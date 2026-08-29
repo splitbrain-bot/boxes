@@ -1,0 +1,16 @@
+{
+  "name": "boxes-egress-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/main.js",
+    "test": "node --test --experimental-strip-types src/cidr.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.3"
+  }
+}
