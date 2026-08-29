@@ -52,6 +52,20 @@ RUN if grep -rIEl 'InstrumentationKey=[0-9a-fA-F-]{36}|IngestionEndpoint=https' 
     fi \
  && echo "telemetry check passed: no connection string in bundle"
 
+# The dashboard's one-click "Open in acp-ui" button works by writing acp-ui's
+# own agent config -- same origin, so same localStorage -- and then
+# navigating here. That depends on this storage key, so assert it is really
+# the key this build uses. If acp-ui renames it, fail the image build with a
+# clear pointer rather than shipping a button that silently does nothing.
+ARG ACP_UI_AGENTS_KEY="acp-ui:agents"
+RUN if ! grep -rIqF "$ACP_UI_AGENTS_KEY" dist-web/ ; then \
+      echo "ERROR: storage key '$ACP_UI_AGENTS_KEY' not found in the acp-ui bundle." >&2; \
+      echo "       acp-ui changed its agent-config key. Update STORAGE_KEY in" >&2; \
+      echo "       dashboard/src/acpui.ts and the ACP_UI_AGENTS_KEY build arg." >&2; \
+      exit 1; \
+    fi \
+ && echo "storage key check passed: $ACP_UI_AGENTS_KEY present in bundle"
+
 FROM nginx:1.27-alpine AS runtime
 COPY --from=build /src/dist-web /usr/share/nginx/html
 # Served under /ui behind Traefik; the SPA needs an index fallback.

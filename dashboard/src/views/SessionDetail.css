@@ -92,3 +92,41 @@
   color: var(--color-danger);
   font-size: var(--text-sm);
 }
+
+/* Primary action: one tap to configure acp-ui and open it. */
+.SessionDetail-connect {
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent);
+  font-weight: 600;
+  font-size: var(--text-lg);
+  min-height: calc(var(--tap-target) + var(--space-2));
+  width: 100%;
+}
+
+.SessionDetail-connectHint {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.SessionDetail-manual {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+}
+
+.SessionDetail-manualSummary {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  min-height: var(--tap-target);
+  display: flex;
+  align-items: center;
+}
+
+.SessionDetail-manualBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}

@@ -43,9 +43,12 @@ services:
       - egress-proxy
     labels:
       traefik.enable: "true"
-      # (a) dashboard + API: basicauth.
-      traefik.http.routers.boxes.rule: >-
-        Host(`${BASE_DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`) || Path(`/`))
+      # (a) dashboard + API: basicauth. This is the catch-all, so SPA deep
+      # links (/new, /sessions/:id) reach the orchestrator's index.html
+      # fallback on reload or when returning from /ui. Explicit priorities
+      # keep /ws and /ui ahead of it rather than relying on rule length.
+      traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN}`)
+      traefik.http.routers.boxes.priority: "10"
       traefik.http.routers.boxes.entrypoints: websecure
       traefik.http.routers.boxes.tls.certresolver: ${CERT_RESOLVER:-le}
       traefik.http.routers.boxes.middlewares: boxes-auth
@@ -55,6 +58,7 @@ services:
       # token-auths the upgrade itself via the bearer.<token> subprotocol
       # (plan §2, §12.6).
       traefik.http.routers.boxes-ws.rule: Host(`${BASE_DOMAIN}`) && PathPrefix(`/ws`)
+      traefik.http.routers.boxes-ws.priority: "100"
       traefik.http.routers.boxes-ws.entrypoints: websecure
       traefik.http.routers.boxes-ws.tls.certresolver: ${CERT_RESOLVER:-le}
       traefik.http.routers.boxes-ws.service: boxes
@@ -70,13 +74,17 @@ services:
         # Required: see frontend/Dockerfile. Pin both in .env.
         ACP_UI_REPO: ${ACP_UI_REPO}
         ACP_UI_COMMIT: ${ACP_UI_COMMIT}
+        ACP_UI_AGENTS_KEY: ${ACP_UI_AGENTS_KEY:-acp-ui:agents}
     container_name: boxes-acp-ui
     restart: unless-stopped
     networks:
       - traefik
     labels:
       traefik.enable: "true"
+      # Same origin as the dashboard, which is what lets the dashboard write
+      # acp-ui's agent config for the one-click connect (dashboard/src/acpui.ts).
       traefik.http.routers.boxes-ui.rule: Host(`${BASE_DOMAIN}`) && PathPrefix(`/ui`)
+      traefik.http.routers.boxes-ui.priority: "90"
       traefik.http.routers.boxes-ui.entrypoints: websecure
       traefik.http.routers.boxes-ui.tls.certresolver: ${CERT_RESOLVER:-le}
       traefik.http.routers.boxes-ui.middlewares: boxes-ui-strip,boxes-auth

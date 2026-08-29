@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { useLocation, useRoute } from 'preact-iso';
 import type { SessionDetail as SessionDetailType } from '../../../shared/types.ts';
+import { connectToSession } from '../acpui.ts';
 import { api } from '../api.ts';
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx';
 import { CopyField } from '../components/CopyField.tsx';
@@ -19,6 +20,7 @@ export function SessionDetail() {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [purge, setPurge] = useState(false);
+  const [storageBlocked, setStorageBlocked] = useState(false);
 
   const load = async (): Promise<void> => {
     try {
@@ -89,20 +91,44 @@ export function SessionDetail() {
       ) : null}
 
       <div class="SessionDetail-section">
-        <div class="SessionDetail-sectionTitle">Connect from acp-ui</div>
-        <ol class="SessionDetail-steps">
-          <li>Open acp-ui and go to Settings → add agent.</li>
-          <li>Choose transport “websocket”.</li>
-          <li>Paste the URL below.</li>
-          <li>
-            Set header <code>Authorization: Bearer &lt;token&gt;</code> with the token below.
-          </li>
-        </ol>
-        <CopyField label="WebSocket URL" value={session.wsUrl} />
-        <CopyField label="Bearer token" value={session.wsToken} masked />
-        <span class="SessionDetail-warning">
-          acp-ui has no URL prefill, so this setup is once per device.
+        <button
+          type="button"
+          class="SessionDetail-connect"
+          onClick={() => {
+            if (!connectToSession(session)) setStorageBlocked(true);
+          }}
+        >
+          Open in acp-ui
+        </button>
+        <span class="SessionDetail-connectHint">
+          Configures acp-ui for this session and opens it. Nothing to type.
         </span>
+
+        {storageBlocked ? (
+          <span class="SessionDetail-error">
+            This browser blocked local storage, so acp-ui cannot be configured
+            automatically. Use the manual details below.
+          </span>
+        ) : null}
+
+        {/* Safety net: acp-ui's stored config format is the one thing here
+            that depends on its internals, so keep a manual path available. */}
+        <details class="SessionDetail-manual">
+          <summary class="SessionDetail-manualSummary">Connect manually instead</summary>
+          <div class="SessionDetail-manualBody">
+            <ol class="SessionDetail-steps">
+              <li>In acp-ui, go to Settings → add agent.</li>
+              <li>Choose transport “websocket”.</li>
+              <li>Paste the URL below.</li>
+              <li>
+                Set header <code>Authorization: Bearer &lt;token&gt;</code> with the token
+                below.
+              </li>
+            </ol>
+            <CopyField label="WebSocket URL" value={session.wsUrl} />
+            <CopyField label="Bearer token" value={session.wsToken} masked />
+          </div>
+        </details>
       </div>
 
       <div class="SessionDetail-section">

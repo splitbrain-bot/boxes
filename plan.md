@@ -1,6 +1,6 @@
 # Build Plan: Personal AI Agent Orchestrator ("Boxes")
 
-Status: FINAL (revision 3). All previously open protocol/compatibility
+Status: FINAL (revision 4). All previously open protocol/compatibility
 questions have been resolved by source-level inspection of the actual
 packages (see §2, "Verified facts"). There are no research spikes; every
 milestone is implementation work with concrete acceptance criteria.
@@ -104,8 +104,10 @@ re-verify only when upgrading.
   lock-phone/unlock-phone flow we need.
 - Agent config is per-origin `localStorage` (key `acp-ui:agents`), managed
   in its Settings UI. There is NO URL-prefill mechanism (verified: no query
-  param handling) → onboarding is a one-time copy/paste of the wss URL and
-  token from our dashboard.
+  param handling). **But acp-ui is served at `/ui` on the same host as the
+  dashboard, so it is the same origin — the dashboard writes acp-ui's agent
+  config itself and navigates to `/ui`.** Onboarding is therefore a single
+  "Open in acp-ui" button, not a copy/paste. See §8.5.
 - Telemetry: embeds Azure Application Insights with an in-app disable
   toggle. Our build step strips the connection string (set it empty at
   build) so the self-hosted bundle phones home nowhere.
@@ -481,10 +483,17 @@ fallback: unknown non-/api, non-/ws GETs return index.html). Orchestrator
 Dockerfile is multi-stage: stage 1 runs the esbuild command in `dashboard/`,
 stage 2 copies `dashboard/dist` into the runtime image. Views: session list
 with "running turn"/"waiting for approval" badges; create form; session
-detail showing the wss URL + `WS_AUTH_TOKEN` via CopyField and the one-time
-instructions: acp-ui → Settings → add agent → transport websocket → URL →
-header `Authorization: Bearer <token>` (rides the subprotocol; verified §2).
-No URL prefill exists in acp-ui; per-browser setup is once per device.
+detail with a single "Open in acp-ui" button (`dashboard/src/acpui.ts`):
+it upserts this session into acp-ui's own `localStorage` agent list — legal
+because `/ui` and `/` are the same origin — then navigates to `/ui`. Nothing
+is typed, on any device.
+
+Two things keep that from depending on guesswork about acp-ui's internals:
+`frontend/Dockerfile` fails the image build if `acp-ui:agents` is absent from
+the built bundle (so a key rename is loud, not a dead button), and when
+acp-ui has already stored an agent we clone *that* entry's field shape rather
+than imposing ours. The wss URL + token remain available via CopyField behind
+a collapsed "Connect manually instead" disclosure as a safety net.
 Data via the signals store polling `GET /api/sessions` every 5 s while the
 tab is visible (pause on `visibilitychange`); SSE is an M7 upgrade, not v1.
 Styling rules (enforced in review): no inline `style=` attributes, no
@@ -535,7 +544,7 @@ disconnects; `session/load` from a fresh client replays the full thread.
 ### M4 — Gateway downstream + dashboard + frontend image
 Token-authed WS, remapping, broadcast, pending queue, dashboard, acp-ui
 static image (telemetry stripped). Acceptance (headline demo, on a phone):
-create session with repo URL → add agent in acp-ui once → start a
+create session with repo URL → tap "Open in acp-ui" → start a
 multi-minute task → lock phone for its duration → unlock → completed thread
 renders after reattach; then trigger a permission prompt with no browser
 attached → dashboard shows waiting badge → attach → approve → turn continues.
@@ -606,7 +615,10 @@ IP may accept TCP on ports of 0.0.0.0-bound host services (§8.4 assumption).
 1. Persistent ACP gateway; orchestrator is the client of record (dumb pipe
    rejected: turns must survive disconnects).
 2. Frontend = acp-ui web build, pinned, telemetry stripped; replay via the
-   adapter's native `session/load` (no gateway replay store).
+   adapter's native `session/load` (no gateway replay store). Connecting is
+   one button: acp-ui is same-origin with the dashboard, so the dashboard
+   seeds its `localStorage` agent config directly (revision 4; supersedes the
+   copy/paste onboarding, at the owner's request).
 3. TypeScript/Node 22; ACP TS SDK both sides; adapter pinned 0.70.0.
 4. Claude auth = `claude setup-token` env var (code-verified pass-through);
    fallback if the live check in M1 fails: primed `/home/agent/.claude`

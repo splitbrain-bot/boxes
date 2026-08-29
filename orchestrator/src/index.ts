@@ -103,7 +103,9 @@ const CONTENT_TYPES: Record<string, string> = {
 app.setNotFoundHandler((req, reply) => {
   if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
   const url = req.url.split('?')[0] ?? '/';
-  if (url.startsWith('/api') || url.startsWith('/ws')) {
+  // /ui belongs to the acp-ui service; if a request for it reaches us,
+  // something is misrouted and a 404 is clearer than the dashboard shell.
+  if (url.startsWith('/api') || url.startsWith('/ws') || url.startsWith('/ui')) {
     return reply.code(404).send({ error: 'Not found' });
   }
 
