@@ -1,0 +1,71 @@
+.ConfirmDialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: var(--space-4);
+  z-index: 10;
+}
+
+.ConfirmDialog {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  width: 100%;
+  max-width: 26rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ConfirmDialog-title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.ConfirmDialog-body {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.ConfirmDialog-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ConfirmDialog-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  min-height: var(--tap-target);
+}
+
+.ConfirmDialog-check input {
+  width: 1.15rem;
+  height: 1.15rem;
+  min-height: 0;
+  flex: none;
+}
+
+.ConfirmDialog-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.ConfirmDialog-actions button {
+  flex: 1;
+}
+
+.ConfirmDialog-danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+@media (min-width: 40rem) {
+  .ConfirmDialog-backdrop { align-items: center; }
+}

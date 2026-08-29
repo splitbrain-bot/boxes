@@ -1,0 +1,113 @@
+# Boxes: personal AI agent orchestrator (plan §8.7).
+#
+# Session containers are NOT here: they are created at runtime by the
+# orchestrator, on their own internal networks, and are never attached to the
+# Traefik network.
+
+name: boxes
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    container_name: boxes-orchestrator
+    restart: unless-stopped
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      DATA_DIR: /data
+      SESSION_IMAGE: ${SESSION_IMAGE:-boxes-session:latest}
+      SESSION_SUBNET_POOL: ${SESSION_SUBNET_POOL:-10.200.0.0/16}
+      SESSION_MEM_LIMIT: ${SESSION_MEM_LIMIT:-4g}
+      SESSION_CPUS: ${SESSION_CPUS:-2}
+      SESSION_PIDS_LIMIT: ${SESSION_PIDS_LIMIT:-512}
+      IDLE_STOP_MINUTES: ${IDLE_STOP_MINUTES:-30}
+      WS_AUTH_TOKEN: ${WS_AUTH_TOKEN}
+      PERMISSION_FALLBACK: ${PERMISSION_FALLBACK:-hold}
+      PERMISSION_HOLD_MINUTES: ${PERMISSION_HOLD_MINUTES:-120}
+      NTFY_URL: ${NTFY_URL:-}
+      EGRESS_PROXY_CONTAINER: boxes-egress-proxy
+      PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: ${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN}
+      PROFILE_DEFAULT_GH_TOKEN: ${PROFILE_DEFAULT_GH_TOKEN}
+      PROFILE_DEFAULT_GIT_NAME: ${PROFILE_DEFAULT_GIT_NAME}
+      PROFILE_DEFAULT_GIT_EMAIL: ${PROFILE_DEFAULT_GIT_EMAIL}
+    volumes:
+      # Root-equivalent. Mitigated by the fixed HostConfig template, no
+      # shell-exec of user strings, and Traefik auth in front (plan §11).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - boxes-data:/data
+    networks:
+      - default
+      - traefik
+    depends_on:
+      - egress-proxy
+    labels:
+      traefik.enable: "true"
+      # (a) dashboard + API: basicauth.
+      traefik.http.routers.boxes.rule: >-
+        Host(`${BASE_DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`) || Path(`/`))
+      traefik.http.routers.boxes.entrypoints: websecure
+      traefik.http.routers.boxes.tls.certresolver: ${CERT_RESOLVER:-le}
+      traefik.http.routers.boxes.middlewares: boxes-auth
+      traefik.http.routers.boxes.service: boxes
+      # (b) /ws: NO basicauth. Browsers cannot attach Basic credentials to a
+      # cross-path WS upgrade nor answer a 401 on one, so the gateway
+      # token-auths the upgrade itself via the bearer.<token> subprotocol
+      # (plan §2, §12.6).
+      traefik.http.routers.boxes-ws.rule: Host(`${BASE_DOMAIN}`) && PathPrefix(`/ws`)
+      traefik.http.routers.boxes-ws.entrypoints: websecure
+      traefik.http.routers.boxes-ws.tls.certresolver: ${CERT_RESOLVER:-le}
+      traefik.http.routers.boxes-ws.service: boxes
+      traefik.http.services.boxes.loadbalancer.server.port: "3000"
+      traefik.http.middlewares.boxes-auth.basicauth.users: ${BASICAUTH_USERS}
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+
+  acp-ui:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Required: see frontend/Dockerfile. Pin both in .env.
+        ACP_UI_REPO: ${ACP_UI_REPO}
+        ACP_UI_COMMIT: ${ACP_UI_COMMIT}
+    container_name: boxes-acp-ui
+    restart: unless-stopped
+    networks:
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.boxes-ui.rule: Host(`${BASE_DOMAIN}`) && PathPrefix(`/ui`)
+      traefik.http.routers.boxes-ui.entrypoints: websecure
+      traefik.http.routers.boxes-ui.tls.certresolver: ${CERT_RESOLVER:-le}
+      traefik.http.routers.boxes-ui.middlewares: boxes-ui-strip,boxes-auth
+      traefik.http.middlewares.boxes-ui-strip.stripprefix.prefixes: /ui
+      traefik.http.services.boxes-ui.loadbalancer.server.port: "8080"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+
+  egress-proxy:
+    build:
+      context: .
+      dockerfile: proxy/Dockerfile
+    # Fixed name: the orchestrator connects this container to each session
+    # network by name (plan §8.2 step 3, §8.4).
+    container_name: boxes-egress-proxy
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Attached to the compose default network for external egress. The
+    # orchestrator dynamically connects it to each session's internal network.
+    networks:
+      - default
+    # No ports published, no Traefik labels, no volumes.
+
+volumes:
+  boxes-data:
+
+networks:
+  default:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

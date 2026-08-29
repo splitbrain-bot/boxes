@@ -1,0 +1,94 @@
+.SessionDetail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.SessionDetail-back {
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.SessionDetail-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.SessionDetail-title {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.SessionDetail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.SessionDetail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.SessionDetail-sectionTitle {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.SessionDetail-steps {
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.SessionDetail-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.SessionDetail-metaKey {
+  color: var(--color-text-muted);
+}
+
+.SessionDetail-metaValue {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.SessionDetail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.SessionDetail-actions button {
+  flex: 1 1 8rem;
+}
+
+.SessionDetail-danger {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.SessionDetail-warning {
+  color: var(--color-warn);
+  font-size: var(--text-sm);
+}
+
+.SessionDetail-error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
