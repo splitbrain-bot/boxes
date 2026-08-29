@@ -5,8 +5,9 @@ isolated Docker containers, controlled from a mobile-friendly web UI. It runs
 behind an existing Traefik reverse proxy, or on a single local port with no
 proxy at all.
 
-The design, decisions and milestones live in [`plan.md`](./plan.md). This
-README covers running it and the risks you are accepting by doing so.
+How the system is put together is described in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md). This README covers running it and the
+risks you are accepting by doing so.
 
 ## The one property that matters
 
@@ -34,8 +35,8 @@ phone ──wss──▶ Traefik ──▶ orchestrator ──docker exec stdio�
 | `proxy/` | The in-house egress proxy — the security boundary |
 | `session-image/` | The per-session container image |
 | `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
-| `scripts/smoke-test.sh` | Security smoke test (plan §10), no credentials needed |
-| `scripts/live-test.sh` | The checks that need a real Claude token (plan M1, M3, M4) |
+| `scripts/smoke-test.sh` | Security smoke test, no credentials needed |
+| `scripts/live-test.sh` | The checks that need a real Claude token |
 
 acp-ui has no directory of its own: the orchestrator image clones it at a
 pinned commit, builds it, and serves it at `/ui`. That is deliberate — see
@@ -125,18 +126,18 @@ If you would rather the Claude token not sit there, either works:
   ```
   docker compose --env-file ~/.config/boxes.env -f compose.yaml -f compose.local.yaml up -d
   ```
-- **Skip the token entirely and log in inside the session.** This is plan
-  §12.4's fallback, and it means no token exists in any file or in the
-  container's environment — the credential lands in that session's own home
-  volume:
+- **Skip the token entirely and log in inside the session.** No token then
+  exists in any file or in the container's environment — the credential lands
+  in that session's own home volume:
   ```
   docker exec -it session-<id> claude /login
   ```
 
 Either way the value is still visible to anything that can run `docker
 inspect` or `docker exec` on this host, so treat these as "not lying around in
-the repo", not as isolation. The token is inference-only and rotatable; plan
-§11 covers what it can and cannot do if it leaks.
+the repo", not as isolation. The token is inference-only and rotatable; see
+[Risks you are accepting](#risks-you-are-accepting) for what it can and cannot
+do if it leaks.
 
 ## How isolation works
 
