@@ -9,13 +9,12 @@ import { log, type Logger } from '../log.ts';
 import type { PendingStore } from './pending.ts';
 
 /**
- * One persistent ACP client per session, connected to `claude-agent-acp`
- * inside the session container over a long-lived `docker exec` (plan §8.3).
+ * One persistent ACP client per session, connected to the adapter inside the
+ * session container over a long-lived docker exec.
  *
- * This connection is the point of the whole system: it is owned by the
- * orchestrator, not by a browser. Turns run to completion regardless of who
- * is watching, and thread replay is delegated upstream to the adapter's own
- * `session/load` (plan §2) rather than reimplemented here.
+ * The orchestrator owns this connection, not a browser, so a turn runs to
+ * completion whoever is watching. Thread replay belongs to the adapter's own
+ * session/load.
  */
 
 /** A browser attached to this session, as seen from the upstream side. */
@@ -23,24 +22,30 @@ export interface DownstreamHandle {
   readonly id: number;
   /** Bumped whenever this browser sends something; picks the permission target. */
   lastActiveAt: number;
+  /** Sends a notification to this browser. */
   notify(method: string, params: unknown): void;
+  /** Sends a request to this browser and awaits its answer. */
   request(method: string, params: unknown): Promise<unknown>;
 }
 
-/** Raw pass-through parser: keeps `_meta` extensions intact (verified §2). */
+/** Pass-through parser, leaving params and their _meta untouched. */
 const raw = <T = unknown>(params: unknown): T => params as T;
 
+/** How often a failed adapter spawn is retried before the session errors. */
 const MAX_SPAWN_ATTEMPTS = 3;
+
+/** Wait before each retry, in milliseconds. */
 const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
 
-/** JSON-RPC code the ACP SDK uses for `RequestError.resourceNotFound`. */
+/** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
 const RESOURCE_NOT_FOUND = -32002;
 
-/** Did the adapter answer "I do not have that thread" rather than fail? */
+/** True when the adapter reported a missing thread rather than a failure. */
 function isResourceNotFound(err: unknown): boolean {
   return (err as { code?: number } | null)?.code === RESOURCE_NOT_FOUND;
 }
 
+/** The orchestrator's own ACP connection to one session's adapter. */
 export class UpstreamSession {
   private exec: dk.AdapterExec | null = null;
   private conn: ClientConnection | null = null;
@@ -62,30 +67,34 @@ export class UpstreamSession {
     this.slog = log.session(sessionId);
   }
 
+  /** How many browsers are attached to this session. */
   get attachedCount(): number {
     return this.downstreams.size;
   }
 
+  /** Whether the adapter connection is up. */
   get isConnected(): boolean {
     return this.conn !== null;
   }
 
-  /** The initialize response to hand browsers, cached verbatim (plan §8.3). */
+  /** The initialize response to hand browsers, cached verbatim. */
   get cachedInitialize(): unknown {
     return this.initializeResponse;
   }
 
+  /** Adds a browser to the broadcast set. */
   attach(handle: DownstreamHandle): void {
     this.downstreams.add(handle);
     this.slog.info('downstream attached', { attached: this.downstreams.size });
   }
 
-  /** Upstream is deliberately unaffected — this property is the point (§8.3). */
+  /** Removes a browser from the broadcast set, leaving the upstream running. */
   detach(handle: DownstreamHandle): void {
     this.downstreams.delete(handle);
     this.slog.info('downstream detached', { attached: this.downstreams.size });
   }
 
+  /** This session's stored row. Throws once the session is gone. */
   private row(): SessionRow {
     const row = this.db
       .prepare('SELECT * FROM sessions WHERE id = ?')
@@ -94,12 +103,14 @@ export class UpstreamSession {
     return row;
   }
 
+  /** Marks the session as active now, which holds off the reaper. */
   private touch(): void {
     this.db
       .prepare('UPDATE sessions SET last_active_at = ? WHERE id = ?')
       .run(Date.now(), this.sessionId);
   }
 
+  /** Records whether a prompt turn is running, and marks the session active. */
   private setTurnActive(active: boolean): void {
     this.db
       .prepare('UPDATE sessions SET turn_active = ?, last_active_at = ? WHERE id = ?')
@@ -107,14 +118,13 @@ export class UpstreamSession {
   }
 
   /**
-   * Brings up container + exec + ACP session, idempotently. Concurrent
-   * callers share one attempt.
+   * Brings up the container, the exec and the ACP session. Concurrent callers
+   * share one attempt.
    *
-   * The guard is the cached initialize response rather than the connection.
-   * The connection object exists from the moment the exec stream is wired up,
-   * but the handshake it carries takes a few hundred milliseconds; a browser
-   * asking to initialize inside that window must wait for the handshake, not
-   * be told the upstream is unavailable.
+   * The guard is the cached initialize response, not the connection: the
+   * connection exists from the moment the exec stream is wired up, but its
+   * handshake takes a few hundred milliseconds, and a browser arriving inside
+   * that window has to wait for the handshake.
    */
   async ensureStarted(): Promise<void> {
     if (this.conn && this.initializeResponse) return;
@@ -126,6 +136,7 @@ export class UpstreamSession {
     return this.starting;
   }
 
+  /** Starts the container and spawns the adapter, retrying with a backoff. */
   private async start(): Promise<void> {
     this.stopping = false;
     const row = this.row();
@@ -157,17 +168,21 @@ export class UpstreamSession {
     );
   }
 
+  /**
+   * Spawns the adapter, performs the ACP handshake, and either replays the
+   * stored thread or starts a fresh one.
+   */
   private async spawnAndInitialize(row: SessionRow): Promise<void> {
     const cmd = JSON.parse(row.agent_cmd) as string[];
-    // Prefer the clone as cwd, fall back to the workspace root (plan §8.3).
+    // Prefer the clone as cwd, and fall back to the workspace root.
     const hasRepo = row.repo_url ? await dk.hasRepoDir(row.container_id!) : false;
     const workingDir = hasRepo ? '/workspace/repo' : '/workspace';
 
     const exec = await dk.spawnAdapterExec(row.container_id!, cmd, workingDir);
     this.exec = exec;
 
-    // stderr is log-only: the adapter's entrypoint redirects all console
-    // logging there to keep stdout clean for protocol (plan §2).
+    // stderr is log-only: the adapter sends its console logging there to
+    // keep stdout clean for protocol.
     exec.stderr.setEncoding('utf8');
     exec.stderr.on('data', (chunk: string) => {
       for (const line of chunk.split('\n')) {
@@ -189,8 +204,8 @@ export class UpstreamSession {
     const conn = app.connect(stream);
     this.conn = conn;
 
-    // Capabilities `{}`: no fs, no terminal, no elicitation. Verified in §2
-    // to confine client-bound traffic to the two methods handled above.
+    // Empty capabilities: no fs, no terminal, no elicitation, which confines
+    // client-bound traffic to the two methods handled above.
     this.initializeResponse = await conn.agent.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: {},
@@ -204,14 +219,13 @@ export class UpstreamSession {
   }
 
   /**
-   * Replays a stored thread from the home volume (plan §2). Returns false when
-   * the adapter no longer holds it, so the caller starts a fresh one.
+   * Replays a stored thread. Returns false when the adapter no longer holds
+   * it, which tells the caller to start a fresh one.
    *
-   * A missing thread is a legitimate state, not a failure: the agent SDK only
-   * writes a transcript once a prompt has run, so an id minted by session/new
-   * and never prompted does not survive the container stopping. Any other
-   * error is rethrown, because falling back on a transient fault would
-   * silently discard a thread that still exists.
+   * A missing thread is a legitimate state: the agent SDK writes a transcript
+   * only once a prompt has run, so an id minted by session/new and never
+   * prompted does not survive the container stopping. Any other error is
+   * rethrown, which keeps a transient fault from discarding a live thread.
    */
   private async loadSession(
     conn: ClientConnection,
@@ -267,6 +281,7 @@ export class UpstreamSession {
     return ndJsonStream(writable, readable);
   }
 
+  /** Taps an adapter update and broadcasts it to every attached browser. */
   private onSessionUpdate(params: unknown): void {
     this.touch();
     this.tap('up', 'session/update', params);
@@ -280,9 +295,9 @@ export class UpstreamSession {
   }
 
   /**
-   * The adapter blocks on this request until we answer, which is exactly what
-   * we want when nobody is watching: the turn pauses rather than proceeding
-   * without consent (plan §8.3).
+   * Puts a permission request to the most recently active browser, or queues
+   * it when none is attached. The adapter blocks until the answer arrives, so
+   * an unattended turn pauses instead of proceeding without consent.
    */
   private onPermissionRequest(params: unknown): Promise<unknown> {
     this.touch();
@@ -302,6 +317,7 @@ export class UpstreamSession {
     return this.queuePermission(params);
   }
 
+  /** Holds a permission request for a browser to answer, and sends a notification. */
   private queuePermission(params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const entry = this.pending.add(
@@ -319,9 +335,9 @@ export class UpstreamSession {
   }
 
   /**
-   * After PERMISSION_HOLD_MINUTES apply PERMISSION_FALLBACK. `deny` answers
-   * with the reject option taken from the request's own options list — never
-   * an invented one, and never an approval (plan §8.3, §12.9).
+   * Applies PERMISSION_FALLBACK once PERMISSION_HOLD_MINUTES has passed. The
+   * deny fallback answers with a reject option from the request's own list,
+   * never an invented one, and cancels the request when none is offered.
    */
   private applyPermissionFallback(
     pendingId: number,
@@ -349,6 +365,7 @@ export class UpstreamSession {
     }
   }
 
+  /** Posts an approval-waiting notification to NTFY_URL, when one is set. */
   private async notifyNtfy(): Promise<void> {
     if (!this.cfg.NTFY_URL) return;
     try {
@@ -362,7 +379,7 @@ export class UpstreamSession {
     }
   }
 
-  /** Deliver queued permission prompts to a browser that just attached. */
+  /** Puts every queued permission request to a browser that just attached. */
   flushPendingTo(handle: DownstreamHandle): void {
     for (const entry of this.pending.listForSession(this.sessionId)) {
       const params = JSON.parse(entry.row.params) as unknown;
@@ -380,7 +397,7 @@ export class UpstreamSession {
     }
   }
 
-  /** Forward a browser request upstream. Turn tracking lives here. */
+  /** Forwards a browser request to the adapter, tracking prompt turns. */
   async forwardRequest(method: string, params: unknown): Promise<unknown> {
     await this.ensureStarted();
     const conn = this.conn;
@@ -396,6 +413,7 @@ export class UpstreamSession {
     }
   }
 
+  /** Forwards a browser notification to the adapter. */
   async forwardNotification(method: string, params: unknown): Promise<void> {
     await this.ensureStarted();
     const conn = this.conn;
@@ -405,6 +423,7 @@ export class UpstreamSession {
     await conn.agent.notify(method, params);
   }
 
+  /** Records one message in the debug log. A failed write never breaks the flow. */
   private tap(direction: 'up' | 'down', method: string, params: unknown): void {
     try {
       appendAcpLog(this.db, this.sessionId, direction, JSON.stringify({ method, params }));
@@ -413,15 +432,18 @@ export class UpstreamSession {
     }
   }
 
+  /**
+   * Drops the connection when the adapter exits on its own. The next forwarded
+   * message calls ensureStarted, which re-spawns and re-issues session/load.
+   */
   private handleExecExit(code: number | null): void {
     if (this.closed || this.stopping) return;
     this.slog.warn('adapter exec exited', { code });
     this.teardownConnection();
     this.setTurnActive(false);
-    // Reconnect lazily: the next forwarded message calls ensureStarted(),
-    // which re-spawns and re-issues session/load to restore the thread.
   }
 
+  /** Closes the connection and kills the exec, tolerating either being gone. */
   private teardownConnection(): void {
     try {
       this.conn?.close();
@@ -437,7 +459,7 @@ export class UpstreamSession {
     this.exec = null;
   }
 
-  /** Deliberate stop (reaper, REST stop): do not auto-reconnect. */
+  /** Stops the connection deliberately, which suppresses the reconnect. */
   stop(): void {
     this.stopping = true;
     this.teardownConnection();
@@ -445,12 +467,14 @@ export class UpstreamSession {
     this.pending.failSession(this.sessionId, 'Session stopped');
   }
 
+  /** Stops the connection for good and forgets every attached browser. */
   close(): void {
     this.closed = true;
     this.stop();
     this.downstreams.clear();
   }
 
+  /** Periodic housekeeping: keeps the debug log within its ring size. */
   maintenance(): void {
     try {
       pruneAcpLog(this.db, this.sessionId);

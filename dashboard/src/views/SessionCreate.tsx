@@ -4,6 +4,7 @@ import { api } from '../api.ts';
 import { refresh } from '../store.ts';
 import './SessionCreate.css';
 
+/** The new-session form, which opens the session's detail view on success. */
 export function SessionCreate() {
   const { route } = useLocation();
   const [name, setName] = useState('');

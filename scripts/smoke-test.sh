@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Security smoke test (plan §10).
+# Security smoke test.
 #
-# Run on the Docker host after `docker compose up -d`. Creates a throwaway
-# session via the API, asserts the isolation properties from inside its
-# container, then cleans up.
+# Run on the Docker host after `docker compose up -d`. Creates throwaway
+# sessions via the API, asserts the isolation properties from inside one of
+# their containers, then cleans up.
 #
 #   API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
 #
-# Every MUST-FAIL case is a property an agent must not be able to violate;
-# a pass here is the difference between "isolated" and "hopefully isolated".
+# Every probe passes `curl -f`, so a 403 from the egress proxy leaves a
+# non-zero exit status.
 set -uo pipefail
 
 API_BASE="${API_BASE:-http://localhost:3000}"
@@ -20,11 +20,6 @@ pass=0; fail=0; noted=0
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
-
-# NOTE ON `curl -f`: every probe below uses it. Without -f, curl exits 0 for a
-# 403 from the egress proxy, so a correctly denied request would be scored as a
-# success -- and an intended-to-work request would be scored as a pass even
-# when the proxy refused it. The -f is what makes this file a real test.
 
 # Asserts a command run inside the session container FAILS.
 must_fail() {
@@ -46,7 +41,7 @@ must_pass() {
   fi
 }
 
-# Documented-but-accepted: assert and log, never fail the run (plan §10, §8.4).
+# Asserts a documented and accepted property: logs the outcome, never fails.
 note() {
   local desc="$1"; shift
   if docker exec -u agent "$CONTAINER" "$@" >/dev/null 2>&1; then
@@ -86,7 +81,7 @@ grey "session=$SESSION_ID sibling=$SIBLING_ID sibling_ip=${SIBLING_IP:-unknown}"
 
 echo
 echo "== MUST FAIL: direct (proxy-bypassing) egress =="
-# The session network is `internal`: no NAT, no default route (plan §8.4).
+# The session network is internal: no NAT, no default route.
 must_fail "curl --noproxy '*' https://api.github.com" \
   curl --noproxy '*' -fsS -m 3 https://api.github.com
 must_fail "nc -w3 1.1.1.1 443" \
@@ -147,12 +142,11 @@ fi
 
 if [ -n "${SMOKE_UPSTREAM_REPO:-}" ]; then
   echo
-  echo "== MUST FAIL: pushing to an upstream default branch (plan §10) =="
+  echo "== MUST FAIL: pushing to an upstream default branch =="
   # The bot is read-only on upstreams and works on forks, so a push straight at
-  # the upstream must be refused. Cloned into the tmpfs, so the agent's own
-  # workspace is untouched. The clone is checked separately: a clone that
-  # failed for an unrelated reason would otherwise be scored as a passing
-  # push guard.
+  # the upstream must be refused. The clone lands in the tmpfs, leaving the
+  # agent's workspace untouched, and is scored on its own, because only a
+  # successful clone can test the push.
   if docker exec -u agent "$CONTAINER" sh -c \
        'rm -rf /tmp/upstream && git clone --depth 1 "$0" /tmp/upstream' \
        "$SMOKE_UPSTREAM_REPO" >/dev/null 2>&1; then
@@ -168,8 +162,8 @@ fi
 
 echo
 echo "== pids limit containment =="
-# A fork bomb must be contained by PidsLimit without affecting the host or
-# the sibling session. Bounded so the test itself cannot hang.
+# PidsLimit must contain a fork bomb without affecting the host or the sibling
+# session. Bounded, so the test itself cannot hang.
 docker exec -u agent "$CONTAINER" sh -c \
   ':(){ :|:& };: & sleep 5; kill %1 2>/dev/null' >/dev/null 2>&1
 if docker exec -u agent "$SIBLING_CONTAINER" true >/dev/null 2>&1; then
@@ -179,10 +173,10 @@ else
 fi
 
 echo
-echo "== documented-but-accepted residual surface (plan §8.4) =="
+echo "== documented-but-accepted residual surface =="
 # Docker's internal-network isolation filters forwarded traffic only, so the
-# host stays addressable at its per-bridge IP. The owner accepted this; we
-# assert and log it rather than failing.
+# host stays addressable at its per-bridge IP. The owner accepted this, so it
+# is logged rather than failed.
 HOST_BRIDGE_IP=$(docker network inspect "sn-$SESSION_ID" \
   -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)
 if [ -n "$HOST_BRIDGE_IP" ]; then

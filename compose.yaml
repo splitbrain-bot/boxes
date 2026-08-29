@@ -1,8 +1,7 @@
-# Boxes: personal AI agent orchestrator (plan §8.7).
+# Boxes: personal AI agent orchestrator.
 #
-# Session containers are NOT here: they are created at runtime by the
-# orchestrator, on their own internal networks, and are never attached to the
-# Traefik network.
+# The orchestrator creates session containers at runtime, each on an internal
+# network of its own, so they appear in no compose file.
 
 name: boxes
 
@@ -32,8 +31,8 @@ services:
       PROFILE_DEFAULT_GIT_NAME: ${PROFILE_DEFAULT_GIT_NAME:-boxes-bot}
       PROFILE_DEFAULT_GIT_EMAIL: ${PROFILE_DEFAULT_GIT_EMAIL:-boxes-bot@users.noreply.github.com}
     volumes:
-      # Root-equivalent. Mitigated by the fixed HostConfig template, no
-      # shell-exec of user strings, and Traefik auth in front (plan §11).
+      # Root-equivalent access, mitigated by the fixed HostConfig template, by
+      # never shell-exec'ing user strings, and by the auth in front.
       - /var/run/docker.sock:/var/run/docker.sock
       - boxes-data:/data
     networks:
@@ -43,20 +42,18 @@ services:
       - egress-proxy
     labels:
       traefik.enable: "true"
-      # (a) dashboard, API and acp-ui at /ui: basicauth. This is the catch-all,
-      # so SPA deep links (/new, /sessions/:id) reach the orchestrator's
-      # index.html fallback on reload or when returning from /ui. An explicit
-      # priority keeps /ws ahead of it rather than relying on rule length.
+      # Dashboard, API and acp-ui, behind basicauth. This catch-all router
+      # hands deep links such as /new and /sessions/:id to the orchestrator's
+      # index.html fallback. The explicit priority keeps /ws ahead of it.
       traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`)
       traefik.http.routers.boxes.priority: "10"
       traefik.http.routers.boxes.entrypoints: websecure
       traefik.http.routers.boxes.tls.certresolver: ${CERT_RESOLVER:-le}
       traefik.http.routers.boxes.middlewares: boxes-auth
       traefik.http.routers.boxes.service: boxes
-      # (b) /ws: NO basicauth. Browsers cannot attach Basic credentials to a
-      # cross-path WS upgrade nor answer a 401 on one, so the gateway
-      # token-auths the upgrade itself via the bearer.<token> subprotocol
-      # (plan §2, §12.6).
+      # /ws carries no basicauth: a browser can neither attach Basic
+      # credentials to a WebSocket upgrade nor answer a 401 on one, so the
+      # gateway authenticates the upgrade with the bearer.<token> subprotocol.
       traefik.http.routers.boxes-ws.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`) && PathPrefix(`/ws`)
       traefik.http.routers.boxes-ws.priority: "100"
       traefik.http.routers.boxes-ws.entrypoints: websecure
@@ -71,7 +68,7 @@ services:
       context: .
       dockerfile: proxy/Dockerfile
     # Fixed name: the orchestrator connects this container to each session
-    # network by name (plan §8.2 step 3, §8.4).
+    # network by name.
     container_name: boxes-egress-proxy
     restart: unless-stopped
     read_only: true
@@ -83,7 +80,6 @@ services:
     # orchestrator dynamically connects it to each session's internal network.
     networks:
       - default
-    # No ports published, no Traefik labels, no volumes.
 
 volumes:
   boxes-data:

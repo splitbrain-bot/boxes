@@ -1,7 +1,6 @@
 /*
- * The only global vocabulary in the dashboard (plan §5, §8.5).
- * Cross-component values may travel through these custom properties and
- * nowhere else: no inline styles, no Tailwind, no CSS-in-JS.
+ * The dashboard's only global vocabulary. Every value shared between
+ * components travels through these custom properties.
  */
 :root {
   color-scheme: dark light;
@@ -36,7 +35,7 @@
   --radius-md: 10px;
   --radius-lg: 14px;
 
-  /* Thumb-sized: the dashboard is used on a phone first (plan §8.5). */
+  /* Thumb-sized: the dashboard is used on a phone first. */
   --tap-target: 44px;
 
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;

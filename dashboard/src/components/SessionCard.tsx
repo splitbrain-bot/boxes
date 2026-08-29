@@ -6,8 +6,8 @@ import { StatusBadge, type BadgeKind } from './StatusBadge.tsx';
 import './SessionCard.css';
 
 /**
- * Badges answer the two questions the plan's headline demo cares about:
- * is a turn running, and is something waiting for me (plan §8.5, M4).
+ * Builds the badges for a session: waiting approvals, a running turn, the
+ * session's own state, and how many browsers are watching.
  */
 export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label: string }> {
   const badges: Array<{ kind: BadgeKind; label: string }> = [];
@@ -31,21 +31,21 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
 }
 
 /**
- * The card is a container rather than one big anchor, because it holds two
- * distinct actions: the info area links to the detail view, and Open
- * configures acp-ui for this session and goes there. A <button> nested in an
- * <a> would be invalid markup and would swallow taps on touch.
+ * One session in the list. The info area links to the detail view and Open
+ * configures acp-ui for this session and goes there. The two actions sit side
+ * by side rather than nested, because a button inside an anchor is invalid
+ * markup.
  */
 export function SessionCard({ session }: { session: SessionSummary }) {
   const { route } = useLocation();
   const [failed, setFailed] = useState(false);
 
   const open = (): void => {
-    // A stopped session is fine to open: attaching starts it lazily and
-    // session/load restores the thread (plan §8.6).
+    // A stopped session is fine to open: attaching starts it and
+    // session/load restores the thread.
     if (!connectToSession(session)) {
-      // Storage is blocked in this browser. Send them to the detail view,
-      // which carries the manual fallback, rather than failing silently.
+      // Storage is blocked in this browser; the detail view carries the
+      // manual fallback.
       setFailed(true);
       route(`/sessions/${session.id}`);
     }
@@ -53,8 +53,6 @@ export function SessionCard({ session }: { session: SessionSummary }) {
 
   return (
     <div class="SessionCard">
-      {/* Title and repo get the full card width, so long names are not
-          truncated by the action button sitting beside them. */}
       <a class="SessionCard-main" href={`/sessions/${session.id}`}>
         <div class="SessionCard-head">
           <span class="SessionCard-name">{session.name}</span>

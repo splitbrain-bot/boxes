@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import { upsertAgent, type AgentFields } from './acpui.ts';
 
 /**
- * These tests assert what acp-ui can actually read back, not what we happen to
- * write. `readBack` is acp-ui's own `loadWebConfig` (src/lib/host/index.ts):
- * it ignores any stored value without an `agents` record, which is exactly the
- * property a test on our own output shape would miss.
+ * Reads a stored config the way acp-ui does, ignoring any value without an
+ * agents record. Every assertion below runs against this, so the tests hold
+ * acp-ui's reading of the output rather than its shape.
  */
 function readBack(raw: string | null): Record<string, Record<string, unknown>> {
   if (!raw) return {};
@@ -97,7 +96,6 @@ test('a corrupt stored value is replaced with something readable', () => {
 });
 
 test('a stored value with a non-record agents field is replaced', () => {
-  // What the earlier, broken version of this module wrote.
   const agents = readBack(upsertAgent(JSON.stringify([{ id: 'boxes-x' }]), fields));
   assert.equal(agents[fields.name]?.['url'], fields.url);
 });

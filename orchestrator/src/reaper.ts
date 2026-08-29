@@ -4,10 +4,9 @@ import { log } from './log.ts';
 import type { SessionManager } from './sessions.ts';
 
 /**
- * Turn-aware idle reaper (plan §8.6). Stops — never deletes. All four
- * conditions must hold, so a long-running turn with a locked phone is never
- * interrupted, and a session blocked on an unanswered permission prompt is
- * kept alive so the answer still has somewhere to land.
+ * Starts the idle reaper and returns a handle that stops it. Every minute it
+ * stops each session that has no running turn, no waiting permission request,
+ * no attached browser and no activity for IDLE_STOP_MINUTES. It never deletes.
  */
 export function startReaper(
   db: Db,
@@ -50,7 +49,10 @@ export function startReaper(
   return { stop: () => clearInterval(timer) };
 }
 
-/** 60s proxy-attachment reconcile loop (plan §8.4). */
+/**
+ * Starts the loop that re-attaches the egress proxy every minute, reporting
+ * the sessions still missing it. Returns a handle that stops the loop.
+ */
 export function startProxyReconciler(
   manager: SessionManager,
   onWarnings: (ids: string[]) => void,

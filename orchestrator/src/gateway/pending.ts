@@ -2,27 +2,27 @@ import type { Db, PendingRequestRow } from '../db.ts';
 import { log } from '../log.ts';
 
 /**
- * Permission requests the adapter is blocked on while no browser is attached
- * (plan §8.3). The adapter blocking is correct behaviour: the turn pauses
- * until a human answers, or until PERMISSION_HOLD_MINUTES expires and
- * PERMISSION_FALLBACK applies.
+ * Permission requests the adapter is blocked on while no browser is attached.
+ * The turn pauses until a human answers, or until PERMISSION_HOLD_MINUTES
+ * expires and PERMISSION_FALLBACK applies.
  *
- * The DB row exists so the dashboard can show a "waiting for approval" badge
- * and so a restart of the orchestrator does not lose the fact that something
- * is waiting. The in-flight resolver lives in memory only — a request whose
- * resolver is gone (orchestrator restarted) can no longer be answered, and
- * the upstream connection is re-established from scratch in that case.
+ * Each request gets a row, so the dashboard can show that something is waiting
+ * and a restart does not lose that fact. The resolver that answers the request
+ * lives in memory, so a row outliving its process can no longer be answered.
  */
 
+/** One queued permission request and the handlers waiting on its answer. */
 export interface PendingEntry {
   row: PendingRequestRow;
   /** Resolves the upstream request with the browser's chosen outcome. */
   resolve: (result: unknown) => void;
   /** Fails the upstream request. */
   reject: (error: Error) => void;
+  /** Fires when the hold expires. */
   timer: NodeJS.Timeout;
 }
 
+/** The queue of unanswered permission requests, in memory and in the database. */
 export class PendingStore {
   private readonly entries = new Map<number, PendingEntry>();
 
@@ -36,6 +36,10 @@ export class PendingStore {
     }
   }
 
+  /**
+   * Queues a request and returns its entry. The timeout callback fires after
+   * holdMs unless the entry is settled first.
+   */
   add(
     sessionId: string,
     upstreamId: string,
@@ -83,10 +87,12 @@ export class PendingStore {
     return entry;
   }
 
+  /** The answerable entries of one session. */
   listForSession(sessionId: string): PendingEntry[] {
     return [...this.entries.values()].filter((e) => e.row.session_id === sessionId);
   }
 
+  /** How many requests of one session are waiting. */
   countForSession(sessionId: string): number {
     const row = this.db
       .prepare('SELECT COUNT(*) AS n FROM pending_requests WHERE session_id = ?')
@@ -94,6 +100,7 @@ export class PendingStore {
     return row?.n ?? 0;
   }
 
+  /** Waiting request counts, keyed by session id. */
   countsBySession(): Map<string, number> {
     const rows = this.db
       .prepare('SELECT session_id, COUNT(*) AS n FROM pending_requests GROUP BY session_id')

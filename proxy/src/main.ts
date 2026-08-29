@@ -4,33 +4,40 @@ import dns from 'node:dns';
 import { allAddressesAllowed, isBlockedAddress } from './cidr.ts';
 
 /**
- * The sole egress path out of every session network (plan §8.4).
+ * The sole egress path out of every session network.
  *
- * Session networks are Docker `internal` networks: no NAT, no default route.
- * This process is attached to each of them with the alias `proxy`, so it is
- * the only thing an agent can reach, and it is therefore the security
- * boundary between a session and both the LAN and every other session.
- *
- * Deliberately tiny: two cases (absolute-URI plain HTTP, and CONNECT), no
- * caching, no auth, no config file, no runtime dependencies.
+ * Session networks are internal Docker networks with no NAT and no default
+ * route. This process is attached to each of them under the alias proxy, so it
+ * is the only thing an agent can reach and the boundary between a session, the
+ * LAN, and every other session.
  */
 
+/** Port the proxy listens on. */
 const PORT = Number(process.env['PORT'] ?? 3128);
+
+/** Destination ports an agent may reach. */
 const ALLOWED_PORTS = new Set([80, 443]);
+
+/** How long a CONNECT may take to establish, in milliseconds. */
 const CONNECT_TIMEOUT_MS = 15_000;
+
+/** How long an established connection may sit idle, in milliseconds. */
 const IDLE_TIMEOUT_MS = 120_000;
 
+/** Writes one JSON line to stderr. */
 function log(msg: string, fields: Record<string, unknown> = {}): void {
   process.stderr.write(
     `${JSON.stringify({ ts: new Date().toISOString(), msg, ...fields })}\n`,
   );
 }
 
+/** Where a request wants to go. */
 interface Target {
   host: string;
   port: number;
 }
 
+/** Splits an authority into host and port, or null if it is malformed. */
 function parseHostPort(authority: string, defaultPort: number): Target | null {
   // IPv6 literals arrive bracketed: [::1]:443
   if (authority.startsWith('[')) {
@@ -52,9 +59,9 @@ function parseHostPort(authority: string, defaultPort: number): Target | null {
 }
 
 /**
- * Resolves a hostname and vets every answer, returning one address to pin the
- * connection to. Connecting to the *resolved* address rather than re-resolving
- * is what makes the check meaningful (plan §8.4).
+ * Vets a target and returns the single address to pin the connection to. An IP
+ * literal is checked as it stands; a hostname is resolved first and every
+ * answer has to pass.
  */
 async function vetTarget(
   target: Target,
@@ -81,9 +88,8 @@ async function vetTarget(
 
   const addresses = answers.map((a) => a.address);
   if (!allAddressesAllowed(addresses)) {
-    // Rejecting when ANY answer is private is what closes DNS rebinding: a
-    // hostname must not pass with a public record and connect with a private
-    // one on a second resolution.
+    // Rejecting when any answer is private closes DNS rebinding: a hostname
+    // must not pass with a public record and connect with a private one.
     return { ok: false, reason: 'hostname resolves to a blocked address' };
   }
 
@@ -92,6 +98,7 @@ async function vetTarget(
   return { ok: true, address: chosen.address, family: chosen.family };
 }
 
+/** Answers a forwarded request with a 403 and the reason. */
 function deny(res: http.ServerResponse, reason: string): void {
   res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end(`egress denied: ${reason}\n`);
@@ -104,8 +111,8 @@ const server = http.createServer();
 server.on('request', (req, res) => {
   const rawUrl = req.url ?? '';
   if (!/^https?:\/\//i.test(rawUrl)) {
-    // A non-absolute URI means the client is talking to us as an origin
-    // server, not as a proxy. We are only ever a proxy.
+    // A non-absolute request URI addresses this process as an origin server,
+    // which it never is.
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('this is a forward proxy; use an absolute request URI\n');
     return;
@@ -119,7 +126,7 @@ server.on('request', (req, res) => {
     return;
   }
   if (url.protocol !== 'http:') {
-    // https must arrive as CONNECT; we never terminate TLS.
+    // https must arrive as CONNECT: this proxy never terminates TLS.
     deny(res, 'only http:// may be forwarded; use CONNECT for https');
     return;
   }
@@ -144,8 +151,8 @@ server.on('request', (req, res) => {
 
     const upstream = http.request(
       {
-        // Pinned to the vetted address; `headers.host` preserves virtual
-        // hosting and there is no second resolution to race.
+        // Pinned to the vetted address. The Host header preserves virtual
+        // hosting, and no second resolution can race the check.
         host: verdict.address,
         port: target.port,
         method: req.method,

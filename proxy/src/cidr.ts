@@ -1,12 +1,9 @@
 /**
- * Resolved-IP vetting: the critical rule of the egress proxy (plan §8.4).
+ * Resolved-IP vetting for the egress proxy, and the only thing between an
+ * agent and the owner's LAN.
  *
- * Pure and unit-tested, because this function is the only thing standing
- * between an agent and the owner's LAN once the proxy has a route to both.
- * Every address a hostname resolves to must pass; the caller then connects to
- * a specific vetted address and never re-resolves, which is what closes DNS
- * rebinding — a hostname must not be able to pass the check with a public A
- * record and connect with a private one.
+ * Every address a hostname resolves to has to pass, and the caller then
+ * connects to one vetted address without resolving a second time.
  */
 
 /** IPv4 ranges an agent must never reach through the proxy. */
@@ -24,6 +21,7 @@ const V4_BLOCKED: ReadonlyArray<readonly [string, number]> = [
   ['240.0.0.0', 4], // reserved, incl. 255.255.255.255
 ];
 
+/** Parses a dotted quad into a 32-bit unsigned integer, or null if malformed. */
 function v4ToInt(addr: string): number | null {
   const parts = addr.split('.');
   if (parts.length !== 4) return null;
@@ -37,6 +35,7 @@ function v4ToInt(addr: string): number | null {
   return value;
 }
 
+/** Whether an IPv4 value falls inside base/prefix. */
 function inV4Range(value: number, base: string, prefix: number): boolean {
   const baseInt = v4ToInt(base);
   if (baseInt === null) return false;
@@ -99,14 +98,15 @@ function parseV6(addr: string): number[] | null {
   return [...head, ...zeros, ...mid, ...tail];
 }
 
+/** Parses one IPv6 group, or null if it is not one to four hex digits. */
 function hexGroup(text: string): number | null {
   if (!/^[0-9a-f]{1,4}$/.test(text)) return null;
   return Number.parseInt(text, 16);
 }
 
 /**
- * Returns true when `address` is one an agent must not be able to reach.
- * Unparseable input is treated as blocked: this function fails closed.
+ * Whether an address is one an agent must not reach. Unparseable input counts
+ * as blocked: this check fails closed.
  */
 export function isBlockedAddress(address: string): boolean {
   const text = address.trim();
@@ -118,11 +118,11 @@ export function isBlockedAddress(address: string): boolean {
   }
 
   const groups = parseV6(text);
-  if (groups === null) return true; // fail closed on anything we cannot parse
+  if (groups === null) return true; // fail closed on anything unparseable
 
-  // v4-mapped (::ffff:a.b.c.d) and v4-compatible (::a.b.c.d) forms must be
-  // vetted as the IPv4 address they actually reach, or the whole check is
-  // trivially bypassed by rewriting the target.
+  // v4-mapped (::ffff:a.b.c.d) and v4-compatible (::a.b.c.d) forms are vetted
+  // as the IPv4 address they reach, or the check is bypassed by rewriting the
+  // target.
   const isV4Mapped =
     groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff;
   const isV4Compat =

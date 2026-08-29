@@ -10,6 +10,7 @@ import { StatusBadge } from '../components/StatusBadge.tsx';
 import { refresh } from '../store.ts';
 import './SessionDetail.css';
 
+/** One session in full: how to connect to it, what it is made of, and its controls. */
 export function SessionDetail() {
   const { params } = useRoute();
   const { route } = useLocation();
@@ -111,8 +112,8 @@ export function SessionDetail() {
           </span>
         ) : null}
 
-        {/* Safety net: acp-ui's stored config format is the one thing here
-            that depends on its internals, so keep a manual path available. */}
+        {/* Fallback for a browser that blocks storage, or an acp-ui whose
+            stored config format has changed. */}
         <details class="SessionDetail-manual">
           <summary class="SessionDetail-manualSummary">Connect manually instead</summary>
           <div class="SessionDetail-manualBody">

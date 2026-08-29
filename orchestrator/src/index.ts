@@ -16,19 +16,22 @@ import { log } from './log.ts';
 import { startProxyReconciler, startReaper } from './reaper.ts';
 import { HttpError, SessionManager } from './sessions.ts';
 
+/** Version reported by the health endpoint. */
 const VERSION = '1.0.0';
+
 const here = dirname(fileURLToPath(import.meta.url));
+
 /** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
+
 /**
- * acp-ui bundle, built into the same image and served under `/ui`.
- *
- * Serving it ourselves rather than from a second container is what makes the
- * dashboard and acp-ui the same origin in every deployment, which is what the
- * one-click connect depends on (dashboard/src/acpui.ts) and what lets the
- * stack run with no reverse proxy in front of it at all.
+ * acp-ui bundle, built into the same image. Serving it here puts it on the
+ * same origin as the dashboard, which the one-click connect needs and which
+ * lets the stack run with no reverse proxy in front of it.
  */
 const ACPUI_DIR = resolve(here, '../acpui');
+
+/** Path prefix acp-ui is served under, and the base it is built with. */
 const ACPUI_PREFIX = '/ui';
 
 const cfg = config();
@@ -39,7 +42,7 @@ let proxyWarnings: string[] = [];
 
 const app = Fastify({ logger: false });
 
-// --- REST (behind Traefik basicauth; plan §8.5) -----------------------------
+// --- REST: unauthenticated here, the deployment puts auth in front ----------
 
 app.setErrorHandler((err, _req, reply) => {
   if (err instanceof HttpError) {
@@ -99,8 +102,9 @@ app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
   return { entries, cursor: entries.at(-1)?.id ?? afterId };
 });
 
-// --- Static bundles + SPA fallback (plan §8.5) ------------------------------
+// --- Static bundles with a single-page fallback -----------------------------
 
+/** Content types served from the bundles, by file extension. */
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -154,23 +158,24 @@ app.setNotFoundHandler((req, reply) => {
     return reply.code(404).send({ error: 'Not found' });
   }
   if (url === ACPUI_PREFIX || url.startsWith(`${ACPUI_PREFIX}/`)) {
-    // acp-ui is built with `--base=/ui/`, so it asks for its own assets under
+    // acp-ui is built with --base=/ui/, so it asks for its own assets under
     // this prefix; strip it back off to find them on disk.
     return sendBundle(reply, ACPUI_DIR, url.slice(ACPUI_PREFIX.length) || '/', 'acp-ui not built');
   }
   return sendBundle(reply, DASHBOARD_DIR, url, 'Dashboard not built');
 });
 
-// --- WebSocket gateway (token-authed; bypasses basicauth, plan §2) ----------
+// --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
 const wss = new WebSocketServer({
   noServer: true,
   // The client offers ['acp.v1', 'bearer.<token>']. The bearer entry is
-  // credentials, not a protocol, so negotiate acp.v1 explicitly rather than
-  // relying on the client happening to list it first (plan §2, §8.3).
+  // credentials, not a protocol, so acp.v1 is negotiated explicitly rather
+  // than relying on the client to list it first.
   handleProtocols: (protocols) =>
     protocols.has(ACP_SUBPROTOCOL) ? ACP_SUBPROTOCOL : false,
 });
+/** The only upgrade path the gateway answers, capturing the session id. */
 const WS_PATH = /^\/ws\/sessions\/([A-Za-z0-9_-]{1,64})\/acp$/;
 
 app.server.on('upgrade', (req, socket, head) => {
@@ -186,8 +191,8 @@ app.server.on('upgrade', (req, socket, head) => {
   const check = checkUpgrade(req.headers['sec-websocket-protocol'], cfg);
   if (!check.ok) {
     log.warn('rejected WS upgrade', { sessionId, reason: check.reason });
-    // 4401 is the app-level "unauthorized" the plan specifies; the handshake
-    // itself must fail with an HTTP status, so use 401 here.
+    // The handshake fails before a WebSocket exists, so the refusal is an
+    // HTTP status rather than a close code.
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
@@ -207,6 +212,7 @@ app.server.on('upgrade', (req, socket, head) => {
 
 // --- boot -------------------------------------------------------------------
 
+/** Reconciles against Docker, starts the background loops, and listens. */
 async function main(): Promise<void> {
   await manager.reconcile();
   startReaper(db, cfg, manager);

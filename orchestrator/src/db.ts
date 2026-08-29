@@ -4,11 +4,11 @@ import { join } from 'node:path';
 import type { SessionStatus } from '../../shared/types.ts';
 
 /**
- * SQLite persistence (plan §7). WAL mode; the DB holds metadata only —
- * Docker is runtime truth (plan §8.2) and thread replay is the adapter's job
- * (plan §2), so there is deliberately no replay table here.
+ * SQLite persistence in WAL mode. The database holds session metadata only:
+ * Docker is the runtime truth, and thread replay belongs to the adapter.
  */
 
+/** A row of the sessions table. */
 export interface SessionRow {
   id: string;
   name: string;
@@ -29,6 +29,7 @@ export interface SessionRow {
   last_active_at: number;
 }
 
+/** A permission request the adapter is still blocked on. */
 export interface PendingRequestRow {
   id: number;
   session_id: string;
@@ -38,6 +39,7 @@ export interface PendingRequestRow {
   created_at: number;
 }
 
+/** Schema migrations, applied in order and tracked by user_version. */
 const MIGRATIONS: string[] = [
   `
   CREATE TABLE sessions (
@@ -73,8 +75,10 @@ const MIGRATIONS: string[] = [
   `,
 ];
 
+/** An open database handle. */
 export type Db = Database.Database;
 
+/** Opens boxes.db under dataDir, creating and migrating it as needed. */
 export function openDb(dataDir: string): Db {
   mkdirSync(dataDir, { recursive: true });
   const db = new Database(join(dataDir, 'boxes.db'));
@@ -85,6 +89,7 @@ export function openDb(dataDir: string): Db {
   return db;
 }
 
+/** Runs every migration the database has not applied yet, one per transaction. */
 function migrate(db: Db): void {
   const current = db.pragma('user_version', { simple: true }) as number;
   for (let v = current; v < MIGRATIONS.length; v++) {
@@ -102,11 +107,7 @@ function migrate(db: Db): void {
   }
 }
 
-/**
- * Allocates the next per-session /24 out of SESSION_SUBNET_POOL. Docker
- * requires non-overlapping subnets; nothing filters on these anymore since
- * the proxy vets resolved IPs instead (plan §8.4).
- */
+/** Returns the next value of the subnet counter, incrementing it in place. */
 export function nextSubnetIndex(db: Db): number {
   const row = db
     .prepare(
@@ -118,9 +119,10 @@ export function nextSubnetIndex(db: Db): number {
   return row?.value ?? 0;
 }
 
-/** Ring-prune the debug tap to the newest 5,000 rows per session (plan §7). */
+/** Debug log rows kept per session. */
 const LOG_RING = 5000;
 
+/** Records one tapped ACP message, truncating the payload at 64,000 characters. */
 export function appendAcpLog(
   db: Db,
   sessionId: string,
@@ -132,6 +134,7 @@ export function appendAcpLog(
   ).run(sessionId, direction, Date.now(), payload.slice(0, 64_000));
 }
 
+/** Drops all but the newest LOG_RING debug log entries of one session. */
 export function pruneAcpLog(db: Db, sessionId: string): void {
   db.prepare(
     `DELETE FROM acp_log

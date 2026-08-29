@@ -6,6 +6,7 @@ import { SessionDetail } from './views/SessionDetail.tsx';
 import { SessionList } from './views/SessionList.tsx';
 import './main.css';
 
+/** The dashboard's routes. */
 function App() {
   return (
     <LocationProvider>

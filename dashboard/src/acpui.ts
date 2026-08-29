@@ -3,20 +3,13 @@ import type { SessionSummary } from '../../shared/types.ts';
 /**
  * One-click connect.
  *
- * acp-ui keeps its agent list in per-origin `localStorage` and has no
- * URL-prefill mechanism. The orchestrator serves acp-ui at `/ui` and this
- * dashboard at `/`, so the two are the same origin: we can write that config
- * ourselves and then navigate there. Nothing is typed, on any device.
- *
- * The stored value is acp-ui's own `AgentsConfig`: one object whose `agents`
- * record is keyed by the agent's display name. acp-ui ignores a stored value
- * that has no `agents` record at all, so the container shape matters as much
- * as the entry shape. The orchestrator image build asserts that STORAGE_KEY
- * still appears in the acp-ui bundle, so a rename upstream fails the build
- * rather than shipping a button that silently does nothing.
+ * acp-ui keeps its agent list in per-origin localStorage and has no way to
+ * prefill it from a URL. The orchestrator serves acp-ui at /ui and this
+ * dashboard at /, so the two share an origin and the dashboard can write that
+ * config itself before sending the browser there.
  */
 
-/** acp-ui's own storage key. Asserted against the bundle at image build time. */
+/** acp-ui's own storage key, asserted against the bundle at image build time. */
 export const STORAGE_KEY = 'acp-ui:agents';
 
 /** Where the orchestrator serves acp-ui. */
@@ -30,15 +23,18 @@ export interface AgentFields {
   token: string;
 }
 
+/** A JSON object, which is all this module needs to know about acp-ui's shapes. */
 type Entry = Record<string, unknown>;
 
+/** True for a JSON object, excluding null and arrays. */
 function isEntry(value: unknown): value is Entry {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
- * Reads the stored config the way acp-ui reads it: anything without an
- * `agents` record is treated as absent rather than repaired.
+ * Reads the stored config the way acp-ui reads it: anything without an agents
+ * record counts as absent. Returns the agents record and the settings beside
+ * it.
  */
 function parseConfig(raw: string | null): { rest: Entry; agents: Entry } {
   if (!raw) return { rest: {}, agents: {} };
@@ -55,12 +51,11 @@ function parseConfig(raw: string | null): { rest: Entry; agents: Entry } {
 
 /**
  * Upserts this session into acp-ui's stored config and returns the JSON to
- * store. Pure, so it can be tested without a DOM.
+ * store. The entry is keyed by display name, and any field acp-ui added to it
+ * survives; only transport, url and the Authorization header are overwritten.
  *
- * Fields acp-ui may have added to its own entry are preserved; only the three
- * this dashboard owns are overwritten. Per plan §2, acp-ui turns the
- * `Authorization` header into the `bearer.<token>` subprotocol entry, because
- * browsers cannot set real headers on a WebSocket.
+ * acp-ui turns that header into the bearer.<token> subprotocol entry, because
+ * a browser cannot set real headers on a WebSocket.
  */
 export function upsertAgent(raw: string | null, fields: AgentFields): string {
   const { rest, agents } = parseConfig(raw);
@@ -86,18 +81,16 @@ export function upsertAgent(raw: string | null, fields: AgentFields): string {
 }
 
 /**
- * This session's ACP endpoint on the current origin.
- *
- * Derived from the browser's own location rather than from the API: the
- * dashboard, acp-ui and the gateway are all served by the orchestrator, so the
- * page already knows the right scheme and host. That keeps the button correct
- * with no deployment configuration, behind TLS or on a plain local port.
+ * This session's ACP endpoint on the current origin. The dashboard, acp-ui and
+ * the gateway are all served by the orchestrator, so the page's own location
+ * carries the right scheme and host.
  */
 export function wsUrlFor(sessionId: string): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${scheme}//${window.location.host}/ws/sessions/${sessionId}/acp`;
 }
 
+/** Describes one session as an acp-ui agent entry. */
 export function agentFieldsFor(session: SessionSummary): AgentFields {
   return {
     name: `${session.name} (${session.id})`,

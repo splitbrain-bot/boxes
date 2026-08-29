@@ -7,10 +7,13 @@ import type {
 } from '../../shared/types.ts';
 
 /**
- * Typed fetch client for /api. Shapes come from shared/types.ts, which the
- * orchestrator handlers import too, so the boundary cannot drift (plan §4).
+ * Typed fetch client for the orchestrator's REST API.
  */
 
+/**
+ * Sends one JSON request and returns the parsed body. Throws with the API's
+ * own error message when the response is not a success.
+ */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -30,6 +33,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Every REST call the dashboard makes. */
 export const api = {
   listSessions: () => request<SessionSummary[]>('/api/sessions'),
   getSession: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),

@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import './CopyField.css';
 
-/** wss URL and token copy for the one-time acp-ui setup (plan §8.5). */
+/** A labelled value with a copy button, masked until revealed when asked. */
 export function CopyField({
   label,
   value,
@@ -20,7 +20,7 @@ export function CopyField({
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Clipboard needs a secure context; the value stays selectable.
+      // Clipboard needs a secure context; reveal the value to be copied by hand.
       setRevealed(true);
     }
   };

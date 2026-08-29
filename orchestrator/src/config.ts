@@ -2,13 +2,12 @@ import { z } from 'zod';
 import { resolveWsAuthToken } from './secret.ts';
 
 /**
- * Environment parsing. Everything the orchestrator needs comes from the
- * process env (plan §6). Parsed once at boot so a misconfigured deployment
- * fails loudly instead of at first use.
+ * Environment parsing. Every setting the orchestrator reads comes from the
+ * process env and is parsed once at boot, so a misconfigured deployment fails
+ * at startup.
  *
- * Every value has a working default, so the orchestrator starts with no
- * configuration at all. The one secret that cannot have a shipped default,
- * WS_AUTH_TOKEN, is generated per deployment instead (see secret.ts).
+ * Every setting has a working default, so the orchestrator starts with no
+ * configuration at all.
  */
 
 const durationMinutes = z.coerce.number().int().positive();
@@ -26,8 +25,8 @@ const schema = z.object({
   IDLE_STOP_MINUTES: durationMinutes.default(30),
 
   /**
-   * Validated against the `bearer.<token>` WS subprotocol (plan §2, §8.3).
-   * Unset means "generate one and keep it in the data volume".
+   * Validated against the bearer.<token> WebSocket subprotocol. Unset means
+   * the orchestrator generates one and keeps it in the data volume.
    */
   WS_AUTH_TOKEN: z.string().default(''),
 
@@ -35,7 +34,7 @@ const schema = z.object({
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
   NTFY_URL: z.string().url().or(z.literal('')).default(''),
 
-  /** Name of the compose service running the egress proxy (plan §8.4). */
+  /** Container name of the egress proxy the orchestrator attaches. */
   EGRESS_PROXY_CONTAINER: z.string().min(1).default('boxes-egress-proxy'),
   EGRESS_PROXY_ALIAS: z.string().min(1).default('proxy'),
   EGRESS_PROXY_PORT: z.coerce.number().int().positive().default(3128),
@@ -47,7 +46,7 @@ const schema = z.object({
 });
 
 export type Config = Readonly<z.infer<typeof schema>> & {
-  /** Secrets injected into every session container of the DEFAULT profile. */
+  /** Credentials by profile name. */
   readonly profiles: Readonly<Record<string, SessionProfile>>;
 };
 
@@ -61,6 +60,7 @@ export interface SessionProfile {
 
 let cached: Config | null = null;
 
+/** Parses an environment into a config, throwing on any invalid value. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.safeParse(env);
   if (!parsed.success) {
@@ -84,6 +84,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
+/** The process-wide config, parsed on first call. */
 export function config(): Config {
   if (!cached) cached = loadConfig();
   return cached;

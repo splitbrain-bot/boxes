@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Live tests that need a real Claude subscription token (plan M1, M3, M4).
+# Live tests that need a real Claude subscription token.
 #
-# Everything else is covered by scripts/smoke-test.sh, which needs no
-# credentials. These four checks are the ones that only a real inference call
-# can prove, so they are kept separate and are never run by default.
+# These are the checks only a real inference call can prove, so they are kept
+# apart from the credential-free scripts/smoke-test.sh and never run by
+# default.
 #
 # The orchestrator needs PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN from
-# `claude setup-token` before these can pass. It does not have to live in the
-# repo -- see "Keeping the token out of .env" in the README:
+# `claude setup-token` before these can pass. It can live outside the repo:
 #
 #   docker compose --env-file ~/.config/boxes.env \
 #     -f compose.yaml -f compose.local.yaml up -d
@@ -43,7 +42,7 @@ SESSION_ID=$(api -X POST "$API_BASE/api/sessions" \
 [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] || { red "could not create session"; exit 1; }
 CONTAINER="session-$SESSION_ID"
 WS_TOKEN=$(api "$API_BASE/api/sessions/$SESSION_ID" | jq -r '.wsToken')
-# The endpoint is same-origin with the API, exactly as the dashboard derives it.
+# Same origin as the API, the way the dashboard derives it.
 LOCAL_WS="${API_BASE/http/ws}/ws/sessions/$SESSION_ID/acp"
 grey "session=$SESSION_ID  ws=$LOCAL_WS"
 
@@ -61,7 +60,7 @@ echo "== M3/M4: a turn survives the browser leaving, and the thread replays =="
 node --input-type=module - "$LOCAL_WS" "$WS_TOKEN" <<'NODE'
 const [url, token] = process.argv.slice(2);
 
-/** One JSON-RPC call over a fresh socket, as acp-ui makes them. */
+/** Opens a socket and returns its JSON-RPC helpers, the way acp-ui connects. */
 function connect() {
   const ws = new WebSocket(url, ['acp.v1', `bearer.${token}`]);
   const pending = new Map();
@@ -125,9 +124,8 @@ await b.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
 await b.rpc('session/load', { sessionId, cwd: '/workspace', mcpServers: [] });
 await sleep(5000);
 
-// Only the agent's own message counts. The replay also contains the prompt we
-// sent, which quotes the words we are looking for -- matching anywhere in the
-// transcript would pass even when the agent never answered at all.
+// Only the agent's own messages count: the replay also carries the prompt,
+// which quotes the words being matched.
 const agentText = b.updates
   .filter((u) => u?.update?.sessionUpdate === 'agent_message_chunk')
   .map((u) => u.update?.content?.text ?? '')

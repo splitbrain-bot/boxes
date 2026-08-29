@@ -1,5 +1,5 @@
-# Same toolchain as the rest of the project: strict TS, type-checked before
-# bundling, single bundled file, non-root, read-only root fs (plan §8.4).
+# The egress proxy: type-checked, bundled to a single file, and run as a
+# non-root user.
 FROM node:22-alpine AS build
 WORKDIR /build
 COPY proxy/package.json ./
@@ -13,5 +13,4 @@ WORKDIR /app
 COPY --from=build /build/dist/main.js ./main.js
 USER node
 EXPOSE 3128
-# No volumes, no runtime deps, nothing to configure.
 CMD ["node", "main.js"]

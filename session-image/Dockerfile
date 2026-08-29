@@ -1,6 +1,6 @@
 # Boxes session image: one long-lived container per agent session.
-# PID 1 only holds the container open; the ACP adapter runs as a
-# gateway-owned `docker exec` so browser churn never restarts it (plan §8.1).
+# PID 1 only holds the container open; the ACP adapter runs as a gateway-owned
+# docker exec, so browser churn never restarts it.
 FROM node:22-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       dnsutils \
  && rm -rf /var/lib/apt/lists/*
 
-# GitHub CLI from the official apt repo (used by the bot fork/PR flow, §8.1).
+# GitHub CLI from the official apt repo, for the bot's fork and PR flow.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -26,15 +26,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && apt-get update && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
-# Pinned per plan §2 / §12.3. The adapter package was renamed; the old
-# @zed-industries/claude-code-acp is stale at 0.16.2 and must not be used.
+# The adapter is pinned here and nowhere else. Do not switch to
+# @zed-industries/claude-code-acp, which is stale at 0.16.2.
 RUN npm install -g \
       @anthropic-ai/claude-code \
       @agentclientprotocol/claude-agent-acp@0.70.0 \
  && npm cache clean --force
 
-# node:22-bookworm already ships uid 1000 as `node`; rename to `agent` so the
-# container user, the volume owner and the exec user all line up.
+# node:22-bookworm ships uid 1000 as node; rename it to agent so the container
+# user, the volume owner and the exec user all line up.
 RUN usermod -l agent -d /home/agent -m node \
  && groupmod -n agent node
 
@@ -45,8 +45,8 @@ ENV CLAUDE_CONFIG_DIR=/home/agent/.claude \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
-# Root filesystem is mounted read-only at runtime; /workspace and /home/agent
-# are the writable volumes, /tmp is a tmpfs (plan §8.2 step 5).
+# The root filesystem is mounted read-only at runtime. /workspace and
+# /home/agent are the writable volumes, and /tmp is a tmpfs.
 RUN mkdir -p /workspace /home/agent \
  && chown agent:agent /workspace /home/agent
 

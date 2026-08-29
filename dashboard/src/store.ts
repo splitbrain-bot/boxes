@@ -3,17 +3,24 @@ import type { SessionSummary } from '../../shared/types.ts';
 import { api } from './api.ts';
 
 /**
- * Signals store. Polls GET /api/sessions every 5s while the tab is visible
- * and pauses on visibilitychange — SSE is an M7 upgrade, not v1 (plan §8.5).
+ * The session list every view reads, kept fresh by polling.
  */
 
+/** The sessions as of the last successful poll. */
 export const sessions = signal<SessionSummary[]>([]);
+
+/** The message from the last failed poll, or null. */
 export const loadError = signal<string | null>(null);
+
+/** True until the first poll has finished, however it went. */
 export const loading = signal(true);
 
+/** Time between polls, in milliseconds. */
 const POLL_MS = 5000;
+
 let timer: number | null = null;
 
+/** Fetches the session list once. */
 export async function refresh(): Promise<void> {
   try {
     sessions.value = await api.listSessions();
@@ -25,17 +32,20 @@ export async function refresh(): Promise<void> {
   }
 }
 
+/** Starts the poll timer, unless it already runs. */
 function schedule(): void {
   if (timer !== null) return;
   timer = window.setInterval(() => void refresh(), POLL_MS);
 }
 
+/** Stops the poll timer. */
 function pause(): void {
   if (timer === null) return;
   window.clearInterval(timer);
   timer = null;
 }
 
+/** Polls for as long as the tab is visible, resuming on the way back. */
 export function startPolling(): void {
   void refresh();
   schedule();

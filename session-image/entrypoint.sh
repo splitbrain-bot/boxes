@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs as `agent` on container start. Prepares git/gh identity and the clone,
-# then hands the container to `sleep infinity`: the ACP adapter is spawned
-# separately by the gateway as a long-lived exec (plan §8.1).
+# Runs as agent on container start. Prepares the git and gh identity and the
+# clone, then holds the container open with sleep. The gateway spawns the ACP
+# adapter separately, as a long-lived exec.
 set -uo pipefail
 
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
@@ -15,7 +15,7 @@ if [ -n "${GIT_EMAIL:-}" ]; then
 fi
 git config --global init.defaultBranch main
 git config --global advice.detachedHead false
-# The clone below is the agent's own checkout; marking it safe avoids git's
+# The clone below is the agent's own checkout. Marking it safe avoids git's
 # dubious-ownership refusal when uid mapping differs across volume restores.
 git config --global --add safe.directory '*'
 

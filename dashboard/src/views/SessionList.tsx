@@ -2,6 +2,7 @@ import { SessionCard } from '../components/SessionCard.tsx';
 import { loadError, loading, sessions } from '../store.ts';
 import './SessionList.css';
 
+/** The dashboard's home: every session as a card. */
 export function SessionList() {
   return (
     <div class="SessionList">

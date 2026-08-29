@@ -8,8 +8,8 @@
 # proxy, and nothing needs configuring: the dashboard derives the WebSocket URL
 # from the browser's own location.
 #
-# There is no basicauth here, because Traefik is what provides it. Bind to
-# loopback only, and do not use this on a shared or exposed host.
+# This override has no basicauth, because Traefik is what provides it, which
+# is why it binds to loopback. Do not use it on a shared or exposed host.
 
 services:
   orchestrator:

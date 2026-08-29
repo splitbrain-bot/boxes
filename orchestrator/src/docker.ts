@@ -5,28 +5,30 @@ import type { Config, SessionProfile } from './config.ts';
 import { log } from './log.ts';
 
 /**
- * Container / network / volume lifecycle plus the long-lived adapter exec
- * (plan §8.2, §8.3).
+ * Container, network and volume lifecycle, plus the long-lived adapter exec.
  *
- * The HostConfig here is a fixed template: user input never reaches it. The
- * only caller-supplied values are the session id (server-generated), the
- * repo URL (validated https, passed as an env var, never as argv) and the
- * profile secrets.
+ * The HostConfig below is a fixed template that user input never reaches. The
+ * caller supplies only the server-generated session id, the validated https
+ * repo URL, which travels as an env var, and the profile secrets.
  */
 
+/** Docker label carrying the session id on every object Boxes creates. */
 export const LABEL = 'boxes.session';
 
 let client: Docker | null = null;
 
+/** The shared Docker client, connected to the host socket on first use. */
 export function docker(): Docker {
   if (!client) client = new Docker({ socketPath: '/var/run/docker.sock' });
   return client;
 }
 
+/** Test seam: install a client, or null to reset. */
 export function setDockerForTests(d: Docker | null): void {
   client = d;
 }
 
+/** Docker object names derived from a session id. */
 export const names = {
   container: (id: string) => `session-${id}`,
   network: (id: string) => `sn-${id}`,
@@ -34,6 +36,7 @@ export const names = {
   homeVolume: (id: string) => `home-${id}`,
 };
 
+/** Everything createContainer needs to know about one session. */
 export interface CreateContainerSpec {
   sessionId: string;
   image: string;
@@ -45,7 +48,7 @@ export interface CreateContainerSpec {
   profile: SessionProfile;
 }
 
-/** Env injected at create (plan §8.1). Secrets go here and nowhere else. */
+/** Environment of a session container. Secrets go here and nowhere else. */
 function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
   const proxyUrl = `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
   const env: Record<string, string> = {
@@ -56,8 +59,8 @@ function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     REPO_URL: spec.repoUrl ?? '',
     TERM: 'dumb',
     CLAUDE_CONFIG_DIR: '/home/agent/.claude',
-    // Every proxy-aware client honours these; anything else simply has no
-    // route out, which is the intended failure mode (plan §8.4).
+    // Every proxy-aware client honours these; anything else has no route
+    // out, which is the intended failure mode.
     HTTP_PROXY: proxyUrl,
     HTTPS_PROXY: proxyUrl,
     http_proxy: proxyUrl,
@@ -70,6 +73,7 @@ function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     .map(([k, v]) => `${k}=${v}`);
 }
 
+/** Converts a Docker-style memory limit such as 4g into bytes. */
 function memoryBytes(limit: string): number {
   const match = /^(\d+)([kmgKMG]?)$/.exec(limit);
   if (!match) throw new Error(`Invalid memory limit: ${limit}`);
@@ -79,7 +83,7 @@ function memoryBytes(limit: string): number {
   return value * scale;
 }
 
-/** Step 2: an `internal` network — no NAT, no default route (plan §8.4). */
+/** Creates a session network. Internal, so it has no NAT and no default route. */
 export async function createNetwork(networkName: string, subnet: string, sessionId: string): Promise<void> {
   await docker().createNetwork({
     Name: networkName,
@@ -92,9 +96,9 @@ export async function createNetwork(networkName: string, subnet: string, session
 }
 
 /**
- * Step 3 / reconciliation: attach the egress proxy to a session network with
- * the `proxy` alias. Idempotent by check, because `compose up` may recreate
- * the proxy container and drop its dynamic attachments (plan §8.4).
+ * Attaches the egress proxy to a session network under its alias, and reports
+ * whether it is attached. The check runs every time, because compose can
+ * recreate the proxy container and drop its dynamic attachments.
  */
 export async function ensureProxyAttached(networkName: string, cfg: Config): Promise<boolean> {
   const net = docker().getNetwork(networkName);
@@ -124,6 +128,7 @@ export async function ensureProxyAttached(networkName: string, cfg: Config): Pro
   }
 }
 
+/** Whether the egress proxy is attached to a session network right now. */
 export async function isProxyAttached(networkName: string, cfg: Config): Promise<boolean> {
   try {
     const info = await docker().getNetwork(networkName).inspect();
@@ -135,11 +140,12 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
   }
 }
 
+/** Creates a volume labelled with its session. */
 export async function createVolume(name: string, sessionId: string): Promise<void> {
   await docker().createVolume({ Name: name, Labels: { [LABEL]: sessionId } });
 }
 
-/** Step 5: the fixed, hardened HostConfig template. */
+/** Creates a session container from the fixed, hardened HostConfig template. */
 export async function createContainer(spec: CreateContainerSpec, cfg: Config): Promise<string> {
   const container = await docker().createContainer({
     name: names.container(spec.sessionId),
@@ -148,7 +154,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     WorkingDir: '/workspace',
     Env: sessionEnv(spec, cfg),
     Labels: { [LABEL]: spec.sessionId },
-    // The adapter is a separate exec; PID 1 just holds the container.
+    // The adapter is a separate exec; PID 1 only holds the container open.
     AttachStdin: false,
     AttachStdout: false,
     AttachStderr: false,
@@ -167,13 +173,11 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       NanoCpus: Math.round(cfg.SESSION_CPUS * 1e9),
       PidsLimit: cfg.SESSION_PIDS_LIMIT,
       RestartPolicy: { Name: 'no' },
-      // The kernel discards default-disposition signals for PID 1, so an
-      // entrypoint that ends in `exec sleep infinity` would ignore SIGTERM and
-      // every stop would wait out the 10s grace period and then SIGKILL.
-      // docker-init forwards the signal and reaps, so stops are prompt.
+      // The kernel discards default-disposition signals for PID 1, so the
+      // entrypoint's sleep never sees SIGTERM. docker-init forwards the signal
+      // and reaps, which keeps stops prompt.
       Init: true,
-      // Explicitly nothing else: no bind mounts of host paths, no
-      // docker.sock, no published ports, no extra devices.
+      // Stated explicitly so a later edit cannot loosen them by omission.
       Privileged: false,
       PublishAllPorts: false,
     },
@@ -181,15 +185,17 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
   return container.id;
 }
 
+/** Starts a container, tolerating one that already runs. */
 export async function startContainer(containerId: string): Promise<void> {
   try {
     await docker().getContainer(containerId).start();
   } catch (err) {
-    // 304 = already started, which is success for our purposes.
+    // 304 means the container is already started.
     if ((err as { statusCode?: number }).statusCode !== 304) throw err;
   }
 }
 
+/** Stops a container with a 10 second grace period, tolerating one already gone. */
 export async function stopContainer(containerId: string): Promise<void> {
   try {
     await docker().getContainer(containerId).stop({ t: 10 });
@@ -199,6 +205,7 @@ export async function stopContainer(containerId: string): Promise<void> {
   }
 }
 
+/** Removes a container and keeps its volumes. */
 export async function removeContainer(containerId: string): Promise<void> {
   try {
     await docker().getContainer(containerId).remove({ force: true, v: false });
@@ -207,6 +214,7 @@ export async function removeContainer(containerId: string): Promise<void> {
   }
 }
 
+/** Removes a session network, detaching the egress proxy first. */
 export async function removeNetwork(networkName: string, cfg: Config): Promise<void> {
   const net = docker().getNetwork(networkName);
   // Disconnect the proxy first, else Docker refuses to remove the network.
@@ -222,6 +230,7 @@ export async function removeNetwork(networkName: string, cfg: Config): Promise<v
   }
 }
 
+/** Removes a volume, tolerating one that is already gone. */
 export async function removeVolume(name: string): Promise<void> {
   try {
     await docker().getVolume(name).remove();
@@ -230,8 +239,10 @@ export async function removeVolume(name: string): Promise<void> {
   }
 }
 
+/** What Docker reports about a container. */
 export type DockerContainerState = 'running' | 'exited' | 'missing' | 'unknown';
 
+/** Resolves a container's live state, mapping every lookup failure onto a state. */
 export async function containerState(containerId: string | null): Promise<DockerContainerState> {
   if (!containerId) return 'missing';
   try {
@@ -244,7 +255,7 @@ export async function containerState(containerId: string | null): Promise<Docker
   }
 }
 
-/** Boot reconciliation input: everything Docker knows about our sessions. */
+/** Every labelled session container Docker knows about, for boot reconciliation. */
 export async function listSessionContainers(): Promise<
   Array<{ id: string; sessionId: string; running: boolean }>
 > {
@@ -278,12 +289,11 @@ export async function hasRepoDir(containerId: string): Promise<boolean> {
 }
 
 /**
- * A demuxed, long-lived exec: the ACP adapter's stdio.
+ * A demuxed, long-lived exec carrying the ACP adapter's stdio.
  *
- * Tty is false, so Docker frames stdout and stderr into one stream and we
- * must demux (plan §8.3). stdout carries newline-delimited JSON-RPC and
- * nothing else; the adapter's entrypoint sends all logging to stderr, which
- * we treat as log-only.
+ * Tty is false, so Docker frames stdout and stderr into a single stream that
+ * has to be demuxed. stdout carries newline-delimited JSON-RPC and nothing
+ * else; the adapter sends all its logging to stderr.
  */
 export interface AdapterExec {
   /** Newline-delimited JSON-RPC from the adapter. */
@@ -297,6 +307,7 @@ export interface AdapterExec {
   kill(): void;
 }
 
+/** Starts the adapter inside a running container and demuxes its streams. */
 export async function spawnAdapterExec(
   containerId: string,
   cmd: string[],

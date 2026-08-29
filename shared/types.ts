@@ -1,10 +1,8 @@
 /**
- * REST API shapes shared by the orchestrator handlers and the dashboard's
- * api.ts. Importing this from both sides is what keeps the API boundary from
- * drifting silently (plan §4).
+ * REST API shapes shared by the orchestrator handlers and the dashboard.
  */
 
-/** Lifecycle status of a Boxes session. Mirrors the `status` column. */
+/** Lifecycle status of a Boxes session, as stored in the sessions table. */
 export type SessionStatus =
   | 'creating'
   | 'running'
@@ -31,15 +29,9 @@ export interface SessionSummary {
   /** Number of browsers currently attached to the session's /ws route. */
   attachedCount: number;
   /**
-   * Bearer token acp-ui must be configured with; rides the WS subprotocol.
-   * Present on the list so the dashboard can connect straight from a card with
-   * no per-session round trip. Global rather than per-session, and already
-   * behind the same basicauth as the rest of /api.
-   *
-   * The endpoint URL is deliberately not here: the dashboard, acp-ui and the
-   * gateway are all served by the orchestrator, so the browser derives it from
-   * its own location (dashboard/src/acpui.ts) and no deployment setting can
-   * make it wrong.
+   * Bearer token acp-ui must be configured with, carried in the WebSocket
+   * subprotocol. One token covers the whole deployment, and the list carries
+   * it so a card can connect without a further request.
    */
   wsToken: string;
   createdAt: number;
@@ -59,6 +51,7 @@ export interface SessionDetail extends SessionSummary {
   proxyAttached: boolean;
 }
 
+/** Body of a create-session request. */
 export interface CreateSessionBody {
   name: string;
   /** https:// only; validated server-side. */
@@ -66,6 +59,7 @@ export interface CreateSessionBody {
   profile?: string;
 }
 
+/** One tapped ACP message from the debug log. */
 export interface AcpLogEntry {
   id: number;
   direction: 'up' | 'down' | 'stderr';
@@ -73,20 +67,23 @@ export interface AcpLogEntry {
   payload: string;
 }
 
+/** A page of debug log entries. */
 export interface AcpLogPage {
   entries: AcpLogEntry[];
-  /** Pass as `after` to poll for newer entries. */
+  /** Pass as the after parameter to poll for newer entries. */
   cursor: number;
 }
 
+/** Answer to a health probe. */
 export interface HealthResponse {
   ok: boolean;
   version: string;
   sessions: number;
-  /** Session ids whose network is missing the egress proxy (plan §8.4). */
+  /** Session ids whose network is missing the egress proxy. */
   proxyWarnings: string[];
 }
 
+/** Body of any 4xx or 5xx answer from the API. */
 export interface ApiError {
   error: string;
 }

@@ -1,14 +1,10 @@
-# Multi-stage. The dashboard and acp-ui are both bundled here and copied into
-# the runtime image, which serves them as static files alongside the API and
-# the gateway (plan §8.5).
+# The dashboard and acp-ui are bundled here and copied into the runtime image,
+# which serves them as static files alongside the API and the gateway. That
+# puts acp-ui on the same origin as the dashboard, which the one-click connect
+# needs and which lets the stack run with no reverse proxy in front of it.
 #
-# Serving acp-ui from this image rather than a second container is what makes
-# it the same origin as the dashboard in every deployment. That is what the
-# one-click connect needs (dashboard/src/acpui.ts), and it is what lets the
-# stack run with no reverse proxy in front of it.
-#
-# Type-checking runs before every bundle step, so an image cannot be built
-# from code that fails `tsc --noEmit` (plan §4).
+# Type-checking runs before every bundle step, so an image cannot be built from
+# code that fails it.
 
 FROM node:22-bookworm AS dashboard-build
 WORKDIR /build
@@ -20,18 +16,14 @@ COPY dashboard/ ./
 RUN npm run check && npm run build
 
 # --- acp-ui ------------------------------------------------------------------
-# The acp-ui pin is a build dependency, so it lives here and nowhere else --
-# the same way session-image/Dockerfile pins the adapter version. Deployment
-# configuration cannot reach it: there is no passthrough from compose or .env,
-# because an overridable pin would let a deployment build a frontend that
-# differs from the one version control claims, which is exactly what plan §2
-# and §12.2 exist to prevent.
+# The acp-ui pin is a build dependency, so it lives here and nowhere else, the
+# way session-image/Dockerfile pins the adapter version. No compose or .env
+# passthrough reaches it, so the frontend a deployment builds is the one this
+# commit names. Changing it is a reviewable commit; a one-off build takes an
+# explicit --build-arg.
 #
-# Changing the frontend is therefore a reviewable commit. To try another build
-# without committing, pass --build-arg to `docker build` explicitly.
-#
-# On upgrade, re-check plan §2: initialize capabilities, the client-bound
-# method set, and WS framing/subprotocol handling.
+# On upgrade, re-check the initialize capabilities, the client-bound method
+# set, and the WebSocket framing and subprotocol handling.
 FROM node:22-bookworm AS acpui-build
 ARG ACP_UI_REPO=https://github.com/formulahendry/acp-ui
 # v0.1.16
@@ -50,23 +42,21 @@ RUN git init -q . \
 
 RUN npm ci || npm install
 
-# Telemetry: acp-ui embeds Azure Application Insights with the connection
-# string hardcoded in its source, not read from the environment, so blanking it
-# means editing that source. An empty string makes the Application Insights
-# constructor throw, which acp-ui already catches and turns into a disabled
-# no-op client. The `grep` proves the edit landed before the build consumes it.
+# acp-ui hardcodes its Azure Application Insights connection string in source
+# rather than reading it from the environment, so blanking it means editing
+# that source. An empty string makes the Application Insights constructor
+# throw, which acp-ui catches and turns into a disabled client. The grep proves
+# the edit landed before the build consumes it.
 RUN sed -i "s#^const CONNECTION_STRING = '.*';#const CONNECTION_STRING = '';#" src/lib/telemetry.ts \
  && grep -qF "const CONNECTION_STRING = '';" src/lib/telemetry.ts \
  || (echo "ERROR: could not blank the telemetry connection string in src/lib/telemetry.ts." >&2; \
      echo "       acp-ui changed how it configures Application Insights." >&2; exit 1)
 
-# `--base=/ui/` because the orchestrator serves this bundle under that prefix.
-# Vite defaults to `/`, which would make the bundle request its assets from the
-# dashboard's routes and get the dashboard's index.html back instead.
+# --base=/ui/ because the orchestrator serves this bundle under that prefix.
+# Vite defaults to /, which points the bundle's asset requests at the
+# dashboard's routes.
 RUN npm run build:web -- --base=/ui/
 
-# The three checks below are the actual guarantees. The steps above are only
-# the attempt, and each of these failure modes is silent without them.
 RUN if grep -rIEl 'InstrumentationKey=[0-9a-fA-F-]{36}|IngestionEndpoint=https' dist-web/ ; then \
       echo "ERROR: Application Insights connection string found in dist-web/" >&2; \
       exit 1; \
@@ -80,10 +70,9 @@ RUN if ! grep -qF '/ui/assets/' dist-web/index.html ; then \
     fi \
  && echo "base path check passed: assets are referenced under /ui/"
 
-# The dashboard's connect button works by writing acp-ui's own agent config --
-# same origin, so same localStorage. That depends on this storage key, so
-# assert it is really the key this build uses. If acp-ui renames it, fail the
-# build with a clear pointer rather than shipping a button that does nothing.
+# The dashboard's connect button writes acp-ui's own agent config into the
+# shared origin's localStorage, under this key. Assert the key is the one this
+# build uses, so a rename upstream fails the build.
 ARG ACP_UI_AGENTS_KEY="acp-ui:agents"
 RUN if ! grep -rIqF "$ACP_UI_AGENTS_KEY" dist-web/ ; then \
       echo "ERROR: storage key '$ACP_UI_AGENTS_KEY' not found in the acp-ui bundle." >&2; \
@@ -107,8 +96,8 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-# better-sqlite3 is a native module, so production deps are installed here
-# rather than copied from a build stage with a different libc layout.
+# better-sqlite3 is a native module, so production deps are installed against
+# the runtime image's own libc.
 COPY orchestrator/package.json orchestrator/package-lock.json* ./
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \

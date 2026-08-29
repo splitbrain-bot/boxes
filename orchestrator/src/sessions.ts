@@ -14,15 +14,18 @@ import { UpstreamSession } from './gateway/upstream.ts';
 import { allocateSubnet } from './subnet.ts';
 
 /**
- * Session lifecycle state machine (plan §8.2) and the owner of every
- * UpstreamSession. Docker is runtime truth; this table is metadata.
+ * Session lifecycle and the owner of every UpstreamSession. Docker is the
+ * runtime truth; the sessions table is metadata.
  */
 
 /** argv for the pinned ACP adapter inside the session container. */
 const AGENT_CMD = ['claude-agent-acp'];
 
+/** Creates, starts, stops and describes sessions. */
 export class SessionManager {
   private readonly upstreams = new Map<string, UpstreamSession>();
+
+  /** Permission requests waiting for a browser, across all sessions. */
   readonly pending: PendingStore;
 
   constructor(
@@ -34,12 +37,14 @@ export class SessionManager {
 
   // --- helpers --------------------------------------------------------------
 
+  /** The stored row for a session, including deleted ones. */
   getRow(id: string): SessionRow | undefined {
     return this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as
       | SessionRow
       | undefined;
   }
 
+  /** Every session that has not been deleted, newest first. */
   private allRows(): SessionRow[] {
     return this.db
       .prepare("SELECT * FROM sessions WHERE status != 'deleted' ORDER BY created_at DESC")
@@ -47,9 +52,9 @@ export class SessionManager {
   }
 
   /**
-   * A deleted session stays deleted. An upstream spawn still retrying when the
-   * session was removed reports its outcome afterwards, and that must not
-   * resurrect the row as an undeletable `error` entry in the list.
+   * Records a new status, leaving a deleted session deleted. An upstream spawn
+   * still retrying when the session was removed reports its outcome
+   * afterwards, and that must not resurrect the row.
    */
   private setStatus(id: string, status: SessionRow['status']): void {
     this.db
@@ -72,8 +77,8 @@ export class SessionManager {
   // --- create ---------------------------------------------------------------
 
   /**
-   * Creates network, volumes and container, tearing everything down and
-   * marking the session `error` if any step fails (plan §8.2).
+   * Creates the network, volumes and container for a new session. Any failed
+   * step tears the whole session down and marks it as an error.
    */
   async create(body: CreateSessionBody): Promise<SessionDetail> {
     const name = body.name?.trim();
@@ -159,17 +164,19 @@ export class SessionManager {
 
   // --- start / stop / delete ------------------------------------------------
 
+  /** Starts a stopped session's container and re-attaches the egress proxy. */
   async start(id: string): Promise<SessionDetail> {
     const row = this.mustGet(id);
     if (!row.container_id) throw new HttpError(409, 'Session has no container');
     await dk.startContainer(row.container_id);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.setStatus(id, 'running');
-    // The upstream reconnects lazily on the next forwarded message, which
-    // re-issues session/load and restores the thread (plan §8.6).
+    // The upstream reconnects on the next forwarded message, which re-issues
+    // session/load and restores the thread.
     return this.detail(id);
   }
 
+  /** Stops the container and drops the upstream connection. */
   async stop(id: string): Promise<SessionDetail> {
     const row = this.mustGet(id);
     this.upstreams.get(id)?.stop();
@@ -179,6 +186,7 @@ export class SessionManager {
     return this.detail(id);
   }
 
+  /** Deletes a session, discarding its volumes as well when purge is set. */
   async remove(id: string, purge: boolean): Promise<void> {
     const row = this.mustGet(id);
     this.upstreams.get(id)?.close();
@@ -190,7 +198,10 @@ export class SessionManager {
     log.session(id).info('session deleted', { purge, name: row.name });
   }
 
-  /** SIGTERM (10s) → rm container → disconnect proxy → rm network (§8.2). */
+  /**
+   * Removes a session's container and network, and its volumes when purging.
+   * Every failure is logged rather than thrown, so teardown always finishes.
+   */
   private async teardownResources(id: string, opts: { purge: boolean }): Promise<void> {
     const row = this.getRow(id);
     if (!row) return;
@@ -209,8 +220,8 @@ export class SessionManager {
       slog.warn('network teardown failed', { error: (err as Error).message });
     }
     if (opts.purge) {
-      // Volumes are kept unless explicitly purged: they hold the agent's
-      // work and the adapter's replayable thread history.
+      // The volumes hold the agent's work and the adapter's thread history,
+      // so they outlive the session unless the caller asks to purge them.
       await dk.removeVolume(row.ws_volume);
       await dk.removeVolume(row.home_volume);
     }
@@ -218,12 +229,14 @@ export class SessionManager {
 
   // --- views ----------------------------------------------------------------
 
+  /** The stored row for a live session, or a 404. */
   private mustGet(id: string): SessionRow {
     const row = this.getRow(id);
     if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
     return row;
   }
 
+  /** Summaries of every live session. */
   async list(): Promise<SessionSummary[]> {
     const rows = this.allRows();
     const counts = this.pending.countsBySession();
@@ -232,6 +245,7 @@ export class SessionManager {
     );
   }
 
+  /** Builds a summary, resolving the container state against Docker. */
   private async summarize(row: SessionRow, pendingCount: number): Promise<SessionSummary> {
     const dockerState = (await dk.containerState(row.container_id)) as DockerState;
     return {
@@ -250,6 +264,7 @@ export class SessionManager {
     };
   }
 
+  /** A summary plus the Docker object names the detail view shows. */
   async detail(id: string): Promise<SessionDetail> {
     const row = this.mustGet(id);
     const summary = await this.summarize(row, this.pending.countForSession(id));
@@ -269,9 +284,9 @@ export class SessionManager {
   // --- boot reconciliation --------------------------------------------------
 
   /**
-   * Docker is runtime truth (plan §8.2): adopt what is actually there, mark
-   * what is gone, and re-ensure the proxy attachment on every session
-   * network. Upstream connections are re-established lazily.
+   * Aligns the stored rows with what Docker runs: adopts live
+   * containers, marks missing ones stopped, and re-attaches the egress proxy.
+   * Upstream connections are re-established on first use.
    */
   async reconcile(): Promise<void> {
     this.pending.clearStale();
@@ -293,15 +308,18 @@ export class SessionManager {
           .run(container.id, row.id);
       }
       this.setStatus(row.id, container.running ? 'running' : 'stopped');
-      // A turn cannot have survived our own restart: the upstream connection
-      // that owned it is gone.
+      // A turn cannot survive an orchestrator restart: the upstream
+      // connection that owned it is gone.
       this.db.prepare('UPDATE sessions SET turn_active = 0 WHERE id = ?').run(row.id);
       await dk.ensureProxyAttached(row.network_name, this.cfg);
     }
     log.info('boot reconciliation complete', { sessions: this.allRows().length });
   }
 
-  /** 60s loop: proxy attachments drift when compose recreates it (§8.4). */
+  /**
+   * Re-attaches the egress proxy to every running session's network. Returns
+   * the ids of the sessions where that failed.
+   */
   async reconcileProxyAttachments(): Promise<string[]> {
     const warnings: string[] = [];
     for (const row of this.allRows()) {
@@ -312,16 +330,19 @@ export class SessionManager {
     return warnings;
   }
 
+  /** Drops every upstream connection, for shutdown. */
   closeAll(): void {
     for (const up of this.upstreams.values()) up.close();
     this.upstreams.clear();
   }
 
+  /** Periodic housekeeping on every upstream. */
   maintenance(): void {
     for (const up of this.upstreams.values()) up.maintenance();
   }
 }
 
+/** An error carrying the HTTP status the API should answer with. */
 export class HttpError extends Error {
   constructor(
     readonly statusCode: number,

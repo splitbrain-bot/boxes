@@ -1,6 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import './ConfirmDialog.css';
 
+/** A modal that asks before an action. A click on the backdrop cancels. */
 export function ConfirmDialog({
   title,
   children,
