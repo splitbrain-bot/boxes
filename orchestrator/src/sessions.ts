@@ -225,6 +225,10 @@ export class SessionManager {
     );
   }
 
+  private wsUrl(id: string): string {
+    return `wss://${this.cfg.BASE_DOMAIN}/ws/sessions/${id}/acp`;
+  }
+
   private async summarize(row: SessionRow, pendingCount: number): Promise<SessionSummary> {
     const dockerState = (await dk.containerState(row.container_id)) as DockerState;
     return {
@@ -237,6 +241,8 @@ export class SessionManager {
       turnActive: row.turn_active === 1,
       pendingCount,
       attachedCount: this.upstreams.get(row.id)?.attachedCount ?? 0,
+      wsUrl: this.wsUrl(row.id),
+      wsToken: this.cfg.WS_AUTH_TOKEN,
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,
     };
@@ -254,8 +260,6 @@ export class SessionManager {
       wsVolume: row.ws_volume,
       homeVolume: row.home_volume,
       acpSessionId: row.acp_session_id,
-      wsUrl: `wss://${this.cfg.BASE_DOMAIN}/ws/sessions/${id}/acp`,
-      wsToken: this.cfg.WS_AUTH_TOKEN,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
     };
   }

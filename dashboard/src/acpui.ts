@@ -1,4 +1,4 @@
-import type { SessionDetail } from '../../shared/types.ts';
+import type { SessionSummary } from '../../shared/types.ts';
 
 /**
  * One-click connect.
@@ -147,7 +147,7 @@ function upsertIntoArray(list: unknown[], fields: AgentFields): unknown[] {
   return [...list, entry];
 }
 
-export function agentFieldsFor(session: SessionDetail): AgentFields {
+export function agentFieldsFor(session: SessionSummary): AgentFields {
   return {
     id: `boxes-${session.id}`,
     name: `${session.name} (${session.id})`,
@@ -161,7 +161,7 @@ export function agentFieldsFor(session: SessionDetail): AgentFields {
  * unavailable (private mode, disabled cookies), so the caller can fall back
  * to showing the manual details.
  */
-export function connectToSession(session: SessionDetail): boolean {
+export function connectToSession(session: SessionSummary): boolean {
   const fields = agentFieldsFor(session);
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);

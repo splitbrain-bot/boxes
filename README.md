@@ -56,17 +56,18 @@ phone ──wss──▶ Traefik ──▶ orchestrator ──docker exec stdio�
 
 4. **Verify isolation:** `API_BASE=http://localhost:3000 ./scripts/smoke-test.sh`
 
-5. **Connect.** Open `/`, create a session, open it, and tap **Open in
-   acp-ui**. That's it — nothing to type, on any device.
+5. **Connect.** Open `/`, create a session, and tap **Open** on its card.
+   That's it — one tap from the list, nothing to type, on any device.
 
    acp-ui has no URL-prefill mechanism, but it is served at `/ui` on the same
    host as the dashboard, so it is the *same origin* and its agent config
    lives in `localStorage` we can write. The button upserts this session into
    acp-ui's agent list and navigates there. If acp-ui already has an agent
    stored, we clone that entry's field shape rather than imposing our own, so
-   the format stays correct even if acp-ui changes it. A collapsed "Connect
-   manually instead" disclosure keeps the URL and token available as a
-   fallback.
+   the format stays correct even if acp-ui changes it. The list payload
+   carries the wss URL and token, so connecting costs no extra request. The
+   session detail view has the same button, plus a collapsed "Connect manually
+   instead" disclosure with the URL and token as a fallback.
 
 ## How isolation works
 
@@ -118,8 +119,10 @@ limits. No bind mounts, no docker socket, no published ports.
   a fixed `HostConfig` template that user input never reaches, no shell-exec
   of user strings, and Traefik basicauth in front.
 - **`WS_AUTH_TOKEN` lives in browser localStorage** (acp-ui's agent config).
-  Acceptable for a personal tool; rotate by editing `.env` and tapping
-  **Open in acp-ui** again, which overwrites the stored entry in place.
+  It is also returned by `GET /api/sessions`, which is behind the same
+  basicauth as the rest of `/api`. Acceptable for a personal tool; rotate by
+  editing `.env` and tapping **Open** again, which overwrites the stored entry
+  in place.
 - **The one-click connect depends on acp-ui's storage key.** If acp-ui renames
   `acp-ui:agents`, the *image build fails* with a pointer to the two places to
   update (`dashboard/src/acpui.ts` and the `ACP_UI_AGENTS_KEY` build arg) —

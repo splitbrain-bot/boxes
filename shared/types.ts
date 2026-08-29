@@ -30,6 +30,18 @@ export interface SessionSummary {
   pendingCount: number;
   /** Number of browsers currently attached to the session's /ws route. */
   attachedCount: number;
+  /**
+   * Absolute wss:// URL for this session's ACP endpoint. Present on the list
+   * so the dashboard can configure acp-ui and connect straight from a card,
+   * with no per-session round trip.
+   */
+  wsUrl: string;
+  /**
+   * Bearer token acp-ui must be configured with; rides the WS subprotocol.
+   * Global rather than per-session, and already behind the same basicauth as
+   * the rest of /api.
+   */
+  wsToken: string;
   createdAt: number;
   lastActiveAt: number;
 }
@@ -43,10 +55,6 @@ export interface SessionDetail extends SessionSummary {
   wsVolume: string;
   homeVolume: string;
   acpSessionId: string | null;
-  /** Absolute wss:// URL to paste into acp-ui's agent settings. */
-  wsUrl: string;
-  /** Bearer token acp-ui must be configured with; rides the WS subprotocol. */
-  wsToken: string;
   /** True when the egress proxy is attached to this session's network. */
   proxyAttached: boolean;
 }

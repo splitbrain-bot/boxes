@@ -472,8 +472,10 @@ we own, not new infrastructure.
 ### 8.5 REST API + dashboard
 `/api` (JSON; behind Traefik basicauth):
 `POST /api/sessions {name, repo_url?, profile?}` (https:// URLs only) ·
-`GET /api/sessions` (+live Docker state) · `GET /api/sessions/:id`
-(incl. wss URL, turn_active, pending count) · `POST .../start|stop` ·
+`GET /api/sessions` (+live Docker state, turn_active, pending count, and the
+wss URL + token so the list can connect without a per-session round trip) ·
+`GET /api/sessions/:id` (adds container/network/volume detail) ·
+`POST .../start|stop` ·
 `DELETE ...?purge=` · `GET /api/sessions/:id/log?after=&limit=` ·
 `GET /healthz` (no auth).
 
@@ -483,12 +485,15 @@ fallback: unknown non-/api, non-/ws GETs return index.html). Orchestrator
 Dockerfile is multi-stage: stage 1 runs the esbuild command in `dashboard/`,
 stage 2 copies `dashboard/dist` into the runtime image. Views: session list
 with "running turn"/"waiting for approval" badges; create form; session
-detail with a single "Open in acp-ui" button (`dashboard/src/acpui.ts`):
+list where every card carries an "Open" button, and detail with the same
+action (`dashboard/src/acpui.ts`):
 it upserts this session into acp-ui's own `localStorage` agent list — legal
 because `/ui` and `/` are the same origin — then navigates to `/ui`. Nothing
 is typed, on any device.
 
-Two things keep that from depending on guesswork about acp-ui's internals:
+Connecting is therefore one tap from the session list — the reason the list
+payload carries `wsUrl`/`wsToken`. Two things keep the seeding from depending
+on guesswork about acp-ui's internals:
 `frontend/Dockerfile` fails the image build if `acp-ui:agents` is absent from
 the built bundle (so a key rename is loud, not a dead button), and when
 acp-ui has already stored an agent we clone *that* entry's field shape rather
@@ -544,7 +549,7 @@ disconnects; `session/load` from a fresh client replays the full thread.
 ### M4 — Gateway downstream + dashboard + frontend image
 Token-authed WS, remapping, broadcast, pending queue, dashboard, acp-ui
 static image (telemetry stripped). Acceptance (headline demo, on a phone):
-create session with repo URL → tap "Open in acp-ui" → start a
+create session with repo URL → tap "Open" on its card → start a
 multi-minute task → lock phone for its duration → unlock → completed thread
 renders after reattach; then trigger a permission prompt with no browser
 attached → dashboard shows waiting badge → attach → approve → turn continues.
