@@ -11,7 +11,7 @@ import type {
 } from '../../shared/types.ts';
 import { config } from './config.ts';
 import { openDb } from './db.ts';
-import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
+import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { log } from './log.ts';
 import { startProxyReconciler, startReaper } from './reaper.ts';
 import { HttpError, SessionManager } from './sessions.ts';
@@ -124,7 +124,14 @@ app.setNotFoundHandler((req, reply) => {
 
 // --- WebSocket gateway (token-authed; bypasses basicauth, plan §2) ----------
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+  noServer: true,
+  // The client offers ['acp.v1', 'bearer.<token>']. The bearer entry is
+  // credentials, not a protocol, so negotiate acp.v1 explicitly rather than
+  // relying on the client happening to list it first (plan §2, §8.3).
+  handleProtocols: (protocols) =>
+    protocols.has(ACP_SUBPROTOCOL) ? ACP_SUBPROTOCOL : false,
+});
 const WS_PATH = /^\/ws\/sessions\/([A-Za-z0-9_-]{1,64})\/acp$/;
 
 app.server.on('upgrade', (req, socket, head) => {

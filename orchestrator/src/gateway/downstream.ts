@@ -17,6 +17,9 @@ import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
 
 const raw = <T = unknown>(params: unknown): T => params as T;
 
+/** The subprotocol the server negotiates; the rest of the offer is credentials. */
+export const ACP_SUBPROTOCOL = 'acp.v1';
+
 /** Methods forwarded verbatim to the adapter, `_meta` intact (plan §8.3). */
 const FORWARDED_REQUESTS = [
   'session/load',
@@ -53,7 +56,7 @@ export function checkUpgrade(
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  if (!offered.includes('acp.v1')) {
+  if (!offered.includes(ACP_SUBPROTOCOL)) {
     return { ok: false, reason: 'missing acp.v1 subprotocol' };
   }
   const expected = `bearer.${cfg.WS_AUTH_TOKEN}`;
@@ -62,7 +65,7 @@ export function checkUpgrade(
   if (!timingSafeEqualStr(presented, expected)) {
     return { ok: false, reason: 'invalid bearer token' };
   }
-  return { ok: true, select: 'acp.v1' };
+  return { ok: true, select: ACP_SUBPROTOCOL };
 }
 
 /** Constant-time compare that does not leak length via early return. */
