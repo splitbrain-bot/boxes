@@ -46,8 +46,15 @@ export class SessionManager {
       .all() as SessionRow[];
   }
 
+  /**
+   * A deleted session stays deleted. An upstream spawn still retrying when the
+   * session was removed reports its outcome afterwards, and that must not
+   * resurrect the row as an undeletable `error` entry in the list.
+   */
   private setStatus(id: string, status: SessionRow['status']): void {
-    this.db.prepare('UPDATE sessions SET status = ? WHERE id = ?').run(status, id);
+    this.db
+      .prepare("UPDATE sessions SET status = ? WHERE id = ? AND status != 'deleted'")
+      .run(status, id);
   }
 
   /** The persistent upstream for a session, created on first use. */
