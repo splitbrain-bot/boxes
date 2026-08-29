@@ -168,7 +168,7 @@ await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
 const { sessionId } = await rpc('session/new', { cwd: '/workspace', mcpServers: [] });
 rpc('session/prompt', {
   sessionId,
-  prompt: [{ type: 'text', text: 'Run the shell command `id` and tell me the output.' }],
+  prompt: [{ type: 'text', text: 'Create a file /workspace/permission-probe.txt containing the word hello.' }],
 }).catch(() => {});
 await new Promise((r) => setTimeout(r, 3000));
 ws.close();
