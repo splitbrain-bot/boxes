@@ -33,6 +33,14 @@ const raw = <T = unknown>(params: unknown): T => params as T;
 const MAX_SPAWN_ATTEMPTS = 3;
 const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
 
+/** JSON-RPC code the ACP SDK uses for `RequestError.resourceNotFound`. */
+const RESOURCE_NOT_FOUND = -32002;
+
+/** Did the adapter answer "I do not have that thread" rather than fail? */
+function isResourceNotFound(err: unknown): boolean {
+  return (err as { code?: number } | null)?.code === RESOURCE_NOT_FOUND;
+}
+
 export class UpstreamSession {
   private exec: dk.AdapterExec | null = null;
   private conn: ClientConnection | null = null;
@@ -189,25 +197,59 @@ export class UpstreamSession {
     });
     this.slog.info('adapter initialized', { workingDir });
 
-    if (row.acp_session_id) {
-      // Adapter replays the thread from the home volume (plan §2).
+    const replayed = row.acp_session_id
+      ? await this.loadSession(conn, row.acp_session_id, workingDir)
+      : false;
+    if (!replayed) await this.newSession(conn, workingDir);
+  }
+
+  /**
+   * Replays a stored thread from the home volume (plan §2). Returns false when
+   * the adapter no longer holds it, so the caller starts a fresh one.
+   *
+   * A missing thread is a legitimate state, not a failure: the agent SDK only
+   * writes a transcript once a prompt has run, so an id minted by session/new
+   * and never prompted does not survive the container stopping. Any other
+   * error is rethrown, because falling back on a transient fault would
+   * silently discard a thread that still exists.
+   */
+  private async loadSession(
+    conn: ClientConnection,
+    acpSessionId: string,
+    workingDir: string,
+  ): Promise<boolean> {
+    try {
       await conn.agent.request('session/load', {
-        sessionId: row.acp_session_id,
+        sessionId: acpSessionId,
         cwd: workingDir,
         mcpServers: [],
       });
-      this.slog.info('acp session loaded', { acpSessionId: row.acp_session_id });
-    } else {
-      const res = (await conn.agent.request('session/new', {
-        cwd: workingDir,
-        mcpServers: [],
-      })) as { sessionId?: string };
-      if (!res?.sessionId) throw new Error('session/new returned no sessionId');
+      this.slog.info('acp session loaded', { acpSessionId });
+      return true;
+    } catch (err) {
+      if (!isResourceNotFound(err)) throw err;
+      this.slog.warn('stored thread is gone; starting a fresh one', {
+        acpSessionId,
+        error: (err as Error).message,
+      });
       this.db
-        .prepare('UPDATE sessions SET acp_session_id = ? WHERE id = ?')
-        .run(res.sessionId, this.sessionId);
-      this.slog.info('acp session created', { acpSessionId: res.sessionId });
+        .prepare('UPDATE sessions SET acp_session_id = NULL WHERE id = ?')
+        .run(this.sessionId);
+      return false;
     }
+  }
+
+  /** Starts a fresh thread and records its id as this session's only one. */
+  private async newSession(conn: ClientConnection, workingDir: string): Promise<void> {
+    const res = (await conn.agent.request('session/new', {
+      cwd: workingDir,
+      mcpServers: [],
+    })) as { sessionId?: string };
+    if (!res?.sessionId) throw new Error('session/new returned no sessionId');
+    this.db
+      .prepare('UPDATE sessions SET acp_session_id = ? WHERE id = ?')
+      .run(res.sessionId, this.sessionId);
+    this.slog.info('acp session created', { acpSessionId: res.sessionId });
   }
 
   /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
