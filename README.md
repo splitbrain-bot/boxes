@@ -1,8 +1,9 @@
 # Boxes — personal AI agent orchestrator
 
 Runs AI coding-agent sessions (Claude Code first, other ACP agents later) in
-isolated Docker containers, controlled from a mobile-friendly web UI, behind
-an existing Traefik reverse proxy.
+isolated Docker containers, controlled from a mobile-friendly web UI. It runs
+behind an existing Traefik reverse proxy, or on a single local port with no
+proxy at all.
 
 The design, decisions and milestones live in [`plan.md`](./plan.md). This
 README covers running it and the risks you are accepting by doing so.
@@ -30,44 +31,112 @@ phone ──wss──▶ Traefik ──▶ orchestrator ──docker exec stdio�
 |---|---|
 | `orchestrator/` | Node 22 + TS: REST, SQLite, Docker lifecycle, ACP gateway, reaper |
 | `dashboard/` | Preact SPA, esbuild only, served by the orchestrator at `/` |
-| `frontend/` | acp-ui web build as a static nginx image, at `/ui` |
 | `proxy/` | The in-house egress proxy — the security boundary |
 | `session-image/` | The per-session container image |
 | `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
-| `scripts/smoke-test.sh` | Security smoke test (plan §10) |
+| `scripts/smoke-test.sh` | Security smoke test (plan §10), no credentials needed |
+| `scripts/live-test.sh` | The checks that need a real Claude token (plan M1, M3, M4) |
+
+acp-ui has no directory of its own: the orchestrator image clones it at a
+pinned commit, builds it, and serves it at `/ui`. That is deliberate — see
+[One origin](#one-origin).
 
 ## Setup
 
-1. **Configure.** `cp .env.example .env`, `chmod 600 .env`, fill it in.
-   - `WS_AUTH_TOKEN`: `openssl rand -hex 32`
-   - `BASICAUTH_USERS`: `htpasswd -nB owner` (escape every `$` as `$$`)
-   - `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`: run `claude setup-token`
-     locally and paste the result. This uses your subscription; no API key.
-   - `PROFILE_DEFAULT_GH_TOKEN`: a **classic** PAT for a separate bot account.
-   - `ACP_UI_REPO` / `ACP_UI_COMMIT`: pin the acp-ui upstream and commit.
-     These are required build args with no defaults, on purpose — see below.
+**There is no configuration step.** Every setting has a working default, so
+this is the whole local install:
 
-2. **Build the session image** (it is not part of compose):
-   ```
-   docker build -t boxes-session:latest session-image/
-   ```
+```
+docker build -t boxes-session:latest session-image/   # not part of compose
+docker compose -f compose.yaml -f compose.local.yaml up -d
+```
 
-3. **Bring it up:** `docker compose up -d`
+That serves everything on <http://localhost:3000>. The override publishes port
+3000 on loopback and drops the Traefik network and labels; it has no
+basicauth, which is why it binds to loopback only. Do not use it on a shared
+or exposed host.
 
-4. **Verify isolation:** `API_BASE=http://localhost:3000 ./scripts/smoke-test.sh`
+`WS_AUTH_TOKEN` has no default because a shipped secret is not a secret. The
+orchestrator generates one on first boot instead and keeps it in the data
+volume at `/data/ws-auth-token` (mode 0600), so it survives restarts. Set the
+variable to pin or rotate it.
+
+To run an agent turn you need one credential: a Claude token from
+`claude setup-token`, as `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`. Sessions
+and the gateway work without it; only inference fails. See [Keeping the token
+out of `.env`](#keeping-the-token-out-of-env).
+
+**Behind Traefik** instead, `docker compose up -d`, with two values that
+cannot have defaults — a domain and a password:
+
+```
+BASE_DOMAIN=agents.example.com
+BASICAUTH_USERS=owner:$$apr1$$...      # htpasswd -nB owner, $ escaped as $$
+```
+
+Leave `BASICAUTH_USERS` unset and the proxied routes reject every request,
+which is the right way for an unconfigured deployment to fail. `.env.example`
+lists every other override; copy it only when you want to change something.
+
+**Verify isolation:** `API_BASE=http://localhost:3000 ./scripts/smoke-test.sh`
 
 5. **Connect.** Open `/`, create a session, and tap **Open** on its card.
    That's it — one tap from the list, nothing to type, on any device.
 
-   acp-ui has no URL-prefill mechanism, but it is served at `/ui` on the same
-   host as the dashboard, so it is the *same origin* and its agent config
-   lives in `localStorage` we can write. The button upserts this session into
-   acp-ui's agent list and navigates there. If acp-ui already has an agent
-   stored, we clone that entry's field shape rather than imposing our own, so
-   the format stays correct even if acp-ui changes it. The list payload
-   carries the wss URL and token, so connecting costs no extra request. The
+   acp-ui has no URL-prefill mechanism, but it is the same origin as the
+   dashboard, so its `localStorage` agent config is ours to write. The button
+   upserts this session into acp-ui's agent list and navigates there. The
    session detail view has the same button, plus a collapsed "Connect manually
    instead" disclosure with the URL and token as a fallback.
+
+## One origin
+
+The orchestrator serves everything on one port: the dashboard at `/`, the API
+at `/api`, the gateway at `/ws`, and acp-ui at `/ui`. acp-ui is cloned at a
+commit pinned in `orchestrator/Dockerfile`, built into the orchestrator image,
+and served from there. That pin is a build dependency, like the adapter
+version in `session-image/Dockerfile` — it is not deployment configuration and
+no `.env` entry can change it.
+
+That single property carries a lot of weight:
+
+- **The connect button works at all.** Writing acp-ui's `localStorage` is only
+  legal from the same origin.
+- **Nothing needs configuring.** The dashboard derives the WebSocket URL from
+  the browser's own location, so it is right behind TLS and right on
+  `localhost` with no setting to get wrong. There is no `wsUrl` in the API for
+  a deployment to disagree with.
+- **The stack runs with no reverse proxy.** One service, one published port.
+
+Three things about acp-ui are asserted at image build time, because each fails
+silently otherwise: its `acp-ui:agents` storage key still exists, the bundle
+references its assets under `/ui/`, and no Application Insights connection
+string survived into it. A failed assertion names the file to update.
+
+## Keeping the token out of `.env`
+
+`.env` is an ordinary file in the working directory. Anything with access to
+that directory can read it — including a coding agent you run in this repo.
+It is gitignored, not hidden.
+
+If you would rather the Claude token not sit there, either works:
+
+- **Keep the file elsewhere.** Nothing requires it to be in the repo:
+  ```
+  docker compose --env-file ~/.config/boxes.env -f compose.yaml -f compose.local.yaml up -d
+  ```
+- **Skip the token entirely and log in inside the session.** This is plan
+  §12.4's fallback, and it means no token exists in any file or in the
+  container's environment — the credential lands in that session's own home
+  volume:
+  ```
+  docker exec -it session-<id> claude /login
+  ```
+
+Either way the value is still visible to anything that can run `docker
+inspect` or `docker exec` on this host, so treat these as "not lying around in
+the repo", not as isolation. The token is inference-only and rotatable; plan
+§11 covers what it can and cannot do if it leaks.
 
 ## How isolation works
 
@@ -123,10 +192,17 @@ limits. No bind mounts, no docker socket, no published ports.
   basicauth as the rest of `/api`. Acceptable for a personal tool; rotate by
   editing `.env` and tapping **Open** again, which overwrites the stored entry
   in place.
-- **The one-click connect depends on acp-ui's storage key.** If acp-ui renames
-  `acp-ui:agents`, the *image build fails* with a pointer to the two places to
-  update (`dashboard/src/acpui.ts` and the `ACP_UI_AGENTS_KEY` build arg) —
-  deliberately loud, so you never get a button that silently does nothing.
+- **The one-click connect depends on acp-ui's storage key and its stored
+  shape.** If acp-ui renames `acp-ui:agents`, the *image build fails* with a
+  pointer to the two places to update (`dashboard/src/acpui.ts` and the
+  `ACP_UI_AGENTS_KEY` build arg). The shape itself is covered by
+  `acpui.test.ts`, which asserts against a copy of acp-ui's own reader rather
+  than against our output.
+- **acp-ui's telemetry is disabled by patching its source at build time.** The
+  Application Insights connection string is hardcoded upstream, not read from
+  the environment, so the build blanks that line and then greps the bundle to
+  prove it. If upstream restructures that module, the build fails rather than
+  quietly shipping telemetry.
 - **Fine-grained GitHub PATs cannot act as a collaborator on another user's
   private repos** (a documented GitHub gap), hence the classic PAT. Migrating
   the repos to an org is the upgrade path.
@@ -150,6 +226,12 @@ cd orchestrator && npm run check && npm test
 cd proxy        && npm run check && npm test
 cd dashboard    && npm run check && npm test && npm run build
 ```
+
+`scripts/smoke-test.sh` needs no credentials and is the security gate.
+`scripts/live-test.sh` covers what only a real inference call can prove —
+subscription auth, a turn surviving the browser leaving, thread replay on
+reattach, and a permission request held with nobody watching — so it needs
+`PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN` set.
 
 The dashboard uses **esbuild alone** — native JSX/TS and native CSS bundling,
 no plugins, no Vite. Styling rules, enforced in review: no inline `style=`
