@@ -167,6 +167,11 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       NanoCpus: Math.round(cfg.SESSION_CPUS * 1e9),
       PidsLimit: cfg.SESSION_PIDS_LIMIT,
       RestartPolicy: { Name: 'no' },
+      // The kernel discards default-disposition signals for PID 1, so an
+      // entrypoint that ends in `exec sleep infinity` would ignore SIGTERM and
+      // every stop would wait out the 10s grace period and then SIGKILL.
+      // docker-init forwards the signal and reaps, so stops are prompt.
+      Init: true,
       // Explicitly nothing else: no bind mounts of host paths, no
       // docker.sock, no published ports, no extra devices.
       Privileged: false,
