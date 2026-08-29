@@ -1,0 +1,20 @@
+# Local development: run the whole stack without Traefik.
+#
+#   docker compose -f compose.yaml -f compose.local.yaml up -d
+#   -> http://localhost:3000
+#
+# The orchestrator serves the dashboard, the API, the /ws gateway and acp-ui at
+# /ui, so one published port is the entire deployment. Nothing needs a reverse
+# proxy, and nothing needs configuring: the dashboard derives the WebSocket URL
+# from the browser's own location.
+#
+# There is no basicauth here, because Traefik is what provides it. Bind to
+# loopback only, and do not use this on a shared or exposed host.
+
+services:
+  orchestrator:
+    networks: !override
+      - default
+    ports:
+      - "127.0.0.1:3000:3000"
+    labels: !reset null

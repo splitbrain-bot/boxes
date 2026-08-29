@@ -43,10 +43,10 @@ services:
       - egress-proxy
     labels:
       traefik.enable: "true"
-      # (a) dashboard + API: basicauth. This is the catch-all, so SPA deep
-      # links (/new, /sessions/:id) reach the orchestrator's index.html
-      # fallback on reload or when returning from /ui. Explicit priorities
-      # keep /ws and /ui ahead of it rather than relying on rule length.
+      # (a) dashboard, API and acp-ui at /ui: basicauth. This is the catch-all,
+      # so SPA deep links (/new, /sessions/:id) reach the orchestrator's
+      # index.html fallback on reload or when returning from /ui. An explicit
+      # priority keeps /ws ahead of it rather than relying on rule length.
       traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN}`)
       traefik.http.routers.boxes.priority: "10"
       traefik.http.routers.boxes.entrypoints: websecure
@@ -64,32 +64,6 @@ services:
       traefik.http.routers.boxes-ws.service: boxes
       traefik.http.services.boxes.loadbalancer.server.port: "3000"
       traefik.http.middlewares.boxes-auth.basicauth.users: ${BASICAUTH_USERS}
-      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
-
-  acp-ui:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-      args:
-        # Required: see frontend/Dockerfile. Pin both in .env.
-        ACP_UI_REPO: ${ACP_UI_REPO}
-        ACP_UI_COMMIT: ${ACP_UI_COMMIT}
-        ACP_UI_AGENTS_KEY: ${ACP_UI_AGENTS_KEY:-acp-ui:agents}
-    container_name: boxes-acp-ui
-    restart: unless-stopped
-    networks:
-      - traefik
-    labels:
-      traefik.enable: "true"
-      # Same origin as the dashboard, which is what lets the dashboard write
-      # acp-ui's agent config for the one-click connect (dashboard/src/acpui.ts).
-      traefik.http.routers.boxes-ui.rule: Host(`${BASE_DOMAIN}`) && PathPrefix(`/ui`)
-      traefik.http.routers.boxes-ui.priority: "90"
-      traefik.http.routers.boxes-ui.entrypoints: websecure
-      traefik.http.routers.boxes-ui.tls.certresolver: ${CERT_RESOLVER:-le}
-      traefik.http.routers.boxes-ui.middlewares: boxes-ui-strip,boxes-auth
-      traefik.http.middlewares.boxes-ui-strip.stripprefix.prefixes: /ui
-      traefik.http.services.boxes-ui.loadbalancer.server.port: "8080"
       traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
 
   egress-proxy:

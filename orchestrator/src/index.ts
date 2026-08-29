@@ -1,5 +1,5 @@
-import Fastify from 'fastify';
-import { readFileSync, existsSync } from 'node:fs';
+import Fastify, { type FastifyReply } from 'fastify';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -20,6 +20,16 @@ const VERSION = '1.0.0';
 const here = dirname(fileURLToPath(import.meta.url));
 /** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
+/**
+ * acp-ui bundle, built into the same image and served under `/ui`.
+ *
+ * Serving it ourselves rather than from a second container is what makes the
+ * dashboard and acp-ui the same origin in every deployment, which is what the
+ * one-click connect depends on (dashboard/src/acpui.ts) and what lets the
+ * stack run with no reverse proxy in front of it at all.
+ */
+const ACPUI_DIR = resolve(here, '../acpui');
+const ACPUI_PREFIX = '/ui';
 
 const cfg = config();
 const db = openDb(cfg.DATA_DIR);
@@ -89,37 +99,66 @@ app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
   return { entries, cursor: entries.at(-1)?.id ?? afterId };
 });
 
-// --- Dashboard static files + SPA fallback (plan §8.5) ----------------------
+// --- Static bundles + SPA fallback (plan §8.5) ------------------------------
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.json': 'application/json',
+  '.map': 'application/json',
   '.ico': 'image/x-icon',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
 };
 
-app.setNotFoundHandler((req, reply) => {
-  if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
-  const url = req.url.split('?')[0] ?? '/';
-  // /ui belongs to the acp-ui service; if a request for it reaches us,
-  // something is misrouted and a 404 is clearer than the dashboard shell.
-  if (url.startsWith('/api') || url.startsWith('/ws') || url.startsWith('/ui')) {
-    return reply.code(404).send({ error: 'Not found' });
-  }
-
-  // Serve a real asset when the path names one, else the SPA shell.
-  const candidate = resolve(DASHBOARD_DIR, `.${normalize(url)}`);
-  if (candidate.startsWith(DASHBOARD_DIR) && url !== '/' && existsSync(candidate)) {
+/**
+ * Serves one single-page bundle: a real file when the path names one, else the
+ * bundle's index.html so client-side routes survive a reload.
+ */
+function sendBundle(
+  reply: FastifyReply,
+  dir: string,
+  path: string,
+  missing: string,
+): FastifyReply {
+  const candidate = resolve(dir, `.${normalize(path)}`);
+  if (
+    candidate.startsWith(dir) &&
+    path !== '/' &&
+    existsSync(candidate) &&
+    statSync(candidate).isFile()
+  ) {
     const ext = candidate.slice(candidate.lastIndexOf('.'));
     return reply
       .type(CONTENT_TYPES[ext] ?? 'application/octet-stream')
       .send(readFileSync(candidate));
   }
-  const index = join(DASHBOARD_DIR, 'index.html');
-  if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
+  const index = join(dir, 'index.html');
+  if (!existsSync(index)) return reply.code(404).send({ error: missing });
   return reply.type('text/html; charset=utf-8').send(readFileSync(index));
+}
+
+app.setNotFoundHandler((req, reply) => {
+  if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
+  const url = req.url.split('?')[0] ?? '/';
+  if (url.startsWith('/api') || url.startsWith('/ws')) {
+    return reply.code(404).send({ error: 'Not found' });
+  }
+  if (url === ACPUI_PREFIX || url.startsWith(`${ACPUI_PREFIX}/`)) {
+    // acp-ui is built with `--base=/ui/`, so it asks for its own assets under
+    // this prefix; strip it back off to find them on disk.
+    return sendBundle(reply, ACPUI_DIR, url.slice(ACPUI_PREFIX.length) || '/', 'acp-ui not built');
+  }
+  return sendBundle(reply, DASHBOARD_DIR, url, 'Dashboard not built');
 });
 
 // --- WebSocket gateway (token-authed; bypasses basicauth, plan §2) ----------
