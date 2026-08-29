@@ -101,9 +101,15 @@ export class UpstreamSession {
   /**
    * Brings up container + exec + ACP session, idempotently. Concurrent
    * callers share one attempt.
+   *
+   * The guard is the cached initialize response rather than the connection.
+   * The connection object exists from the moment the exec stream is wired up,
+   * but the handshake it carries takes a few hundred milliseconds; a browser
+   * asking to initialize inside that window must wait for the handshake, not
+   * be told the upstream is unavailable.
    */
   async ensureStarted(): Promise<void> {
-    if (this.conn) return;
+    if (this.conn && this.initializeResponse) return;
     if (!this.starting) {
       this.starting = this.start().finally(() => {
         this.starting = null;
