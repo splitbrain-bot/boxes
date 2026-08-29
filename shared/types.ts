@@ -31,15 +31,15 @@ export interface SessionSummary {
   /** Number of browsers currently attached to the session's /ws route. */
   attachedCount: number;
   /**
-   * Absolute wss:// URL for this session's ACP endpoint. Present on the list
-   * so the dashboard can configure acp-ui and connect straight from a card,
-   * with no per-session round trip.
-   */
-  wsUrl: string;
-  /**
    * Bearer token acp-ui must be configured with; rides the WS subprotocol.
-   * Global rather than per-session, and already behind the same basicauth as
-   * the rest of /api.
+   * Present on the list so the dashboard can connect straight from a card with
+   * no per-session round trip. Global rather than per-session, and already
+   * behind the same basicauth as the rest of /api.
+   *
+   * The endpoint URL is deliberately not here: the dashboard, acp-ui and the
+   * gateway are all served by the orchestrator, so the browser derives it from
+   * its own location (dashboard/src/acpui.ts) and no deployment setting can
+   * make it wrong.
    */
   wsToken: string;
   createdAt: number;

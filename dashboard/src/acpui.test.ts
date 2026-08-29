@@ -2,82 +2,102 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { upsertAgent, type AgentFields } from './acpui.ts';
 
+/**
+ * These tests assert what acp-ui can actually read back, not what we happen to
+ * write. `readBack` is acp-ui's own `loadWebConfig` (src/lib/host/index.ts):
+ * it ignores any stored value without an `agents` record, which is exactly the
+ * property a test on our own output shape would miss.
+ */
+function readBack(raw: string | null): Record<string, Record<string, unknown>> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.agents) return parsed.agents;
+  } catch {
+    // fall through
+  }
+  return {};
+}
+
 const fields: AgentFields = {
-  id: 'boxes-a1b2',
-  name: 'refactor auth (a1b2)',
-  url: 'wss://agents.example.com/ws/sessions/a1b2/acp',
-  token: 'tok123',
+  name: 'demo (a1b2c3d4)',
+  url: 'wss://agents.example.com/ws/sessions/a1b2c3d4/acp',
+  token: 'tok-1',
 };
 
-test('seeds a fresh store with a websocket agent and bearer header', () => {
-  const out = JSON.parse(upsertAgent(null, fields)) as Array<Record<string, unknown>>;
-  assert.equal(out.length, 1);
-  assert.equal(out[0]!['url'], fields.url);
-  assert.equal(out[0]!['transport'], 'websocket');
-  assert.deepEqual(out[0]!['headers'], { Authorization: 'Bearer tok123' });
+test('a fresh browser gets an agent acp-ui can actually read', () => {
+  const agents = readBack(upsertAgent(null, fields));
+  assert.deepEqual(agents[fields.name], {
+    transport: 'websocket',
+    url: fields.url,
+    headers: { Authorization: 'Bearer tok-1' },
+  });
 });
 
-test('appends to an existing array without disturbing other agents', () => {
-  const existing = JSON.stringify([{ id: 'other', name: 'Other', url: 'wss://x/1' }]);
-  const out = JSON.parse(upsertAgent(existing, fields)) as Array<Record<string, unknown>>;
-  assert.equal(out.length, 2);
-  assert.equal(out[0]!['id'], 'other');
-  assert.equal(out[1]!['url'], fields.url);
+test('the entry is keyed by display name, which is how acp-ui labels it', () => {
+  const agents = readBack(upsertAgent(null, fields));
+  assert.deepEqual(Object.keys(agents), ['demo (a1b2c3d4)']);
 });
 
-test('clones the shape of an entry acp-ui already stores', () => {
-  // acp-ui uses `address` rather than `url` here; our entry must match.
-  const existing = JSON.stringify([
-    { id: 'other', label: 'Other', address: 'wss://x/1', kind: 'ws', extra: 7 },
-  ]);
-  const out = JSON.parse(upsertAgent(existing, fields)) as Array<Record<string, unknown>>;
-  const added = out[1]!;
-  assert.equal(added['address'], fields.url, 'uses the alias the store already uses');
-  assert.equal(added['label'], fields.name);
-  assert.equal(added['kind'], 'ws', 'unknown fields are carried over from the template');
-  assert.equal(added['extra'], 7);
-  assert.equal(added['url'], undefined, 'does not invent a second url field');
+test('agents acp-ui already stored are left alone', () => {
+  const existing = JSON.stringify({
+    agents: {
+      'my laptop': {
+        transport: 'websocket',
+        url: 'wss://other/acp',
+        headers: { Authorization: 'Bearer other' },
+      },
+    },
+  });
+  const agents = readBack(upsertAgent(existing, fields));
+  assert.equal(Object.keys(agents).length, 2);
+  assert.deepEqual(agents['my laptop'], {
+    transport: 'websocket',
+    url: 'wss://other/acp',
+    headers: { Authorization: 'Bearer other' },
+  });
+  assert.equal(agents[fields.name]?.['url'], fields.url);
 });
 
-test('updates in place when the session is already configured', () => {
+test('reconnecting the same session updates in place rather than duplicating', () => {
   const first = upsertAgent(null, fields);
-  const out = JSON.parse(upsertAgent(first, { ...fields, token: 'rotated' })) as Array<
-    Record<string, unknown>
-  >;
-  assert.equal(out.length, 1, 'no duplicate entry');
-  assert.deepEqual(out[0]!['headers'], { Authorization: 'Bearer rotated' });
+  const second = upsertAgent(first, { ...fields, url: 'wss://new/acp', token: 'tok-2' });
+  const agents = readBack(second);
+  assert.equal(Object.keys(agents).length, 1);
+  assert.equal(agents[fields.name]?.['url'], 'wss://new/acp');
+  assert.deepEqual(agents[fields.name]?.['headers'], { Authorization: 'Bearer tok-2' });
 });
 
-test('matches an existing entry by url even when the id differs', () => {
-  const existing = JSON.stringify([{ id: 'manually-added', name: 'Mine', url: fields.url }]);
-  const out = JSON.parse(upsertAgent(existing, fields)) as unknown[];
-  assert.equal(out.length, 1, 'updates the manual entry instead of duplicating it');
+test('fields acp-ui added to our entry survive a rewrite', () => {
+  const existing = JSON.stringify({
+    agents: {
+      [fields.name]: {
+        transport: 'websocket',
+        url: 'wss://stale/acp',
+        headers: { Authorization: 'Bearer stale', 'X-Extra': 'keep' },
+        lastUsed: 12345,
+      },
+    },
+  });
+  const entry = readBack(upsertAgent(existing, fields))[fields.name];
+  assert.equal(entry?.['lastUsed'], 12345);
+  assert.deepEqual(entry?.['headers'], { Authorization: 'Bearer tok-1', 'X-Extra': 'keep' });
+  assert.equal(entry?.['url'], fields.url);
 });
 
-test('preserves a { agents: [...] } container', () => {
-  const existing = JSON.stringify({ version: 2, agents: [], theme: 'dark' });
-  const parsed = JSON.parse(upsertAgent(existing, fields)) as Record<string, unknown>;
-  assert.equal(parsed['version'], 2);
-  assert.equal(parsed['theme'], 'dark');
-  assert.equal((parsed['agents'] as unknown[]).length, 1);
+test('unknown top-level keys are preserved for forward compatibility', () => {
+  const existing = JSON.stringify({ agents: {}, someFutureSetting: true });
+  const stored = JSON.parse(upsertAgent(existing, fields)) as Record<string, unknown>;
+  assert.equal(stored['someFutureSetting'], true);
 });
 
-test('preserves a record-keyed container', () => {
-  const existing = JSON.stringify({ other: { id: 'other', name: 'Other', url: 'wss://x/1' } });
-  const parsed = JSON.parse(upsertAgent(existing, fields)) as Record<string, Record<string, unknown>>;
-  assert.ok(parsed['other'], 'other agent kept');
-  assert.equal(parsed['boxes-a1b2']!['url'], fields.url);
+test('a corrupt stored value is replaced with something readable', () => {
+  const agents = readBack(upsertAgent('not json at all', fields));
+  assert.equal(agents[fields.name]?.['url'], fields.url);
 });
 
-test('preserves other headers already configured on the template', () => {
-  const existing = JSON.stringify([
-    { id: 'other', name: 'Other', url: 'wss://x/1', headers: { 'X-Trace': '1' } },
-  ]);
-  const out = JSON.parse(upsertAgent(existing, fields)) as Array<Record<string, unknown>>;
-  assert.deepEqual(out[1]!['headers'], { 'X-Trace': '1', Authorization: 'Bearer tok123' });
-});
-
-test('recovers from a corrupt stored value instead of throwing', () => {
-  const out = JSON.parse(upsertAgent('not json at all', fields)) as unknown[];
-  assert.equal(out.length, 1);
+test('a stored value with a non-record agents field is replaced', () => {
+  // What the earlier, broken version of this module wrote.
+  const agents = readBack(upsertAgent(JSON.stringify([{ id: 'boxes-x' }]), fields));
+  assert.equal(agents[fields.name]?.['url'], fields.url);
 });

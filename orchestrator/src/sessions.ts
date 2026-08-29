@@ -232,10 +232,6 @@ export class SessionManager {
     );
   }
 
-  private wsUrl(id: string): string {
-    return `wss://${this.cfg.BASE_DOMAIN}/ws/sessions/${id}/acp`;
-  }
-
   private async summarize(row: SessionRow, pendingCount: number): Promise<SessionSummary> {
     const dockerState = (await dk.containerState(row.container_id)) as DockerState;
     return {
@@ -248,7 +244,6 @@ export class SessionManager {
       turnActive: row.turn_active === 1,
       pendingCount,
       attachedCount: this.upstreams.get(row.id)?.attachedCount ?? 0,
-      wsUrl: this.wsUrl(row.id),
       wsToken: this.cfg.WS_AUTH_TOKEN,
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,

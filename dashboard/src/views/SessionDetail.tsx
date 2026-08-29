@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { useLocation, useRoute } from 'preact-iso';
 import type { SessionDetail as SessionDetailType } from '../../../shared/types.ts';
-import { connectToSession } from '../acpui.ts';
+import { connectToSession, wsUrlFor } from '../acpui.ts';
 import { api } from '../api.ts';
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx';
 import { CopyField } from '../components/CopyField.tsx';
@@ -125,7 +125,7 @@ export function SessionDetail() {
                 below.
               </li>
             </ol>
-            <CopyField label="WebSocket URL" value={session.wsUrl} />
+            <CopyField label="WebSocket URL" value={wsUrlFor(session.id)} />
             <CopyField label="Bearer token" value={session.wsToken} masked />
           </div>
         </details>
