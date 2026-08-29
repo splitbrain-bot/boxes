@@ -14,7 +14,6 @@ services:
     container_name: boxes-orchestrator
     restart: unless-stopped
     environment:
-      BASE_DOMAIN: ${BASE_DOMAIN}
       DATA_DIR: /data
       SESSION_IMAGE: ${SESSION_IMAGE:-boxes-session:latest}
       SESSION_SUBNET_POOL: ${SESSION_SUBNET_POOL:-10.200.0.0/16}
@@ -22,15 +21,16 @@ services:
       SESSION_CPUS: ${SESSION_CPUS:-2}
       SESSION_PIDS_LIMIT: ${SESSION_PIDS_LIMIT:-512}
       IDLE_STOP_MINUTES: ${IDLE_STOP_MINUTES:-30}
-      WS_AUTH_TOKEN: ${WS_AUTH_TOKEN}
+      # Unset means the orchestrator generates one and keeps it in /data.
+      WS_AUTH_TOKEN: ${WS_AUTH_TOKEN:-}
       PERMISSION_FALLBACK: ${PERMISSION_FALLBACK:-hold}
       PERMISSION_HOLD_MINUTES: ${PERMISSION_HOLD_MINUTES:-120}
       NTFY_URL: ${NTFY_URL:-}
       EGRESS_PROXY_CONTAINER: boxes-egress-proxy
-      PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: ${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN}
-      PROFILE_DEFAULT_GH_TOKEN: ${PROFILE_DEFAULT_GH_TOKEN}
-      PROFILE_DEFAULT_GIT_NAME: ${PROFILE_DEFAULT_GIT_NAME}
-      PROFILE_DEFAULT_GIT_EMAIL: ${PROFILE_DEFAULT_GIT_EMAIL}
+      PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: ${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}
+      PROFILE_DEFAULT_GH_TOKEN: ${PROFILE_DEFAULT_GH_TOKEN:-}
+      PROFILE_DEFAULT_GIT_NAME: ${PROFILE_DEFAULT_GIT_NAME:-boxes-bot}
+      PROFILE_DEFAULT_GIT_EMAIL: ${PROFILE_DEFAULT_GIT_EMAIL:-boxes-bot@users.noreply.github.com}
     volumes:
       # Root-equivalent. Mitigated by the fixed HostConfig template, no
       # shell-exec of user strings, and Traefik auth in front (plan §11).
@@ -47,7 +47,7 @@ services:
       # so SPA deep links (/new, /sessions/:id) reach the orchestrator's
       # index.html fallback on reload or when returning from /ui. An explicit
       # priority keeps /ws ahead of it rather than relying on rule length.
-      traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN}`)
+      traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`)
       traefik.http.routers.boxes.priority: "10"
       traefik.http.routers.boxes.entrypoints: websecure
       traefik.http.routers.boxes.tls.certresolver: ${CERT_RESOLVER:-le}
@@ -57,13 +57,13 @@ services:
       # cross-path WS upgrade nor answer a 401 on one, so the gateway
       # token-auths the upgrade itself via the bearer.<token> subprotocol
       # (plan §2, §12.6).
-      traefik.http.routers.boxes-ws.rule: Host(`${BASE_DOMAIN}`) && PathPrefix(`/ws`)
+      traefik.http.routers.boxes-ws.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`) && PathPrefix(`/ws`)
       traefik.http.routers.boxes-ws.priority: "100"
       traefik.http.routers.boxes-ws.entrypoints: websecure
       traefik.http.routers.boxes-ws.tls.certresolver: ${CERT_RESOLVER:-le}
       traefik.http.routers.boxes-ws.service: boxes
       traefik.http.services.boxes.loadbalancer.server.port: "3000"
-      traefik.http.middlewares.boxes-auth.basicauth.users: ${BASICAUTH_USERS}
+      traefik.http.middlewares.boxes-auth.basicauth.users: ${BASICAUTH_USERS:-}
       traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
 
   egress-proxy:

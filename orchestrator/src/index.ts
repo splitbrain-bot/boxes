@@ -215,7 +215,7 @@ async function main(): Promise<void> {
   });
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });
-  log.info('orchestrator listening', { port: cfg.PORT, baseDomain: cfg.BASE_DOMAIN });
+  log.info('orchestrator listening', { port: cfg.PORT });
 }
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {

@@ -1,15 +1,19 @@
 import { z } from 'zod';
+import { resolveWsAuthToken } from './secret.ts';
 
 /**
  * Environment parsing. Everything the orchestrator needs comes from the
- * process env (populated from .env by compose, plan §6). Parsed once at
- * boot so a misconfigured deployment fails loudly instead of at first use.
+ * process env (plan §6). Parsed once at boot so a misconfigured deployment
+ * fails loudly instead of at first use.
+ *
+ * Every value has a working default, so the orchestrator starts with no
+ * configuration at all. The one secret that cannot have a shipped default,
+ * WS_AUTH_TOKEN, is generated per deployment instead (see secret.ts).
  */
 
 const durationMinutes = z.coerce.number().int().positive();
 
 const schema = z.object({
-  BASE_DOMAIN: z.string().min(1),
   DATA_DIR: z.string().min(1).default('/data'),
   PORT: z.coerce.number().int().positive().default(3000),
 
@@ -21,8 +25,11 @@ const schema = z.object({
 
   IDLE_STOP_MINUTES: durationMinutes.default(30),
 
-  /** Validated against the `bearer.<token>` WS subprotocol (plan §2, §8.3). */
-  WS_AUTH_TOKEN: z.string().min(32, 'WS_AUTH_TOKEN must be at least 32 chars'),
+  /**
+   * Validated against the `bearer.<token>` WS subprotocol (plan §2, §8.3).
+   * Unset means "generate one and keep it in the data volume".
+   */
+  WS_AUTH_TOKEN: z.string().default(''),
 
   PERMISSION_FALLBACK: z.enum(['hold', 'deny']).default('hold'),
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
@@ -65,6 +72,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const base = parsed.data;
   return {
     ...base,
+    WS_AUTH_TOKEN: resolveWsAuthToken(base.DATA_DIR, base.WS_AUTH_TOKEN),
     profiles: {
       DEFAULT: {
         claudeOauthToken: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,
