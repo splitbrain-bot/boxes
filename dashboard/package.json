@@ -7,7 +7,7 @@
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "build": "esbuild src/main.tsx --bundle --minify --format=esm --outdir=dist --loader:.css=css && cp src/index.html dist/index.html",
     "dev": "esbuild src/main.tsx --bundle --format=esm --outdir=dist --loader:.css=css --watch --servedir=dist",
-    "test": "node --test --experimental-strip-types src/*.test.ts"
+    "test": "node --test --experimental-strip-types 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@preact/signals": "^2.0.1",

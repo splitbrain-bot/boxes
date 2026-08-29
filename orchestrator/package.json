@@ -6,7 +6,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --packages=external",
-    "test": "node --test --experimental-strip-types src/**/*.test.ts",
+    "test": "node --test --experimental-strip-types 'src/**/*.test.ts'",
     "dev": "node --experimental-strip-types src/index.ts"
   },
   "dependencies": {

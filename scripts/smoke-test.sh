@@ -21,6 +21,11 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
 
+# NOTE ON `curl -f`: every probe below uses it. Without -f, curl exits 0 for a
+# 403 from the egress proxy, so a correctly denied request would be scored as a
+# success -- and an intended-to-work request would be scored as a pass even
+# when the proxy refused it. The -f is what makes this file a real test.
+
 # Asserts a command run inside the session container FAILS.
 must_fail() {
   local desc="$1"; shift
@@ -83,23 +88,23 @@ echo
 echo "== MUST FAIL: direct (proxy-bypassing) egress =="
 # The session network is `internal`: no NAT, no default route (plan §8.4).
 must_fail "curl --noproxy '*' https://api.github.com" \
-  curl --noproxy '*' -sS -m 3 https://api.github.com
+  curl --noproxy '*' -fsS -m 3 https://api.github.com
 must_fail "nc -w3 1.1.1.1 443" \
   nc -w3 -z 1.1.1.1 443
 
 echo
 echo "== MUST FAIL: private space via the proxy (resolved-IP vetting) =="
 must_fail "curl http://192.168.1.1" \
-  curl -sS -m 3 http://192.168.1.1
+  curl -fsS -m 3 http://192.168.1.1
 must_fail "curl http://10.0.0.1" \
-  curl -sS -m 3 http://10.0.0.1
+  curl -fsS -m 3 http://10.0.0.1
 must_fail "curl http://169.254.169.254 (cloud metadata)" \
-  curl -sS -m 3 http://169.254.169.254/latest/meta-data/
+  curl -fsS -m 3 http://169.254.169.254/latest/meta-data/
 # DNS-rebind shape: a public hostname whose A record is private.
 must_fail "curl http://localtest.me (hostname -> private IP)" \
-  curl -sS -m 3 http://localtest.me
+  curl -fsS -m 3 http://localtest.me
 must_fail "curl http://[::ffff:192.168.1.1] (v4-mapped bypass)" \
-  curl -sS -m 3 'http://[::ffff:192.168.1.1]'
+  curl -fsS -m 3 'http://[::ffff:192.168.1.1]'
 
 echo
 echo "== MUST FAIL: cross-session reachability =="
@@ -107,7 +112,7 @@ if [ -n "${SIBLING_IP:-}" ]; then
   must_fail "nc -w3 <sibling> 22 (distinct internal networks)" \
     nc -w3 -z "$SIBLING_IP" 22
   must_fail "curl http://<sibling>:8080 via proxy" \
-    curl -sS -m 3 "http://$SIBLING_IP:8080"
+    curl -fsS -m 3 "http://$SIBLING_IP:8080"
 else
   grey "skipped: sibling IP unavailable"
 fi
@@ -122,7 +127,7 @@ must_fail "touch /usr/local/bin/x (read-only rootfs)" \
 echo
 echo "== MUST SUCCEED: intended egress and writes (via injected proxy env) =="
 must_pass "curl https://api.github.com" \
-  curl -sS -m 15 https://api.github.com
+  curl -fsS -m 15 https://api.github.com
 must_pass "write to /workspace" \
   sh -c 'echo ok > /workspace/.smoke && rm /workspace/.smoke'
 must_pass "write to /home/agent" \
@@ -138,6 +143,27 @@ if [ "${SMOKE_CLAUDE:-0}" = "1" ]; then
   # Costs a real inference call, so opt-in.
   must_pass "claude -p 'reply ok' (subscription auth)" \
     claude -p 'reply ok'
+fi
+
+if [ -n "${SMOKE_UPSTREAM_REPO:-}" ]; then
+  echo
+  echo "== MUST FAIL: pushing to an upstream default branch (plan §10) =="
+  # The bot is read-only on upstreams and works on forks, so a push straight at
+  # the upstream must be refused. Cloned into the tmpfs, so the agent's own
+  # workspace is untouched. The clone is checked separately: a clone that
+  # failed for an unrelated reason would otherwise be scored as a passing
+  # push guard.
+  if docker exec -u agent "$CONTAINER" sh -c \
+       'rm -rf /tmp/upstream && git clone --depth 1 "$0" /tmp/upstream' \
+       "$SMOKE_UPSTREAM_REPO" >/dev/null 2>&1; then
+    must_fail "git push origin HEAD to \$SMOKE_UPSTREAM_REPO" \
+      sh -c 'cd /tmp/upstream &&
+             git commit --allow-empty -m "smoke test" >/dev/null &&
+             git push origin HEAD'
+  else
+    red "FAIL: could not clone \$SMOKE_UPSTREAM_REPO to test the push guard"
+    fail=$((fail+1))
+  fi
 fi
 
 echo
