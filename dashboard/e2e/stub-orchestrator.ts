@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import type { SessionDetail, SessionSummary } from '../../shared/types.ts';
+import type { ExecRecord, SessionDetail, SessionSummary } from '../../shared/types.ts';
 import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
 
 /**
@@ -68,6 +68,8 @@ export interface StubOrchestrator {
   execCalls: Array<{ sessionId: string; command: string }>;
   /** Combined output the exec endpoint streams back, by command. */
   execOutput: (command: string) => { output: string; exitCode: number };
+  /** What GET /exec reports, as if from a previous session. */
+  execLog: ExecRecord[];
   server: Server;
   close(): Promise<void>;
 }
@@ -81,6 +83,7 @@ export async function startStubOrchestrator(
   const dir = resolve(distDir);
   const state: StubState = { sessions: initial };
   const execCalls: StubOrchestrator['execCalls'] = [];
+  const execLog: ExecRecord[] = [];
   let execOutput: StubOrchestrator['execOutput'] = (command) => ({
     output: `${command}\n`,
     exitCode: 0,
@@ -113,7 +116,7 @@ export async function startStubOrchestrator(
       });
       return undefined;
     }
-    if (exec && req.method === 'GET') return json(res, 200, { records: [] });
+    if (exec && req.method === 'GET') return json(res, 200, { records: execLog });
 
     if (url.startsWith('/api') || url.startsWith('/ws')) {
       return json(res, 404, { error: 'Not found' });
@@ -140,6 +143,7 @@ export async function startStubOrchestrator(
     state,
     gateway,
     execCalls,
+    execLog,
     get execOutput() {
       return execOutput;
     },

@@ -7,7 +7,7 @@ import type {
   SessionUpdate,
 } from './acp-types.ts';
 import type { AcpClient, AcpClientHandlers } from './acp-client.ts';
-import { ThreadStore } from './thread-store.ts';
+import { ThreadStore, type ThreadStoreDeps } from './thread-store.ts';
 import { convertMessage } from './convert.ts';
 import { resetIds, type Message } from './translate.ts';
 
@@ -59,18 +59,20 @@ class FakeClient {
 }
 
 /** A store wired to a fake client, already started. */
-function makeStore(configure?: (c: FakeClient) => void): {
-  store: ThreadStore;
-  client: FakeClient;
-} {
+function makeStore(
+  configure?: (c: FakeClient) => void,
+  deps?: Partial<ThreadStoreDeps>,
+): { store: ThreadStore; client: FakeClient } {
   resetIds();
   let client!: FakeClient;
   const store = new ThreadStore({
+    sessionId: 'box-1',
     createClient: (handlers) => {
       client = new FakeClient(handlers);
       configure?.(client);
       return client as unknown as AcpClient;
     },
+    ...deps,
   });
   store.start();
   return { store, client };
@@ -310,4 +312,131 @@ test('disposing closes the client', () => {
   const { store, client } = makeStore();
   store.dispose();
   assert.equal(client.disposed, true);
+});
+
+test('a turn blocked on a permission request is not reported as running', async () => {
+  const { store, client } = makeStore((c) => {
+    c.hold = true;
+  });
+  void store.send('edit the file');
+  assert.equal(store.getSnapshot().isRunning, true);
+
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write main.ts' });
+  const answered = client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+
+  // The turn is paused for the user, not progressing. Saying otherwise
+  // would hide the very question that is holding it up.
+  assert.equal(store.getSnapshot().isRunning, false);
+
+  store.respondToApproval('approval-1', 'yes');
+  await answered;
+  assert.equal(store.getSnapshot().isRunning, true);
+
+  client.settle();
+});
+
+test('a bang command runs locally, streams, and never reaches the adapter', async () => {
+  const chunks: string[] = [];
+  const { store, client } = makeStore(undefined, {
+    runExec: async (sessionId, command, onChunk) => {
+      assert.equal(sessionId, 'box-1');
+      assert.equal(command, 'echo hi');
+      onChunk('hi');
+      chunks.push('hi');
+      onChunk('hi\nthere');
+      chunks.push('hi\nthere');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+  });
+
+  await store.runCommand('echo hi');
+
+  // Nothing was sent upstream: a bang line costs no tokens.
+  assert.deepEqual(client.requests, []);
+  assert.equal(chunks.length, 2);
+
+  const messages = store.getSnapshot().messages;
+  // The line as typed, then the shell call it produced.
+  assert.equal(messages[0]!.role, 'user');
+  assert.deepEqual(partsOf(messages[0]!), [{ type: 'text', text: '!echo hi' }]);
+
+  const call = partsOf(messages[1]!)[0]!;
+  assert.equal(call.type, 'tool-call');
+  assert.equal(call.toolName, 'shell');
+  assert.match(String((call as unknown as { result: string }).result), /hi\nthere\n\[exit 0\]/);
+});
+
+test('a non-zero exit marks the shell call failed and shows the code', async () => {
+  const { store } = makeStore(undefined, {
+    runExec: async (_id, _cmd, onChunk) => {
+      onChunk('bash: nope: command not found');
+      return { exitCode: 127, truncated: false, timedOut: false };
+    },
+  });
+
+  await store.runCommand('nope');
+  const call = partsOf(store.getSnapshot().messages[1]!)[0] as unknown as {
+    result: string;
+    isError?: boolean;
+  };
+  assert.equal(call.isError, true);
+  assert.match(call.result, /\[exit 127\]/);
+});
+
+test('a killed or truncated run says so beside its exit code', async () => {
+  const { store } = makeStore(undefined, {
+    runExec: async (_id, _cmd, onChunk) => {
+      onChunk('a lot of output');
+      return { exitCode: null, truncated: true, timedOut: true };
+    },
+  });
+
+  await store.runCommand('yes');
+  const call = partsOf(store.getSnapshot().messages[1]!)[0] as unknown as { result: string };
+  assert.match(call.result, /\[exit killed\] · timed out · output truncated/);
+});
+
+test('a failed exec request is reported on the call rather than thrown away', async () => {
+  const { store } = makeStore(undefined, {
+    runExec: async () => {
+      throw new Error('503 exec unavailable');
+    },
+  });
+
+  await store.runCommand('ls');
+  const call = partsOf(store.getSnapshot().messages[1]!)[0] as unknown as {
+    result: string;
+    isError?: boolean;
+  };
+  assert.equal(call.isError, true);
+  assert.match(call.result, /503 exec unavailable/);
+});
+
+test('previously run commands are appended once, however often they are loaded', async () => {
+  const { store } = makeStore(undefined, {
+    listExec: async () => [
+      {
+        id: 7,
+        sessionId: 'box-1',
+        command: 'git status',
+        output: 'clean\n',
+        exitCode: 0,
+        truncated: false,
+        timedOut: false,
+        startedAt: 1,
+        finishedAt: 2,
+      },
+    ],
+  });
+
+  await store.loadExecHistory();
+  await store.loadExecHistory();
+  assert.equal(store.getSnapshot().messages.length, 2);
+  assert.deepEqual(partsOf(store.getSnapshot().messages[0]!), [
+    { type: 'text', text: '!git status' },
+  ]);
 });

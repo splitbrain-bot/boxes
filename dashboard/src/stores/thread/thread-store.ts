@@ -7,12 +7,14 @@ import type {
   SessionNotification,
 } from './acp-types.ts';
 import { AcpClient, type ConnectionState } from './acp-client.ts';
+import { BANG, listExec, runExec } from './exec.ts';
 import {
   applyUpdate,
   emptyModel,
   findTool,
   type Message,
   type ThreadModel,
+  type ToolPart,
 } from './translate.ts';
 
 /**
@@ -45,6 +47,12 @@ interface OpenApproval {
 export interface ThreadStoreDeps {
   /** Builds the client. Present so a test can supply a fake. */
   createClient: (handlers: ConstructorParameters<typeof AcpClient>[2]) => AcpClient;
+  /** The Boxes session id, which the exec endpoint is scoped to. */
+  sessionId: string;
+  /** Runs a local command, streaming its output. Swapped in tests. */
+  runExec?: typeof runExec;
+  /** Lists the commands already run in this session. Swapped in tests. */
+  listExec?: typeof listExec;
 }
 
 /** The live thread for one Boxes session. */
@@ -58,6 +66,11 @@ export class ThreadStore {
   private client: AcpClient | null = null;
   private promptsInFlight = 0;
   private nextApprovalId = 1;
+  private nextExecId = 1;
+  /** Exec records already replayed, so a re-attach does not double them. */
+  private replayedExec = new Set<number>();
+  /** Raw output per shell call, kept apart from the exit trailer shown after it. */
+  private readonly execOutput = new Map<string, string>();
 
   constructor(private readonly deps: ThreadStoreDeps) {
     this.snapshot = {
@@ -81,8 +94,22 @@ export class ThreadStore {
 
   /** Publishes a new snapshot and wakes every subscriber. */
   private emit(patch: Partial<ThreadSnapshot> = {}): void {
-    this.snapshot = { ...this.snapshot, ...patch };
+    this.snapshot = { ...this.snapshot, ...patch, isRunning: this.running };
     for (const l of this.listeners) l();
+  }
+
+  /**
+   * Whether a turn is actually progressing.
+   *
+   * A turn blocked on a permission request is not running, it is waiting for
+   * the user — which is the whole point of the request. Saying otherwise
+   * would also hide the question: the runtime derives a message's
+   * requires-action status from its unresolved approval only while the
+   * thread is not running, so a permanently-running thread would render a
+   * spinner where the buttons belong and deadlock the turn.
+   */
+  private get running(): boolean {
+    return this.promptsInFlight > 0 && this.approvals.size === 0;
   }
 
   /**
@@ -140,6 +167,8 @@ export class ThreadStore {
     this.model = emptyModel();
     this.model.modes = modes;
     this.views = new Map();
+    this.execOutput.clear();
+    this.replayedExec.clear();
     this.failOpenApprovals();
     this.emit({ messages: [], plan: null });
   }
@@ -214,7 +243,7 @@ export class ThreadStore {
     if (!sessionId) throw new Error('no ACP thread yet');
 
     this.promptsInFlight++;
-    this.emit({ isRunning: true, error: null });
+    this.emit({ error: null });
     try {
       await client.request('session/prompt', {
         sessionId,
@@ -224,9 +253,118 @@ export class ThreadStore {
       this.emit({ error: (err as Error).message });
       throw err;
     } finally {
-      this.promptsInFlight--;
-      if (this.promptsInFlight === 0) this.emit({ isRunning: false });
+      // Never below zero: cancel() clears the count, and this finally still
+      // runs when the cancelled prompt's request comes back.
+      this.promptsInFlight = Math.max(0, this.promptsInFlight - 1);
+      this.emit();
     }
+  }
+
+  /**
+   * Runs a `!bang` command in the session container.
+   *
+   * It never reaches the model: the command is echoed as the user message it
+   * was typed as, and its output rides the same tool-call rendering path as
+   * an agent's own tool calls, so it collapses and expands the same way.
+   */
+  async runCommand(command: string): Promise<void> {
+    const toolCallId = `bang-${this.nextExecId++}`;
+    this.execOutput.set(toolCallId, '');
+    this.appendExecCall(toolCallId, command, 'in_progress', '');
+
+    const exec = this.deps.runExec ?? runExec;
+    try {
+      const outcome = await exec(this.deps.sessionId, command, (output) => {
+        this.updateExecCall(toolCallId, 'in_progress', output);
+      });
+      const notes = [
+        outcome.timedOut ? 'timed out' : '',
+        outcome.truncated ? 'output truncated' : '',
+      ].filter(Boolean);
+      this.updateExecCall(
+        toolCallId,
+        outcome.exitCode === 0 ? 'completed' : 'failed',
+        undefined,
+        [`[exit ${outcome.exitCode ?? 'killed'}]`, ...notes].join(' · '),
+      );
+    } catch (err) {
+      this.updateExecCall(toolCallId, 'failed', undefined, (err as Error).message);
+    }
+  }
+
+  /**
+   * Appends the commands already run in this session, after whatever the
+   * replay produced.
+   *
+   * ACP replay carries no timestamps, so interleaving them into the
+   * transcript is not attempted; they go at the end, in the order they ran.
+   */
+  async loadExecHistory(): Promise<void> {
+    const list = this.deps.listExec ?? listExec;
+    let records;
+    try {
+      records = await list(this.deps.sessionId);
+    } catch {
+      return;
+    }
+    for (const record of records) {
+      if (this.replayedExec.has(record.id)) continue;
+      this.replayedExec.add(record.id);
+      const notes = [
+        record.timedOut ? 'timed out' : '',
+        record.truncated ? 'output truncated' : '',
+      ].filter(Boolean);
+      this.appendExecCall(
+        `bang-log-${record.id}`,
+        record.command,
+        record.exitCode === 0 ? 'completed' : 'failed',
+        record.output,
+        [`[exit ${record.exitCode ?? 'killed'}]`, ...notes].join(' · '),
+      );
+    }
+  }
+
+  /** Puts a shell tool call, and the prompt that asked for it, in the thread. */
+  private appendExecCall(
+    toolCallId: string,
+    command: string,
+    status: 'in_progress' | 'completed' | 'failed',
+    output: string,
+    trailer?: string,
+  ): void {
+    applyUpdate(this.model, {
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `${BANG}${command}` },
+      messageId: `${toolCallId}-prompt`,
+    });
+    const touched = applyUpdate(this.model, {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      title: command,
+      name: 'shell',
+      kind: 'execute',
+      status,
+      rawInput: { command },
+      content: execContent(output, trailer),
+    });
+    this.refreshMessages(touched);
+  }
+
+  /** Updates a running shell tool call in place. */
+  private updateExecCall(
+    toolCallId: string,
+    status: 'in_progress' | 'completed' | 'failed',
+    output?: string,
+    trailer?: string,
+  ): void {
+    if (output !== undefined) this.execOutput.set(toolCallId, output);
+    const touched = applyUpdate(this.model, {
+      sessionUpdate: 'tool_call_update',
+      toolCallId,
+      status,
+      content: execContent(this.execOutput.get(toolCallId) ?? '', trailer),
+    });
+    this.refreshMessages(touched ?? this.messageOfTool(toolCallId));
   }
 
   /** Cancels the running turn. The prompt request resolves on its own after. */
@@ -235,7 +373,10 @@ export class ThreadStore {
     const sessionId = client?.sessionId;
     if (!client || !sessionId) return;
     client.notify('session/cancel', { sessionId });
-    this.emit({ isRunning: false });
+    // The prompt request resolves on its own afterwards; this only stops the
+    // view from claiming a turn is still going.
+    this.promptsInFlight = 0;
+    this.emit();
   }
 
   /** Switches the adapter into another of its advertised modes. */
@@ -302,3 +443,10 @@ export class ThreadStore {
     });
   }
 }
+
+/** A shell call's output, plus its exit trailer once there is one. */
+function execContent(output: string, trailer?: string): ToolPart['content'] {
+  const text = trailer ? `${output}${output.endsWith('\n') || !output ? '' : '\n'}${trailer}` : output;
+  return text ? [{ type: 'content', content: { type: 'text', text } }] : [];
+}
+

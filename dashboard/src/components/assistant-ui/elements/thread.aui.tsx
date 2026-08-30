@@ -41,6 +41,8 @@ import {
   type FileMessagePartComponent,
   type ImageMessagePartComponent,
   type ToolCallMessagePartComponent,
+  unstable_useComposerInputHistory,
+  useAuiEvent,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -60,6 +62,8 @@ import {
 import {
   createContext,
   useContext,
+  useRef,
+  useState,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -206,6 +210,42 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   );
 };
 
+/**
+ * The stock tool group, with one Boxes edit: it opens itself when a call
+ * inside it is waiting on the user.
+ *
+ * A tool call collapses because its output is usually not what you came for.
+ * A permission request is: the adapter blocks until it is answered, so a
+ * question folded away behind a "1 tool call" summary stalls the turn until
+ * someone thinks to look inside.
+ *
+ * Only the interrupt reason opens it. The other requires-action reason is a
+ * call still waiting on its own result, which is ordinary progress and has
+ * nothing for the user to do.
+ */
+const DefaultToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
+  group,
+  children,
+}) => {
+  const running = group.status.type === "running";
+  const waiting =
+    group.status.type === "requires-action" && group.status.reason === "interrupt";
+
+  const [open, setOpen] = useState(waiting);
+  const [wasWaiting, setWasWaiting] = useState(waiting);
+  if (waiting !== wasWaiting) {
+    setWasWaiting(waiting);
+    if (waiting) setOpen(true);
+  }
+
+  return (
+    <ToolGroupRoot variant="ghost" open={open} onOpenChange={setOpen}>
+      <ToolGroupTrigger count={group.indices.length} active={running} />
+      <ToolGroupContent>{children}</ToolGroupContent>
+    </ToolGroupRoot>
+  );
+};
+
 const ThreadMessage: FC = () => {
   const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
     useContext(ThreadComponentsContext);
@@ -268,6 +308,22 @@ const ThreadSuggestionItem: FC = () => {
 };
 
 const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
+  // Boxes edit: terminal semantics on the composer. ArrowUp on an empty
+  // draft walks back through what was sent, ArrowDown returns and restores
+  // the draft. The hook yields to IME, popovers and multi-line caret
+  // movement, so it costs nothing when the draft is not empty.
+  const history = unstable_useComposerInputHistory();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Boxes edit: keep the caret in the composer after a send. Typing the next
+  // prompt must never need a click, on a phone least of all — the composer
+  // is where a thread is driven from.
+  useAuiEvent({ event: "composer.send", scope: "thread" }, () => {
+    // After the runtime has cleared the draft, so the focus is not stolen
+    // back by the re-render that follows.
+    requestAnimationFrame(() => inputRef.current?.focus());
+  });
+
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone asChild>
@@ -277,12 +333,14 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
         >
           <ComposerAttachments />
           <ComposerPrimitive.Input
+            ref={inputRef}
             placeholder="Send a message..."
             className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
             rows={1}
             autoFocus={autoFocus}
             enterKeyHint="send"
             aria-label="Message input"
+            onKeyDown={history.onKeyDown}
           />
           <ComposerAction />
         </div>
@@ -407,15 +465,7 @@ const AssistantMessage: FC = () => {
                 if (ToolGroup) {
                   return <ToolGroup group={part}>{children}</ToolGroup>;
                 }
-                return (
-                  <ToolGroupRoot variant="ghost">
-                    <ToolGroupTrigger
-                      count={part.indices.length}
-                      active={part.status.type === "running"}
-                    />
-                    <ToolGroupContent>{children}</ToolGroupContent>
-                  </ToolGroupRoot>
-                );
+                return <DefaultToolGroup group={part}>{children}</DefaultToolGroup>;
               case "group-reasoning": {
                 if (ReasoningGroup) {
                   return (

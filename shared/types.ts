@@ -87,3 +87,31 @@ export interface HealthResponse {
 export interface ApiError {
   error: string;
 }
+
+/** Body of a request to run a local command in the session container. */
+export interface ExecRequest {
+  /** Run with `bash -lc`, inside the session's own isolation. */
+  command: string;
+}
+
+/** One finished local command, as the exec log stores it. */
+export interface ExecRecord {
+  id: number;
+  sessionId: string;
+  command: string;
+  /** Combined stdout and stderr, truncated at the output limit. */
+  output: string;
+  /** Null when the command was killed before reporting one. */
+  exitCode: number | null;
+  /** True when output hit the size limit and the rest was dropped. */
+  truncated: boolean;
+  /** True when the command hit the wall-clock limit and was killed. */
+  timedOut: boolean;
+  startedAt: number;
+  finishedAt: number;
+}
+
+/** A page of exec records for one session, oldest first. */
+export interface ExecLogPage {
+  records: ExecRecord[];
+}

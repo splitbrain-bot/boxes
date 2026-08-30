@@ -21,6 +21,7 @@ export function useThread(
   useEffect(() => {
     if (!token) return undefined;
     const created = new ThreadStore({
+      sessionId,
       createClient: (handlers) => new AcpClient(url, token, handlers),
     });
     setStore(created);
@@ -29,7 +30,7 @@ export function useThread(
       created.dispose();
       setStore(null);
     };
-  }, [url, token]);
+  }, [sessionId, url, token]);
 
   const state = useSyncExternalStore(
     store ? store.subscribe : NOOP_SUBSCRIBE,

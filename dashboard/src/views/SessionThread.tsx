@@ -10,6 +10,7 @@ import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../api.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
+import { bangCommand } from '../stores/thread/exec.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
 import { ThreadHeader } from '@/components/ThreadHeader';
@@ -48,10 +49,25 @@ export function SessionThread() {
 
   const { store, state } = useThread(id, session?.wsToken ?? null);
 
+  // Commands already run in this session, appended once the thread is up.
+  // ACP replay carries no timestamps, so they go after the transcript rather
+  // than interleaved into it.
+  useEffect(() => {
+    if (!store || state.connection !== 'ready') return;
+    void store.loadExecHistory();
+  }, [store, state.connection]);
+
   const onNew = useCallback(
     async (message: AppendMessage) => {
       const text = textOf(message);
       if (!text || !store) return;
+      // A !bang line is intercepted here and never reaches the adapter, so
+      // it costs no tokens and cannot be read as an instruction.
+      const command = bangCommand(text);
+      if (command) {
+        await store.runCommand(command);
+        return;
+      }
       await store.send(text);
     },
     [store],
