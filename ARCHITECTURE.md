@@ -406,6 +406,17 @@ visible, and pauses while it is hidden.
 deployment fails at startup rather than at first use. Every setting has a
 working default, which is why the stack runs with no `.env` at all.
 
+That file is the only place a default is written down. `compose.yaml` lists
+which variables reach the container — Compose does not forward `.env` into
+one on its own — but supplies no values, so there is no second copy to drift.
+The two it does set, `DATA_DIR` and `EGRESS_PROXY_CONTAINER`, are not
+defaults: they name the volume mount and the container that compose file
+itself creates, and overriding them would break that wiring.
+
+An empty value counts as unset. `FOO=` in an `.env`, and a pass-through for a
+variable the host does not set, both arrive as an empty string, and failing
+the boot on a setting nobody set would be a poor way to read it.
+
 `WS_AUTH_TOKEN` is the exception, because a shipped default for a secret would
 be a published password. Left unset, `secret.ts` generates a token on first
 boot and writes it to `DATA_DIR/ws-auth-token` with mode 0600, so it survives

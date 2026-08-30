@@ -20,23 +20,31 @@ services:
     container_name: boxes-orchestrator
     restart: unless-stopped
     environment:
-      DATA_DIR: /data
-      SESSION_IMAGE: ${SESSION_IMAGE:-boxes-session:latest}
-      SESSION_SUBNET_POOL: ${SESSION_SUBNET_POOL:-10.200.0.0/16}
-      SESSION_MEM_LIMIT: ${SESSION_MEM_LIMIT:-4g}
-      SESSION_CPUS: ${SESSION_CPUS:-2}
-      SESSION_PIDS_LIMIT: ${SESSION_PIDS_LIMIT:-512}
-      IDLE_STOP_MINUTES: ${IDLE_STOP_MINUTES:-30}
-      # Unset means the orchestrator generates one and keeps it in /data.
-      WS_AUTH_TOKEN: ${WS_AUTH_TOKEN:-}
-      PERMISSION_FALLBACK: ${PERMISSION_FALLBACK:-hold}
-      PERMISSION_HOLD_MINUTES: ${PERMISSION_HOLD_MINUTES:-120}
-      NTFY_URL: ${NTFY_URL:-}
-      EGRESS_PROXY_CONTAINER: boxes-egress-proxy
-      PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: ${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}
-      PROFILE_DEFAULT_GH_TOKEN: ${PROFILE_DEFAULT_GH_TOKEN:-}
-      PROFILE_DEFAULT_GIT_NAME: ${PROFILE_DEFAULT_GIT_NAME:-boxes-bot}
-      PROFILE_DEFAULT_GIT_EMAIL: ${PROFILE_DEFAULT_GIT_EMAIL:-boxes-bot@users.noreply.github.com}
+      # Two settings this file is entitled to decide, because it is this file
+      # that wires them: the data dir is where the volume below is mounted,
+      # and the proxy name is the container_name further down. Overriding
+      # either from a .env would break that wiring, so neither is a
+      # pass-through.
+      - DATA_DIR=/data
+      - EGRESS_PROXY_CONTAINER=boxes-egress-proxy
+      # Everything else is passed through from the environment if set, and
+      # left unset otherwise. The defaults live in orchestrator/src/config.ts,
+      # which parses all of this at boot; restating them here would only give
+      # them somewhere to drift apart. See .env.example for what each does.
+      - SESSION_IMAGE
+      - SESSION_SUBNET_POOL
+      - SESSION_MEM_LIMIT
+      - SESSION_CPUS
+      - SESSION_PIDS_LIMIT
+      - IDLE_STOP_MINUTES
+      - WS_AUTH_TOKEN
+      - PERMISSION_FALLBACK
+      - PERMISSION_HOLD_MINUTES
+      - NTFY_URL
+      - PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN
+      - PROFILE_DEFAULT_GH_TOKEN
+      - PROFILE_DEFAULT_GIT_NAME
+      - PROFILE_DEFAULT_GIT_EMAIL
     volumes:
       # Root-equivalent access, mitigated by the fixed HostConfig template, by
       # never shell-exec'ing user strings, and by the auth in front.

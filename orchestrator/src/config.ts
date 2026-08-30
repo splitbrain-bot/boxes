@@ -60,9 +60,21 @@ export interface SessionProfile {
 
 let cached: Config | null = null;
 
+/**
+ * An empty value means the setting was not provided.
+ *
+ * `FOO=` in an .env file, and a compose pass-through for a variable the host
+ * does not set, both arrive as an empty string. Treating that as a value
+ * rather than as an absence would fail the regex and enum fields at boot,
+ * for a setting nobody actually set.
+ */
+function withoutEmpty(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
+}
+
 /** Parses an environment into a config, throwing on any invalid value. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const parsed = schema.safeParse(env);
+  const parsed = schema.safeParse(withoutEmpty(env));
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
