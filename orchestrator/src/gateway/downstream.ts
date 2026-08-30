@@ -200,7 +200,9 @@ export function attachDownstream(
   for (const method of FORWARDED_REQUESTS) {
     app.onRequest(method as string, raw, async ({ params }) => {
       handle.lastActiveAt = Date.now();
-      const result = await up.forwardRequest(method, params);
+      // The handle goes with the request: a replay belongs to the browser
+      // that asked for it, and a prompt is echoed on that browser's behalf.
+      const result = await up.forwardRequest(method, params, handle);
       // An empty answer is not an error: session/load delivers the replay as
       // session/update notifications rather than as its result.
       return result ?? {};

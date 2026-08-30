@@ -29,6 +29,19 @@ export interface SessionRow {
   last_active_at: number;
 }
 
+/** One finished local command, as stored. */
+export interface ExecRow {
+  id: number;
+  session_id: string;
+  command: string;
+  output: string;
+  exit_code: number | null;
+  truncated: number;
+  timed_out: number;
+  started_at: number;
+  finished_at: number;
+}
+
 /** A permission request the adapter is still blocked on. */
 export interface PendingRequestRow {
   id: number;
@@ -72,6 +85,20 @@ const MIGRATIONS: string[] = [
   CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
   CREATE INDEX idx_pending_session ON pending_requests(session_id);
   CREATE INDEX idx_acp_log_session ON acp_log(session_id, id);
+  `,
+  `
+  CREATE TABLE exec_log (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    command     TEXT NOT NULL,
+    output      TEXT NOT NULL,
+    exit_code   INTEGER,
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    timed_out   INTEGER NOT NULL DEFAULT 0,
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_exec_log_session ON exec_log(session_id, id);
   `,
 ];
 
@@ -143,4 +170,46 @@ export function pruneAcpLog(db: Db, sessionId: string): void {
          (SELECT id FROM acp_log WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
          -1)`,
   ).run(sessionId, sessionId, LOG_RING);
+}
+
+/** Local command runs kept per session. */
+const EXEC_RING = 200;
+
+/** Records one finished local command and returns its stored row id. */
+export function appendExecLog(
+  db: Db,
+  sessionId: string,
+  record: Omit<ExecRow, 'id' | 'session_id'>,
+): number {
+  const info = db
+    .prepare(
+      `INSERT INTO exec_log
+         (session_id, command, output, exit_code, truncated, timed_out, started_at, finished_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      sessionId,
+      record.command,
+      record.output,
+      record.exit_code,
+      record.truncated,
+      record.timed_out,
+      record.started_at,
+      record.finished_at,
+    );
+  db.prepare(
+    `DELETE FROM exec_log
+     WHERE session_id = ?
+       AND id <= COALESCE(
+         (SELECT id FROM exec_log WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
+         -1)`,
+  ).run(sessionId, sessionId, EXEC_RING);
+  return Number(info.lastInsertRowid);
+}
+
+/** Every stored command run for one session, oldest first. */
+export function listExecLog(db: Db, sessionId: string): ExecRow[] {
+  return db
+    .prepare('SELECT * FROM exec_log WHERE session_id = ? ORDER BY id ASC')
+    .all(sessionId) as ExecRow[];
 }

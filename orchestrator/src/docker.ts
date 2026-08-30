@@ -365,3 +365,76 @@ export async function spawnAdapterExec(
     },
   };
 }
+
+/** A one-off exec whose combined output is streamed back. */
+export interface CommandExec {
+  /** stdout and stderr, demuxed and merged in arrival order. */
+  output: Readable;
+  /** Resolves with the exit code once the stream ends, or null if unknown. */
+  exited: Promise<number | null>;
+  kill(): void;
+}
+
+/**
+ * Runs one command in a session container as the agent user.
+ *
+ * The command travels as an argument to `bash -lc`, never as part of a
+ * command line the host assembles, and it runs inside the container's
+ * existing isolation: internal network, read-only rootfs, capabilities
+ * dropped. No new privilege is introduced by running it.
+ */
+export async function runCommandExec(
+  containerId: string,
+  command: string,
+  workingDir: string,
+): Promise<CommandExec> {
+  const exec = await docker().getContainer(containerId).exec({
+    Cmd: ['bash', '-lc', command],
+    AttachStdin: false,
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: false,
+    User: 'agent',
+    WorkingDir: workingDir,
+  });
+
+  const stream = (await exec.start({ hijack: true, stdin: false })) as Duplex;
+  // One stream for the caller: a shell's stderr is part of its output, and
+  // splitting them would lose the order they were written in.
+  const output = new PassThrough();
+  docker().modem.demuxStream(stream, output, output);
+
+  let settle: (code: number | null) => void = () => {};
+  const exited = new Promise<number | null>((resolve) => {
+    settle = resolve;
+  });
+
+  let finished = false;
+  const finish = async (): Promise<void> => {
+    if (finished) return;
+    finished = true;
+    output.end();
+    try {
+      const info = await exec.inspect();
+      settle(info.ExitCode ?? null);
+    } catch {
+      settle(null);
+    }
+  };
+
+  stream.on('end', () => void finish());
+  stream.on('close', () => void finish());
+  stream.on('error', () => void finish());
+
+  return {
+    output,
+    exited,
+    kill: () => {
+      try {
+        stream.destroy();
+      } catch {
+        // already gone
+      }
+    },
+  };
+}

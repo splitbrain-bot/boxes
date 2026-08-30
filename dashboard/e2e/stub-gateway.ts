@@ -36,6 +36,8 @@ export interface PermissionScript {
 /** How the stub behaves, mutable between tests. */
 export interface GatewayScript {
   token: string;
+  /** Whether a prompt is echoed back as a user_message_chunk. */
+  echoPrompt?: boolean;
   modes: SessionModeState | null;
   prompts: PromptScript[];
   permissions: PermissionScript[];
@@ -162,10 +164,12 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         const blocks = (params(msg)['prompt'] ?? []) as Array<{ type: string; text?: string }>;
         const promptText = blocks.map((b) => b.text ?? '').join('');
         prompts.push(promptText);
-        emit({
-          sessionUpdate: 'user_message_chunk',
-          content: { type: 'text', text: promptText },
-        } as SessionUpdate);
+        if (script.echoPrompt !== false) {
+          emit({
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: promptText },
+          } as SessionUpdate);
+        }
 
         const permission = script.permissions.find((p) => p.match(promptText));
         if (permission) {

@@ -236,6 +236,31 @@ export class SessionManager {
     return row;
   }
 
+  /**
+   * Where a local command should run for this session, starting the
+   * container if it is stopped.
+   *
+   * Prefers the clone as the working directory and falls back to the
+   * workspace root, which is the same choice the adapter's exec makes.
+   */
+  async execTarget(id: string): Promise<{ containerId: string; workingDir: string }> {
+    const row = this.mustGet(id);
+    if (!row.container_id) throw new HttpError(409, 'Session has no container');
+    await dk.startContainer(row.container_id);
+    const hasRepo = row.repo_url ? await dk.hasRepoDir(row.container_id) : false;
+    return {
+      containerId: row.container_id,
+      workingDir: hasRepo ? '/workspace/repo' : '/workspace',
+    };
+  }
+
+  /** Marks a session active, so running a command holds off the reaper. */
+  touch(id: string): void {
+    this.db
+      .prepare("UPDATE sessions SET last_active_at = ? WHERE id = ? AND status != 'deleted'")
+      .run(Date.now(), id);
+  }
+
   /** Summaries of every live session. */
   async list(): Promise<SessionSummary[]> {
     const rows = this.allRows();

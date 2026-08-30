@@ -6,6 +6,7 @@ import type { Config } from '../config.ts';
 import { appendAcpLog, pruneAcpLog, type Db, type SessionRow } from '../db.ts';
 import * as dk from '../docker.ts';
 import { log, type Logger } from '../log.ts';
+import { Broadcast } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
 
 /**
@@ -51,7 +52,8 @@ export class UpstreamSession {
   private conn: ClientConnection | null = null;
   private initializeResponse: unknown = null;
   private starting: Promise<void> | null = null;
-  private readonly downstreams = new Set<DownstreamHandle>();
+  /** Who each adapter update goes to; see broadcast.ts. */
+  private readonly downstreams: Broadcast;
   private readonly slog: Logger;
   private closed = false;
   /** Guards against reconnect storms after a deliberate stop. */
@@ -65,6 +67,7 @@ export class UpstreamSession {
     private readonly onStatus: (status: SessionRow['status']) => void,
   ) {
     this.slog = log.session(sessionId);
+    this.downstreams = new Broadcast(sessionId);
   }
 
   /** How many browsers are attached to this session. */
@@ -90,7 +93,7 @@ export class UpstreamSession {
 
   /** Removes a browser from the broadcast set, leaving the upstream running. */
   detach(handle: DownstreamHandle): void {
-    this.downstreams.delete(handle);
+    this.downstreams.remove(handle);
     this.slog.info('downstream detached', { attached: this.downstreams.size });
   }
 
@@ -281,17 +284,11 @@ export class UpstreamSession {
     return ndJsonStream(writable, readable);
   }
 
-  /** Taps an adapter update and broadcasts it to every attached browser. */
+  /** Taps an adapter update and delivers it to the browsers it is meant for. */
   private onSessionUpdate(params: unknown): void {
     this.touch();
     this.tap('up', 'session/update', params);
-    for (const d of this.downstreams) {
-      try {
-        d.notify('session/update', params);
-      } catch (err) {
-        this.slog.warn('broadcast failed', { error: (err as Error).message });
-      }
-    }
+    this.downstreams.update(params);
   }
 
   /**
@@ -303,7 +300,7 @@ export class UpstreamSession {
     this.touch();
     this.tap('up', 'session/request_permission', params);
 
-    const target = [...this.downstreams].sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+    const target = this.downstreams.byRecency[0];
     if (target) {
       return target.request('session/request_permission', params).catch((err) => {
         // The browser vanished mid-question: fall back to queueing so the
@@ -397,19 +394,39 @@ export class UpstreamSession {
     }
   }
 
-  /** Forwards a browser request to the adapter, tracking prompt turns. */
-  async forwardRequest(method: string, params: unknown): Promise<unknown> {
+  /**
+   * Forwards a browser request to the adapter, tracking prompt turns.
+   *
+   * `from` is the browser that asked, which decides who a replay goes to and
+   * lets a prompt be echoed to everyone watching.
+   */
+  async forwardRequest(
+    method: string,
+    params: unknown,
+    from?: DownstreamHandle,
+  ): Promise<unknown> {
     await this.ensureStarted();
     const conn = this.conn;
     if (!conn) throw new Error('Upstream not connected');
     this.tap('down', method, params);
 
     const isPrompt = method === 'session/prompt';
-    if (isPrompt) this.setTurnActive(true);
+    const isLoad = method === 'session/load';
+
+    if (isPrompt) {
+      this.setTurnActive(true);
+      this.downstreams.beginPrompt(params);
+    }
+    if (isLoad && from) this.downstreams.beginReplay(from);
+
     try {
       return await conn.agent.request(method, params);
     } finally {
-      if (isPrompt) this.setTurnActive(false);
+      if (isPrompt) {
+        this.setTurnActive(false);
+        this.downstreams.endPrompt();
+      }
+      if (isLoad && from) this.downstreams.endReplay(from);
     }
   }
 
