@@ -1,6 +1,6 @@
 # Build Plan: Replace acp-ui with an in-dashboard thread view (assistant-ui)
 
-Status: PROPOSED (revision 1). Owner decision on 2026-08-30: the frontend is
+Status: PROPOSED (revision 2). Tailwind demoted from build dependency to vendor-time tool per owner question, verified by compiling the vendored thread component end-to-end. Owner decision on 2026-08-30: the frontend is
 assistant-ui (React), embedded in our own dashboard; the standalone acp-ui
 app goes away. Every fact in §2 was verified by installing the packages and
 reading the shipped type declarations and registry payloads on 2026-08-30;
@@ -77,14 +77,25 @@ repo as source files we own:
   `tool-group`, and (via markdown-text) `use-copy-to-clipboard`.
 - The vendored sources use **both** semantic `aui-*` classes **and** Tailwind
   utility classes. `@assistant-ui/styles` 0.3.7 ships precompiled CSS for the
-  147 `aui-*` classes **only** — verified: zero utility classes in it. So the
-  registry components require Tailwind; the styles package supplies the
-  `aui-*` layer on top.
-- Tailwind v4 needs no PostCSS/Vite: `@tailwindcss/cli` 4.3.3 is a standalone
-  binary (`tailwindcss -i src/globals.css -o dist/main.css`) with automatic
-  content detection. The dashboard build becomes two commands (tailwind for
-  CSS, esbuild for JS), still no bundler framework. The owner accepted the
-  Tailwind adoption when choosing assistant-ui.
+  147 `aui-*` classes **only** — verified: zero utility classes in it, while
+  `thread.aui.tsx` alone carries 175 distinct utility tokens (variants like
+  `dark:hover:bg-accent`, values like `-mb-7.5`, opacity forms like
+  `border-border/60`). Upstream's published CSS therefore cannot style the
+  components by itself; something must compile the utilities.
+- **Tailwind is a vendor-time tool, not a build or authoring dependency
+  (owner decision 2026-08-30).** Proven end-to-end: one pass of
+  `@tailwindcss/cli` 4.3.3 (standalone, no PostCSS/Vite) over the vendored
+  sources — input `@import "tailwindcss"` + `tw-animate-css` +
+  `@assistant-ui/styles/index.css` + `@source "./vendored"` + the theme
+  bridge below — emits every utility the components use plus the `aui-*`
+  layer into one ~135 KB static file (100 ms). That file is committed as
+  `dashboard/src/components/assistant-ui/vendored.css` and imported like any
+  other CSS; esbuild remains the only build tool in the image.
+- The theme bridge is mandatory, not cosmetic: Tailwind v4 **silently
+  skips** utilities such as `bg-background` unless `@theme` defines those
+  colors — verified by compiling without the token block (utilities absent)
+  and with it (all present). The vendor input defines the shadcn-convention
+  tokens from our palette, light and dark.
 - Markdown: `@assistant-ui/react-markdown` 0.14.13 (peer `^0.15` of react
   pkg; wraps `react-markdown`) + `remark-gfm`, used by the vendored
   `markdown-text` component.
@@ -128,8 +139,8 @@ machinery is not used; our session list is the thread list.
 | Chat UI | acp-ui (separate app) | vendored assistant-ui registry components (base flavor) |
 | Chat runtime | — | `useExternalStoreRuntime` over our ACP client |
 | Markdown | (acp-ui's) | `@assistant-ui/react-markdown` + `remark-gfm` |
-| CSS | plain per-component CSS | same for dashboard views; + Tailwind v4 (`@tailwindcss/cli`) + `@assistant-ui/styles` for the thread |
-| Build | esbuild only | esbuild (JS) + tailwind CLI (CSS); `tsc --noEmit` still gates both in Docker |
+| CSS | plain per-component CSS | same everywhere we author; the thread additionally imports a committed `vendored.css` (compiled once at vendor time, §7.5) |
+| Build | esbuild only | esbuild only, unchanged; Tailwind CLI is a devDependency used only by the vendor script |
 
 Pins: `@assistant-ui/react@0.15.17`, `@assistant-ui/react-markdown@0.14.13`,
 `@assistant-ui/styles@0.3.7`, `@tailwindcss/cli@4.3.3`, `react@^19`,
@@ -270,14 +281,28 @@ rest of `/api`. The command runs inside the session's existing isolation
 (internal network, read-only rootfs, caps dropped) — no new privilege is
 introduced, and the endpoint never shell-executes on the host.
 
-### 7.5 Theme bridge (globals.css)
-`@import "tailwindcss"` + `@import "@assistant-ui/styles/index.css"` +
-a token block defining the shadcn-convention variables (`--background`,
-`--primary`, …) from our existing palette in both schemes, so vendored
-components and dashboard views share one look. Tailwind preflight lands
-before our per-component CSS; the dashboard's element-level `button`/`input`
-rules move into explicit classes so preflight and dashboard styles cannot
-fight over bare elements.
+### 7.5 Vendored CSS pipeline and authoring rules
+`scripts/vendor-ui.mjs` (dev-time only) fetches pinned registry items,
+writes the component sources, and compiles `vendored.css` with the Tailwind
+CLI from an input of `tailwindcss` + `tw-animate-css` +
+`@assistant-ui/styles/index.css` + `@source` over the vendored directory +
+the theme-token bridge (shadcn-convention variables defined from our
+palette, light and dark). Components and CSS are committed together as one
+frozen upstream artifact.
+
+Authoring rules, so Tailwind never enters our workflow:
+- Our styling changes are plain CSS targeting the `aui-*` semantic classes
+  (every element carries one) or our own class names, in our own files,
+  loaded after `vendored.css`.
+- Behavior edits to vendored TSX are fine; adding *new* utility classes to
+  them is not — use an `aui-*`/own class and style it in plain CSS. A check
+  script (part of `npm run check`) extracts static class tokens from the
+  vendored TSX and fails if any is missing from the committed CSS, so a
+  forgotten regen is loud, not silently unstyled. Regen itself is one
+  command re-running the vendor script.
+- Tailwind preflight is inside `vendored.css` and loads before our CSS; the
+  dashboard's element-level `button`/`input` rules move into explicit
+  classes so preflight and dashboard styles cannot fight over bare elements.
 
 ## 8. Milestones
 
@@ -288,9 +313,10 @@ placeholder thread route + SessionInfo. Acceptance: `npm run check` and unit
 tests green; Chromium screenshots of list/create/info match the current UI;
 card tap navigates to `/sessions/:id`.
 
-### M2 — Toolchain + vendored components
-Add tailwind CLI build step; vendor the registry components + shadcn
-button/skeleton/utils; write globals.css theme bridge. Acceptance: a
+### M2 — Vendoring pipeline + vendored components
+Write `scripts/vendor-ui.mjs`; vendor the registry components + shadcn
+button/skeleton/utils; commit `vendored.css`; add the class-coverage check
+to `npm run check`. The Docker build gains no new tools. Acceptance: a
 playground route rendering the vendored Thread over a canned in-memory
 external store shows fully styled composer, user/assistant messages,
 markdown, reasoning, and a tool call — light and dark screenshots, no
@@ -355,6 +381,11 @@ multi-thread-per-session.
   covers it.
 - Tailwind preflight vs. dashboard CSS interactions — bounded by M2's
   screenshot acceptance and the class-scoping rule in §7.5.
+- A vendored-TSX edit that adds a utility class without regenerating
+  `vendored.css` would be silently unstyled — which is why the class-coverage
+  check runs in `npm run check` and fails the image build (§7.5). Dynamic
+  class construction could evade the extractor; the vendored sources use
+  static strings, and the rule stands that our edits use non-utility classes.
 - Bundle size grows (React + radix-ui + zustand internals). Irrelevant for a
   self-hosted single-user tool; not a goal.
 
@@ -363,8 +394,10 @@ multi-thread-per-session.
 2. assistant-ui with vendored registry components; primitives + vendored
    sources are the customization surface; upstream upgrades come through
    re-vendoring diffs, never at image-build time from a moving ref.
-3. React 19 + wouter; Tailwind v4 via standalone CLI + esbuild; no Vite/
-   webpack; `tsc --noEmit` still gates every image build.
+3. React 19 + wouter; esbuild remains the only build tool in the image.
+   Tailwind runs solely inside the vendor script, and no code we author uses
+   Tailwind syntax; our styling stays plain CSS on semantic classes.
+   `tsc --noEmit` still gates every image build.
 4. The browser speaks plain ACP to the existing gateway; the gateway stays
    client-agnostic (external ACP clients remain supported) except the two
    additive fixes in §7.3.
