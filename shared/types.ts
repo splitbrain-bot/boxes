@@ -29,9 +29,9 @@ export interface SessionSummary {
   /** Number of browsers currently attached to the session's /ws route. */
   attachedCount: number;
   /**
-   * Bearer token acp-ui must be configured with, carried in the WebSocket
-   * subprotocol. One token covers the whole deployment, and the list carries
-   * it so a card can connect without a further request.
+   * Bearer token an ACP client authenticates the WebSocket upgrade with,
+   * carried in the subprotocol. One token covers the whole deployment, and
+   * the list carries it so opening a thread needs no further request.
    */
   wsToken: string;
   createdAt: number;

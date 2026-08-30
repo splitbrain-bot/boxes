@@ -42,7 +42,7 @@ services:
       - egress-proxy
     labels:
       traefik.enable: "true"
-      # Dashboard, API and acp-ui, behind basicauth. This catch-all router
+      # Dashboard and API, behind basicauth. This catch-all router
       # hands deep links such as /new and /sessions/:id to the orchestrator's
       # index.html fallback. The explicit priority keeps /ws ahead of it.
       traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`)

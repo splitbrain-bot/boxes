@@ -3,8 +3,8 @@
 #   docker compose -f compose.yaml -f compose.local.yaml up -d
 #   -> http://localhost:3000
 #
-# The orchestrator serves the dashboard, the API, the /ws gateway and acp-ui at
-# /ui, so one published port is the entire deployment. Nothing needs a reverse
+# The orchestrator serves the dashboard, the API and the /ws gateway, so one
+# published port is the entire deployment. Nothing needs a reverse
 # proxy, and nothing needs configuring: the dashboard derives the WebSocket URL
 # from the browser's own location.
 #

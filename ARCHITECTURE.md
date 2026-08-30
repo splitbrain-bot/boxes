@@ -36,7 +36,7 @@ Two consequences shape the rest of the design:
               ┌───────────────────▼───────────────────┐
               │            orchestrator               │
               │  /  dashboard   /api  REST            │
-              │  /ui  acp-ui    /ws   ACP gateway     │
+              │                 /ws   ACP gateway     │
               │                                       │
               │  SQLite · reaper · Docker client      │
               └───┬───────────────────────────────┬───┘
@@ -73,28 +73,24 @@ The orchestrator serves everything a browser needs:
 | Path | Handler |
 |---|---|
 | `/` | Dashboard bundle, with a single-page fallback |
-| `/ui` | acp-ui bundle, built with `--base=/ui/` |
 | `/api/...` | REST |
 | `/ws/sessions/:id/acp` | ACP gateway |
 | `/healthz` | Version, session count and proxy warnings |
 
-A GET that matches no route falls back to the `index.html` of the bundle its
-prefix belongs to, so client-side routes survive a reload. Anything under
-`/api` or `/ws` gets a 404 instead.
+A GET that matches no route falls back to the dashboard's `index.html`, so
+client-side routes survive a reload. Anything under `/api` or `/ws` gets a
+404 instead.
 
-Serving acp-ui from the orchestrator image, rather than from a second
-container, puts it on the same origin as the dashboard. Three things follow:
+The dashboard is the only frontend, and it is served from the orchestrator's
+own image. Two things follow:
 
-- The dashboard can write acp-ui's `localStorage` agent config, which is what
-  makes the one-click connect possible. Same-origin is the only way that is
-  legal.
-- The dashboard derives the WebSocket URL from the browser's own location, so
-  no deployment setting can make it wrong and the API carries no endpoint URL.
+- The browser derives the WebSocket URL from its own location, so no
+  deployment setting can make it wrong and the API carries no endpoint URL.
 - The whole stack runs behind one published port, with no reverse proxy.
 
 ## REST API
 
-`orchestrator/src/index.ts` defines the routes; `SessionManager` does the work.
+`orchestrator/src/app.ts` defines the routes; `SessionManager` does the work.
 Request and response shapes live in `shared/types.ts`, which both the
 orchestrator handlers and the dashboard's `api.ts` import.
 
@@ -107,9 +103,85 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
 | `DELETE /api/sessions/:id?purge=` | Deletes the session, and its volumes when purging |
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
+| `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
+| `GET /api/sessions/:id/exec` | Commands already run in this session |
 
 The API carries no authentication of its own. Behind Traefik, basicauth covers
 every route but `/ws`; locally, the port binds to loopback.
+
+### Local commands
+
+A composer line starting with `!` is a local command: the dashboard
+intercepts it, so it never reaches the model, costs no tokens, and cannot be
+read as an instruction.
+
+`exec.ts` runs it as `bash -lc <command>` inside the session container, as the
+non-root `agent` user, in the container's existing isolation — internal
+network, read-only rootfs, capabilities dropped. No new privilege is
+introduced, and nothing shell-executes on the host: the command travels as an
+argument to the container's own shell and never reaches a host command line.
+
+The response is chunked `text/plain` rather than JSON, so the browser can
+render the output as it arrives, and ends with a trailer line carrying the
+exit code and whether either limit was hit. Both limits are enforced by the
+orchestrator rather than trusted to the container: 120 seconds of wall clock
+and 256 KiB of output, after which the exec is killed. Finished runs go into
+`exec_log`, ring-pruned per session.
+
+The browser appends stored runs *after* whatever the replay produced rather
+than interleaving them. ACP replay carries no timestamps, so where they belong
+in the transcript is not recoverable.
+
+## The frontend
+
+One React app, served at `/`. The session list is the thread list: tapping a
+session opens its conversation at `/sessions/:id`, and the ops that used to
+share that page — start, stop, delete, the details, the connection fields for
+an external ACP client — live at `/sessions/:id/info`.
+
+The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
+components are installed into `src/components/assistant-ui/` by the official
+CLI, in the shadcn distribution model: the sources are committed and are ours
+to edit, and an upgrade is a CLI re-run reviewed as a diff rather than a
+version bump that changes the UI silently. Three edits are ours so far, each
+marked in the source: ArrowUp history on the composer, returning focus after
+a send, and opening a tool group when a call inside it is waiting on the user.
+
+Because those components are written in Tailwind utilities, Tailwind is a
+build dependency rather than a style choice, and it compiles from source on
+every build. `globals.css` is the whole design system: the tokens, and the
+`@theme inline` block bridging them into Tailwind colours. That bridge is a
+correctness requirement, not theming polish — Tailwind v4 emits a utility only
+for a colour its theme defines, so without it `bg-background` and every other
+token utility the installed components use would silently vanish.
+
+The browser speaks plain ACP to the gateway, so it is a client like any other
+and the gateway stays client-agnostic. That is not only tidiness: this
+dashboard replaced a separate chat application served alongside it, and the
+gateway needed no protocol change to swap one for the other. An external ACP
+client still attaches to the same endpoint, with the URL and token from
+`/sessions/:id/info`.
+
+```
+AcpClient    ⇄ /ws/sessions/:id/acp     JSON-RPC over one WebSocket
+translate.ts   session/update*       →  an append-only message model (pure)
+thread-store   the live thread          messages, modes, approvals, exec
+convert.ts     that model            →  what useExternalStoreRuntime reads
+```
+
+`translate.ts` being pure is what makes replay and live streaming the same
+code path: a reconnect repeats the handshake, `session/load` re-sends the
+history as ordinary notifications, and folding them rebuilds the thread. An
+update kind this build predates is kept and rendered as nothing, so a newer
+adapter cannot break an older dashboard.
+
+Two behaviours are worth knowing because they look like bugs otherwise. A turn
+blocked on a permission request reports itself as *not running* — it is
+waiting for the user, and the runtime derives a message's requires-action
+status from its unresolved approval only while the thread is idle, so claiming
+otherwise would hide the very question holding up the turn. And ACP's
+permission vocabulary maps onto assistant-ui's approval vocabulary by rename
+alone: `allow_once` to `allow-once`, `optionId`/`name` to `id`/`label`.
 
 ## The ACP gateway
 
@@ -160,9 +232,9 @@ both sides, so each connection runs its own id space and the SDK correlates
 request and response within it.
 
 The upgrade at `/ws/sessions/:id/acp` is authenticated on the handshake. A
-browser cannot set an `Authorization` header on a WebSocket, so acp-ui offers
-the token as a `bearer.<token>` subprotocol entry alongside `acp.v1`. The
-gateway compares it against `WS_AUTH_TOKEN` in constant time and selects
+browser cannot set an `Authorization` header on a WebSocket, so a client
+offers the token as a `bearer.<token>` subprotocol entry alongside `acp.v1`.
+The gateway compares it against `WS_AUTH_TOKEN` in constant time and selects
 `acp.v1` explicitly, rather than relying on the client to list it first.
 
 Three methods are answered or reshaped rather than forwarded:
@@ -171,13 +243,29 @@ Three methods are answered or reshaped rather than forwarded:
   reach the browser intact.
 - `session/new` returns the session's existing ACP thread id when there is one.
   One Boxes session means one thread.
-- `$/ping`, which acp-ui sends every 25 seconds, is dropped before the SDK sees
-  it. JSON-RPC forbids replying to a notification.
+- `$/ping`, which some ACP clients send every 25 seconds, is dropped before the
+  SDK sees it. JSON-RPC forbids replying to a notification. The dashboard
+  sends none.
 
 Everything else in `FORWARDED_REQUESTS` and `FORWARDED_NOTIFICATIONS` goes
-upstream untouched, `_meta` included. Adapter updates are broadcast to every
-attached browser. Detaching removes the handle from the broadcast set and
-touches nothing else.
+upstream untouched, `_meta` included. Detaching removes the handle from the
+broadcast set and touches nothing else.
+
+### Who each update goes to
+
+`broadcast.ts` decides. Sending every update to every browser is almost
+right, and wrong in two places that only appear with more than one attached —
+a phone and a desktop watching the same session.
+
+- **A forwarded prompt is echoed to every browser, the sender included.** The
+  adapter is only required to replay a prompt later, not to echo it live, so
+  without this the browser that sent it shows nothing until its next reload.
+  While the gateway is echoing, an adapter that *does* echo is suppressed, so
+  either kind of adapter produces exactly one copy. Replay is exempt: there
+  the adapter is reading back history the gateway never saw.
+- **A replay goes only to the browser that asked for it.** `session/load` is
+  by definition a re-send of the whole thread, so broadcasting it rendered
+  every other open tab's conversation twice.
 
 ### Permission requests
 
@@ -281,6 +369,7 @@ applies migrations tracked by `user_version`.
 | `sessions` | One row per session: names, Docker object names, status, ACP thread id, timestamps |
 | `pending_requests` | Permission requests waiting for a browser |
 | `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session |
+| `exec_log` | Local commands and their output, ring-pruned to 200 rows per session |
 | `counters` | The subnet allocation counter |
 
 Two kinds of state deliberately stay out of the database. Secrets live only in
@@ -321,21 +410,16 @@ are injected into a session container at create time and nowhere else.
 
 ## Build-time pins
 
-Two versions are pinned in Dockerfiles rather than in configuration, so the
-running code is the code this commit names and no `.env` entry can change it:
-the ACP adapter in `session-image/Dockerfile`, and the acp-ui commit in
-`orchestrator/Dockerfile`.
+The ACP adapter version is pinned in `session-image/Dockerfile` rather than in
+configuration, so the running agent is the one this commit names and no `.env`
+entry can change it.
 
-The acp-ui build stage then asserts three things about the bundle it produced,
-because each of them fails silently otherwise:
-
-- The `acp-ui:agents` storage key is still present, so the connect button still
-  has something to write.
-- Assets are referenced under `/ui/`, so the bundle does not ask the dashboard's
-  routes for its own files.
-- No Application Insights connection string survived. acp-ui hardcodes it in
-  source rather than reading it from the environment, so the build blanks that
-  line and greps the result to prove the edit landed.
+Frontend dependencies are pinned in `dashboard/package.json` and resolved by
+`package-lock.json`, which every Docker stage installs with `npm ci` rather
+than `npm install`. `@assistant-ui/react` and `@assistant-ui/react-markdown`
+carry exact versions rather than ranges: the composer's history behaviour
+comes from a hook upstream documents as unstable, so the version that behaves
+is the version that ships.
 
 Every package type-checks before it bundles, in its own Docker stage, so an
 image cannot be built from code that fails `tsc --noEmit`.
@@ -344,7 +428,9 @@ image cannot be built from code that fails `tsc --noEmit`.
 
 ```
 orchestrator/src/
-  index.ts              Routes, static bundles, WS upgrade, boot and shutdown
+  index.ts              Boot, the WS upgrade, the background loops, shutdown
+  app.ts                REST routes, the exec endpoint, the static bundle
+  exec.ts               Local commands: limits, streaming, the exec log
   config.ts             Environment parsing, one pass at boot
   secret.ts             WS auth token: configured, stored, or generated
   db.ts                 SQLite, schema migrations, the debug log
@@ -356,17 +442,35 @@ orchestrator/src/
   gateway/
     upstream.ts         One persistent ACP client per session
     downstream.ts       One ACP agent connection per browser
+    broadcast.ts        Which browsers each adapter update goes to
     pending.ts          Permission requests waiting for an answer
 
 proxy/src/
   main.ts               The forward proxy: absolute-URI HTTP and CONNECT
   cidr.ts               Resolved-IP vetting, the security boundary
 
-dashboard/src/
-  store.ts              Polled session list, as signals
-  api.ts                Typed fetch client
-  acpui.ts              One-click connect: writes acp-ui's agent config
-  views/, components/   Preact views and their co-located CSS
+dashboard/
+  index.html            Vite entry; sets the dark class before first paint
+  vite.config.ts        React, Tailwind, the dev proxy, both test projects
+  components.json       Where the shadcn and assistant-ui CLIs install to
+  e2e/                  Browser tests, and the stub orchestrator and gateway
+  src/
+    main.tsx            React mount and the routes
+    globals.css         The whole design system: tokens and the @theme bridge
+    api.ts              Typed fetch client
+    stores/
+      sessions.ts       Polled session list, read by useSyncExternalStore
+      thread/
+        acp-types.ts    The slice of the ACP schema the browser speaks
+        acp-client.ts   JSON-RPC over the WebSocket, and the handshake
+        translate.ts    session/update notifications → a message model (pure)
+        thread-store.ts The live thread: messages, modes, approvals, exec
+        convert.ts      That model in the shape the runtime reads
+        exec.ts         !bang commands against the exec endpoint
+    views/              SessionList, SessionCreate, SessionThread, SessionInfo
+    components/
+      assistant-ui/     Installed registry sources, ours to edit
+      ui/               Installed shadcn primitives
 
 shared/types.ts         REST shapes, imported by both sides
 session-image/          The per-session container image and its entrypoint
@@ -389,6 +493,16 @@ browser leaves, the thread replaying on reattach, and a permission request held
 with nobody watching.
 
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
-proxy's range checks, subnet allocation, the WebSocket upgrade check, and the
-acp-ui config write, which is asserted against a copy of acp-ui's own reader
-rather than against the output shape.
+proxy's range checks, subnet allocation, the WebSocket upgrade check, update
+routing with two browsers attached, the exec limits, and the translation of
+ACP notifications into the thread's message model — including replay,
+out-of-order tool updates, and an update kind this build predates.
+
+The dashboard also runs a browser suite. It builds the production bundle and
+serves it the way the orchestrator does, from a stub orchestrator and a stub
+ACP gateway that speaks the agent side from canned scripts. That is what
+asserts the six UX properties this frontend exists for, and it is where a
+component upgrade is reviewed: `/playground` renders every part kind over a
+canned store, so a registry re-run shows up on one page.
+
+One runner throughout: `npm test` in each package is `vitest run`.

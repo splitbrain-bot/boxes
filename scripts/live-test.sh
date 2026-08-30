@@ -60,7 +60,7 @@ echo "== M3/M4: a turn survives the browser leaving, and the thread replays =="
 node --input-type=module - "$LOCAL_WS" "$WS_TOKEN" <<'NODE'
 const [url, token] = process.argv.slice(2);
 
-/** Opens a socket and returns its JSON-RPC helpers, the way acp-ui connects. */
+/** Opens a socket and returns its JSON-RPC helpers, the way a browser connects. */
 function connect() {
   const ws = new WebSocket(url, ['acp.v1', `bearer.${token}`]);
   const pending = new Map();
@@ -119,7 +119,7 @@ await sleep(20000);
 const b = connect();
 await b.open;
 await b.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
-// acp-ui clears its messages and calls session/load, expecting the replay to
+// A reattaching browser clears its messages and calls session/load, expecting the replay to
 // arrive as session/update notifications.
 await b.rpc('session/load', { sessionId, cwd: '/workspace', mcpServers: [] });
 await sleep(5000);

@@ -44,7 +44,7 @@ let nextHandleId = 1;
 /**
  * Validates a WebSocket upgrade and returns the subprotocol to select.
  *
- * A browser cannot set an Authorization header on a WebSocket, so acp-ui
+ * A browser cannot set an Authorization header on a WebSocket, so a client
  * offers the token as a bearer.<token> subprotocol entry alongside acp.v1.
  * The gateway checks it here, on the upgrade itself.
  */
@@ -99,9 +99,9 @@ function wsStream(ws: WebSocket, sessionId: string): Stream {
           slog.warn('rejecting non-JSON WS frame');
           return;
         }
-        // acp-ui sends a $/ping notification every 25s. JSON-RPC forbids a
-        // reply to a notification, so drop it before the SDK logs an unknown
-        // method.
+        // Some ACP clients send a $/ping notification every 25s. JSON-RPC
+        // forbids a reply to a notification, so drop it before the SDK logs
+        // an unknown method. The dashboard sends none.
         if (
           typeof msg === 'object' &&
           msg !== null &&

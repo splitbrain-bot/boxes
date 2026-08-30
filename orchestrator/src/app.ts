@@ -32,16 +32,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
 
-/**
- * acp-ui bundle, built into the same image. Serving it here puts it on the
- * same origin as the dashboard, which the one-click connect needs and which
- * lets the stack run with no reverse proxy in front of it.
- */
-const ACPUI_DIR = resolve(here, '../acpui');
-
-/** Path prefix acp-ui is served under, and the base it is built with. */
-const ACPUI_PREFIX = '/ui';
-
 /** Everything one orchestrator process owns, wired together. */
 export interface Orchestrator {
   app: ReturnType<typeof Fastify>;
@@ -236,11 +226,6 @@ app.setNotFoundHandler((req, reply) => {
   const url = req.url.split('?')[0] ?? '/';
   if (url.startsWith('/api') || url.startsWith('/ws')) {
     return reply.code(404).send({ error: 'Not found' });
-  }
-  if (url === ACPUI_PREFIX || url.startsWith(`${ACPUI_PREFIX}/`)) {
-    // acp-ui is built with --base=/ui/, so it asks for its own assets under
-    // this prefix; strip it back off to find them on disk.
-    return sendBundle(reply, ACPUI_DIR, url.slice(ACPUI_PREFIX.length) || '/', 'acp-ui not built');
   }
   return sendBundle(reply, DASHBOARD_DIR, url, 'Dashboard not built');
 });

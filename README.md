@@ -31,16 +31,12 @@ phone ──wss──▶ Traefik ──▶ orchestrator ──docker exec stdio�
 | Path | What |
 |---|---|
 | `orchestrator/` | Node 22 + TS: REST, SQLite, Docker lifecycle, ACP gateway, reaper |
-| `dashboard/` | Preact SPA, esbuild only, served by the orchestrator at `/` |
+| `dashboard/` | React SPA — session list and chat — served by the orchestrator at `/` |
 | `proxy/` | The in-house egress proxy — the security boundary |
 | `session-image/` | The per-session container image |
 | `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
 | `scripts/smoke-test.sh` | Security smoke test, no credentials needed |
 | `scripts/live-test.sh` | The checks that need a real Claude token |
-
-acp-ui has no directory of its own: the orchestrator image clones it at a
-pinned commit, builds it, and serves it at `/ui`. That is deliberate — see
-[One origin](#one-origin).
 
 ## Setup
 
@@ -81,38 +77,27 @@ lists every other override; copy it only when you want to change something.
 
 **Verify isolation:** `API_BASE=http://localhost:3000 ./scripts/smoke-test.sh`
 
-5. **Connect.** Open `/`, create a session, and tap **Open** on its card.
-   That's it — one tap from the list, nothing to type, on any device.
+5. **Use it.** Open `/`, create a session, and tap its card. That is the
+   conversation — one tap from the list, nothing to configure, on any device.
+   The ⓘ corner of a card opens the same session's controls and details.
 
-   acp-ui has no URL-prefill mechanism, but it is the same origin as the
-   dashboard, so its `localStorage` agent config is ours to write. The button
-   upserts this session into acp-ui's agent list and navigates there. The
-   session detail view has the same button, plus a collapsed "Connect manually
-   instead" disclosure with the URL and token as a fallback.
+   A stopped session is fine to open: attaching starts the container, and the
+   adapter replays the thread.
 
 ## One origin
 
 The orchestrator serves everything on one port: the dashboard at `/`, the API
-at `/api`, the gateway at `/ws`, and acp-ui at `/ui`. acp-ui is cloned at a
-commit pinned in `orchestrator/Dockerfile`, built into the orchestrator image,
-and served from there. That pin is a build dependency, like the adapter
-version in `session-image/Dockerfile` — it is not deployment configuration and
-no `.env` entry can change it.
+at `/api`, and the gateway at `/ws`. The dashboard is built into the
+orchestrator image and served from there, so there is no second frontend
+service and no second origin.
 
-That single property carries a lot of weight:
+That carries two things:
 
-- **The connect button works at all.** Writing acp-ui's `localStorage` is only
-  legal from the same origin.
-- **Nothing needs configuring.** The dashboard derives the WebSocket URL from
-  the browser's own location, so it is right behind TLS and right on
-  `localhost` with no setting to get wrong. There is no `wsUrl` in the API for
-  a deployment to disagree with.
+- **Nothing needs configuring.** The browser derives the WebSocket URL from
+  its own location, so it is right behind TLS and right on `localhost` with no
+  setting to get wrong. There is no `wsUrl` in the API for a deployment to
+  disagree with.
 - **The stack runs with no reverse proxy.** One service, one published port.
-
-Three things about acp-ui are asserted at image build time, because each fails
-silently otherwise: its `acp-ui:agents` storage key still exists, the bundle
-references its assets under `/ui/`, and no Application Insights connection
-string survived into it. A failed assertion names the file to update.
 
 ## Keeping the token out of `.env`
 
@@ -178,32 +163,28 @@ limits. No bind mounts, no docker socket, no published ports.
   assumption ever stops holding, the retrofit is a DOCKER-USER/INPUT firewall
   sidecar.
 - **Version drift is the main residual risk.** The protocol facts this is
-  built on are pinned to `claude-agent-acp` 0.70.0 and a pinned acp-ui commit.
-  On upgrade, re-check: initialize capabilities, the client-bound method set,
-  and WS framing/subprotocol handling. Unknown methods get a JSON-RPC
-  method-not-found rather than silent misbehaviour, so drift is visible.
+  built on are pinned to `claude-agent-acp` 0.70.0. On upgrade, re-check:
+  initialize capabilities, the client-bound method set, and WS
+  framing/subprotocol handling. Unknown methods get a JSON-RPC
+  method-not-found rather than silent misbehaviour, and an unknown
+  `session/update` kind renders as nothing rather than breaking the thread,
+  so drift is visible without being fatal.
 - **Prompt injection can leak session env tokens.** Bounded by: read-only
   access on upstream private repos, fork-only writes, a rotatable classic PAT,
   and an inference-only Claude token. Rotate on suspicion.
 - **The orchestrator holds the Docker socket** (root-equivalent). Mitigated by
   a fixed `HostConfig` template that user input never reaches, no shell-exec
   of user strings, and Traefik basicauth in front.
-- **`WS_AUTH_TOKEN` lives in browser localStorage** (acp-ui's agent config).
-  It is also returned by `GET /api/sessions`, which is behind the same
-  basicauth as the rest of `/api`. Acceptable for a personal tool; rotate by
-  editing `.env` and tapping **Open** again, which overwrites the stored entry
-  in place.
-- **The one-click connect depends on acp-ui's storage key and its stored
-  shape.** If acp-ui renames `acp-ui:agents`, the *image build fails* with a
-  pointer to the two places to update (`dashboard/src/acpui.ts` and the
-  `ACP_UI_AGENTS_KEY` build arg). The shape itself is covered by
-  `acpui.test.ts`, which asserts against a copy of acp-ui's own reader rather
-  than against our output.
-- **acp-ui's telemetry is disabled by patching its source at build time.** The
-  Application Insights connection string is hardcoded upstream, not read from
-  the environment, so the build blanks that line and then greps the bundle to
-  prove it. If upstream restructures that module, the build fails rather than
-  quietly shipping telemetry.
+- **`WS_AUTH_TOKEN` is returned by `GET /api/sessions`**, which is behind the
+  same basicauth as the rest of `/api`. The dashboard reads it from there and
+  holds it in memory for the length of a page view; it is never written to
+  browser storage. Acceptable for a personal tool; rotate by editing `.env`
+  and restarting.
+- **`!bang` commands run arbitrary shell in the session container.** They add
+  no privilege — the agent can already run anything there, and the command
+  goes to the container's own shell as an argument, never to a host command
+  line — but they are as powerful as the container is, so the basicauth in
+  front of `/api` is what keeps them yours.
 - **Fine-grained GitHub PATs cannot act as a collaborator on another user's
   private repos** (a documented GitHub gap), hence the classic PAT. Migrating
   the repos to an org is the upgrade path.
@@ -212,15 +193,15 @@ limits. No bind mounts, no docker socket, no published ports.
 
 Browsers do not reliably attach Basic credentials to a cross-path WebSocket
 upgrade and cannot answer a 401 challenge on one. So the gateway authenticates
-the upgrade itself: acp-ui offers `['acp.v1', 'bearer.<token>']` as
+the upgrade itself: the client offers `['acp.v1', 'bearer.<token>']` as
 subprotocols, the gateway validates the token against `WS_AUTH_TOKEN` in
 constant time and selects `acp.v1`. Everything else stays behind basicauth.
 
 ## Development
 
-Each package type-checks independently, and every Docker build runs
-`tsc --noEmit` *before* esbuild, so an image cannot be built from code that
-fails type-checking.
+One toolchain across the repository. Every package builds with Vite and tests
+with Vitest, and every Docker build runs `tsc --noEmit` *before* the bundle,
+so an image cannot be built from code that fails type-checking.
 
 ```
 cd orchestrator && npm run check && npm test
@@ -228,14 +209,40 @@ cd proxy        && npm run check && npm test
 cd dashboard    && npm run check && npm test && npm run build
 ```
 
+The dashboard's `npm test` runs two projects: `unit` for the framework-free
+stores, and `e2e`, which builds the production bundle and drives it in
+Chromium against a stub orchestrator and a stub ACP gateway. `npm run dev`
+serves the app with `/api`, `/healthz` and `/ws` proxied to a local
+orchestrator on port 3000.
+
 `scripts/smoke-test.sh` needs no credentials and is the security gate.
 `scripts/live-test.sh` covers what only a real inference call can prove —
 subscription auth, a turn surviving the browser leaving, thread replay on
 reattach, and a permission request held with nobody watching — so it needs
 `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN` set.
 
-The dashboard uses **esbuild alone** — native JSX/TS and native CSS bundling,
-no plugins, no Vite. Styling rules, enforced in review: no inline `style=`
-attributes, no Tailwind, no CSS-in-JS; every component imports its co-located
-`.css`; cross-component values travel only through `tokens.css` custom
-properties.
+### Frontend conventions
+
+The dashboard's dependencies dictate its stack rather than the other way
+round: assistant-ui's components are written in Tailwind utilities, so
+Tailwind compiles from source on every build and is the one styling system.
+Rules, enforced in review: Tailwind utilities and shadcn/assistant-ui
+components everywhere, no inline `style=`, no CSS-in-JS, and design tokens
+defined once in `src/globals.css` — including the `@theme inline` bridge,
+without which Tailwind silently drops every token utility.
+
+Components under `src/components/assistant-ui/` and `src/components/ui/` are
+installed by their official CLIs and committed. They are ours to edit, and the
+edits we have made carry a comment saying so. Upgrade by re-running the CLI
+with `--overwrite` and reading the diff:
+
+```
+cd dashboard
+npx assistant-ui add thread --overwrite     # or: npx shadcn add <name> --overwrite
+npm run check && npm test
+```
+
+`/playground` renders every part kind over a canned store, which is where that
+diff is reviewed by eye. The browser suite asserts the same page, so a
+regression in an upgraded component fails the build rather than surprising you
+in a live session.

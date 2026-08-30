@@ -14,8 +14,8 @@ import type {
  * gateway is client-agnostic — external ACP clients use the same endpoint —
  * so nothing here is a private arrangement with the orchestrator.
  *
- * There is no $/ping. That was acp-ui's habit, not the protocol's, and the
- * gateway drops it.
+ * There is no $/ping. Some ACP clients send one; it is not part of the
+ * protocol, and the gateway drops it.
  */
 
 /** What the header shows about the connection. */
