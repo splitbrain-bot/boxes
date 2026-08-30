@@ -26,17 +26,13 @@ services:
     env_file:
       - path: ${BOXES_ENV:-.env}
         required: false
-    environment:
-      # Not a default being restated — config.ts has the same one — but the
-      # other half of the volume mount below, pinned here so the two cannot
-      # disagree. An env file that moved it would put the database somewhere
-      # nothing is mounted, and lose it on the next recreate without saying
-      # so. Placed after the env file, so it wins.
-      - DATA_DIR=/data
     volumes:
       # Root-equivalent access, mitigated by the fixed HostConfig template, by
       # never shell-exec'ing user strings, and by the auth in front.
       - /var/run/docker.sock:/var/run/docker.sock
+      # /data because that is where the orchestrator keeps its database and
+      # its generated token — the default of DATA_DIR in
+      # orchestrator/src/config.ts. Mount it elsewhere and set that too.
       - boxes-data:/data
     ports:
       # Loopback by default, because the orchestrator has no authentication of

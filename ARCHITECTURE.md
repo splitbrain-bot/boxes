@@ -410,14 +410,16 @@ That file is the only place a default is written down, and the only place
 that knows which settings exist. `compose.yaml` hands the orchestrator an env
 file wholesale (`BOXES_ENV`, defaulting to `.env` and optional) and names
 nothing in it, so adding a setting means editing the schema and nothing else.
-The one value it does set, `DATA_DIR`, is the other half of the volume mount
-two lines below it, pinned so the two cannot disagree — an env file that
-moved it would put the database where nothing is mounted and lose it on the
-next recreate, silently. It is placed after the env file so it wins. The
-egress proxy's container name is not set there: `compose.yaml` names the
-container and `config.ts` defaults to the same string, so they agree without
-either restating the other, and a mismatch is loud — sessions lose egress and
-the id shows up in `/healthz`.
+It sets nothing at all. Where compose has to agree with a default — `/data`
+for the volume mount, `boxes-egress-proxy` for the container the orchestrator
+attaches to session networks — it agrees by using the same value, not by
+restating it as configuration, and the comment at each site says which
+default it is matching.
+
+`DATA_DIR` and the rest stay configurable because the orchestrator also runs
+outside a container, under `npm run dev` and in its own tests. Inside the
+image every default is already the right answer, which is why compose passes
+an env file and otherwise stays out of it.
 
 An empty value counts as unset. `NTFY_URL=` in an env file arrives as an
 empty string, and failing the boot on a setting nobody set would be a poor
