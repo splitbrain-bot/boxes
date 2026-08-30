@@ -215,6 +215,12 @@ Starting it, in `ensureStarted`:
 4. Replay the stored thread with `session/load`, or start a fresh one with
    `session/new` and store its id.
 
+A fresh thread is then switched into `auto` mode, when the adapter advertises
+a mode by that id. Only the thread the adapter has just minted goes through
+this: from then on the mode is the user's, and a reconnect must not undo it.
+An adapter offering no such mode is left in whichever mode it starts in, and a
+switch that fails is logged rather than failing the spawn.
+
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
 that the session's status becomes `error`.
 

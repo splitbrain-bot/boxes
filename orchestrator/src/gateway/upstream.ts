@@ -18,6 +18,12 @@ import type { PendingStore } from './pending.ts';
  * session/load.
  */
 
+/** The modes an adapter advertises for a thread, and the one it is in. */
+interface SessionModeState {
+  currentModeId: string;
+  availableModes: Array<{ id: string }>;
+}
+
 /** A browser attached to this session, as seen from the upstream side. */
 export interface DownstreamHandle {
   readonly id: number;
@@ -40,6 +46,13 @@ const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
 
 /** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
 const RESOURCE_NOT_FOUND = -32002;
+
+/**
+ * The mode a fresh thread is switched into, when the adapter advertises one
+ * by that id. An adapter that offers no such mode is left in whichever mode
+ * it starts in.
+ */
+const DEFAULT_MODE_ID = 'auto';
 
 /** True when the adapter reported a missing thread rather than a failure. */
 function isResourceNotFound(err: unknown): boolean {
@@ -253,12 +266,39 @@ export class UpstreamSession {
     const res = (await conn.agent.request('session/new', {
       cwd: dk.WORKSPACE_DIR,
       mcpServers: [],
-    })) as { sessionId?: string };
+    })) as { sessionId?: string; modes?: SessionModeState | null };
     if (!res?.sessionId) throw new Error('session/new returned no sessionId');
     this.db
       .prepare('UPDATE sessions SET acp_session_id = ? WHERE id = ?')
       .run(res.sessionId, this.sessionId);
     this.slog.info('acp session created', { acpSessionId: res.sessionId });
+    await this.applyDefaultMode(conn, res.sessionId, res.modes ?? null);
+  }
+
+  /**
+   * Puts a fresh thread into the default mode.
+   *
+   * Only the thread the adapter has just minted goes through here: a mode is
+   * the user's choice from then on, and a reconnect must not undo it.
+   */
+  private async applyDefaultMode(
+    conn: ClientConnection,
+    acpSessionId: string,
+    modes: SessionModeState | null,
+  ): Promise<void> {
+    if (!modes?.availableModes?.some((mode) => mode.id === DEFAULT_MODE_ID)) return;
+    if (modes.currentModeId === DEFAULT_MODE_ID) return;
+    try {
+      await conn.agent.request('session/set_mode', {
+        sessionId: acpSessionId,
+        modeId: DEFAULT_MODE_ID,
+      });
+      this.slog.info('new thread set to the default mode', { modeId: DEFAULT_MODE_ID });
+    } catch (err) {
+      // A thread in the adapter's own mode is still usable, so this never
+      // fails the spawn.
+      this.slog.warn('could not set the default mode', { error: (err as Error).message });
+    }
   }
 
   /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
