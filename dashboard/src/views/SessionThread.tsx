@@ -8,8 +8,10 @@ import { useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
+import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../api.ts';
+import { useSessions } from '../stores/sessions.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
 import { bangCommand } from '../stores/thread/exec.ts';
 import type { Message } from '../stores/thread/translate.ts';
@@ -35,6 +37,7 @@ export function SessionThread() {
   const { id = '' } = useParams();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const { claudeTokenConfigured } = useSessions();
 
   // The WS token comes from the session API, behind the deployment's auth.
   useEffect(() => {
@@ -99,8 +102,13 @@ export function SessionThread() {
               name={session?.name ?? id}
               connection={state.connection}
               modes={state.modes}
+              configOptions={state.configOptions}
               onSetMode={(modeId) => void store?.setMode(modeId)}
+              onSetConfigOption={(configId, value) =>
+                void store?.setConfigOption(configId, value)
+              }
             />
+            {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
             {loadError ? (
               <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
                 {loadError}

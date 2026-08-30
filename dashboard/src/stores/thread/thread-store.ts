@@ -4,6 +4,7 @@ import type {
   PlanEntry,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionConfigOption,
   SessionModeState,
   SessionNotification,
 } from './acp-types.ts';
@@ -32,6 +33,8 @@ export interface ThreadSnapshot {
   isRunning: boolean;
   connection: ConnectionState;
   modes: SessionModeState | null;
+  /** The options the adapter lets a client set, such as the model. */
+  configOptions: readonly SessionConfigOption[];
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
   commands: AvailableCommand[];
@@ -78,6 +81,7 @@ export class ThreadStore {
       isRunning: false,
       connection: 'connecting',
       modes: null,
+      configOptions: [],
       plan: null,
       commands: [],
       error: null,
@@ -140,9 +144,10 @@ export class ThreadStore {
     this.client = this.deps.createClient({
       onUpdate: (params) => this.onUpdate(params),
       onPermission: (params) => this.onPermission(params),
-      onReady: (modes) => {
+      onReady: (modes, configOptions) => {
         this.model.modes = modes;
-        this.emit({ modes, error: null });
+        this.model.configOptions = configOptions;
+        this.emit({ modes, configOptions, error: null });
       },
       onState: (connection) => this.emit({ connection }),
       onResetThread: () => this.reset(),
@@ -164,9 +169,10 @@ export class ThreadStore {
    * history as notifications. Keeping what was there would double it.
    */
   private reset(): void {
-    const modes = this.model.modes;
+    const { modes, configOptions } = this.model;
     this.model = emptyModel();
     this.model.modes = modes;
+    this.model.configOptions = configOptions;
     this.views = new Map();
     this.replayedExec.clear();
     this.failOpenApprovals();
@@ -188,11 +194,13 @@ export class ThreadStore {
     const touched = applyUpdate(this.model, params.update);
     if (
       this.snapshot.modes !== this.model.modes ||
+      this.snapshot.configOptions !== this.model.configOptions ||
       this.snapshot.plan !== this.model.plan ||
       this.snapshot.commands !== this.model.commands
     ) {
       this.emit({
         modes: this.model.modes,
+        configOptions: this.model.configOptions,
         plan: this.model.plan,
         commands: this.model.commands,
       });
@@ -376,6 +384,28 @@ export class ThreadStore {
     } catch (err) {
       this.model.modes = before;
       this.emit({ modes: before, error: (err as Error).message });
+    }
+  }
+
+  /**
+   * Sets one of the adapter's configuration options, such as the model it
+   * answers with.
+   */
+  async setConfigOption(configId: string, value: string): Promise<void> {
+    const client = this.client;
+    const sessionId = client?.sessionId;
+    if (!client || !sessionId) return;
+    // Optimistic: config_option_update confirms it, and a failure puts it back.
+    const before = this.model.configOptions;
+    this.model.configOptions = before.map((option) =>
+      option.id === configId ? { ...option, currentValue: value } : option,
+    );
+    this.emit({ configOptions: this.model.configOptions });
+    try {
+      await client.request('session/set_config_option', { sessionId, configId, value });
+    } catch (err) {
+      this.model.configOptions = before;
+      this.emit({ configOptions: before, error: (err as Error).message });
     }
   }
 

@@ -3,6 +3,7 @@ import type {
   NewSessionResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionConfigOption,
   SessionModeState,
   SessionNotification,
 } from './acp-types.ts';
@@ -31,7 +32,7 @@ export interface AcpClientHandlers {
    */
   onPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse>;
   /** The handshake finished; a replay, if any, has been requested. */
-  onReady(modes: SessionModeState | null): void;
+  onReady(modes: SessionModeState | null, configOptions: SessionConfigOption[]): void;
   /** The connection state changed. */
   onState(state: ConnectionState): void;
   /**
@@ -196,6 +197,7 @@ export class AcpClient {
       this.handlers.onResetThread();
 
       let modes = created.modes ?? null;
+      let configOptions = created.configOptions ?? null;
       if (!created.modes) {
         const loaded = await this.request<LoadSessionResponse>('session/load', {
           sessionId: created.sessionId,
@@ -203,11 +205,12 @@ export class AcpClient {
           mcpServers: [],
         });
         modes = loaded?.modes ?? null;
+        configOptions = loaded?.configOptions ?? null;
       }
 
       this.attempt = 0;
       this.handlers.onState('ready');
-      this.handlers.onReady(modes);
+      this.handlers.onReady(modes, configOptions ?? []);
     } catch {
       // A failed handshake is a failed connection: close and let the
       // backoff bring up a fresh one rather than sitting half-open.

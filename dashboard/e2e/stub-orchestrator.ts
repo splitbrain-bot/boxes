@@ -2,7 +2,12 @@ import { createServer, type Server } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import type { ExecRecord, SessionDetail, SessionSummary } from '../../shared/types.ts';
+import type {
+  ExecRecord,
+  HealthResponse,
+  SessionDetail,
+  SessionSummary,
+} from '../../shared/types.ts';
 import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
 
 /**
@@ -55,6 +60,8 @@ export function stubSession(over: Partial<SessionDetail> = {}): SessionDetail {
 /** What the stub answers with, mutable between navigations. */
 export interface StubState {
   sessions: SessionDetail[];
+  /** What the health probe reports about the deployment's Claude token. */
+  claudeTokenConfigured: boolean;
 }
 
 /** A running stub, with the base URL to point a browser at. */
@@ -80,7 +87,7 @@ export async function startStubOrchestrator(
   gatewayScript?: Partial<GatewayScript>,
 ): Promise<StubOrchestrator> {
   const dir = resolve(distDir);
-  const state: StubState = { sessions: initial };
+  const state: StubState = { sessions: initial, claudeTokenConfigured: true };
   const execCalls: StubOrchestrator['execCalls'] = [];
   const execLog: ExecRecord[] = [];
   let execOutput: StubOrchestrator['execOutput'] = (command) => ({
@@ -93,6 +100,17 @@ export async function startStubOrchestrator(
   const server = createServer((req, res) => {
     const url = (req.url ?? '/').split('?')[0] ?? '/';
 
+    if (url === '/healthz' && req.method === 'GET') {
+      const health: HealthResponse = {
+        ok: true,
+        version: 'stub',
+        sessions: state.sessions.length,
+        proxyWarnings: [],
+        egress: null,
+        claudeTokenConfigured: state.claudeTokenConfigured,
+      };
+      return json(res, 200, health);
+    }
     if (url === '/api/sessions' && req.method === 'GET') {
       return json(res, 200, state.sessions.map(summary));
     }
@@ -128,6 +146,7 @@ export async function startStubOrchestrator(
   const gateway = attachStubGateway(server, {
     token: initial[0]?.wsToken ?? 'stub-token',
     modes: null,
+    configOptions: [],
     prompts: [],
     permissions: [],
     queuedPermission: null,

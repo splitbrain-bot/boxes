@@ -24,6 +24,18 @@ interface SessionModeState {
   availableModes: Array<{ id: string }>;
 }
 
+/**
+ * One thing about a thread the adapter lets a client set, and its current
+ * value. `category` says what the option is for, which is how the model
+ * selector is found without depending on the adapter's own id for it.
+ */
+interface SessionConfigOption {
+  id: string;
+  category?: string | null;
+  currentValue?: string;
+  options?: Array<{ value: string }>;
+}
+
 /** A browser attached to this session, as seen from the upstream side. */
 export interface DownstreamHandle {
   readonly id: number;
@@ -53,6 +65,23 @@ const RESOURCE_NOT_FOUND = -32002;
  * it starts in.
  */
 const DEFAULT_MODE_ID = 'auto';
+
+/**
+ * The model a fresh thread is put on, when the adapter offers it. An adapter
+ * that offers no such model leaves the thread on whichever one it starts on.
+ */
+const DEFAULT_MODEL_ID = 'opus';
+
+/**
+ * The value to select for a wanted model: the name itself when the adapter
+ * offers it, else a bracketed variant of it such as `opus[1m]`, which is the
+ * same model with a different context window. A name that merely starts the
+ * same way, such as `opusplan`, is a different model and never matches.
+ */
+function pickModel(options: Array<{ value: string }>, wanted: string): string | null {
+  if (options.some((option) => option.value === wanted)) return wanted;
+  return options.find((option) => option.value.startsWith(`${wanted}[`))?.value ?? null;
+}
 
 /** True when the adapter reported a missing thread rather than a failure. */
 function isResourceNotFound(err: unknown): boolean {
@@ -266,13 +295,18 @@ export class UpstreamSession {
     const res = (await conn.agent.request('session/new', {
       cwd: dk.WORKSPACE_DIR,
       mcpServers: [],
-    })) as { sessionId?: string; modes?: SessionModeState | null };
+    })) as {
+      sessionId?: string;
+      modes?: SessionModeState | null;
+      configOptions?: SessionConfigOption[] | null;
+    };
     if (!res?.sessionId) throw new Error('session/new returned no sessionId');
     this.db
       .prepare('UPDATE sessions SET acp_session_id = ? WHERE id = ?')
       .run(res.sessionId, this.sessionId);
     this.slog.info('acp session created', { acpSessionId: res.sessionId });
     await this.applyDefaultMode(conn, res.sessionId, res.modes ?? null);
+    await this.applyDefaultModel(conn, res.sessionId, res.configOptions ?? null);
   }
 
   /**
@@ -298,6 +332,35 @@ export class UpstreamSession {
       // A thread in the adapter's own mode is still usable, so this never
       // fails the spawn.
       this.slog.warn('could not set the default mode', { error: (err as Error).message });
+    }
+  }
+
+  /**
+   * Puts a fresh thread on the default model.
+   *
+   * Only the thread the adapter has just minted goes through here: the model
+   * is the user's choice from then on, and a reconnect must not undo it.
+   */
+  private async applyDefaultModel(
+    conn: ClientConnection,
+    acpSessionId: string,
+    configOptions: SessionConfigOption[] | null,
+  ): Promise<void> {
+    const selector = configOptions?.find((option) => option.category === 'model');
+    if (!selector?.options) return;
+    const value = pickModel(selector.options, DEFAULT_MODEL_ID);
+    if (!value || value === selector.currentValue) return;
+    try {
+      await conn.agent.request('session/set_config_option', {
+        sessionId: acpSessionId,
+        configId: selector.id,
+        value,
+      });
+      this.slog.info('new thread set to the default model', { modelId: value });
+    } catch (err) {
+      // A thread on the adapter's own model is still usable, so this never
+      // fails the spawn.
+      this.slog.warn('could not set the default model', { error: (err as Error).message });
     }
   }
 

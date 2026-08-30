@@ -1,6 +1,6 @@
 import { Info } from 'lucide-react';
 import { Link } from 'react-router';
-import type { SessionModeState } from '../stores/thread/acp-types.ts';
+import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -15,23 +15,31 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
 
 /**
  * The thread's own chrome: where it goes back to, what it is connected to,
- * and which of the adapter's modes it is in.
+ * which of the adapter's modes it is in, and which model it answers with.
  */
 export function ThreadHeader({
   sessionId,
   name,
   connection,
   modes,
+  configOptions,
   onSetMode,
+  onSetConfigOption,
 }: {
   sessionId: string;
   name: string;
   connection: ConnectionState;
   modes: SessionModeState | null;
+  configOptions: readonly SessionConfigOption[];
   onSetMode: (modeId: string) => void;
+  onSetConfigOption: (configId: string, value: string) => void;
 }) {
   const state = CONNECTION[connection];
   const current = modes?.availableModes.find((mode) => mode.id === modes.currentModeId);
+  // By category rather than by id: what the option is for is part of the
+  // protocol, the id the adapter gives it is not.
+  const model = configOptions.find((option) => option.category === 'model');
+  const currentModel = model?.options?.find((value) => value.value === model.currentValue);
 
   return (
     <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
@@ -41,7 +49,9 @@ export function ThreadHeader({
         </Link>
       </Button>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* A floor under the name: two selects next to it would otherwise take
+          the whole row on a phone and squeeze it away entirely. */}
+      <div className="flex min-w-16 flex-1 flex-col">
         <span className="truncate text-sm font-medium">{name}</span>
         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className={cn('size-1.5 rounded-full', state.dot)} />
@@ -50,22 +60,39 @@ export function ThreadHeader({
       </div>
 
       {/* Whatever the adapter advertises, with nothing hardcoded: an adapter
-          that offers no modes gets no switcher.
+          that offers no modes and no model gets neither switcher.
 
-          A select rather than a row of buttons: six modes are wider than a
+          Selects rather than rows of buttons: six modes are wider than a
           phone, and the native control opens the platform's own picker and
-          brings its keyboard and screen-reader behaviour with it. */}
+          brings its keyboard and screen-reader behaviour with it. Each is
+          capped so a long label truncates instead of pushing the name out. */}
       {modes && modes.availableModes.length > 1 ? (
         <select
           aria-label="Agent mode"
           value={modes.currentModeId}
           onChange={(event) => onSetMode(event.target.value)}
           title={current?.description ?? current?.name}
-          className="min-w-0 shrink rounded-md border bg-muted px-2 py-1 text-xs"
+          className="min-w-0 max-w-24 shrink rounded-md border bg-muted px-2 py-1 text-xs"
         >
           {modes.availableModes.map((mode) => (
             <option key={mode.id} value={mode.id}>
               {mode.name}
+            </option>
+          ))}
+        </select>
+      ) : null}
+
+      {model && (model.options?.length ?? 0) > 1 ? (
+        <select
+          aria-label="Model"
+          value={model.currentValue ?? ''}
+          onChange={(event) => onSetConfigOption(model.id, event.target.value)}
+          title={currentModel?.description ?? currentModel?.name}
+          className="min-w-0 max-w-24 shrink rounded-md border bg-muted px-2 py-1 text-xs"
+        >
+          {model.options?.map((value) => (
+            <option key={value.value} value={value.value}>
+              {value.name}
             </option>
           ))}
         </select>

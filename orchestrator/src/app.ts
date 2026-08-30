@@ -83,6 +83,7 @@ app.get('/healthz', async (): Promise<HealthResponse> => {
     sessions: row.n,
     proxyWarnings,
     egress: egress.status(),
+    claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
   };
 });
 

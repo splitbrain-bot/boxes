@@ -74,6 +74,32 @@ export interface SessionModeState {
   availableModes: SessionMode[];
 }
 
+/** One selectable value of a session configuration option. */
+export interface SessionConfigSelectOption {
+  value: string;
+  name: string;
+  description?: string | null;
+}
+
+/**
+ * One thing about a thread the adapter lets a client set — the model, the
+ * effort level, the permission mode — together with its current value.
+ *
+ * `category` says what the option is for, so a client can place a known one
+ * deliberately rather than depend on the adapter's own id for it.
+ */
+export interface SessionConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  /** `model`, `mode`, `model_config`, `thought_level`, or an unknown label. */
+  category?: string | null;
+  /** `select` carries an options list; other kinds carry none. */
+  type?: string;
+  currentValue?: string;
+  options?: SessionConfigSelectOption[];
+}
+
 /** One slash command the adapter accepts at the start of a prompt. */
 export interface AvailableCommand {
   name: string;
@@ -105,6 +131,7 @@ export type SessionUpdate =
   | { sessionUpdate: 'plan'; entries?: PlanEntry[] }
   | { sessionUpdate: 'current_mode_update'; currentModeId: string }
   | { sessionUpdate: 'available_commands_update'; availableCommands?: AvailableCommand[] }
+  | { sessionUpdate: 'config_option_update'; configOptions?: SessionConfigOption[] }
   // Forward compatibility: an adapter may send a kind this build predates.
   | { sessionUpdate: string; [key: string]: unknown };
 
@@ -144,11 +171,13 @@ export interface RequestPermissionResponse {
 export interface NewSessionResponse {
   sessionId: string;
   modes?: SessionModeState | null;
+  configOptions?: SessionConfigOption[] | null;
 }
 
 /** What session/load answers with. */
 export interface LoadSessionResponse {
   modes?: SessionModeState | null;
+  configOptions?: SessionConfigOption[] | null;
 }
 
 /** Reads a content block as plain text, for the blocks that carry any. */

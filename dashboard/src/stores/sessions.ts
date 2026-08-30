@@ -3,7 +3,8 @@ import type { SessionSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 
 /**
- * The session list every view reads, kept fresh by polling.
+ * The session list every view reads, together with the deployment facts a
+ * view has to warn about, kept fresh by polling.
  *
  * A plain module-level store with a subscriber set: React reads it through
  * useSyncExternalStore, and nothing outside this file needs a hook to change
@@ -13,13 +14,23 @@ import { api } from '../api.ts';
 /** What the views render. */
 export interface SessionsState {
   sessions: SessionSummary[];
+  /**
+   * False once a probe has reported that the deployment holds no Claude
+   * token. True to begin with, so a slow first answer shows no warning.
+   */
+  claudeTokenConfigured: boolean;
   /** The message from the last failed poll, or null. */
   error: string | null;
   /** True until the first poll has finished, however it went. */
   loading: boolean;
 }
 
-let state: SessionsState = { sessions: [], error: null, loading: true };
+let state: SessionsState = {
+  sessions: [],
+  claudeTokenConfigured: true,
+  error: null,
+  loading: true,
+};
 const listeners = new Set<() => void>();
 
 /** Replaces the state and wakes every subscriber. */
@@ -42,13 +53,24 @@ export function useSessions(): SessionsState {
   );
 }
 
-/** Fetches the session list once. */
+/**
+ * Fetches the session list and the health probe once.
+ *
+ * The two are settled apart: a failed probe says nothing about the sessions,
+ * and neither does a failed list say anything about the token, so one
+ * failure never discards the other's answer.
+ */
 export async function refresh(): Promise<void> {
-  try {
-    set({ sessions: await api.listSessions(), error: null, loading: false });
-  } catch (err) {
-    set({ error: (err as Error).message, loading: false });
-  }
+  const [list, health] = await Promise.allSettled([api.listSessions(), api.health()]);
+  set({
+    ...(list.status === 'fulfilled'
+      ? { sessions: list.value, error: null }
+      : { error: (list.reason as Error).message }),
+    ...(health.status === 'fulfilled'
+      ? { claudeTokenConfigured: health.value.claudeTokenConfigured }
+      : {}),
+    loading: false,
+  });
 }
 
 /** Time between polls, in milliseconds. */

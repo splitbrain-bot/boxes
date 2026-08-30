@@ -3,6 +3,7 @@ import { expect, test, vi } from 'vitest';
 import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionConfigOption,
   SessionModeState,
   SessionUpdate,
 } from './acp-types.ts';
@@ -32,10 +33,11 @@ class FakeClient {
   start(): void {
     this.handlers.onResetThread();
     this.handlers.onState('ready');
-    this.handlers.onReady(this.modes);
+    this.handlers.onReady(this.modes, this.configOptions);
   }
 
   modes: SessionModeState | null = null;
+  configOptions: SessionConfigOption[] = [];
 
   request(method: string, params: unknown): Promise<unknown> {
     this.requests.push({ method, params });
@@ -344,6 +346,78 @@ test('the mode switcher sets the mode optimistically and rolls back on failure',
   await store.setMode('default');
   assert.equal(store.getSnapshot().modes?.currentModeId, 'auto');
   assert.equal(store.getSnapshot().error, 'mode not supported');
+});
+
+test('the model selector sets the option optimistically and rolls back on failure', async () => {
+  const configOptions: SessionConfigOption[] = [
+    {
+      id: 'model',
+      name: 'Model',
+      category: 'model',
+      type: 'select',
+      currentValue: 'sonnet',
+      options: [
+        { value: 'sonnet', name: 'Sonnet' },
+        { value: 'opus', name: 'Opus' },
+      ],
+    },
+  ];
+  const { store, client } = makeStore((c) => {
+    c.configOptions = configOptions;
+  });
+  const valueOf = (): string | undefined =>
+    store.getSnapshot().configOptions.find((o) => o.id === 'model')?.currentValue;
+  assert.equal(valueOf(), 'sonnet');
+
+  await store.setConfigOption('model', 'opus');
+  assert.deepEqual(client.requests.at(-1), {
+    method: 'session/set_config_option',
+    params: { sessionId: 'acp-1', configId: 'model', value: 'opus' },
+  });
+  assert.equal(valueOf(), 'opus');
+
+  client.fail = 'no such model';
+  await store.setConfigOption('model', 'sonnet');
+  assert.equal(valueOf(), 'opus');
+  assert.equal(store.getSnapshot().error, 'no such model');
+});
+
+test('a config_option_update from the adapter moves the model selector', () => {
+  const { store, client } = makeStore((c) => {
+    c.configOptions = [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'sonnet',
+        options: [
+          { value: 'sonnet', name: 'Sonnet' },
+          { value: 'opus', name: 'Opus' },
+        ],
+      },
+    ];
+  });
+  push(client, {
+    sessionUpdate: 'config_option_update',
+    configOptions: [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'opus',
+        options: [
+          { value: 'sonnet', name: 'Sonnet' },
+          { value: 'opus', name: 'Opus' },
+        ],
+      },
+    ],
+  });
+  assert.equal(
+    store.getSnapshot().configOptions.find((o) => o.id === 'model')?.currentValue,
+    'opus',
+  );
 });
 
 test('a current_mode_update from the adapter moves the switcher', () => {

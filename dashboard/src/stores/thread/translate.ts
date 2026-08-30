@@ -3,6 +3,7 @@ import {
   type AvailableCommand,
   type PermissionOption,
   type PlanEntry,
+  type SessionConfigOption,
   type SessionModeState,
   type SessionUpdate,
   type ToolCallContent,
@@ -74,6 +75,8 @@ export interface ThreadModel {
   messages: Message[];
   /** The adapter's advertised modes, or null when it advertises none. */
   modes: SessionModeState | null;
+  /** The options the adapter lets a client set, such as the model. */
+  configOptions: SessionConfigOption[];
   /** The agent's current plan, or null when it has published none. */
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
@@ -84,7 +87,14 @@ export interface ThreadModel {
 
 /** A model with nothing in it. */
 export function emptyModel(): ThreadModel {
-  return { messages: [], modes: null, plan: null, commands: [], unknown: [] };
+  return {
+    messages: [],
+    modes: null,
+    configOptions: [],
+    plan: null,
+    commands: [],
+    unknown: [],
+  };
 }
 
 /** Source of message ids for chunks that arrive without one. */
@@ -233,6 +243,13 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
         { sessionUpdate: 'available_commands_update' }
       >;
       model.commands = u.availableCommands ?? [];
+      return null;
+    }
+    case 'config_option_update': {
+      const u = update as Extract<SessionUpdate, { sessionUpdate: 'config_option_update' }>;
+      // The adapter sends the whole set every time, so this replaces rather
+      // than merges.
+      model.configOptions = u.configOptions ?? [];
       return null;
     }
     case 'current_mode_update': {

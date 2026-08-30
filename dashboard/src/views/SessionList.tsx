@@ -1,12 +1,13 @@
 import { Plus } from 'lucide-react';
 import { Link } from 'react-router';
 import { SessionCard } from '@/components/SessionCard';
+import { TokenWarning } from '@/components/TokenWarning';
 import { Button } from '@/components/ui/button';
 import { useSessions } from '../stores/sessions.ts';
 
 /** The dashboard's home: every session as a card, and the card is the thread. */
 export function SessionList() {
-  const { sessions, error, loading } = useSessions();
+  const { sessions, claudeTokenConfigured, error, loading } = useSessions();
 
   return (
     <div className="flex flex-col gap-3">
@@ -19,6 +20,8 @@ export function SessionList() {
           </Link>
         </Button>
       </div>
+
+      {claudeTokenConfigured ? null : <TokenWarning className="rounded-md border px-3 py-2" />}
 
       {error ? (
         <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">

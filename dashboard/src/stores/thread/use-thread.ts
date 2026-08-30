@@ -49,6 +49,7 @@ const INITIAL: ThreadSnapshot = {
   isRunning: false,
   connection: 'connecting',
   modes: null,
+  configOptions: [],
   plan: null,
   commands: [],
   error: null,

@@ -80,6 +80,11 @@ export interface HealthResponse {
   proxyWarnings: string[];
   /** Egress policy state, or null before the first push has been attempted. */
   egress: EgressHealth | null;
+  /**
+   * True when the deployment holds a Claude token. False means no session can
+   * run a turn unless somebody logs in inside it.
+   */
+  claudeTokenConfigured: boolean;
 }
 
 /** Body of any 4xx or 5xx answer from the API. */

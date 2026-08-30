@@ -1,6 +1,10 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
-import type { SessionModeState, SessionUpdate } from '../src/stores/thread/acp-types.ts';
+import type {
+  SessionConfigOption,
+  SessionModeState,
+  SessionUpdate,
+} from '../src/stores/thread/acp-types.ts';
 
 /**
  * A stand-in ACP gateway: a WebSocket server speaking the agent side of ACP
@@ -39,6 +43,8 @@ export interface GatewayScript {
   /** Whether a prompt is echoed back as a user_message_chunk. */
   echoPrompt?: boolean;
   modes: SessionModeState | null;
+  /** The options the adapter offers, such as the model. */
+  configOptions: SessionConfigOption[];
   prompts: PromptScript[];
   permissions: PermissionScript[];
   /** Delivered to the next socket that attaches, then cleared. */
@@ -130,12 +136,16 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         // a response without modes is how the browser learns to load.
         if (firstAttach && history.length === 0) {
           firstAttach = false;
-          return reply({ sessionId: THREAD_ID, modes: script.modes });
+          return reply({
+            sessionId: THREAD_ID,
+            modes: script.modes,
+            configOptions: script.configOptions,
+          });
         }
         return reply({ sessionId: THREAD_ID });
 
       case 'session/load': {
-        reply({ modes: script.modes });
+        reply({ modes: script.modes, configOptions: script.configOptions });
         // Replay is the stored history re-sent as notifications, to this
         // socket only.
         for (const update of history) {
@@ -158,6 +168,19 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         if (script.modes) script.modes = { ...script.modes, currentModeId: modeId };
         reply({});
         return void emit({ sessionUpdate: 'current_mode_update', currentModeId: modeId });
+      }
+
+      case 'session/set_config_option': {
+        const configId = String(params(msg)['configId'] ?? '');
+        const value = String(params(msg)['value'] ?? '');
+        script.configOptions = script.configOptions.map((option) =>
+          option.id === configId ? { ...option, currentValue: value } : option,
+        );
+        reply({ configOptions: script.configOptions });
+        return void emit({
+          sessionUpdate: 'config_option_update',
+          configOptions: script.configOptions,
+        });
       }
 
       case 'session/prompt': {

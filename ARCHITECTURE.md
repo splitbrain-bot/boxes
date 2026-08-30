@@ -81,7 +81,7 @@ The orchestrator serves everything a browser needs:
 | `/` | Dashboard bundle, with a single-page fallback |
 | `/api/...` | REST |
 | `/ws/sessions/:id/acp` | ACP gateway |
-| `/healthz` | Version, session count and proxy warnings |
+| `/healthz` | Version, session count, proxy warnings and whether a Claude token is configured |
 
 A GET that matches no route falls back to the dashboard's `index.html`, so
 client-side routes survive a reload. Anything under `/api` or `/ws` gets a
@@ -184,7 +184,7 @@ client still attaches to the same endpoint, with the URL and token from
 ```
 AcpClient    ⇄ /ws/sessions/:id/acp     JSON-RPC over one WebSocket
 translate.ts   session/update*       →  an append-only message model (pure)
-thread-store   the live thread          messages, modes, approvals, exec
+thread-store   the live thread          messages, modes, models, approvals, exec
 convert.ts     that model            →  what useExternalStoreRuntime reads
 ```
 
@@ -605,12 +605,12 @@ dashboard/
     globals.css         The whole design system: tokens and the @theme bridge
     api.ts              Typed fetch client
     stores/
-      sessions.ts       Polled session list, read by useSyncExternalStore
+      sessions.ts       Polled session list and health, read by useSyncExternalStore
       thread/
         acp-types.ts    The slice of the ACP schema the browser speaks
         acp-client.ts   JSON-RPC over the WebSocket, and the handshake
         translate.ts    session/update notifications → a message model (pure)
-        thread-store.ts The live thread: messages, modes, approvals, exec
+        thread-store.ts The live thread: messages, modes, models, approvals, exec
         convert.ts      That model in the shape the runtime reads
         exec.ts         !bang commands against the exec endpoint
     views/              SessionList, SessionCreate, SessionThread, SessionInfo

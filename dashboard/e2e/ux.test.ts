@@ -277,6 +277,74 @@ test('a current_mode_update from the adapter moves the switcher', async () => {
   }
 });
 
+// Model selection.
+test('the model selector lists the advertised models and sets one', async () => {
+  await start({
+    configOptions: [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'opus',
+        options: [
+          { value: 'opus', name: 'Opus' },
+          { value: 'sonnet', name: 'Sonnet' },
+          { value: 'haiku', name: 'Haiku' },
+        ],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    const models = page.getByRole('combobox', { name: 'Model' });
+    await expect.poll(() => models.isVisible()).toBe(true);
+    // Nothing hardcoded: whatever the adapter advertises is what appears.
+    expect(await models.locator('option').allInnerTexts()).toEqual(['Opus', 'Sonnet', 'Haiku']);
+    expect(await models.inputValue()).toBe('opus');
+
+    await models.selectOption('haiku');
+    await expect.poll(() => models.inputValue()).toBe('haiku');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// The missing-token warning.
+test('a deployment with no Claude token is warned about in the list and the thread', async () => {
+  await start();
+  stub.state.claudeTokenConfigured = false;
+  const warning = /No Claude token is set/;
+
+  const list = await openPage(stub.url, '/');
+  try {
+    await expect.poll(() => list.page.getByText(warning).isVisible()).toBe(true);
+  } finally {
+    await list.close();
+  }
+
+  const thread = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => thread.page.getByText(warning).isVisible()).toBe(true);
+    expect(thread.errors).toEqual([]);
+  } finally {
+    await thread.close();
+  }
+});
+
+test('a deployment that holds a Claude token is not warned about', async () => {
+  await start();
+  const { page, close } = await openPage(stub.url, '/');
+  try {
+    await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
+    expect(await page.getByText(/No Claude token is set/).count()).toBe(0);
+  } finally {
+    await close();
+  }
+});
+
 // Permissions.
 test('a permission request renders its options and the choice answers the agent', async () => {
   await start({
