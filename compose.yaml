@@ -20,12 +20,24 @@ services:
     container_name: boxes-orchestrator
     restart: unless-stopped
     # Whatever is in the env file reaches the orchestrator, which parses and
-    # defaults all of it in orchestrator/src/config.ts. Nothing needs listing
-    # here, and there is no env file to have by default.
+    # defaults all of it in orchestrator/src/config.ts. Nothing else needs
+    # listing here, and there is no env file to have by default.
     # Keep it outside the repo with: BOXES_ENV=~/.config/boxes.env
     env_file:
       - path: ${BOXES_ENV:-.env}
         required: false
+    # The two credentials, named so that exporting one in a shell is enough
+    # and it never has to be written down. A name listed with no value here
+    # takes the shell's value.
+    #
+    # It also wins when the shell has none, which `environment` always does
+    # over `env_file`. So these two names are the one thing an env file
+    # outside the repo cannot carry: keep a credential in the shell, or in
+    # ./.env, which compose reads for both. Every other setting is unaffected,
+    # and nothing else belongs here.
+    environment:
+      - PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN
+      - PROFILE_DEFAULT_GH_TOKEN
     volumes:
       # Root-equivalent access, mitigated by the fixed HostConfig template, by
       # never shell-exec'ing user strings, and by the auth in front.

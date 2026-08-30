@@ -485,9 +485,15 @@ working default, which is why the stack runs with no `.env` at all.
 
 That file is the only place a default is written down, and the only place
 that knows which settings exist. `compose.yaml` hands the orchestrator an env
-file wholesale (`BOXES_ENV`, defaulting to `.env` and optional) and names
-nothing in it, so adding a setting means editing the schema and nothing else.
-It sets nothing at all. Where compose has to agree with a default — `/data`
+file wholesale (`BOXES_ENV`, defaulting to `.env` and optional), so adding a
+setting means editing the schema and nothing else. It sets no value at all.
+The one thing it names is the two credentials, listed with no value so that
+they can be exported in a shell rather than written down at all. The cost is
+that `environment` overrides `env_file` whether or not the shell has a value,
+so those two names cannot come from a `BOXES_ENV` file outside the repo —
+they come from the shell or from `./.env`, which compose reads for both.
+Every other setting is unaffected. Where compose has to agree with a default
+— `/data`
 for the volume mount, `boxes-egress-proxy` for the container the orchestrator
 attaches to session networks — it agrees by using the same value, not by
 restating it as configuration, and the comment at each site says which

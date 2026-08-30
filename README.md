@@ -62,9 +62,15 @@ BOXES_ENV=~/.config/boxes.env docker compose up -d
 To actually run an agent turn you need one credential:
 
 ```sh
-claude setup-token          # then put the value in your env file
-PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+claude setup-token          # then export it, or put it in ./.env
+export PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+docker compose up -d
 ```
+
+The two credentials are the only settings compose takes from the shell, so
+they need never be written down. That is also why they are the only two a
+`BOXES_ENV` file cannot carry — use the shell or `./.env` for those, and the
+env file for everything else.
 
 Without it, sessions still start and the UI still works — only inference
 fails. Alternatively skip the variable and log in inside a session, which
