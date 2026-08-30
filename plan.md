@@ -1,13 +1,16 @@
 # Build Plan: Replace acp-ui with an in-dashboard thread view (assistant-ui)
 
-Status: PROPOSED (revision 3). Owner decisions incorporated:
+Status: PROPOSED (revision 4). Owner decisions incorporated:
 (2026-08-30 a) the frontend is assistant-ui, embedded in our dashboard; the
 standalone acp-ui app goes away. (2026-08-30 b) no vendor scripts, no
 committed build artifacts, no parallel build paths: dependencies dictate the
-frontend tech, so the frontend adopts that ecosystem's canonical toolchain
+frontend tech, so the project adopts that ecosystem's canonical toolchain
 outright, and prior stack rules (esbuild-only, no Tailwind, plain
-per-component CSS) are void for the dashboard. One build process produces
-the frontend; styles compile from source on every build.
+per-component CSS) are void. Styles compile from source on every build.
+(2026-08-30 c) **one build system for the whole repository, not per tier**:
+since the frontend needs Vite, the orchestrator and proxy build with Vite
+too, and esbuild leaves the repo. By the same rule there is one test runner
+(Vitest) — node:test migrates.
 Facts in §2 were verified against installed packages and live registry
 payloads on 2026-08-30. Audience: a coding agent. Follow milestones in
 order. Do not begin implementation until the owner approves this plan.
@@ -29,8 +32,8 @@ the frontend decision, each of which must be demonstrably fixed:
 | 5 | Can't see output of commands | Tool-call parts render name, args, status and output through the tool components; `!bang` output rides the same rendering path |
 | 6 | No way to switch into auto mode | Header mode switcher driven by the session's advertised modes → `session/set_mode`; live via `current_mode_update` |
 
-What stays: the orchestrator (its own esbuild server build is a backend
-concern and unrelated to this pivot), the ACP gateway (browser-facing WS
+What stays: the orchestrator's and proxy's source code and behavior (only
+their build/test tooling changes, §4), the ACP gateway (browser-facing WS
 protocol unchanged — external ACP clients keep working), the egress proxy,
 the session image, container lifecycle, reaper, both test scripts.
 
@@ -101,6 +104,15 @@ maintained; peer deps `react ^18 || ^19`).
   `tooltip-icon-button`, `tool-fallback`, `tool-group`,
   `use-copy-to-clipboard`; npm deps `lucide-react`.
 
+**Vite as the server build — proven, not assumed.** A PoC with the
+orchestrator's dependency shape (node builtins + `ws` + native
+`better-sqlite3`) built with `vite build` (`build.ssr: 'src/index.ts'`,
+`target: 'node22'`) in 30 ms: builtins and npm deps — the native module
+included — stay external by default (the semantics of today's
+`esbuild --packages=external`), the output is a plain ESM file, and the
+bundle boots and serves. The proxy is stdlib-only, so its Vite output is
+the same single self-contained file it ships today.
+
 **Current gateway behavior this plan builds on** (from the code as of
 `b5618b2`): the downstream answers `initialize` from the cached upstream
 response; answers `session/new` with the bare `{ sessionId }` when a thread
@@ -132,20 +144,20 @@ Browser ────────────────────────
 One thread per session remains the model. assistant-ui's thread-list
 machinery is not used; our session list is the thread list.
 
-## 4. Frontend stack (full adoption, one build)
+## 4. One toolchain (repo-wide)
 
 | Concern | Choice |
 |---|---|
 | Framework | React 19 |
-| Build | Vite 8 (`@vitejs/plugin-react` 6) — the single frontend build; `vite build` emits JS+CSS together |
+| Build | Vite 8 — the single build system for every package. Dashboard: `@vitejs/plugin-react` 6, `vite build` emits JS+CSS together. Orchestrator and proxy: `build.ssr` Node bundles (verified §2), replacing esbuild, which leaves the repo |
 | Styling | Tailwind CSS v4 via `@tailwindcss/vite` 4.3.3, compiled from source on every build; `tw-animate-css`; `@assistant-ui/styles` for the `aui-*` layer |
 | Components | assistant-ui registry (base flavor) + shadcn primitives, installed by their official CLIs, sources committed; `components.json` in repo |
 | Chat runtime | `@assistant-ui/react` 0.15.17, `useExternalStoreRuntime` |
 | Markdown | `@assistant-ui/react-markdown` 0.14.13 + `remark-gfm` |
 | Router | `react-router` 8 (library mode: `BrowserRouter`/`Routes`) |
 | State | `useSyncExternalStore` over plain TS stores (sessions polling, thread store) |
-| Tests | Vitest 4 (Vite-native; same config file), jsdom where components need it |
-| Type gate | `tsc --noEmit` before `vite build` in the Docker stage, as everywhere else in the repo |
+| Tests | Vitest 4 — the single test runner for every package; the orchestrator's and proxy's node:test suites migrate (runner imports change; the node:assert assertions run unchanged under Vitest) |
+| Type gate | `tsc --noEmit` before `vite build` in every package's Docker stage, unchanged |
 | Dev loop | `vite dev` with `/api`, `/healthz`, `/ws` proxied to the orchestrator |
 
 House styling rule (replaces the plain-CSS rules): Tailwind utilities and
@@ -155,9 +167,11 @@ Preact-era `tokens.css`/`base.css`/per-component `.css` files are deleted,
 and the existing views are restyled during the port, so the app has exactly
 one styling system.
 
-The orchestrator and proxy keep their existing esbuild server builds: those
-are backend artifacts with no styling pipeline; this pivot is about the
-frontend having one canonical build.
+Each package keeps its own package.json and Docker stage (that layering is
+what lets images build independently), but all three carry the same three
+scripts on the same tools: `check` = `tsc --noEmit`, `build` = `vite build`,
+`test` = `vitest run`, with vite/vitest pinned to identical versions across
+packages.
 
 ## 5. Repository changes
 
@@ -198,6 +212,8 @@ DELETED: dashboard/src/acpui.ts + test, store.ts, main.css, styles/tokens.css,
          styles/base.css, every per-component/view .css file, SessionDetail.*,
          orchestrator Dockerfile acpui-build stage, /ui serving in index.ts.
 orchestrator/src/exec.ts        # NEW: container exec runner (§7.4)
+orchestrator/vite.config.ts     # NEW: build.ssr node bundle; vitest config
+proxy/vite.config.ts            # NEW: same; esbuild devDependency removed
 shared/types.ts                 # + ExecRequest/ExecRecord shapes
 ```
 
@@ -310,6 +326,15 @@ first paint (manual toggle is a later nicety, not v1).
 
 ## 8. Milestones
 
+### M0 — Backend toolchain migration
+Orchestrator and proxy move from esbuild + node:test to Vite (`build.ssr`)
++ Vitest; Dockerfiles updated; esbuild removed from the repo. No source
+changes beyond test-runner imports. Acceptance: both suites green under
+Vitest; the built orchestrator bundle boots against a data dir and fails at
+the absent docker socket exactly as the esbuild bundle did; the built proxy
+bundle serves and denies exactly as before (re-run its live checks);
+`docker compose config` valid.
+
 ### M1 — Vite toolchain + React port + restyle
 Stand up the Vite app (config, tsconfig split, scripts, dev proxy); port
 list/create views and the session store to React + react-router; restyle
@@ -389,10 +414,11 @@ multi-thread-per-session, manual dark-mode toggle.
   acceptance covers it.
 - The restyle in M1 changes the dashboard's look. Bounded by screenshot
   review in both schemes; the palette carries over via the token block.
-- Vite and Tailwind become load-bearing build dependencies. That is the
-  point of the pivot: both are the ecosystem-canonical, actively maintained
-  tools for exactly this stack, and `tsc --noEmit` still gates every image
-  build.
+- Vite and Tailwind become load-bearing build dependencies — for every
+  package, not just the dashboard. That is the point of the pivot: both are
+  ecosystem-canonical and actively maintained, the server-build semantics
+  were verified before adoption (§2), and `tsc --noEmit` still gates every
+  image build.
 
 ## 10. Fixed decisions (this revision)
 1. The chat UI is part of the dashboard; no standalone frontend container.
@@ -400,11 +426,13 @@ multi-thread-per-session, manual dark-mode toggle.
    installed sources are committed and are the customization surface;
    upgrades come through CLI re-runs reviewed as diffs, never at image-build
    time from a moving ref.
-3. The frontend fully adopts its ecosystem's canonical toolchain: React 19,
-   Vite 8 (single build producing JS+CSS), Tailwind v4 compiled from source
-   every build, shadcn-convention theming, Vitest. The former esbuild-only /
-   no-Tailwind / plain-CSS rules are revoked for the dashboard. No vendor
-   scripts, no committed generated artifacts, no parallel build paths.
+3. One build system and one test runner for the whole repository: Vite 8
+   and Vitest 4 in every package — dashboard (React 19, Tailwind v4
+   compiled from source every build, shadcn-convention theming) and the
+   Node services (`build.ssr` bundles) alike. esbuild and node:test leave
+   the repo. The former esbuild-only / no-Tailwind / plain-CSS rules are
+   revoked. No vendor scripts, no committed generated artifacts, no
+   parallel build paths.
 4. Tailwind utilities + shadcn/assistant-ui components are the one styling
    system for the entire dashboard; design tokens live once in globals.css.
 5. The browser speaks plain ACP to the existing gateway; the gateway stays
