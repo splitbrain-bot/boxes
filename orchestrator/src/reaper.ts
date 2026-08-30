@@ -1,5 +1,6 @@
 import type { Config } from './config.ts';
 import type { Db, SessionRow } from './db.ts';
+import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
 import type { SessionManager } from './sessions.ts';
 
@@ -50,11 +51,17 @@ export function startReaper(
 }
 
 /**
- * Starts the loop that re-attaches the egress proxy every minute, reporting
- * the sessions still missing it. Returns a handle that stops the loop.
+ * Starts the loop that re-asserts the proxy's state every minute: its
+ * attachment to each session network, and the policy it is running.
+ *
+ * Both need re-asserting for the same reason. The proxy holds nothing at rest,
+ * so a restart leaves it with no policy at all and compose can recreate it
+ * without its dynamic network attachments. This loop is what closes both
+ * windows, and is why the push is idempotent and cheap.
  */
 export function startProxyReconciler(
   manager: SessionManager,
+  egress: EgressManager,
   onWarnings: (ids: string[]) => void,
 ): { stop: () => void } {
   const tick = async (): Promise<void> => {
@@ -62,6 +69,13 @@ export function startProxyReconciler(
     onWarnings(warnings);
     if (warnings.length > 0) {
       log.warn('sessions missing egress proxy attachment', { sessions: warnings });
+    }
+    try {
+      await egress.sync();
+    } catch (err) {
+      log.warn('could not push the egress policy to the proxy', {
+        error: (err as Error).message,
+      });
     }
   };
   const timer = setInterval(() => {

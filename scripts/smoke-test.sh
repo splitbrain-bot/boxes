@@ -9,6 +9,14 @@
 #
 # Every probe passes `curl -f`, so a 403 from the egress proxy leaves a
 # non-zero exit status.
+#
+# The token-translation and allowlist sections below only assert what the
+# deployment actually configured. Run it with credentials and an allowlist to
+# exercise all of it:
+#
+#   PROFILE_DEFAULT_GH_TOKEN=ghp_...
+#   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+#   EGRESS_ALLOWED_HOSTS='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,registry.npmjs.org'
 set -uo pipefail
 
 API_BASE="${API_BASE:-http://localhost:3000}"
@@ -50,6 +58,39 @@ note() {
     grey "note (not reachable):          $desc"
   fi
   noted=$((noted+1))
+}
+
+# Asserts that a string appears nowhere in a session's environment or volumes.
+# The needle is the real credential, so it is never printed.
+absent_from_session() {
+  local desc="$1" needle="$2"
+  if [ -z "$needle" ]; then return; fi
+  local found=0
+  docker exec "$CONTAINER" env 2>/dev/null | grep -qF -- "$needle" && found=1
+  docker exec "$CONTAINER" sh -c \
+    'cat /proc/*/environ 2>/dev/null | tr "\0" "\n"' 2>/dev/null \
+    | grep -qF -- "$needle" && found=1
+  docker exec "$CONTAINER" sh -c \
+    'grep -rlF -- "$0" /workspace /home/agent 2>/dev/null | head -1' "$needle" \
+    2>/dev/null | grep -q . && found=1
+  if [ "$found" -eq 1 ]; then
+    red   "FAIL (real credential present): $desc"; fail=$((fail+1))
+  else
+    green "ok   (no real credential):      $desc"; pass=$((pass+1))
+  fi
+}
+
+# Runs a command in the session and asserts its output matches a pattern.
+must_output() {
+  local desc="$1" pattern="$2"; shift 2
+  local out
+  out=$(docker exec -u agent "$CONTAINER" "$@" 2>&1)
+  if printf '%s' "$out" | grep -Eq "$pattern"; then
+    green "ok   (as intended):             $desc"; pass=$((pass+1))
+  else
+    red   "FAIL (unexpected output):     $desc"; fail=$((fail+1))
+    grey  "     wanted /$pattern/, got: $(printf '%s' "$out" | head -c 200 | tr '\n' ' ')"
+  fi
 }
 
 cleanup() {
@@ -181,6 +222,73 @@ HOST_BRIDGE_IP=$(docker network inspect "sn-$SESSION_ID" \
   -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)
 if [ -n "$HOST_BRIDGE_IP" ]; then
   note "host per-bridge IP $HOST_BRIDGE_IP:22" nc -w3 -z "$HOST_BRIDGE_IP" 22
+fi
+
+echo
+echo "== token translation: the session holds placeholders, not credentials =="
+# What the deployment configured, read back from the orchestrator's own env.
+REAL_GH=$(docker exec boxes-orchestrator printenv PROFILE_DEFAULT_GH_TOKEN 2>/dev/null || true)
+REAL_CLAUDE=$(docker exec boxes-orchestrator printenv PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
+
+if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ]; then
+  grey "skipped: this deployment configures no credential, so it translates none"
+else
+  absent_from_session "GH_TOKEN is nowhere in the session" "$REAL_GH"
+  absent_from_session "CLAUDE_CODE_OAUTH_TOKEN is nowhere in the session" "$REAL_CLAUDE"
+
+  if [ -n "$REAL_GH" ]; then
+    # The placeholder must authenticate as the bot: proof the proxy swapped it.
+    must_output "curl api.github.com/user with the placeholder is the bot" '"login"' \
+      sh -c 'curl -fsS -m 15 -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user'
+    # An invented token must be refused by the proxy, not forwarded to GitHub.
+    must_output "an invented GitHub token is refused by the proxy" 'egress denied' \
+      sh -c 'curl -sS -m 15 -H "Authorization: Bearer ghp_notTheDeploymentsToken" https://api.github.com/user'
+  fi
+  if [ -n "$REAL_CLAUDE" ]; then
+    must_output "an invented Anthropic token is refused by the proxy" 'egress denied' \
+      sh -c 'curl -sS -m 15 -H "Authorization: Bearer sk-ant-oat01-notTheDeploymentsToken" https://api.anthropic.com/v1/messages'
+  fi
+
+  # Interception is bounded: the deployment CA appears for a translated host
+  # and nowhere else.
+  must_output "an injection host presents the deployment CA" 'Boxes egress proxy CA' \
+    sh -c 'curl -sS -m 15 -v https://api.github.com/ 2>&1 | grep -i "issuer:"'
+  must_output "a passthrough host presents its own certificate chain" 'issuer:' \
+    sh -c 'curl -sS -m 15 -v https://registry.npmjs.org/ 2>&1 | grep -i "issuer:" | grep -v "Boxes egress proxy CA"'
+fi
+
+echo
+echo "== egress allowlist =="
+ALLOWLIST=$(docker exec boxes-orchestrator printenv EGRESS_ALLOWED_HOSTS 2>/dev/null || true)
+if [ -z "$ALLOWLIST" ]; then
+  # Unset is the documented default: any public host, private ranges still denied.
+  must_pass "allowlist unset: https://example.com is reachable" \
+    curl -fsS -m 15 https://example.com
+  grey "note (allowlist off):          set EGRESS_ALLOWED_HOSTS to exercise the deny probes"
+  noted=$((noted+1))
+else
+  grey "allowlist: $ALLOWLIST"
+  must_fail "an unlisted host is denied" \
+    curl -fsS -m 15 https://example.com
+  must_fail "an unlisted address literal is denied" \
+    curl -fsS -m 15 https://1.1.1.1
+  must_pass "a listed host is still reachable" \
+    curl -fsS -m 15 https://registry.npmjs.org/
+  # A narrow allowlist must never sever the credential hosts.
+  must_pass "a credential host is implied by the allowlist" \
+    curl -fsS -m 15 https://api.github.com
+fi
+
+echo
+echo "== egress policy is live in the proxy =="
+if curl -sS "${CURL_AUTH[@]}" "$API_BASE/healthz" | jq -e '.egress.inSync == true' >/dev/null; then
+  green "ok   proxy is running the policy the orchestrator composed"; pass=$((pass+1))
+elif curl -sS "${CURL_AUTH[@]}" "$API_BASE/healthz" | jq -e '.egress == null' >/dev/null; then
+  grey "note (no policy pushed yet):   /healthz reports no egress state"
+  noted=$((noted+1))
+else
+  red   "FAIL: the proxy is not running the composed policy"; fail=$((fail+1))
+  curl -sS "${CURL_AUTH[@]}" "$API_BASE/healthz" | jq -c '.egress' | sed 's/^/     /'
 fi
 
 echo

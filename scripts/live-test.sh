@@ -55,6 +55,22 @@ else
 fi
 
 echo
+echo "== the turn above ran on a placeholder, not on the real token =="
+# The same turn, seen from the credential's side: the container holds something
+# that is not the configured token, and the proxy is what made it work.
+REAL_CLAUDE=$(docker exec boxes-orchestrator printenv PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
+IN_SESSION=$(docker exec "$CONTAINER" printenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
+if [ -z "$REAL_CLAUDE" ]; then
+  grey "skipped: no Claude token is configured, so nothing is translated"
+elif [ -z "$IN_SESSION" ]; then
+  no "the session has no CLAUDE_CODE_OAUTH_TOKEN at all"
+elif [ "$IN_SESSION" = "$REAL_CLAUDE" ]; then
+  no "the session holds the real Claude token - translation is not in effect"
+else
+  ok "the session holds a placeholder; the proxy swapped it for the real token"
+fi
+
+echo
 echo "== M3/M4: a turn survives the browser leaving, and the thread replays =="
 node --input-type=module - "$LOCAL_WS" "$WS_TOKEN" <<'NODE'
 const [url, token] = process.argv.slice(2);

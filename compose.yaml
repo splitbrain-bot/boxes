@@ -61,8 +61,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # Attached to the compose default network for external egress. The
-    # orchestrator dynamically connects it to each session's internal network.
+    # Attached to the compose default network for external egress, and for the
+    # control channel the orchestrator pushes the egress policy over. The
+    # orchestrator dynamically connects it to each session's internal network
+    # too — those are internal, so nothing on them can route back here.
+    #
+    # read_only holds: the proxy keeps its policy, its credentials and its CA
+    # in memory and writes nothing anywhere.
     networks:
       - default
 

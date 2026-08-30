@@ -9,7 +9,8 @@ import { log } from './log.ts';
  *
  * The HostConfig below is a fixed template that user input never reaches. The
  * caller supplies only the server-generated session id, the validated https
- * repo URL, which travels as an env var, and the profile secrets.
+ * repo URL, which travels as an env var, and the values a session is to hold
+ * in place of the deployment's credentials.
  */
 
 /** Docker label carrying the session id on every object Boxes creates. */
@@ -36,6 +37,24 @@ export const names = {
   homeVolume: (id: string) => `home-${id}`,
 };
 
+/**
+ * What a session is handed in place of the deployment's real credentials.
+ *
+ * Where translation is on these are placeholders and the proxy swaps them for
+ * the real thing on the wire, so nothing inside the container is worth
+ * stealing. Where it is off — a credential this deployment did not configure —
+ * they are whatever the profile holds, which is today's behavior.
+ */
+export interface SessionEgress {
+  claudeOauthToken: string;
+  ghToken: string;
+  /**
+   * PEM of the deployment CA the session must trust, or '' when nothing is
+   * intercepted and no extra trust is needed.
+   */
+  caCertificate: string;
+}
+
 /** Everything createContainer needs to know about one session. */
 export interface CreateContainerSpec {
   sessionId: string;
@@ -46,14 +65,25 @@ export interface CreateContainerSpec {
   homeVolume: string;
   repoUrl: string | null;
   profile: SessionProfile;
+  egress: SessionEgress;
 }
 
-/** Environment of a session container. Secrets go here and nowhere else. */
-function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
+/** Where the entrypoint writes the CA, and where the CA env vars point. */
+const CA_PATH = '/home/agent/.boxes/proxy-ca.crt';
+
+/**
+ * Environment of a session container.
+ *
+ * This is the only delivery path for a session's credentials, and with
+ * translation on it carries no real one. The CA travels here too, as a PEM
+ * rather than a mount, so the proxy's trust anchor needs no volume and no file
+ * on the host.
+ */
+export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
   const proxyUrl = `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
   const env: Record<string, string> = {
-    CLAUDE_CODE_OAUTH_TOKEN: spec.profile.claudeOauthToken,
-    GH_TOKEN: spec.profile.ghToken,
+    CLAUDE_CODE_OAUTH_TOKEN: spec.egress.claudeOauthToken,
+    GH_TOKEN: spec.egress.ghToken,
     GIT_NAME: spec.profile.gitName,
     GIT_EMAIL: spec.profile.gitEmail,
     REPO_URL: spec.repoUrl ?? '',
@@ -68,6 +98,19 @@ function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     NO_PROXY: 'localhost,127.0.0.1',
     no_proxy: 'localhost,127.0.0.1',
   };
+
+  if (spec.egress.caCertificate !== '') {
+    // The entrypoint writes the PEM to CA_PATH; these are the four variables
+    // that point node, gh, git and curl at it. A tool honouring none of them
+    // fails TLS against the intercepted hosts and nothing else — the shape the
+    // README's troubleshooting table describes.
+    env['BOXES_PROXY_CA'] = spec.egress.caCertificate;
+    env['NODE_EXTRA_CA_CERTS'] = CA_PATH;
+    env['SSL_CERT_FILE'] = CA_PATH;
+    env['GIT_SSL_CAINFO'] = CA_PATH;
+    env['CURL_CA_BUNDLE'] = CA_PATH;
+  }
+
   return Object.entries(env)
     .filter(([, v]) => v !== '')
     .map(([k, v]) => `${k}=${v}`);

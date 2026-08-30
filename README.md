@@ -13,8 +13,11 @@ mid-task and find the finished thread when you come back.
   Non-root, read-only rootfs, no capabilities, no host mounts, no published
   ports.
 - **Vetted egress only.** Session networks are `internal`; the sole way out is
-  an egress proxy that rejects private addresses and pins the connection to a
-  vetted IP.
+  an egress proxy that rejects private addresses, pins the connection to a
+  vetted IP, and can be given a host allowlist.
+- **No credentials in the sandbox.** Sessions hold placeholder tokens. The
+  proxy swaps in the real ones on the wire, and refuses any other credential
+  to those hosts — so a leaked placeholder is worth nothing.
 - **One service, one port.** The orchestrator serves the UI, the REST API and
   the WebSocket gateway on `:3000`. No second origin, nothing to configure.
 - **Claude Code today**, other agents later — sessions speak the Agent Client
@@ -93,6 +96,7 @@ docker exec -it session-<id> claude /login
 | `NTFY_URL` | — | POSTed when a permission request is waiting |
 | `DATA_DIR` | `/data` | Database and generated token, inside the volume |
 | `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Proxy container the orchestrator attaches to session networks |
+| `EGRESS_ALLOWED_HOSTS` | — | Hosts sessions may reach; empty means every public host |
 
 Everything is parsed and validated at boot, so a bad value fails startup
 rather than surfacing later. `orchestrator/src/config.ts` is the full list.
@@ -114,7 +118,9 @@ API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
 
 The smoke test needs no credentials: it creates throwaway sessions, asserts the
 isolation properties from inside a container, and cleans up. Run it after any
-change to networking, the proxy, or the session image.
+change to networking, the proxy, or the session image. Where the deployment
+*has* configured credentials or an allowlist, it additionally proves that no
+real credential is inside a session and that the allowlist bites.
 
 ## Use
 
@@ -175,6 +181,76 @@ Two rules:
 Also forward `Upgrade` and `Connection` on `/ws`, and give it a long read
 timeout — a turn can hold the socket open for minutes with nothing on it.
 
+## What a session can reach
+
+Two settings shape it, and both default to something safe.
+
+**The allowlist.** `EGRESS_ALLOWED_HOSTS` is a comma or whitespace separated
+list of exact hostnames and one-label wildcards:
+
+```
+EGRESS_ALLOWED_HOSTS=github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,registry.npmjs.org
+```
+
+`*.example.com` matches `a.example.com`, but neither `example.com` nor
+`a.b.example.com`. An address literal matches only as a literal. Leave it unset
+and behaviour is what it has always been: any public host, private ranges still
+denied. The hosts of a credential you configured are always reachable, so a
+narrow list can never sever inference or GitHub.
+
+**Token translation.** It is always on, and it applies to whichever credentials
+you configured:
+
+- Set `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`, and `api.anthropic.com`
+  becomes a translated host.
+- Set `PROFILE_DEFAULT_GH_TOKEN`, and the GitHub hosts do.
+- Leave one unset and its host stays an ordinary tunnel, which is what keeps
+  the "log in inside a session with `claude setup-token`" flow working.
+
+For a translated host the session holds a placeholder of the same shape as the
+real token, and:
+
+```
+docker exec session-<id> env | grep -c sk-ant-oat01-...   # 0
+```
+
+The proxy terminates TLS for that host under a CA generated once for your
+deployment, swaps the placeholder for the real credential, and refuses any
+*other* credential outright — so "api.anthropic.com is allowlisted" no longer
+implies "any Anthropic account is reachable". Everything else stays an opaque
+tunnel the proxy cannot read.
+
+The real credentials live in the orchestrator's environment and in the proxy's
+memory, and nowhere else. The proxy has no config file, no database and no CA
+on disk: it boots empty and is handed its policy over an authenticated channel
+on the compose network, which no session can route to. Restart it and the
+orchestrator's reconciler pushes again within a minute.
+
+The CA certificate reaches each session as `BOXES_PROXY_CA`, written by the
+entrypoint to `~/.boxes/proxy-ca.crt`, with `NODE_EXTRA_CA_CERTS`,
+`SSL_CERT_FILE`, `GIT_SSL_CAINFO` and `CURL_CA_BUNDLE` pointing at it.
+
+### When a new tool fails TLS
+
+A tool that honours none of those variables fails TLS against *translated
+hosts only*, which is a confusing shape — everything else keeps working. The
+fix is to point that tool at the same file:
+
+| Tool | Variable | Notes |
+|---|---|---|
+| node, npm, anything on Node | `NODE_EXTRA_CA_CERTS` | Already set |
+| curl | `CURL_CA_BUNDLE` | Already set |
+| git | `GIT_SSL_CAINFO` | Already set |
+| gh, and most Go tools | `SSL_CERT_FILE` | Already set |
+| Python `requests` | `REQUESTS_CA_BUNDLE` | Add it, pointing at `$BOXES_PROXY_CA`'s file |
+| Python `httpx`, `aiohttp` | `SSL_CERT_FILE` | Already set |
+| Deno | `DENO_CERT` | Add it |
+| Rust `reqwest` (rustls) | `SSL_CERT_FILE` | Already set |
+
+Rotating the CA is deleting `egress-secrets.json` from the data volume and
+restarting; sessions created before that keep the old certificate and must be
+recreated.
+
 ## Security model
 
 Isolation rests on two Docker primitives, with nothing touching the host
@@ -182,10 +258,14 @@ firewall:
 
 - **Session networks are `internal`.** No NAT, no default route: no L3 path to
   your LAN, the internet, or another session.
-- **The egress proxy is the only way out.** It resolves the target, rejects the
-  request if *any* resolved address is private, then connects to that specific
-  vetted address without re-resolving — which is what closes DNS rebinding. If
-  the proxy is down, sessions have no egress at all.
+- **The egress proxy is the only way out.** It checks the allowlist, resolves
+  the target, rejects the request if *any* resolved address is private, then
+  connects to that specific vetted address without re-resolving — which is what
+  closes DNS rebinding. Every connection it makes goes through that one check,
+  including the ones it makes on behalf of a translated host. If the proxy is
+  down, sessions have no egress at all.
+- **Credentials never enter the sandbox.** See
+  [What a session can reach](#what-a-session-can-reach).
 
 Session containers additionally run as a non-root user with `ReadonlyRootfs`,
 `CapDrop: ALL`, `no-new-privileges`, a tmpfs `/tmp`, and memory, CPU and pids
@@ -201,8 +281,14 @@ Known residual risks, accepted deliberately:
   never shell-executing user strings — but the auth you put in front of `/api`
   is what keeps it yours.
 - `GET /api/sessions` returns `WS_AUTH_TOKEN`, behind that same auth.
-- Prompt injection can leak a session's env tokens. Keep the Claude token
-  inference-only and the GitHub PAT narrow, and rotate on suspicion.
+- A compromised proxy sees the credentials it injects. That is true of any
+  injecting proxy; what this one adds is that it leaves nothing at rest.
+- A credential you do *not* configure is not translated. A session that logs
+  itself in with `claude setup-token` holds its own token, and prompt injection
+  can leak that one.
+- Sibling sessions share a deployment's placeholders, so they map to the same
+  real credentials. Per-session placeholders arrive with per-session
+  credentials.
 - Protocol behaviour is pinned to `claude-agent-acp` 0.70.0. Re-check
   capabilities and WebSocket framing on upgrade.
 
@@ -253,7 +339,7 @@ npm run check && npm test
 |---|---|
 | `orchestrator/` | Node 22 + TypeScript: REST API, SQLite, Docker lifecycle, ACP gateway, idle reaper |
 | `dashboard/` | React SPA — session list and chat — built into the orchestrator image and served at `/` |
-| `proxy/` | The egress proxy: dependency-free TypeScript, the security boundary |
+| `proxy/` | The egress proxy: allowlist, address vetting and token translation — the security boundary |
 | `session-image/` | The per-session container image |
 | `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
 | `scripts/smoke-test.sh` | Security smoke test, no credentials needed |

@@ -6,6 +6,7 @@ import type {
   SessionSummary,
 } from '../../shared/types.ts';
 import type { Config } from './config.ts';
+import type { EgressManager } from './egress.ts';
 import { nextSubnetIndex, type Db, type SessionRow } from './db.ts';
 import * as dk from './docker.ts';
 import { log } from './log.ts';
@@ -31,6 +32,7 @@ export class SessionManager {
   constructor(
     private readonly db: Db,
     private readonly cfg: Config,
+    private readonly egress: EgressManager,
   ) {
     this.pending = new PendingStore(db);
   }
@@ -144,6 +146,11 @@ export class SessionManager {
           homeVolume: row.home_volume,
           repoUrl,
           profile,
+          egress: {
+            claudeOauthToken: this.egress.sessionValue('claude', profile.claudeOauthToken),
+            ghToken: this.egress.sessionValue('github', profile.ghToken),
+            caCertificate: this.egress.caCertificate(),
+          },
         },
         this.cfg,
       );

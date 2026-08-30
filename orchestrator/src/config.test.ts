@@ -91,3 +91,53 @@ test('a genuinely invalid value still fails the boot', () => {
     assert.throws(() => loadConfig({ DATA_DIR: dir, NTFY_URL: 'not-a-url' }), /Invalid configuration/);
   });
 });
+
+test('the allowlist is off by default and parses either separator', () => {
+  withDataDir((dir) => {
+    assert.deepEqual(loadConfig({ DATA_DIR: dir }).egressAllowedHosts, []);
+    assert.deepEqual(
+      loadConfig({
+        DATA_DIR: dir,
+        EGRESS_ALLOWED_HOSTS: 'GitHub.com, *.githubusercontent.com  registry.npmjs.org,',
+      }).egressAllowedHosts,
+      ['github.com', '*.githubusercontent.com', 'registry.npmjs.org'],
+    );
+  });
+});
+
+test('an allowlist entry that would allow everything is refused at boot', () => {
+  withDataDir((dir) => {
+    assert.throws(
+      () => loadConfig({ DATA_DIR: dir, EGRESS_ALLOWED_HOSTS: 'github.com,*' }),
+      /bare \*/,
+    );
+    assert.throws(
+      () => loadConfig({ DATA_DIR: dir, EGRESS_ALLOWED_HOSTS: 'api.*.com' }),
+      /leading \*\./,
+    );
+  });
+});
+
+test('only a credential with a configured secret is translated', () => {
+  withDataDir((dir) => {
+    assert.deepEqual(loadConfig({ DATA_DIR: dir }).egressCredentials, []);
+
+    const one = loadConfig({ DATA_DIR: dir, PROFILE_DEFAULT_GH_TOKEN: 'ghp_x' });
+    assert.deepEqual(
+      one.egressCredentials.map((c) => c.id),
+      ['github'],
+    );
+    assert.equal(one.egressCredentials[0]?.secret, 'ghp_x');
+    assert.ok(one.egressCredentials[0]?.hosts.includes('api.github.com'));
+
+    const both = loadConfig({
+      DATA_DIR: dir,
+      PROFILE_DEFAULT_GH_TOKEN: 'ghp_x',
+      PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x',
+    });
+    assert.deepEqual(
+      both.egressCredentials.map((c) => c.id),
+      ['claude', 'github'],
+    );
+  });
+});

@@ -38,6 +38,19 @@ const schema = z.object({
   EGRESS_PROXY_CONTAINER: z.string().min(1).default('boxes-egress-proxy'),
   EGRESS_PROXY_ALIAS: z.string().min(1).default('proxy'),
   EGRESS_PROXY_PORT: z.coerce.number().int().positive().default(3128),
+  /**
+   * Port of the proxy's control channel, on the compose network. Nobody sets
+   * this: the orchestrator is the only thing that speaks to it, and it is
+   * unreachable from a session either way.
+   */
+  EGRESS_CONTROL_PORT: z.coerce.number().int().positive().default(3129),
+
+  /**
+   * Hosts sessions may reach, comma or whitespace separated. Exact names and
+   * one-label wildcards: `github.com, *.githubusercontent.com`. Empty is off,
+   * which leaves every public host reachable, as it is today.
+   */
+  EGRESS_ALLOWED_HOSTS: z.string().default(''),
 
   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: z.string().default(''),
   PROFILE_DEFAULT_GH_TOKEN: z.string().default(''),
@@ -48,7 +61,85 @@ const schema = z.object({
 export type Config = Readonly<z.infer<typeof schema>> & {
   /** Credentials by profile name. */
   readonly profiles: Readonly<Record<string, SessionProfile>>;
+  /** The parsed allowlist. Empty means the allowlist is off. */
+  readonly egressAllowedHosts: readonly string[];
+  /**
+   * The credentials this deployment translates: the entries of CREDENTIAL_SET
+   * whose secret is actually configured.
+   */
+  readonly egressCredentials: readonly ConfiguredCredential[];
 };
+
+/**
+ * One credential the proxy can translate, and everything the deployment knows
+ * about it that is not the secret itself.
+ *
+ * The host lists and header names are fixed here rather than configured,
+ * because they are facts about the services, not preferences: getting them
+ * wrong either breaks a tool or widens what a credential can reach.
+ */
+export interface CredentialSpec {
+  /** Stable identifier, used in logs, status and the placeholder file. */
+  id: string;
+  /** Hosts intercepted so the credential can be swapped in. */
+  hosts: readonly string[];
+  /** Headers the credential may travel in, lowercased. */
+  headers: readonly string[];
+  /**
+   * Hosts this credential's tools need reachable but never send it to, so a
+   * narrow allowlist cannot break them. Not intercepted.
+   */
+  alsoAllow: readonly string[];
+  /**
+   * Prefix a generated placeholder carries, so that a client checking the
+   * shape of its token accepts it and fails at the API rather than at startup.
+   */
+  placeholderPrefix: string;
+}
+
+/** A credential spec together with the secret this deployment configured. */
+export interface ConfiguredCredential extends CredentialSpec {
+  secret: string;
+}
+
+/**
+ * Every credential the proxy knows how to translate. A deployment translates
+ * the ones it configures a secret for; the rest stay ordinary passthrough
+ * hosts, which is what preserves the "log in inside a session" flow.
+ */
+export const CREDENTIAL_SET: readonly CredentialSpec[] = [
+  {
+    id: 'claude',
+    hosts: ['api.anthropic.com'],
+    headers: ['authorization', 'x-api-key'],
+    // The token endpoints an OAuth credential may be refreshed at. They are
+    // reachable but not intercepted, so a session that runs `claude
+    // setup-token` still works and keeps its own token.
+    alsoAllow: ['console.anthropic.com', 'platform.claude.com', 'claude.ai'],
+    placeholderPrefix: 'sk-ant-oat01-',
+  },
+  {
+    id: 'github',
+    hosts: ['github.com', 'api.github.com', '*.githubusercontent.com'],
+    // git sends the token as the password of an HTTP Basic pair and gh sends
+    // it directly; both arrive in this one header.
+    headers: ['authorization'],
+    alsoAllow: ['codeload.github.com'],
+    placeholderPrefix: 'ghp_',
+  },
+];
+
+/** Splits a comma or whitespace separated host list into patterns. */
+export function parseHostList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[\s,]+/)
+        .map((h) => h.trim().toLowerCase())
+        .filter((h) => h !== ''),
+    ),
+  ];
+}
 
 /** Credentials + identity handed to a session container at create time. */
 export interface SessionProfile {
@@ -82,9 +173,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid configuration:\n${issues}`);
   }
   const base = parsed.data;
+  const allowedHosts = parseHostList(base.EGRESS_ALLOWED_HOSTS);
+  for (const pattern of allowedHosts) {
+    if (pattern === '*') {
+      throw new Error(
+        'Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: a bare * would allow every host; ' +
+          'leave the setting empty to turn the allowlist off',
+      );
+    }
+    if (pattern.includes('*') && !pattern.startsWith('*.')) {
+      throw new Error(
+        `Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: ${pattern} may only use a leading *. wildcard`,
+      );
+    }
+  }
+
+  const secrets: Record<string, string> = {
+    claude: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,
+    github: base.PROFILE_DEFAULT_GH_TOKEN,
+  };
+
   return {
     ...base,
     WS_AUTH_TOKEN: resolveWsAuthToken(base.DATA_DIR, base.WS_AUTH_TOKEN),
+    egressAllowedHosts: allowedHosts,
+    egressCredentials: CREDENTIAL_SET.flatMap((spec) => {
+      const secret = secrets[spec.id] ?? '';
+      return secret ? [{ ...spec, secret }] : [];
+    }),
     profiles: {
       DEFAULT: {
         claudeOauthToken: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,

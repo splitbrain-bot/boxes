@@ -13,6 +13,7 @@ import type {
 } from '../../shared/types.ts';
 import type { config } from './config.ts';
 import type { openDb } from './db.ts';
+import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
 import { log } from './log.ts';
 import { HttpError, SessionManager } from './sessions.ts';
@@ -38,6 +39,8 @@ export interface Orchestrator {
   db: ReturnType<typeof openDb>;
   manager: SessionManager;
   cfg: ReturnType<typeof config>;
+  /** Owns the egress policy and keeps the proxy holding it. */
+  egress: EgressManager;
   /** Session ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -53,7 +56,8 @@ export function buildApp(
   cfg: ReturnType<typeof config>,
   db: ReturnType<typeof openDb>,
 ): Orchestrator {
-const manager = new SessionManager(db, cfg);
+const egress = new EgressManager(cfg);
+const manager = new SessionManager(db, cfg, egress);
 
 let proxyWarnings: string[] = [];
 
@@ -73,7 +77,13 @@ app.get('/healthz', async (): Promise<HealthResponse> => {
   const row = db
     .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
     .get() as { n: number };
-  return { ok: true, version: VERSION, sessions: row.n, proxyWarnings };
+  return {
+    ok: true,
+    version: VERSION,
+    sessions: row.n,
+    proxyWarnings,
+    egress: egress.status(),
+  };
 });
 
 app.get('/api/sessions', async () => manager.list());
@@ -235,6 +245,7 @@ app.setNotFoundHandler((req, reply) => {
     db,
     manager,
     cfg,
+    egress,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

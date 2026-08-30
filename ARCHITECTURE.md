@@ -41,11 +41,14 @@ Two consequences shape the rest of the design:
               │  SQLite · reaper · Docker client      │
               └───┬───────────────────────────────┬───┘
                   │ /var/run/docker.sock          │ docker exec, stdio
-   ┌──────────────▼──────────────┐                │
+                  │      ▲ policy push (compose network, bearer)
+   ┌──────────────▼──────┴───────┐                │
    │       egress proxy          │                │
    │  attached to every session  │                │
    │  network under the alias    │                │
-   │  "proxy"                    │                │
+   │  "proxy"; holds the policy  │                │
+   │  and the credentials in     │                │
+   │  memory, nothing at rest    │                │
    └──────┬───────────────┬──────┘                │
           │               │                       │
    ┌──────▼───────┐ ┌─────▼────────┐              │
@@ -58,7 +61,7 @@ Two consequences shape the rest of the design:
 | Process | Built from | Role |
 |---|---|---|
 | orchestrator | `orchestrator/Dockerfile` | Serves every route, owns the sessions, holds the Docker socket |
-| egress proxy | `proxy/Dockerfile` | The only route out of a session network |
+| egress proxy | `proxy/Dockerfile` | The only route out of a session network, and where credentials are put on the wire |
 | session container | `session-image/Dockerfile` | Runs the agent and the ACP adapter, one container per session |
 
 The orchestrator and the proxy are compose services. Session containers are
@@ -350,18 +353,92 @@ gets `HTTP_PROXY` and `HTTPS_PROXY` pointing at it. Every proxy-aware client
 honours those; anything else has no route out, which is the intended failure
 mode.
 
-The proxy itself (`proxy/src/`) has no dependencies and handles two cases:
-plain HTTP with an absolute request URI, and CONNECT. Only ports 80 and 443 are
-allowed. Its critical rule is in `vetTarget`: resolve the hostname, reject if
-**any** resolved address is private, then connect to one **vetted address**
-without resolving again. Checking every answer and pinning the connection is
-what closes DNS rebinding, since a hostname must not pass with a public record
-and connect with a private one. `cidr.ts` holds the range checks; v4-mapped and
+The proxy itself (`proxy/src/`) runs three listeners:
+
+| Listener | Bound to | Role |
+|---|---|---|
+| front door | `0.0.0.0:3128` | Faces the sessions: allowlist, vetting, and the choice between an opaque tunnel and interception |
+| interception engine | loopback, ephemeral | Terminates TLS for translated hosts and swaps the credential (`inject.ts`, on mockttp) |
+| upstream tunnel | loopback, ephemeral | The one place a connection actually leaves, so both routes out are vetted identically |
+
+The front door (`forward.ts`) handles plain HTTP with an absolute request URI
+and CONNECT. Only ports 80 and 443 are allowed. Its critical rule is in
+`vetTarget`: check the allowlist, resolve the hostname, reject if **any**
+resolved address is private, then connect to one **vetted address** without
+resolving again. Checking every answer and pinning the connection is what
+closes DNS rebinding, since a hostname must not pass with a public record and
+connect with a private one. `cidr.ts` holds the range checks; v4-mapped and
 v4-compatible IPv6 forms are vetted as the IPv4 address they reach, and
 unparseable input fails closed.
 
 The design fails closed. If the proxy is down or detached, sessions have no
 egress at all, because there is no direct route to fall back to.
+
+### The allowlist
+
+`EGRESS_ALLOWED_HOSTS` is one deployment-wide list, checked at CONNECT before
+any DNS lookup. Exact names and one-label wildcards — `*.example.com` matches
+`a.example.com` and neither `example.com` nor `a.b.example.com` — matched
+case-insensitively, with address literals matched only as literals. Empty is
+off: any public host, private ranges still denied. A configured credential's
+hosts are implied members, so a narrow list cannot sever the traffic the proxy
+exists to authenticate. The grammar lives in `policy.ts` as pure functions.
+
+### Token translation
+
+A session holds placeholders. Real credentials exist only in the
+orchestrator's environment and in the proxy's memory.
+
+A host becomes a *translated host* when its credential is configured. Reaching
+one, the front door hands the CONNECT to the interception engine instead of
+tunnelling it — by replaying the CONNECT on loopback, so the engine picks the
+certificate for the host the client actually asked for. The engine terminates
+TLS under the deployment CA and `decideCredentials` rules on the request:
+
+| The request carries | What happens |
+|---|---|
+| the deployment's placeholder | rewritten to carry the real credential |
+| any other credential | 403 from the proxy; nothing reaches the host |
+| no credential | forwarded unauthenticated, as it always was |
+
+The swap is value-level: the placeholder is replaced wherever it appears in the
+credential header, which covers `Bearer <p>`, `token <p>`, a bare value, and
+the HTTP Basic pair git's credential helper produces — one mechanism instead of
+a rule per tool.
+
+Everything else stays an opaque tunnel that never reaches the engine, so
+interception is bounded by policy rather than by trust in the engine. And every
+request the engine forwards leaves through the upstream tunnel, so the vetting
+above governs the connection that actually happens: decrypting a host buys it
+no way around the checks.
+
+`api.anthropic.com`, `github.com`, `api.github.com` and
+`*.githubusercontent.com` are the translated hosts, fixed in `config.ts`
+alongside the headers each credential travels in. They are facts about the
+services rather than preferences, so they are not configurable.
+
+### The control channel
+
+The proxy has no configuration file, no database and no CA on disk. It boots
+empty and the orchestrator pushes it a policy — the allowlist, the CA key and
+certificate, and the credential map — over an HTTP endpoint on the compose
+network, held in memory only.
+
+Two things keep it out of a session's reach. It binds to the compose network
+alone: sessions sit on internal networks with no route to that address, because
+the proxy bridges them at L7 and does not route. `control.ts` finds that
+address by asking the kernel which local address the default route uses, which
+is an exact description of the compose interface, since internal networks
+install no default route; failing that it binds to loopback, because no control
+channel is a safe failure and an exposed one is not. And it requires a bearer
+token that nobody configures: the first push over that interface claims the
+channel and every later push must match it.
+
+The orchestrator's side is `egress.ts`. The CA and the placeholders are
+generated once and persisted in `DATA_DIR` at mode 0600, beside the generated
+WebSocket token — regenerating them per boot would strand every running
+session, which holds the old certificate in its trust file. Rotation is
+deleting that file.
 
 ## State, and where truth lives
 
@@ -394,7 +471,7 @@ restart; the resolver that answers the request is in memory only, so
 | Loop | Interval | Does |
 |---|---|---|
 | Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all four counts: no running turn, no waiting permission request, no attached browser, and no activity for `IDLE_STOP_MINUTES`. It never deletes |
-| Proxy reconciler (`reaper.ts`) | 60s | Re-attaches the egress proxy to every running session's network, because `compose up` can recreate the proxy container and drop its dynamic attachments. Sessions still missing it show up in `/healthz` |
+| Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running session's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
 | Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size |
 
 The dashboard polls `GET /api/sessions` every 5 seconds while its tab is
@@ -431,8 +508,19 @@ boot and writes it to `DATA_DIR/ws-auth-token` with mode 0600, so it survives
 restarts and rebuilds. Setting the variable wins, which is also how the token
 is rotated.
 
+The same reasoning covers the egress material. `egress.ts` generates the CA,
+the placeholders and the control-channel bearer on first boot and stores them
+in `DATA_DIR/egress-secrets.json` at mode 0600. They are generated rather than
+configured, and they persist rather than being regenerated, because running
+sessions hold them.
+
 Profile credentials — the Claude token, the GitHub token and the git identity —
-are injected into a session container at create time and nowhere else.
+are injected into a session container at create time and nowhere else. With
+translation on, what is injected is a placeholder: the real value never enters
+a session container, and never reaches a filesystem outside the orchestrator's
+own data volume. The CA certificate travels the same path, as
+`BOXES_PROXY_CA`, which the entrypoint writes to `~/.boxes/proxy-ca.crt` for
+the four CA-trust variables to point at.
 
 ## Build-time pins
 
@@ -457,8 +545,9 @@ orchestrator/src/
   index.ts              Boot, the WS upgrade, the background loops, shutdown
   app.ts                REST routes, the exec endpoint, the static bundle
   exec.ts               Local commands: limits, streaming, the exec log
-  config.ts             Environment parsing, one pass at boot
+  config.ts             Environment parsing, and the translatable credential set
   secret.ts             WS auth token: configured, stored, or generated
+  egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log
   sessions.ts           Session lifecycle, the owner of every UpstreamSession
   docker.ts             Containers, networks, volumes, the adapter exec
@@ -472,7 +561,11 @@ orchestrator/src/
     pending.ts          Permission requests waiting for an answer
 
 proxy/src/
-  main.ts               The forward proxy: absolute-URI HTTP and CONNECT
+  main.ts               The three listeners, the in-memory policy, the denial tally
+  forward.ts            Absolute-URI HTTP and CONNECT: allowlist, vetting, pinning
+  policy.ts             Allowlist grammar and the credential decision, as pure functions
+  inject.ts             TLS interception and the swap, on mockttp
+  control.ts            The authenticated policy push, and where it may be reached
   cidr.ts               Resolved-IP vetting, the security boundary
 
 dashboard/
@@ -498,7 +591,7 @@ dashboard/
       assistant-ui/     Installed registry sources, ours to edit
       ui/               Installed shadcn primitives
 
-shared/types.ts         REST shapes, imported by both sides
+shared/types.ts         REST shapes and the control-channel contract
 session-image/          The per-session container image and its entrypoint
 scripts/                Security smoke test and credentialed live test
 ```

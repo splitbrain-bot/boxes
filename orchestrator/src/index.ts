@@ -12,7 +12,7 @@ import { startProxyReconciler, startReaper } from './reaper.ts';
 
 const cfg = config();
 const db = openDb(cfg.DATA_DIR);
-const { app, manager, setProxyWarnings } = buildApp(cfg, db);
+const { app, manager, egress, setProxyWarnings } = buildApp(cfg, db);
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
@@ -63,9 +63,21 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
 
 /** Reconciles against Docker, starts the background loops, and listens. */
 async function main(): Promise<void> {
+  // The policy has to exist before the first session is created, because a
+  // session's environment is built from it. Pushing it can fail — the proxy
+  // may still be booting — and the reconciler retries every minute.
+  await egress.prepare();
+  try {
+    await egress.sync();
+  } catch (err) {
+    log.warn('could not push the egress policy at boot; will retry', {
+      error: (err as Error).message,
+    });
+  }
+
   await manager.reconcile();
   startReaper(db, cfg, manager);
-  startProxyReconciler(manager, setProxyWarnings);
+  startProxyReconciler(manager, egress, setProxyWarnings);
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });
   log.info('orchestrator listening', { port: cfg.PORT });
