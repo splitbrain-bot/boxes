@@ -93,6 +93,14 @@ function partsOf(message: Message): ConvertedPart[] {
   return content as ConvertedPart[];
 }
 
+/** The single text part a shell run writes into the thread. */
+function outputOf(message: Message): string {
+  const parts = partsOf(message);
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0]!.type, 'text');
+  return String((parts[0] as unknown as { text: string }).text);
+}
+
 /** One converted part, in the shape the assertions read it. */
 type ConvertedPart = {
   type: string;
@@ -404,17 +412,13 @@ test('a bang command runs locally, streams, and never reaches the adapter', asyn
   assert.equal(chunks.length, 2);
 
   const messages = store.getSnapshot().messages;
-  // The line as typed, then the shell call it produced.
+  // The line as typed, then the output it produced.
   assert.equal(messages[0]!.role, 'user');
   assert.deepEqual(partsOf(messages[0]!), [{ type: 'text', text: '!echo hi' }]);
-
-  const call = partsOf(messages[1]!)[0]!;
-  assert.equal(call.type, 'tool-call');
-  assert.equal(call.toolName, 'shell');
-  assert.match(String((call as unknown as { result: string }).result), /hi\nthere\n\[exit 0\]/);
+  assert.equal(outputOf(messages[1]!), '```console\nhi\nthere\n[exit 0]\n```');
 });
 
-test('a non-zero exit marks the shell call failed and shows the code', async () => {
+test('a non-zero exit shows the code under the output', async () => {
   const { store } = makeStore(undefined, {
     runExec: async (_id, _cmd, onChunk) => {
       onChunk('bash: nope: command not found');
@@ -423,12 +427,9 @@ test('a non-zero exit marks the shell call failed and shows the code', async () 
   });
 
   await store.runCommand('nope');
-  const call = partsOf(store.getSnapshot().messages[1]!)[0] as unknown as {
-    result: string;
-    isError?: boolean;
-  };
-  assert.equal(call.isError, true);
-  assert.match(call.result, /\[exit 127\]/);
+  const output = outputOf(store.getSnapshot().messages[1]!);
+  assert.match(output, /bash: nope: command not found/);
+  assert.match(output, /\[exit 127\]/);
 });
 
 test('a killed or truncated run says so beside its exit code', async () => {
@@ -440,11 +441,27 @@ test('a killed or truncated run says so beside its exit code', async () => {
   });
 
   await store.runCommand('yes');
-  const call = partsOf(store.getSnapshot().messages[1]!)[0] as unknown as { result: string };
-  assert.match(call.result, /\[exit killed\] · timed out · output truncated/);
+  assert.match(
+    outputOf(store.getSnapshot().messages[1]!),
+    /\[exit killed\] · timed out · output truncated/,
+  );
 });
 
-test('a failed exec request is reported on the call rather than thrown away', async () => {
+test('output carrying a fence of its own cannot break out of the block', async () => {
+  const { store } = makeStore(undefined, {
+    runExec: async (_id, _cmd, onChunk) => {
+      onChunk('```\nnot a fence\n```');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+  });
+
+  await store.runCommand('cat readme.md');
+  const output = outputOf(store.getSnapshot().messages[1]!);
+  assert.ok(output.startsWith('````console\n'), output);
+  assert.ok(output.endsWith('\n````'), output);
+});
+
+test('a failed exec request is reported in the thread rather than thrown away', async () => {
   const { store } = makeStore(undefined, {
     runExec: async () => {
       throw new Error('503 exec unavailable');
@@ -452,12 +469,7 @@ test('a failed exec request is reported on the call rather than thrown away', as
   });
 
   await store.runCommand('ls');
-  const call = partsOf(store.getSnapshot().messages[1]!)[0] as unknown as {
-    result: string;
-    isError?: boolean;
-  };
-  assert.equal(call.isError, true);
-  assert.match(call.result, /503 exec unavailable/);
+  assert.match(outputOf(store.getSnapshot().messages[1]!), /503 exec unavailable/);
 });
 
 test('previously run commands are appended once, however often they are loaded', async () => {

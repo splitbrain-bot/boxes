@@ -74,6 +74,14 @@ export interface SessionModeState {
   availableModes: SessionMode[];
 }
 
+/** One slash command the adapter accepts at the start of a prompt. */
+export interface AvailableCommand {
+  name: string;
+  description?: string | null;
+  /** What the command expects after its name, when it takes anything. */
+  input?: { hint?: string } | null;
+}
+
 /** A step of the agent's plan. */
 export interface PlanEntry {
   content: string;
@@ -96,6 +104,7 @@ export type SessionUpdate =
   | (ToolCallUpdate & { sessionUpdate: 'tool_call_update' })
   | { sessionUpdate: 'plan'; entries?: PlanEntry[] }
   | { sessionUpdate: 'current_mode_update'; currentModeId: string }
+  | { sessionUpdate: 'available_commands_update'; availableCommands?: AvailableCommand[] }
   // Forward compatibility: an adapter may send a kind this build predates.
   | { sessionUpdate: string; [key: string]: unknown };
 

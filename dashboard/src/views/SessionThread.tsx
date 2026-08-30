@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
+import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../api.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
@@ -91,28 +92,30 @@ export function SessionThread() {
   return (
     <TooltipProvider>
       <AssistantRuntimeProvider runtime={runtime}>
-        <div className="flex h-dvh flex-col">
-          <ThreadHeader
-            sessionId={id}
-            name={session?.name ?? id}
-            connection={state.connection}
-            modes={state.modes}
-            onSetMode={(modeId) => void store?.setMode(modeId)}
-          />
-          {loadError ? (
-            <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
-              {loadError}
+        <SlashCommandsProvider commands={state.commands}>
+          <div className="flex h-dvh flex-col">
+            <ThreadHeader
+              sessionId={id}
+              name={session?.name ?? id}
+              connection={state.connection}
+              modes={state.modes}
+              onSetMode={(modeId) => void store?.setMode(modeId)}
+            />
+            {loadError ? (
+              <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
+                {loadError}
+              </div>
+            ) : null}
+            {state.error ? (
+              <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
+                {state.error}
+              </div>
+            ) : null}
+            <div className="min-h-0 flex-1">
+              <Thread />
             </div>
-          ) : null}
-          {state.error ? (
-            <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
-              {state.error}
-            </div>
-          ) : null}
-          <div className="min-h-0 flex-1">
-            <Thread />
           </div>
-        </div>
+        </SlashCommandsProvider>
       </AssistantRuntimeProvider>
     </TooltipProvider>
   );

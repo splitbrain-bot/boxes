@@ -117,13 +117,7 @@ test('a !bang command runs in the container and never reaches the agent', async 
     expect(stub.execCalls[0]).toEqual({ sessionId: SESSION.id, command: 'echo hi' });
     expect(stub.gateway.prompts).toEqual([]);
 
-    // It renders as a shell tool call, and its output is there to open.
-    const group = page.locator('[data-slot="tool-group-trigger"]');
-    await expect.poll(() => group.count()).toBe(1);
-    await group.first().click();
-    const call = page.locator('[data-slot="tool-fallback-trigger"]');
-    await expect.poll(() => call.count()).toBe(1);
-    await call.first().click();
+    // The output is printed as code, with nothing to open first.
     await expect.poll(() => page.getByText('ran: echo hi').isVisible()).toBe(true);
     expect(await page.getByText('[exit 0]').isVisible()).toBe(true);
     await shoot(page, 'bang-command');
@@ -133,7 +127,7 @@ test('a !bang command runs in the container and never reaches the agent', async 
   }
 });
 
-test('a failing !bang command is marked failed and shows its exit code', async () => {
+test('a failing !bang command shows its exit code under the output', async () => {
   await start();
   stub.execOutput = () => ({ output: 'bash: nope: command not found\n', exitCode: 127 });
 
@@ -144,8 +138,6 @@ test('a failing !bang command is marked failed and shows its exit code', async (
     await input.fill('!nope');
     await input.press('Enter');
 
-    await page.locator('[data-slot="tool-group-trigger"]').first().click();
-    await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
     await expect.poll(() => page.getByText('command not found').isVisible()).toBe(true);
     expect(await page.getByText('[exit 127]').isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -171,8 +163,6 @@ test('commands from a previous visit come back after the replay', async () => {
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
     await expect.poll(() => page.getByText('!git status').isVisible()).toBe(true);
-    await page.locator('[data-slot="tool-group-trigger"]').first().click();
-    await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
     await expect.poll(() => page.getByText('nothing to commit').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
@@ -358,6 +348,40 @@ test('a permission request queued while nobody watched is delivered on attach', 
     await expect.poll(() => approval.isVisible(), { timeout: 10_000 }).toBe(true);
     await approval.getByRole('button', { name: 'Reject' }).click();
     await expect.poll(() => page.getByText('queued answer: no').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// A slash command is completed in the composer, not run from the list: the
+// agent runs it, and it often takes arguments the user still has to type.
+test('typing a slash lists the adapter commands and completes the one picked', async () => {
+  await start();
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    stub.gateway.emit({
+      sessionUpdate: 'available_commands_update',
+      availableCommands: [
+        { name: 'review', description: 'Review the working tree' },
+        { name: 'release', description: 'Cut a release' },
+        { name: 'compact', description: 'Compact the thread' },
+      ],
+    } as SessionUpdate);
+
+    const input = page.getByLabel('Message input');
+    await input.press('/');
+    const options = page.getByRole('option');
+    await expect.poll(() => options.count()).toBe(3);
+
+    // Typing narrows the list, and Enter completes rather than sends.
+    await input.pressSequentially('rel');
+    await expect.poll(() => options.count()).toBe(1);
+    await input.press('Enter');
+    await expect.poll(() => input.inputValue()).toBe('/release ');
+    expect(stub.gateway.prompts).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
     await close();

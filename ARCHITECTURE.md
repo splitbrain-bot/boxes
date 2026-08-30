@@ -138,6 +138,12 @@ orchestrator rather than trusted to the container: 120 seconds of wall clock
 and 256 KiB of output, after which the exec is killed. Finished runs go into
 `exec_log`, ring-pruned per session.
 
+The browser writes the output straight into the thread as a code block, which
+grows as the chunks arrive. Output is what the command was run for, so it is
+shown rather than folded away behind a tool call that has to be opened first.
+The fence is grown past the longest run of backticks in the output, so output
+carrying a fence of its own cannot break out of the block.
+
 The browser appends stored runs *after* whatever the replay produced rather
 than interleaving them. ACP replay carries no timestamps, so where they belong
 in the transcript is not recoverable.
@@ -153,9 +159,12 @@ The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
 CLI, in the shadcn distribution model: the sources are committed and are ours
 to edit, and an upgrade is a CLI re-run reviewed as a diff rather than a
-version bump that changes the UI silently. Three edits are ours so far, each
+version bump that changes the UI silently. Six edits are ours so far, each
 marked in the source: ArrowUp history on the composer, returning focus after
-a send, and opening a tool group when a call inside it is waiting on the user.
+a send, opening a tool group when a call inside it is waiting on the user,
+dropping the add-attachment button because nothing here takes an attachment,
+following the bottom of the viewport for output that is not a turn, and the
+slash-command list below.
 
 Because those components are written in Tailwind utilities, Tailwind is a
 build dependency rather than a style choice, and it compiles from source on
@@ -184,6 +193,13 @@ code path: a reconnect repeats the handshake, `session/load` re-sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
+
+`available_commands_update` carries the slash commands this agent accepts, and
+the composer completes them: a leading `/` opens the list, each further
+character narrows it, and picking one writes the command's name into the
+composer. It completes rather than sends, because a command often takes
+arguments and running it is the agent's job. The list is whatever the adapter
+advertises, so it follows the agent rather than this build.
 
 Two behaviours are worth knowing because they look like bugs otherwise. A turn
 blocked on a permission request reports itself as *not running* — it is

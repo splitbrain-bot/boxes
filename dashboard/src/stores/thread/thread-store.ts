@@ -1,4 +1,5 @@
 import type {
+  AvailableCommand,
   PermissionOption,
   PlanEntry,
   RequestPermissionRequest,
@@ -14,7 +15,6 @@ import {
   findTool,
   type Message,
   type ThreadModel,
-  type ToolPart,
 } from './translate.ts';
 
 /**
@@ -33,6 +33,8 @@ export interface ThreadSnapshot {
   connection: ConnectionState;
   modes: SessionModeState | null;
   plan: PlanEntry[] | null;
+  /** The slash commands the adapter accepts, for the composer to complete. */
+  commands: AvailableCommand[];
   /** The last send or connection error, or null. */
   error: string | null;
 }
@@ -69,8 +71,6 @@ export class ThreadStore {
   private nextExecId = 1;
   /** Exec records already replayed, so a re-attach does not double them. */
   private replayedExec = new Set<number>();
-  /** Raw output per shell call, kept apart from the exit trailer shown after it. */
-  private readonly execOutput = new Map<string, string>();
 
   constructor(private readonly deps: ThreadStoreDeps) {
     this.snapshot = {
@@ -79,6 +79,7 @@ export class ThreadStore {
       connection: 'connecting',
       modes: null,
       plan: null,
+      commands: [],
       error: null,
     };
   }
@@ -167,10 +168,9 @@ export class ThreadStore {
     this.model = emptyModel();
     this.model.modes = modes;
     this.views = new Map();
-    this.execOutput.clear();
     this.replayedExec.clear();
     this.failOpenApprovals();
-    this.emit({ messages: [], plan: null });
+    this.emit({ messages: [], plan: null, commands: [] });
   }
 
   /**
@@ -186,8 +186,16 @@ export class ThreadStore {
 
   private onUpdate(params: SessionNotification): void {
     const touched = applyUpdate(this.model, params.update);
-    if (this.snapshot.modes !== this.model.modes || this.snapshot.plan !== this.model.plan) {
-      this.emit({ modes: this.model.modes, plan: this.model.plan });
+    if (
+      this.snapshot.modes !== this.model.modes ||
+      this.snapshot.plan !== this.model.plan ||
+      this.snapshot.commands !== this.model.commands
+    ) {
+      this.emit({
+        modes: this.model.modes,
+        plan: this.model.plan,
+        commands: this.model.commands,
+      });
     }
     this.refreshMessages(touched);
   }
@@ -264,31 +272,25 @@ export class ThreadStore {
    * Runs a `!bang` command in the session container.
    *
    * It never reaches the model: the command is echoed as the user message it
-   * was typed as, and its output rides the same tool-call rendering path as
-   * an agent's own tool calls, so it collapses and expands the same way.
+   * was typed as, and its output is written straight into the thread as a
+   * code block. Output is what the user asked for, so it is shown rather
+   * than folded away behind a tool call that has to be opened.
    */
   async runCommand(command: string): Promise<void> {
-    const toolCallId = `bang-${this.nextExecId++}`;
-    this.execOutput.set(toolCallId, '');
-    this.appendExecCall(toolCallId, command, 'in_progress', '');
+    const execId = `bang-${this.nextExecId++}`;
+    this.appendExecCommand(execId, command);
+    let output = '';
+    this.setExecOutput(execId, output);
 
     const exec = this.deps.runExec ?? runExec;
     try {
-      const outcome = await exec(this.deps.sessionId, command, (output) => {
-        this.updateExecCall(toolCallId, 'in_progress', output);
+      const outcome = await exec(this.deps.sessionId, command, (soFar) => {
+        output = soFar;
+        this.setExecOutput(execId, output);
       });
-      const notes = [
-        outcome.timedOut ? 'timed out' : '',
-        outcome.truncated ? 'output truncated' : '',
-      ].filter(Boolean);
-      this.updateExecCall(
-        toolCallId,
-        outcome.exitCode === 0 ? 'completed' : 'failed',
-        undefined,
-        [`[exit ${outcome.exitCode ?? 'killed'}]`, ...notes].join(' · '),
-      );
+      this.setExecOutput(execId, output, trailerOf(outcome));
     } catch (err) {
-      this.updateExecCall(toolCallId, 'failed', undefined, (err as Error).message);
+      this.setExecOutput(execId, output, (err as Error).message);
     }
   }
 
@@ -310,61 +312,40 @@ export class ThreadStore {
     for (const record of records) {
       if (this.replayedExec.has(record.id)) continue;
       this.replayedExec.add(record.id);
-      const notes = [
-        record.timedOut ? 'timed out' : '',
-        record.truncated ? 'output truncated' : '',
-      ].filter(Boolean);
-      this.appendExecCall(
-        `bang-log-${record.id}`,
-        record.command,
-        record.exitCode === 0 ? 'completed' : 'failed',
-        record.output,
-        [`[exit ${record.exitCode ?? 'killed'}]`, ...notes].join(' · '),
-      );
+      const execId = `bang-log-${record.id}`;
+      this.appendExecCommand(execId, record.command);
+      this.setExecOutput(execId, record.output, trailerOf(record));
     }
   }
 
-  /** Puts a shell tool call, and the prompt that asked for it, in the thread. */
-  private appendExecCall(
-    toolCallId: string,
-    command: string,
-    status: 'in_progress' | 'completed' | 'failed',
-    output: string,
-    trailer?: string,
-  ): void {
+  /** Echoes a bang line into the thread as the user message it was typed as. */
+  private appendExecCommand(execId: string, command: string): void {
     applyUpdate(this.model, {
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text: `${BANG}${command}` },
-      messageId: `${toolCallId}-prompt`,
+      messageId: `${execId}-command`,
     });
-    const touched = applyUpdate(this.model, {
-      sessionUpdate: 'tool_call',
-      toolCallId,
-      title: command,
-      name: 'shell',
-      kind: 'execute',
-      status,
-      rawInput: { command },
-      content: execContent(output, trailer),
-    });
-    this.refreshMessages(touched);
   }
 
-  /** Updates a running shell tool call in place. */
-  private updateExecCall(
-    toolCallId: string,
-    status: 'in_progress' | 'completed' | 'failed',
-    output?: string,
-    trailer?: string,
-  ): void {
-    if (output !== undefined) this.execOutput.set(toolCallId, output);
-    const touched = applyUpdate(this.model, {
-      sessionUpdate: 'tool_call_update',
-      toolCallId,
-      status,
-      content: execContent(this.execOutput.get(toolCallId) ?? '', trailer),
-    });
-    this.refreshMessages(touched ?? this.messageOfTool(toolCallId));
+  /**
+   * Writes a shell run's output into the thread as a code block, replacing
+   * whatever was there so the block can grow while the command runs.
+   */
+  private setExecOutput(execId: string, output: string, trailer?: string): void {
+    const text = execBlock(output, trailer);
+    const existing = this.model.messages.find((m) => m.id === execId);
+    if (existing) {
+      existing.parts = [{ type: 'text', text }];
+      this.refreshMessages(existing);
+      return;
+    }
+    this.refreshMessages(
+      applyUpdate(this.model, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text },
+        messageId: execId,
+      }),
+    );
   }
 
   /** Cancels the running turn. The prompt request resolves on its own after. */
@@ -444,9 +425,29 @@ export class ThreadStore {
   }
 }
 
-/** A shell call's output, plus its exit trailer once there is one. */
-function execContent(output: string, trailer?: string): ToolPart['content'] {
-  const text = trailer ? `${output}${output.endsWith('\n') || !output ? '' : '\n'}${trailer}` : output;
-  return text ? [{ type: 'content', content: { type: 'text', text } }] : [];
+/**
+ * A shell run's output as a fenced code block, with its exit line under it.
+ *
+ * The fence is grown past the longest run of backticks in the body, so output
+ * that contains a fence of its own cannot break out of the block.
+ */
+function execBlock(output: string, trailer?: string): string {
+  const body = [output.replace(/\n+$/, ''), trailer].filter(Boolean).join('\n');
+  const longestFence = Math.max(0, ...[...body.matchAll(/`+/g)].map((m) => m[0].length));
+  const fence = '`'.repeat(Math.max(3, longestFence + 1));
+  return `${fence}console\n${body}\n${fence}`;
+}
+
+/** The exit line shown under a finished run's output. */
+function trailerOf(outcome: {
+  exitCode: number | null;
+  truncated: boolean;
+  timedOut: boolean;
+}): string {
+  const notes = [
+    outcome.timedOut ? 'timed out' : '',
+    outcome.truncated ? 'output truncated' : '',
+  ].filter(Boolean);
+  return [`[exit ${outcome.exitCode ?? 'killed'}]`, ...notes].join(' · ');
 }
 

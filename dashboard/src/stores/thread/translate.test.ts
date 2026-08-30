@@ -187,6 +187,18 @@ test('a mode update moves the current mode without inventing a mode list', () =>
   assert.equal(model.modes.availableModes.length, 2);
 });
 
+test('a command list replaces the previous one', () => {
+  const model = fold(
+    {
+      sessionUpdate: 'available_commands_update',
+      availableCommands: [{ name: 'review' }, { name: 'release' }],
+    },
+    { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'compact' }] },
+  );
+  assert.deepEqual(model.commands, [{ name: 'compact' }]);
+  assert.deepEqual(model.messages, []);
+});
+
 test('an unknown update kind is kept and renders nothing', () => {
   const model = fold({ sessionUpdate: 'usage_update', tokens: 12 } as unknown as SessionUpdate);
   assert.equal(model.messages.length, 0);

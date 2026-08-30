@@ -1,5 +1,6 @@
 import {
   blockText,
+  type AvailableCommand,
   type PermissionOption,
   type PlanEntry,
   type SessionModeState,
@@ -75,13 +76,15 @@ export interface ThreadModel {
   modes: SessionModeState | null;
   /** The agent's current plan, or null when it has published none. */
   plan: PlanEntry[] | null;
+  /** The slash commands the adapter accepts, for the composer to complete. */
+  commands: AvailableCommand[];
   /** Updates whose kind this build does not know, kept for forward compatibility. */
   unknown: SessionUpdate[];
 }
 
 /** A model with nothing in it. */
 export function emptyModel(): ThreadModel {
-  return { messages: [], modes: null, plan: null, unknown: [] };
+  return { messages: [], modes: null, plan: null, commands: [], unknown: [] };
 }
 
 /** Source of message ids for chunks that arrive without one. */
@@ -222,6 +225,14 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
     case 'plan': {
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'plan' }>;
       model.plan = u.entries ?? [];
+      return null;
+    }
+    case 'available_commands_update': {
+      const u = update as Extract<
+        SessionUpdate,
+        { sessionUpdate: 'available_commands_update' }
+      >;
+      model.commands = u.availableCommands ?? [];
       return null;
     }
     case 'current_mode_update': {

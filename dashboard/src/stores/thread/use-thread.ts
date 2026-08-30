@@ -50,6 +50,7 @@ const INITIAL: ThreadSnapshot = {
   connection: 'connecting',
   modes: null,
   plan: null,
+  commands: [],
   error: null,
 };
 

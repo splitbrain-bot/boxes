@@ -150,8 +150,8 @@ spent, no chance of it being read as an instruction:
 !git diff --stat
 ```
 
-Output streams back and ends with the exit code. Commands are capped at 120
-seconds and 256 KiB of output.
+Output is printed as it arrives, as a code block ending with the exit code.
+Commands are capped at 120 seconds and 256 KiB of output.
 
 **Answer permission requests.** When the agent asks to do something requiring
 consent, the request goes to your attached browser. With nobody attached it is
