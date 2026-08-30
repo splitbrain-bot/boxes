@@ -1,5 +1,12 @@
 # Boxes: personal AI agent orchestrator.
 #
+#   docker compose up -d     ->  http://localhost:3000
+#
+# The whole deployment is one published port: the orchestrator serves the
+# dashboard, the API and the /ws gateway on it. Putting it on the internet is
+# a reverse proxy's job, and no proxy is named here — see README.md, which
+# covers the one rule any of them has to follow about /ws.
+#
 # The orchestrator creates session containers at runtime, each on an internal
 # network of its own, so they appear in no compose file.
 
@@ -35,33 +42,17 @@ services:
       # never shell-exec'ing user strings, and by the auth in front.
       - /var/run/docker.sock:/var/run/docker.sock
       - boxes-data:/data
+    ports:
+      # Loopback by default, because the orchestrator has no authentication of
+      # its own: binding it to every interface would publish a
+      # root-equivalent control plane to the LAN. A reverse proxy on this host
+      # reaches it here. One in a container should join this project's network
+      # and address `orchestrator:3000` directly, rather than widening this.
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-3000}:3000"
     networks:
       - default
-      - traefik
     depends_on:
       - egress-proxy
-    labels:
-      traefik.enable: "true"
-      # Dashboard and API, behind basicauth. This catch-all router
-      # hands deep links such as /new and /sessions/:id to the orchestrator's
-      # index.html fallback. The explicit priority keeps /ws ahead of it.
-      traefik.http.routers.boxes.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`)
-      traefik.http.routers.boxes.priority: "10"
-      traefik.http.routers.boxes.entrypoints: websecure
-      traefik.http.routers.boxes.tls.certresolver: ${CERT_RESOLVER:-le}
-      traefik.http.routers.boxes.middlewares: boxes-auth
-      traefik.http.routers.boxes.service: boxes
-      # /ws carries no basicauth: a browser can neither attach Basic
-      # credentials to a WebSocket upgrade nor answer a 401 on one, so the
-      # gateway authenticates the upgrade with the bearer.<token> subprotocol.
-      traefik.http.routers.boxes-ws.rule: Host(`${BASE_DOMAIN:-boxes.localhost}`) && PathPrefix(`/ws`)
-      traefik.http.routers.boxes-ws.priority: "100"
-      traefik.http.routers.boxes-ws.entrypoints: websecure
-      traefik.http.routers.boxes-ws.tls.certresolver: ${CERT_RESOLVER:-le}
-      traefik.http.routers.boxes-ws.service: boxes
-      traefik.http.services.boxes.loadbalancer.server.port: "3000"
-      traefik.http.middlewares.boxes-auth.basicauth.users: ${BASICAUTH_USERS:-}
-      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
 
   egress-proxy:
     build:
@@ -86,6 +77,3 @@ volumes:
 
 networks:
   default:
-  traefik:
-    external: true
-    name: ${TRAEFIK_NETWORK:-traefik}

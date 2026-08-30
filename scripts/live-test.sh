@@ -8,8 +8,7 @@
 # The orchestrator needs PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN from
 # `claude setup-token` before these can pass. It can live outside the repo:
 #
-#   docker compose --env-file ~/.config/boxes.env \
-#     -f compose.yaml -f compose.local.yaml up -d
+#   docker compose --env-file ~/.config/boxes.env up -d
 #   API_BASE=http://localhost:3000 ./scripts/live-test.sh
 #
 # Needs: curl, jq, docker, and node 22 or newer (for the WebSocket client).

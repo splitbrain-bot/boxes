@@ -1,9 +1,9 @@
 # Boxes — personal AI agent orchestrator
 
 Runs AI coding-agent sessions (Claude Code first, other ACP agents later) in
-isolated Docker containers, controlled from a mobile-friendly web UI. It runs
-behind an existing Traefik reverse proxy, or on a single local port with no
-proxy at all.
+isolated Docker containers, controlled from a mobile-friendly web UI. It is
+one service on one port: run it on loopback as-is, or put any reverse proxy
+you already have in front of it.
 
 How the system is put together is described in
 [`ARCHITECTURE.md`](./ARCHITECTURE.md). This README covers running it and the
@@ -21,9 +21,9 @@ as *views*; thread replay on reattach is the adapter's own `session/load`,
 replayed from the session's home volume.
 
 ```
-phone ──wss──▶ Traefik ──▶ orchestrator ──docker exec stdio──▶ claude-agent-acp
-                            (ACP gateway)                       (in container)
-   detaching here ─────────────┘  changes nothing upstream ────────────▲
+phone ──wss──▶ orchestrator ──docker exec stdio──▶ claude-agent-acp
+                (ACP gateway)                       (in container)
+   detaching here ─┘  changes nothing upstream ──────────▲
 ```
 
 ## Layout
@@ -45,13 +45,12 @@ this is the whole local install:
 
 ```
 docker build -t boxes-session:latest session-image/   # not part of compose
-docker compose -f compose.yaml -f compose.local.yaml up -d
+docker compose up -d
 ```
 
-That serves everything on <http://localhost:3000>. The override publishes port
-3000 on loopback and drops the Traefik network and labels; it has no
-basicauth, which is why it binds to loopback only. Do not use it on a shared
-or exposed host.
+That serves everything on <http://localhost:3000>. The port is bound to
+loopback, because Boxes has no authentication of its own — see
+[Putting it on a network](#putting-it-on-a-network) before you move it.
 
 `WS_AUTH_TOKEN` has no default because a shipped secret is not a secret. The
 orchestrator generates one on first boot instead and keeps it in the data
@@ -63,17 +62,8 @@ To run an agent turn you need one credential: a Claude token from
 and the gateway work without it; only inference fails. See [Keeping the token
 out of `.env`](#keeping-the-token-out-of-env).
 
-**Behind Traefik** instead, `docker compose up -d`, with two values that
-cannot have defaults — a domain and a password:
-
-```
-BASE_DOMAIN=agents.example.com
-BASICAUTH_USERS=owner:$$apr1$$...      # htpasswd -nB owner, $ escaped as $$
-```
-
-Leave `BASICAUTH_USERS` unset and the proxied routes reject every request,
-which is the right way for an unconfigured deployment to fail. `.env.example`
-lists every other override; copy it only when you want to change something.
+`.env.example` lists every override; copy it only when you want to change
+something.
 
 **Verify isolation:** `API_BASE=http://localhost:3000 ./scripts/smoke-test.sh`
 
@@ -97,7 +87,8 @@ That carries two things:
   its own location, so it is right behind TLS and right on `localhost` with no
   setting to get wrong. There is no `wsUrl` in the API for a deployment to
   disagree with.
-- **The stack runs with no reverse proxy.** One service, one published port.
+- **The stack runs with no reverse proxy.** One service, one published port,
+  and no deployment topology baked into the compose file.
 
 ## Keeping the token out of `.env`
 
@@ -109,7 +100,7 @@ If you would rather the Claude token not sit there, either works:
 
 - **Keep the file elsewhere.** Nothing requires it to be in the repo:
   ```
-  docker compose --env-file ~/.config/boxes.env -f compose.yaml -f compose.local.yaml up -d
+  docker compose --env-file ~/.config/boxes.env up -d
   ```
 - **Skip the token entirely and log in inside the session.** No token then
   exists in any file or in the container's environment — the credential lands
@@ -174,7 +165,7 @@ limits. No bind mounts, no docker socket, no published ports.
   and an inference-only Claude token. Rotate on suspicion.
 - **The orchestrator holds the Docker socket** (root-equivalent). Mitigated by
   a fixed `HostConfig` template that user input never reaches, no shell-exec
-  of user strings, and Traefik basicauth in front.
+  of user strings, and whatever authentication you put in front of it.
 - **`WS_AUTH_TOKEN` is returned by `GET /api/sessions`**, which is behind the
   same basicauth as the rest of `/api`. The dashboard reads it from there and
   holds it in memory for the length of a page view; it is never written to
@@ -189,13 +180,35 @@ limits. No bind mounts, no docker socket, no published ports.
   private repos** (a documented GitHub gap), hence the classic PAT. Migrating
   the repos to an org is the upgrade path.
 
-## Why `/ws` bypasses basicauth
+## Putting it on a network
 
-Browsers do not reliably attach Basic credentials to a cross-path WebSocket
-upgrade and cannot answer a 401 challenge on one. So the gateway authenticates
-the upgrade itself: the client offers `['acp.v1', 'bearer.<token>']` as
-subprotocols, the gateway validates the token against `WS_AUTH_TOKEN` in
-constant time and selects `acp.v1`. Everything else stays behind basicauth.
+Boxes has no authentication of its own, and it holds the Docker socket. As
+shipped it binds to `127.0.0.1:3000`, which is safe on a machine you are the
+only user of and nowhere else. Anything beyond that is a reverse proxy's job —
+Caddy, nginx, Traefik, whatever you already run. Boxes names none of them and
+carries no configuration for any of them.
+
+Proxy to `127.0.0.1:3000` if the proxy runs on this host, or attach it to the
+`boxes_default` network and use `orchestrator:3000` if it runs in a container.
+Only widen `BIND_ADDR` if something else is doing the authenticating.
+
+Two rules any proxy has to follow:
+
+**1. Put authentication in front of `/` and `/api`, and terminate TLS there.**
+Every route is unauthenticated otherwise, including the one that creates
+containers.
+
+**2. Do not put HTTP authentication in front of `/ws`.** A browser cannot
+attach Basic credentials to a WebSocket upgrade and cannot answer a 401
+challenge on one, so a proxy that guards `/ws` breaks the thread view for
+every browser. It does not need guarding: the gateway authenticates the
+upgrade itself, from the client's offered subprotocols
+`['acp.v1', 'bearer.<token>']`, checking the token against `WS_AUTH_TOKEN` in
+constant time before selecting `acp.v1`.
+
+Also forward the upgrade headers (`Upgrade`, `Connection`) on `/ws`, and give
+it a long read timeout — an agent turn can hold the socket open for minutes
+with nothing on it.
 
 ## Development
 

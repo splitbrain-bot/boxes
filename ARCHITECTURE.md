@@ -30,9 +30,9 @@ Two consequences shape the rest of the design:
                         phone or desktop browser
                                   │ https / wss
                     ┌─────────────▼─────────────┐
-                    │  Traefik (optional)       │  TLS and basicauth,
-                    └─────────────┬─────────────┘  except on /ws
-                                  │
+                    │  any reverse proxy        │  TLS and authentication,
+                    │  (optional)               │  except on /ws
+                    └─────────────┬─────────────┘
               ┌───────────────────▼───────────────────┐
               │            orchestrator               │
               │  /  dashboard   /api  REST            │
@@ -63,8 +63,11 @@ Two consequences shape the rest of the design:
 
 The orchestrator and the proxy are compose services. Session containers are
 created at runtime through the Docker API, so they appear in no compose file.
-Traefik is optional: `compose.local.yaml` publishes port 3000 on loopback and
-drops the Traefik network and labels.
+
+`compose.yaml` publishes one port, on loopback, and names no reverse proxy:
+what sits in front is a deployment decision, not part of the system. The one
+constraint it places on that decision is that `/ws` must not be behind HTTP
+authentication — see below.
 
 ## One origin, one port
 
@@ -106,8 +109,12 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run in this session |
 
-The API carries no authentication of its own. Behind Traefik, basicauth covers
-every route but `/ws`; locally, the port binds to loopback.
+The API carries no authentication of its own; a reverse proxy is expected to
+provide it for `/` and `/api`, and the published port binds to loopback so
+that an unproxied deployment is not an exposed one. `/ws` is the exception in
+both directions: it must *not* be behind HTTP authentication, because a
+browser cannot attach Basic credentials to a WebSocket upgrade, and it does
+not need to be, because the gateway authenticates the upgrade itself.
 
 ### Local commands
 
