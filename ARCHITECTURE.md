@@ -410,10 +410,14 @@ That file is the only place a default is written down, and the only place
 that knows which settings exist. `compose.yaml` hands the orchestrator an env
 file wholesale (`BOXES_ENV`, defaulting to `.env` and optional) and names
 nothing in it, so adding a setting means editing the schema and nothing else.
-The two values it does set, `DATA_DIR` and `EGRESS_PROXY_CONTAINER`, are not
-defaults being restated: they name the volume mount and the container that
-same file creates, and are placed after the env file so that one cannot
-change them and break the wiring.
+The one value it does set, `DATA_DIR`, is the other half of the volume mount
+two lines below it, pinned so the two cannot disagree — an env file that
+moved it would put the database where nothing is mounted and lose it on the
+next recreate, silently. It is placed after the env file so it wins. The
+egress proxy's container name is not set there: `compose.yaml` names the
+container and `config.ts` defaults to the same string, so they agree without
+either restating the other, and a mismatch is loud — sessions lose egress and
+the id shows up in `/healthz`.
 
 An empty value counts as unset. `NTFY_URL=` in an env file arrives as an
 empty string, and failing the boot on a setting nobody set would be a poor

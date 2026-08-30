@@ -27,12 +27,12 @@ services:
       - path: ${BOXES_ENV:-.env}
         required: false
     environment:
-      # Set here rather than defaulted, and deliberately after the env file so
-      # they win over it: these two name the volume mounted below and the
-      # container created further down. They are this file's wiring, not
-      # settings, and an env file that changed them would only break it.
+      # Not a default being restated — config.ts has the same one — but the
+      # other half of the volume mount below, pinned here so the two cannot
+      # disagree. An env file that moved it would put the database somewhere
+      # nothing is mounted, and lose it on the next recreate without saying
+      # so. Placed after the env file, so it wins.
       - DATA_DIR=/data
-      - EGRESS_PROXY_CONTAINER=boxes-egress-proxy
     volumes:
       # Root-equivalent access, mitigated by the fixed HostConfig template, by
       # never shell-exec'ing user strings, and by the auth in front.
@@ -54,8 +54,10 @@ services:
     build:
       context: .
       dockerfile: proxy/Dockerfile
-    # Fixed name: the orchestrator connects this container to each session
-    # network by name.
+    # Fixed name: the orchestrator attaches this container to every session
+    # network by name, and expects this one — it is the default of
+    # EGRESS_PROXY_CONTAINER in orchestrator/src/config.ts. Renaming it here
+    # means setting that too, or sessions get no egress at all.
     container_name: boxes-egress-proxy
     restart: unless-stopped
     read_only: true
