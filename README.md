@@ -1,261 +1,261 @@
-# Boxes — personal AI agent orchestrator
+# Boxes
 
-Runs AI coding-agent sessions (Claude Code first, other ACP agents later) in
-isolated Docker containers, controlled from a mobile-friendly web UI. It is
-one service on one port: run it on loopback as-is, or put any reverse proxy
-you already have in front of it.
+Boxes runs AI coding-agent sessions in isolated Docker containers and gives you
+a mobile-friendly web UI to drive them. Each session is a long-lived container
+with its own workspace volume, its own internal network, and no route out
+except through a proxy that vets every destination.
 
-How the system is put together is described in
-[`ARCHITECTURE.md`](./ARCHITECTURE.md). This README covers running it and the
-risks you are accepting by doing so.
+Agent turns keep running when your browser goes away. The orchestrator — not
+the browser — is the agent's client of record, so you can lock your phone
+mid-task and find the finished thread when you come back.
 
-## The one property that matters
+- **Isolated sessions.** One container, one network, one workspace per session.
+  Non-root, read-only rootfs, no capabilities, no host mounts, no published
+  ports.
+- **Vetted egress only.** Session networks are `internal`; the sole way out is
+  an egress proxy that rejects private addresses and pins the connection to a
+  vetted IP.
+- **One service, one port.** The orchestrator serves the UI, the REST API and
+  the WebSocket gateway on `:3000`. No second origin, nothing to configure.
+- **Claude Code today**, other agents later — sessions speak the Agent Client
+  Protocol (ACP).
 
-**A running agent turn continues when the browser disconnects.** Lock your
-phone mid-task, come back later, and the completed thread is there.
+`ARCHITECTURE.md` describes how it is built.
 
-That works because the orchestrator — not the browser — is the ACP client of
-record. It holds one persistent stdio connection per session to
-`claude-agent-acp` inside the session container. Browsers attach and detach
-as *views*; thread replay on reattach is the adapter's own `session/load`,
-replayed from the session's home volume.
+## Requirements
+
+- Docker with Compose v2, on Linux or macOS
+- A Claude token from `claude setup-token` (subscription-based, inference only)
+- Node 22+ — only if you want to develop on Boxes itself
+
+## Install
+
+```sh
+git clone https://github.com/splitbrain/experiments.git boxes
+cd boxes
+
+docker build -t boxes-session:latest session-image/
+docker compose up -d
+```
+
+The session image is deliberately **not** part of `compose.yaml` — the
+orchestrator creates session containers at runtime. Build it once as shown,
+and rebuild it whenever `session-image/` changes.
+
+Boxes is now on <http://localhost:3000>, bound to loopback because it ships
+with no authentication of its own. See
+[Behind a reverse proxy](#behind-a-reverse-proxy) before moving it.
+
+## Configure
+
+There is no required configuration — every setting has a working default. To
+change one, copy `.env.example` to `.env` and edit it. To keep the file out of
+the repo, point at it instead:
+
+```sh
+BOXES_ENV=~/.config/boxes.env docker compose up -d
+```
+
+To actually run an agent turn you need one credential:
+
+```sh
+claude setup-token          # then put the value in your env file
+PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+```
+
+Without it, sessions still start and the UI still works — only inference
+fails. Alternatively skip the variable and log in inside a session, which
+keeps the credential in that session's home volume and out of every file:
+
+```sh
+docker exec -it session-<id> claude /login
+```
+
+### Settings
+
+| Variable | Default | What |
+|---|---|---|
+| `BIND_ADDR` | `127.0.0.1` | Interface the port is published on |
+| `HOST_PORT` | `3000` | Published port |
+| `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN` | — | Claude token; without it no turn can run |
+| `PROFILE_DEFAULT_GH_TOKEN` | — | Classic GitHub PAT for the bot account |
+| `PROFILE_DEFAULT_GIT_NAME` | `boxes-bot` | Git author name in sessions |
+| `PROFILE_DEFAULT_GIT_EMAIL` | `boxes-bot@users.noreply.github.com` | Git author email |
+| `WS_AUTH_TOKEN` | generated | Gateway bearer token; generated on first boot into `/data/ws-auth-token` and reused |
+| `SESSION_IMAGE` | `boxes-session:latest` | Image sessions run |
+| `SESSION_SUBNET_POOL` | `10.200.0.0/16` | Pool sessions get a `/24` from |
+| `SESSION_MEM_LIMIT` | `4g` | Per-session memory cap |
+| `SESSION_CPUS` | `2` | Per-session CPU cap |
+| `SESSION_PIDS_LIMIT` | `512` | Per-session pids cap |
+| `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
+| `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
+| `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
+| `NTFY_URL` | — | POSTed when a permission request is waiting |
+| `DATA_DIR` | `/data` | Database and generated token, inside the volume |
+| `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Proxy container the orchestrator attaches to session networks |
+
+Everything is parsed and validated at boot, so a bad value fails startup
+rather than surfacing later. `orchestrator/src/config.ts` is the full list.
+
+## Run
+
+```sh
+docker compose up -d          # start
+docker compose logs -f        # follow
+docker compose down           # stop
+```
+
+Health check and verification:
+
+```sh
+curl localhost:3000/healthz
+API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
+```
+
+The smoke test needs no credentials: it creates throwaway sessions, asserts the
+isolation properties from inside a container, and cleans up. Run it after any
+change to networking, the proxy, or the session image.
+
+## Use
+
+Open <http://localhost:3000>.
+
+**Create a session.** Give it a name and, optionally, an `https://` repository
+URL — it is cloned into `/workspace/repo` on first start. The session gets its
+own container, network and volumes.
+
+**Talk to the agent.** Tap a session card to open its thread. That is the whole
+interface: type, and the turn runs in the container. Close the tab or lock your
+phone whenever you like; reattaching replays the thread from the session's own
+history. Opening a stopped session starts it again.
+
+**Run a shell command with `!`.** A composer line starting with `!` runs as
+`bash -lc` in the session container and never reaches the model — no tokens
+spent, no chance of it being read as an instruction:
 
 ```
-phone ──wss──▶ orchestrator ──docker exec stdio──▶ claude-agent-acp
-                (ACP gateway)                       (in container)
-   detaching here ─┘  changes nothing upstream ──────────▲
+!npm test
+!git diff --stat
+```
+
+Output streams back and ends with the exit code. Commands are capped at 120
+seconds and 256 KiB of output.
+
+**Answer permission requests.** When the agent asks to do something requiring
+consent, the request goes to your attached browser. With nobody attached it is
+queued (and posted to `NTFY_URL` if set) and delivered to the next browser to
+attach. Nothing is ever auto-approved.
+
+**Manage the session.** The ⓘ corner of a card opens its details and controls:
+start, stop, delete, the container and network names, and the WebSocket URL and
+bearer token for attaching your own ACP client. Deleting keeps the volumes
+unless you tick purge, because they hold the agent's work.
+
+Idle sessions — no turn, no waiting request, no attached browser — are stopped
+after `IDLE_STOP_MINUTES`. They are never deleted.
+
+## Behind a reverse proxy
+
+Boxes has no authentication and holds the Docker socket, so as shipped it binds
+to `127.0.0.1`. Anything beyond a single-user machine needs a reverse proxy in
+front — Caddy, nginx, Traefik, whatever you already run. Proxy to
+`127.0.0.1:3000`, or join the `boxes_default` network and use
+`orchestrator:3000` if the proxy is itself a container. Only widen `BIND_ADDR`
+once something else is doing the authenticating.
+
+Two rules:
+
+1. **Authenticate `/` and `/api`, and terminate TLS there.** Every route is
+   otherwise open, including the one that creates containers.
+2. **Do not put HTTP authentication in front of `/ws`.** Browsers cannot attach
+   Basic credentials to a WebSocket upgrade, so guarding it breaks every thread
+   view. It does not need guarding: the gateway authenticates the upgrade
+   itself against `WS_AUTH_TOKEN`.
+
+Also forward `Upgrade` and `Connection` on `/ws`, and give it a long read
+timeout — a turn can hold the socket open for minutes with nothing on it.
+
+## Security model
+
+Isolation rests on two Docker primitives, with nothing touching the host
+firewall:
+
+- **Session networks are `internal`.** No NAT, no default route: no L3 path to
+  your LAN, the internet, or another session.
+- **The egress proxy is the only way out.** It resolves the target, rejects the
+  request if *any* resolved address is private, then connects to that specific
+  vetted address without re-resolving — which is what closes DNS rebinding. If
+  the proxy is down, sessions have no egress at all.
+
+Session containers additionally run as a non-root user with `ReadonlyRootfs`,
+`CapDrop: ALL`, `no-new-privileges`, a tmpfs `/tmp`, and memory, CPU and pids
+limits.
+
+Known residual risks, accepted deliberately:
+
+- Host services bound to `0.0.0.0` stay reachable from inside a session at the
+  host's per-bridge IP; Docker's internal-network isolation filters forwarded
+  traffic only. Anything sensitive on the host must have its own auth.
+- The orchestrator holds the Docker socket, which is root-equivalent. It is
+  mitigated by a fixed container template that user input never reaches and by
+  never shell-executing user strings — but the auth you put in front of `/api`
+  is what keeps it yours.
+- `GET /api/sessions` returns `WS_AUTH_TOKEN`, behind that same auth.
+- Prompt injection can leak a session's env tokens. Keep the Claude token
+  inference-only and the GitHub PAT narrow, and rotate on suspicion.
+- Protocol behaviour is pinned to `claude-agent-acp` 0.70.0. Re-check
+  capabilities and WebSocket framing on upgrade.
+
+## Development
+
+One toolchain across the repository: every package builds with Vite, tests with
+Vitest, and type-checks before its Docker bundle, so an image cannot be built
+from code that fails `tsc`.
+
+```sh
+cd orchestrator && npm run check && npm test
+cd proxy        && npm run check && npm test
+cd dashboard    && npm run check && npm test && npm run build
+```
+
+`npm run dev` in `dashboard/` serves the SPA with `/api`, `/healthz` and `/ws`
+proxied to an orchestrator on port 3000. The dashboard's tests run in two
+projects: `unit` for the framework-free stores, and `e2e`, which builds the
+production bundle and drives it in Chromium against stub backends.
+`/playground` renders every message part kind over a canned store, and the
+browser suite asserts that page.
+
+`scripts/live-test.sh` covers what only real inference can prove — a turn
+surviving the browser leaving, thread replay on reattach, a permission request
+held with nobody watching — and needs
+`PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`.
+
+### Frontend conventions
+
+Tailwind utilities and shadcn/assistant-ui components only: no inline `style=`,
+no CSS-in-JS, and design tokens defined once in `src/globals.css` — including
+the `@theme inline` bridge, without which Tailwind silently drops every token
+utility.
+
+Components under `src/components/assistant-ui/` and `src/components/ui/` are
+installed by their official CLIs and committed. Our edits carry a comment
+saying so. Upgrade by re-running the CLI and reading the diff:
+
+```sh
+cd dashboard
+npx assistant-ui add thread --overwrite     # or: npx shadcn add <name> --overwrite
+npm run check && npm test
 ```
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `orchestrator/` | Node 22 + TS: REST, SQLite, Docker lifecycle, ACP gateway, reaper |
-| `dashboard/` | React SPA — session list and chat — served by the orchestrator at `/` |
-| `proxy/` | The in-house egress proxy — the security boundary |
+| `orchestrator/` | Node 22 + TypeScript: REST API, SQLite, Docker lifecycle, ACP gateway, idle reaper |
+| `dashboard/` | React SPA — session list and chat — built into the orchestrator image and served at `/` |
+| `proxy/` | The egress proxy: dependency-free TypeScript, the security boundary |
 | `session-image/` | The per-session container image |
 | `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
 | `scripts/smoke-test.sh` | Security smoke test, no credentials needed |
 | `scripts/live-test.sh` | The checks that need a real Claude token |
-
-## Setup
-
-**There is no configuration step.** Every setting has a working default, so
-this is the whole local install:
-
-```
-docker build -t boxes-session:latest session-image/   # not part of compose
-docker compose up -d
-```
-
-That serves everything on <http://localhost:3000>. The port is bound to
-loopback, because Boxes has no authentication of its own — see
-[Putting it on a network](#putting-it-on-a-network) before you move it.
-
-`WS_AUTH_TOKEN` has no default because a shipped secret is not a secret. The
-orchestrator generates one on first boot instead and keeps it in the data
-volume at `/data/ws-auth-token` (mode 0600), so it survives restarts. Set the
-variable to pin or rotate it.
-
-To run an agent turn you need one credential: a Claude token from
-`claude setup-token`, as `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`. Sessions
-and the gateway work without it; only inference fails. See [Keeping the token
-out of `.env`](#keeping-the-token-out-of-env).
-
-`.env.example` lists every override; copy it only when you want to change
-something.
-
-**Verify isolation:** `API_BASE=http://localhost:3000 ./scripts/smoke-test.sh`
-
-5. **Use it.** Open `/`, create a session, and tap its card. That is the
-   conversation — one tap from the list, nothing to configure, on any device.
-   The ⓘ corner of a card opens the same session's controls and details.
-
-   A stopped session is fine to open: attaching starts the container, and the
-   adapter replays the thread.
-
-## One origin
-
-The orchestrator serves everything on one port: the dashboard at `/`, the API
-at `/api`, and the gateway at `/ws`. The dashboard is built into the
-orchestrator image and served from there, so there is no second frontend
-service and no second origin.
-
-That carries two things:
-
-- **Nothing needs configuring.** The browser derives the WebSocket URL from
-  its own location, so it is right behind TLS and right on `localhost` with no
-  setting to get wrong. There is no `wsUrl` in the API for a deployment to
-  disagree with.
-- **The stack runs with no reverse proxy.** One service, one published port,
-  and no deployment topology baked into the compose file.
-
-## Keeping the token out of `.env`
-
-`.env` is an ordinary file in the working directory. Anything with access to
-that directory can read it — including a coding agent you run in this repo.
-It is gitignored, not hidden.
-
-If you would rather the Claude token not sit there, either works:
-
-- **Keep the file elsewhere.** Nothing requires it to be in the repo:
-  ```
-  BOXES_ENV=~/.config/boxes.env docker compose up -d
-  ```
-- **Skip the token entirely and log in inside the session.** No token then
-  exists in any file or in the container's environment — the credential lands
-  in that session's own home volume:
-  ```
-  docker exec -it session-<id> claude /login
-  ```
-
-Either way the value is still visible to anything that can run `docker
-inspect` or `docker exec` on this host, so treat these as "not lying around in
-the repo", not as isolation. The token is inference-only and rotatable; see
-[Risks you are accepting](#risks-you-are-accepting) for what it can and cannot
-do if it leaks.
-
-## How isolation works
-
-Two legs, both in Docker's own primitives — nothing touches the host firewall
-and no service needs `NET_ADMIN`:
-
-1. **Every session network is `internal`.** No NAT, no default route. An agent
-   has zero L3 path to the LAN, the internet, or another session.
-2. **One egress proxy is the sole way out.** `proxy/` is ~250 lines of
-   dependency-free TypeScript, attached to each session network at create
-   time with the alias `proxy`. Sessions get `HTTP_PROXY`/`HTTPS_PROXY`
-   pointing at it.
-
-The proxy's critical rule: resolve the target, reject if **any** resolved
-address is private, then connect to a **specific vetted address** without
-re-resolving. Checking every answer and pinning the connection is what closes
-DNS rebinding — a hostname must not pass with a public A record and connect
-with a private one. v4-mapped IPv6 forms (`::ffff:192.168.1.1`) are vetted as
-the IPv4 address they actually reach, and unparseable input fails closed.
-That logic is `proxy/src/cidr.ts`, unit-tested and exercised end-to-end by the
-smoke test.
-
-Fail-closed by construction: if the proxy is down or detached, sessions have
-no egress at all. There is no direct route to fall back to.
-
-Session containers additionally run non-root, with `ReadonlyRootfs`,
-`CapDrop: ALL`, `no-new-privileges`, a tmpfs `/tmp`, and memory/CPU/pids
-limits. No bind mounts, no docker socket, no published ports.
-
-## Risks you are accepting
-
-- **The host stays addressable at its per-bridge IP.** Docker's
-  internal-network isolation filters *forwarded* traffic only, so host
-  services bound to `0.0.0.0` (sshd, other stacks' published ports) are
-  reachable from inside a session. This is an explicitly accepted residual
-  surface: everything sensitive on this host is assumed to sit behind its own
-  auth. The smoke test asserts and logs it rather than failing. If that
-  assumption ever stops holding, the retrofit is a DOCKER-USER/INPUT firewall
-  sidecar.
-- **Version drift is the main residual risk.** The protocol facts this is
-  built on are pinned to `claude-agent-acp` 0.70.0. On upgrade, re-check:
-  initialize capabilities, the client-bound method set, and WS
-  framing/subprotocol handling. Unknown methods get a JSON-RPC
-  method-not-found rather than silent misbehaviour, and an unknown
-  `session/update` kind renders as nothing rather than breaking the thread,
-  so drift is visible without being fatal.
-- **Prompt injection can leak session env tokens.** Bounded by: read-only
-  access on upstream private repos, fork-only writes, a rotatable classic PAT,
-  and an inference-only Claude token. Rotate on suspicion.
-- **The orchestrator holds the Docker socket** (root-equivalent). Mitigated by
-  a fixed `HostConfig` template that user input never reaches, no shell-exec
-  of user strings, and whatever authentication you put in front of it.
-- **`WS_AUTH_TOKEN` is returned by `GET /api/sessions`**, which is behind the
-  same basicauth as the rest of `/api`. The dashboard reads it from there and
-  holds it in memory for the length of a page view; it is never written to
-  browser storage. Acceptable for a personal tool; rotate by editing `.env`
-  and restarting.
-- **`!bang` commands run arbitrary shell in the session container.** They add
-  no privilege — the agent can already run anything there, and the command
-  goes to the container's own shell as an argument, never to a host command
-  line — but they are as powerful as the container is, so the basicauth in
-  front of `/api` is what keeps them yours.
-- **Fine-grained GitHub PATs cannot act as a collaborator on another user's
-  private repos** (a documented GitHub gap), hence the classic PAT. Migrating
-  the repos to an org is the upgrade path.
-
-## Putting it on a network
-
-Boxes has no authentication of its own, and it holds the Docker socket. As
-shipped it binds to `127.0.0.1:3000`, which is safe on a machine you are the
-only user of and nowhere else. Anything beyond that is a reverse proxy's job —
-Caddy, nginx, Traefik, whatever you already run. Boxes names none of them and
-carries no configuration for any of them.
-
-Proxy to `127.0.0.1:3000` if the proxy runs on this host, or attach it to the
-`boxes_default` network and use `orchestrator:3000` if it runs in a container.
-Only widen `BIND_ADDR` if something else is doing the authenticating.
-
-Two rules any proxy has to follow:
-
-**1. Put authentication in front of `/` and `/api`, and terminate TLS there.**
-Every route is unauthenticated otherwise, including the one that creates
-containers.
-
-**2. Do not put HTTP authentication in front of `/ws`.** A browser cannot
-attach Basic credentials to a WebSocket upgrade and cannot answer a 401
-challenge on one, so a proxy that guards `/ws` breaks the thread view for
-every browser. It does not need guarding: the gateway authenticates the
-upgrade itself, from the client's offered subprotocols
-`['acp.v1', 'bearer.<token>']`, checking the token against `WS_AUTH_TOKEN` in
-constant time before selecting `acp.v1`.
-
-Also forward the upgrade headers (`Upgrade`, `Connection`) on `/ws`, and give
-it a long read timeout — an agent turn can hold the socket open for minutes
-with nothing on it.
-
-## Development
-
-One toolchain across the repository. Every package builds with Vite and tests
-with Vitest, and every Docker build runs `tsc --noEmit` *before* the bundle,
-so an image cannot be built from code that fails type-checking.
-
-```
-cd orchestrator && npm run check && npm test
-cd proxy        && npm run check && npm test
-cd dashboard    && npm run check && npm test && npm run build
-```
-
-The dashboard's `npm test` runs two projects: `unit` for the framework-free
-stores, and `e2e`, which builds the production bundle and drives it in
-Chromium against a stub orchestrator and a stub ACP gateway. `npm run dev`
-serves the app with `/api`, `/healthz` and `/ws` proxied to a local
-orchestrator on port 3000.
-
-`scripts/smoke-test.sh` needs no credentials and is the security gate.
-`scripts/live-test.sh` covers what only a real inference call can prove —
-subscription auth, a turn surviving the browser leaving, thread replay on
-reattach, and a permission request held with nobody watching — so it needs
-`PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN` set.
-
-### Frontend conventions
-
-The dashboard's dependencies dictate its stack rather than the other way
-round: assistant-ui's components are written in Tailwind utilities, so
-Tailwind compiles from source on every build and is the one styling system.
-Rules, enforced in review: Tailwind utilities and shadcn/assistant-ui
-components everywhere, no inline `style=`, no CSS-in-JS, and design tokens
-defined once in `src/globals.css` — including the `@theme inline` bridge,
-without which Tailwind silently drops every token utility.
-
-Components under `src/components/assistant-ui/` and `src/components/ui/` are
-installed by their official CLIs and committed. They are ours to edit, and the
-edits we have made carry a comment saying so. Upgrade by re-running the CLI
-with `--overwrite` and reading the diff:
-
-```
-cd dashboard
-npx assistant-ui add thread --overwrite     # or: npx shadcn add <name> --overwrite
-npm run check && npm test
-```
-
-`/playground` renders every part kind over a canned store, which is where that
-diff is reviewed by eye. The browser suite asserts the same page, so a
-regression in an upgraded component fails the build rather than surprising you
-in a live session.
+| `ARCHITECTURE.md` | How the system is put together |
