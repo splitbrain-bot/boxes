@@ -76,16 +76,25 @@ for (const scheme of ['light', 'dark'] as const) {
   });
 }
 
-test('the aui- layer is actually loaded', async () => {
+test('the components are styled by our own Tailwind build', async () => {
   const { page, close } = await openPage(stub.url, '/playground');
   try {
-    // The thread root carries an aui- class the styles package defines and a
-    // Tailwind utility the component itself carries. A missing stylesheet
-    // shows up as no computed background at all.
     const root = page.locator('.aui-thread-root');
     await expect.poll(() => root.count()).toBe(1);
-    const bg = await root.evaluate((el) => getComputedStyle(el).backgroundColor);
-    expect(bg).not.toBe('rgba(0, 0, 0, 0)');
+
+    // bg-background is a utility the component carries and our @theme bridge
+    // defines. No background here means the bridge is gone and every other
+    // token utility went with it.
+    const style = await root.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { bg: cs.backgroundColor, position: cs.position };
+    });
+    expect(style.bg).not.toBe('rgba(0, 0, 0, 0)');
+
+    // The thread lays out in the flow of whatever embeds it. @assistant-ui/
+    // styles positioned .aui-root fixed, which floated the thread over the
+    // dashboard's own chrome; nothing may reintroduce that.
+    expect(style.position).toBe('static');
   } finally {
     await close();
   }

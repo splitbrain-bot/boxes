@@ -1,0 +1,313 @@
+import assert from 'node:assert/strict';
+import { expect, test, vi } from 'vitest';
+import type {
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  SessionModeState,
+  SessionUpdate,
+} from './acp-types.ts';
+import type { AcpClient, AcpClientHandlers } from './acp-client.ts';
+import { ThreadStore } from './thread-store.ts';
+import { convertMessage } from './convert.ts';
+import { resetIds, type Message } from './translate.ts';
+
+/**
+ * The store against a fake client, which is the whole protocol surface it
+ * touches: notifications in, requests out.
+ */
+
+/** A stand-in AcpClient that records what the store asks of it. */
+class FakeClient {
+  sessionId: string | null = 'acp-1';
+  readonly requests: Array<{ method: string; params: unknown }> = [];
+  readonly notifications: Array<{ method: string; params: unknown }> = [];
+  /** Resolvers for requests the test wants to hold open. */
+  private readonly held: Array<(v: unknown) => void> = [];
+  hold = false;
+  fail: string | null = null;
+  disposed = false;
+
+  constructor(readonly handlers: AcpClientHandlers) {}
+
+  start(): void {
+    this.handlers.onResetThread();
+    this.handlers.onState('ready');
+    this.handlers.onReady(this.modes);
+  }
+
+  modes: SessionModeState | null = null;
+
+  request(method: string, params: unknown): Promise<unknown> {
+    this.requests.push({ method, params });
+    if (this.fail) return Promise.reject(new Error(this.fail));
+    if (this.hold) return new Promise((resolve) => this.held.push(resolve));
+    return Promise.resolve({});
+  }
+
+  /** Finishes the oldest held request. */
+  settle(): void {
+    this.held.shift()?.({});
+  }
+
+  notify(method: string, params: unknown): void {
+    this.notifications.push({ method, params });
+  }
+
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+/** A store wired to a fake client, already started. */
+function makeStore(configure?: (c: FakeClient) => void): {
+  store: ThreadStore;
+  client: FakeClient;
+} {
+  resetIds();
+  let client!: FakeClient;
+  const store = new ThreadStore({
+    createClient: (handlers) => {
+      client = new FakeClient(handlers);
+      configure?.(client);
+      return client as unknown as AcpClient;
+    },
+  });
+  store.start();
+  return { store, client };
+}
+
+/** Pushes one session/update at the store, as the gateway would. */
+function push(client: FakeClient, update: SessionUpdate): void {
+  client.handlers.onUpdate({ sessionId: 'acp-1', update });
+}
+
+/**
+ * The converted parts of one message. ThreadMessageLike allows a bare string
+ * for content; convertMessage never produces one, so the tests read parts.
+ */
+function partsOf(message: Message): ConvertedPart[] {
+  const content = convertMessage(message).content;
+  assert.ok(Array.isArray(content), 'convertMessage always produces parts');
+  return content as ConvertedPart[];
+}
+
+/** One converted part, in the shape the assertions read it. */
+type ConvertedPart = {
+  type: string;
+  text?: string;
+  toolName?: string;
+  approval?: {
+    id: string;
+    options?: Array<{ id: string; kind: string; label?: string }>;
+  };
+};
+
+test('a snapshot changes identity when a streamed message grows', () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'Hel' },
+  } as SessionUpdate);
+  const first = store.getSnapshot().messages;
+
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'lo' },
+  } as SessionUpdate);
+  const second = store.getSnapshot().messages;
+
+  // A view that memoised on identity has to see a new object, or it would
+  // keep rendering "Hel" after the rest arrived.
+  assert.notEqual(first[0], second[0]);
+  assert.deepEqual(partsOf(second[0]!), [{ type: 'text', text: 'Hello' }]);
+});
+
+test('subscribers are woken on every update', () => {
+  const { store, client } = makeStore();
+  const listener = vi.fn();
+  store.subscribe(listener);
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'x' },
+  } as SessionUpdate);
+  expect(listener).toHaveBeenCalled();
+});
+
+test('a prompt marks the thread running until it answers', async () => {
+  const { store, client } = makeStore((c) => {
+    c.hold = true;
+  });
+  assert.equal(store.getSnapshot().isRunning, false);
+
+  const sent = store.send('hello');
+  assert.equal(store.getSnapshot().isRunning, true);
+  assert.deepEqual(client.requests[0], {
+    method: 'session/prompt',
+    params: { sessionId: 'acp-1', prompt: [{ type: 'text', text: 'hello' }] },
+  });
+
+  client.settle();
+  await sent;
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('a failed prompt clears the running state and reports the reason', async () => {
+  const { store } = makeStore((c) => {
+    c.fail = 'upstream not connected';
+  });
+  await assert.rejects(() => store.send('hello'));
+  assert.equal(store.getSnapshot().isRunning, false);
+  assert.equal(store.getSnapshot().error, 'upstream not connected');
+});
+
+test('cancel notifies the adapter and stops the running state', () => {
+  const { store, client } = makeStore((c) => {
+    c.hold = true;
+  });
+  void store.send('long one');
+  store.cancel();
+  assert.deepEqual(client.notifications, [
+    { method: 'session/cancel', params: { sessionId: 'acp-1' } },
+  ]);
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('a reconnect replay rebuilds the thread instead of doubling it', () => {
+  const { store, client } = makeStore();
+  const script: SessionUpdate[] = [
+    { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } } as SessionUpdate,
+    {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'hello' },
+    } as SessionUpdate,
+  ];
+  for (const u of script) push(client, u);
+  assert.equal(store.getSnapshot().messages.length, 2);
+
+  // What a fresh connection does: reset, then replay the same history.
+  client.handlers.onResetThread();
+  assert.equal(store.getSnapshot().messages.length, 0);
+  for (const u of script) push(client, u);
+  assert.equal(store.getSnapshot().messages.length, 2);
+});
+
+test('a permission request attaches to its tool call and its answer unblocks the turn', async () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 't1',
+    title: 'Write main.ts',
+    kind: 'edit',
+  });
+
+  const request: RequestPermissionRequest = {
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    options: [
+      { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+    ],
+  };
+  const answered: Promise<RequestPermissionResponse> = client.handlers.onPermission(request);
+
+  // The options render on the tool call, mapped into approval vocabulary.
+  const part = partsOf(store.getSnapshot().messages[0]!)[0]!;
+  assert.equal(part.type, 'tool-call');
+  const approval = part.approval;
+  assert.ok(approval);
+  assert.deepEqual(approval.options, [
+    { id: 'yes', kind: 'allow-once', label: 'Allow' },
+    { id: 'no', kind: 'reject-once', label: 'Reject' },
+  ]);
+
+  store.respondToApproval(approval.id, 'yes');
+  assert.deepEqual(await answered, { outcome: { outcome: 'selected', optionId: 'yes' } });
+});
+
+test('declining to choose cancels the request rather than answering it', async () => {
+  const { store, client } = makeStore();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't2', title: 'Delete file' });
+  const answered = client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't2' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+
+  store.respondToApproval('approval-1', undefined);
+  assert.deepEqual(await answered, { outcome: { outcome: 'cancelled' } });
+});
+
+test('a permission request for an unannounced call makes a place for itself', async () => {
+  const { store, client } = makeStore();
+  const answered = client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 'tX', title: 'Run rm -rf' },
+    options: [{ optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+  });
+
+  const part = partsOf(store.getSnapshot().messages[0]!)[0]!;
+  assert.equal(part.type, 'tool-call');
+  assert.equal(part.toolName, 'Run rm -rf');
+
+  store.respondToApproval('approval-1', 'no');
+  assert.deepEqual(await answered, { outcome: { outcome: 'selected', optionId: 'no' } });
+});
+
+test('answering the same approval twice does nothing the second time', async () => {
+  const { store, client } = makeStore();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't3', title: 'Edit' });
+  const answered = client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't3' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+  store.respondToApproval('approval-1', 'yes');
+  store.respondToApproval('approval-1', undefined);
+  assert.deepEqual(await answered, { outcome: { outcome: 'selected', optionId: 'yes' } });
+});
+
+test('the mode switcher sets the mode optimistically and rolls back on failure', async () => {
+  const modes: SessionModeState = {
+    currentModeId: 'default',
+    availableModes: [
+      { id: 'default', name: 'Default' },
+      { id: 'auto', name: 'Auto' },
+    ],
+  };
+  const { store, client } = makeStore((c) => {
+    c.modes = modes;
+  });
+  assert.equal(store.getSnapshot().modes?.currentModeId, 'default');
+
+  await store.setMode('auto');
+  assert.deepEqual(client.requests.at(-1), {
+    method: 'session/set_mode',
+    params: { sessionId: 'acp-1', modeId: 'auto' },
+  });
+  assert.equal(store.getSnapshot().modes?.currentModeId, 'auto');
+
+  client.fail = 'mode not supported';
+  await store.setMode('default');
+  assert.equal(store.getSnapshot().modes?.currentModeId, 'auto');
+  assert.equal(store.getSnapshot().error, 'mode not supported');
+});
+
+test('a current_mode_update from the adapter moves the switcher', () => {
+  const { store, client } = makeStore((c) => {
+    c.modes = {
+      currentModeId: 'default',
+      availableModes: [
+        { id: 'default', name: 'Default' },
+        { id: 'auto', name: 'Auto' },
+      ],
+    };
+  });
+  push(client, { sessionUpdate: 'current_mode_update', currentModeId: 'auto' });
+  assert.equal(store.getSnapshot().modes?.currentModeId, 'auto');
+});
+
+test('disposing closes the client', () => {
+  const { store, client } = makeStore();
+  store.dispose();
+  assert.equal(client.disposed, true);
+});

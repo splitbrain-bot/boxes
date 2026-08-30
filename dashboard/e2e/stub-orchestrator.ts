@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { SessionDetail, SessionSummary } from '../../shared/types.ts';
+import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
 
 /**
  * A stand-in orchestrator for the browser tests: it serves the built
@@ -61,6 +62,8 @@ export interface StubState {
 export interface StubOrchestrator {
   url: string;
   state: StubState;
+  /** The ACP gateway attached to the same server, on the same origin. */
+  gateway: StubGateway;
   /** Bodies posted to the exec endpoint, in order. */
   execCalls: Array<{ sessionId: string; command: string }>;
   /** Combined output the exec endpoint streams back, by command. */
@@ -73,6 +76,7 @@ export interface StubOrchestrator {
 export async function startStubOrchestrator(
   distDir: string,
   initial: SessionDetail[] = [stubSession()],
+  gatewayScript?: Partial<GatewayScript>,
 ): Promise<StubOrchestrator> {
   const dir = resolve(distDir);
   const state: StubState = { sessions: initial };
@@ -117,12 +121,24 @@ export async function startStubOrchestrator(
     return sendBundle(res, dir, url);
   });
 
+  // Same origin as the dashboard, which is how the deployment serves it and
+  // why the browser can derive the WebSocket URL from its own location.
+  const gateway = attachStubGateway(server, {
+    token: initial[0]?.wsToken ?? 'stub-token',
+    modes: null,
+    prompts: [],
+    permissions: [],
+    queuedPermission: null,
+    ...gatewayScript,
+  });
+
   await new Promise<void>((ok) => server.listen(0, '127.0.0.1', ok));
   const { port } = server.address() as AddressInfo;
 
   return {
     url: `http://127.0.0.1:${port}`,
     state,
+    gateway,
     execCalls,
     get execOutput() {
       return execOutput;
@@ -131,7 +147,12 @@ export async function startStubOrchestrator(
       execOutput = fn;
     },
     server,
-    close: () => new Promise<void>((ok) => server.close(() => ok())),
+    close: () =>
+      new Promise<void>((ok) => {
+        gateway.close();
+        server.closeAllConnections();
+        server.close(() => ok());
+      }),
   };
 }
 

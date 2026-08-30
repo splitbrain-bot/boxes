@@ -1,12 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "tw-shimmer";
-/*
- * The aui-* layer the installed assistant-ui components carry alongside
- * their Tailwind utilities. It is only those 147 class rules: no reset, no
- * preflight, nothing that could reach our own markup.
- */
-@import "@assistant-ui/styles/index.css";
 
 /*
  * The dashboard's whole design system, in one file.

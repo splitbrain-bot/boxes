@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.node.json",
     "build": "vite build",
     "dev": "vite",
     "test": "vitest run"
@@ -12,7 +12,6 @@
   "dependencies": {
     "@assistant-ui/react": "0.15.17",
     "@assistant-ui/react-markdown": "0.14.13",
-    "@assistant-ui/styles": "0.3.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.37.0",
@@ -31,11 +30,13 @@
     "@types/node": "^22.13.1",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.0",
     "playwright": "^1.62.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.3",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "ws": "^8.21.3"
   }
 }

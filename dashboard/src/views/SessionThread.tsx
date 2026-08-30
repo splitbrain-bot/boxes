@@ -1,30 +1,103 @@
-import { Info } from 'lucide-react';
-import { Link, useParams } from 'react-router';
-import { Button } from '@/components/ui/button';
+import {
+  AssistantRuntimeProvider,
+  useExternalStoreRuntime,
+  type AppendMessage,
+} from '@assistant-ui/react';
+import { useCallback, useEffect, useState } from 'react';
+import { useParams } from 'react-router';
+import type { SessionDetail } from '../../../shared/types.ts';
+import { Thread } from '@/components/assistant-ui/elements/thread.aui';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { api } from '../api.ts';
+import { convertMessage } from '../stores/thread/convert.ts';
+import type { Message } from '../stores/thread/translate.ts';
+import { useThread } from '../stores/thread/use-thread.ts';
+import { ThreadHeader } from '@/components/ThreadHeader';
+
+/** The text of a composer submission, which is all we send upstream. */
+function textOf(message: AppendMessage): string {
+  return message.content
+    .map((part) => (part.type === 'text' ? part.text : ''))
+    .join('')
+    .trim();
+}
 
 /**
- * The thread view. Placeholder: the runtime, the ACP client and the store
- * land here next.
+ * A session's conversation, inside the dashboard.
+ *
+ * The browser speaks plain ACP to the gateway; the store turns the adapter's
+ * session/update notifications into messages and this route mounts them into
+ * the installed assistant-ui components.
  */
 export function SessionThread() {
   const { id = '' } = useParams();
+  const [session, setSession] = useState<SessionDetail | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // The WS token comes from the session API, behind the deployment's auth.
+  useEffect(() => {
+    let live = true;
+    api
+      .getSession(id)
+      .then((s) => live && setSession(s))
+      .catch((err: Error) => live && setLoadError(err.message));
+    return () => {
+      live = false;
+    };
+  }, [id]);
+
+  const { store, state } = useThread(id, session?.wsToken ?? null);
+
+  const onNew = useCallback(
+    async (message: AppendMessage) => {
+      const text = textOf(message);
+      if (!text || !store) return;
+      await store.send(text);
+    },
+    [store],
+  );
+
+  const runtime = useExternalStoreRuntime<Message>({
+    messages: state.messages as Message[],
+    convertMessage,
+    isRunning: state.isRunning,
+    isSendDisabled: !store || state.connection !== 'ready',
+    onNew,
+    onCancel: async () => store?.cancel(),
+    onRefetchThread: async () => store?.refetch(),
+    onRespondToToolApproval: ({ approvalId, approved, optionId }) => {
+      // A decision with no option id is a plain refusal to choose; the store
+      // turns that into ACP's cancelled outcome.
+      store?.respondToApproval(approvalId, approved || optionId ? optionId : undefined);
+    },
+  });
 
   return (
-    <div className="flex h-dvh flex-col">
-      <header className="flex items-center justify-between gap-2 border-b px-4 py-3">
-        <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
-          ← Sessions
-        </Link>
-        <span className="font-mono text-xs text-muted-foreground">{id}</span>
-        <Button asChild variant="ghost" size="icon-sm">
-          <Link to={`/sessions/${id}/info`} aria-label="Session details and controls">
-            <Info />
-          </Link>
-        </Button>
-      </header>
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        Thread view not wired up yet.
-      </div>
-    </div>
+    <TooltipProvider>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <div className="flex h-dvh flex-col">
+          <ThreadHeader
+            sessionId={id}
+            name={session?.name ?? id}
+            connection={state.connection}
+            modes={state.modes}
+            onSetMode={(modeId) => void store?.setMode(modeId)}
+          />
+          {loadError ? (
+            <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
+              {loadError}
+            </div>
+          ) : null}
+          {state.error ? (
+            <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
+              {state.error}
+            </div>
+          ) : null}
+          <div className="min-h-0 flex-1">
+            <Thread />
+          </div>
+        </div>
+      </AssistantRuntimeProvider>
+    </TooltipProvider>
   );
 }
