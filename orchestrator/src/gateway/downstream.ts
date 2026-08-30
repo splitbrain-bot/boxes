@@ -172,6 +172,15 @@ export function attachDownstream(
       if (!conn) return Promise.reject(new Error('downstream closed'));
       return conn.client.request(method, params);
     },
+    // 1012 is "service restart": the browser's own backoff brings it back,
+    // and its fresh handshake lands on whichever thread is now current.
+    close: () => {
+      try {
+        ws.close(1012, 'thread changed');
+      } catch {
+        // already closing
+      }
+    },
   };
 
   const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
@@ -184,14 +193,16 @@ export function attachDownstream(
       if (!cached) throw new Error('Upstream initialize unavailable');
       return cached;
     })
-    // One thread per Boxes session: hand back the existing ACP session id
-    // instead of starting a second one.
+    // A session owns several threads but one is current, and that is the one
+    // this endpoint is about: hand back its ACP id rather than starting a
+    // second conversation on every browser reconnect. Which thread is current
+    // is a REST decision, so the ACP contract does not change.
     .onRequest('session/new' as string, raw, async ({ params }) => {
       handle.lastActiveAt = Date.now();
       await up.ensureStarted();
-      const existing = manager.getRow(sessionId)?.acp_session_id;
+      const existing = up.current?.acp_session_id;
       if (existing) {
-        slog.info('session/new answered with existing acp session', { existing });
+        slog.info('session/new answered with the current thread', { existing });
         return { sessionId: existing };
       }
       return up.forwardRequest('session/new', params);

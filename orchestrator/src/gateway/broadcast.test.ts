@@ -17,6 +17,7 @@ function fakeDownstream(id: number, lastActiveAt = 0): DownstreamHandle & { sent
     sent,
     notify: (_method, params) => sent.push(params),
     request: () => Promise.resolve({}),
+    close: () => {},
   };
 }
 
@@ -167,6 +168,7 @@ test('one browser failing does not stop the others being told', () => {
       throw new Error('socket gone');
     },
     request: () => Promise.resolve({}),
+    close: () => {},
   };
   const ok = fakeDownstream(2);
   b.add(broken);

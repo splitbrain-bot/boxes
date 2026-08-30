@@ -65,7 +65,7 @@ function insertSession(id: string): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
-       network_name, subnet, ws_volume, home_volume, status, acp_session_id, turn_active,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id, turn_active,
        created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
        ?, '10.200.0.0/24', ?, ?, 'running', NULL, 0, ?, ?)`,

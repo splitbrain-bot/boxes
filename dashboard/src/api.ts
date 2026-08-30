@@ -1,9 +1,11 @@
 import type {
   AcpLogPage,
   CreateSessionBody,
+  CreateThreadBody,
   HealthResponse,
   SessionDetail,
   SessionSummary,
+  ThreadSummary,
 } from '../../shared/types.ts';
 
 /**
@@ -54,6 +56,16 @@ export const api = {
   stopSession: (id: string) =>
     request<SessionDetail>(`/api/sessions/${id}/stop`, { method: 'POST' }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${id}`, { method: 'DELETE' }),
+  listThreads: (id: string) => request<ThreadSummary[]>(`/api/sessions/${id}/threads`),
+  createThread: (id: string, body: CreateThreadBody = {}) =>
+    request<ThreadSummary>(`/api/sessions/${id}/threads`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  selectThread: (id: string, threadId: string) =>
+    request<ThreadSummary>(`/api/sessions/${id}/threads/${threadId}/select`, {
+      method: 'POST',
+    }),
   getLog: (id: string, after = 0) =>
     request<AcpLogPage>(`/api/sessions/${id}/log?after=${after}&limit=200`),
   health: () => request<HealthResponse>('/healthz'),

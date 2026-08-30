@@ -24,6 +24,13 @@ Two consequences shape the rest of the design:
 - Thread history is replayed by the adapter's own `session/load` from the
   session's home volume, so the orchestrator stores no transcript of its own.
 
+A session owns several *threads* — ACP calls one conversation a session, and
+this document calls it a thread to keep it apart from a Boxes session. The
+container, both volumes, the network and the egress policy are the session's
+and are shared, so a second thread costs nothing but its own transcript. One
+thread is current at a time; see [Several threads per
+session](#several-threads-per-session).
+
 ## Processes
 
 ```
@@ -108,6 +115,9 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/start` | Starts a stopped container |
 | `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
 | `DELETE /api/sessions/:id` | Deletes the session, its volumes included |
+| `GET /api/sessions/:id/threads` | Every conversation the session owns |
+| `POST /api/sessions/:id/threads` | Adds one and makes it current; `{"from":"<threadId>"}` forks that one instead of starting empty |
+| `POST /api/sessions/:id/threads/:threadId/select` | Makes one current |
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
 | `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run in this session |
@@ -151,9 +161,16 @@ in the transcript is not recoverable.
 ## The frontend
 
 One React app, served at `/`. The session list is the thread list: tapping a
-session opens its conversation at `/sessions/:id`, and the ops that used to
-share that page — start, stop, delete, the details, the connection fields for
-an external ACP client — live at `/sessions/:id/info`.
+session opens its current conversation at `/sessions/:id`, and the ops that
+used to share that page — start, stop, delete, the details, the connection
+fields for an external ACP client — live at `/sessions/:id/info`.
+
+Each card carries its session's threads under its badges, the current one
+marked, so the list is the tree. Tapping one opens it — a select call and then
+a navigation, when it is not the current one already. **New thread** and
+**Fork** sit under them, the second only when the adapter offers it. The
+thread view names which thread it is on beside the session's name, because the
+header is already full at phone width with the mode and model selects.
 
 The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
@@ -228,8 +245,9 @@ Starting it, in `ensureStarted`:
    terminal, no elicitation. That confines adapter-to-client traffic to
    `session/update` and `session/request_permission`. The response is cached
    verbatim.
-4. Replay the stored thread with `session/load`, or start a fresh one with
-   `session/new` and store its id.
+4. Replay the session's *current* thread with `session/load`, or, when it has
+   none or the adapter no longer holds it, mint one with `session/new` and
+   store its id.
 
 A fresh thread is then switched into `auto` mode, when the adapter advertises
 a mode by that id. Only the thread the adapter has just minted goes through
@@ -248,9 +266,11 @@ unavailable.
 
 A `session/load` that comes back with `resourceNotFound` is not a failure. The
 agent SDK writes a transcript only once a prompt has run, so an id minted by
-`session/new` and never prompted does not survive the container stopping. Any
-other error is rethrown, which keeps a transient fault from discarding a live
-thread.
+`session/new` and never prompted does not survive the container stopping. Only
+that thread's row loses its adapter id and gets a freshly minted conversation;
+the session's other threads have transcripts of their own and are untouched.
+Any other error is rethrown, which keeps a transient fault from discarding a
+live thread.
 
 When the adapter exits on its own, the connection is torn down and nothing
 reconnects immediately. The next forwarded message calls `ensureStarted` again,
@@ -273,8 +293,9 @@ Three methods are answered or reshaped rather than forwarded:
 
 - `initialize` returns the cached upstream response, so its `_meta` extensions
   reach the browser intact.
-- `session/new` returns the session's existing ACP thread id when there is one.
-  One Boxes session means one thread.
+- `session/new` returns the session's *current* thread's ACP id when there is
+  one. Which thread that is, is a REST decision, so a browser or an external
+  ACP client speaks the same contract either way.
 - `$/ping`, which some ACP clients send every 25 seconds, is dropped before the
   SDK sees it. JSON-RPC forbids replying to a notification. The dashboard
   sends none.
@@ -298,6 +319,47 @@ a phone and a desktop watching the same session.
 - **A replay goes only to the browser that asked for it.** `session/load` is
   by definition a re-send of the whole thread, so broadcasting it rendered
   every other open tab's conversation twice.
+
+### Several threads per session
+
+A workspace an agent has already prepared is worth keeping; the context it
+built up on the way there is often not. So a Boxes session owns several
+threads, and two things make new ones: **New thread** starts an empty one on
+the same workspace, and **Fork** branches the one you are on so an
+investigation can go two ways without disturbing the original. Everything else
+about the session is shared, so an extra thread costs nothing but its own
+transcript.
+
+**One thread is current at a time.** The session row records which, and the
+gateway keeps answering the browser's `session/new` with that thread's id, so
+the ACP contract the dashboard and any external client speak does not change
+at all. Switching is a REST call followed by the browsers being dropped; each
+reconnects on its own backoff, and its handshake throws the old thread away
+before the replay rebuilds the new one. The alternative — a thread id in the
+WebSocket URL, so two browsers could watch two threads of one session — would
+mean `UpstreamSession` holding several live threads on one adapter connection
+and `Broadcast` routing every update by thread id. That is a much larger
+change to the part of the system that is hardest to get right, and nothing
+here blocks it later.
+
+The adapter is not the source of truth for which threads exist. `session/list`
+returns only threads that have a transcript on disk, and a thread minted but
+never prompted has none, so Boxes keeps its own record in the `threads` table.
+A thread goes by the title the agent generates — the adapter pushes it as a
+`session_info_update` at the end of a turn, and it is written to the row the
+update's own ACP id names — and until then by its ordinal, which is per
+session and never reused.
+
+Forking is offered only when the adapter advertised
+`sessionCapabilities.fork` in its `initialize` answer, which the orchestrator
+already caches verbatim. The capability is marked unstable in the ACP schema,
+so an adapter that drops it costs the dashboard a button rather than a build.
+
+Deleting a thread is not implemented, though the adapter supports
+`session/delete`. `!bang` command history, permission requests, the
+running-turn flag and the debug log stay session-scoped: those things happened
+in the container rather than in a conversation, so they appear under every
+thread.
 
 ### Permission requests
 
@@ -471,7 +533,8 @@ applies migrations tracked by `user_version`.
 
 | Table | Holds |
 |---|---|
-| `sessions` | One row per session: names, Docker object names, status, ACP thread id, timestamps |
+| `sessions` | One row per session: names, Docker object names, status, which thread is current, timestamps |
+| `threads` | One row per conversation: which session owns it, the adapter's id for it, the agent's title, its ordinal |
 | `pending_requests` | Permission requests waiting for a browser |
 | `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session |
 | `exec_log` | Local commands and their output, ring-pruned to 200 rows per session |
@@ -640,15 +703,20 @@ with nobody watching.
 
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update
-routing with two browsers attached, the exec limits, and the translation of
-ACP notifications into the thread's message model — including replay,
-out-of-order tool updates, and an update kind this build predates.
+routing with two browsers attached, the exec limits, the schema migration that
+turned one thread per session into several, the spawn path against a stand-in
+adapter — a forgotten thread costing the session only that thread — and the
+translation of ACP notifications into the thread's message model — including
+replay, out-of-order tool updates, and an update kind this build predates.
 
 The dashboard also runs a browser suite. It builds the production bundle and
 serves it the way the orchestrator does, from a stub orchestrator and a stub
-ACP gateway that speaks the agent side from canned scripts. That is what
-asserts the six UX properties this frontend exists for, and it is where a
-component upgrade is reviewed: `/playground` renders every part kind over a
+ACP gateway that speaks the agent side from canned scripts — including its
+own several threads per session, so a fresh thread starting empty, a fork
+carrying the source's messages and a switch bringing the first thread's
+transcript back are asserted against a gateway that behaves like the real one.
+That is what asserts the UX properties this frontend exists for, and it is
+where a component upgrade is reviewed: `/playground` renders every part kind over a
 canned store, so a registry re-run shows up on one page.
 
 One runner throughout: `npm test` in each package is `vitest run`.

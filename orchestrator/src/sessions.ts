@@ -1,17 +1,27 @@
 import { randomBytes } from 'node:crypto';
 import type {
   CreateSessionBody,
+  CreateThreadBody,
   DockerState,
   SessionDetail,
   SessionSummary,
+  ThreadSummary,
 } from '../../shared/types.ts';
 import type { Config } from './config.ts';
 import type { EgressManager } from './egress.ts';
-import { nextSubnetIndex, type Db, type SessionRow } from './db.ts';
+import {
+  currentThread,
+  getThread,
+  listThreads,
+  nextSubnetIndex,
+  type Db,
+  type SessionRow,
+  type ThreadRow,
+} from './db.ts';
 import * as dk from './docker.ts';
 import { log } from './log.ts';
 import { PendingStore } from './gateway/pending.ts';
-import { UpstreamSession } from './gateway/upstream.ts';
+import { NOTHING_TO_FORK, UpstreamSession } from './gateway/upstream.ts';
 import { allocateSubnet } from './subnet.ts';
 
 /**
@@ -107,7 +117,7 @@ export class SessionManager {
       ws_volume: dk.names.wsVolume(id),
       home_volume: dk.names.homeVolume(id),
       status: 'creating',
-      acp_session_id: null,
+      current_thread_id: null,
       turn_active: 0,
       created_at: now,
       last_active_at: now,
@@ -116,10 +126,10 @@ export class SessionManager {
     this.db
       .prepare(
         `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
-           network_name, subnet, ws_volume, home_volume, status, acp_session_id,
+           network_name, subnet, ws_volume, home_volume, status, current_thread_id,
            turn_active, created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
-           @network_name, @subnet, @ws_volume, @home_volume, @status, @acp_session_id,
+           @network_name, @subnet, @ws_volume, @home_volume, @status, @current_thread_id,
            @turn_active, @created_at, @last_active_at)`,
       )
       .run(row);
@@ -194,6 +204,7 @@ export class SessionManager {
     await this.teardownResources(id);
     this.db.prepare('DELETE FROM pending_requests WHERE session_id = ?').run(id);
     this.db.prepare('DELETE FROM acp_log WHERE session_id = ?').run(id);
+    this.db.prepare('DELETE FROM threads WHERE session_id = ?').run(id);
     this.setStatus(id, 'deleted');
     log.session(id).info('session deleted', { name: row.name });
   }
@@ -276,6 +287,11 @@ export class SessionManager {
       pendingCount,
       attachedCount: this.upstreams.get(row.id)?.attachedCount ?? 0,
       wsToken: this.cfg.WS_AUTH_TOKEN,
+      threads: listThreads(this.db, row.id).map(toThreadSummary),
+      currentThreadId: row.current_thread_id,
+      // False until the adapter has been reached and has advertised it. The
+      // capability is unstable, so an absent one is taken at face value.
+      canFork: this.upstreams.get(row.id)?.canFork ?? false,
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,
     };
@@ -293,9 +309,51 @@ export class SessionManager {
       subnet: row.subnet,
       wsVolume: row.ws_volume,
       homeVolume: row.home_volume,
-      acpSessionId: row.acp_session_id,
+      acpSessionId: currentThread(this.db, id)?.acp_session_id ?? null,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
     };
+  }
+
+  // --- threads --------------------------------------------------------------
+
+  /** Every conversation of a session, oldest first. */
+  threads(id: string): ThreadSummary[] {
+    this.mustGet(id);
+    return listThreads(this.db, id).map(toThreadSummary);
+  }
+
+  /**
+   * Adds a conversation to a session and makes it current: empty by default,
+   * or carrying another thread's context when `from` names one.
+   *
+   * Both need the adapter, because only the adapter can mint a thread.
+   */
+  async createThread(id: string, body: CreateThreadBody | undefined): Promise<ThreadSummary> {
+    this.mustGet(id);
+    const from = body?.from?.trim();
+    const up = this.upstream(id);
+    try {
+      const row = from ? await up.forkThread(from) : await up.newThread();
+      return toThreadSummary(row);
+    } catch (err) {
+      const message = (err as Error).message;
+      if (message === 'Thread not found') throw new HttpError(404, message);
+      // A thread minted and never prompted has no adapter-side conversation
+      // to branch from, which is the caller's timing rather than a fault.
+      if (message === NOTHING_TO_FORK) throw new HttpError(409, message);
+      throw new HttpError(500, `Failed to create thread: ${message}`);
+    }
+  }
+
+  /**
+   * Makes one of a session's threads current. The browsers watching it are
+   * dropped and reconnect onto the new one.
+   */
+  selectThread(id: string, threadId: string): ThreadSummary {
+    this.mustGet(id);
+    const row = getThread(this.db, threadId);
+    if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
+    return toThreadSummary(this.upstream(id).switchThread(threadId));
   }
 
   // --- boot reconciliation --------------------------------------------------
@@ -357,6 +415,18 @@ export class SessionManager {
   maintenance(): void {
     for (const up of this.upstreams.values()) up.maintenance();
   }
+}
+
+/** One stored thread, as the API reports it. */
+function toThreadSummary(row: ThreadRow): ThreadSummary {
+  return {
+    id: row.id,
+    acpSessionId: row.acp_session_id,
+    title: row.title,
+    ordinal: row.ordinal,
+    createdAt: row.created_at,
+    lastActiveAt: row.last_active_at,
+  };
 }
 
 /** An error carrying the HTTP status the API should answer with. */

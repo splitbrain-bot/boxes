@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionStatus } from '../../shared/types.ts';
@@ -22,8 +23,28 @@ export interface SessionRow {
   ws_volume: string;
   home_volume: string;
   status: SessionStatus;
-  acp_session_id: string | null;
+  /** The thread the gateway answers `session/new` with, or null before one exists. */
+  current_thread_id: string | null;
   turn_active: number;
+  created_at: number;
+  last_active_at: number;
+}
+
+/**
+ * One conversation of a session, as stored.
+ *
+ * `acp_session_id` is the adapter's own id for it, and is null while the row
+ * exists but the adapter has forgotten the thread — a thread minted and never
+ * prompted does not survive the adapter restarting.
+ */
+export interface ThreadRow {
+  id: string;
+  session_id: string;
+  acp_session_id: string | null;
+  /** The title the agent SDK generates, once a turn has produced one. */
+  title: string | null;
+  /** Per session and never reused; what an untitled thread is called. */
+  ordinal: number;
   created_at: number;
   last_active_at: number;
 }
@@ -51,8 +72,13 @@ export interface PendingRequestRow {
   created_at: number;
 }
 
-/** Schema migrations, applied in order and tracked by user_version. */
-const MIGRATIONS: string[] = [
+/**
+ * Schema migrations, applied in order and tracked by user_version.
+ *
+ * Exported so a test can build a database at an earlier version and watch the
+ * next migration move its data.
+ */
+export const MIGRATIONS: string[] = [
   `
   CREATE TABLE sessions (
     id             TEXT PRIMARY KEY,
@@ -101,6 +127,30 @@ const MIGRATIONS: string[] = [
   `,
   `
   ALTER TABLE sessions DROP COLUMN repo_url;
+  `,
+  // A session owns several threads. The single acp_session_id column becomes
+  // one row per thread, and the session points at the one that is current.
+  `
+  CREATE TABLE threads (
+    id             TEXT PRIMARY KEY,
+    session_id     TEXT NOT NULL,
+    acp_session_id TEXT,
+    title          TEXT,
+    ordinal        INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL,
+    last_active_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_threads_session ON threads(session_id, ordinal);
+  ALTER TABLE sessions ADD COLUMN current_thread_id TEXT;
+
+  INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+                       created_at, last_active_at)
+    SELECT 't' || id, id, acp_session_id, NULL, 1, created_at, last_active_at
+      FROM sessions WHERE acp_session_id IS NOT NULL;
+  UPDATE sessions SET current_thread_id = 't' || id
+    WHERE acp_session_id IS NOT NULL;
+
+  ALTER TABLE sessions DROP COLUMN acp_session_id;
   `,
 ];
 
@@ -214,4 +264,90 @@ export function listExecLog(db: Db, sessionId: string): ExecRow[] {
   return db
     .prepare('SELECT * FROM exec_log WHERE session_id = ? ORDER BY id ASC')
     .all(sessionId) as ExecRow[];
+}
+
+// --- threads ----------------------------------------------------------------
+
+/** Every thread of a session, oldest first. */
+export function listThreads(db: Db, sessionId: string): ThreadRow[] {
+  return db
+    .prepare('SELECT * FROM threads WHERE session_id = ? ORDER BY ordinal ASC')
+    .all(sessionId) as ThreadRow[];
+}
+
+/** One thread by id, whichever session it belongs to. */
+export function getThread(db: Db, threadId: string): ThreadRow | undefined {
+  return db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as
+    | ThreadRow
+    | undefined;
+}
+
+/** The thread a session's gateway is currently answering for, or undefined. */
+export function currentThread(db: Db, sessionId: string): ThreadRow | undefined {
+  return db
+    .prepare(
+      `SELECT t.* FROM threads t
+         JOIN sessions s ON s.current_thread_id = t.id
+        WHERE s.id = ?`,
+    )
+    .get(sessionId) as ThreadRow | undefined;
+}
+
+/**
+ * Inserts a thread and makes it the session's current one.
+ *
+ * The ordinal is one past the highest the session has ever used, so a name
+ * like "Thread 2" stays that thread's for good.
+ */
+export function insertThread(
+  db: Db,
+  sessionId: string,
+  acpSessionId: string | null,
+): ThreadRow {
+  const now = Date.now();
+  const id = `t${randomBytes(6).toString('hex')}`;
+  const next = db
+    .prepare('SELECT COALESCE(MAX(ordinal), 0) + 1 AS n FROM threads WHERE session_id = ?')
+    .get(sessionId) as { n: number };
+  const row: ThreadRow = {
+    id,
+    session_id: sessionId,
+    acp_session_id: acpSessionId,
+    title: null,
+    ordinal: next.n,
+    created_at: now,
+    last_active_at: now,
+  };
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+         created_at, last_active_at)
+       VALUES (@id, @session_id, @acp_session_id, @title, @ordinal,
+         @created_at, @last_active_at)`,
+    ).run(row);
+    db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(id, sessionId);
+  })();
+  return row;
+}
+
+/** Records the adapter's own id for a thread, or clears it. */
+export function setThreadAcpId(db: Db, threadId: string, acpSessionId: string | null): void {
+  db.prepare('UPDATE threads SET acp_session_id = ? WHERE id = ?').run(
+    acpSessionId,
+    threadId,
+  );
+}
+
+/** Records the title the agent generated for a thread, or clears it. */
+export function setThreadTitle(db: Db, threadId: string, title: string | null): void {
+  db.prepare('UPDATE threads SET title = ?, last_active_at = ? WHERE id = ?').run(
+    title,
+    Date.now(),
+    threadId,
+  );
+}
+
+/** Marks a thread active now, alongside its session. */
+export function touchThread(db: Db, threadId: string): void {
+  db.prepare('UPDATE threads SET last_active_at = ? WHERE id = ?').run(Date.now(), threadId);
 }

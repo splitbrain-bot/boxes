@@ -14,12 +14,14 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
 };
 
 /**
- * The thread's own chrome: where it goes back to, what it is connected to,
- * which of the adapter's modes it is in, and which model it answers with.
+ * The thread's own chrome: where it goes back to, which of the session's
+ * conversations it is, what it is connected to, which of the adapter's modes
+ * it is in, and which model it answers with.
  */
 export function ThreadHeader({
   sessionId,
   name,
+  threadLabel,
   connection,
   modes,
   configOptions,
@@ -28,6 +30,8 @@ export function ThreadHeader({
 }: {
   sessionId: string;
   name: string;
+  /** Which conversation of the session this is, or null while it is unknown. */
+  threadLabel: string | null;
   connection: ConnectionState;
   modes: SessionModeState | null;
   configOptions: readonly SessionConfigOption[];
@@ -52,7 +56,18 @@ export function ThreadHeader({
       {/* A floor under the name: two selects next to it would otherwise take
           the whole row on a phone and squeeze it away entirely. */}
       <div className="flex min-w-16 flex-1 flex-col">
-        <span className="truncate text-sm font-medium">{name}</span>
+        {/* The thread's name shares the session's line: the row below is the
+            connection state, and the two selects have already taken the rest
+            of the width at phone size. */}
+        <span className="flex items-baseline gap-1.5 text-sm">
+          {/* The session's name goes first and keeps up to two thirds of the
+              line: which box you are in matters more than which of its
+              conversations, so the thread's name is what gives way. */}
+          <span className="max-w-2/3 shrink-0 truncate font-medium">{name}</span>
+          {threadLabel ? (
+            <span className="min-w-0 truncate text-xs text-muted-foreground">{threadLabel}</span>
+          ) : null}
+        </span>
         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className={cn('size-1.5 rounded-full', state.dot)} />
           {state.label}

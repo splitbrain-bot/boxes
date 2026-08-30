@@ -1,8 +1,13 @@
-import { Info } from 'lucide-react';
-import { Link } from 'react-router';
-import type { SessionSummary } from '../../../shared/types.ts';
+import { GitBranch, Info, Plus } from 'lucide-react';
+import { useState } from 'react';
+import { Link, useNavigate } from 'react-router';
+import type { SessionSummary, ThreadSummary } from '../../../shared/types.ts';
 import { StatusBadge, type BadgeKind } from './StatusBadge';
 import { Card } from '@/components/ui/card';
+import { api } from '../api.ts';
+import { threadName } from '@/lib/threads';
+import { refresh } from '../stores/sessions.ts';
+import { cn } from '@/lib/utils';
 
 /**
  * Builds the badges for a session: waiting approvals, a running turn, the
@@ -30,15 +35,52 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
 }
 
 /**
- * One session in the list. The card is the thread: tapping it opens the
- * conversation, because that is what a session is for. Ops live behind the
- * info corner, and the two sit side by side rather than nested, because an
- * anchor inside an anchor is invalid markup.
+ * One session in the list, with its conversations under it. Tapping the card
+ * opens whichever one is current; tapping a thread opens that one instead.
+ *
+ * Ops live behind the info corner, and the two sit side by side rather than
+ * nested, because an anchor inside an anchor is invalid markup. The threads
+ * are buttons for the same reason, and because opening one that is not
+ * current is a call before it is a navigation.
  *
  * The info link says it came from the list, which is where the details view
  * then goes back to.
  */
 export function SessionCard({ session }: { session: SessionSummary }) {
+  const navigate = useNavigate();
+  /** Held while a thread call is in flight, so a double tap cannot fork twice. */
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  /** Runs one thread call, then opens the session on whatever it made current. */
+  async function open(work: () => Promise<unknown>): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await work();
+      // The card's own thread list comes from the poll, so a change made here
+      // is visible on the way back rather than a reload later.
+      void refresh();
+      await navigate(`/sessions/${session.id}`);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Current already: a plain navigation, with nothing to switch. */
+  const openThread = (thread: ThreadSummary): void => {
+    if (thread.id === session.currentThreadId) {
+      void navigate(`/sessions/${session.id}`);
+      return;
+    }
+    void open(() => api.selectThread(session.id, thread.id));
+  };
+
+  const current = session.threads.find((t) => t.id === session.currentThreadId);
+
   return (
     <Card className="relative gap-0 overflow-hidden py-0 transition-colors hover:border-ring">
       <Link
@@ -63,6 +105,65 @@ export function SessionCard({ session }: { session: SessionSummary }) {
       >
         <Info className="size-4" />
       </Link>
+
+      <div className="flex flex-col border-t px-2 py-2">
+        {session.threads.map((thread) => (
+          <button
+            key={thread.id}
+            type="button"
+            disabled={busy}
+            onClick={() => openThread(thread)}
+            aria-current={thread.id === session.currentThreadId ? 'true' : undefined}
+            className={cn(
+              'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-60',
+              thread.id === session.currentThreadId
+                ? 'font-medium'
+                : 'text-muted-foreground',
+            )}
+          >
+            <span
+              aria-hidden
+              className={cn(
+                'size-1.5 shrink-0 rounded-full',
+                thread.id === session.currentThreadId ? 'bg-ok' : 'bg-idle',
+              )}
+            />
+            <span className="truncate">{threadName(thread)}</span>
+          </button>
+        ))}
+
+        <div className="flex gap-1 pt-1">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void open(() => api.createThread(session.id))}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+          >
+            <Plus className="size-3.5" />
+            New thread
+          </button>
+          {/* Forking needs a thread to fork and an adapter that advertised the
+              capability, which is unstable in the ACP schema and may be
+              absent. */}
+          {session.canFork && current ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void open(() => api.createThread(session.id, { from: current.id }))}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+            >
+              <GitBranch className="size-3.5" />
+              Fork
+            </button>
+          ) : null}
+        </div>
+
+        {error ? (
+          <div className="px-2 pt-1 text-xs text-danger" role="alert">
+            {error}
+          </div>
+        ) : null}
+      </div>
     </Card>
   );
 }

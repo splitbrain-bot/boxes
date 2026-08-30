@@ -16,6 +16,7 @@ import { convertMessage } from '../stores/thread/convert.ts';
 import { bangCommand } from '../stores/thread/exec.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
+import { threadName } from '@/lib/threads';
 import { ThreadHeader } from '@/components/ThreadHeader';
 
 /** The text of a composer submission, which is all we send upstream. */
@@ -52,6 +53,12 @@ export function SessionThread() {
   }, [id]);
 
   const { store, state } = useThread(id, session?.wsToken ?? null);
+
+  // Which of the session's conversations this is. A session with only one
+  // says nothing, because then the session's own name is the whole answer.
+  const threads = session?.threads ?? [];
+  const current = threads.find((t) => t.id === session?.currentThreadId);
+  const threadLabel = current && threads.length > 1 ? threadName(current) : null;
 
   // Commands already run in this session, appended once the thread is up.
   // ACP replay carries no timestamps, so they go after the transcript rather
@@ -100,6 +107,7 @@ export function SessionThread() {
             <ThreadHeader
               sessionId={id}
               name={session?.name ?? id}
+              threadLabel={threadLabel}
               connection={state.connection}
               modes={state.modes}
               configOptions={state.configOptions}

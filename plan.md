@@ -240,4 +240,24 @@ REST table.
 
 ## Progress
 
-Not started.
+Done, all seven steps.
+
+Three things were settled while implementing, none of which changes the shape
+above.
+
+- **`sessionCapabilities.fork` is an object, not a boolean.** ACP spells a
+  supported capability as `{}` and an unsupported one as absent or null, so
+  `canFork` tests for presence. It is read from
+  `initialize.agentCapabilities.sessionCapabilities`, and is false until the
+  adapter has actually been reached.
+- **A title is recorded against the thread the update names**, not against
+  whichever thread is current, so an update arriving while a switch is in
+  flight lands on the thread it is about. An explicit null clears the title,
+  which puts the thread back on its ordinal.
+- **Forking a thread the adapter has never held is a 409**, not a 500: a
+  thread minted and never prompted has no conversation to branch from, which
+  is the caller's timing rather than a fault.
+
+The stub gateway now keeps one transcript per thread and drops its sockets on
+a switch, the way the real one does, so the browser tests run against
+something that behaves like the gateway rather than like a fixture.

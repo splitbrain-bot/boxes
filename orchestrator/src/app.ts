@@ -7,6 +7,7 @@ import type {
   AcpLogEntry,
   AcpLogPage,
   CreateSessionBody,
+  CreateThreadBody,
   ExecLogPage,
   ExecRequest,
   HealthResponse,
@@ -113,6 +114,35 @@ app.delete('/api/sessions/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
   await manager.remove(id);
   return reply.code(204).send();
+});
+
+/**
+ * The conversations a session owns. A session shares its container, its
+ * volumes and its egress policy across all of them, so an extra one costs
+ * nothing but its own transcript.
+ */
+app.get('/api/sessions/:id/threads', async (req) => {
+  const { id } = req.params as { id: string };
+  return manager.threads(id);
+});
+
+/**
+ * Adds a conversation and makes it current: empty, or carrying the context of
+ * the thread named by `from`.
+ */
+app.post('/api/sessions/:id/threads', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const created = await manager.createThread(id, req.body as CreateThreadBody | undefined);
+  return reply.code(201).send(created);
+});
+
+/**
+ * Makes one of a session's threads current. Browsers watching the session are
+ * dropped and reconnect onto it; the ACP contract they speak is unchanged.
+ */
+app.post('/api/sessions/:id/threads/:threadId/select', async (req) => {
+  const { id, threadId } = req.params as { id: string; threadId: string };
+  return manager.selectThread(id, threadId);
 });
 
 app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
