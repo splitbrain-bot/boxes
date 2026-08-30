@@ -1,0 +1,118 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * The dashboard's whole design system, in one file.
+ *
+ * Values are the shadcn convention, because the installed components — ours
+ * and assistant-ui's alike — are written against those names. The palette is
+ * the one the Preact dashboard used, carried over unchanged.
+ *
+ * Dark mode is a class, not a media query: index.html sets it from
+ * prefers-color-scheme before first paint, which leaves room for a manual
+ * toggle later without restyling anything.
+ */
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --radius: 0.625rem;
+
+  --background: #f6f7f9;
+  --foreground: #171a21;
+  --card: #ffffff;
+  --card-foreground: #171a21;
+  --popover: #ffffff;
+  --popover-foreground: #171a21;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1f6;
+  --secondary-foreground: #171a21;
+  --muted: #eef1f6;
+  --muted-foreground: #5c6577;
+  --accent: #eef1f6;
+  --accent-foreground: #171a21;
+  --destructive: #f2777a;
+  --destructive-foreground: #ffffff;
+  --border: #d8dde7;
+  --input: #d8dde7;
+  --ring: #2563eb;
+
+  /* Session state, the one vocabulary Tailwind has no name for. */
+  --ok: #4ec9a0;
+  --warn: #e8c46a;
+  --danger: #f2777a;
+  --idle: #8a92a6;
+}
+
+.dark {
+  --background: #14161a;
+  --foreground: #e8eaf0;
+  --card: #1c1f26;
+  --card-foreground: #e8eaf0;
+  --popover: #1c1f26;
+  --popover-foreground: #e8eaf0;
+  --primary: #6ea8fe;
+  --primary-foreground: #0b1220;
+  --secondary: #242833;
+  --secondary-foreground: #e8eaf0;
+  --muted: #242833;
+  --muted-foreground: #9aa3b5;
+  --accent: #242833;
+  --accent-foreground: #e8eaf0;
+  --destructive: #f2777a;
+  --destructive-foreground: #0b1220;
+  --border: #2f3441;
+  --input: #2f3441;
+  --ring: #6ea8fe;
+
+  --idle: #7b8398;
+}
+
+/*
+ * Mandatory, not theming polish: Tailwind v4 emits a utility only for a
+ * colour its theme defines, so without this bridge `bg-background` and every
+ * other token utility the installed components use would silently vanish.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-idle: var(--idle);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    -webkit-text-size-adjust: 100%;
+  }
+}

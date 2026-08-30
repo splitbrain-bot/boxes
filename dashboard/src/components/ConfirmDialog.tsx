@@ -1,9 +1,18 @@
-import type { ComponentChildren } from 'preact';
-import './ConfirmDialog.css';
+import type { ReactNode } from 'react';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
-/** A modal that asks before an action. A click on the backdrop cancels. */
+/** A modal that asks before an action. Escape and the backdrop cancel. */
 export function ConfirmDialog({
   title,
+  description,
   children,
   confirmLabel,
   danger = false,
@@ -12,7 +21,8 @@ export function ConfirmDialog({
   onCancel,
 }: {
   title: string;
-  children?: ComponentChildren;
+  description?: string;
+  children?: ReactNode;
   confirmLabel: string;
   danger?: boolean;
   busy?: boolean;
@@ -20,29 +30,27 @@ export function ConfirmDialog({
   onCancel: () => void;
 }) {
   return (
-    <div
-      class="ConfirmDialog-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onCancel();
-      }}
-    >
-      <div class="ConfirmDialog" role="dialog" aria-modal="true" aria-label={title}>
-        <div class="ConfirmDialog-title">{title}</div>
-        <div class="ConfirmDialog-body">{children}</div>
-        <div class="ConfirmDialog-actions">
-          <button type="button" onClick={onCancel} disabled={busy}>
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          {description ? <DialogDescription>{description}</DialogDescription> : null}
+        </DialogHeader>
+        {children}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            class={danger ? 'ConfirmDialog-danger' : undefined}
+            variant={danger ? 'destructive' : 'default'}
             onClick={onConfirm}
             disabled={busy}
           >
             {busy ? 'Working…' : confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

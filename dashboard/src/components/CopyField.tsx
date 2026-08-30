@@ -1,5 +1,5 @@
-import { useState } from 'preact/hooks';
-import './CopyField.css';
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
 
 /** A labelled value with a copy button, masked until revealed when asked. */
 export function CopyField({
@@ -28,22 +28,20 @@ export function CopyField({
   const shown = revealed ? value : '•'.repeat(Math.min(value.length, 32));
 
   return (
-    <div class="CopyField">
-      <span class="CopyField-label">{label}</span>
-      <div class="CopyField-row">
-        <code class="CopyField-value">{shown}</code>
+    <div className="flex flex-col gap-1">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs">
+          {shown}
+        </code>
         {masked && !revealed ? (
-          <button type="button" class="CopyField-button" onClick={() => setRevealed(true)}>
+          <Button type="button" variant="outline" size="sm" onClick={() => setRevealed(true)}>
             Show
-          </button>
+          </Button>
         ) : null}
-        <button
-          type="button"
-          class={`CopyField-button${copied ? ' CopyField-button--done' : ''}`}
-          onClick={() => void copy()}
-        >
+        <Button type="button" variant="outline" size="sm" onClick={() => void copy()}>
           {copied ? 'Copied' : 'Copy'}
-        </button>
+        </Button>
       </div>
     </div>
   );

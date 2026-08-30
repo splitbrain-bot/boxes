@@ -1,29 +1,42 @@
-import { render } from 'preact';
-import { LocationProvider, Route, Router } from 'preact-iso';
-import { startPolling } from './store.ts';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { startPolling } from './stores/sessions.ts';
 import { SessionCreate } from './views/SessionCreate.tsx';
-import { SessionDetail } from './views/SessionDetail.tsx';
+import { Shell } from './views/Shell.tsx';
+import { SessionInfo } from './views/SessionInfo.tsx';
 import { SessionList } from './views/SessionList.tsx';
-import './main.css';
+import { SessionThread } from './views/SessionThread.tsx';
+import './globals.css';
 
-/** The dashboard's routes. */
+/**
+ * One app, one origin. The session list is the thread list, and a session's
+ * conversation is a route inside this same dashboard.
+ */
 function App() {
   return (
-    <LocationProvider>
-      <div class="App">
-        <Router>
-          <Route path="/" component={SessionList} />
-          <Route path="/new" component={SessionCreate} />
-          <Route path="/sessions/:id" component={SessionDetail} />
-          <Route default component={SessionList} />
-        </Router>
-      </div>
-    </LocationProvider>
+    <BrowserRouter>
+      <Routes>
+        {/* The thread owns the whole viewport; every other route sits in the
+            narrow reading column. */}
+        <Route path="/sessions/:id" element={<SessionThread />} />
+        <Route element={<Shell />}>
+          <Route path="/" element={<SessionList />} />
+          <Route path="/new" element={<SessionCreate />} />
+          <Route path="/sessions/:id/info" element={<SessionInfo />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
   );
 }
 
 const root = document.getElementById('app');
 if (root) {
-  render(<App />, root);
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
   startPolling();
 }

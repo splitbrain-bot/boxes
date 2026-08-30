@@ -1,9 +1,8 @@
-import { useState } from 'preact/hooks';
-import { useLocation } from 'preact-iso';
+import { Info } from 'lucide-react';
+import { Link } from 'react-router';
 import type { SessionSummary } from '../../../shared/types.ts';
-import { connectToSession } from '../acpui.ts';
-import { StatusBadge, type BadgeKind } from './StatusBadge.tsx';
-import './SessionCard.css';
+import { StatusBadge, type BadgeKind } from './StatusBadge';
+import { Card } from '@/components/ui/card';
 
 /**
  * Builds the badges for a session: waiting approvals, a running turn, the
@@ -31,53 +30,38 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
 }
 
 /**
- * One session in the list. The info area links to the detail view and Open
- * configures acp-ui for this session and goes there. The two actions sit side
- * by side rather than nested, because a button inside an anchor is invalid
- * markup.
+ * One session in the list. The card is the thread: tapping it opens the
+ * conversation, because that is what a session is for. Ops live behind the
+ * info corner, and the two sit side by side rather than nested, because an
+ * anchor inside an anchor is invalid markup.
  */
 export function SessionCard({ session }: { session: SessionSummary }) {
-  const { route } = useLocation();
-  const [failed, setFailed] = useState(false);
-
-  const open = (): void => {
-    // A stopped session is fine to open: attaching starts it and
-    // session/load restores the thread.
-    if (!connectToSession(session)) {
-      // Storage is blocked in this browser; the detail view carries the
-      // manual fallback.
-      setFailed(true);
-      route(`/sessions/${session.id}`);
-    }
-  };
-
   return (
-    <div class="SessionCard">
-      <a class="SessionCard-main" href={`/sessions/${session.id}`}>
-        <div class="SessionCard-head">
-          <span class="SessionCard-name">{session.name}</span>
-          <span class="SessionCard-id">{session.id}</span>
+    <Card className="relative gap-0 overflow-hidden py-0 transition-colors hover:border-ring">
+      <Link
+        to={`/sessions/${session.id}`}
+        className="flex flex-col gap-1 px-4 pt-4 pb-3 no-underline"
+      >
+        <div className="flex items-baseline gap-2 pr-9">
+          <span className="truncate font-medium">{session.name}</span>
+          <span className="font-mono text-xs text-muted-foreground">{session.id}</span>
         </div>
-        {session.repoUrl ? <div class="SessionCard-repo">{session.repoUrl}</div> : null}
-      </a>
-      <div class="SessionCard-footer">
-        <div class="SessionCard-badges">
+        {session.repoUrl ? (
+          <div className="truncate text-xs text-muted-foreground">{session.repoUrl}</div>
+        ) : null}
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {sessionBadges(session).map((b) => (
             <StatusBadge key={b.label} kind={b.kind} label={b.label} />
           ))}
         </div>
-        <button
-          type="button"
-          class="SessionCard-open"
-          onClick={open}
-          aria-label={`Open ${session.name} in acp-ui`}
-        >
-          Open
-        </button>
-      </div>
-      {failed ? (
-        <div class="SessionCard-error">This browser blocked local storage.</div>
-      ) : null}
-    </div>
+      </Link>
+      <Link
+        to={`/sessions/${session.id}/info`}
+        aria-label={`Details and controls for ${session.name}`}
+        className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      >
+        <Info className="size-4" />
+      </Link>
+    </Card>
   );
 }

@@ -4,3 +4,4 @@ dist-web/
 *.tsbuildinfo
 .env
 data/
+dashboard/e2e/screenshots/
