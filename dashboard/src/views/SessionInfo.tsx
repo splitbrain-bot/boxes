@@ -1,6 +1,6 @@
 import { ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -25,16 +25,22 @@ function Meta({ label, value }: { label: string; value: string }) {
 /**
  * What a session is made of and what can be done to it. The conversation
  * lives at /sessions/:id; this route is the ops side of the same session.
+ *
+ * Back goes where the visitor came from: the list when the list sent them,
+ * the thread otherwise, which is also where a reload or a pasted URL lands.
  */
 export function SessionInfo() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const cameFromList = (useLocation().state as { from?: string } | null)?.from === 'list';
+  const back = cameFromList
+    ? { to: '/', label: 'Sessions' }
+    : { to: `/sessions/${id}`, label: 'Back to the thread' };
 
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [purge, setPurge] = useState(false);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -67,11 +73,29 @@ export function SessionInfo() {
     }
   };
 
+  /**
+   * Deletes the session and leaves for the list. Not through act, which
+   * reloads the session it just acted on: there is nothing left to reload,
+   * and asking for it again would only answer 404.
+   */
+  const remove = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteSession(id);
+      await refresh();
+      void navigate('/');
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+
   if (!session) {
     return (
       <div className="flex flex-col gap-4">
-        <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
-          ← Sessions
+        <Link to={back.to} className="text-sm text-muted-foreground hover:text-foreground">
+          ← {back.label}
         </Link>
         {error ? (
           <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
@@ -89,11 +113,11 @@ export function SessionInfo() {
   return (
     <div className="flex flex-col gap-4">
       <Link
-        to={`/sessions/${session.id}`}
+        to={back.to}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="size-4" />
-        Back to the thread
+        {back.label}
       </Link>
 
       <div className="flex flex-col gap-2">
@@ -186,28 +210,13 @@ export function SessionInfo() {
       {confirmDelete ? (
         <ConfirmDialog
           title={`Delete ${session.name}?`}
-          description="The container and network are removed. Volumes are kept unless you purge them."
+          description="The container, the network and both volumes are removed, so the workspace and the thread history go with them."
           confirmLabel="Delete"
           danger
           busy={busy}
           onCancel={() => setConfirmDelete(false)}
-          onConfirm={() =>
-            void act(async () => {
-              await api.deleteSession(id, purge);
-              void navigate('/');
-            })
-          }
-        >
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="size-4 accent-primary"
-              checked={purge}
-              onChange={(e) => setPurge(e.target.checked)}
-            />
-            Also delete volumes (workspace and thread history)
-          </label>
-        </ConfirmDialog>
+          onConfirm={() => void remove()}
+        />
       ) : null}
     </div>
   );

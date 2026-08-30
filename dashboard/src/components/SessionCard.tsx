@@ -34,6 +34,9 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
  * conversation, because that is what a session is for. Ops live behind the
  * info corner, and the two sit side by side rather than nested, because an
  * anchor inside an anchor is invalid markup.
+ *
+ * The info link says it came from the list, which is where the details view
+ * then goes back to.
  */
 export function SessionCard({ session }: { session: SessionSummary }) {
   return (
@@ -54,6 +57,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
       </Link>
       <Link
         to={`/sessions/${session.id}/info`}
+        state={{ from: 'list' }}
         aria-label={`Details and controls for ${session.name}`}
         className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       >

@@ -160,8 +160,8 @@ attach. Nothing is ever auto-approved.
 
 **Manage the session.** The ⓘ corner of a card opens its details and controls:
 start, stop, delete, the container and network names, and the WebSocket URL and
-bearer token for attaching your own ACP client. Deleting keeps the volumes
-unless you tick purge, because they hold the agent's work.
+bearer token for attaching your own ACP client. Deleting removes the volumes
+too, so the agent's work and the thread history go with it.
 
 Idle sessions — no turn, no waiting request, no attached browser — are stopped
 after `IDLE_STOP_MINUTES`. They are never deleted.

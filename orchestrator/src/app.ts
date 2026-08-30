@@ -110,8 +110,7 @@ app.post('/api/sessions/:id/stop', async (req) => {
 
 app.delete('/api/sessions/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
-  const { purge } = req.query as { purge?: string };
-  await manager.remove(id, purge === 'true' || purge === '1');
+  await manager.remove(id);
   return reply.code(204).send();
 });
 

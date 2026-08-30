@@ -96,10 +96,10 @@ must_output() {
 cleanup() {
   if [ -n "${SESSION_ID:-}" ]; then
     grey "cleaning up session $SESSION_ID"
-    curl -sS "${CURL_AUTH[@]}" -X DELETE "$API_BASE/api/sessions/$SESSION_ID?purge=true" >/dev/null || true
+    curl -sS "${CURL_AUTH[@]}" -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null || true
   fi
   if [ -n "${SIBLING_ID:-}" ]; then
-    curl -sS "${CURL_AUTH[@]}" -X DELETE "$API_BASE/api/sessions/$SIBLING_ID?purge=true" >/dev/null || true
+    curl -sS "${CURL_AUTH[@]}" -X DELETE "$API_BASE/api/sessions/$SIBLING_ID" >/dev/null || true
   fi
 }
 trap cleanup EXIT

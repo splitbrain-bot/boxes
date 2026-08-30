@@ -154,7 +154,7 @@ export class SessionManager {
       slog.info('session created', { name });
     } catch (err) {
       slog.error('session create failed; tearing down', { error: (err as Error).message });
-      await this.teardownResources(id, { purge: true });
+      await this.teardownResources(id);
       this.setStatus(id, 'error');
       throw new HttpError(500, `Failed to create session: ${(err as Error).message}`);
     }
@@ -186,23 +186,23 @@ export class SessionManager {
     return this.detail(id);
   }
 
-  /** Deletes a session, discarding its volumes as well when purge is set. */
-  async remove(id: string, purge: boolean): Promise<void> {
+  /** Deletes a session and everything it is made of, its volumes included. */
+  async remove(id: string): Promise<void> {
     const row = this.mustGet(id);
     this.upstreams.get(id)?.close();
     this.upstreams.delete(id);
-    await this.teardownResources(id, { purge });
+    await this.teardownResources(id);
     this.db.prepare('DELETE FROM pending_requests WHERE session_id = ?').run(id);
     this.db.prepare('DELETE FROM acp_log WHERE session_id = ?').run(id);
     this.setStatus(id, 'deleted');
-    log.session(id).info('session deleted', { purge, name: row.name });
+    log.session(id).info('session deleted', { name: row.name });
   }
 
   /**
-   * Removes a session's container and network, and its volumes when purging.
-   * Every failure is logged rather than thrown, so teardown always finishes.
+   * Removes a session's container, network and volumes. Every failure is
+   * logged rather than thrown, so teardown always finishes.
    */
-  private async teardownResources(id: string, opts: { purge: boolean }): Promise<void> {
+  private async teardownResources(id: string): Promise<void> {
     const row = this.getRow(id);
     if (!row) return;
     const slog = log.session(id);
@@ -219,12 +219,11 @@ export class SessionManager {
     } catch (err) {
       slog.warn('network teardown failed', { error: (err as Error).message });
     }
-    if (opts.purge) {
-      // The volumes hold the agent's work and the adapter's thread history,
-      // so they outlive the session unless the caller asks to purge them.
-      await dk.removeVolume(row.ws_volume);
-      await dk.removeVolume(row.home_volume);
-    }
+    // The volumes hold the agent's work and the adapter's thread history.
+    // Nothing else refers to them once the session is gone, so a session that
+    // is deleted takes them with it rather than leaving them orphaned.
+    await dk.removeVolume(row.ws_volume);
+    await dk.removeVolume(row.home_volume);
   }
 
   // --- views ----------------------------------------------------------------

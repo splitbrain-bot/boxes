@@ -30,7 +30,7 @@ api() { curl -sS "${CURL_AUTH[@]}" "$@"; }
 cleanup() {
   if [ -n "${SESSION_ID:-}" ]; then
     grey "cleaning up session $SESSION_ID"
-    api -X DELETE "$API_BASE/api/sessions/$SESSION_ID?purge=true" >/dev/null || true
+    api -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null || true
   fi
 }
 trap cleanup EXIT

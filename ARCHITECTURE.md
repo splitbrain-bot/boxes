@@ -107,7 +107,7 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id` | One session with its Docker object names |
 | `POST /api/sessions/:id/start` | Starts a stopped container |
 | `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
-| `DELETE /api/sessions/:id?purge=` | Deletes the session, and its volumes when purging |
+| `DELETE /api/sessions/:id` | Deletes the session, its volumes included |
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
 | `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run in this session |
@@ -330,9 +330,9 @@ volume and starts empty.
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
-network, and clears the session's pending requests and log rows. The volumes
-survive unless `purge=true`, because they hold the agent's work and the
-adapter's thread history.
+network and both volumes, and clears the session's pending requests and log
+rows. Nothing refers to the volumes once the session is gone, so they go with
+it rather than being left orphaned.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
 the stored rows with them: live containers are adopted, missing ones are marked

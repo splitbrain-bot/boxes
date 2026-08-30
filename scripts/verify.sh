@@ -161,7 +161,7 @@ dump_logs() {
 cleanup() {
   local status=$?
   [ -n "$SESSION_ID" ] && \
-    curl -sS -m 15 -X DELETE "$API_BASE/api/sessions/$SESSION_ID?purge=true" >/dev/null 2>&1
+    curl -sS -m 15 -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null 2>&1
   if [ "$STACK_UP" = 1 ]; then
     if [ "${KEEP_UP:-0}" = 1 ]; then
       grey "leaving the stack up on $API_BASE (KEEP_UP=1); take it down with: docker compose down"
