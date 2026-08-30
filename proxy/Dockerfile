@@ -4,7 +4,7 @@ FROM node:22-alpine AS build
 WORKDIR /build
 COPY proxy/package.json ./
 RUN npm install
-COPY proxy/tsconfig.json ./
+COPY proxy/tsconfig.json proxy/vite.config.ts ./
 COPY proxy/src ./src
 RUN npm run check && npm run build
 
