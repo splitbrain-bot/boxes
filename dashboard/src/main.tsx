@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { startPolling } from './stores/sessions.ts';
+import { Playground } from './views/Playground.tsx';
 import { SessionCreate } from './views/SessionCreate.tsx';
 import { Shell } from './views/Shell.tsx';
 import { SessionInfo } from './views/SessionInfo.tsx';
@@ -20,6 +21,9 @@ function App() {
         {/* The thread owns the whole viewport; every other route sits in the
             narrow reading column. */}
         <Route path="/sessions/:id" element={<SessionThread />} />
+        {/* The installed components over a canned store: where a registry
+            upgrade is reviewed as a diff and a screenshot. */}
+        <Route path="/playground" element={<Playground />} />
         <Route element={<Shell />}>
           <Route path="/" element={<SessionList />} />
           <Route path="/new" element={<SessionCreate />} />

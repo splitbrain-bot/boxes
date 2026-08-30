@@ -1,5 +1,12 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "tw-shimmer";
+/*
+ * The aui-* layer the installed assistant-ui components carry alongside
+ * their Tailwind utilities. It is only those 147 class rules: no reset, no
+ * preflight, nothing that could reach our own markup.
+ */
+@import "@assistant-ui/styles/index.css";
 
 /*
  * The dashboard's whole design system, in one file.
@@ -104,6 +111,23 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  /* Installed by `npx assistant-ui add`, for the collapsible elements. */
+  @keyframes collapsible-down {
+    from {
+      height: 0;
+    }
+    to {
+      height: var(--radix-collapsible-content-height, var(--collapsible-panel-height, auto));
+    }
+  }
+  @keyframes collapsible-up {
+    from {
+      height: var(--radix-collapsible-content-height, var(--collapsible-panel-height, auto));
+    }
+    to {
+      height: 0;
+    }
+  }
 }
 
 @layer base {
@@ -116,3 +140,10 @@
     -webkit-text-size-adjust: 100%;
   }
 }
+
+/*
+ * Installed by `npx assistant-ui add`. The elements drive their open and
+ * closed styling from data attributes rather than a class.
+ */
+@custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
+@custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
