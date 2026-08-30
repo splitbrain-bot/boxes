@@ -1,443 +1,367 @@
-# Build Plan: Replace acp-ui with an in-dashboard thread view (assistant-ui)
+# Plan: Egress allowlist and token translation
 
-Status: PROPOSED (revision 4). Owner decisions incorporated:
-(2026-08-30 a) the frontend is assistant-ui, embedded in our dashboard; the
-standalone acp-ui app goes away. (2026-08-30 b) no vendor scripts, no
-committed build artifacts, no parallel build paths: dependencies dictate the
-frontend tech, so the project adopts that ecosystem's canonical toolchain
-outright, and prior stack rules (esbuild-only, no Tailwind, plain
-per-component CSS) are void. Styles compile from source on every build.
-(2026-08-30 c) **one build system for the whole repository, not per tier**:
-since the frontend needs Vite, the orchestrator and proxy build with Vite
-too, and esbuild leaves the repo. By the same rule there is one test runner
-(Vitest) — node:test migrates.
-Facts in §2 were verified against installed packages and live registry
-payloads on 2026-08-30. Audience: a coding agent. Follow milestones in
-order. Do not begin implementation until the owner approves this plan.
+Status: PROPOSED (revision 1). Audience: the owner first, then a coding
+agent. Research facts in §2 were verified against primary sources on
+2026-08-30 (proxy tool docs, Anthropic engineering posts, Claude Code and
+GitHub docs). Do not begin implementation until the owner approves this
+plan and the open questions in §9 are decided.
 
 ---
 
 ## 1. Why, and what must be true afterwards
 
-acp-ui is a separate application with its own session management and its own
-UX, and we can only influence it upstream. The concrete failures that forced
-the frontend decision, each of which must be demonstrably fixed:
+Two gaps in today's egress design:
 
-| # | Complaint | Mechanism that fixes it (details in §6) |
-|---|-----------|------------------------------------------|
-| 1 | acp-ui's session panel duplicates our dashboard | The thread view lives *inside* the dashboard at `/sessions/:id`; there is no second app and no second session list |
-| 2 | No ArrowUp to recall previous messages | `unstable_useComposerInputHistory()` — an upstream hook with exactly terminal semantics, spread onto the composer input |
-| 3 | Input loses focus after each send | We own the installed composer component; autofocus on mount and refocus after send are asserted by the e2e test |
-| 4 | `!bang` local commands don't work | First-party feature: composer text starting with `!` runs in the session container via a new exec endpoint, never touching the model |
-| 5 | Can't see output of commands | Tool-call parts render name, args, status and output through the tool components; `!bang` output rides the same rendering path |
-| 6 | No way to switch into auto mode | Header mode switcher driven by the session's advertised modes → `session/set_mode`; live via `current_mode_update` |
+1. **No allowlist.** The proxy denies private ranges and non-80/443 ports,
+   and nothing else. A prompt-injected agent can POST anything it has to any
+   public host. Wanted: an optional host allowlist, so a deployment can say
+   "sessions reach the Anthropic API, GitHub and npm, and nothing else".
+2. **Real tokens sit inside the sandbox.** `CLAUDE_CODE_OAUTH_TOKEN` and
+   `GH_TOKEN` are session-container env vars; README lists "prompt injection
+   can leak a session's env tokens" as an accepted risk. Wanted: **token
+   translation** — the session holds per-session placeholder tokens, and the
+   proxy swaps them for the real credentials on the wire, so a real token
+   never exists inside a session container and a leaked placeholder is
+   useless anywhere else.
 
-What stays: the orchestrator's and proxy's source code and behavior (only
-their build/test tooling changes, §4), the ACP gateway (browser-facing WS
-protocol unchanged — external ACP clients keep working), the egress proxy,
-the session image, container lifecycle, reaper, both test scripts.
+Afterwards, all of these must hold:
 
-What goes: the acp-ui build stage, the `/ui` route, `dashboard/src/acpui.ts`
-and its tests, the localStorage-seeding connect flow, and the entire
-Preact-era dashboard toolchain and styling system.
+- With `EGRESS_ALLOWED_HOSTS` set, a session can complete a turn and push to
+  GitHub, and a request to any host not on the list is denied with a logged
+  reason. Unset, behavior is today's (any public host).
+- `docker exec <session> env` shows no real credential, and no file in the
+  session's volumes contains one. Placeholders only.
+- The real tokens authenticate only requests that arrive carrying the
+  matching placeholder. A request to an injection host carrying any *other*
+  credential is denied — so "api.anthropic.com is allowlisted" no longer
+  implies "data can be exfiltrated to an arbitrary Anthropic account".
+- Everything already true stays true: DNS-rebinding pinning, private-range
+  blocking, fail-closed egress, `scripts/smoke-test.sh` green (extended, §8).
 
-## 2. Verified facts (source-inspected 2026-08-30; pin these versions)
+## 2. Research: what exists, and what the constraint really is
 
-**`@assistant-ui/react` 0.15.17** (published within the last day; actively
-maintained; peer deps `react ^18 || ^19`).
+Token injection into HTTPS traffic is only possible where the proxy can see
+plaintext. That means either (a) TLS interception (MITM with a
+deployment-local CA the session trusts), or (b) the client is explicitly
+pointed at the proxy as its API endpoint (base-URL / reverse-proxy pattern,
+no CA needed). Everything surveyed falls on one of those two sides.
 
-- `useExternalStoreRuntime<T>(store: ExternalStoreAdapter<T>)` is exported
-  from the package root and mounts via `<AssistantRuntimeProvider>`. It lives
-  under a `legacy-runtime/` path internally but is the supported
-  external-state entry point; its successor (`ExternalThread` from
-  `@assistant-ui/core/store`) has the same field shape, so a later migration
-  is mechanical.
-- `ExternalStoreAdapter` carries everything we need, verified field by
-  field: `messages` + `convertMessage` (to `ThreadMessageLike`), `isRunning`,
-  `isSendDisabled`, `onNew`, `onCancel`, `onRefetchThread`, and
-  **`onRespondToToolApproval(options: RespondToToolApprovalOptions)`**.
-  A `queue?: ExternalThreadQueueAdapter` field exists for prompt queueing —
-  not used in v1, but the upgrade path for the adapter's promptQueueing/
-  steering `_meta` extensions already exists upstream.
-- **Tool approval is first-class and maps 1:1 onto ACP.** A
-  `ToolCallMessagePart` may carry
-  `approval: { id, options?: ToolApprovalOption[], approved?, optionId?, resolution? }`;
-  `ToolApprovalOptionKind` is `"allow-once" | "allow-always" | "reject-once"
-  | "reject-always"` — ACP's `allow_once` etc. with hyphens; ACP's
-  `optionId`/`name` map to `id`/`label`. `ToolApprovalResponse` returns
-  `{ optionId }`, which converts directly to ACP's
-  `{ outcome: { outcome: "selected", optionId } }`.
-- `unstable_useComposerInputHistory()` returns `{ onKeyDown }` to spread on
-  `ComposerPrimitive.Input`: ArrowUp on an empty draft recalls previously
-  sent user messages, ArrowDown steps back and restores the draft; yields to
-  IME, popovers, multi-line caret movement. Documented as unstable → pin the
-  exact package version; if it changes, the behavior is ~40 lines to inline
-  in a component file we own.
+### Reference design (Anthropic, verified from their engineering posts)
 
-**Styling and components — why Tailwind is dictated, not chosen.**
+Claude Code on the web / Cowork containment does exactly what this plan
+wants: sandboxes hold **custom scoped placeholder credentials**; a proxy
+outside the sandbox verifies the placeholder, inspects the operation (for
+git: is this push going to the configured branch?), then attaches the real
+GitHub token and forwards. Their egress proxy also enforces a domain
+allowlist, and they run a *defensive* MITM on `api.anthropic.com` traffic
+that rejects any request not carrying the session's own provisioned token —
+closing the "allowlisted API host as exfiltration channel" hole. This
+session's own environment (`/root/.ccr`) is that design in production: TLS
+re-terminated at the proxy, per-deployment CA bundle, standard CA env vars
+pre-set in the sandbox. The design is proven; the exact service is not
+released. The open-sourced piece, `anthropic-experimental/sandbox-runtime`,
+has domain allowlisting and an *experimental* TLS-terminate mode, but its
+proxy is not packaged standalone and its injection hooks are thinly
+documented — a source to crib from, not a dependency to take.
 
-- Components are installed from a shadcn-format registry
-  (`https://r.assistant-ui.com/base/<name>.json`) into the project source
-  tree by the official CLIs (`npx assistant-ui add thread` shells out to
-  `npx shadcn add <registry-url>`). Installed sources are committed —
-  that is the shadcn distribution model, not a custom mechanism — and
-  upgrades are a re-run with `--overwrite`, reviewed as a diff.
-- The installed sources use both semantic `aui-*` classes and Tailwind
-  utility classes: `thread.aui.tsx` alone carries 175 distinct utility
-  tokens (variants like `dark:hover:bg-accent`, values like `-mb-7.5`,
-  opacity forms like `border-border/60`). `@assistant-ui/styles` 0.3.7
-  covers only the 147 `aui-*` classes — verified: zero utility classes in
-  it. Nothing published by upstream can style these components without a
-  Tailwind compile; therefore Tailwind is a build dependency.
-- Compilation was proven end-to-end: Tailwind v4 over the installed sources
-  with `@import "tailwindcss"` + `tw-animate-css` +
-  `@assistant-ui/styles/index.css` + the theme bridge emits every utility
-  the components use (spot-checked variants, fractional values, opacity
-  modifiers) in ~100 ms.
-- **Trap, verified:** Tailwind v4 silently omits utilities like
-  `bg-background` unless `@theme` defines those colors. The
-  shadcn-convention token block (§7.5) is a correctness requirement, not
-  theming polish.
-- `thread` registry deps: shadcn `button`, `skeleton`, plus `attachment`,
-  `file`, `follow-up-suggestions`, `image`, `markdown-text` (which pulls
-  `@assistant-ui/react-markdown` 0.14.13 + `remark-gfm`), `reasoning`,
-  `tooltip-icon-button`, `tool-fallback`, `tool-group`,
-  `use-copy-to-clipboard`; npm deps `lucide-react`.
+### Off-the-shelf candidates
 
-**Vite as the server build — proven, not assumed.** A PoC with the
-orchestrator's dependency shape (node builtins + `ws` + native
-`better-sqlite3`) built with `vite build` (`build.ssr: 'src/index.ts'`,
-`target: 'node22'`) in 30 ms: builtins and npm deps — the native module
-included — stay external by default (the semantics of today's
-`esbuild --packages=external`), the output is a plain ESM file, and the
-bundle boots and serves. The proxy is stdlib-only, so its Vite output is
-the same single self-contained file it ships today.
+| Tool | Allowlist | TLS intercept | Token injection | Verdict for Boxes |
+|---|---|---|---|---|
+| **mitmproxy** (MIT, v12, official Docker image) | yes (addon rejects CONNECT pre-tunnel) | yes — mature CA + per-host cert forging | yes — small Python addon rewrites headers; selective passthrough for hosts that don't need it | **The adopt candidate.** Everything needed, battle-tested; costs a Python component and ~100 MB image |
+| Stripe smokescreen | yes | no | no | Allowlist only; solves half the problem |
+| Envoy | yes | **no MITM inside CONNECT** — tunnels raw bytes | yes, but only as an explicit gateway (`credential_injector` filter) | Same power as building the base-URL pattern ourselves, at much higher config weight |
+| Squid ssl_bump | yes | yes, operationally brittle | `request_header_add` — removed in Squid 8 | No |
+| iron-proxy | yes | yes | yes — its headline feature (Vault/KMS-backed) | Purpose-built and promising, but young (hundreds of stars, no audit) and its transparent nftables/TPROXY deployment model doesn't match our `HTTPS_PROXY` + internal-network model |
+| coder/boundary, agentgateway, lunar.dev | partly | varies | varies | Wrong shape (needs NET_ADMIN / explicit LLM gateway / interceptor model) |
+| google/martian (Go MITM lib) | — | — | — | Archived Feb 2026; do not build on it |
 
-**Current gateway behavior this plan builds on** (from the code as of
-`b5618b2`): the downstream answers `initialize` from the cached upstream
-response; answers `session/new` with the bare `{ sessionId }` when a thread
-already exists (a fresh creation passes the full upstream response through,
-which includes the adapter's advertised modes); forwards `session/load`,
-`session/prompt`, `session/set_mode`, `session/cancel` etc. verbatim;
-broadcasts every upstream `session/update` to all attached browsers; flushes
-queued permission requests to a newly attached browser; WS auth is the
-`bearer.<token>` subprotocol, token available to the dashboard from
-`GET /api/sessions` (same origin, behind the deployment's auth).
+### Client-side facts that make this feasible (verified, Claude Code docs)
+
+- Claude Code / the agent SDK honors `HTTPS_PROXY` and trusts extra CAs via
+  `NODE_EXTRA_CA_CERTS`; the docs explicitly support TLS-inspection proxies.
+  **No certificate pinning.** Prior art exists of exactly our scheme: dummy
+  API key inside, mitmproxy addon swaps the real key on `api.anthropic.com`.
+- Auth reaches the API as `Authorization: Bearer` (OAuth / `ANTHROPIC_AUTH_TOKEN`)
+  or `x-api-key` (API key). `ANTHROPIC_BASE_URL` can point the client at a
+  gateway instead (the no-MITM pattern).
+- git and gh honor `HTTPS_PROXY`; git trusts a CA via `GIT_SSL_CAINFO` /
+  `http.sslCAInfo`, gh (Go) via `SSL_CERT_FILE`. curl via `CURL_CA_BUNDLE`.
+  All deliverable as env vars — no root, no writable rootfs needed.
+- GitHub App installation tokens (1 h expiry, repo- and permission-scoped)
+  are the complementary hardening: even the *real* token the proxy injects
+  can be a short-lived scoped one minted by the orchestrator. Out of scope
+  for v1, enabled by this architecture (§10).
+
+### Build vs adopt
+
+The two engines that fit Boxes:
+
+- **A. Adopt mitmproxy as the egress proxy engine**, with one policy addon
+  of ours (~150 lines of Python): allowlist, private-range vetting with
+  address pinning, selective interception of only the injection hosts,
+  placeholder swap, foreign-credential rejection. Everything else —
+  CA lifecycle, cert forging, HTTP/2, CONNECT handling — is mitmproxy's
+  problem, which is the point. Transparent to every client: git, gh, the
+  adapter, curl, npm all just work.
+- **B. Extend our Node proxy with explicit gateway endpoints** (no MITM, no
+  CA): `ANTHROPIC_BASE_URL=http://proxy:3129/anthropic` and a git
+  `insteadOf` rewrite to `http://proxy:3129/github/…`; the proxy verifies
+  the placeholder, injects the real header, re-originates TLS. Zero new
+  dependencies, smallest possible TCB, keeps today's code. **Known hole:**
+  `gh` cannot be pointed at such a gateway (it treats non-github.com hosts
+  as GHES with different API paths), so `gh pr create` etc. would lose
+  auth — a real functional regression for agents.
+
+**Recommendation: A.** The owner's instinct — don't hand-build this — is
+right at the layer where it counts: TLS interception is mature, audited
+ground in mitmproxy and treacherous ground to reimplement (Node cannot even
+mint certificates without adding a crypto dependency, at which point we've
+built a worse mitmproxy). What stays ours is the policy addon, which is the
+same ~150 lines of judgement either way. B remains the documented fallback
+if the M0 spike turns up a blocker (§7), and its base-URL trick for the
+Anthropic API is worth keeping in mind regardless.
 
 ## 3. Architecture after the change
 
 ```
-Browser ──────────────────────────────────────────────────────────────
-  React SPA (one app, one origin, served by the orchestrator at /)
-  ├── session list / create / info views      (restyled on the new stack)
-  └── /sessions/:id  = THREAD VIEW
-      ├── assistant-ui components (installed sources, ours to edit)
-      ├── useExternalStoreRuntime(adapter)
-      ├── thread store  ← translate(session/update*)   [replay + live]
-      ├── AcpClient      ⇄ /ws/sessions/:id/acp        [unchanged protocol]
-      └── !bang runner   ⇄ POST /api/sessions/:id/exec [new]
-──────────────────────────────────────────────────────────────────────
-  Orchestrator: gateway unchanged on the wire, plus two quality fixes (§7.3);
-  new exec endpoint (§7.4). Everything below the gateway untouched.
+┌────────────────────────── session network sn-<id> (internal) ─────────────┐
+│  session container                                                        │
+│    env: HTTPS_PROXY=http://proxy:3128                                     │
+│         CLAUDE_CODE_OAUTH_TOKEN = placeholder (sk-ant-oat01-…-BOXESPH…)   │
+│         GH_TOKEN               = placeholder                              │
+│         BOXES_PROXY_CA (PEM) → written to ~/.boxes/proxy-ca.crt by        │
+│         entrypoint; NODE_EXTRA_CA_CERTS / SSL_CERT_FILE / GIT_SSL_CAINFO  │
+│         / CURL_CA_BUNDLE point at it                                      │
+└──────────────────────────────┬─────────────────────────────────────────---┘
+                               │ CONNECT host:443
+              ┌────────────────▼────────────────┐
+              │  egress proxy = mitmdump        │
+              │  + boxes_policy.py addon        │
+              │                                 │
+              │  1 allowlist check (optional)   │──── deny 403, logged
+              │  2 resolve + vet all answers,   │
+              │    pin upstream to vetted addr  │──── deny (rebinding, private)
+              │  3 injection host?              │
+              │     no  → opaque tunnel         │──── TLS passthrough
+              │     yes → intercept TLS:        │
+              │       placeholder → real token  │
+              │       anything else → deny      │
+              └───────┬─────────────────▲───────┘
+                      │ internet        │ policy.json (ro): allowlist,
+                      ▼                 │ placeholder→credential map
+                                 orchestrator (writes it; already runs a
+                                 60 s proxy reconciler that will re-assert it)
 ```
 
-One thread per session remains the model. assistant-ui's thread-list
-machinery is not used; our session list is the thread list.
+- **Interception is the exception, not the rule.** Only the injection hosts
+  (`api.anthropic.com`, `github.com`, `api.github.com`, `uploads.github.com`)
+  are MITMed. Every other allowed host is an opaque tunnel exactly as today,
+  so the CA the sessions trust can decrypt only traffic to hosts where we
+  rewrite credentials.
+- **Placeholders are per-session** random values minted by the orchestrator
+  at session create. The placeholder itself identifies the session at the
+  proxy — no source-IP mapping — which later enables per-session policy
+  (§10) and makes a placeholder found in a leaked transcript traceable and
+  individually revocable (delete the session).
+- **Policy transport** is a JSON file on a new named volume, written
+  atomically (0600) by the orchestrator, mounted read-only into the proxy;
+  the addon reloads on mtime change. No admin API, no secrets on the compose
+  network, survives either container restarting. The existing 60-second
+  proxy reconciler gains "policy file is current" as a second assertion.
+- **CA material**: mitmproxy generates its CA into a confdir volume that
+  only the proxy mounts. The orchestrator reads the *certificate* (not the
+  key — mitmproxy writes `mitmproxy-ca-cert.pem` separately) and hands it to
+  session containers as the `BOXES_PROXY_CA` env value; the entrypoint
+  writes it to a file and the CA env vars point there. Public material only
+  ever leaves the proxy volume.
 
-## 4. One toolchain (repo-wide)
+## 4. The policy addon, precisely
 
-| Concern | Choice |
+One file, `proxy/boxes_policy.py`, unit-testable logic kept in pure
+functions. Hooks (names verified against mitmproxy 12 docs; the pinning
+hook is re-verified in M0):
+
+| Hook | Does |
 |---|---|
-| Framework | React 19 |
-| Build | Vite 8 — the single build system for every package. Dashboard: `@vitejs/plugin-react` 6, `vite build` emits JS+CSS together. Orchestrator and proxy: `build.ssr` Node bundles (verified §2), replacing esbuild, which leaves the repo |
-| Styling | Tailwind CSS v4 via `@tailwindcss/vite` 4.3.3, compiled from source on every build; `tw-animate-css`; `@assistant-ui/styles` for the `aui-*` layer |
-| Components | assistant-ui registry (base flavor) + shadcn primitives, installed by their official CLIs, sources committed; `components.json` in repo |
-| Chat runtime | `@assistant-ui/react` 0.15.17, `useExternalStoreRuntime` |
-| Markdown | `@assistant-ui/react-markdown` 0.14.13 + `remark-gfm` |
-| Router | `react-router` 8 (library mode: `BrowserRouter`/`Routes`) |
-| State | `useSyncExternalStore` over plain TS stores (sessions polling, thread store) |
-| Tests | Vitest 4 — the single test runner for every package; the orchestrator's and proxy's node:test suites migrate (runner imports change; the node:assert assertions run unchanged under Vitest) |
-| Type gate | `tsc --noEmit` before `vite build` in every package's Docker stage, unchanged |
-| Dev loop | `vite dev` with `/api`, `/healthz`, `/ws` proxied to the orchestrator |
+| `http_connect` | Parse target. Deny (non-2xx, kills the tunnel pre-TLS) when: allowlist active and host not matched; port not 443. Absolute-URI plain HTTP handled analogously in `request` for port 80 |
+| `tls_clienthello` | `ignore_connection = True` for every host that is not an injection host → opaque passthrough, no forged cert |
+| `server_connect` | Resolve the hostname, vet **all** answers against the blocked ranges (port of `cidr.ts`, including v4-mapped forms failing closed), then overwrite the upstream address with the vetted one — the same pin-after-vet that closes DNS rebinding today |
+| `request` (intercepted flows only) | Look up the credential presented (`Authorization: Bearer/token/Basic`, `x-api-key`; Basic is decoded — git sends `x-access-token:<token>` that way). Known placeholder → replace with the mapped real credential and forward. Anything else, or none where one is expected → 403. Never log header values |
 
-House styling rule (replaces the plain-CSS rules): Tailwind utilities and
-shadcn/assistant-ui components everywhere in the dashboard; design tokens
-live once in `globals.css` as CSS variables bridged into `@theme`; the
-Preact-era `tokens.css`/`base.css`/per-component `.css` files are deleted,
-and the existing views are restyled during the port, so the app has exactly
-one styling system.
+Allowlist semantics: exact hostnames and `*.example.com` wildcards
+(one-label, no bare `*`), case-insensitive, matched against the CONNECT /
+absolute-URI authority. IP-literal targets are matched as literals only.
+Empty list = allowlist off (today's behavior). Injection hosts are implied
+members whenever token translation is on, so a misconfigured allowlist
+cannot silently sever inference.
 
-Each package keeps its own package.json and Docker stage (that layering is
-what lets images build independently), but all three carry the same three
-scripts on the same tools: `check` = `tsc --noEmit`, `build` = `vite build`,
-`test` = `vitest run`, with vite/vitest pinned to identical versions across
-packages.
+What is deliberately *not* built: response inspection, request-body rules
+(the git branch-enforcement idea — §10), per-path rules, quotas.
 
 ## 5. Repository changes
 
 ```
-dashboard/                      # becomes a standard Vite app
-├── index.html                  # Vite entry (moves from src/ to root, Vite convention)
-├── vite.config.ts              # react() + tailwindcss() + /api,/ws dev proxy + vitest config
-├── components.json             # shadcn/assistant-ui CLI config (aliases, css path)
-├── tsconfig.json               # app config; tsconfig.node.json for vite.config
-├── package.json                # scripts: dev / build (vite) / check (tsc) / test (vitest)
-└── src/
-    ├── main.tsx                # React mount + <BrowserRouter> routes
-    ├── globals.css             # @import tailwindcss, tw-animate-css,
-    │                           #   @assistant-ui/styles; token block + @theme
-    │                           #   bridge; dark variant config (§7.5)
-    ├── lib/utils.ts            # cn() — installed by shadcn CLI
-    ├── stores/
-    │   ├── sessions.ts         # list polling (port of store.ts)
-    │   └── thread/
-    │       ├── acp-client.ts   # JSON-RPC over WS (§7.1)
-    │       ├── translate.ts    # ACP session/update* → message model (pure)
-    │       ├── thread-store.ts # messages, isRunning, modes, approvals, exec
-    │       └── *.test.ts       # Vitest
-    ├── views/
-    │   ├── SessionList.tsx     # restyled: Tailwind + shadcn Card/Badge/Button
-    │   ├── SessionCreate.tsx   # restyled: shadcn form controls
-    │   ├── SessionThread.tsx   # NEW: runtime wiring + header (badges, mode
-    │   │                       #   switcher, link to info)
-    │   └── SessionInfo.tsx     # ops from old SessionDetail + external-ACP-
-    │                           #   client connect info (wss URL + token)
-    └── components/
-        ├── assistant-ui/…      # installed registry sources (thread, markdown-
-        │                       #   text, tool-fallback, tool-group, reasoning,
-        │                       #   tooltip-icon-button, attachment, …)
-        └── ui/…                # installed shadcn primitives (button, skeleton,
-                                #   + card/badge/input/dialog as the views need)
-DELETED: dashboard/src/acpui.ts + test, store.ts, main.css, styles/tokens.css,
-         styles/base.css, every per-component/view .css file, SessionDetail.*,
-         orchestrator Dockerfile acpui-build stage, /ui serving in index.ts.
-orchestrator/src/exec.ts        # NEW: container exec runner (§7.4)
-orchestrator/vite.config.ts     # NEW: build.ssr node bundle; vitest config
-proxy/vite.config.ts            # NEW: same; esbuild devDependency removed
-shared/types.ts                 # + ExecRequest/ExecRecord shapes
+proxy/
+├── boxes_policy.py          # NEW: the addon — all policy, pure-function core
+├── policy_test.py           # NEW: pytest over the pure functions (allowlist
+│                            #   match, CIDR vetting, credential parsing)
+├── Dockerfile               # REWRITTEN: FROM mitmproxy/mitmproxy:<pin>,
+│                            #   copies the addon, runs mitmdump with it
+└── src/, vite.config.ts, package.json   # DELETED with the Node proxy
+                             #   (cidr.ts logic ports into the addon + tests)
+orchestrator/src/
+├── config.ts                # + EGRESS_ALLOWED_HOSTS (default '': off)
+│                            # + EGRESS_TOKEN_TRANSLATION ('on'|'off')
+├── policy.ts                # NEW: placeholder minting, policy.json writer
+│                            #   (atomic, 0600), CA cert reader
+├── docker.ts                # sessionEnv: placeholders + BOXES_PROXY_CA + CA
+│                            #   env vars when translation is on; real tokens
+│                            #   only when it is off
+├── sessions.ts              # mint/store placeholder per session on create,
+│                            #   drop on delete; rewrite policy.json on both
+└── reaper.ts                # proxy reconciler also re-asserts policy.json
+session-image/entrypoint.sh  # writes $BOXES_PROXY_CA to ~/.boxes/proxy-ca.crt
+compose.yaml                 # proxy: new image, volumes boxes-egress-policy
+                             #   (ro) + boxes-proxy-ca; orchestrator: both
+                             #   (policy rw, ca ro)
+scripts/smoke-test.sh        # extended, §8
+README.md, ARCHITECTURE.md   # network-isolation and risks sections rewritten
+db migration                 # sessions table + placeholder columns (values
+                             #   are secrets-lite: usable only via the proxy,
+                             #   but stored hashed anyway; plaintext lives in
+                             #   policy.json only)
 ```
 
-## 6. UX requirements, precisely
+The one-toolchain rule (Vite/Vitest everywhere) gets its first deliberate
+exception, confined to `proxy/`: the addon is Python because the engine is,
+and its tests run under pytest in the proxy's own Docker build stage (build
+fails if they fail — same gate the TS packages get from `tsc && vitest`).
+The alternative — keeping a second, Node proxy chained in front for policy —
+buys toolchain purity with an extra network hop and two places for egress
+bugs to live, and is rejected.
 
-1. **Session management** — the dashboard's list is the only session UI.
-   Tapping a card opens the thread directly. Ops move to `/sessions/:id/info`.
-2. **ArrowUp history** — `unstable_useComposerInputHistory()` spread onto the
-   installed `ComposerPrimitive.Input`. e2e-asserted.
-3. **Focus** — composer autofocuses on thread mount and after every send,
-   including sends resolved by error; asserted in e2e (send →
-   `document.activeElement` is the input). If the installed composer doesn't
-   already do it, we add it there — it is our file.
-4. **`!bang` commands** — composer text starting with `!` is intercepted in
-   `onNew` (never sent to the adapter, costs no tokens): `POST
-   /api/sessions/:id/exec` streams combined stdout+stderr; rendered as a
-   tool-call part `toolName: "shell"` with args `{command}` and streaming
-   result, so it gets the same collapsible output UI as agent tool calls.
-   History persists server-side (§7.4) and is appended after replay on
-   reload, ordered by time (interleaving into the replayed transcript is not
-   attempted — ACP replay carries no timestamps; documented limitation).
-5. **Command/tool output** — ACP `tool_call` / `tool_call_update` params
-   (title, kind, status, content including terminal output, locations) map
-   onto tool-call parts; the installed `tool-fallback` renders args and
-   results collapsibly, and we extend it (our file) to render ACP content
-   blocks and diffs. Streaming `content` deltas update `result` live.
-6. **Mode switching** — modes come from the full `session/new` response
-   (fresh thread) or the `session/load` response (existing); tracked via
-   `current_mode_update` notifications; a header segmented control issues
-   `session/set_mode`. Whatever the adapter advertises (e.g. default /
-   acceptEdits / bypassPermissions) appears without hardcoding.
+## 6. Milestones
 
-Permission prompts (not on the complaint list but load-bearing): incoming
-`session/request_permission` attaches `approval` (options mapped per §2) to
-the matching tool-call part; the user's choice resolves the JSON-RPC request
-via `onRespondToToolApproval`. Queued requests flushed on attach take the
-same path. A request cancelled upstream sets `resolution: "cancelled"`.
+### M0 — Spike: prove the two swaps end to end (throwaway code allowed)
+Run mitmdump with a hand-written addon on the developer host; one real
+session-image container pointed at it with placeholders.
+Acceptance, each demonstrated:
+1. `claude-agent-acp` completes a turn with `CLAUDE_CODE_OAUTH_TOKEN` set to
+   a placeholder shaped like a real token (`sk-ant-oat01-…`), the addon
+   swapping the Bearer on `api.anthropic.com`. Establishes: no pinning in
+   practice, placeholder shape accepted client-side, streaming unaffected.
+2. `git clone`/`push` and `gh api user` / `gh pr list` work with a
+   placeholder `GH_TOKEN` (covers `gh auth setup-git`'s Basic form and gh's
+   direct form).
+3. **The OAuth-refresh question answered by observation**: does the adapter
+   under a `setup-token` credential ever call `platform.claude.com` /
+   `claude.ai` to refresh? If yes, decide: allowlist-and-passthrough those
+   hosts (refreshed token then lives in the session — document as residual)
+   or intercept the refresh too (proxy-held refresh). This is the plan's
+   main unknown; everything else is assembly.
+4. `server_connect` address-overwrite pinning confirmed against the current
+   mitmproxy version.
+Fallback trigger: if 1 or 2 fails for a reason that reads structural (not a
+bug of ours), switch the token-translation engine to option B (§2) for the
+Anthropic leg — base-URL gateway in our Node proxy — and keep mitmproxy only
+if gh support is still wanted; re-plan at that point.
 
-## 7. Component specifications
+### M1 — Orchestrator: config, placeholders, policy file
+`EGRESS_ALLOWED_HOSTS`, `EGRESS_TOKEN_TRANSLATION` in config.ts; migration;
+placeholder minting on create / removal on delete; `policy.ts` writer; the
+reconciler assertion. Unit tests: minting uniqueness, atomic write, file
+content shape, reconciler re-write after deletion. No behavior change yet
+(nothing reads the file).
 
-### 7.1 AcpClient (browser)
-Connects to `wss(s)://<origin>/ws/sessions/:id/acp` offering
-`['acp.v1', 'bearer.<token>']` (token from the sessions API; URL derived
-from `location`, never configured). JSON-RPC 2.0, one message per text
-frame; no `$/ping` (that was acp-ui's habit, not the protocol's).
-Handshake: `initialize` → `session/new` → if the response carries no
-`modes`, treat as existing thread and `session/load` (replay arrives as
-`session/update` notifications). Handles server→client requests
-(`session/request_permission`) by delegating to the thread store and
-responding with its resolution. Reconnects with capped backoff on close;
-on reconnect, repeats the handshake (fresh replay rebuilds the store).
-Surfaces connection state for the header.
+### M2 — The proxy engine swap
+New `proxy/Dockerfile` (pinned mitmproxy image) + `boxes_policy.py` +
+pytest stage. Port `cidr.ts` vetting into the addon with its full test
+table. compose volumes. Delete the Node proxy. Acceptance: the existing
+smoke test passes unchanged with translation **off** and no allowlist — the
+new engine must be behavior-compatible before it becomes policy-bearing.
 
-### 7.2 translate.ts + thread-store.ts
-Pure translation of ACP updates into an append-only message model:
+### M3 — Session wiring
+`sessionEnv` emits placeholders + CA env vars when translation is on (real
+tokens when off); entrypoint writes the CA file. Acceptance: live session
+completes a turn and pushes to GitHub with `EGRESS_TOKEN_TRANSLATION=on`;
+`docker exec env` contains no real token.
 
-| ACP `session/update` kind | Store effect |
-|---|---|
-| `user_message_chunk` | append/extend current user message text |
-| `agent_message_chunk` | append/extend assistant text part |
-| `agent_thought_chunk` | append/extend reasoning part |
-| `tool_call` | new tool-call part (id, name/title, kind, status, args) |
-| `tool_call_update` | merge status/content/result into that part |
-| `plan` | replace plan state (rendered in header or as a part) |
-| `current_mode_update` | update modes state |
-| unknown kinds | keep raw, log, render nothing (forward-compat) |
+### M4 — The security gate
+Smoke-test extensions (§8) all green in both modes; README/ARCHITECTURE
+rewritten (the "prompt injection can leak env tokens" risk moves from
+accepted to mitigated-by-default); `live-test.sh` gains the translated-auth
+turn. Owner flips the default of `EGRESS_TOKEN_TRANSLATION` to `on` here if
+M0–M3 gave no reason not to.
 
-`convertMessage` maps this model to `ThreadMessageLike`. Exec records
-convert to assistant messages with a `shell` tool-call part. `isRunning`
-tracks prompt in flight (set on send, cleared on `session/prompt` response
-or cancel). The store is framework-free and fully unit-tested under Vitest —
-including approval attachment/resolution, replay rebuild, and out-of-order
-`tool_call_update`.
+## 7. Risks
 
-### 7.3 Gateway additions (small, wire-compatible)
-a) **Prompt echo**: when forwarding `session/prompt` from downstream X,
-   synthesize `user_message_chunk` update(s) to the *other* downstreams so a
-   second device sees the prompt live (today it only appears after its next
-   replay). No change for single-device use; external clients unaffected.
-b) **Replay routing**: while a `session/load` forwarded for downstream X is
-   in flight, deliver `session/update` notifications only to X. Prevents
-   another browser's reattach from duplicating the full history into every
-   open tab. (Replay is by definition a re-send of history.) Unit-tested
-   with two fake downstreams.
+- **OAuth refresh flow** (M0.3) — the one item that could reshape the
+  Anthropic leg. Contained: worst case, refresh hosts are passthrough and
+  the refreshed token's residency in the session is a documented, smaller
+  residual (it still transits only allowlisted hosts).
+- **mitmproxy is a big new dependency in the TCB.** Mitigated by pinning the
+  image, MITMing only injection hosts (all other traffic stays opaque), and
+  the CA key never leaving its volume. The engine is MIT-licensed, actively
+  maintained, and the most-audited thing in this niche.
+- **Client CA quirks**: some tool inside a session ignoring the CA env vars
+  will fail TLS *only* against injection hosts (everything else is
+  passthrough) — a confusing failure shape. Mitigation: README troubleshooting
+  table (the `/root/.ccr/README.md` in Anthropic's own product is the model,
+  and our env-var set matches theirs).
+- **Placeholder shape drift**: a client-side format check tightening (e.g.
+  the CLI validating token structure) breaks placeholders. Placeholders
+  mimic real prefixes; a breakage is loud (auth error), not silent.
+- **Two config surfaces** (proxy env today → orchestrator-written policy
+  file) — the proxy stops being configurable standalone. Accepted: config.ts
+  is already the doctrine's single source of truth.
+- **HTTP/2 / streaming through interception**: mitmproxy supports h2 and
+  SSE; M0.1 proves it on our exact traffic.
 
-### 7.4 Exec endpoint (orchestrator)
-`POST /api/sessions/:id/exec {command}` → runs `bash -lc <command>` as
-`agent` in `/workspace/repo` (fallback `/workspace`) via the existing
-dockerode exec plumbing; streams combined output as chunked
-`text/plain` (client reads via fetch body reader); hard limits: 120 s
-wall clock, 256 KiB output, then the exec is killed and the response marked
-truncated/timed out. Exit code in a trailer line. On completion the record
-(command, output, exit code, timestamps) is inserted into a new `exec_log`
-table (migration 2); `GET /api/sessions/:id/exec` lists records for
-post-replay rendering. Same session-id validation and auth posture as the
-rest of `/api`. The command runs inside the session's existing isolation
-(internal network, read-only rootfs, caps dropped) — no new privilege is
-introduced, and the endpoint never shell-executes on the host.
+## 8. Smoke-test additions (the acceptance definition)
 
-### 7.5 globals.css: tokens and dark mode
-One file owns the design system: `@import "tailwindcss"`,
-`@import "tw-animate-css"`, `@import "@assistant-ui/styles/index.css"`;
-shadcn-convention CSS variables (`--background`, `--primary`, …) defined for
-light and dark from our existing palette; an `@theme inline` block bridging
-them into Tailwind color tokens (mandatory — see the §2 trap); dark mode as
-the shadcn-standard class variant
-(`@custom-variant dark (&:where(.dark, .dark *))`) with a three-line inline
-script in `index.html` applying `.dark` from `prefers-color-scheme` before
-first paint (manual toggle is a later nicety, not v1).
+From inside a throwaway session, with allowlist `github.com,*.github.com,
+api.anthropic.com,registry.npmjs.org` and translation on:
 
-## 8. Milestones
+1. No real token in `env`, in `/proc/1/environ`, or under `$HOME` (grep for
+   the configured secrets' values — the host script knows them).
+2. `curl https://api.github.com/user` with the placeholder → 200 as the bot
+   account (proof of swap).
+3. Same request with an invented token → 403 **from the proxy** (foreign
+   credentials rejected, not forwarded).
+4. `curl https://example.com` → denied (allowlist), `https://1.1.1.1` →
+   denied (not matched as literal), private ranges → denied (unchanged).
+5. Allowlist unset: `example.com` reachable again (optionality), private
+   ranges still denied.
+6. Translation off: today's exact behavior (regression guard).
+7. TLS to a passthrough host shows the host's real certificate chain; TLS to
+   an injection host shows the deployment CA (interception is bounded).
 
-### M0 — Backend toolchain migration
-Orchestrator and proxy move from esbuild + node:test to Vite (`build.ssr`)
-+ Vitest; Dockerfiles updated; esbuild removed from the repo. No source
-changes beyond test-runner imports. Acceptance: both suites green under
-Vitest; the built orchestrator bundle boots against a data dir and fails at
-the absent docker socket exactly as the esbuild bundle did; the built proxy
-bundle serves and denies exactly as before (re-run its live checks);
-`docker compose config` valid.
+## 9. Open questions for the owner
 
-### M1 — Vite toolchain + React port + restyle
-Stand up the Vite app (config, tsconfig split, scripts, dev proxy); port
-list/create views and the session store to React + react-router; restyle
-them with Tailwind + shadcn primitives (button/card/badge/input/dialog via
-`npx shadcn add`); delete the Preact toolchain, esbuild config and all old
-CSS; split SessionDetail into a placeholder thread route + SessionInfo.
-Acceptance: `npm run check` and `npm run test` green; `vite build` output
-served by the orchestrator's static handler works with SPA fallback;
-Chromium screenshots of list/create/info in light and dark, visually
-coherent (not pixel-identical — this is a restyle); card tap navigates to
-`/sessions/:id`.
+1. **Default posture once shipped**: `EGRESS_TOKEN_TRANSLATION` defaulting
+   to `on` (recommended — it is strictly safer and M2 keeps `off` working as
+   the escape hatch)?
+2. **Is `gh` API support a requirement?** It is the main thing option A buys
+   over the dependency-free option B. If the answer is "git push suffices",
+   B becomes competitive and this plan's engine choice should be revisited
+   before M1.
+3. **Allowlist granularity**: one deployment-wide list (this plan) is enough
+   for v1? Per-session lists ride the same policy.json trivially later.
+4. Should the smoke test's secret-grep (8.1) also scan the workspace volume
+   from the host after the run (catches an agent that copied its env
+   somewhere) — cheap to add, slightly slower?
 
-### M2 — assistant-ui components + playground
-`npx assistant-ui add thread` (and the deps it pulls) with committed
-`components.json`; write §7.5's globals.css. Acceptance: a playground route
-rendering the installed Thread over a canned in-memory external store shows
-fully styled composer, user/assistant messages, markdown, reasoning, and a
-tool call — light and dark screenshots, no unstyled elements, no console
-errors.
+## 10. Enabled later, out of scope now
 
-### M3 — Live thread: client, store, runtime
-AcpClient + translate + thread-store + runtime wiring; replay on attach;
-streaming; cancel. Acceptance (e2e against a stub ACP gateway — a Node WS
-server speaking the agent side with canned scripts): send → streamed
-markdown reply renders progressively; reload mid-conversation → full thread
-reappears via replay; a second tab receives live updates; cancel stops the
-run state.
-
-### M4 — The six UX items + permissions
-Everything in §6. Acceptance, each asserted in the stub e2e: ArrowUp recalls
-the previous prompt into the composer; after send the input is focused;
-`!echo hi` renders a shell tool call with output `hi` (stub exec endpoint)
-and never reaches the stub agent; a tool call with streamed output shows it
-collapsibly; a `session/request_permission` renders options, clicking
-answers the JSON-RPC request, and a queued one is delivered on attach; the
-mode switcher lists stub-advertised modes and emits `session/set_mode`, and
-a `current_mode_update` moves the control.
-
-### M5 — Gateway refinements + exec endpoint (server side)
-§7.3 a+b with unit tests over two fake downstreams; §7.4 endpoint + migration
-+ limits tests (timeout, truncation, exit code, missing container). Acceptance:
-orchestrator suite green; e2e now exercises real exec streaming end-to-end
-against a live orchestrator process with a stubbed docker layer.
-
-### M6 — Removal, integration, docs
-Delete acp-ui stage/route/files and the localStorage connect flow; Dockerfile
-dashboard stage = `npm ci` + `tsc --noEmit` + `vite build`; update
-ARCHITECTURE.md (frontend section rewritten: stack, one-build rule, component
-installation model) and README (connect = open the session; external-ACP-
-client instructions move to SessionInfo/README appendix); verify
-scripts/live-test.sh still passes unchanged (it drives the WS directly).
-Acceptance: full test matrix green (orchestrator/dashboard/proxy unit + stub
-e2e); `docker compose config` valid; repo contains no reference to acp-ui
-outside ARCHITECTURE.md history notes.
-
-Out of scope for v1 (explicitly): attachments/images, message branching &
-edit-resend, prompt queueing/steering UI (upstream `queue` adapter exists —
-natural M7), syntax highlighting in code blocks (add-on package later),
-multi-thread-per-session, manual dark-mode toggle.
-
-## 9. Risks
-
-- **The one unverifiable-here integration** remains the live adapter: modes
-  payload shape and replay behavior against real `claude-agent-acp` need one
-  session on the owner's host after M4 (same caveat as the original plan's
-  M1). The stub gateway encodes the ACP v1 schema, so drift shows up as a
-  concrete diff, not a mystery.
-- `unstable_useComposerInputHistory` may change signature — pinned version;
-  fallback is inlining the behavior into the installed composer (~40 lines).
-- `useExternalStoreRuntime` is in a `legacy-runtime` path upstream: exported,
-  documented, but its successor exists. Mitigation: our adapter object
-  already matches `ExternalThreadProps` field-for-field; migration is a
-  mount-point swap.
-- Approval UI rendering by the stock components is unconfirmed (the *types*
-  are verified; the default rendering may need our tool-fallback to draw the
-  option buttons). Either way the file is installed source and ours; M4
-  acceptance covers it.
-- The restyle in M1 changes the dashboard's look. Bounded by screenshot
-  review in both schemes; the palette carries over via the token block.
-- Vite and Tailwind become load-bearing build dependencies — for every
-  package, not just the dashboard. That is the point of the pivot: both are
-  ecosystem-canonical and actively maintained, the server-build semantics
-  were verified before adoption (§2), and `tsc --noEmit` still gates every
-  image build.
-
-## 10. Fixed decisions (this revision)
-1. The chat UI is part of the dashboard; no standalone frontend container.
-2. assistant-ui with registry components installed by the official CLIs;
-   installed sources are committed and are the customization surface;
-   upgrades come through CLI re-runs reviewed as diffs, never at image-build
-   time from a moving ref.
-3. One build system and one test runner for the whole repository: Vite 8
-   and Vitest 4 in every package — dashboard (React 19, Tailwind v4
-   compiled from source every build, shadcn-convention theming) and the
-   Node services (`build.ssr` bundles) alike. esbuild and node:test leave
-   the repo. The former esbuild-only / no-Tailwind / plain-CSS rules are
-   revoked. No vendor scripts, no committed generated artifacts, no
-   parallel build paths.
-4. Tailwind utilities + shadcn/assistant-ui components are the one styling
-   system for the entire dashboard; design tokens live once in globals.css.
-5. The browser speaks plain ACP to the existing gateway; the gateway stays
-   client-agnostic (external ACP clients remain supported) except the two
-   additive fixes in §7.3.
-6. `!bang` execution is a REST feature of the orchestrator scoped to the
-   session container, persisted in SQLite, rendered as a shell tool call.
-7. One thread per session; the session list is the thread list.
+- **Content-aware git policy** at the proxy (Anthropic's design): the
+  injection point already sees decrypted git smart-HTTP, so "pushes only to
+  branch X / repo Y" is an addon rule away.
+- **Short-lived scoped real credentials**: orchestrator mints 1-hour
+  repo-scoped GitHub App installation tokens and rotates them in
+  policy.json; the sandbox side changes not at all (placeholders are
+  already indirection).
+- **Per-session allowlists and an egress audit log** in the dashboard
+  (the addon already logs structured denials per placeholder = per session).
+- **More profiles**: the placeholder map is per-session already; multiple
+  profiles are a config.ts change only.
