@@ -18,7 +18,6 @@ beforeAll(async () => {
     stubSession({
       id: 'e5f6a7b8',
       name: 'flaky CI',
-      repoUrl: null,
       status: 'stopped',
       dockerState: 'exited',
       pendingCount: 2,

@@ -132,9 +132,9 @@ real credential is inside a session and that the allowlist bites.
 
 Open <http://localhost:3000>.
 
-**Create a session.** Give it a name and, optionally, an `https://` repository
-URL — it is cloned into `/workspace/repo` on first start. The session gets its
-own container, network and volumes.
+**Create a session.** Give it a name. The session gets its own container,
+network and volumes, and its workspace starts empty — tell the agent what to
+fetch into it.
 
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
 interface: type, and the turn runs in the container. Close the tab or lock your

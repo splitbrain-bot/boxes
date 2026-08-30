@@ -10,7 +10,6 @@ import { Label } from '@/components/ui/label';
 export function SessionCreate() {
   const navigate = useNavigate();
   const [name, setName] = useState('');
-  const [repoUrl, setRepoUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -20,10 +19,7 @@ export function SessionCreate() {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createSession({
-        name: name.trim(),
-        ...(repoUrl.trim() ? { repoUrl: repoUrl.trim() } : {}),
-      });
+      const created = await api.createSession({ name: name.trim() });
       await refresh();
       void navigate(`/sessions/${created.id}`);
     } catch (err) {
@@ -46,21 +42,6 @@ export function SessionCreate() {
           placeholder="refactor auth"
           onChange={(e) => setName(e.target.value)}
         />
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="session-repo">Repository URL (optional)</Label>
-        <Input
-          id="session-repo"
-          type="url"
-          value={repoUrl}
-          placeholder="https://github.com/owner/repo"
-          pattern="https://.*"
-          onChange={(e) => setRepoUrl(e.target.value)}
-        />
-        <span className="text-xs text-muted-foreground">
-          Cloned into /workspace/repo on first start. https:// only.
-        </span>
       </div>
 
       {error ? (

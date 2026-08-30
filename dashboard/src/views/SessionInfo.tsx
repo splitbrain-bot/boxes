@@ -125,7 +125,6 @@ export function SessionInfo() {
         <CardContent>
           <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-2">
             <Meta label="Session" value={session.id} />
-            <Meta label="Repo" value={session.repoUrl ?? '—'} />
             <Meta label="ACP thread" value={session.acpSessionId ?? 'not started'} />
             <Meta
               label="Container"

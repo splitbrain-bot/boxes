@@ -298,7 +298,7 @@ proceeding without consent.
 
 Creating a session, in `SessionManager.create`:
 
-1. Validate the name and the optional repo URL, which must be `https://`.
+1. Validate the name.
 2. Generate a session id server-side. User input never reaches a Docker object
    name.
 3. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
@@ -314,13 +314,12 @@ It runs as the non-root `agent` user with `ReadonlyRootfs`, `CapDrop: ALL`,
 `Init: true`. That last one matters: the kernel discards default-disposition
 signals for PID 1, so without docker-init the entrypoint's `sleep` would never
 see SIGTERM and every stop would wait out the grace period. The only
-caller-supplied values are the session id, the repo URL, which travels as an
-env var and never as argv, and the profile secrets.
+caller-supplied values are the session id and the profile secrets.
 
-The entrypoint sets the git and gh identity, clones `REPO_URL` into
-`/workspace/repo` when the target is absent or empty, and then holds the
-container open. The adapter is spawned separately by the gateway, so browser
-churn never restarts the container.
+The entrypoint sets the git and gh identity and then holds the container open.
+The adapter is spawned separately by the gateway, so browser churn never
+restarts the container. Both run in `/workspace`, which is the session's own
+volume and starts empty.
 
 | Status | Means |
 |---|---|

@@ -74,7 +74,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-const TARGET = { containerId: 'c1', workingDir: '/workspace/repo' };
+const TARGET = { containerId: 'c1', workingDir: '/workspace' };
 
 afterEach(() => dk.setDockerForTests(null));
 

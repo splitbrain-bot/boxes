@@ -87,11 +87,6 @@ export class SessionManager {
     if (!name) throw new HttpError(400, 'name is required');
     if (name.length > 100) throw new HttpError(400, 'name must be 100 characters or fewer');
 
-    const repoUrl = body.repoUrl?.trim() || null;
-    if (repoUrl && !/^https:\/\/[^\s]+$/.test(repoUrl)) {
-      throw new HttpError(400, 'repoUrl must be an https:// URL');
-    }
-
     const profileName = body.profile?.trim() || 'DEFAULT';
     const profile = this.cfg.profiles[profileName];
     if (!profile) throw new HttpError(400, `Unknown profile: ${profileName}`);
@@ -104,7 +99,6 @@ export class SessionManager {
       id,
       name,
       profile: profileName,
-      repo_url: repoUrl,
       image: this.cfg.SESSION_IMAGE,
       agent_cmd: JSON.stringify(AGENT_CMD),
       container_id: null,
@@ -121,10 +115,10 @@ export class SessionManager {
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, name, profile, repo_url, image, agent_cmd, container_id,
+        `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
            network_name, subnet, ws_volume, home_volume, status, acp_session_id,
            turn_active, created_at, last_active_at)
-         VALUES (@id, @name, @profile, @repo_url, @image, @agent_cmd, @container_id,
+         VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @status, @acp_session_id,
            @turn_active, @created_at, @last_active_at)`,
       )
@@ -144,7 +138,6 @@ export class SessionManager {
           subnet,
           wsVolume: row.ws_volume,
           homeVolume: row.home_volume,
-          repoUrl,
           profile,
           egress: {
             claudeOauthToken: this.egress.sessionValue('claude', profile.claudeOauthToken),
@@ -158,7 +151,7 @@ export class SessionManager {
       this.db
         .prepare("UPDATE sessions SET container_id = ?, status = 'running' WHERE id = ?")
         .run(containerId, id);
-      slog.info('session created', { name, repoUrl });
+      slog.info('session created', { name });
     } catch (err) {
       slog.error('session create failed; tearing down', { error: (err as Error).message });
       await this.teardownResources(id, { purge: true });
@@ -245,20 +238,14 @@ export class SessionManager {
 
   /**
    * Where a local command should run for this session, starting the
-   * container if it is stopped.
-   *
-   * Prefers the clone as the working directory and falls back to the
-   * workspace root, which is the same choice the adapter's exec makes.
+   * container if it is stopped. The workspace root, which is where the
+   * adapter runs too.
    */
   async execTarget(id: string): Promise<{ containerId: string; workingDir: string }> {
     const row = this.mustGet(id);
     if (!row.container_id) throw new HttpError(409, 'Session has no container');
     await dk.startContainer(row.container_id);
-    const hasRepo = row.repo_url ? await dk.hasRepoDir(row.container_id) : false;
-    return {
-      containerId: row.container_id,
-      workingDir: hasRepo ? '/workspace/repo' : '/workspace',
-    };
+    return { containerId: row.container_id, workingDir: dk.WORKSPACE_DIR };
   }
 
   /** Marks a session active, so running a command holds off the reaper. */
@@ -284,7 +271,6 @@ export class SessionManager {
       id: row.id,
       name: row.name,
       profile: row.profile,
-      repoUrl: row.repo_url,
       status: row.status,
       dockerState,
       turnActive: row.turn_active === 1,

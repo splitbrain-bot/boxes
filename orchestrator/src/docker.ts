@@ -8,13 +8,15 @@ import { log } from './log.ts';
  * Container, network and volume lifecycle, plus the long-lived adapter exec.
  *
  * The HostConfig below is a fixed template that user input never reaches. The
- * caller supplies only the server-generated session id, the validated https
- * repo URL, which travels as an env var, and the values a session is to hold
- * in place of the deployment's credentials.
+ * caller supplies only the server-generated session id and the values a
+ * session is to hold in place of the deployment's credentials.
  */
 
 /** Docker label carrying the session id on every object Boxes creates. */
 export const LABEL = 'boxes.session';
+
+/** The session's writable volume, and the working directory of everything in it. */
+export const WORKSPACE_DIR = '/workspace';
 
 let client: Docker | null = null;
 
@@ -63,7 +65,6 @@ export interface CreateContainerSpec {
   subnet: string;
   wsVolume: string;
   homeVolume: string;
-  repoUrl: string | null;
   profile: SessionProfile;
   egress: SessionEgress;
 }
@@ -86,7 +87,6 @@ export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     GH_TOKEN: spec.egress.ghToken,
     GIT_NAME: spec.profile.gitName,
     GIT_EMAIL: spec.profile.gitEmail,
-    REPO_URL: spec.repoUrl ?? '',
     TERM: 'dumb',
     CLAUDE_CONFIG_DIR: '/home/agent/.claude',
     // Every proxy-aware client honours these; anything else has no route
@@ -194,7 +194,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     name: names.container(spec.sessionId),
     Image: spec.image,
     User: 'agent',
-    WorkingDir: '/workspace',
+    WorkingDir: WORKSPACE_DIR,
     Env: sessionEnv(spec, cfg),
     Labels: { [LABEL]: spec.sessionId },
     // The adapter is a separate exec; PID 1 only holds the container open.
@@ -205,7 +205,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     HostConfig: {
       NetworkMode: spec.networkName,
       Binds: [
-        `${spec.wsVolume}:/workspace`,
+        `${spec.wsVolume}:${WORKSPACE_DIR}`,
         `${spec.homeVolume}:/home/agent`,
       ],
       ReadonlyRootfs: true,
@@ -311,24 +311,6 @@ export async function listSessionContainers(): Promise<
     if (!sessionId) return [];
     return [{ id: c.Id, sessionId, running: c.State === 'running' }];
   });
-}
-
-/** Does the session container already have a checked-out repo to work in? */
-export async function hasRepoDir(containerId: string): Promise<boolean> {
-  const exec = await docker().getContainer(containerId).exec({
-    Cmd: ['test', '-d', '/workspace/repo'],
-    AttachStdout: true,
-    AttachStderr: true,
-    User: 'agent',
-  });
-  const stream = await exec.start({ hijack: true, stdin: false });
-  await new Promise<void>((resolve) => {
-    stream.on('end', resolve);
-    stream.on('close', resolve);
-    stream.resume();
-  });
-  const info = await exec.inspect();
-  return info.ExitCode === 0;
 }
 
 /**

@@ -32,7 +32,6 @@ export function stubSession(over: Partial<SessionDetail> = {}): SessionDetail {
     id,
     name: 'refactor auth',
     profile: 'DEFAULT',
-    repoUrl: 'https://github.com/owner/repo',
     status: 'running',
     dockerState: 'running',
     turnActive: false,

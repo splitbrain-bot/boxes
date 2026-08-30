@@ -42,7 +42,6 @@ async function envFor(over: Record<string, string>): Promise<Record<string, stri
     subnet: '10.200.0.0/29',
     wsVolume: 'ws-abcd1234',
     homeVolume: 'home-abcd1234',
-    repoUrl: null,
     profile,
     egress: {
       claudeOauthToken: egress.sessionValue('claude', profile.claudeOauthToken),

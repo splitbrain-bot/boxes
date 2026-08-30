@@ -177,11 +177,7 @@ export class UpstreamSession {
    */
   private async spawnAndInitialize(row: SessionRow): Promise<void> {
     const cmd = JSON.parse(row.agent_cmd) as string[];
-    // Prefer the clone as cwd, and fall back to the workspace root.
-    const hasRepo = row.repo_url ? await dk.hasRepoDir(row.container_id!) : false;
-    const workingDir = hasRepo ? '/workspace/repo' : '/workspace';
-
-    const exec = await dk.spawnAdapterExec(row.container_id!, cmd, workingDir);
+    const exec = await dk.spawnAdapterExec(row.container_id!, cmd, dk.WORKSPACE_DIR);
     this.exec = exec;
 
     // stderr is log-only: the adapter sends its console logging there to
@@ -213,12 +209,12 @@ export class UpstreamSession {
       protocolVersion: 1,
       clientCapabilities: {},
     });
-    this.slog.info('adapter initialized', { workingDir });
+    this.slog.info('adapter initialized', { workingDir: dk.WORKSPACE_DIR });
 
     const replayed = row.acp_session_id
-      ? await this.loadSession(conn, row.acp_session_id, workingDir)
+      ? await this.loadSession(conn, row.acp_session_id)
       : false;
-    if (!replayed) await this.newSession(conn, workingDir);
+    if (!replayed) await this.newSession(conn);
   }
 
   /**
@@ -230,15 +226,11 @@ export class UpstreamSession {
    * prompted does not survive the container stopping. Any other error is
    * rethrown, which keeps a transient fault from discarding a live thread.
    */
-  private async loadSession(
-    conn: ClientConnection,
-    acpSessionId: string,
-    workingDir: string,
-  ): Promise<boolean> {
+  private async loadSession(conn: ClientConnection, acpSessionId: string): Promise<boolean> {
     try {
       await conn.agent.request('session/load', {
         sessionId: acpSessionId,
-        cwd: workingDir,
+        cwd: dk.WORKSPACE_DIR,
         mcpServers: [],
       });
       this.slog.info('acp session loaded', { acpSessionId });
@@ -257,9 +249,9 @@ export class UpstreamSession {
   }
 
   /** Starts a fresh thread and records its id as this session's only one. */
-  private async newSession(conn: ClientConnection, workingDir: string): Promise<void> {
+  private async newSession(conn: ClientConnection): Promise<void> {
     const res = (await conn.agent.request('session/new', {
-      cwd: workingDir,
+      cwd: dk.WORKSPACE_DIR,
       mcpServers: [],
     })) as { sessionId?: string };
     if (!res?.sessionId) throw new Error('session/new returned no sessionId');

@@ -46,9 +46,6 @@ export function SessionCard({ session }: { session: SessionSummary }) {
           <span className="truncate font-medium">{session.name}</span>
           <span className="font-mono text-xs text-muted-foreground">{session.id}</span>
         </div>
-        {session.repoUrl ? (
-          <div className="truncate text-xs text-muted-foreground">{session.repoUrl}</div>
-        ) : null}
         <div className="mt-2 flex flex-wrap gap-1.5">
           {sessionBadges(session).map((b) => (
             <StatusBadge key={b.label} kind={b.kind} label={b.label} />

@@ -13,7 +13,6 @@ export interface SessionRow {
   id: string;
   name: string;
   profile: string;
-  repo_url: string | null;
   image: string;
   /** JSON array of argv for the ACP adapter. */
   agent_cmd: string;
@@ -99,6 +98,9 @@ const MIGRATIONS: string[] = [
     finished_at INTEGER NOT NULL
   );
   CREATE INDEX idx_exec_log_session ON exec_log(session_id, id);
+  `,
+  `
+  ALTER TABLE sessions DROP COLUMN repo_url;
   `,
 ];
 

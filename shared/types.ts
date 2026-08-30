@@ -18,7 +18,6 @@ export interface SessionSummary {
   id: string;
   name: string;
   profile: string;
-  repoUrl: string | null;
   status: SessionStatus;
   /** Live container state, resolved against Docker on every request. */
   dockerState: DockerState;
@@ -54,8 +53,6 @@ export interface SessionDetail extends SessionSummary {
 /** Body of a create-session request. */
 export interface CreateSessionBody {
   name: string;
-  /** https:// only; validated server-side. */
-  repoUrl?: string;
   profile?: string;
 }
 
