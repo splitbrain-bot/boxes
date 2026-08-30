@@ -247,22 +247,18 @@ test('the mode switcher lists the advertised modes and sets one', async () => {
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
-    const group = page.getByRole('radiogroup', { name: 'Agent mode' });
-    await expect.poll(() => group.isVisible()).toBe(true);
+    const modes = page.getByRole('combobox', { name: 'Agent mode' });
+    await expect.poll(() => modes.isVisible()).toBe(true);
     // Nothing hardcoded: whatever the adapter advertises is what appears.
-    expect(await group.getByRole('radio').allInnerTexts()).toEqual([
+    expect(await modes.locator('option').allInnerTexts()).toEqual([
       'Default',
       'Accept edits',
       'Auto',
     ]);
-    expect(
-      await group.getByRole('radio', { name: 'Default' }).getAttribute('aria-checked'),
-    ).toBe('true');
+    expect(await modes.inputValue()).toBe('default');
 
-    await group.getByRole('radio', { name: 'Auto' }).click();
-    await expect
-      .poll(() => group.getByRole('radio', { name: 'Auto' }).getAttribute('aria-checked'))
-      .toBe('true');
+    await modes.selectOption('bypassPermissions');
+    await expect.poll(() => modes.inputValue()).toBe('bypassPermissions');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -282,12 +278,10 @@ test('a current_mode_update from the adapter moves the switcher', async () => {
 
   const { page, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
-    const group = page.getByRole('radiogroup', { name: 'Agent mode' });
-    await expect.poll(() => group.isVisible()).toBe(true);
+    const modes = page.getByRole('combobox', { name: 'Agent mode' });
+    await expect.poll(() => modes.isVisible()).toBe(true);
     stub.gateway.emit({ sessionUpdate: 'current_mode_update', currentModeId: 'auto' });
-    await expect
-      .poll(() => group.getByRole('radio', { name: 'Auto' }).getAttribute('aria-checked'))
-      .toBe('true');
+    await expect.poll(() => modes.inputValue()).toBe('auto');
   } finally {
     await close();
   }

@@ -98,9 +98,13 @@ type ConvertedPart = {
   type: string;
   text?: string;
   toolName?: string;
+  /** Absent while a call is unfinished, which includes awaiting permission. */
+  result?: unknown;
   approval?: {
     id: string;
     options?: Array<{ id: string; kind: string; label?: string }>;
+    approved?: boolean;
+    resolution?: string;
   };
 };
 
@@ -224,6 +228,46 @@ test('a permission request attaches to its tool call and its answer unblocks the
 
   store.respondToApproval(approval.id, 'yes');
   assert.deepEqual(await answered, { outcome: { outcome: 'selected', optionId: 'yes' } });
+});
+
+test('a call awaiting permission reports no result, so the question can render', async () => {
+  const { store, client } = makeStore();
+  // The shape a real edit arrives in: the adapter sends the diff it proposes
+  // before it is allowed to write it.
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 'td',
+    title: 'Write hello.txt',
+    kind: 'edit',
+  });
+  push(client, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'td',
+    content: [{ type: 'diff', path: '/workspace/hello.txt', oldText: null, newText: 'hello' }],
+  });
+
+  const answered = client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 'td' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+
+  // A result of any kind reads to the runtime as a finished call, and a
+  // finished call is never the one being asked about.
+  const asked = partsOf(store.getSnapshot().messages[0]!)[0]!;
+  assert.equal(asked.type, 'tool-call');
+  assert.equal(asked.result, undefined);
+  assert.ok(asked.approval);
+  assert.equal(asked.approval.approved, undefined);
+  assert.equal(asked.approval.resolution, undefined);
+
+  store.respondToApproval(asked.approval.id, 'yes');
+  await answered;
+
+  // Once answered the diff is a result again, so the call renders as done.
+  const done = partsOf(store.getSnapshot().messages[0]!)[0]!;
+  assert.equal(done.type, 'tool-call');
+  assert.match(String(done.result), /\+hello/);
 });
 
 test('declining to choose cancels the request rather than answering it', async () => {

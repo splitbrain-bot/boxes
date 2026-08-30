@@ -31,6 +31,7 @@ export function ThreadHeader({
   onSetMode: (modeId: string) => void;
 }) {
   const state = CONNECTION[connection];
+  const current = modes?.availableModes.find((mode) => mode.id === modes.currentModeId);
 
   return (
     <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
@@ -49,32 +50,25 @@ export function ThreadHeader({
       </div>
 
       {/* Whatever the adapter advertises, with nothing hardcoded: an adapter
-          that offers no modes gets no switcher. */}
+          that offers no modes gets no switcher.
+
+          A select rather than a row of buttons: six modes are wider than a
+          phone, and the native control opens the platform's own picker and
+          brings its keyboard and screen-reader behaviour with it. */}
       {modes && modes.availableModes.length > 1 ? (
-        <div
-          role="radiogroup"
+        <select
           aria-label="Agent mode"
-          className="flex shrink-0 gap-0.5 rounded-md bg-muted p-0.5"
+          value={modes.currentModeId}
+          onChange={(event) => onSetMode(event.target.value)}
+          title={current?.description ?? current?.name}
+          className="min-w-0 shrink rounded-md border bg-muted px-2 py-1 text-xs"
         >
           {modes.availableModes.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              role="radio"
-              aria-checked={mode.id === modes.currentModeId}
-              title={mode.description ?? mode.name}
-              onClick={() => onSetMode(mode.id)}
-              className={cn(
-                'rounded px-2 py-1 text-xs whitespace-nowrap transition-colors',
-                mode.id === modes.currentModeId
-                  ? 'bg-background text-foreground shadow-xs'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
+            <option key={mode.id} value={mode.id}>
               {mode.name}
-            </button>
+            </option>
           ))}
-        </div>
+        </select>
       ) : null}
 
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">

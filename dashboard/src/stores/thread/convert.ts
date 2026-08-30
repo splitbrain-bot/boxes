@@ -65,9 +65,32 @@ function asArgs(value: unknown): JsonObject {
     : {};
 }
 
+/**
+ * Whether the permission question on a call is still open.
+ *
+ * Mirrors the runtime's own test: an approval counts as answered once it
+ * carries the option that was picked, or the resolution that cancelled it.
+ */
+function awaitingApproval(part: ToolPart): boolean {
+  const state = part.approval;
+  return state !== undefined && state.optionId === undefined && state.resolution === undefined;
+}
+
 /** One tool part as a tool-call message part. */
 function toolPart(part: ToolPart) {
   const output = toolOutputText(part);
+  // A call still waiting on its permission question has no result, whatever
+  // content it has already sent: what an unapproved edit carries is the diff
+  // it proposes, not work it did. The runtime reads any result at all as
+  // proof the call finished, and a finished call is never the one being
+  // asked about, so reporting one here hides the question and leaves the
+  // turn blocked with no way to answer it.
+  //
+  // An empty result on a finished call is still a result: it says the tool
+  // produced nothing, which is different from still running.
+  const finished =
+    !awaitingApproval(part) &&
+    (output !== '' || part.status === 'completed' || part.status === 'failed');
   return {
     type: 'tool-call' as const,
     toolCallId: part.toolCallId,
@@ -76,11 +99,7 @@ function toolPart(part: ToolPart) {
     toolName: part.name ?? part.title,
     args: asArgs(part.rawInput),
     ...(part.rawInput === undefined ? {} : { argsText: JSON.stringify(part.rawInput) }),
-    // An empty result on a finished call is still a result: it says the tool
-    // produced nothing, which is different from still running.
-    ...(output || part.status === 'completed' || part.status === 'failed'
-      ? { result: output }
-      : {}),
+    ...(finished ? { result: output } : {}),
     ...(part.status === 'failed' ? { isError: true } : {}),
     ...(part.approval ? { approval: approval(part.approval) } : {}),
   };
