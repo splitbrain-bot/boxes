@@ -1,10 +1,15 @@
 # Build Plan: Replace acp-ui with an in-dashboard thread view (assistant-ui)
 
-Status: PROPOSED (revision 2). Tailwind demoted from build dependency to vendor-time tool per owner question, verified by compiling the vendored thread component end-to-end. Owner decision on 2026-08-30: the frontend is
-assistant-ui (React), embedded in our own dashboard; the standalone acp-ui
-app goes away. Every fact in §2 was verified by installing the packages and
-reading the shipped type declarations and registry payloads on 2026-08-30;
-pin the versions named there. Audience: a coding agent. Follow milestones in
+Status: PROPOSED (revision 3). Owner decisions incorporated:
+(2026-08-30 a) the frontend is assistant-ui, embedded in our dashboard; the
+standalone acp-ui app goes away. (2026-08-30 b) no vendor scripts, no
+committed build artifacts, no parallel build paths: dependencies dictate the
+frontend tech, so the frontend adopts that ecosystem's canonical toolchain
+outright, and prior stack rules (esbuild-only, no Tailwind, plain
+per-component CSS) are void for the dashboard. One build process produces
+the frontend; styles compile from source on every build.
+Facts in §2 were verified against installed packages and live registry
+payloads on 2026-08-30. Audience: a coding agent. Follow milestones in
 order. Do not begin implementation until the owner approves this plan.
 
 ---
@@ -13,24 +18,25 @@ order. Do not begin implementation until the owner approves this plan.
 
 acp-ui is a separate application with its own session management and its own
 UX, and we can only influence it upstream. The concrete failures that forced
-this decision, each of which must be demonstrably fixed by this plan:
+the frontend decision, each of which must be demonstrably fixed:
 
 | # | Complaint | Mechanism that fixes it (details in §6) |
 |---|-----------|------------------------------------------|
 | 1 | acp-ui's session panel duplicates our dashboard | The thread view lives *inside* the dashboard at `/sessions/:id`; there is no second app and no second session list |
 | 2 | No ArrowUp to recall previous messages | `unstable_useComposerInputHistory()` — an upstream hook with exactly terminal semantics, spread onto the composer input |
-| 3 | Input loses focus after each send | We own the vendored composer; autofocus on mount and refocus after send are asserted by the e2e test |
+| 3 | Input loses focus after each send | We own the installed composer component; autofocus on mount and refocus after send are asserted by the e2e test |
 | 4 | `!bang` local commands don't work | First-party feature: composer text starting with `!` runs in the session container via a new exec endpoint, never touching the model |
-| 5 | Can't see output of commands | Tool-call parts render name, args, status and output through the vendored tool components; `!bang` output rides the same rendering path |
+| 5 | Can't see output of commands | Tool-call parts render name, args, status and output through the tool components; `!bang` output rides the same rendering path |
 | 6 | No way to switch into auto mode | Header mode switcher driven by the session's advertised modes → `session/set_mode`; live via `current_mode_update` |
 
-What stays: the orchestrator, the ACP gateway (browser-facing WS protocol
-unchanged — external ACP clients keep working), the egress proxy, the session
-image, container lifecycle, reaper, both test scripts.
+What stays: the orchestrator (its own esbuild server build is a backend
+concern and unrelated to this pivot), the ACP gateway (browser-facing WS
+protocol unchanged — external ACP clients keep working), the egress proxy,
+the session image, container lifecycle, reaper, both test scripts.
 
 What goes: the acp-ui build stage, the `/ui` route, `dashboard/src/acpui.ts`
-and its tests, the localStorage-seeding connect flow. Connecting becomes SPA
-navigation.
+and its tests, the localStorage-seeding connect flow, and the entire
+Preact-era dashboard toolchain and styling system.
 
 ## 2. Verified facts (source-inspected 2026-08-30; pin these versions)
 
@@ -41,15 +47,15 @@ maintained; peer deps `react ^18 || ^19`).
   from the package root and mounts via `<AssistantRuntimeProvider>`. It lives
   under a `legacy-runtime/` path internally but is the supported
   external-state entry point; its successor (`ExternalThread` from
-  `@assistant-ui/core/store`) has the same shape. If a later upgrade removes
-  the hook, the migration is mechanical.
-- `ExternalStoreAdapter` carries everything we need, verified field by field:
-  `messages` + `convertMessage` (to `ThreadMessageLike`), `isRunning`,
+  `@assistant-ui/core/store`) has the same field shape, so a later migration
+  is mechanical.
+- `ExternalStoreAdapter` carries everything we need, verified field by
+  field: `messages` + `convertMessage` (to `ThreadMessageLike`), `isRunning`,
   `isSendDisabled`, `onNew`, `onCancel`, `onRefetchThread`, and
   **`onRespondToToolApproval(options: RespondToToolApprovalOptions)`**.
   A `queue?: ExternalThreadQueueAdapter` field exists for prompt queueing —
   not used in v1, but the upgrade path for the adapter's promptQueueing/
-  steering `_meta` extensions is already present upstream.
+  steering `_meta` extensions already exists upstream.
 - **Tool approval is first-class and maps 1:1 onto ACP.** A
   `ToolCallMessagePart` may carry
   `approval: { id, options?: ToolApprovalOption[], approved?, optionId?, resolution? }`;
@@ -63,42 +69,37 @@ maintained; peer deps `react ^18 || ^19`).
   sent user messages, ArrowDown steps back and restores the draft; yields to
   IME, popovers, multi-line caret movement. Documented as unstable → pin the
   exact package version; if it changes, the behavior is ~40 lines to inline
-  in a file we own.
+  in a component file we own.
 
-**Styled components** come from a shadcn-format registry, vendored into the
-repo as source files we own:
+**Styling and components — why Tailwind is dictated, not chosen.**
 
-- `https://r.assistant-ui.com/base/<name>.json` (the CLI shells out to
-  `shadcn add` with these URLs; we can fetch the JSON and write the files
-  directly, avoiding the interactive CLI). `thread.json` declares deps
-  `@assistant-ui/react`, `lucide-react` and registry deps: shadcn `button`,
-  `skeleton`, plus `attachment`, `file`, `follow-up-suggestions`, `image`,
-  `markdown-text`, `reasoning`, `tooltip-icon-button`, `tool-fallback`,
-  `tool-group`, and (via markdown-text) `use-copy-to-clipboard`.
-- The vendored sources use **both** semantic `aui-*` classes **and** Tailwind
-  utility classes. `@assistant-ui/styles` 0.3.7 ships precompiled CSS for the
-  147 `aui-*` classes **only** — verified: zero utility classes in it, while
-  `thread.aui.tsx` alone carries 175 distinct utility tokens (variants like
-  `dark:hover:bg-accent`, values like `-mb-7.5`, opacity forms like
-  `border-border/60`). Upstream's published CSS therefore cannot style the
-  components by itself; something must compile the utilities.
-- **Tailwind is a vendor-time tool, not a build or authoring dependency
-  (owner decision 2026-08-30).** Proven end-to-end: one pass of
-  `@tailwindcss/cli` 4.3.3 (standalone, no PostCSS/Vite) over the vendored
-  sources — input `@import "tailwindcss"` + `tw-animate-css` +
-  `@assistant-ui/styles/index.css` + `@source "./vendored"` + the theme
-  bridge below — emits every utility the components use plus the `aui-*`
-  layer into one ~135 KB static file (100 ms). That file is committed as
-  `dashboard/src/components/assistant-ui/vendored.css` and imported like any
-  other CSS; esbuild remains the only build tool in the image.
-- The theme bridge is mandatory, not cosmetic: Tailwind v4 **silently
-  skips** utilities such as `bg-background` unless `@theme` defines those
-  colors — verified by compiling without the token block (utilities absent)
-  and with it (all present). The vendor input defines the shadcn-convention
-  tokens from our palette, light and dark.
-- Markdown: `@assistant-ui/react-markdown` 0.14.13 (peer `^0.15` of react
-  pkg; wraps `react-markdown`) + `remark-gfm`, used by the vendored
-  `markdown-text` component.
+- Components are installed from a shadcn-format registry
+  (`https://r.assistant-ui.com/base/<name>.json`) into the project source
+  tree by the official CLIs (`npx assistant-ui add thread` shells out to
+  `npx shadcn add <registry-url>`). Installed sources are committed —
+  that is the shadcn distribution model, not a custom mechanism — and
+  upgrades are a re-run with `--overwrite`, reviewed as a diff.
+- The installed sources use both semantic `aui-*` classes and Tailwind
+  utility classes: `thread.aui.tsx` alone carries 175 distinct utility
+  tokens (variants like `dark:hover:bg-accent`, values like `-mb-7.5`,
+  opacity forms like `border-border/60`). `@assistant-ui/styles` 0.3.7
+  covers only the 147 `aui-*` classes — verified: zero utility classes in
+  it. Nothing published by upstream can style these components without a
+  Tailwind compile; therefore Tailwind is a build dependency.
+- Compilation was proven end-to-end: Tailwind v4 over the installed sources
+  with `@import "tailwindcss"` + `tw-animate-css` +
+  `@assistant-ui/styles/index.css` + the theme bridge emits every utility
+  the components use (spot-checked variants, fractional values, opacity
+  modifiers) in ~100 ms.
+- **Trap, verified:** Tailwind v4 silently omits utilities like
+  `bg-background` unless `@theme` defines those colors. The
+  shadcn-convention token block (§7.5) is a correctness requirement, not
+  theming polish.
+- `thread` registry deps: shadcn `button`, `skeleton`, plus `attachment`,
+  `file`, `follow-up-suggestions`, `image`, `markdown-text` (which pulls
+  `@assistant-ui/react-markdown` 0.14.13 + `remark-gfm`), `reasoning`,
+  `tooltip-icon-button`, `tool-fallback`, `tool-group`,
+  `use-copy-to-clipboard`; npm deps `lucide-react`.
 
 **Current gateway behavior this plan builds on** (from the code as of
 `b5618b2`): the downstream answers `initialize` from the cached upstream
@@ -116,9 +117,9 @@ queued permission requests to a newly attached browser; WS auth is the
 ```
 Browser ──────────────────────────────────────────────────────────────
   React SPA (one app, one origin, served by the orchestrator at /)
-  ├── session list / create / info views      (ported from Preact)
+  ├── session list / create / info views      (restyled on the new stack)
   └── /sessions/:id  = THREAD VIEW
-      ├── vendored assistant-ui components    (ours to edit)
+      ├── assistant-ui components (installed sources, ours to edit)
       ├── useExternalStoreRuntime(adapter)
       ├── thread store  ← translate(session/update*)   [replay + live]
       ├── AcpClient      ⇄ /ws/sessions/:id/acp        [unchanged protocol]
@@ -131,55 +132,70 @@ Browser ────────────────────────
 One thread per session remains the model. assistant-ui's thread-list
 machinery is not used; our session list is the thread list.
 
-## 4. Tech stack changes
+## 4. Frontend stack (full adoption, one build)
 
-| Concern | Was | Becomes |
-|---|---|---|
-| UI library | Preact + preact-iso + @preact/signals | React 19 + wouter (2 kB router) + `useSyncExternalStore` stores |
-| Chat UI | acp-ui (separate app) | vendored assistant-ui registry components (base flavor) |
-| Chat runtime | — | `useExternalStoreRuntime` over our ACP client |
-| Markdown | (acp-ui's) | `@assistant-ui/react-markdown` + `remark-gfm` |
-| CSS | plain per-component CSS | same everywhere we author; the thread additionally imports a committed `vendored.css` (compiled once at vendor time, §7.5) |
-| Build | esbuild only | esbuild only, unchanged; Tailwind CLI is a devDependency used only by the vendor script |
+| Concern | Choice |
+|---|---|
+| Framework | React 19 |
+| Build | Vite 8 (`@vitejs/plugin-react` 6) — the single frontend build; `vite build` emits JS+CSS together |
+| Styling | Tailwind CSS v4 via `@tailwindcss/vite` 4.3.3, compiled from source on every build; `tw-animate-css`; `@assistant-ui/styles` for the `aui-*` layer |
+| Components | assistant-ui registry (base flavor) + shadcn primitives, installed by their official CLIs, sources committed; `components.json` in repo |
+| Chat runtime | `@assistant-ui/react` 0.15.17, `useExternalStoreRuntime` |
+| Markdown | `@assistant-ui/react-markdown` 0.14.13 + `remark-gfm` |
+| Router | `react-router` 8 (library mode: `BrowserRouter`/`Routes`) |
+| State | `useSyncExternalStore` over plain TS stores (sessions polling, thread store) |
+| Tests | Vitest 4 (Vite-native; same config file), jsdom where components need it |
+| Type gate | `tsc --noEmit` before `vite build` in the Docker stage, as everywhere else in the repo |
+| Dev loop | `vite dev` with `/api`, `/healthz`, `/ws` proxied to the orchestrator |
 
-Pins: `@assistant-ui/react@0.15.17`, `@assistant-ui/react-markdown@0.14.13`,
-`@assistant-ui/styles@0.3.7`, `@tailwindcss/cli@4.3.3`, `react@^19`,
-`wouter` latest at implementation time. Registry components are pinned by
-being committed; upgrades are a re-vendor with a reviewable diff.
+House styling rule (replaces the plain-CSS rules): Tailwind utilities and
+shadcn/assistant-ui components everywhere in the dashboard; design tokens
+live once in `globals.css` as CSS variables bridged into `@theme`; the
+Preact-era `tokens.css`/`base.css`/per-component `.css` files are deleted,
+and the existing views are restyled during the port, so the app has exactly
+one styling system.
+
+The orchestrator and proxy keep their existing esbuild server builds: those
+are backend artifacts with no styling pipeline; this pivot is about the
+frontend having one canonical build.
 
 ## 5. Repository changes
 
 ```
-dashboard/src/
-├── main.tsx                    # React mount + wouter routes
-├── globals.css                 # tailwind import + @assistant-ui/styles +
-│                               #   theme-token bridge to our palette
-├── stores/
-│   ├── sessions.ts             # list polling (useSyncExternalStore port of store.ts)
-│   └── thread/
-│       ├── acp-client.ts       # JSON-RPC over WS: initialize/new/load/prompt/
-│       │                       #   cancel/set_mode; answers request_permission;
-│       │                       #   reconnect with backoff; $/ping-free
-│       ├── translate.ts        # ACP session/update* → our message model (pure)
-│       ├── thread-store.ts     # message list, isRunning, modes, pending
-│       │                       #   approvals, exec records; subscribe API
-│       └── thread-store.test.ts
-├── views/
-│   ├── SessionList.tsx/.css    # ported; card tap → /sessions/:id
-│   ├── SessionCreate.tsx/.css  # ported
-│   ├── SessionThread.tsx/.css  # NEW: runtime wiring + header (badges, mode
-│   │                           #   switcher, link to info)
-│   └── SessionInfo.tsx/.css    # ops from old SessionDetail (stop/delete/
-│                               #   volumes/network/proxy warning) + external-
-│                               #   client connect info (wss URL + token)
-├── components/
-│   ├── assistant-ui/…          # vendored registry sources (thread, markdown-
-│   │                           #   text, tool-fallback, tool-group, reasoning,
-│   │                           #   tooltip-icon-button, attachment, …)
-│   ├── ui/…                    # vendored shadcn button, skeleton, lib/utils
-│   └── (existing dashboard components ported)
-DELETED: dashboard/src/acpui.ts, acpui.test.ts, store.ts (replaced),
-         SessionDetail.* (split into SessionThread/SessionInfo),
+dashboard/                      # becomes a standard Vite app
+├── index.html                  # Vite entry (moves from src/ to root, Vite convention)
+├── vite.config.ts              # react() + tailwindcss() + /api,/ws dev proxy + vitest config
+├── components.json             # shadcn/assistant-ui CLI config (aliases, css path)
+├── tsconfig.json               # app config; tsconfig.node.json for vite.config
+├── package.json                # scripts: dev / build (vite) / check (tsc) / test (vitest)
+└── src/
+    ├── main.tsx                # React mount + <BrowserRouter> routes
+    ├── globals.css             # @import tailwindcss, tw-animate-css,
+    │                           #   @assistant-ui/styles; token block + @theme
+    │                           #   bridge; dark variant config (§7.5)
+    ├── lib/utils.ts            # cn() — installed by shadcn CLI
+    ├── stores/
+    │   ├── sessions.ts         # list polling (port of store.ts)
+    │   └── thread/
+    │       ├── acp-client.ts   # JSON-RPC over WS (§7.1)
+    │       ├── translate.ts    # ACP session/update* → message model (pure)
+    │       ├── thread-store.ts # messages, isRunning, modes, approvals, exec
+    │       └── *.test.ts       # Vitest
+    ├── views/
+    │   ├── SessionList.tsx     # restyled: Tailwind + shadcn Card/Badge/Button
+    │   ├── SessionCreate.tsx   # restyled: shadcn form controls
+    │   ├── SessionThread.tsx   # NEW: runtime wiring + header (badges, mode
+    │   │                       #   switcher, link to info)
+    │   └── SessionInfo.tsx     # ops from old SessionDetail + external-ACP-
+    │                           #   client connect info (wss URL + token)
+    └── components/
+        ├── assistant-ui/…      # installed registry sources (thread, markdown-
+        │                       #   text, tool-fallback, tool-group, reasoning,
+        │                       #   tooltip-icon-button, attachment, …)
+        └── ui/…                # installed shadcn primitives (button, skeleton,
+                                #   + card/badge/input/dialog as the views need)
+DELETED: dashboard/src/acpui.ts + test, store.ts, main.css, styles/tokens.css,
+         styles/base.css, every per-component/view .css file, SessionDetail.*,
          orchestrator Dockerfile acpui-build stage, /ui serving in index.ts.
 orchestrator/src/exec.ts        # NEW: container exec runner (§7.4)
 shared/types.ts                 # + ExecRequest/ExecRecord shapes
@@ -190,11 +206,11 @@ shared/types.ts                 # + ExecRequest/ExecRecord shapes
 1. **Session management** — the dashboard's list is the only session UI.
    Tapping a card opens the thread directly. Ops move to `/sessions/:id/info`.
 2. **ArrowUp history** — `unstable_useComposerInputHistory()` spread onto the
-   vendored `ComposerPrimitive.Input`. e2e-asserted.
+   installed `ComposerPrimitive.Input`. e2e-asserted.
 3. **Focus** — composer autofocuses on thread mount and after every send,
-   including sends resolved by error; asserted in e2e (send → `document.activeElement`
-   is the input). If the vendored composer doesn't already do it, we add it
-   there — it is our file.
+   including sends resolved by error; asserted in e2e (send →
+   `document.activeElement` is the input). If the installed composer doesn't
+   already do it, we add it there — it is our file.
 4. **`!bang` commands** — composer text starting with `!` is intercepted in
    `onNew` (never sent to the adapter, costs no tokens): `POST
    /api/sessions/:id/exec` streams combined stdout+stderr; rendered as a
@@ -205,7 +221,7 @@ shared/types.ts                 # + ExecRequest/ExecRecord shapes
    attempted — ACP replay carries no timestamps; documented limitation).
 5. **Command/tool output** — ACP `tool_call` / `tool_call_update` params
    (title, kind, status, content including terminal output, locations) map
-   onto tool-call parts; the vendored `tool-fallback` renders args and
+   onto tool-call parts; the installed `tool-fallback` renders args and
    results collapsibly, and we extend it (our file) to render ACP content
    blocks and diffs. Streaming `content` deltas update `result` live.
 6. **Mode switching** — modes come from the full `session/new` response
@@ -252,8 +268,8 @@ Pure translation of ACP updates into an append-only message model:
 `convertMessage` maps this model to `ThreadMessageLike`. Exec records
 convert to assistant messages with a `shell` tool-call part. `isRunning`
 tracks prompt in flight (set on send, cleared on `session/prompt` response
-or cancel). The store is framework-free and fully unit-tested — including
-approval attachment/resolution, replay rebuild, and out-of-order
+or cancel). The store is framework-free and fully unit-tested under Vitest —
+including approval attachment/resolution, replay rebuild, and out-of-order
 `tool_call_update`.
 
 ### 7.3 Gateway additions (small, wire-compatible)
@@ -281,46 +297,38 @@ rest of `/api`. The command runs inside the session's existing isolation
 (internal network, read-only rootfs, caps dropped) — no new privilege is
 introduced, and the endpoint never shell-executes on the host.
 
-### 7.5 Vendored CSS pipeline and authoring rules
-`scripts/vendor-ui.mjs` (dev-time only) fetches pinned registry items,
-writes the component sources, and compiles `vendored.css` with the Tailwind
-CLI from an input of `tailwindcss` + `tw-animate-css` +
-`@assistant-ui/styles/index.css` + `@source` over the vendored directory +
-the theme-token bridge (shadcn-convention variables defined from our
-palette, light and dark). Components and CSS are committed together as one
-frozen upstream artifact.
-
-Authoring rules, so Tailwind never enters our workflow:
-- Our styling changes are plain CSS targeting the `aui-*` semantic classes
-  (every element carries one) or our own class names, in our own files,
-  loaded after `vendored.css`.
-- Behavior edits to vendored TSX are fine; adding *new* utility classes to
-  them is not — use an `aui-*`/own class and style it in plain CSS. A check
-  script (part of `npm run check`) extracts static class tokens from the
-  vendored TSX and fails if any is missing from the committed CSS, so a
-  forgotten regen is loud, not silently unstyled. Regen itself is one
-  command re-running the vendor script.
-- Tailwind preflight is inside `vendored.css` and loads before our CSS; the
-  dashboard's element-level `button`/`input` rules move into explicit
-  classes so preflight and dashboard styles cannot fight over bare elements.
+### 7.5 globals.css: tokens and dark mode
+One file owns the design system: `@import "tailwindcss"`,
+`@import "tw-animate-css"`, `@import "@assistant-ui/styles/index.css"`;
+shadcn-convention CSS variables (`--background`, `--primary`, …) defined for
+light and dark from our existing palette; an `@theme inline` block bridging
+them into Tailwind color tokens (mandatory — see the §2 trap); dark mode as
+the shadcn-standard class variant
+(`@custom-variant dark (&:where(.dark, .dark *))`) with a three-line inline
+script in `index.html` applying `.dark` from `prefers-color-scheme` before
+first paint (manual toggle is a later nicety, not v1).
 
 ## 8. Milestones
 
-### M1 — React migration (no assistant-ui yet)
-Swap Preact→React 19, preact-iso→wouter, signals→`useSyncExternalStore`
-store; port list/create views and components; split SessionDetail into a
-placeholder thread route + SessionInfo. Acceptance: `npm run check` and unit
-tests green; Chromium screenshots of list/create/info match the current UI;
-card tap navigates to `/sessions/:id`.
+### M1 — Vite toolchain + React port + restyle
+Stand up the Vite app (config, tsconfig split, scripts, dev proxy); port
+list/create views and the session store to React + react-router; restyle
+them with Tailwind + shadcn primitives (button/card/badge/input/dialog via
+`npx shadcn add`); delete the Preact toolchain, esbuild config and all old
+CSS; split SessionDetail into a placeholder thread route + SessionInfo.
+Acceptance: `npm run check` and `npm run test` green; `vite build` output
+served by the orchestrator's static handler works with SPA fallback;
+Chromium screenshots of list/create/info in light and dark, visually
+coherent (not pixel-identical — this is a restyle); card tap navigates to
+`/sessions/:id`.
 
-### M2 — Vendoring pipeline + vendored components
-Write `scripts/vendor-ui.mjs`; vendor the registry components + shadcn
-button/skeleton/utils; commit `vendored.css`; add the class-coverage check
-to `npm run check`. The Docker build gains no new tools. Acceptance: a
-playground route rendering the vendored Thread over a canned in-memory
-external store shows fully styled composer, user/assistant messages,
-markdown, reasoning, and a tool call — light and dark screenshots, no
-unstyled elements, no console errors.
+### M2 — assistant-ui components + playground
+`npx assistant-ui add thread` (and the deps it pulls) with committed
+`components.json`; write §7.5's globals.css. Acceptance: a playground route
+rendering the installed Thread over a canned in-memory external store shows
+fully styled composer, user/assistant messages, markdown, reasoning, and a
+tool call — light and dark screenshots, no unstyled elements, no console
+errors.
 
 ### M3 — Live thread: client, store, runtime
 AcpClient + translate + thread-store + runtime wiring; replay on attach;
@@ -348,19 +356,19 @@ against a live orchestrator process with a stubbed docker layer.
 
 ### M6 — Removal, integration, docs
 Delete acp-ui stage/route/files and the localStorage connect flow; Dockerfile
-dashboard stage = `tsc --noEmit` + tailwind + esbuild; update
-ARCHITECTURE.md (frontend section rewritten) and README (connect = open the
-session; external-ACP-client instructions move to SessionInfo/README
-appendix); verify scripts/live-test.sh still passes unchanged (it drives the
-WS directly). Acceptance: full test matrix green
-(orchestrator/dashboard/proxy unit + stub e2e); `docker compose config`
-valid; repo contains no reference to acp-ui outside ARCHITECTURE.md history
-notes.
+dashboard stage = `npm ci` + `tsc --noEmit` + `vite build`; update
+ARCHITECTURE.md (frontend section rewritten: stack, one-build rule, component
+installation model) and README (connect = open the session; external-ACP-
+client instructions move to SessionInfo/README appendix); verify
+scripts/live-test.sh still passes unchanged (it drives the WS directly).
+Acceptance: full test matrix green (orchestrator/dashboard/proxy unit + stub
+e2e); `docker compose config` valid; repo contains no reference to acp-ui
+outside ARCHITECTURE.md history notes.
 
 Out of scope for v1 (explicitly): attachments/images, message branching &
 edit-resend, prompt queueing/steering UI (upstream `queue` adapter exists —
 natural M7), syntax highlighting in code blocks (add-on package later),
-multi-thread-per-session.
+multi-thread-per-session, manual dark-mode toggle.
 
 ## 9. Risks
 
@@ -370,37 +378,38 @@ multi-thread-per-session.
   M1). The stub gateway encodes the ACP v1 schema, so drift shows up as a
   concrete diff, not a mystery.
 - `unstable_useComposerInputHistory` may change signature — pinned version;
-  fallback is inlining the behavior into the vendored composer (~40 lines).
+  fallback is inlining the behavior into the installed composer (~40 lines).
 - `useExternalStoreRuntime` is in a `legacy-runtime` path upstream: exported,
   documented, but its successor exists. Mitigation: our adapter object
   already matches `ExternalThreadProps` field-for-field; migration is a
   mount-point swap.
 - Approval UI rendering by the stock components is unconfirmed (the *types*
   are verified; the default rendering may need our tool-fallback to draw the
-  option buttons). Either way the file is vendored and ours; M4 acceptance
-  covers it.
-- Tailwind preflight vs. dashboard CSS interactions — bounded by M2's
-  screenshot acceptance and the class-scoping rule in §7.5.
-- A vendored-TSX edit that adds a utility class without regenerating
-  `vendored.css` would be silently unstyled — which is why the class-coverage
-  check runs in `npm run check` and fails the image build (§7.5). Dynamic
-  class construction could evade the extractor; the vendored sources use
-  static strings, and the rule stands that our edits use non-utility classes.
-- Bundle size grows (React + radix-ui + zustand internals). Irrelevant for a
-  self-hosted single-user tool; not a goal.
+  option buttons). Either way the file is installed source and ours; M4
+  acceptance covers it.
+- The restyle in M1 changes the dashboard's look. Bounded by screenshot
+  review in both schemes; the palette carries over via the token block.
+- Vite and Tailwind become load-bearing build dependencies. That is the
+  point of the pivot: both are the ecosystem-canonical, actively maintained
+  tools for exactly this stack, and `tsc --noEmit` still gates every image
+  build.
 
 ## 10. Fixed decisions (this revision)
 1. The chat UI is part of the dashboard; no standalone frontend container.
-2. assistant-ui with vendored registry components; primitives + vendored
-   sources are the customization surface; upstream upgrades come through
-   re-vendoring diffs, never at image-build time from a moving ref.
-3. React 19 + wouter; esbuild remains the only build tool in the image.
-   Tailwind runs solely inside the vendor script, and no code we author uses
-   Tailwind syntax; our styling stays plain CSS on semantic classes.
-   `tsc --noEmit` still gates every image build.
-4. The browser speaks plain ACP to the existing gateway; the gateway stays
+2. assistant-ui with registry components installed by the official CLIs;
+   installed sources are committed and are the customization surface;
+   upgrades come through CLI re-runs reviewed as diffs, never at image-build
+   time from a moving ref.
+3. The frontend fully adopts its ecosystem's canonical toolchain: React 19,
+   Vite 8 (single build producing JS+CSS), Tailwind v4 compiled from source
+   every build, shadcn-convention theming, Vitest. The former esbuild-only /
+   no-Tailwind / plain-CSS rules are revoked for the dashboard. No vendor
+   scripts, no committed generated artifacts, no parallel build paths.
+4. Tailwind utilities + shadcn/assistant-ui components are the one styling
+   system for the entire dashboard; design tokens live once in globals.css.
+5. The browser speaks plain ACP to the existing gateway; the gateway stays
    client-agnostic (external ACP clients remain supported) except the two
    additive fixes in §7.3.
-5. `!bang` execution is a REST feature of the orchestrator scoped to the
+6. `!bang` execution is a REST feature of the orchestrator scoped to the
    session container, persisted in SQLite, rendered as a shell tool call.
-6. One thread per session; the session list is the thread list.
+7. One thread per session; the session list is the thread list.
