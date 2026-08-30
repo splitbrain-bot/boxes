@@ -100,7 +100,7 @@ If you would rather the Claude token not sit there, either works:
 
 - **Keep the file elsewhere.** Nothing requires it to be in the repo:
   ```
-  docker compose --env-file ~/.config/boxes.env up -d
+  BOXES_ENV=~/.config/boxes.env docker compose up -d
   ```
 - **Skip the token entirely and log in inside the session.** No token then
   exists in any file or in the container's environment — the credential lands

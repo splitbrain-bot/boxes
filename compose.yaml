@@ -19,32 +19,20 @@ services:
       dockerfile: orchestrator/Dockerfile
     container_name: boxes-orchestrator
     restart: unless-stopped
+    # Whatever is in the env file reaches the orchestrator, which parses and
+    # defaults all of it in orchestrator/src/config.ts. Nothing needs listing
+    # here, and there is no env file to have by default.
+    # Keep it outside the repo with: BOXES_ENV=~/.config/boxes.env
+    env_file:
+      - path: ${BOXES_ENV:-.env}
+        required: false
     environment:
-      # Two settings this file is entitled to decide, because it is this file
-      # that wires them: the data dir is where the volume below is mounted,
-      # and the proxy name is the container_name further down. Overriding
-      # either from a .env would break that wiring, so neither is a
-      # pass-through.
+      # Set here rather than defaulted, and deliberately after the env file so
+      # they win over it: these two name the volume mounted below and the
+      # container created further down. They are this file's wiring, not
+      # settings, and an env file that changed them would only break it.
       - DATA_DIR=/data
       - EGRESS_PROXY_CONTAINER=boxes-egress-proxy
-      # Everything else is passed through from the environment if set, and
-      # left unset otherwise. The defaults live in orchestrator/src/config.ts,
-      # which parses all of this at boot; restating them here would only give
-      # them somewhere to drift apart. See .env.example for what each does.
-      - SESSION_IMAGE
-      - SESSION_SUBNET_POOL
-      - SESSION_MEM_LIMIT
-      - SESSION_CPUS
-      - SESSION_PIDS_LIMIT
-      - IDLE_STOP_MINUTES
-      - WS_AUTH_TOKEN
-      - PERMISSION_FALLBACK
-      - PERMISSION_HOLD_MINUTES
-      - NTFY_URL
-      - PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN
-      - PROFILE_DEFAULT_GH_TOKEN
-      - PROFILE_DEFAULT_GIT_NAME
-      - PROFILE_DEFAULT_GIT_EMAIL
     volumes:
       # Root-equivalent access, mitigated by the fixed HostConfig template, by
       # never shell-exec'ing user strings, and by the auth in front.
