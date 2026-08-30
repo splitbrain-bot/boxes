@@ -1,6 +1,6 @@
 # Plan: Egress allowlist and token translation
 
-Status: PROPOSED (revision 4). Owner decisions incorporated:
+Status: PROPOSED (revision 5). Owner decisions incorporated:
 (2026-08-30 a) MITM is the way to go — selective TLS interception at the
 egress proxy, chosen for the marginal cost of the next tool (§2).
 (2026-08-30 b) **No time-limited GitHub tokens**: the proxy injects the
@@ -8,6 +8,11 @@ configured PAT; App-minted short-lived tokens move to future work (§10).
 (2026-08-30 c) **Credentials must be dynamically attachable to sessions**,
 managed from the dashboard, not only fixed at boot — this shapes the
 credential model (§4) and the orchestrator↔proxy interface (§5).
+(2026-08-30 d) **Runtime credentials live in the SQLite database**, not in
+a side file: one store, transactional with the attachment rows it relates
+to. This amends ARCHITECTURE.md's "secrets stay out of the database" rule
+for owner-managed credentials (§4); `policy.json` remains a file because
+it is the proxy's least-privilege read interface, not a store.
 Research facts were verified against primary sources on 2026-08-30.
 Audience: the owner first, then a coding agent. Do not begin
 implementation until the owner approves this plan (open questions: §9).
@@ -157,7 +162,11 @@ certificate pinning; git trusts a CA via `GIT_SSL_CAINFO`, gh via
 The orchestrator is the single stateful, dashboard-facing component; the
 Python addon is a stateless executor of a file it cannot write. All
 interaction between the TS world and the proxy is two JSON files on two
-small volumes — no RPC, no shared database, no Python touching state.
+small volumes — no RPC, and no shared database: the proxy reading our
+SQLite directly would mean cross-container WAL access (fragile), schema
+coupling into Python, and read access to the whole database where it needs
+a handful of values. `policy.json` is the proxy's least-privilege view of
+the store, projected from the database on every change.
 
 **A credential** is `{id, label, hosts[], headerKind, envVar, secret}` —
 e.g. `{label: "npm publish", hosts: ["registry.npmjs.org"], headerKind:
@@ -166,10 +175,20 @@ e.g. `{label: "npm publish", hosts: ["registry.npmjs.org"], headerKind:
 - **Boot credentials** from config.ts as today
   (`PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`, `PROFILE_DEFAULT_GH_TOKEN`
   plus their fixed host/header definitions), auto-attached to every
-  session at create.
+  session at create. These stay environment-only, as now.
 - **Runtime credentials**, created and attached via REST/dashboard, stored
-  in `DATA_DIR/credentials.json` (0600) — the database stays secret-free
-  per doctrine, same pattern as the generated WS token. Survives restarts.
+  in SQLite: a `credentials` table (secret included) and a
+  `session_credentials` attachment table (session, credential, placeholder
+  hash), so attach/detach is one transaction with no second store to keep
+  in sync. This deliberately amends the "secrets stay out of the database"
+  doctrine for owner-managed credentials — the DB file sits in the same
+  0-permission volume a side file would, so a separate file added sync
+  problems, not security. What the amendment costs is discipline at the
+  edges, which becomes explicit: the REST layer never serializes the
+  `secret` column (write-only by construction, enforced by the row-shape
+  types in `shared/types.ts`), `log.ts` redaction already covers
+  credential-shaped values, and the README's backup note says plainly that
+  `boxes-data` now contains credentials.
 
 **Attach** (create-time or mid-session) mints a placeholder for
 (session, credential), rewrites `policy.json`, and delivers the
@@ -231,8 +250,8 @@ proxy/
 orchestrator/src/
 ├── config.ts                # + EGRESS_ALLOWED_HOSTS ('' = off)
 │                            # + EGRESS_TOKEN_TRANSLATION ('on'|'off')
-├── credentials.ts           # NEW: the credential store — boot + runtime
-│                            #   merged; DATA_DIR/credentials.json (0600)
+├── credentials.ts           # NEW: the credential store — boot (env) +
+│                            #   runtime (SQLite) merged behind one interface
 ├── policy.ts                # NEW: placeholder minting; atomic policy.json
 │                            #   writer; status.json reader; CA cert reader
 ├── app.ts                   # + the five credential routes (§4)
@@ -254,8 +273,10 @@ shared/types.ts              # credential shapes; healthz policy-sync fields
 scripts/smoke-test.sh        # extended, §8
 README.md, ARCHITECTURE.md   # network/risks sections rewritten + CA-trust
                              #   troubleshooting table for future tools
-db migration                 # per-session placeholder bookkeeping (hashed;
-                             #   plaintext only in policy.json)
+db migration                 # credentials table (secret is write-only above
+                             #   the store) + session_credentials attachments
+                             #   (placeholder stored hashed; plaintext only
+                             #   in policy.json)
 ```
 
 **Where Python is and is not.** Python exists only inside `proxy/`: one
@@ -295,7 +316,7 @@ Fallback trigger: a structural failure of 1 or 2 → the per-protocol design
 (plan revision 2, git history) is the fallback; re-plan at that point.
 
 ### M1 — Orchestrator: config, credential store, policy plumbing
-Config keys; migration; `credentials.ts` (boot + runtime, file-backed);
+Config keys; migration; `credentials.ts` (boot + runtime, DB-backed);
 placeholder mint/drop; `policy.ts` writer + status reader; reconciler
 assertions; the five REST routes. Unit tests: mint uniqueness, atomic
 write, file shapes, detach-revokes, reconciler re-write after deletion.
@@ -344,6 +365,11 @@ not to.
 - **Mid-session delivery reaches shells, not the running adapter** —
   documented nuance (§4); the adapter's own credentials ride container
   env from create.
+- **Secrets in the database** (owner decision): a DB dump or a future
+  debug/export endpoint is now a place credentials could leak. Mitigated
+  by the write-only `secret` column above the store, the existing log
+  redaction, and the README backup note; the smoke test's secret-grep
+  (§8.1) covers the session-facing side.
 - **Placeholder shape drift**: a client-side token format check tightening
   breaks placeholders loudly (auth error), not silently.
 - **PAT blast radius** (owner-accepted): the injected GitHub credential is
@@ -378,12 +404,9 @@ on:
 
 1. **Default posture once shipped**: `EGRESS_TOKEN_TRANSLATION` → `on` at
    M5 (recommended; `off` remains the escape hatch)?
-2. **Runtime credential persistence**: `DATA_DIR/credentials.json` (0600,
-   doctrine-conform, recommended) is assumed — veto if you'd rather they
-   be session-lifetime only and vanish on orchestrator restart.
-3. **Allowlist granularity**: one deployment-wide list for v1 (this plan)?
+2. **Allowlist granularity**: one deployment-wide list for v1 (this plan)?
    Per-session lists ride the same policy.json trivially later.
-4. Ship `.env.example` with the §8 working allowlist commented in?
+3. Ship `.env.example` with the §8 working allowlist commented in?
 
 ## 10. Enabled later, out of scope now
 
