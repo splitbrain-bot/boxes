@@ -109,11 +109,15 @@ export const SlashCommands: FC = () => {
               key={item.id}
               item={item}
               index={index}
-              className="flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left data-[highlighted]:bg-accent"
+              className="flex w-full min-w-0 flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left data-[highlighted]:bg-accent"
             >
-              <span className="font-mono text-sm">/{item.id}</span>
+              {/* Both lines break anywhere they have to: a description is
+                  whatever the agent wrote, and one long unbroken word in one
+                  of them would otherwise widen the popover past a phone and
+                  leave the whole list scrolling sideways. */}
+              <span className="w-full font-mono text-sm break-words">/{item.id}</span>
               {item.description ? (
-                <span className="line-clamp-2 text-xs text-muted-foreground">
+                <span className="line-clamp-2 w-full text-xs break-words text-muted-foreground">
                   {item.description}
                 </span>
               ) : null}

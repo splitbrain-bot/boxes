@@ -377,6 +377,9 @@ test('a permission request renders its options and the choice answers the agent'
     // The question opens itself: a prompt nobody can see blocks the turn.
     const approval = page.locator('[data-slot="tool-fallback-approval"]');
     await expect.poll(() => approval.isVisible(), { timeout: 10_000 }).toBe(true);
+    // And the call it is about has not run yet, whatever the collapsed header
+    // of a finished one says.
+    expect(await page.getByText('Wants to run:').isVisible()).toBe(true);
     expect(await approval.getByRole('button').allInnerTexts()).toEqual([
       'Allow once',
       'Always allow',

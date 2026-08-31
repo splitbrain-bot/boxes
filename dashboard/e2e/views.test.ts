@@ -113,6 +113,21 @@ test('the info corner opens the ops route instead', async () => {
   }
 });
 
+test('a link to a session that is gone says so instead of offering a composer', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/sessions/deadbeef');
+  try {
+    // What a bookmark for a deleted box lands on. Nothing can connect without
+    // the session's token, so a composer would be an invitation to type into
+    // a void.
+    await expect.poll(() => page.getByText('Back to sessions').isVisible()).toBe(true);
+    expect(await page.getByRole('textbox', { name: 'Message input' }).isVisible()).toBe(false);
+    expect(await page.getByText('disconnected').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the session list offers to notify this browser', async () => {
   const { page, errors, close } = await openPage(stub.url, '/', 'dark');
   try {

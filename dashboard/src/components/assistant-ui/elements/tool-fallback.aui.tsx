@@ -139,7 +139,16 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled tool" : "Used tool";
+  // A call waiting on a permission question has not run, and one still running
+  // has not finished. Both used to read "Used tool", which said the opposite
+  // of what the buttons underneath were asking.
+  const label = isCancelled
+    ? "Cancelled tool"
+    : statusType === "requires-action"
+      ? "Wants to run"
+      : isRunning
+        ? "Running tool"
+        : "Used tool";
 
   return (
     <CollapsibleTrigger

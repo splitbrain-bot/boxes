@@ -54,6 +54,19 @@ export function useSessions(): SessionsState {
 }
 
 /**
+ * What a failed list says, in the terms of the thing that went wrong.
+ *
+ * A request that never reached the server rejects with the browser's own
+ * "Failed to fetch", which names neither what failed nor what happens next.
+ * An answer the server did send is already a sentence, and is passed through.
+ */
+function reachable(error: Error): string {
+  return error instanceof TypeError
+    ? 'Could not reach Boxes. Still trying.'
+    : error.message;
+}
+
+/**
  * Fetches the session list and the health probe once.
  *
  * The two are settled apart: a failed probe says nothing about the sessions,
@@ -65,7 +78,7 @@ export async function refresh(): Promise<void> {
   set({
     ...(list.status === 'fulfilled'
       ? { sessions: list.value, error: null }
-      : { error: (list.reason as Error).message }),
+      : { error: reachable(list.reason as Error) }),
     ...(health.status === 'fulfilled'
       ? { claudeTokenConfigured: health.value.claudeTokenConfigured }
       : {}),

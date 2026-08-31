@@ -40,7 +40,10 @@ export function SessionList() {
         <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
       ) : null}
 
-      {!loading && sessions.length === 0 ? (
+      {/* Only where the list is genuinely empty. A failed poll knows nothing
+          about how many sessions there are, and saying there are none under
+          the error that says so is the one reading that is certainly wrong. */}
+      {!loading && !error && sessions.length === 0 ? (
         <div className="py-8 text-center text-sm text-muted-foreground">
           No sessions yet. Create one to get started.
         </div>

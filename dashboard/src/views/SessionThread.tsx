@@ -157,7 +157,9 @@ export function SessionThread() {
               threadId={thread?.id ?? null}
               name={session?.name ?? id}
               threadLabel={threadLabel}
-              connection={state.connection}
+              // Nothing is connecting while the session itself could not be
+              // read, and a dot that pulses forever says the opposite.
+              connection={loadError ? 'closed' : state.connection}
               modes={state.modes}
               configOptions={state.configOptions}
               canFork={session?.canFork === true && thread !== undefined}
@@ -171,7 +173,14 @@ export function SessionThread() {
             {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
-                <span>{threadName(forked)} branched from this conversation.</span>
+                {/* It opens on an empty transcript, which is the adapter's
+                    doing: it keeps the context it was forked with and has no
+                    replay to hand over. Saying so here is cheaper than the
+                    reader wondering what was lost. */}
+                <span>
+                  {threadName(forked)} branched from this conversation. It knows what was said
+                  here, but starts with an empty transcript.
+                </span>
                 {/* A real click on a real link, so the browser opens the tab
                     rather than a script asking it to. */}
                 <Link
@@ -196,18 +205,29 @@ export function SessionThread() {
                 Could not fork this thread: {forkError}
               </div>
             ) : null}
-            {loadError ? (
-              <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
-                {loadError}
-              </div>
-            ) : null}
             {state.error ? (
               <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
                 {state.error}
               </div>
             ) : null}
             <div className="min-h-0 flex-1">
-              <Thread />
+              {/* A session that could not be read has no token, so nothing can
+                  connect and nothing can be sent. A composer over an empty
+                  greeting would say otherwise — which is exactly what a
+                  bookmark for a deleted box lands on. */}
+              {loadError ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                  <p className="text-sm">{loadError}</p>
+                  <p className="text-sm text-muted-foreground">
+                    It may have been deleted. Nothing can be sent to it from here.
+                  </p>
+                  <Link to="/" className="text-sm font-medium underline">
+                    Back to sessions
+                  </Link>
+                </div>
+              ) : (
+                <Thread />
+              )}
             </div>
           </div>
         </SlashCommandsProvider>
