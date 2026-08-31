@@ -1,397 +1,337 @@
-# Threads in parallel
+# Code review in Boxes
 
 Last modified: 2026-08-31
-Repo state: implemented on top of commit `0ad8a8b`.
-
-## Where the last change left this
-
-A Boxes session owns several threads. One is current at a time: the session
-row names it, the gateway answers every browser's `session/new` with it, and
-switching is a REST call that drops the attached browsers so each reconnects
-onto the new one.
-
-That was the deliberately small version. Its own design note said the
-alternative — a thread id in the WebSocket URL, so two browsers could watch
-two threads of one session at once — stayed possible later and was blocked by
-nothing. This is that change.
+Repo state: planned on top of commit `cd4269a`.
 
 ## What is wanted
 
-One thread keeps working while you use another to explore. The concrete
-motion: you are in a thread that is doing something long, you fork it, and you
-ask the fork questions about what it is doing without stopping it or losing
-your place. Two tabs, two conversations, one box.
+The standalone desktop tool [`review`](https://github.com/splitbrain/review) —
+browse a project's files, read them highlighted, tap a line to leave a
+comment, everything persisted to a `REVIEW.md` the agent can read back — built
+into Boxes, against a session's workspace, in the stack Boxes already has:
+Node + TypeScript in the orchestrator, React + Tailwind + shadcn in the
+dashboard. Same features:
 
-That is a narrower requirement than parallelism in general, and it is the
-benign case. A thread that reads and answers does not fight the working thread
-over the checkout the way two threads both editing would. It is still one
-workspace, so the risk is real but bounded; see the risks.
+- a file browser over the session's workspace,
+- syntax-highlighted file viewing,
+- per-line comments: add, edit, delete,
+- read and write of `REVIEW.md`, **byte-compatible with the desktop tool's
+  format**, so a review started in one is continued in the other,
+- git awareness: file statuses in the tree, changed/added lines marked in the
+  gutter, deletions marked between lines, compare against a base revision,
+- and one thing the desktop tool cannot have: the review lives where the agent
+  works. `REVIEW.md` is written into the workspace, so "address the comments
+  in REVIEW.md" is a one-line prompt — the review view and the thread close a
+  loop instead of being two applications.
 
-## What has to be true for it to work
+The additional requirement over the desktop tool is that it must work on a
+phone, because Boxes is driven from one. That rules out porting the desktop
+tool's three-panel layout and its hover interactions as they are; the feature
+set survives, the layout does not.
 
-**The wire already allows it.** The ACP SDK keys pending responses by
-JSON-RPC id (`jsonrpc.js`, `prepareRequest`) with no write queue, so two
-`session/prompt` calls naming different threads can be in flight on the one
-adapter connection. Nothing in the transport serialises them.
+## The constraint everything is designed around
 
-**Whether the adapter allows it is unverified.** `claude-agent-acp` holds
-every thread of a session in one process, and it may serve two prompts
-concurrently or it may queue the second behind the first. Nothing here has
-tested that, and it decides how much of this plan is worth building. It is
-step 0.
+**The reviewed files are inside the session container, and the orchestrator
+has no mount into it.** The desktop tool reads the filesystem it runs on;
+Boxes cannot. The workspace is a named volume mounted only into the session
+container, and the one road the orchestrator already has into it is
+`docker exec` — the same road the `!bang` commands take (`exec.ts`,
+`dk.runCommandExec`).
 
-If the adapter turns out to queue, the feature is still worth having — the
-explorer's answer arrives after the working turn's next pause rather than
-during it — but the UI must not claim otherwise, and that is a different
-promise from the one above. Find out before building the rest.
+So every review operation is an exec: listing files is `git ls-files`, reading
+a file is `cat`, git status is `git status --porcelain`, writing `REVIEW.md`
+is a `cat > tmp && mv` with the content on stdin. That settles several things
+at once:
 
-## The design decisions
+- **No new privilege.** Review sees exactly what the agent sees, inside the
+  container's existing isolation. Nothing mounts the volume anywhere new.
+- **The container must be running.** Opening the review view starts a stopped
+  container, exactly as opening a thread does (`execTarget` already does
+  this).
+- **Latency is an exec round trip** — tens of milliseconds per call. Fine for
+  interactive browsing, poor for chatty protocols, which is why the API below
+  batches (tree + statuses + annotation markers in one response, file content
+  + diff + annotations in one response) and why live updates poll instead of
+  pretending we can watch files.
+- **No fsnotify.** The desktop tool watches the filesystem and pushes over a
+  WebSocket. There is no inotify across the exec boundary worth trusting, so
+  freshness comes from polling a cheap fingerprint endpoint, below.
 
-### 1. A connection is pinned to one thread, and the thread is in the URL
+The alternatives were considered and rejected: mounting session volumes into
+the orchestrator breaks the "nothing shares a filesystem with the sandbox"
+property and fights the one-container-per-volume lifecycle; running a helper
+server inside the session image adds a second listener inside the sandbox and
+a version coupling between images. Exec is slower and simpler and uses only
+machinery that exists.
 
-`/ws/sessions/:id/threads/:threadId/acp` is a connection to that thread.
-`/ws/sessions/:id/acp` keeps working and means whichever thread is current.
+### Exec plumbing this needs
 
-The second half is what makes this cheap. An external ACP client's contract
-does not change at all: it connects where it always did and gets the session's
-current thread, exactly as today. Only the dashboard learns the longer path.
+`runCommandExec` takes a shell string (`bash -lc <command>`), which is right
+for `!bang` and wrong for review: review paths are user input and must never
+be spliced into a shell string. Two additions to `docker.ts`:
 
-It also means the browser barely changes. `AcpClient` already sends
-`session/new` and takes back an id it does not choose; pinning happens in the
-gateway, so the store, the translation layer and the assistant-ui mounting are
-untouched. What changes is `wsUrlFor` and which route mounts the view.
+- `runArgvExec(containerId, argv, workingDir, { stdin? })` — same demux and
+  exit-code handling as today, but `Cmd` is the argv array itself, no shell,
+  with optional `AttachStdin` for the write path.
+- On top of it in a new `orchestrator/src/review/exec.ts`: `capture(argv,
+  limit)` (buffer output up to a byte cap, return `{output, exitCode,
+  truncated}`) and `writeFile(relPath, content)` — argv
+  `['sh', '-c', 'cat > "$1.tmp" && mv -- "$1.tmp" "$1"', 'sh', <abs path>]`,
+  content on stdin. The path travels as a positional parameter, not as shell
+  text, and the write is atomic, matching the desktop tool's flush.
 
-### 2. Everything session-wide in `Broadcast` becomes keyed by thread
+Review execs do not go through `exec.ts`'s `runCommand`: they must not land in
+`exec_log` (they are not user commands), and they want per-call output caps
+(a 2 MiB file read, a 64 KiB status). They do call `manager.touch(id)` so an
+active review holds off the idle reaper, which otherwise cannot see a REST
+poller the way it sees an attached WebSocket.
 
-`Broadcast` holds three pieces of session-wide state, and each has a
-thread-scoped meaning that is the same rule in a smaller scope:
+### Where the review roots
 
-| Now | Becomes |
-|---|---|
-| the set of attached browsers | the set of browsers, each recording which thread it watches |
-| `replayTargets`, a set of handles | replay targets per thread |
-| `echoingPrompts`, one counter | one counter per thread |
+`/workspace` starts empty and the agent usually clones a project into a
+subdirectory, so `/workspace` itself is frequently not the repo. Root
+resolution, at review open and cached on the session row:
 
-An update is routed by its own `sessionId`, which every `session/update`
-carries. The two rules the class exists for survive verbatim, one thread at a
-time: a replay goes only to the browser that asked for it, and a prompt the
-gateway has echoed is not echoed twice. What is fixed is that a replay of one
-thread no longer silences another thread's live updates, which is exactly the
-bug you would hit first with two tabs open.
+1. If `/workspace` is a git work tree (`git -C /workspace rev-parse
+   --show-toplevel`), root there.
+2. Else, if `/workspace` contains exactly one directory and it is a git work
+   tree, root there — the overwhelmingly common shape.
+3. Else root at `/workspace` with git features off (the desktop tool degrades
+   the same way: plain tree, no statuses, no diff).
 
-This is the part the previous plan called the hardest to get right, and it is
-also the part that needs no Docker to test. `broadcast.test.ts` should carry
-the weight.
+`REVIEW.md` is written at that root, which is what makes it visible to the
+agent as a file of the project it is working on, and what keeps the format
+contract with the desktop tool (it also writes at the reviewed root).
 
-### 3. `current_thread_id` survives, as the default rather than the truth
+## The REVIEW.md contract
 
-It stops being what every connection gets and becomes what a connection that
-does not name a thread gets: `/sessions/:id`, `/ws/sessions/:id/acp`, an
-external client, a bookmark from before this change.
+The desktop tool's `internal/store` is ported to TypeScript as pure functions,
+keeping the format exactly:
 
-One consequence is worth stating plainly: **switching threads stops dropping
-browsers.** Selecting a thread now only moves a default, and no live
-connection is pinned to it, so the reconnect flicker the last plan listed as a
-visible cost disappears. `switchThread` loses its `dropDownstreams()` call and
-becomes an ordinary write.
+```
+# Code Review
 
-### 4. A fork starts in `plan` mode, not `auto`
+_Started: 2026-08-31_
 
-The explorer thread shares the working thread's checkout. If a question makes
-it decide to edit a file, it collides with the thread that is mid-turn, and
-neither agent can see the other doing it.
+---
 
-The default-mode step already runs on exactly one thread — the one the adapter
-has just minted — so a fork can be given `plan` where a fresh thread is given
-`auto`, at the cost of one parameter. That does not solve the shared
-workspace, it just stops the common accident. Flipping the fork to `auto` is
-one tap in the header the user already has, and then it is their decision
-rather than a surprise.
+## `src/app.ts`
 
-## Steps
+#### Line 42
 
-### 0. Find out whether the adapter runs two turns at once
+The comment, as written. A line that would parse as this document's own
+structure is backslash-escaped on write.
 
-Before any of the below. In a real session container, against the pinned
-adapter: mint two threads, start a long prompt on the first, and prompt the
-second while the first is still streaming. Watch whether the second's updates
-interleave or only begin after the first's `stopReason`.
-
-Record the answer in this file. If it queues, stop and re-scope: the gateway
-work below is still correct, but step 8's UI must say "queued behind the other
-thread" rather than implying two turns run at once, and the payoff is smaller
-than this plan assumes.
-
-**Not run, and still unanswered.** The environment this was implemented in has
-no Docker daemon and no Claude token, so there was no real session container
-to put the question to, and there is no way to answer it short of one — a
-stand-in adapter would only report what the stand-in was written to do.
-
-What was built instead is the half the answer does not change. Everything in
-steps 1–7 is correct either way: routing an update to the thread it names,
-recording a turn against the thread it runs on, asking the browser watching the
-thread that asked, and reloading every watched thread on a respawn are all
-right whether the adapter interleaves two turns or queues the second. And step
-8's UI was written to claim nothing about it: the per-thread badges report what
-a thread *is* doing, which is true under either answer, and no copy anywhere
-promises that two turns run at once.
-
-What is still owed, once a real deployment can run the experiment: if the
-adapter interleaves, this is done as written. If it queues, the explorer's
-answer arrives after the working turn's next pause rather than during it, and
-the thread view should say so — a queued-behind-another-thread note in the
-composer's place, driven by the session's other threads' `turnActive`, which
-the API already reports per thread. That is a small addition on top of what is
-here, not a change to it.
-
-### 1. Gateway: a connection names its thread
-
-`orchestrator/src/index.ts` — the upgrade path regex `WS_PATH` gains a second
-shape capturing an optional thread id. Reject an upgrade naming a thread that
-does not belong to the session, at the handshake, the way an unknown session
-is already rejected: a 404 before a WebSocket exists.
-
-`downstream.ts` — `attachDownstream(ws, sessionId, threadId | null, manager)`.
-The handle records the ACP thread it is for, resolved once at attach: the
-named thread's `acp_session_id`, or the current thread's when none was named.
-`session/new` answers with that, rather than with `up.current`.
-
-A thread with no `acp_session_id` — minted but never prompted, and the adapter
-restarted since — is the one case needing care. Today the spawn path re-mints
-into the row. Keep that, and have attach wait for `ensureStarted` before
-resolving the handle's thread, so the id it pins is the live one.
-
-### 2. `Broadcast`: route by thread
-
-As the table in decision 2. `add(handle, acpThreadId)`; `update(params)` reads
-`params.sessionId` and delivers only to the handles watching it;
-`beginPrompt`/`endPrompt` and `beginReplay`/`endReplay` take the thread they
-are about. An update naming a thread nobody watches is dropped rather than
-broadcast, which is the honest reading and also what stops a background
-thread's stream reaching the wrong tab.
-
-`byRecency` becomes `byRecency(acpThreadId)`, since its only caller is picking
-who to put a permission request to.
-
-### 3. Turns: `turn_active` moves onto the thread
-
-`sessions.turn_active` becomes `threads.turn_active`, and the session's
-"a turn is running" is derived as any of its threads. Two sources of truth for
-whether a turn is running is precisely the thing that goes stale, so the
-session column goes rather than being kept in step.
-
-`forwardRequest` already receives the prompt's params, which carry the thread
-id, so it knows which row to set. The places that clear it — a deliberate
-stop, an adapter exit, a cancel, boot reconciliation — clear every thread of
-the session, which is correct: none of those leave a turn running.
-
-The reaper's idle test reads the derived value. Its other three counts
-(waiting permission, attached browser, last activity) stay session-scoped;
-they are about the box, not the conversation.
-
-### 4. Permissions: to a browser watching the thread that asked
-
-`session/request_permission` params carry the thread id, so
-`onPermissionRequest` picks its target from `byRecency(thread)` rather than
-from every attached browser. A browser watching another thread is not asked,
-and with nobody on that thread the request queues as it does today.
-
-`pending_requests` needs the thread, so `flushPendingTo` gives a browser only
-the requests for the thread it is watching. Add the column rather than parsing
-it back out of the stored params on every read: the params carry it, but a
-query wants a column, and the per-thread pending count is worth having for
-step 8's badges. Existing rows need no backfill — `clearStale` drops rows left
-by a previous process at boot, so the column can be nullable and unbackfilled.
-
-### 5. Respawn: reload every thread that is being watched
-
-A real gap, and new. Today the spawn path loads the current thread, so an
-adapter that dies and comes back has the one thread every browser is on. With
-two browsers on two threads, a respawn would load one of them and the other
-browser's next prompt would name a thread the adapter has not loaded.
-
-`UpstreamSession` keeps the set of threads its attached browsers are watching
-and re-issues `session/load` for each on spawn, the current one included. The
-set is derived from the handles, so it needs no storage and shrinks as tabs
-close.
-
-The alternative is to drop every socket on a respawn and let each browser's
-own handshake re-load its thread. That reuses machinery that already works and
-is fewer moving parts, but it turns a recovery the browser cannot currently
-see into a visible reconnect. Prefer the reload; fall back to this if the
-reload proves awkward.
-
-### 6. Database
-
-Migration 5:
-
-```sql
-ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE pending_requests ADD COLUMN acp_session_id TEXT;
-ALTER TABLE sessions DROP COLUMN turn_active;
+```typescript context
+39: …three lines of context above…
+42: the annotated line
+45: …three lines below…
+```
 ```
 
-Nothing needs moving. A turn cannot survive the restart that applies the
-migration, so every thread starting at 0 is not a loss of state but the truth.
+`#### Line N (outdated)` marks an annotation whose context no longer matches.
+The `context` word in the fence info string separates a stored context block
+from a code sample inside a comment; parsing is strict when the marker is in
+use. Context radius is 3, line numbers are 1-based, files sort
+lexicographically, lines numerically. The Go implementation's `parse.go` /
+`write.go` / `drift.go` are the specification; the round-trip and drift test
+tables port with them.
 
-### 7. Shared types
+**REVIEW.md is the single source of truth, and it is shared with the agent.**
+The orchestrator holds no annotation table; every mutation is
+read → parse → apply → serialize → write, under a per-session mutex, with the
+file's hash checked between read and write. If the hash moved (the agent
+edited REVIEW.md mid-mutation), re-read and re-apply once. This is the same
+last-writer honesty the desktop tool has with its file watcher, without the
+watcher.
 
-`ThreadSummary` gains `turnActive` and `pendingCount`. `SessionSummary` keeps
-`turnActive` and `pendingCount` as the derived session-wide values, so the
-existing badges keep working unchanged and the per-thread ones are additive.
+Drift detection ports as-is: on file fetch and on each poll tick that reports
+a changed workspace, compare each annotation's stored context against the
+current source; relocate on an exact context match elsewhere, mark
+`(outdated)` when it is gone, flush when anything changed.
 
-### 8. Dashboard
+## Backend: module and API
 
-- `wsUrlFor(sessionId, threadId?)`, and `useThread` takes the thread.
-- A route `/sessions/:id/threads/:threadId` mounting the same view.
-  `/sessions/:id` stays and means the current thread, so every existing link
-  survives.
-- The card's thread rows become plain `<Link>`s to the per-thread route. This
-  deletes work: opening a thread stops being a REST call followed by a
-  navigation. Opening one still selects it as the session's default, but as a
-  fire-and-forget POST that neither blocks the navigation nor disturbs
-  anything, because no live connection is pinned to the default any more.
-- Per-thread badges on those rows: a running turn, a waiting approval. With
-  two threads live this is the only place that says which one is busy.
-- The thread view names its thread **always**, not only when the session has
-  more than one. Two tabs on one session are otherwise indistinguishable,
-  which is the whole point of the change.
-- **Fork from inside the thread**, which is where the motion actually starts.
-  The button posts, then reveals the new thread as a link with
-  `target="_blank"`, so the working thread stays where it is and the new tab
-  is opened by a real click. A `window.open` after the await is the thing to
-  reach for and it is what popup blockers exist to stop; one extra tap is
-  cheaper than an unreliable one. This is the least settled part of the plan.
+New module `orchestrator/src/review/`, pure logic separated from exec I/O so
+the tests need no Docker:
 
-### 9. Tests
+```
+orchestrator/src/review/
+  store.ts        parse/serialize REVIEW.md, mutation, drift (pure; port of internal/store)
+  gitstatus.ts    porcelain/name-status parsing, base resolution (pure parsers; port)
+  difflines.ts    unified-diff → line markers, hunks, deletion markers (pure; port)
+  tree.ts         git ls-files / find output → tree, ignore lists (port of internal/filetree)
+  safepath.ts     path containment under the review root (port of internal/safepath)
+  exec.ts         capture/writeFile on runArgvExec; root resolution
+  service.ts      the per-session review façade: cache, mutex, fingerprint
+```
 
-`broadcast.test.ts` carries the core, with no Docker and no browser:
+Routes in `app.ts`, shapes in `shared/types.ts` like every other endpoint.
+Batched deliberately — a phone on a slow link gets one round trip per screen:
 
-- an update for one thread does not reach a browser watching another
-- a replay of one thread does not silence another thread's live updates
-- a prompt echo reaches only the threads' own watchers
-- an update for a thread nobody watches is dropped
+| Method and path | Does |
+|---|---|
+| `GET /api/sessions/:id/review/tree` | Tree, git status per path, per-file annotation counts, the resolved root and base — the whole left panel in one response |
+| `GET /api/sessions/:id/review/file?path=` | `{ content, truncated, binary, size, lines, diff: {lines, hunks, deletions}, annotations }` — the whole file view in one response |
+| `PUT /api/sessions/:id/review/annotations` | `{path, line, comment}` — create or update, returns the file's annotations |
+| `DELETE /api/sessions/:id/review/annotations?path=&line=` | Delete one |
+| `GET /api/sessions/:id/review/status` | `{ reviewHash, headCommit, statusHash }` — the poll fingerprint, three cheap execs |
+| `PUT /api/sessions/:id/review/base` | `{rev}` or `{rev: null}` — resolve via `git rev-parse` + `git merge-base` in the container, persist on the session row |
+| `DELETE /api/sessions/:id/review` | Delete REVIEW.md — the "New review" button |
 
-`upstream.test.ts`, against the existing stand-in adapter:
+Git invocations are the desktop tool's, verbatim where possible:
+`-c core.quotepath=false status --porcelain -uall`, `diff --name-status
+<base>`, `ls-files --others --exclude-standard`, `diff <rev> --unified=3
+--no-color -- <path>`, `merge-base <commit> HEAD` — each as argv with `--`
+before any path.
 
-- a prompt sets `turn_active` on its own thread and no other
-- a permission request goes to a browser watching the asking thread, and
-  queues when only another thread's browser is attached
-- a respawn re-issues `session/load` for every watched thread
+One migration: `review_base` (the resolved base commit and the rev as given)
+and `review_root` columns on `sessions`. Nothing else touches the schema —
+annotations live in the file.
 
-The stub gateway learns that a socket belongs to a thread, taken from the
-upgrade path, and addresses its updates accordingly. Browser tests: two tabs
-on two threads of one session, a prompt in one leaving the other's transcript
-untouched and its composer usable; and the existing "a second tab sees updates
-live" test still passing, because two tabs on the *same* thread must still
-share everything.
+Freshness is polling, not push, in v1. The dashboard already polls
+`/api/sessions` every 5 s while visible; the review view polls
+`review/status` the same way and refetches tree/file/annotations only when a
+fingerprint moved, running drift server-side on that transition. The desktop
+tool's WebSocket push is a later stage if polling feels laggy — it would be a
+new upgrade path (`/ws/sessions/:id/review`) beside the ACP gateway, not a
+change to it — but nothing below depends on it.
 
-### 10. Documentation
+### Security
 
-`ARCHITECTURE.md`: the "Several threads per session" section states the
-one-current-thread rule and the rejected alternative as settled, and both
-change. The gateway's `session/new` bullet, the "Who each update goes to"
-section, the schema table and the WebSocket path all move. The section should
-end up describing pinned connections with a default, which is a smaller claim
-than what it says now.
+- Every client-supplied path goes through the `safepath` port against the
+  review root before any exec; escape attempts 404 like an unknown session.
+- No user input ever reaches a shell string; argv arrays only, `--`
+  separators for git, content over stdin.
+- Output caps per endpoint (file reads 2 MiB then `truncated: true`; binary
+  sniffed by NUL byte and refused with `binary: true`).
+- File content and comments are agent-influenced and hostile by assumption:
+  the frontend renders them as text nodes only — highlight tokens become
+  React elements, never `dangerouslySetInnerHTML`. Comments render as plain
+  text in v1 (no markdown rendering of comment bodies).
+- The endpoints sit under `/api` behind whatever authenticates it, and change
+  nothing about the reverse-proxy contract.
 
-## What this makes simpler
+## Frontend
 
-Worth noting, because it is unusual for a change of this size:
+### Route and entry
 
-- `switchThread` stops dropping browsers, and the reconnect flicker goes.
-- The card's thread rows stop needing a REST call to open.
-- `sessions.turn_active` stops being a second source of truth.
+`/sessions/:id/review`, with the open file in the search string
+(`?path=src/app.ts`) so a file is linkable and back-button works. Entry
+points: a Review action in the thread header next to Fork, and on the session
+card. The view owns the whole viewport like the thread view does.
 
-## Deliberately not in scope
+### Layout: one commenting UI, two arrangements
 
-- **Per-thread workspaces.** The honest fix for two threads editing is a git
-  worktree per thread under `/workspace`, which the adapter's
-  `additionalDirectories` capability could carry. That is a larger change and
-  a different one; this plan makes two threads *watchable* in parallel and
-  leans on `plan` mode to keep the explorer out of trouble.
-- **Split view.** Two transcripts side by side is a third layout on top of the
-  two this adds, and two tabs already answers the desktop case.
-- **Per-thread `!bang` history, exec log and debug log.** Those ran in the
-  container, not in a conversation. They stay session-scoped and appear under
-  every thread, as they do today.
-- **Deleting a thread.** Still cheap, still deferred.
+The desktop tool's three panels and hover tooltips do not survive a phone, so
+the design collapses to patterns that work at both sizes instead of two
+parallel UIs:
 
-## Risks
+- **Comments are inline, GitHub-style** — a card under the annotated line —
+  on every screen size. No right-hand sidebar to reflow away; the same
+  component both arrangements render.
+- **The tree is a panel on desktop and a Sheet on mobile.** ≥ `md`: a
+  collapsible left column. Below: full-screen code, tree in a shadcn Sheet
+  opened from the header, closing on selection. Same tree component, badges
+  for git status colour and comment count on both.
+- **Tap replaces hover.** Line commenting: tap/click a line highlights it and
+  shows the composer — inline under the line on desktop, a bottom sheet on
+  mobile (the keyboard is coming up anyway). Diff hunks: the desktop tool
+  shows them on gutter hover; here a tap on the gutter marker opens the hunk
+  as a sheet/popover. Deletion markers likewise.
+- **The scrollbar minimap becomes prev/next.** Scrollbar annotation markers
+  are unusable on touch scrollbars. Instead a compact toolbar: next/previous
+  change, next/previous comment, comment count. Cheaper, and honestly better
+  on desktop too. A decorative overview rail can come later; it is paint, not
+  function.
+- **Code pane mechanics:** CSS grid per line — sticky line-number gutter,
+  code cell scrolling horizontally as one block (`overflow-x` on the pane, so
+  the gutter stays put), a wrap toggle for prose-ish files. Gutter tap
+  targets ≥ 44 px on touch. Tailwind only, tokens from `globals.css`, same as
+  the rest of the dashboard.
 
-- **The adapter may queue concurrent prompts.** Step 0 exists to find out
-  before anything is built on the assumption. This is the risk that decides
-  whether the plan is worth executing as written.
-- **One workspace, two agents.** `plan` mode on a fork narrows this to
-  deliberate acts; it does not remove it. A user who flips the fork to `auto`
-  and edits gets exactly the conflict they asked for, and Boxes will not
-  notice on their behalf.
-- **`Broadcast` is the load-bearing part.** Every routing rule in it exists
-  because broadcasting to everyone was wrong in a way that only showed up with
-  two browsers attached. Making it thread-aware risks reintroducing precisely
-  those bugs, in a shape the current tests would not catch. Hence the four
-  tests in step 9 before anything else in that file changes.
-- **A background tab holds an open connection.** Two tabs is two upstream
-  attachments per session, so `attachedCount` doubles and the reaper's
-  "nobody is watching" test is held off by a tab the user forgot. That is
-  already true of two tabs on one thread today; it just becomes the normal
-  case rather than the accident.
+New shadcn primitives this needs (`npx shadcn add`, committed like the
+existing ones): `sheet`, `popover`, possibly `drawer`.
 
-## Progress
+### Highlighting
 
-Done, except step 0, which could not be run here — see the note under it, and
-the paragraph it ends with for what is still owed.
+Client-side, with Shiki (`shiki/core` + lazily imported grammars and the
+CSS-variables theme bound to the existing design tokens, so light/dark just
+works). The API ships plain text; the browser tokenizes and renders each line
+as spans — which is also what makes every line an addressable, tappable row.
+Grammars load per file type on demand and are code-split out of the main
+bundle; files past the size cap or with pathological lines render un-tokenized
+rather than janking the tab. Server-side highlighting (the Chroma role) was
+considered and dropped: it puts render markup on the wire, couples the
+orchestrator to presentation, and the phone still has to paint it.
 
-Steps 1–10 are implemented, and both suites are green: 104 orchestrator tests
-and 80 dashboard tests, the browser suite included.
+### State
 
-What landed, against the plan:
+`stores/review.ts` in the zustand style of `sessions.ts`: tree, statuses,
+open file (content, tokens, diff), annotations, base, the status-poll loop
+(visible tab only), and optimistic annotation mutation with rollback on a
+failed PUT.
 
-- **`Broadcast` is keyed by thread** (step 2), and its four new tests were
-  written before it changed, as the risk section asked. `replayTargets` became
-  a map from thread to the browsers replaying it, `echoingPrompts` a count per
-  thread, and `byRecency` takes the thread to ask. An update naming a thread
-  nobody watches is dropped.
-- **A connection names its thread** (step 1). `WS_PATH` gained the optional
-  `/threads/:threadId` shape, and a path naming another session's thread is a
-  404 at the handshake. Which thread a connection is on is settled once, at
-  attach, after `ensureStarted` — and a thread whose row has no
-  `acp_session_id` gets one minted into it there, which covers the
-  minted-never-prompted case for every thread rather than only the current one.
-- **`turn_active` moved onto the thread** (steps 3, 6), with the session's
-  answer derived from its threads, and the reaper reading the derived value.
-- **Permissions go to a browser watching the asking thread** (step 4), with
-  `pending_requests.acp_session_id` carrying the thread and per-thread counts
-  feeding step 8's badges.
-- **A respawn reloads every watched thread** (step 5). The reload was preferred
-  over dropping every socket, as the plan said; the fallback is used only for
-  the narrow case it is right for — a watched thread the adapter cannot bring
-  back, whose browsers are holding an id it would now reject.
-- **The dashboard** (step 8) has the per-thread route, thread rows as plain
-  links with per-thread badges, a thread that always names itself, and Fork
-  inside the thread revealing a `target="_blank"` link.
+### Closing the loop with the agent
 
-Three deliberate departures, each small:
+A **"Hand to agent"** action on the review view: navigates to the session's
+current thread with the composer prefilled — "Read REVIEW.md and address the
+comments in it." — not sent, just staged. One line of integration, and it is
+the reason this feature belongs inside Boxes at all.
 
-- **A cancel clears only its own thread**, not every thread of the session.
-  Step 3 grouped a cancel with the stop, exit and boot cases as "clear every
-  thread ... none of those leave a turn running", which stopped being true the
-  moment threads run in parallel: cancelling one thread says nothing about
-  another that is mid-turn. The other three still clear every thread.
-- **Adding a thread stops dropping browsers too**, not only switching. Step 3
-  called out `switchThread`; `newThread` and `forkThread` dropped browsers for
-  the same reason, and step 8's fork-from-inside-the-thread requires that the
-  thread you forked from stays exactly where it is. With nothing left dropping
-  every socket, `dropDownstreams` became `dropWatchers(thread)`, whose only
-  caller is the respawn case above.
-- **`Broadcast.add` did not gain the thread as a parameter.** The thread is a
-  field on the handle instead, mutable until the pin settles, because the
-  handle has to be counted as attached from the moment its socket opens — the
-  reaper counts it — while its thread cannot be known until the adapter
-  answers. A handle with no thread yet receives nothing, which is right: it
-  has not asked for anything either. `UpstreamSession` reads the same field to
-  derive the watched-thread set for a respawn.
+## What is deliberately not ported
 
-Also carried through: `ARCHITECTURE.md` and `README.md` both describe pinned
-connections with a default, and the info view now returns to the exact thread
-it was opened from rather than to whichever one is current.
+- **WebSocket live updates and file watching** — polling a fingerprint
+  instead (v1; push is an additive later stage).
+- **The hover scrollbar minimap** — replaced by prev/next navigation.
+- **Graceful shutdown closing the tab** — meaningless here; the view is a
+  route, not an app.
+- **The comment sidebar** — inline comments on all sizes.
+- **Chroma server-side HTML** — Shiki tokens client-side.
+
+## Stages
+
+Each lands green and shippable on its own.
+
+1. **Pure ports + exec plumbing.** `review/{store,gitstatus,difflines,tree,
+   safepath}.ts` with the Go tests' tables ported (round-trip fixtures
+   asserted byte-for-byte against files the Go tool wrote); `runArgvExec` with
+   stdin support in `docker.ts`; `review/exec.ts` capture/write/root
+   resolution. No routes yet.
+2. **REST surface.** `service.ts`, the seven routes, `shared/types.ts`
+   shapes, the `sessions` migration, `app.test.ts` coverage driving the real
+   routes over a fake exec layer (the same pattern the exec endpoint's tests
+   use).
+3. **Read-only viewer.** Route, entry points, tree (desktop column + mobile
+   sheet), file view with Shiki tokens, git status colours, diff gutter
+   markers, hunk sheet, prev/next navigation. Usable as a browse-the-
+   workspace feature by itself.
+4. **Commenting.** Composer (inline / bottom sheet), annotation CRUD against
+   REVIEW.md, inline comment cards, comment badges in tree and toolbar, "New
+   review", "Hand to agent".
+5. **Base revision + drift.** Base picker in the header (status bar shows the
+   active base, as the desktop tool does), `statusesSince` behaviour, drift
+   check on fetch and on fingerprint change, `(outdated)` rendering.
+6. **Polish and the browser suite.** Review pages in the dashboard e2e suite
+   against a stub orchestrator serving canned review responses (tree → open →
+   comment → REVIEW.md write asserted, on desktop and mobile viewports);
+   optional WS push and overview rail if polling proves laggy.
+
+## Risks and open ends
+
+- **Adapter and reviewer writing REVIEW.md concurrently.** Hash-guarded
+  read-modify-write with one retry keeps it honest; a lost race costs one
+  visible refresh, not data, because every write re-serializes the whole
+  parsed file.
+- **Huge workspaces.** Tree capped (~20k entries, then a "tree truncated"
+  notice); `git ls-files` does the heavy lifting where there is a repo; the
+  desktop tool's ignore lists (node_modules, dist, binaries…) port as-is.
+- **Exec churn from polling.** Three tiny execs per open review view per 5 s,
+  visible-tab only. If it shows up, the fingerprint collapses to one exec
+  (one `sh -c` computing all three hashes — static script, no user input).
+- **Shiki bundle weight.** Grammars and engine lazy-loaded; the thread view's
+  bundle must not grow. Verified in stage 3 by the build's chunk report.
+- **A session with no git.** Everything degrades to tree + read + comment,
+  statuses and diffs empty — same as the desktop tool outside a repo.
+- **Reaper interplay.** Review polling touches the session; without that an
+  idle-looking session under active review would be stopped mid-read.
