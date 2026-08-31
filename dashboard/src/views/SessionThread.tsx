@@ -3,8 +3,8 @@ import {
   useExternalStoreRuntime,
   type AppendMessage,
 } from '@assistant-ui/react';
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useLocation, useParams } from 'react-router';
 import type { SessionDetail, ThreadSummary } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
@@ -41,6 +41,13 @@ function textOf(message: AppendMessage): string {
  */
 export function SessionThread() {
   const { id = '', threadId } = useParams();
+  /**
+   * Text the review view staged in the composer on its way here — "read
+   * REVIEW.md and address the comments in it". Staged, never sent: what to do
+   * with a review is the reviewer's call, and a prompt that fires itself on
+   * navigation is a prompt nobody agreed to.
+   */
+  const prefill = (useLocation().state as { prefill?: string } | null)?.prefill ?? null;
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   /** The thread a fork just made, revealed as a link rather than opened. */
@@ -130,6 +137,15 @@ export function SessionThread() {
       store?.respondToApproval(approvalId, approved || optionId ? optionId : undefined);
     },
   });
+
+  // Once, on arrival. Not in a dependency on the runtime, which is rebuilt on
+  // every message: that would keep overwriting whatever is being typed.
+  const staged = useRef(false);
+  useEffect(() => {
+    if (!prefill || staged.current) return;
+    staged.current = true;
+    runtime.thread.composer.setText(prefill);
+  }, [prefill, runtime]);
 
   return (
     <TooltipProvider>

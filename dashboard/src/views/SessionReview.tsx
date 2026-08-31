@@ -1,22 +1,42 @@
-import { ArrowLeft, FolderTree } from 'lucide-react';
+import { ArrowLeft, FilePlus2, FolderTree, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk } from '../../../shared/types.ts';
 import { CodePane } from '@/components/review/CodePane';
+import { CommentCard } from '@/components/review/CommentCard';
+import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
 import { HunkSheet } from '@/components/review/HunkSheet';
 import { ReviewToolbar } from '@/components/review/ReviewToolbar';
 import { ReviewTree } from '@/components/review/ReviewTree';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { useMediaQuery } from '@/hooks/use-media-query';
 import { useSessions } from '../stores/sessions.ts';
 import {
   closeFile,
+  compose,
+  deleteComment,
   loadFile,
   loadTree,
+  newReview,
   open as openReview,
+  saveComment,
   startPolling,
   useReview,
 } from '../stores/review.ts';
+
+/**
+ * The prompt "Hand to agent" stages in the thread's composer.
+ *
+ * One line, because that is the whole point: the review lives in the
+ * workspace, so pointing the agent at it needs no export, no paste, and no
+ * copy of the comments anywhere.
+ */
+function handoffPrompt(root: string): string {
+  const where = root === '' ? 'REVIEW.md' : `${root}/REVIEW.md`;
+  return `Read ${where} and address the comments in it.`;
+}
 
 /**
  * Reviewing a session's code, at `/sessions/:id/review`.
@@ -37,7 +57,7 @@ export function SessionReview() {
   const [params, setParams] = useSearchParams();
   const path = params.get('path');
 
-  const { tree, file, loadingTree, loadingFile, error } = useReview();
+  const { tree, file, loadingTree, loadingFile, error, composing, saving } = useReview();
   const { sessions } = useSessions();
   const session = sessions.find((s) => s.id === id);
 
@@ -46,6 +66,14 @@ export function SessionReview() {
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
   /** A line to scroll to once, set by the prev/next toolbar. */
   const [scrollTo, setScrollTo] = useState<number | null>(null);
+  const [confirmNew, setConfirmNew] = useState(false);
+  const navigate = useNavigate();
+  /**
+   * Which composer arrangement to mount. A media query in JavaScript rather
+   * than in CSS only because a Sheet renders into a portal, where a
+   * `md:hidden` wrapper cannot reach it.
+   */
+  const wide = useMediaQuery('(min-width: 768px)');
 
   // Point the store at this session and start the fingerprint poll. The store
   // is a singleton, so re-entering the same session keeps what is loaded.
@@ -105,6 +133,47 @@ export function SessionReview() {
     [file?.annotations],
   );
 
+  /**
+   * The card and the composer that sit under a line.
+   *
+   * The pane calls this for every rendered line, so it answers null for almost
+   * all of them; what it returns is what makes comments inline on every screen
+   * size rather than a sidebar that a phone has to fold away.
+   */
+  const underLine = useCallback(
+    (line: number) => {
+      if (!file) return null;
+      const annotation = annotations.get(line);
+      const open = composing === line;
+      if (!annotation && !open) return null;
+      return (
+        <div className="flex flex-col gap-1.5">
+          {annotation && !open ? (
+            <CommentCard
+              annotation={annotation}
+              busy={saving}
+              onEdit={() => compose(line)}
+              onDelete={() => void deleteComment(file.path, line)}
+            />
+          ) : null}
+          {/* On touch the composer is a bottom sheet instead — the keyboard is
+              coming up anyway, and a textarea in a scrolling code pane ends up
+              behind it. */}
+          {open && wide ? (
+            <InlineComposer
+              line={line}
+              initial={annotation?.comment ?? ''}
+              busy={saving}
+              onSave={(comment) => void saveComment(file.path, line, comment)}
+              onCancel={() => compose(null)}
+            />
+          ) : null}
+        </div>
+      );
+    },
+    [file, annotations, composing, saving, wide],
+  );
+
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
     if (lines.length === 0) return;
@@ -141,6 +210,43 @@ export function SessionReview() {
             {tree && !tree.hasGit ? ' · no git' : ''}
           </span>
         </div>
+
+        {/* The reason this feature belongs inside Boxes at all: the review is
+            a file of the project the agent is working on, so handing it over is
+            one line of prompt rather than an export. Staged in the composer,
+            not sent — the reviewer decides when to ask. */}
+        {tree && Object.keys(tree.counts).length > 0 ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() =>
+              void navigate(thread ? `/sessions/${id}/threads/${thread}` : `/sessions/${id}`, {
+                state: { prefill: handoffPrompt(tree.root) },
+              })
+            }
+            title="Open the thread with a prompt to address these comments"
+          >
+            <Send className="size-3.5" />
+            <span className="hidden sm:inline">Hand to agent</span>
+          </Button>
+        ) : null}
+
+        {tree?.hasReview ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0"
+            disabled={saving}
+            onClick={() => setConfirmNew(true)}
+            aria-label="Start a new review"
+            title="Start a new review, discarding these comments"
+          >
+            <FilePlus2 />
+          </Button>
+        ) : null}
 
         {/* The tree lives behind this button below md, and in the column
             beside the pane above it. */}
@@ -205,11 +311,12 @@ export function SessionReview() {
                     diffLines={file.diff.lines}
                     deletions={deletions}
                     annotations={annotations}
-                    composing={null}
+                    composing={composing}
                     wrap={wrap}
                     scrollTo={scrollTo}
-                    onSelectLine={() => {}}
+                    onSelectLine={(line) => compose(composing === line ? null : line)}
                     onShowHunk={(index) => setHunk(file.diff.hunks[index] ?? null)}
+                    renderUnderLine={underLine}
                   />
                 </>
               )}
@@ -250,6 +357,32 @@ export function SessionReview() {
       </Sheet>
 
       <HunkSheet hunk={hunk} onClose={() => setHunk(null)} />
+
+      {/* Below md, writing a comment happens here rather than inline. */}
+      <ComposerSheet
+        line={!wide && file ? composing : null}
+        initial={composing === null ? '' : (annotations.get(composing)?.comment ?? '')}
+        busy={saving}
+        onSave={(comment) => {
+          if (file && composing !== null) void saveComment(file.path, composing, comment);
+        }}
+        onCancel={() => compose(null)}
+      />
+
+      {confirmNew ? (
+        <ConfirmDialog
+          title="Start a new review?"
+          description="REVIEW.md is deleted, so every comment in this review goes with it. The code itself is untouched."
+          confirmLabel="Delete the review"
+          danger
+          busy={saving}
+          onCancel={() => setConfirmNew(false)}
+          onConfirm={() => {
+            setConfirmNew(false);
+            void newReview();
+          }}
+        />
+      ) : null}
 
       {/* Below md a file fills the screen, so going back to the tree needs a
           way that is not the browser's own button. */}

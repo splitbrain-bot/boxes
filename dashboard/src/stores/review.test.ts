@@ -7,10 +7,13 @@ import type {
 } from '../../../shared/types.ts';
 import {
   closeFile,
+  deleteComment,
   loadFile,
   loadTree,
+  newReview,
   open,
   poll,
+  saveComment,
   useReview,
 } from './review.ts';
 
@@ -227,4 +230,115 @@ test('nothing is fetched before a session is set', async () => {
   await loadFile('a.ts');
   await poll();
   assert.deepEqual(requested, []);
+});
+
+// --- comments ---------------------------------------------------------------
+
+test('a comment shows before the server confirms it', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+
+  answers['/review/annotations'] = {
+    path: 'a.ts',
+    annotations: [{ line: 2, comment: 'saved', outdated: false }],
+  };
+  const pending = saveComment('a.ts', 2, 'saved');
+  // Optimistic, because the alternative is a spinner on every comment over a
+  // phone connection.
+  assert.deepEqual(useReview.getState().file?.annotations, [
+    { line: 2, comment: 'saved', outdated: false },
+  ]);
+  await pending;
+  assert.deepEqual(useReview.getState().file?.annotations, [
+    { line: 2, comment: 'saved', outdated: false },
+  ]);
+  assert.equal(useReview.getState().saving, false);
+  assert.equal(useReview.getState().composing, null);
+});
+
+test('a failed comment rolls back and says why', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  failWith = 'REVIEW.md is being written by something else';
+
+  await saveComment('a.ts', 2, 'lost');
+  assert.deepEqual(useReview.getState().file?.annotations, []);
+  assert.match(useReview.getState().error!, /being written/);
+  assert.equal(useReview.getState().saving, false);
+});
+
+test('the tree badge follows a comment without refetching the tree', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  const before = hits('/review/tree');
+
+  answers['/review/annotations'] = {
+    path: 'a.ts',
+    annotations: [{ line: 2, comment: 'x', outdated: false }],
+  };
+  await saveComment('a.ts', 2, 'x');
+  // A whole tree round trip for a badge is exactly the cost this view avoids.
+  assert.equal(hits('/review/tree'), before);
+  assert.deepEqual(useReview.getState().tree?.counts, { 'a.ts': 1 });
+});
+
+test('deleting the last comment clears the badge', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/annotations'] = {
+    path: 'a.ts',
+    annotations: [{ line: 2, comment: 'x', outdated: false }],
+  };
+  await saveComment('a.ts', 2, 'x');
+
+  answers['/review/annotations'] = { path: 'a.ts', annotations: [] };
+  await deleteComment('a.ts', 2);
+  assert.deepEqual(useReview.getState().file?.annotations, []);
+  assert.deepEqual(useReview.getState().tree?.counts, {});
+});
+
+test('a comment on a file that is not open still updates the tree', async () => {
+  await loadTree();
+  answers['/review/annotations'] = {
+    path: 'other.ts',
+    annotations: [{ line: 1, comment: 'x', outdated: false }],
+  };
+  await saveComment('other.ts', 1, 'x');
+  assert.deepEqual(useReview.getState().tree?.counts, { 'other.ts': 1 });
+});
+
+test('editing an existing comment replaces it rather than adding one', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/annotations'] = {
+    path: 'a.ts',
+    annotations: [{ line: 2, comment: 'first', outdated: false }],
+  };
+  await saveComment('a.ts', 2, 'first');
+
+  answers['/review/annotations'] = {
+    path: 'a.ts',
+    annotations: [{ line: 2, comment: 'second', outdated: false }],
+  };
+  await saveComment('a.ts', 2, 'second');
+  assert.equal(useReview.getState().file?.annotations.length, 1);
+  assert.equal(useReview.getState().file?.annotations[0]?.comment, 'second');
+});
+
+test('a new review clears the comments and reloads the tree', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/annotations'] = {
+    path: 'a.ts',
+    annotations: [{ line: 2, comment: 'x', outdated: false }],
+  };
+  await saveComment('a.ts', 2, 'x');
+  const before = hits('/review/tree');
+
+  await newReview();
+  assert.deepEqual(useReview.getState().file?.annotations, []);
+  // The whole review is gone, so the counts have to come from the server
+  // rather than be adjusted locally.
+  assert.equal(hits('/review/tree'), before + 1);
+  assert.equal(requested.some((url) => url.includes('/review') && !url.includes('/review/')), true);
 });
