@@ -122,6 +122,13 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
 | `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run in this session |
+| `GET /api/sessions/:id/review/tree` | Tree, git status per path, comment counts, the resolved root and base — the whole left panel |
+| `GET /api/sessions/:id/review/file?path=` | Content, diff markers and comments — the whole file view |
+| `PUT /api/sessions/:id/review/annotations` | Creates or replaces one line's comment |
+| `DELETE /api/sessions/:id/review/annotations?path=&line=` | Deletes one comment |
+| `GET /api/sessions/:id/review/status` | The poll fingerprint: three cheap local hashes |
+| `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it |
+| `DELETE /api/sessions/:id/review` | Deletes `REVIEW.md` — "New review" |
 
 The API carries no authentication of its own; a reverse proxy is expected to
 provide it for `/` and `/api`, and the published port binds to loopback so
@@ -557,6 +564,73 @@ then delete the volume. A crash before the row is updated leaves a
 volume-backed session that migrates again on the next attempt. A *running*
 legacy session is left alone and comes through at its next stop/start cycle.
 
+## Code review
+
+The review surface browses a session's workspace, shows a file highlighted,
+takes a comment on a line, and writes all of it to a `REVIEW.md` at the review
+root. The format is the desktop [`review`](https://github.com/splitbrain/review)
+tool's, byte for byte, so a review started in one is continued in the other —
+`orchestrator/src/review/fixtures/` holds files that tool wrote, and the tests
+assert the bytes.
+
+What it buys over running that tool separately is that the review lives where
+the agent works. `REVIEW.md` is a file of the project under review, so
+"address the comments in REVIEW.md" is a one-line prompt, and the review view
+and the thread close a loop rather than being two applications.
+
+**REVIEW.md is the single source of truth.** There is no annotation table.
+Every mutation is read → parse → apply → serialize → write-tmp-then-rename,
+under a per-session lock, with the file's hash checked between the read and the
+write. A moved hash means the agent edited the file mid-mutation, and the whole
+thing is re-read and re-applied once. A lost race costs one visible refresh
+rather than data, because every write re-serializes the whole parsed file. What
+is written is chowned to uid 1000, so the agent can edit or delete it.
+
+**Where the review roots.** `/workspace` starts empty and an agent usually
+clones into a subdirectory, so the workspace itself is frequently not the
+repository. At review open: the workspace if it is itself a git work tree; else
+the single directory it holds if that is one, which is the common shape; else
+the workspace with the git features off, the way the desktop tool degrades
+outside a repository. The answer is cached on the session row and re-validated,
+since the agent can delete the directory it named.
+
+**Nothing here starts a container.** Reads and git both run in the
+orchestrator, so the natural moment to review — the agent is done, the box has
+idled out — costs nothing, and none of these endpoints touches a session's
+activity timestamp: polling a review must not hold off the reaper.
+
+**Freshness is polling**, the pattern the session list already uses: the view
+asks `review/status` every 5 s while its tab is visible and refetches only when
+one of three hashes moved. With the files local that costs three hashes rather
+than three execs. Push — an fs watcher and a `/ws/sessions/:id/review` upgrade
+beside the ACP gateway — is an additive later stage that nothing depends on.
+
+**Drift** ports from the desktop tool as-is: each annotation stores three lines
+of context above and below the annotated line, and a check compares the stored
+context against the current source, relocating on an exact match elsewhere and
+marking `(outdated)` when it is gone. It runs on a file fetch and, across every
+annotated file, on a tree fetch.
+
+**Two invariants, one file each**, because the orchestrator now reads a tree
+the agent controls:
+
+- Symlink containment lives in `review/fs.ts`. Every client path resolves
+  through `realpath` and must land under the root's own realpath; a symlink
+  final component is refused outright, since what it points at can change after
+  the tree was listed. The residual `realpath`/open race is documented where the
+  check is, along with what closing it would cost.
+- Git hardening lives in `review/git.ts`. Repo-local config executes commands
+  on exactly the operations review runs — `core.fsmonitor` on status, external
+  diff drivers and `textconv` on diff. Every invocation takes its argv prefix
+  and environment from one builder there, and a test plants both configs in a
+  repository and asserts the hook never ran.
+
+Beyond that: paths are validated against the tree, not merely against the root,
+so the API serves what the browser was offered; every refusal is the same 404;
+file reads are capped at 2 MiB and binaries are refused by a NUL sniff; and
+file content and comments are agent-influenced, so the frontend renders them as
+text nodes only.
+
 ## Network isolation
 
 Two legs, both in Docker's own primitives. Nothing touches the host firewall
@@ -776,6 +850,7 @@ orchestrator/src/
   workspaces.ts         Workspace directories on the data volume: paths, ownership
   docker.ts             Containers, networks, volumes, the adapter exec
   review/
+    service.ts          Per-session façade: root, the REVIEW.md read-modify-write, the fingerprint
     store.ts            REVIEW.md: parse, serialize, mutate, drift (pure)
     gitstatus.ts        Porcelain and name-status parsing, base resolution
     difflines.ts        Unified diff to line markers, hunks and deletion markers (pure)

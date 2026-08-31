@@ -35,6 +35,20 @@ export interface SessionRow {
    * this column decides is only whether the session has a directory at all.
    */
   workspace_dir: string | null;
+  /**
+   * Where the review is rooted, relative to the workspace, or null before it
+   * has been resolved. Empty string means the workspace itself; a name means
+   * that subdirectory, which is the shape a cloned project takes. Re-validated
+   * rather than trusted, since the agent can delete the directory it names.
+   */
+  review_root: string | null;
+  /** The base revision as the user gave it — a branch, a tag, a short id. */
+  review_base_rev: string | null;
+  /**
+   * What that revision resolved to, through the merge base with HEAD. Null
+   * means the review compares against the working tree's HEAD.
+   */
+  review_base_commit: string | null;
   status: SessionStatus;
   /**
    * The thread a connection that names none gets, or null before one exists.
@@ -198,6 +212,15 @@ export const MIGRATIONS: string[] = [
   // new mount.
   `
   ALTER TABLE sessions ADD COLUMN workspace_dir TEXT;
+  `,
+  // What a review remembers between requests. The annotations themselves are
+  // not here: REVIEW.md in the workspace is the single source of truth for
+  // those, and it is shared with the agent. These three are only what the
+  // orchestrator would otherwise have to re-derive on every request.
+  `
+  ALTER TABLE sessions ADD COLUMN review_root TEXT;
+  ALTER TABLE sessions ADD COLUMN review_base_rev TEXT;
+  ALTER TABLE sessions ADD COLUMN review_base_commit TEXT;
   `,
 ];
 

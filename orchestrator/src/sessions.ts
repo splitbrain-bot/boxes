@@ -97,10 +97,17 @@ export class SessionManager {
    * Where a session's files are on this process's own filesystem, or null for
    * a session still backed by a named volume — which the review surface reads
    * as "not reviewable until this session is started once".
+   *
+   * Derived from the current DATA_DIR rather than read from the row, so moving
+   * the data volume moves the workspaces with it; the stored column only says
+   * whether the session has a directory at all. An unknown or deleted session
+   * is null too: the caller's own 404 says so more precisely than a throw from
+   * here would.
    */
-  workspacePath(id: string): string | null {
-    const row = this.mustGet(id);
-    return row.workspace_dir ? ws.workspacePath(this.cfg.DATA_DIR, row.id) : null;
+  workspacePathOf(id: string): string | null {
+    const row = this.getRow(id);
+    if (!row || row.status === 'deleted' || !row.workspace_dir) return null;
+    return ws.workspacePath(this.cfg.DATA_DIR, row.id);
   }
 
   // --- helpers --------------------------------------------------------------
@@ -215,6 +222,11 @@ export class SessionManager {
       ws_volume: '',
       home_volume: dk.names.homeVolume(id),
       workspace_dir: ws.workspacePath(this.cfg.DATA_DIR, id),
+      // Resolved and remembered on first review, not now: the workspace is
+      // empty at create and the shape a clone leaves is what decides them.
+      review_root: null,
+      review_base_rev: null,
+      review_base_commit: null,
       status: 'creating',
       current_thread_id: null,
       created_at: now,
