@@ -1,4 +1,4 @@
-import { Info } from 'lucide-react';
+import { GitBranch, Info } from 'lucide-react';
 import { Link } from 'react-router';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
@@ -14,23 +14,38 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
 };
 
 /**
- * The thread's own chrome: where it goes back to, what it is connected to,
- * which of the adapter's modes it is in, and which model it answers with.
+ * The thread's own chrome: where it goes back to, which of the session's
+ * conversations it is, what it is connected to, which of the adapter's modes
+ * it is in, which model it answers with, and how to branch it.
  */
 export function ThreadHeader({
   sessionId,
+  threadId,
   name,
+  threadLabel,
   connection,
   modes,
   configOptions,
+  canFork,
+  forking,
+  onFork,
   onSetMode,
   onSetConfigOption,
 }: {
   sessionId: string;
+  /** Which thread this is, so the info view can come back to it exactly. */
+  threadId: string | null;
   name: string;
+  /** Which conversation of the session this is, or null while it is unknown. */
+  threadLabel: string | null;
   connection: ConnectionState;
   modes: SessionModeState | null;
   configOptions: readonly SessionConfigOption[];
+  /** Whether the adapter advertised the fork capability; see SessionSummary. */
+  canFork: boolean;
+  /** Held while a fork is in flight, so a double tap cannot branch twice. */
+  forking: boolean;
+  onFork: () => void;
   onSetMode: (modeId: string) => void;
   onSetConfigOption: (configId: string, value: string) => void;
 }) {
@@ -52,7 +67,18 @@ export function ThreadHeader({
       {/* A floor under the name: two selects next to it would otherwise take
           the whole row on a phone and squeeze it away entirely. */}
       <div className="flex min-w-16 flex-1 flex-col">
-        <span className="truncate text-sm font-medium">{name}</span>
+        {/* The thread's name shares the session's line: the row below is the
+            connection state, and the two selects have already taken the rest
+            of the width at phone size. */}
+        <span className="flex items-baseline gap-1.5 text-sm">
+          {/* The session's name goes first and keeps up to two thirds of the
+              line: which box you are in matters more than which of its
+              conversations, so the thread's name is what gives way. */}
+          <span className="max-w-2/3 shrink-0 truncate font-medium">{name}</span>
+          {threadLabel ? (
+            <span className="min-w-0 truncate text-xs text-muted-foreground">{threadLabel}</span>
+          ) : null}
+        </span>
         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className={cn('size-1.5 rounded-full', state.dot)} />
           {state.label}
@@ -98,8 +124,30 @@ export function ThreadHeader({
         </select>
       ) : null}
 
+      {/* Branching belongs here rather than only on the list, because this is
+          where the motion starts: you are in a thread that is doing something
+          long, and you want a second one to ask about it. The fork keeps
+          running alongside this thread rather than replacing it. */}
+      {canFork ? (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0"
+          disabled={forking}
+          onClick={onFork}
+          aria-label="Fork this thread"
+          title="Fork this thread into a second one"
+        >
+          <GitBranch />
+        </Button>
+      ) : null}
+
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
-        <Link to={`/sessions/${sessionId}/info`} aria-label="Session details and controls">
+        <Link
+          to={`/sessions/${sessionId}/info`}
+          state={{ threadId }}
+          aria-label="Session details and controls"
+        >
           <Info />
         </Link>
       </Button>

@@ -145,13 +145,23 @@ function wsStream(ws: WebSocket, sessionId: string): Stream {
 }
 
 /**
- * Wires one browser connection to the session's persistent upstream.
+ * Wires one browser connection to the session's persistent upstream, pinned
+ * to one of its threads.
+ *
+ * `threadId` is the thread the URL named, or null when it named none — an
+ * external ACP client, or a link from before per-thread routes existed —
+ * which pins to the session's current thread instead. Either way the pinning
+ * happens here rather than in the browser: the ACP contract is the same one
+ * it always was, a `session/new` that hands back an id the client did not
+ * choose.
+ *
  * Disconnecting drops the handle from the broadcast set and touches nothing
  * else.
  */
 export function attachDownstream(
   ws: WebSocket,
   sessionId: string,
+  threadId: string | null,
   manager: SessionManager,
 ): void {
   const slog = log.session(sessionId);
@@ -162,6 +172,8 @@ export function attachDownstream(
 
   const handle: DownstreamHandle = {
     id: nextHandleId++,
+    // Settled by the pin below, which has to wait for the adapter.
+    acpThreadId: null,
     lastActiveAt: Date.now(),
     notify: (method, params) => {
       void conn?.client.notify(method, params).catch((err: Error) => {
@@ -172,7 +184,37 @@ export function attachDownstream(
       if (!conn) return Promise.reject(new Error('downstream closed'));
       return conn.client.request(method, params);
     },
+    // 1012 is "service restart": the browser's own backoff brings it back,
+    // and its fresh handshake pins whatever its thread is now. The only
+    // caller is a respawn that could not bring this thread back under the id
+    // the connection holds.
+    close: () => {
+      try {
+        ws.close(1012, 'thread reloaded');
+      } catch {
+        // already closing
+      }
+    },
   };
+
+  // Attached before the thread is settled: the socket is open and holding the
+  // session up, which is what the reaper counts, and nothing is routed to a
+  // handle that has no thread yet. Attaching is also what brings a stopped
+  // session back up, because pinning needs the adapter to answer for the
+  // thread.
+  up.attach(handle);
+  const pinned = up.pin(handle, threadId);
+  pinned.then(
+    () => up.flushPendingTo(handle),
+    (err: Error) => {
+      slog.error('could not pin the connection to a thread', { error: err.message });
+      try {
+        ws.close(1011, 'upstream unavailable');
+      } catch {
+        // already closing
+      }
+    },
+  );
 
   const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
     // Answered from the cached upstream response, so its _meta extensions
@@ -184,17 +226,16 @@ export function attachDownstream(
       if (!cached) throw new Error('Upstream initialize unavailable');
       return cached;
     })
-    // One thread per Boxes session: hand back the existing ACP session id
-    // instead of starting a second one.
-    .onRequest('session/new' as string, raw, async ({ params }) => {
+    // This connection is about one thread of the session — the one the URL
+    // named, or the session's current one — so hand back that thread's ACP
+    // id rather than starting a second conversation on every reconnect.
+    // Which thread that is, is decided outside ACP, so the contract a client
+    // speaks does not change.
+    .onRequest('session/new' as string, raw, async () => {
       handle.lastActiveAt = Date.now();
-      await up.ensureStarted();
-      const existing = manager.getRow(sessionId)?.acp_session_id;
-      if (existing) {
-        slog.info('session/new answered with existing acp session', { existing });
-        return { sessionId: existing };
-      }
-      return up.forwardRequest('session/new', params);
+      const acpThreadId = await pinned;
+      slog.info('session/new answered with the pinned thread', { acpThreadId });
+      return { sessionId: acpThreadId };
     });
 
   for (const method of FORWARDED_REQUESTS) {
@@ -219,9 +260,6 @@ export function attachDownstream(
   conn = app.connect(wsStream(ws, sessionId));
   const active = conn;
 
-  up.attach(handle);
-  up.flushPendingTo(handle);
-
   const detach = (): void => {
     up.detach(handle);
     try {
@@ -232,14 +270,4 @@ export function attachDownstream(
   };
   ws.on('close', detach);
   ws.on('error', detach);
-
-  // Attaching is enough to bring a stopped session back up.
-  void up.ensureStarted().catch((err: Error) => {
-    slog.error('upstream start failed on attach', { error: err.message });
-    try {
-      ws.close(1011, 'upstream unavailable');
-    } catch {
-      // already closing
-    }
-  });
 }

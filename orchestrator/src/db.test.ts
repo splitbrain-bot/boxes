@@ -1,0 +1,144 @@
+import assert from 'node:assert/strict';
+import { afterEach, beforeEach, test } from 'vitest';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { MIGRATIONS, openDb, type Db } from './db.ts';
+
+/**
+ * The migrations that moved a session's conversation onto its threads.
+ *
+ * A deployment upgrading in place has live sessions whose conversation is a
+ * single `sessions.acp_session_id`, and that conversation has to survive as
+ * the session's first thread. What was session-wide about a running turn then
+ * moves onto the thread it is about.
+ */
+
+let dir: string;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'boxes-db-'));
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+/** Builds a database at the version just before threads existed. */
+function atVersion3(withAcpSessionId: string | null): void {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 3)) db.exec(sql);
+  db.pragma('user_version = 3');
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, acp_session_id,
+       turn_active, created_at, last_active_at)
+     VALUES ('s1', 'old session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', ?, 0, 1000, 2000)`,
+  ).run(withAcpSessionId);
+  db.close();
+}
+
+/** The columns a table has, by name. */
+function columns(db: Db, table: string): string[] {
+  return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name);
+}
+
+test('an existing conversation becomes the session first thread', () => {
+  atVersion3('acp-abc');
+  const db = openDb(dir);
+  try {
+    const threads = db.prepare('SELECT * FROM threads').all() as Array<Record<string, unknown>>;
+    assert.equal(threads.length, 1);
+    assert.equal(threads[0]!['session_id'], 's1');
+    assert.equal(threads[0]!['acp_session_id'], 'acp-abc');
+    assert.equal(threads[0]!['ordinal'], 1);
+    // The session's own timestamps carry over: the thread is that session's
+    // conversation, not a new one made today.
+    assert.equal(threads[0]!['created_at'], 1000);
+    assert.equal(threads[0]!['last_active_at'], 2000);
+
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+      string,
+      unknown
+    >;
+    assert.equal(session['current_thread_id'], threads[0]!['id']);
+    // The column it replaces is gone, so nothing can keep writing to it.
+    assert.ok(!columns(db, 'sessions').includes('acp_session_id'));
+  } finally {
+    db.close();
+  }
+});
+
+test('a session that never had a conversation gets no thread', () => {
+  atVersion3(null);
+  const db = openDb(dir);
+  try {
+    const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
+    assert.equal(count.n, 0);
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+      string,
+      unknown
+    >;
+    // The orchestrator mints one on the next spawn, exactly as it did before.
+    assert.equal(session['current_thread_id'], null);
+  } finally {
+    db.close();
+  }
+});
+
+/** Builds a database at the version just before turns moved onto threads. */
+function atVersion4(turnActive: number): void {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 4)) db.exec(sql);
+  db.pragma('user_version = 4');
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       turn_active, created_at, last_active_at)
+     VALUES ('s1', 'busy session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, 1000, 2000)`,
+  ).run(turnActive);
+  db.prepare(
+    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+       created_at, last_active_at)
+     VALUES ('t1', 's1', 'acp-abc', NULL, 1, 1000, 2000)`,
+  ).run();
+  db.close();
+}
+
+test('a running turn moves onto the threads, starting cleared', () => {
+  // Mid-turn when the orchestrator went down, which is the state the upgrade
+  // actually meets.
+  atVersion4(1);
+  const db = openDb(dir);
+  try {
+    // Not a loss of state but the truth: a turn cannot survive the restart
+    // that applies the migration, so every thread starts at 0.
+    const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get('t1') as Record<
+      string,
+      unknown
+    >;
+    assert.equal(thread['turn_active'], 0);
+    // The column it replaces is gone, so nothing can keep writing to it.
+    assert.ok(!columns(db, 'sessions').includes('turn_active'));
+    // And the thread's conversation and identity are untouched by the move.
+    assert.equal(thread['acp_session_id'], 'acp-abc');
+    assert.equal(thread['ordinal'], 1);
+  } finally {
+    db.close();
+  }
+});
+
+test('a queued permission request gains the thread that asked', () => {
+  atVersion4(0);
+  const db = openDb(dir);
+  try {
+    // Nullable and unbackfilled on purpose: clearStale drops every row left
+    // by a previous process at boot, so no existing row outlives the change.
+    assert.ok(columns(db, 'pending_requests').includes('acp_session_id'));
+  } finally {
+    db.close();
+  }
+});

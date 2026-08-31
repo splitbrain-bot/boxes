@@ -1,243 +1,397 @@
-# Several threads per session
+# Threads in parallel
 
-Last modified: 2026-08-30 23:24
-Repo state: commit `2f60238`, plus the uncommitted model-dropdown and
-missing-token-warning work in the working tree.
+Last modified: 2026-08-31
+Repo state: implemented on top of commit `0ad8a8b`.
 
-## What Boxes is, and how a conversation works today
+## Where the last change left this
 
-Boxes runs AI coding-agent sessions in isolated Docker containers and gives
-you a web UI to drive them. One session is one long-lived container with two
-volumes: `/workspace`, which holds the agent's work, and `/home/agent`, which
-holds the agent's own state, including the transcripts of its conversations.
+A Boxes session owns several threads. One is current at a time: the session
+row names it, the gateway answers every browser's `session/new` with it, and
+switching is a REST call that drops the attached browsers so each reconnects
+onto the new one.
 
-The orchestrator, not the browser, is the agent's client of record. It keeps
-one persistent connection per session to an Agent Client Protocol (ACP)
-adapter running inside the container, spawned as a long-lived `docker exec` of
-`claude-agent-acp`. That connection outlives any browser, which is why a turn
-finishes while your phone is locked.
+That was the deliberately small version. Its own design note said the
+alternative — a thread id in the WebSocket URL, so two browsers could watch
+two threads of one session at once — stayed possible later and was blocked by
+nothing. This is that change.
 
-In ACP, one conversation is called a *session*. This document calls it a
-**thread**, to keep it apart from a Boxes session.
+## What is wanted
 
-A Boxes session has exactly one thread, and that is the limitation this plan
-removes. It shows up in three places:
+One thread keeps working while you use another to explore. The concrete
+motion: you are in a thread that is doing something long, you fork it, and you
+ask the fork questions about what it is doing without stopping it or losing
+your place. Two tabs, two conversations, one box.
 
-- `sessions.acp_session_id` is a single column in SQLite.
-- When the orchestrator spawns the adapter it either replays the stored thread
-  with `session/load`, or, when there is none, mints one with `session/new`.
-  A fresh thread is then put into `auto` mode and on the Opus model.
-- The browser runs its own ACP handshake over `/ws/sessions/:id/acp`:
-  `initialize`, then `session/new`, then `session/load` when the answer to
-  `session/new` carried no modes. The gateway answers `session/new` with the
-  session's existing thread id. That is deliberate: without it, every browser
-  reconnect would start a second conversation.
+That is a narrower requirement than parallelism in general, and it is the
+benign case. A thread that reads and answers does not fight the working thread
+over the checkout the way two threads both editing would. It is still one
+workspace, so the risk is real but bounded; see the risks.
 
-Every update the adapter sends is broadcast to every attached browser.
+## What has to be true for it to work
 
-## The problem
+**The wire already allows it.** The ACP SDK keys pending responses by
+JSON-RPC id (`jsonrpc.js`, `prepareRequest`) with no write queue, so two
+`session/prompt` calls naming different threads can be in flight on the one
+adapter connection. Nothing in the transport serialises them.
 
-There is no way to start a fresh conversation against a workspace an agent has
-already prepared. Today the only way to clear the context is to delete the
-session, which also deletes the workspace, or to run `/compact`, which
-summarises rather than resets.
+**Whether the adapter allows it is unverified.** `claude-agent-acp` holds
+every thread of a session in one process, and it may serve two prompts
+concurrently or it may queue the second behind the first. Nothing here has
+tested that, and it decides how much of this plan is worth building. It is
+step 0.
 
-Two things are wanted, and they are different:
+If the adapter turns out to queue, the feature is still worth having — the
+explorer's answer arrives after the working turn's next pause rather than
+during it — but the UI must not claim otherwise, and that is a different
+promise from the one above. Find out before building the rest.
 
-- **New thread** — a fresh, empty context on the same workspace.
-- **Fork** — a second thread that starts from an existing one's context, so
-  you can branch an investigation without disturbing the original.
+## The design decisions
 
-## What the adapter already gives us
+### 1. A connection is pinned to one thread, and the thread is in the URL
 
-All of this was checked against the pinned adapter,
-`@agentclientprotocol/claude-agent-acp@0.70.0`, running in a real session
-container.
+`/ws/sessions/:id/threads/:threadId/acp` is a connection to that thread.
+`/ws/sessions/:id/acp` keeps working and means whichever thread is current.
 
-- Its `initialize` answer advertises `loadSession: true` and
-  `sessionCapabilities: { additionalDirectories, close, delete, fork, list,
-  resume }`.
-- `session/new` with `cwd: /workspace` mints a fresh thread on the same
-  workspace. This is the "new thread" case exactly.
-- `session/fork` takes the source thread's id and returns a new thread
-  carrying that thread's context. Its answer carries `modes` and
-  `configOptions`, the same as `session/new`.
-- `session/list` filtered by `cwd` returns only threads that have a transcript
-  on disk. A thread that has been minted but never prompted does not appear —
-  confirmed by a live call that returned an empty list. So the adapter cannot
-  be the source of truth for which threads exist; Boxes has to keep its own
-  record.
-- `session_info_update` carries a title the agent SDK generates. The adapter
-  pushes it at the end of each turn. That gives a thread a real name for free
-  once it has been used.
-- The gateway already forwards `session/new`, `session/fork`, `session/list`,
-  `session/resume`, `session/close` and `session/delete` to the adapter, so no
-  new forwarding is needed.
+The second half is what makes this cheap. An external ACP client's contract
+does not change at all: it connects where it always did and gets the session's
+current thread, exactly as today. Only the dashboard learns the longer path.
 
-One route is closed. The Claude Code commands `/new` and `/fork` are handled
-by the Claude Code terminal, not by the agent. The adapter's command list has
-41 entries — `model`, `compact`, `context`, `agents`, `effort`, `rename`,
-`recap` among them — and none of `new`, `fork`, `clear` or `resume`. Sending
-those as prompts would do nothing, however they are typed.
+It also means the browser barely changes. `AcpClient` already sends
+`session/new` and takes back an id it does not choose; pinning happens in the
+gateway, so the store, the translation layer and the assistant-ui mounting are
+untouched. What changes is `wsUrlFor` and which route mounts the view.
 
-## The goal
+### 2. Everything session-wide in `Broadcast` becomes keyed by thread
 
-A Boxes session owns several threads. The list shows each session with its
-threads under it. Opening a thread opens that conversation. Two buttons make
-new ones: one starts fresh, one forks the thread you are on. Everything else
-about the session — the container, both volumes, the network, the egress
-policy — is shared, so an extra thread costs nothing.
+`Broadcast` holds three pieces of session-wide state, and each has a
+thread-scoped meaning that is the same rule in a smaller scope:
 
-## The design decision to make first
+| Now | Becomes |
+|---|---|
+| the set of attached browsers | the set of browsers, each recording which thread it watches |
+| `replayTargets`, a set of handles | replay targets per thread |
+| `echoingPrompts`, one counter | one counter per thread |
 
-**One thread is current at a time, per session.**
+An update is routed by its own `sessionId`, which every `session/update`
+carries. The two rules the class exists for survive verbatim, one thread at a
+time: a replay goes only to the browser that asked for it, and a prompt the
+gateway has echoed is not echoed twice. What is fixed is that a replay of one
+thread no longer silences another thread's live updates, which is exactly the
+bug you would hit first with two tabs open.
 
-The session row records which thread is current. The gateway keeps answering
-the browser's `session/new` with that thread's id, so the ACP contract the
-browser and any external ACP client speak does not change at all. Switching
-threads is a REST call followed by the browser reconnecting, which is a path
-that already exists and is already tested: the client reconnects with a
-backoff, and `onResetThread` throws away the old model before the replay
-rebuilds it.
+This is the part the previous plan called the hardest to get right, and it is
+also the part that needs no Docker to test. `broadcast.test.ts` should carry
+the weight.
 
-The alternative was to put a thread id in the WebSocket URL, so two browsers
-could watch two threads of one session at once. That is rejected here. It
-would mean `UpstreamSession` holding several live threads on one adapter
-connection and `Broadcast` routing every update by thread id, which is a much
-larger change to the part of the system that is hardest to get right. It stays
-possible later; nothing in this plan blocks it.
+### 3. `current_thread_id` survives, as the default rather than the truth
+
+It stops being what every connection gets and becomes what a connection that
+does not name a thread gets: `/sessions/:id`, `/ws/sessions/:id/acp`, an
+external client, a bookmark from before this change.
+
+One consequence is worth stating plainly: **switching threads stops dropping
+browsers.** Selecting a thread now only moves a default, and no live
+connection is pinned to it, so the reconnect flicker the last plan listed as a
+visible cost disappears. `switchThread` loses its `dropDownstreams()` call and
+becomes an ordinary write.
+
+### 4. A fork starts in `plan` mode, not `auto`
+
+The explorer thread shares the working thread's checkout. If a question makes
+it decide to edit a file, it collides with the thread that is mid-turn, and
+neither agent can see the other doing it.
+
+The default-mode step already runs on exactly one thread — the one the adapter
+has just minted — so a fork can be given `plan` where a fresh thread is given
+`auto`, at the cost of one parameter. That does not solve the shared
+workspace, it just stops the common accident. Flipping the fork to `auto` is
+one tap in the header the user already has, and then it is their decision
+rather than a surprise.
 
 ## Steps
 
-### 1. Database
+### 0. Find out whether the adapter runs two turns at once
 
-Add migration 4 to `orchestrator/src/db.ts`. Migrations are plain SQL strings
-applied in order and tracked by `user_version`; migration 3 already uses
-`ALTER TABLE ... DROP COLUMN`, so that is available.
+Before any of the below. In a real session container, against the pinned
+adapter: mint two threads, start a long prompt on the first, and prompt the
+second while the first is still streaming. Watch whether the second's updates
+interleave or only begin after the first's `stopReason`.
+
+Record the answer in this file. If it queues, stop and re-scope: the gateway
+work below is still correct, but step 8's UI must say "queued behind the other
+thread" rather than implying two turns run at once, and the payoff is smaller
+than this plan assumes.
+
+**Not run, and still unanswered.** The environment this was implemented in has
+no Docker daemon and no Claude token, so there was no real session container
+to put the question to, and there is no way to answer it short of one — a
+stand-in adapter would only report what the stand-in was written to do.
+
+What was built instead is the half the answer does not change. Everything in
+steps 1–7 is correct either way: routing an update to the thread it names,
+recording a turn against the thread it runs on, asking the browser watching the
+thread that asked, and reloading every watched thread on a respawn are all
+right whether the adapter interleaves two turns or queues the second. And step
+8's UI was written to claim nothing about it: the per-thread badges report what
+a thread *is* doing, which is true under either answer, and no copy anywhere
+promises that two turns run at once.
+
+What is still owed, once a real deployment can run the experiment: if the
+adapter interleaves, this is done as written. If it queues, the explorer's
+answer arrives after the working turn's next pause rather than during it, and
+the thread view should say so — a queued-behind-another-thread note in the
+composer's place, driven by the session's other threads' `turnActive`, which
+the API already reports per thread. That is a small addition on top of what is
+here, not a change to it.
+
+### 1. Gateway: a connection names its thread
+
+`orchestrator/src/index.ts` — the upgrade path regex `WS_PATH` gains a second
+shape capturing an optional thread id. Reject an upgrade naming a thread that
+does not belong to the session, at the handshake, the way an unknown session
+is already rejected: a 404 before a WebSocket exists.
+
+`downstream.ts` — `attachDownstream(ws, sessionId, threadId | null, manager)`.
+The handle records the ACP thread it is for, resolved once at attach: the
+named thread's `acp_session_id`, or the current thread's when none was named.
+`session/new` answers with that, rather than with `up.current`.
+
+A thread with no `acp_session_id` — minted but never prompted, and the adapter
+restarted since — is the one case needing care. Today the spawn path re-mints
+into the row. Keep that, and have attach wait for `ensureStarted` before
+resolving the handle's thread, so the id it pins is the live one.
+
+### 2. `Broadcast`: route by thread
+
+As the table in decision 2. `add(handle, acpThreadId)`; `update(params)` reads
+`params.sessionId` and delivers only to the handles watching it;
+`beginPrompt`/`endPrompt` and `beginReplay`/`endReplay` take the thread they
+are about. An update naming a thread nobody watches is dropped rather than
+broadcast, which is the honest reading and also what stops a background
+thread's stream reaching the wrong tab.
+
+`byRecency` becomes `byRecency(acpThreadId)`, since its only caller is picking
+who to put a permission request to.
+
+### 3. Turns: `turn_active` moves onto the thread
+
+`sessions.turn_active` becomes `threads.turn_active`, and the session's
+"a turn is running" is derived as any of its threads. Two sources of truth for
+whether a turn is running is precisely the thing that goes stale, so the
+session column goes rather than being kept in step.
+
+`forwardRequest` already receives the prompt's params, which carry the thread
+id, so it knows which row to set. The places that clear it — a deliberate
+stop, an adapter exit, a cancel, boot reconciliation — clear every thread of
+the session, which is correct: none of those leave a turn running.
+
+The reaper's idle test reads the derived value. Its other three counts
+(waiting permission, attached browser, last activity) stay session-scoped;
+they are about the box, not the conversation.
+
+### 4. Permissions: to a browser watching the thread that asked
+
+`session/request_permission` params carry the thread id, so
+`onPermissionRequest` picks its target from `byRecency(thread)` rather than
+from every attached browser. A browser watching another thread is not asked,
+and with nobody on that thread the request queues as it does today.
+
+`pending_requests` needs the thread, so `flushPendingTo` gives a browser only
+the requests for the thread it is watching. Add the column rather than parsing
+it back out of the stored params on every read: the params carry it, but a
+query wants a column, and the per-thread pending count is worth having for
+step 8's badges. Existing rows need no backfill — `clearStale` drops rows left
+by a previous process at boot, so the column can be nullable and unbackfilled.
+
+### 5. Respawn: reload every thread that is being watched
+
+A real gap, and new. Today the spawn path loads the current thread, so an
+adapter that dies and comes back has the one thread every browser is on. With
+two browsers on two threads, a respawn would load one of them and the other
+browser's next prompt would name a thread the adapter has not loaded.
+
+`UpstreamSession` keeps the set of threads its attached browsers are watching
+and re-issues `session/load` for each on spawn, the current one included. The
+set is derived from the handles, so it needs no storage and shrinks as tabs
+close.
+
+The alternative is to drop every socket on a respawn and let each browser's
+own handshake re-load its thread. That reuses machinery that already works and
+is fewer moving parts, but it turns a recovery the browser cannot currently
+see into a visible reconnect. Prefer the reload; fall back to this if the
+reload proves awkward.
+
+### 6. Database
+
+Migration 5:
 
 ```sql
-CREATE TABLE threads (
-  id             TEXT PRIMARY KEY,
-  session_id     TEXT NOT NULL,
-  acp_session_id TEXT,
-  title          TEXT,
-  ordinal        INTEGER NOT NULL,
-  created_at     INTEGER NOT NULL,
-  last_active_at INTEGER NOT NULL
-);
-CREATE INDEX idx_threads_session ON threads(session_id, ordinal);
-ALTER TABLE sessions ADD COLUMN current_thread_id TEXT;
+ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pending_requests ADD COLUMN acp_session_id TEXT;
+ALTER TABLE sessions DROP COLUMN turn_active;
 ```
 
-Then move the existing data: for every session that has an
-`acp_session_id`, insert one thread row with `ordinal` 1 and make it current.
-A session whose `acp_session_id` is null gets no row; the orchestrator mints
-one on the next spawn, exactly as it does today. Finally drop
-`sessions.acp_session_id`.
+Nothing needs moving. A turn cannot survive the restart that applies the
+migration, so every thread starting at 0 is not a loss of state but the truth.
 
-`ordinal` is what an unnamed thread is called — "Thread 1", "Thread 2" — until
-the adapter supplies a title. It is per session and never reused.
+### 7. Shared types
 
-### 2. `UpstreamSession` (`orchestrator/src/gateway/upstream.ts`)
+`ThreadSummary` gains `turnActive` and `pendingCount`. `SessionSummary` keeps
+`turnActive` and `pendingCount` as the derived session-wide values, so the
+existing badges keep working unchanged and the per-thread ones are additive.
 
-Everywhere the class reads or writes `sessions.acp_session_id`, it reads or
-writes the current thread's row instead. The spawn path keeps its shape: load
-the current thread, and mint one when there is none.
+### 8. Dashboard
 
-Three new operations:
+- `wsUrlFor(sessionId, threadId?)`, and `useThread` takes the thread.
+- A route `/sessions/:id/threads/:threadId` mounting the same view.
+  `/sessions/:id` stays and means the current thread, so every existing link
+  survives.
+- The card's thread rows become plain `<Link>`s to the per-thread route. This
+  deletes work: opening a thread stops being a REST call followed by a
+  navigation. Opening one still selects it as the session's default, but as a
+  fire-and-forget POST that neither blocks the navigation nor disturbs
+  anything, because no live connection is pinned to the default any more.
+- Per-thread badges on those rows: a running turn, a waiting approval. With
+  two threads live this is the only place that says which one is busy.
+- The thread view names its thread **always**, not only when the session has
+  more than one. Two tabs on one session are otherwise indistinguishable,
+  which is the whole point of the change.
+- **Fork from inside the thread**, which is where the motion actually starts.
+  The button posts, then reveals the new thread as a link with
+  `target="_blank"`, so the working thread stays where it is and the new tab
+  is opened by a real click. A `window.open` after the await is the thing to
+  reach for and it is what popup blockers exist to stop; one extra tap is
+  cheaper than an unreliable one. This is the least settled part of the plan.
 
-- `newThread()` — send `session/new`, insert a thread row, make it current,
-  and apply the default mode and model. The default-mode and default-model
-  steps already exist and already run only on a freshly minted thread, which
-  is the correct rule here too.
-- `forkThread(sourceThreadId)` — the same, with `session/fork` and the source
-  thread's ACP id. The fork answer carries `modes` and `configOptions`, so the
-  same two default steps apply unchanged.
-- `switchThread(threadId)` — record the new current thread, then drop every
-  attached browser. Each reconnects on its own and lands on the new thread.
+### 9. Tests
 
-One existing behaviour needs care. When the adapter reports that a stored
-thread is gone — a thread minted but never prompted does not survive the
-adapter restarting — the code today clears `sessions.acp_session_id`. It must
-now clear only that thread's row, and leave the session's other threads alone.
+`broadcast.test.ts` carries the core, with no Docker and no browser:
 
-Record the title too: when a `session_info_update` arrives carrying one, write
-it to the current thread's row.
+- an update for one thread does not reach a browser watching another
+- a replay of one thread does not silence another thread's live updates
+- a prompt echo reaches only the threads' own watchers
+- an update for a thread nobody watches is dropped
 
-### 3. REST API (`orchestrator/src/app.ts`)
+`upstream.test.ts`, against the existing stand-in adapter:
 
-- `GET /api/sessions/:id/threads` — every thread of a session.
-- `POST /api/sessions/:id/threads` with an optional `{ "from": "<threadId>" }`
-  — no `from` means a fresh thread, a `from` means fork that one. Answers with
-  the new thread, which is now current.
-- `POST /api/sessions/:id/threads/:threadId/select` — make one current.
+- a prompt sets `turn_active` on its own thread and no other
+- a permission request goes to a browser watching the asking thread, and
+  queues when only another thread's browser is attached
+- a respawn re-issues `session/load` for every watched thread
 
-Offer forking only when the adapter advertised `sessionCapabilities.fork` in
-its `initialize` answer, which the orchestrator already caches verbatim. The
-capability is marked unstable in the ACP schema, so the UI must cope with it
-being absent.
+The stub gateway learns that a socket belongs to a thread, taken from the
+upgrade path, and addresses its updates accordingly. Browser tests: two tabs
+on two threads of one session, a prompt in one leaving the other's transcript
+untouched and its composer usable; and the existing "a second tab sees updates
+live" test still passing, because two tabs on the *same* thread must still
+share everything.
 
-### 4. Shared types (`shared/types.ts`)
+### 10. Documentation
 
-Add a `ThreadSummary` — id, ACP id, title, ordinal, created and last-active
-timestamps — and carry `threads` plus `currentThreadId` on `SessionSummary`,
-so the list can draw the tree from the poll it already makes. `SessionDetail`
-inherits both. Add a flag saying whether forking is offered.
+`ARCHITECTURE.md`: the "Several threads per session" section states the
+one-current-thread rule and the rejected alternative as settled, and both
+change. The gateway's `session/new` bullet, the "Who each update goes to"
+section, the schema table and the WebSocket path all move. The section should
+end up describing pinned connections with a default, which is a smaller claim
+than what it says now.
 
-### 5. Dashboard
+## What this makes simpler
 
-- `SessionCard` grows a list of the session's threads under its badges: the
-  current one marked, each row opening that thread. This is the tree.
-- Two actions on the card: **New thread** and **Fork**, the second shown only
-  when the adapter offers it. Both call the REST endpoint and then open the
-  session.
-- Opening a thread that is not current is a select call followed by
-  navigation.
-- The thread view needs to say which thread it is on. The header is already
-  full at phone width with the mode and model selects, so this belongs on the
-  existing name line — the session name, then the thread's title or its
-  ordinal, truncated.
+Worth noting, because it is unusual for a change of this size:
 
-### 6. Tests
-
-- `dashboard/e2e/stub-gateway.ts` learns `session/fork` and answers
-  `session/new` with a distinct thread id each time, so a switch is
-  observable.
-- `dashboard/e2e/stub-orchestrator.ts` learns the three thread routes.
-- Browser tests: a new thread starts empty, a fork carries the earlier
-  messages, and switching back returns to the first thread's transcript.
-- Orchestrator tests: the migration moves an existing `acp_session_id` into a
-  thread row, and a missing thread clears only its own row.
-
-### 7. Documentation
-
-`ARCHITECTURE.md` describes one thread per session in several places,
-including the gateway section and the SQLite schema. Update those, and the
-REST table.
+- `switchThread` stops dropping browsers, and the reconnect flicker goes.
+- The card's thread rows stop needing a REST call to open.
+- `sessions.turn_active` stops being a second source of truth.
 
 ## Deliberately not in scope
 
-- **Deleting a thread.** The adapter supports `session/delete`, so this is
-  cheap to add later. It is left out to keep the first change reviewable.
-- **Two browsers on two threads of one session at once.** See the design
-  decision above.
-- **Renaming a thread by hand.** The adapter generates titles.
-- **Splitting the `!bang` command history per thread.** Those commands ran in
-  the container, not in a conversation, so they stay session-scoped and appear
-  under every thread. Permission requests, the running-turn flag and the debug
-  log stay session-scoped for the same reason.
+- **Per-thread workspaces.** The honest fix for two threads editing is a git
+  worktree per thread under `/workspace`, which the adapter's
+  `additionalDirectories` capability could carry. That is a larger change and
+  a different one; this plan makes two threads *watchable* in parallel and
+  leans on `plan` mode to keep the explorer out of trouble.
+- **Split view.** Two transcripts side by side is a third layout on top of the
+  two this adds, and two tabs already answers the desktop case.
+- **Per-thread `!bang` history, exec log and debug log.** Those ran in the
+  container, not in a conversation. They stay session-scoped and appear under
+  every thread, as they do today.
+- **Deleting a thread.** Still cheap, still deferred.
 
 ## Risks
 
-- `session/fork` is marked unstable in the ACP schema and may change or be
-  withdrawn. Gating it on the advertised capability keeps that from breaking
-  the build.
-- Switching threads closes the browser's socket, so the header shows
-  "reconnecting" for a moment. This is honest but visible.
-- A thread minted and never prompted disappears when the adapter restarts.
-  That is true today and already handled; the plan only narrows the handling
-  to one thread.
+- **The adapter may queue concurrent prompts.** Step 0 exists to find out
+  before anything is built on the assumption. This is the risk that decides
+  whether the plan is worth executing as written.
+- **One workspace, two agents.** `plan` mode on a fork narrows this to
+  deliberate acts; it does not remove it. A user who flips the fork to `auto`
+  and edits gets exactly the conflict they asked for, and Boxes will not
+  notice on their behalf.
+- **`Broadcast` is the load-bearing part.** Every routing rule in it exists
+  because broadcasting to everyone was wrong in a way that only showed up with
+  two browsers attached. Making it thread-aware risks reintroducing precisely
+  those bugs, in a shape the current tests would not catch. Hence the four
+  tests in step 9 before anything else in that file changes.
+- **A background tab holds an open connection.** Two tabs is two upstream
+  attachments per session, so `attachedCount` doubles and the reaper's
+  "nobody is watching" test is held off by a tab the user forgot. That is
+  already true of two tabs on one thread today; it just becomes the normal
+  case rather than the accident.
 
 ## Progress
 
-Not started.
+Done, except step 0, which could not be run here — see the note under it, and
+the paragraph it ends with for what is still owed.
+
+Steps 1–10 are implemented, and both suites are green: 104 orchestrator tests
+and 80 dashboard tests, the browser suite included.
+
+What landed, against the plan:
+
+- **`Broadcast` is keyed by thread** (step 2), and its four new tests were
+  written before it changed, as the risk section asked. `replayTargets` became
+  a map from thread to the browsers replaying it, `echoingPrompts` a count per
+  thread, and `byRecency` takes the thread to ask. An update naming a thread
+  nobody watches is dropped.
+- **A connection names its thread** (step 1). `WS_PATH` gained the optional
+  `/threads/:threadId` shape, and a path naming another session's thread is a
+  404 at the handshake. Which thread a connection is on is settled once, at
+  attach, after `ensureStarted` — and a thread whose row has no
+  `acp_session_id` gets one minted into it there, which covers the
+  minted-never-prompted case for every thread rather than only the current one.
+- **`turn_active` moved onto the thread** (steps 3, 6), with the session's
+  answer derived from its threads, and the reaper reading the derived value.
+- **Permissions go to a browser watching the asking thread** (step 4), with
+  `pending_requests.acp_session_id` carrying the thread and per-thread counts
+  feeding step 8's badges.
+- **A respawn reloads every watched thread** (step 5). The reload was preferred
+  over dropping every socket, as the plan said; the fallback is used only for
+  the narrow case it is right for — a watched thread the adapter cannot bring
+  back, whose browsers are holding an id it would now reject.
+- **The dashboard** (step 8) has the per-thread route, thread rows as plain
+  links with per-thread badges, a thread that always names itself, and Fork
+  inside the thread revealing a `target="_blank"` link.
+
+Three deliberate departures, each small:
+
+- **A cancel clears only its own thread**, not every thread of the session.
+  Step 3 grouped a cancel with the stop, exit and boot cases as "clear every
+  thread ... none of those leave a turn running", which stopped being true the
+  moment threads run in parallel: cancelling one thread says nothing about
+  another that is mid-turn. The other three still clear every thread.
+- **Adding a thread stops dropping browsers too**, not only switching. Step 3
+  called out `switchThread`; `newThread` and `forkThread` dropped browsers for
+  the same reason, and step 8's fork-from-inside-the-thread requires that the
+  thread you forked from stays exactly where it is. With nothing left dropping
+  every socket, `dropDownstreams` became `dropWatchers(thread)`, whose only
+  caller is the respawn case above.
+- **`Broadcast.add` did not gain the thread as a parameter.** The thread is a
+  field on the handle instead, mutable until the pin settles, because the
+  handle has to be counted as attached from the moment its socket opens — the
+  reaper counts it — while its thread cannot be known until the adapter
+  answers. A handle with no thread yet receives nothing, which is right: it
+  has not asked for anything either. `UpstreamSession` reads the same field to
+  derive the watched-thread set for a respawn.
+
+Also carried through: `ARCHITECTURE.md` and `README.md` both describe pinned
+connections with a default, and the info view now returns to the exact thread
+it was opened from rather than to whichever one is current.

@@ -4,7 +4,13 @@ import { ThreadStore, type ThreadSnapshot } from './thread-store.ts';
 import { wsUrlFor } from '@/lib/ws-url';
 
 /**
- * Mounts one session's ThreadStore for as long as the view is on screen.
+ * Mounts one thread's ThreadStore for as long as the view is on screen.
+ *
+ * `threadId` names which of the session's conversations this is, or is null
+ * for the route that means whichever one is current. It is part of the URL
+ * the connection opens, so moving between two threads tears one store down
+ * and builds the other — two tabs on two threads hold two of these, and
+ * neither sees the other's stream.
  *
  * The store outlives no route: leaving the thread closes the WebSocket, and
  * coming back replays. The agent's turn is unaffected either way — the
@@ -12,11 +18,12 @@ import { wsUrlFor } from '@/lib/ws-url';
  */
 export function useThread(
   sessionId: string,
+  threadId: string | null,
   token: string | null,
 ): { store: ThreadStore | null; state: ThreadSnapshot } {
   const [store, setStore] = useState<ThreadStore | null>(null);
 
-  const url = useMemo(() => wsUrlFor(sessionId), [sessionId]);
+  const url = useMemo(() => wsUrlFor(sessionId, threadId), [sessionId, threadId]);
 
   useEffect(() => {
     if (!token) return undefined;

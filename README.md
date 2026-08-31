@@ -141,6 +141,14 @@ interface: type, and the turn runs in the container. Close the tab or lock your
 phone whenever you like; reattaching replays the thread from the session's own
 history. Opening a stopped session starts it again.
 
+**Work in two threads at once.** A session can hold several conversations on
+one workspace, listed under its card, each with its own link. **Fork** branches
+the one you are in, and the button offers to open it in a new tab — so you can
+ask the fork about what the original is doing without stopping it or losing
+your place. A fork starts in `plan` mode, because it shares the original's
+checkout and two agents editing the same files at once is a mess neither can
+see; flip it to `auto` in the header when that is what you want.
+
 **Run a shell command with `!`.** A composer line starting with `!` runs as
 `bash -lc` in the session container and never reaches the model — no tokens
 spent, no chance of it being read as an instruction:
@@ -154,17 +162,17 @@ Output is printed as it arrives, as a code block ending with the exit code.
 Commands are capped at 120 seconds and 256 KiB of output.
 
 **Answer permission requests.** When the agent asks to do something requiring
-consent, the request goes to your attached browser. With nobody attached it is
-queued (and posted to `NTFY_URL` if set) and delivered to the next browser to
-attach. Nothing is ever auto-approved.
+consent, the request goes to a browser watching the thread that asked. With
+nobody on that thread it is queued (and posted to `NTFY_URL` if set) and
+delivered to the next browser to open it. Nothing is ever auto-approved.
 
 **Manage the session.** The ⓘ corner of a card opens its details and controls:
 start, stop, delete, the container and network names, and the WebSocket URL and
 bearer token for attaching your own ACP client. Deleting removes the volumes
 too, so the agent's work and the thread history go with it.
 
-Idle sessions — no turn, no waiting request, no attached browser — are stopped
-after `IDLE_STOP_MINUTES`. They are never deleted.
+Idle sessions — no turn on any thread, no waiting request, no attached browser
+— are stopped after `IDLE_STOP_MINUTES`. They are never deleted.
 
 ## Behind a reverse proxy
 
