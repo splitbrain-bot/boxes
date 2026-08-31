@@ -89,6 +89,27 @@ export interface PendingRequestRow {
 }
 
 /**
+ * One browser that has asked to be pushed to.
+ *
+ * The endpoint is the identity: it is the push service's own opaque URL for
+ * this browser, unique per subscription, and re-subscribing the same browser
+ * returns the same one — so a re-registered browser updates its row rather
+ * than accumulating them. There is no user here to key on; Boxes has no
+ * accounts, and whoever can reach the API can register.
+ */
+export interface PushSubscriptionRow {
+  endpoint: string;
+  /** The subscriber's public key, uncompressed P-256, base64url. */
+  p256dh: string;
+  /** The subscriber's authentication secret, base64url. */
+  auth: string;
+  /** What the browser called itself when it registered; for the UI only. */
+  label: string | null;
+  created_at: number;
+  last_used_at: number;
+}
+
+/**
  * Schema migrations, applied in order and tracked by user_version.
  *
  * Exported so a test can build a database at an earlier version and watch the
@@ -176,6 +197,18 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE pending_requests ADD COLUMN acp_session_id TEXT;
   ALTER TABLE sessions DROP COLUMN turn_active;
+  `,
+  // Browsers subscribed to Web Push. Keyed by the push service's endpoint,
+  // which is the only stable identity a subscription has.
+  `
+  CREATE TABLE push_subscriptions (
+    endpoint     TEXT PRIMARY KEY,
+    p256dh       TEXT NOT NULL,
+    auth         TEXT NOT NULL,
+    label        TEXT,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL
+  );
   `,
 ];
 
@@ -307,6 +340,22 @@ export function getThread(db: Db, threadId: string): ThreadRow | undefined {
     | undefined;
 }
 
+/**
+ * One thread by the adapter's own id for it, within a session.
+ *
+ * The gateway knows a conversation by that id and nothing else, so this is
+ * how a message about it finds the row a link or a name has to come from.
+ */
+export function threadByAcpId(
+  db: Db,
+  sessionId: string,
+  acpSessionId: string,
+): ThreadRow | undefined {
+  return db
+    .prepare('SELECT * FROM threads WHERE session_id = ? AND acp_session_id = ?')
+    .get(sessionId, acpSessionId) as ThreadRow | undefined;
+}
+
 /** The thread a session's gateway is currently answering for, or undefined. */
 export function currentThread(db: Db, sessionId: string): ThreadRow | undefined {
   return db
@@ -428,4 +477,59 @@ export function sessionsWithActiveTurns(db: Db): Set<string> {
     .prepare('SELECT DISTINCT session_id FROM threads WHERE turn_active = 1')
     .all() as Array<{ session_id: string }>;
   return new Set(rows.map((r) => r.session_id));
+}
+
+// --- push subscriptions -----------------------------------------------------
+
+/**
+ * Records a browser's subscription, replacing whatever was stored for the
+ * same endpoint.
+ *
+ * A browser re-subscribes on every load — Safari in particular drops
+ * subscriptions on its own schedule — and the push service hands back the
+ * endpoint it already had. Upserting is what keeps that from growing a row
+ * per page view, and refreshes keys the browser has rotated.
+ */
+export function upsertPushSubscription(
+  db: Db,
+  endpoint: string,
+  p256dh: string,
+  auth: string,
+  label: string | null,
+): void {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label, created_at, last_used_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET
+       p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label`,
+  ).run(endpoint, p256dh, auth, label, now, now);
+}
+
+/** Every subscription this deployment would push to. */
+export function listPushSubscriptions(db: Db): PushSubscriptionRow[] {
+  return db
+    .prepare('SELECT * FROM push_subscriptions ORDER BY created_at ASC')
+    .all() as PushSubscriptionRow[];
+}
+
+/** Forgets one subscription. Used both by an unsubscribe and by a 410. */
+export function deletePushSubscription(db: Db, endpoint: string): void {
+  db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
+}
+
+/** Marks a subscription as delivered to just now. */
+export function touchPushSubscription(db: Db, endpoint: string): void {
+  db.prepare('UPDATE push_subscriptions SET last_used_at = ? WHERE endpoint = ?').run(
+    Date.now(),
+    endpoint,
+  );
+}
+
+/** How many browsers are subscribed. */
+export function countPushSubscriptions(db: Db): number {
+  const row = db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as {
+    n: number;
+  };
+  return row.n;
 }

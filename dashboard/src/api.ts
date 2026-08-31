@@ -3,6 +3,8 @@ import type {
   CreateSessionBody,
   CreateThreadBody,
   HealthResponse,
+  PushKeyResponse,
+  PushSubscribeBody,
   SessionDetail,
   SessionSummary,
   ThreadSummary,
@@ -69,4 +71,15 @@ export const api = {
   getLog: (id: string, after = 0) =>
     request<AcpLogPage>(`/api/sessions/${id}/log?after=${after}&limit=200`),
   health: () => request<HealthResponse>('/healthz'),
+  pushKey: () => request<PushKeyResponse>('/api/push/key'),
+  subscribePush: (body: PushSubscribeBody) =>
+    request<void>('/api/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  unsubscribePush: (endpoint: string) =>
+    request<void>('/api/push/subscribe', {
+      method: 'DELETE',
+      body: JSON.stringify({ endpoint }),
+    }),
 };

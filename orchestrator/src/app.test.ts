@@ -248,6 +248,10 @@ function writeBundle(): string {
   );
   writeFileSync(join(bundle, 'assets', 'index-abc.js'), 'console.log(1)');
   writeFileSync(join(bundle, 'assets', 'index-abc.css'), 'body{}');
+  // Vite copies public/ to the bundle root, which is where these two have to
+  // stay: see the service worker test below.
+  writeFileSync(join(bundle, 'sw.js'), 'self.addEventListener("push", () => {})');
+  writeFileSync(join(bundle, 'manifest.webmanifest'), '{"name":"Boxes"}');
   return bundle;
 }
 
@@ -287,6 +291,28 @@ test('the dashboard bundle is served, with a single-page fallback', async () => 
   }
 });
 
+test('the service worker and the manifest are served from the bundle root', async () => {
+  const bundle = writeBundle();
+  try {
+    // A service worker may only control the scope it is served from, so this
+    // has to be /sw.js and not an asset path — and it must be the file rather
+    // than the single-page fallback, which would register an HTML document as
+    // a worker and take push out silently.
+    const sw = await orchestrator.app.inject({ url: '/sw.js' });
+    assert.equal(sw.statusCode, 200);
+    assert.match(sw.headers['content-type'] as string, /text\/javascript/);
+    assert.match(sw.body, /addEventListener\("push"/);
+
+    // Without the manifest an iPhone cannot install the page, and without
+    // installing it, it has no Push API at all.
+    const manifest = await orchestrator.app.inject({ url: '/manifest.webmanifest' });
+    assert.equal(manifest.statusCode, 200);
+    assert.match(manifest.headers['content-type'] as string, /application\/manifest\+json/);
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
 test('a POST that matches no route is a 404 rather than the page', async () => {
   const bundle = writeBundle();
   try {
@@ -295,4 +321,118 @@ test('a POST that matches no route is a 404 rather than the page', async () => {
   } finally {
     rmSync(bundle, { recursive: true, force: true });
   }
+});
+
+// --- Web Push registration --------------------------------------------------
+
+/** A subscription shaped the way the browser's own toJSON() produces one. */
+function subscription(endpoint = 'https://push.example.net/x/abc'): Record<string, unknown> {
+  return {
+    endpoint,
+    keys: {
+      // 65 and 16 bytes: what a real P-256 point and auth secret decode to.
+      p256dh: Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 7)]).toString('base64url'),
+      auth: Buffer.alloc(16, 9).toString('base64url'),
+    },
+  };
+}
+
+/** Every stored subscription, as rows. */
+function subscriptions(): Array<Record<string, unknown>> {
+  return db.prepare('SELECT * FROM push_subscriptions').all() as Array<
+    Record<string, unknown>
+  >;
+}
+
+test('the VAPID public key is served and stays the same across reads', async () => {
+  const first = await orchestrator.app.inject({ url: '/api/push/key' });
+  const second = await orchestrator.app.inject({ url: '/api/push/key' });
+
+  assert.equal(first.statusCode, 200);
+  const key = (first.json() as { publicKey: string }).publicKey;
+  // Uncompressed P-256, which is the only form a browser accepts here.
+  assert.equal(Buffer.from(key, 'base64url').length, 65);
+  // A key that changed between reads would invalidate every subscription
+  // made against the previous one.
+  assert.equal((second.json() as { publicKey: string }).publicKey, key);
+});
+
+test('a browser registers once however many times it subscribes', async () => {
+  const first = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/push/subscribe',
+    payload: subscription(),
+  });
+  assert.equal(first.statusCode, 204);
+
+  // Re-subscribing hands back the same endpoint with fresh keys, which has to
+  // update the row rather than add one.
+  const rotated = subscription();
+  (rotated['keys'] as Record<string, string>)['auth'] = Buffer.alloc(16, 1).toString(
+    'base64url',
+  );
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/push/subscribe',
+    payload: rotated,
+  });
+
+  const rows = subscriptions();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!['auth'], (rotated['keys'] as Record<string, string>)['auth']);
+});
+
+test('the health probe counts subscribed browsers', async () => {
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/push/subscribe',
+    payload: subscription(),
+  });
+  const res = await orchestrator.app.inject({ url: '/healthz' });
+  assert.equal((res.json() as { pushSubscriptions: number }).pushSubscriptions, 1);
+});
+
+test('an endpoint the orchestrator must not be aimed at is refused', async () => {
+  const refused = [
+    'http://push.example.net/x', // not https
+    'https://127.0.0.1/x', // an address literal in the owner's own space
+    'https://localhost/x',
+    'https://[::1]/x',
+  ];
+  for (const endpoint of refused) {
+    const res = await orchestrator.app.inject({
+      method: 'POST',
+      url: '/api/push/subscribe',
+      payload: subscription(endpoint),
+    });
+    assert.equal(res.statusCode, 400, `${endpoint} should be refused`);
+  }
+  assert.equal(subscriptions().length, 0);
+});
+
+test('a subscription with keys of the wrong size is refused', async () => {
+  const bad = subscription();
+  (bad['keys'] as Record<string, string>)['p256dh'] = Buffer.alloc(32).toString('base64url');
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/push/subscribe',
+    payload: bad,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(subscriptions().length, 0);
+});
+
+test('a browser can unsubscribe itself', async () => {
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/push/subscribe',
+    payload: subscription(),
+  });
+  const res = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: '/api/push/subscribe',
+    payload: { endpoint: 'https://push.example.net/x/abc' },
+  });
+  assert.equal(res.statusCode, 204);
+  assert.equal(subscriptions().length, 0);
 });

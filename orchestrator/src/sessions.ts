@@ -23,6 +23,7 @@ import {
 } from './db.ts';
 import * as dk from './docker.ts';
 import { log } from './log.ts';
+import type { Notifier } from './notify.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, UpstreamSession } from './gateway/upstream.ts';
 import { allocateSubnet } from './subnet.ts';
@@ -46,6 +47,8 @@ export class SessionManager {
     private readonly db: Db,
     private readonly cfg: Config,
     private readonly egress: EgressManager,
+    /** Where "a thread wants you" goes; see notify.ts. */
+    private readonly notifier: Notifier,
   ) {
     this.pending = new PendingStore(db);
   }
@@ -81,7 +84,7 @@ export class SessionManager {
   upstream(id: string): UpstreamSession {
     let up = this.upstreams.get(id);
     if (!up) {
-      up = new UpstreamSession(id, this.db, this.cfg, this.pending, (status) =>
+      up = new UpstreamSession(id, this.db, this.cfg, this.pending, this.notifier, (status) =>
         this.setStatus(id, status),
       );
       this.upstreams.set(id, up);
