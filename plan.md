@@ -1,7 +1,9 @@
 # Code review in Boxes
 
 Last modified: 2026-08-31
-Repo state: planned on top of commit `cd4269a`.
+Repo state: **implemented**, all seven stages, on top of commit `ec482e8`.
+See "What is still owed" at the end for the one thing this environment could
+not verify.
 
 ## What is wanted
 
@@ -387,3 +389,73 @@ Each lands green and shippable on its own.
   bundle must not grow. Verified in stage 4 by the build's chunk report.
 - **A session with no git.** Everything degrades to tree + read + comment,
   statuses and diffs empty — same as the desktop tool outside a repo.
+
+
+## What was built, and what is still owed
+
+All seven stages landed, one commit each, each green on its own:
+
+| Stage | Commit |
+|---|---|
+| 1. Workspace storage | Bind-mounted workspace directories, `HOST_DATA_DIR`, the legacy copy-and-recreate on start, smoke-test assertions |
+| 2. Pure ports + I/O | `review/{store,gitstatus,difflines,tree,fs,git}.ts`, the Go test tables, byte-for-byte fixtures, git in the image |
+| 3. REST surface | `service.ts`, the seven routes, the shared shapes, the `review_root`/`review_base_*` migration, routes driven over a real git repo |
+| 4. Read-only viewer | The route, both entry points, the tree, the pane, Shiki, the hunk sheet, prev/next |
+| 5. Commenting | Composer, annotation CRUD, inline cards, badges, "New review", "Hand to agent" |
+| 6. Base revision | The base picker and the status line that says which base is active |
+| 7. Browser suite | 18 review tests through Chromium on both viewports |
+
+Deviations from the plan as written, all deliberate:
+
+- **`review_base` became two columns**, `review_base_rev` and
+  `review_base_commit`, rather than one column holding both values. Same data,
+  no JSON parsing of stored state.
+- **`HOST_DATA_DIR` was added** as an escape hatch for the host-path
+  resolution. The plan named the container-inspection path only; a deployment
+  where that cannot work — a nested or rootless daemon, or a compose file
+  mounting a real host directory for `/data` — now has a setting instead of a
+  redesign, which is also the plan's own stated fallback made cheap.
+- **Own-container identification uses three sources**, not just
+  `/etc/hostname`: compose sets a container's hostname to its service name, so
+  the hostname is frequently not an id at all. `/proc/self/mountinfo` and
+  `/proc/self/cgroup` are tried first.
+- **The review route is lazily imported.** The plan required that the thread
+  view's bundle not grow; a static import put the view's own ~23 kB in the main
+  chunk even with Shiki split out. Lazily loaded, the main chunk is 906 kB
+  against 904 kB before the change.
+- **No `css-variables` Shiki theme.** Shiki v3 dropped it, so the pane
+  tokenizes with `github-light-default` and `github-dark-default` at once and
+  each token carries both colours as custom properties. Better result and no
+  re-tokenize on a theme switch.
+- **`detectLang` is an extension table**, not Chroma's lexer matcher. The fence
+  language only has to be reasonable — both tools read the language from the
+  first word of the info string and find the `context` marker after it — so
+  reproducing Chroma's full table would have been a liability. Documented where
+  it lives.
+- **Paths are validated against the tree** with a short-lived per-session cache
+  of the tree's path set, rather than rebuilding the tree per file request.
+
+### What is still owed
+
+**The bind assumption is unverified on a real daemon.** The plan asks for it to
+be checked first, on both OSes the README supports, before anything is built on
+it. This environment has the Docker *client* but no daemon, so neither check
+could run:
+
+1. that binding a subdirectory of a named volume's daemon-side path works on
+   Linux and inside Docker Desktop's VM, and
+2. that uid-1000 ownership survives the round trip.
+
+Everything built on it is in place and asserted where it can be — the bind
+template and the isolation flags have unit tests, and `scripts/smoke-test.sh`
+grew the runtime assertions the plan asked for: `/workspace` is a bind of
+`workspaces/<id>`, the agent can write to it, the orchestrator reads the file
+the agent wrote with no exec, `workspaces/` is 0700, and one session cannot see
+another's workspace. **Run `scripts/smoke-test.sh` on a real host before
+trusting this.** If Docker Desktop refuses the bind, the fallback is
+`HOST_DATA_DIR` plus a compose change mounting a real host directory for
+`/data` — a README-visible change, as the plan said, and now a one-line one.
+
+**The later stage the plan left additive** is untouched and nothing depends on
+it: fs watching with a `/ws/sessions/:id/review` upgrade beside the ACP gateway,
+in place of the fingerprint poll, and the decorative overview rail.

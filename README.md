@@ -162,6 +162,29 @@ spent, no chance of it being read as an instruction:
 Output is printed as it arrives, as a code block ending with the exit code.
 Commands are capped at 120 seconds and 256 KiB of output.
 
+**Review the code.** **Review** on a session card, or the magnifier in a
+thread's header, opens the session's workspace as a review: browse the files,
+read one highlighted, and tap a line to leave a comment. Git statuses colour the
+tree, changed lines are marked in the gutter, and tapping a marker shows the
+diff hunk — including the lines that were deleted, which the file itself cannot
+show. **Compare against** a branch, tag or commit to review a whole branch's
+work rather than only what is uncommitted.
+
+Comments are written to a `REVIEW.md` at the root of what you are reviewing, in
+the workspace. That is the point of having this here rather than beside it:
+**Hand to agent** opens the thread with "Read REVIEW.md and address the comments
+in it." waiting in the composer — staged, not sent. The agent can edit and
+delete the file too, and a comment whose code has since moved follows it, or is
+marked as no longer matching.
+
+The format is the desktop [`review`](https://github.com/splitbrain/review)
+tool's, byte for byte, so a review started in one can be continued in the other.
+
+Reviewing needs no running container — the files are a directory on the
+orchestrator's data volume — so the natural moment, once the agent is done and
+the box has idled out, costs nothing. A session created before Boxes stored
+workspaces this way says so and asks you to start it once, which migrates it.
+
 **Answer permission requests.** When the agent asks to do something requiring
 consent, the request goes to a browser watching the thread that asked. With
 nobody on that thread it is queued (and posted to `NTFY_URL` if set) and
