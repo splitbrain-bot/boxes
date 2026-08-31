@@ -775,6 +775,13 @@ orchestrator/src/
   sessions.ts           Session lifecycle, the owner of every UpstreamSession
   workspaces.ts         Workspace directories on the data volume: paths, ownership
   docker.ts             Containers, networks, volumes, the adapter exec
+  review/
+    store.ts            REVIEW.md: parse, serialize, mutate, drift (pure)
+    gitstatus.ts        Porcelain and name-status parsing, base resolution
+    difflines.ts        Unified diff to line markers, hunks and deletion markers (pure)
+    tree.ts             git ls-files or a walk into a tree, and the ignore lists
+    fs.ts               Contained reads and writes under one root: the symlink invariant
+    git.ts              The one place a git process is spawned: fixed argv, scrubbed env
   subnet.ts             Per-session /24 allocation
   reaper.ts             The idle reaper and the proxy reconciler
   log.ts                Structured stderr logging with secret redaction
