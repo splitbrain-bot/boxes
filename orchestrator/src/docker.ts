@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { existsSync, readFileSync } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { Config, SessionProfile } from './config.ts';
@@ -15,7 +16,7 @@ import { log } from './log.ts';
 /** Docker label carrying the session id on every object Boxes creates. */
 export const LABEL = 'boxes.session';
 
-/** The session's writable volume, and the working directory of everything in it. */
+/** The session's writable workspace, and the working directory of everything in it. */
 export const WORKSPACE_DIR = '/workspace';
 
 let client: Docker | null = null;
@@ -63,7 +64,12 @@ export interface CreateContainerSpec {
   image: string;
   networkName: string;
   subnet: string;
-  wsVolume: string;
+  /**
+   * Host-side path bind-mounted at WORKSPACE_DIR. A path rather than a volume
+   * name because the orchestrator has to read these files itself; see
+   * workspaces.ts for how it is resolved.
+   */
+  workspaceSource: string;
   homeVolume: string;
   profile: SessionProfile;
   egress: SessionEgress;
@@ -188,6 +194,111 @@ export async function createVolume(name: string, sessionId: string): Promise<voi
   await docker().createVolume({ Name: name, Labels: { [LABEL]: sessionId } });
 }
 
+// --- resolving this process's own host-side paths ---------------------------
+
+/**
+ * This process's own container id, or null when it is not in a container.
+ *
+ * Three sources, because none of them holds everywhere. `/etc/hostname` is the
+ * classic answer but compose sets a container's hostname to its service name,
+ * which is not an id at all; mountinfo carries the id in the paths of the
+ * three files Docker always binds into a container; the cgroup path carries it
+ * under cgroup v1 and under v2 with a named hierarchy, and is `0::/` otherwise.
+ */
+export function selfContainerId(): string | null {
+  const patterns: Array<[string, RegExp]> = [
+    ['/proc/self/mountinfo', /\/containers\/([0-9a-f]{64})\//],
+    ['/proc/self/cgroup', /(?:^|\/|docker-)([0-9a-f]{64})(?:\.scope)?$/m],
+    ['/etc/hostname', /^([0-9a-f]{12,64})$/],
+  ];
+  for (const [file, pattern] of patterns) {
+    try {
+      const match = pattern.exec(readFileSync(file, 'utf8').trim());
+      if (match?.[1]) return match[1];
+    } catch {
+      // not readable here; try the next source
+    }
+  }
+  return null;
+}
+
+/** Whether this process is running inside a container. */
+export function inContainer(): boolean {
+  return existsSync('/.dockerenv') || selfContainerId() !== null;
+}
+
+/**
+ * The host-side path of a directory mounted into this process's own container,
+ * or null when there is no such mount.
+ *
+ * This is the one thing a bind of a path under the orchestrator's own /data
+ * needs and cannot guess: bind sources are resolved by the daemon, so the
+ * source has to be the path the daemon knows, which is the `Source` of the
+ * mount whose `Destination` is the directory in question. With the shipped
+ * compose that resolves to `/var/lib/docker/volumes/boxes-data/_data`.
+ */
+export async function resolveHostMountSource(destination: string): Promise<string | null> {
+  const self = selfContainerId();
+  if (!self) return null;
+  const info = await docker().getContainer(self).inspect();
+  const mount = (info.Mounts ?? []).find((m) => m.Destination === destination);
+  return mount?.Source ?? null;
+}
+
+/**
+ * Copies a named volume's content into a host directory, through a one-shot
+ * container that can see both.
+ *
+ * This is how a session created before workspaces were directories moves onto
+ * one. The orchestrator has no path to a named volume — the very problem the
+ * bind mount removes — so the copy has to run somewhere both are mounted.
+ * `cp -a` preserves ownership, which keeps the agent's files the agent's;
+ * that needs root in the helper, so this is the one container Boxes creates
+ * that does not drop its capabilities. It has no network and a read-only
+ * rootfs, and its argv is fixed here.
+ */
+export async function copyVolumeToDirectory(
+  volumeName: string,
+  hostDirectory: string,
+  image: string,
+  sessionId: string,
+): Promise<void> {
+  const container = await docker().createContainer({
+    Image: image,
+    User: 'root',
+    // The image's own entrypoint holds a container open; this one has a job
+    // and exits, so the entrypoint is replaced rather than run.
+    Entrypoint: ['sh', '-c'],
+    Cmd: ['cp -a /from/. /to/'],
+    Labels: { [LABEL]: sessionId },
+    HostConfig: {
+      Binds: [`${volumeName}:/from:ro`, `${hostDirectory}:/to`],
+      NetworkMode: 'none',
+      ReadonlyRootfs: true,
+      SecurityOpt: ['no-new-privileges:true'],
+      Privileged: false,
+      RestartPolicy: { Name: 'no' },
+      Init: true,
+    },
+  });
+  try {
+    await container.start();
+    const { StatusCode } = (await container.wait()) as { StatusCode: number };
+    if (StatusCode !== 0) {
+      const logs = await container.logs({ stdout: true, stderr: true, tail: 20 });
+      throw new Error(
+        `copy of ${volumeName} exited ${StatusCode}: ${logs.toString('utf8').trim()}`,
+      );
+    }
+  } finally {
+    try {
+      await container.remove({ force: true, v: false });
+    } catch {
+      // already gone
+    }
+  }
+}
+
 /** Creates a session container from the fixed, hardened HostConfig template. */
 export async function createContainer(spec: CreateContainerSpec, cfg: Config): Promise<string> {
   const container = await docker().createContainer({
@@ -205,7 +316,12 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     HostConfig: {
       NetworkMode: spec.networkName,
       Binds: [
-        `${spec.wsVolume}:${WORKSPACE_DIR}`,
+        // The workspace is a directory on the orchestrator's data volume, so
+        // that reviewing a session's files needs no exec and no running
+        // container. The home volume stays a named volume: it holds
+        // transcripts and session-local credentials, and nothing outside the
+        // container reads it.
+        `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeVolume}:/home/agent`,
       ],
       ReadonlyRootfs: true,

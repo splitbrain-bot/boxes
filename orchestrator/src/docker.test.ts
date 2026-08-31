@@ -1,10 +1,17 @@
+import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Docker from 'dockerode';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from './config.ts';
 import { EgressManager } from './egress.ts';
-import { sessionEnv, type CreateContainerSpec } from './docker.ts';
+import {
+  createContainer,
+  sessionEnv,
+  setDockerForTests,
+  type CreateContainerSpec,
+} from './docker.ts';
 
 /**
  * The environment of a session container, which is the only place a session's
@@ -40,7 +47,7 @@ async function envFor(over: Record<string, string>): Promise<Record<string, stri
     image: cfg.SESSION_IMAGE,
     networkName: 'sn-abcd1234',
     subnet: '10.200.0.0/29',
-    wsVolume: 'ws-abcd1234',
+    workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
     homeVolume: 'home-abcd1234',
     profile,
     egress: {
@@ -99,5 +106,66 @@ describe('sessionEnv', () => {
   it('still carries the git identity, which is not a credential', async () => {
     const env = await envFor({ PROFILE_DEFAULT_GIT_NAME: 'boxes-bot' });
     expect(env['GIT_NAME']).toBe('boxes-bot');
+  }, 30_000);
+});
+
+describe('the container template', () => {
+  /** Captures what createContainer would ask the daemon for. */
+  async function capture(): Promise<Record<string, unknown>> {
+    const cfg = loadConfig({ DATA_DIR: dataDir() });
+    const egress = new EgressManager(cfg);
+    await egress.prepare();
+    const profile = cfg.profiles['DEFAULT']!;
+
+    let opts: Record<string, unknown> = {};
+    setDockerForTests({
+      createContainer: async (o: Record<string, unknown>) => {
+        opts = o;
+        return { id: 'deadbeef' };
+      },
+    } as unknown as Docker);
+    try {
+      await createContainer(
+        {
+          sessionId: 'abcd1234',
+          image: cfg.SESSION_IMAGE,
+          networkName: 'sn-abcd1234',
+          subnet: '10.200.0.0/29',
+          workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
+          homeVolume: 'home-abcd1234',
+          profile,
+          egress: {
+            claudeOauthToken: '',
+            ghToken: '',
+            caCertificate: '',
+          },
+        },
+        cfg,
+      );
+    } finally {
+      setDockerForTests(null);
+    }
+    return opts;
+  }
+
+  it('binds the workspace from a host path and the home from a volume', async () => {
+    const opts = await capture();
+    const host = opts['HostConfig'] as { Binds: string[] };
+    // A path, not a volume name: the orchestrator has to read these files
+    // itself, which is what the whole review surface rests on.
+    assert.deepEqual(host.Binds, [
+      '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234:/workspace',
+      'home-abcd1234:/home/agent',
+    ]);
+  }, 30_000);
+
+  it('keeps the isolation the workspace change does not touch', async () => {
+    const opts = await capture();
+    const host = opts['HostConfig'] as Record<string, unknown>;
+    assert.equal(opts['User'], 'agent');
+    assert.equal(host['ReadonlyRootfs'], true);
+    assert.deepEqual(host['CapDrop'], ['ALL']);
+    assert.equal(host['Privileged'], false);
+    assert.deepEqual(host['SecurityOpt'], ['no-new-privileges:true']);
   }, 30_000);
 });

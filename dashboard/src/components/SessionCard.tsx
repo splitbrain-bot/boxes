@@ -1,4 +1,4 @@
-import { GitBranch, Info, Plus } from 'lucide-react';
+import { FileSearch, GitBranch, Info, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { SessionSummary, ThreadSummary } from '../../../shared/types.ts';
@@ -145,6 +145,16 @@ export function SessionCard({ session }: { session: SessionSummary }) {
             <Plus className="size-3.5" />
             New thread
           </button>
+          {/* Reviewing works whether or not the box is running: the files are
+              a directory the orchestrator reads, so a stopped session — the
+              natural moment, once the agent is done — needs no start. */}
+          <Link
+            to={`/sessions/${session.id}/review`}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground no-underline hover:bg-accent hover:text-accent-foreground"
+          >
+            <FileSearch className="size-3.5" />
+            Review
+          </Link>
           {/* Forking needs a thread to fork and an adapter that advertised the
               capability, which is unstable in the ACP schema and may be
               absent. */}

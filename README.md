@@ -2,7 +2,7 @@
 
 Boxes runs AI coding-agent sessions in isolated Docker containers and gives you
 a mobile-friendly web UI to drive them. Each session is a long-lived container
-with its own workspace volume, its own internal network, and no route out
+with its own workspace directory, its own internal network, and no route out
 except through a proxy that vets every destination.
 
 Agent turns keep running when your browser goes away. The orchestrator — not
@@ -101,7 +101,8 @@ docker exec -it session-<id> claude /login
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
 | `NTFY_URL` | — | POSTed when a session wants you |
 | `PUSH_SUBJECT` | project URL | Contact in the VAPID assertion Web Push carries |
-| `DATA_DIR` | `/data` | Database and generated token, inside the volume |
+| `DATA_DIR` | `/data` | Database, generated token and session workspaces, inside the volume |
+| `HOST_DATA_DIR` | resolved | Host-side path of `DATA_DIR`, which a workspace bind mount has to name. Resolved at boot by inspecting the orchestrator's own container; set it only where that cannot work |
 | `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Proxy container the orchestrator attaches to session networks |
 | `EGRESS_ALLOWED_HOSTS` | — | Hosts sessions may reach; empty means every public host |
 
@@ -134,7 +135,7 @@ real credential is inside a session and that the allowlist bites.
 Open <http://localhost:3000>.
 
 **Create a session.** Give it a name. The session gets its own container,
-network and volumes, and its workspace starts empty — tell the agent what to
+network and storage, and its workspace starts empty — tell the agent what to
 fetch into it.
 
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
@@ -162,6 +163,29 @@ spent, no chance of it being read as an instruction:
 Output is printed as it arrives, as a code block ending with the exit code.
 Commands are capped at 120 seconds and 256 KiB of output.
 
+**Review the code.** **Review** on a session card, or the magnifier in a
+thread's header, opens the session's workspace as a review: browse the files,
+read one highlighted, and tap a line to leave a comment. Git statuses colour the
+tree, changed lines are marked in the gutter, and tapping a marker shows the
+diff hunk — including the lines that were deleted, which the file itself cannot
+show. **Compare against** a branch, tag or commit to review a whole branch's
+work rather than only what is uncommitted.
+
+Comments are written to a `REVIEW.md` at the root of what you are reviewing, in
+the workspace. That is the point of having this here rather than beside it:
+**Hand to agent** opens the thread with "Read REVIEW.md and address the comments
+in it." waiting in the composer — staged, not sent. The agent can edit and
+delete the file too, and a comment whose code has since moved follows it, or is
+marked as no longer matching.
+
+The format is the desktop [`review`](https://github.com/splitbrain/review)
+tool's, byte for byte, so a review started in one can be continued in the other.
+
+Reviewing needs no running container — the files are a directory on the
+orchestrator's data volume — so the natural moment, once the agent is done and
+the box has idled out, costs nothing. A session created before Boxes stored
+workspaces this way says so and asks you to start it once, which migrates it.
+
 **Answer permission requests.** When the agent asks to do something requiring
 consent, the request goes to a browser watching the thread that asked. With
 nobody on that thread it is queued, you are notified, and it is delivered to
@@ -169,7 +193,7 @@ the next browser to open it. Nothing is ever auto-approved.
 
 **Manage the session.** The ⓘ corner of a card opens its details and controls:
 start, stop, delete, the container and network names, and the WebSocket URL and
-bearer token for attaching your own ACP client. Deleting removes the volumes
+bearer token for attaching your own ACP client. Deleting removes the storage
 too, so the agent's work and the thread history go with it.
 
 Idle sessions — no turn on any thread, no waiting request, no attached browser

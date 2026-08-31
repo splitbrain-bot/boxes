@@ -214,6 +214,59 @@ else
 fi
 
 echo
+echo "== workspace storage: a directory on the data volume, bound in =="
+# A session's workspace is a directory under the orchestrator's own /data,
+# bind-mounted at /workspace. The agent must own it, one session must not see
+# another's, and the parent must not be readable by a stray container.
+must_pass "the agent can write to its bound workspace" \
+  sh -c 'echo ok > /workspace/.smoke-ws && rm /workspace/.smoke-ws'
+
+WS_SOURCE=$(docker inspect -f \
+  '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Type}} {{.Source}}{{end}}{{end}}' \
+  "$CONTAINER" 2>/dev/null)
+case "$WS_SOURCE" in
+  "bind "*/workspaces/"$SESSION_ID")
+    green "ok   /workspace is a bind of the session's own directory"; pass=$((pass+1)) ;;
+  *)
+    red   "FAIL: /workspace is not a bind of workspaces/\$SESSION_ID: ${WS_SOURCE:-none}"
+    fail=$((fail+1)) ;;
+esac
+
+# The orchestrator must see the very file the agent wrote, with no exec: that
+# is what makes reviewing a stopped session possible at all.
+docker exec -u agent "$CONTAINER" sh -c 'echo from-the-agent > /workspace/.smoke-seen' \
+  >/dev/null 2>&1
+if docker exec boxes-orchestrator \
+     sh -c 'cat "/data/workspaces/'"$SESSION_ID"'/.smoke-seen"' 2>/dev/null \
+     | grep -q from-the-agent; then
+  green "ok   the orchestrator reads the agent's file directly"; pass=$((pass+1))
+else
+  red   "FAIL: the orchestrator cannot read the agent's workspace file"; fail=$((fail+1))
+fi
+docker exec -u agent "$CONTAINER" rm -f /workspace/.smoke-seen >/dev/null 2>&1
+
+# 0700 on the parent, so mounting the data volume elsewhere shows nothing.
+WS_MODE=$(docker exec boxes-orchestrator stat -c '%a' /data/workspaces 2>/dev/null)
+if [ "$WS_MODE" = "700" ]; then
+  green "ok   workspaces/ on the data volume is 0700"; pass=$((pass+1))
+else
+  red   "FAIL: workspaces/ is ${WS_MODE:-unknown}, must be 700"; fail=$((fail+1))
+fi
+
+# One session's workspace is not mounted into another, and the sibling's
+# directory is not reachable from inside this one.
+if [ -n "${SIBLING_ID:-}" ]; then
+  docker exec -u agent "$SIBLING_CONTAINER" \
+    sh -c 'echo sibling > /workspace/.smoke-sibling' >/dev/null 2>&1
+  must_fail "the sibling's workspace file is not visible" \
+    sh -c 'test -f /workspace/.smoke-sibling'
+  must_fail "the data volume is not reachable from a session" \
+    sh -c 'ls /data'
+  docker exec -u agent "$SIBLING_CONTAINER" rm -f /workspace/.smoke-sibling \
+    >/dev/null 2>&1
+fi
+
+echo
 echo "== documented-but-accepted residual surface =="
 # Docker's internal-network isolation filters forwarded traffic only, so the
 # host stays addressable at its per-bridge IP. The owner accepted this, so it

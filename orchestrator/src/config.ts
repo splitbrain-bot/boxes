@@ -14,6 +14,17 @@ const durationMinutes = z.coerce.number().int().positive();
 
 const schema = z.object({
   DATA_DIR: z.string().min(1).default('/data'),
+  /**
+   * Host-side path of DATA_DIR, which is what a session's workspace bind has
+   * to name — the daemon resolves bind sources, not this process.
+   *
+   * Empty is the normal case: at boot the orchestrator inspects its own
+   * container and takes the `Source` of the mount at DATA_DIR, which with the
+   * shipped compose is `/var/lib/docker/volumes/boxes-data/_data`. Set this
+   * only where that cannot work — a nested or rootless daemon, or a compose
+   * file that mounts a real host directory for /data.
+   */
+  HOST_DATA_DIR: z.string().default(''),
   PORT: z.coerce.number().int().positive().default(3000),
 
   SESSION_IMAGE: z.string().min(1).default('boxes-session:latest'),

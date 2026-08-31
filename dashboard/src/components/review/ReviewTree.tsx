@@ -1,0 +1,221 @@
+import { ChevronDown, ChevronRight, File, MessageSquare } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import type {
+  ReviewFileStatus,
+  ReviewTreeEntry,
+  ReviewTreeResponse,
+} from '../../../../shared/types.ts';
+import { cn } from '@/lib/utils';
+
+/**
+ * The workspace's files, with git status and comment counts on them.
+ *
+ * One component for both arrangements: a collapsible left column from `md` up
+ * and a Sheet below it. The desktop tool's three panels do not survive a
+ * phone, but the tree does — what changes is where it is mounted, not what it
+ * renders.
+ */
+
+/** What a status colours its row, and the single letter that names it. */
+const STATUS: Record<ReviewFileStatus, { className: string; mark: string; label: string }> = {
+  modified: { className: 'text-warn', mark: 'M', label: 'modified' },
+  staged: { className: 'text-primary', mark: 'S', label: 'staged' },
+  untracked: { className: 'text-ok', mark: '?', label: 'untracked' },
+  added: { className: 'text-ok', mark: 'A', label: 'added' },
+  deleted: { className: 'text-danger', mark: 'D', label: 'deleted' },
+  conflict: { className: 'text-danger', mark: '!', label: 'conflict' },
+};
+
+/** The paths of the directories that should start open. */
+function initialOpen(entries: ReviewTreeEntry[]): Set<string> {
+  const open = new Set<string>();
+  /**
+   * Follows the chain of single-child directories from the top. A `src/main/
+   * java/com/…` prefix is noise, not structure, and opening it saves four
+   * taps on a phone.
+   */
+  const walk = (level: ReviewTreeEntry[]): void => {
+    if (level.length !== 1) return;
+    const only = level[0]!;
+    if (!only.isDir) return;
+    open.add(only.path);
+    walk(only.children ?? []);
+  };
+  walk(entries);
+  return open;
+}
+
+export function ReviewTree({
+  tree,
+  activePath,
+  onOpen,
+}: {
+  tree: ReviewTreeResponse;
+  /** The file the pane is showing, so the tree can mark it. */
+  activePath: string | null;
+  onOpen: (path: string) => void;
+}) {
+  const [open, setOpen] = useState<Set<string>>(() => initialOpen(tree.entries));
+  /**
+   * The directories that hold a commented file, so a collapsed branch still
+   * says there is something in it.
+   */
+  const commentedDirs = useMemo(() => dirsWithComments(Object.keys(tree.counts)), [tree.counts]);
+
+  const toggle = (path: string): void => {
+    setOpen((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  if (tree.entries.length === 0) {
+    return (
+      <p className="px-3 py-4 text-sm text-muted-foreground">
+        This workspace is empty. Once the agent has cloned or written something, it shows up
+        here.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col py-1">
+      {tree.truncated ? (
+        <p className="mx-2 mb-1 rounded-md border border-warn/40 bg-warn/10 px-2 py-1 text-xs">
+          This tree is very large and was cut short. Files past the cap are not listed.
+        </p>
+      ) : null}
+      <Level
+        entries={tree.entries}
+        depth={0}
+        open={open}
+        toggle={toggle}
+        statuses={tree.statuses}
+        counts={tree.counts}
+        commentedDirs={commentedDirs}
+        activePath={activePath}
+        onOpen={onOpen}
+      />
+    </div>
+  );
+}
+
+/** One level of the tree, and every open level below it. */
+function Level({
+  entries,
+  depth,
+  open,
+  toggle,
+  statuses,
+  counts,
+  commentedDirs,
+  activePath,
+  onOpen,
+}: {
+  entries: ReviewTreeEntry[];
+  depth: number;
+  open: Set<string>;
+  toggle: (path: string) => void;
+  statuses: Record<string, ReviewFileStatus>;
+  counts: Record<string, number>;
+  commentedDirs: Set<string>;
+  activePath: string | null;
+  onOpen: (path: string) => void;
+}) {
+  return (
+    <ul className="list-none">
+      {entries.map((entry) => {
+        const isOpen = open.has(entry.path);
+        const status = statuses[entry.path];
+        const count = counts[entry.path] ?? 0;
+
+        return (
+          <li key={entry.path}>
+            <button
+              type="button"
+              onClick={() => (entry.isDir ? toggle(entry.path) : onOpen(entry.path))}
+              aria-expanded={entry.isDir ? isOpen : undefined}
+              aria-current={entry.path === activePath ? 'true' : undefined}
+              // 44px of tap target on touch, less on a pointer where rows can
+              // be dense without being unusable.
+              className={cn(
+                'flex w-full items-center gap-1.5 rounded-md px-2 text-left text-sm',
+                'min-h-11 md:min-h-8',
+                'hover:bg-accent hover:text-accent-foreground',
+                entry.path === activePath && 'bg-accent font-medium',
+              )}
+              style={{ paddingLeft: `${0.5 + depth * 0.75}rem` }}
+            >
+              {entry.isDir ? (
+                isOpen ? (
+                  <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                )
+              ) : (
+                <File className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span
+                className={cn('min-w-0 flex-1 truncate', status && STATUS[status].className)}
+                title={entry.path}
+              >
+                {entry.name}
+              </span>
+              {status ? (
+                <span
+                  aria-label={STATUS[status].label}
+                  title={STATUS[status].label}
+                  className={cn('shrink-0 font-mono text-xs', STATUS[status].className)}
+                >
+                  {STATUS[status].mark}
+                </span>
+              ) : null}
+              {count > 0 ? (
+                <span
+                  className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-primary/15 px-1.5 text-xs text-primary"
+                  aria-label={count === 1 ? '1 comment' : `${count} comments`}
+                >
+                  <MessageSquare className="size-3" />
+                  {count}
+                </span>
+              ) : entry.isDir && !isOpen && commentedDirs.has(entry.path) ? (
+                // A collapsed branch still says there is something in it,
+                // which is what makes the tree usable as a to-do list.
+                <MessageSquare
+                  className="size-3 shrink-0 text-primary"
+                  aria-label="contains comments"
+                />
+              ) : null}
+            </button>
+
+            {entry.isDir && isOpen ? (
+              <Level
+                entries={entry.children ?? []}
+                depth={depth + 1}
+                open={open}
+                toggle={toggle}
+                statuses={statuses}
+                counts={counts}
+                commentedDirs={commentedDirs}
+                activePath={activePath}
+                onOpen={onOpen}
+              />
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** Every directory on the way to a commented file. */
+function dirsWithComments(paths: string[]): Set<string> {
+  const dirs = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  }
+  return dirs;
+}

@@ -20,8 +20,35 @@ export interface SessionRow {
   container_id: string | null;
   network_name: string;
   subnet: string;
+  /**
+   * The named volume that used to hold the workspace, and still does for a
+   * session created before workspaces became directories. Empty on a session
+   * that is directory-backed, which every new one is.
+   */
   ws_volume: string;
   home_volume: string;
+  /**
+   * Where the session's files are, as this process saw them when the session
+   * was created or migrated, and null while the session is still
+   * volume-backed. The path actually used is derived from the current
+   * DATA_DIR, so moving the data volume moves the workspaces with it; what
+   * this column decides is only whether the session has a directory at all.
+   */
+  workspace_dir: string | null;
+  /**
+   * Where the review is rooted, relative to the workspace, or null before it
+   * has been resolved. Empty string means the workspace itself; a name means
+   * that subdirectory, which is the shape a cloned project takes. Re-validated
+   * rather than trusted, since the agent can delete the directory it names.
+   */
+  review_root: string | null;
+  /** The base revision as the user gave it — a branch, a tag, a short id. */
+  review_base_rev: string | null;
+  /**
+   * What that revision resolved to, through the merge base with HEAD. Null
+   * means the review compares against the working tree's HEAD.
+   */
+  review_base_commit: string | null;
   status: SessionStatus;
   /**
    * The thread a connection that names none gets, or null before one exists.
@@ -200,6 +227,11 @@ export const MIGRATIONS: string[] = [
   `,
   // Browsers subscribed to Web Push. Keyed by the push service's endpoint,
   // which is the only stable identity a subscription has.
+  //
+  // This one stays at this index. It shipped before the two below it were
+  // written, so a deployment that has already applied it is at user_version 6
+  // — put anything ahead of it and that deployment would skip this migration
+  // and mis-apply whatever took its place.
   `
   CREATE TABLE push_subscriptions (
     endpoint     TEXT PRIMARY KEY,
@@ -209,6 +241,24 @@ export const MIGRATIONS: string[] = [
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER NOT NULL
   );
+  `,
+  // A workspace becomes a directory on the orchestrator's data volume,
+  // bind-mounted into the session container, so the orchestrator can read the
+  // agent's files without an exec. Nothing is moved here: an existing row
+  // keeps its ws_volume and a null workspace_dir, and migrates at its next
+  // start — which is the only moment its container can be recreated with the
+  // new mount.
+  `
+  ALTER TABLE sessions ADD COLUMN workspace_dir TEXT;
+  `,
+  // What a review remembers between requests. The annotations themselves are
+  // not here: REVIEW.md in the workspace is the single source of truth for
+  // those, and it is shared with the agent. These three are only what the
+  // orchestrator would otherwise have to re-derive on every request.
+  `
+  ALTER TABLE sessions ADD COLUMN review_root TEXT;
+  ALTER TABLE sessions ADD COLUMN review_base_rev TEXT;
+  ALTER TABLE sessions ADD COLUMN review_base_commit TEXT;
   `,
 ];
 

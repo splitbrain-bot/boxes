@@ -26,8 +26,9 @@ Two consequences shape the rest of the design:
 
 A session owns several *threads* — ACP calls one conversation a session, and
 this document calls it a thread to keep it apart from a Boxes session. The
-container, both volumes, the network and the egress policy are the session's
-and are shared, so a second thread costs nothing but its own transcript. Each
+container, the workspace, the home volume, the network and the egress policy
+are the session's and are shared, so a second thread costs nothing but its own
+transcript. Each
 connection is pinned to one thread, so two of them can be watched at once; see
 [Several threads per session](#several-threads-per-session).
 
@@ -114,13 +115,20 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id` | One session with its Docker object names |
 | `POST /api/sessions/:id/start` | Starts a stopped container |
 | `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
-| `DELETE /api/sessions/:id` | Deletes the session, its volumes included |
+| `DELETE /api/sessions/:id` | Deletes the session, its workspace and home volume included |
 | `GET /api/sessions/:id/threads` | Every conversation the session owns |
 | `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `{"from":"<threadId>"}` forks that one instead of starting empty |
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
 | `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run in this session |
+| `GET /api/sessions/:id/review/tree` | Tree, git status per path, comment counts, the resolved root and base — the whole left panel |
+| `GET /api/sessions/:id/review/file?path=` | Content, diff markers and comments — the whole file view |
+| `PUT /api/sessions/:id/review/annotations` | Creates or replaces one line's comment |
+| `DELETE /api/sessions/:id/review/annotations?path=&line=` | Deletes one comment |
+| `GET /api/sessions/:id/review/status` | The poll fingerprint: three cheap local hashes |
+| `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it |
+| `DELETE /api/sessions/:id/review` | Deletes `REVIEW.md` — "New review" |
 | `GET /api/push/key` | The deployment's VAPID public key, which a browser subscribes with |
 | `POST /api/push/subscribe` | Registers a browser for Web Push, or refreshes what is stored for it |
 | `DELETE /api/push/subscribe` | Forgets one browser's subscription |
@@ -521,8 +529,9 @@ Creating a session, in `SessionManager.create`:
    name.
 3. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
    `creating`.
-4. Create the network `sn-<id>`, attach the egress proxy, create the volumes
-   `ws-<id>` and `home-<id>`, create the container `session-<id>`, and start it.
+4. Create the network `sn-<id>`, attach the egress proxy, create the workspace
+   directory `${DATA_DIR}/workspaces/<id>` and the volume `home-<id>`, create
+   the container `session-<id>`, and start it.
 
 Any failed step tears the whole session down and marks it `error`.
 
@@ -537,7 +546,7 @@ caller-supplied values are the session id and the profile secrets.
 The entrypoint sets the git and gh identity and then holds the container open.
 The adapter is spawned separately by the gateway, so browser churn never
 restarts the container. Both run in `/workspace`, which is the session's own
-volume and starts empty.
+workspace directory and starts empty.
 
 | Status | Means |
 |---|---|
@@ -548,15 +557,175 @@ volume and starts empty.
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
-network and both volumes, and clears the session's pending requests and log
-rows. Nothing refers to the volumes once the session is gone, so they go with
-it rather than being left orphaned.
+network, the workspace directory and the home volume, and clears the session's
+pending requests and log rows. Nothing refers to either once the session is
+gone, so they go with it rather than being left orphaned.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
 the stored rows with them: live containers are adopted, missing ones are marked
 stopped, and every running session's proxy attachment is re-checked. Turn flags
 are cleared, because a turn cannot survive the restart that killed the
 connection owning it.
+
+## Where a session's files live
+
+A session's workspace is a directory under the orchestrator's own data
+directory — `${DATA_DIR}/workspaces/<id>` — bind-mounted at `/workspace` in
+the session container. It used to be the named volume `ws-<id>`, mounted only
+into that container, which left the orchestrator with no filesystem path to
+the agent's work at all: reaching a file meant a `docker exec`.
+
+The change is what makes reviewing a session's code possible without an exec
+round trip per read, without booting a stopped container, and with git run as
+an ordinary child process. It grants the orchestrator no privilege it did not
+already have — it holds the Docker socket — but it does expose that process to
+hostile *content*, which is why the review layer keeps symlink containment and
+git hardening as maintained invariants, each in one file with a test.
+
+The home volume stays a named volume. It holds thread transcripts and whatever
+credentials a login inside the session created; nothing outside the container
+reads it, and review has no business there.
+
+**Naming the bind source.** Bind sources are resolved by the Docker daemon,
+not by the process asking for the mount, so the orchestrator cannot hand the
+daemon its own `/data/workspaces/<id>`. At boot it identifies its own
+container — from `/proc/self/mountinfo`, `/proc/self/cgroup` or
+`/etc/hostname`, whichever answers — and takes the `Source` of the mount whose
+`Destination` is `DATA_DIR`. With the shipped compose that is
+`/var/lib/docker/volumes/boxes-data/_data`, a plain daemon-side directory that
+binds the same way on Linux and inside Docker Desktop's VM. Outside a
+container the two paths are the same and the inspection is skipped. Where
+neither works — a nested or rootless daemon, a compose file mounting a real
+host directory — `HOST_DATA_DIR` names it outright. Getting this wrong would
+be silent, since the daemon would create an empty directory at the unresolved
+path and mount that, so a failure to resolve it is fatal at boot.
+
+**Ownership.** A bind mount, unlike a named volume, is not
+ownership-initialised by Docker, so every path the orchestrator creates in a
+workspace is chowned to uid 1000 — the session image's `agent` user, named as
+a constant in `workspaces.ts`. That is what lets the agent write in its own
+workspace, and lets it edit or delete the `REVIEW.md` the review surface
+writes there. `workspaces/` itself is 0700: one session's files are not
+another's, and the only thing that reads across all of them is this process.
+
+**Sessions from before the change** keep their `ws_volume` and a null
+`workspace_dir`, and migrate at their next start, which is the only moment a
+container can be recreated with a different mount. The order loses nothing at
+any step: create the directory, copy the volume into it through a one-shot
+helper container that can see both (`cp -a`, which preserves the agent's
+ownership), recreate the session container with the bind, start it, and only
+then delete the volume. A crash before the row is updated leaves a
+volume-backed session that migrates again on the next attempt. A *running*
+legacy session is left alone and comes through at its next stop/start cycle.
+
+## Code review
+
+The review surface browses a session's workspace, shows a file highlighted,
+takes a comment on a line, and writes all of it to a `REVIEW.md` at the review
+root. The format is the desktop [`review`](https://github.com/splitbrain/review)
+tool's, byte for byte, so a review started in one is continued in the other —
+`orchestrator/src/review/fixtures/` holds files that tool wrote, and the tests
+assert the bytes.
+
+What it buys over running that tool separately is that the review lives where
+the agent works. `REVIEW.md` is a file of the project under review, so
+"address the comments in REVIEW.md" is a one-line prompt, and the review view
+and the thread close a loop rather than being two applications.
+
+**REVIEW.md is the single source of truth.** There is no annotation table.
+Every mutation is read → parse → apply → serialize → write-tmp-then-rename,
+under a per-session lock, with the file's hash checked between the read and the
+write. A moved hash means the agent edited the file mid-mutation, and the whole
+thing is re-read and re-applied once. A lost race costs one visible refresh
+rather than data, because every write re-serializes the whole parsed file. What
+is written is chowned to uid 1000, so the agent can edit or delete it.
+
+**Where the review roots.** `/workspace` starts empty and an agent usually
+clones into a subdirectory, so the workspace itself is frequently not the
+repository. At review open: the workspace if it is itself a git work tree; else
+the single directory it holds if that is one, which is the common shape; else
+the workspace with the git features off, the way the desktop tool degrades
+outside a repository. The answer is cached on the session row and re-validated,
+since the agent can delete the directory it named.
+
+**Nothing here starts a container.** Reads and git both run in the
+orchestrator, so the natural moment to review — the agent is done, the box has
+idled out — costs nothing, and none of these endpoints touches a session's
+activity timestamp: polling a review must not hold off the reaper.
+
+**Freshness is polling**, the pattern the session list already uses: the view
+asks `review/status` every 5 s while its tab is visible and refetches only when
+one of three hashes moved. With the files local that costs three hashes rather
+than three execs. Push — an fs watcher and a `/ws/sessions/:id/review` upgrade
+beside the ACP gateway — is an additive later stage that nothing depends on.
+
+**Drift** ports from the desktop tool as-is: each annotation stores three lines
+of context above and below the annotated line, and a check compares the stored
+context against the current source, relocating on an exact match elsewhere and
+marking `(outdated)` when it is gone. It runs on a file fetch and, across every
+annotated file, on a tree fetch.
+
+**Two invariants, one file each**, because the orchestrator now reads a tree
+the agent controls:
+
+- Symlink containment lives in `review/fs.ts`. Every client path resolves
+  through `realpath` and must land under the root's own realpath; a symlink
+  final component is refused outright, since what it points at can change after
+  the tree was listed. The residual `realpath`/open race is documented where the
+  check is, along with what closing it would cost.
+- Git hardening lives in `review/git.ts`. Repo-local config executes commands
+  on exactly the operations review runs — `core.fsmonitor` on status, external
+  diff drivers and `textconv` on diff. Every invocation takes its argv prefix
+  and environment from one builder there, and a test plants both configs in a
+  repository and asserts the hook never ran.
+
+### The review view
+
+`/sessions/:id/review`, with the open file in the search string
+(`?path=src/app.ts`) so a file is linkable and the back button works — which on
+a phone is also how you get from a file back to the tree. Entry points: a
+Review action in the thread header next to Fork, and one on the session card,
+where it works whether or not the box is running. The view owns the whole
+viewport the way the thread view does.
+
+Boxes is driven from a phone, so the desktop tool's three panels and hover
+interactions do not survive. The feature set does; the layout does not. What
+replaces it is one set of components in two arrangements rather than two
+parallel UIs:
+
+- **The tree** is a column from `md` up and a shadcn Sheet below it, closing on
+  selection. Same component, same status colours and comment badges.
+- **Comments are inline**, GitHub-style, on every screen size. There is no
+  right-hand sidebar to reflow away.
+- **Tap replaces hover.** Tapping a line's gutter is how a comment starts;
+  tapping a gutter marker opens the diff hunk as a sheet, which is also the
+  only place deleted lines exist. Gutter targets are 44 px on touch.
+- **Prev/next replaces the scrollbar minimap.** Annotation markers on a
+  scrollbar are unusable on touch, and "the next thing that needs me" is what
+  the minimap was for — so the toolbar says it directly, with counts and paired
+  step buttons for changes and comments.
+- **The code pane** is a CSS grid per line: a sticky line-number gutter, the
+  code cell scrolling horizontally as one block, and a wrap toggle. Every line
+  being its own element is what makes it addressable at all.
+
+Highlighting is client-side, with Shiki: the API ships plain text and the
+browser tokenizes it. Both themes are tokenized at once and travel as
+`--shiki-light`/`--shiki-dark` custom properties on each span, so a light/dark
+switch costs no re-tokenize. The engine is Shiki's JavaScript regex engine, so
+there is no wasm fetch, and grammars load per file type on demand. The whole
+review route is lazily imported, so none of it — the pane, the tree, the sheet
+primitives, the engine, the grammars — is in the bundle a browser opening a
+conversation downloads.
+
+Server-side highlighting was considered and dropped: it puts render markup on
+the wire, couples the orchestrator to presentation, and the phone still has to
+paint it.
+
+Beyond that: paths are validated against the tree, not merely against the root,
+so the API serves what the browser was offered; every refusal is the same 404;
+file reads are capped at 2 MiB and binaries are refused by a NUL sniff; and
+file content and comments are agent-influenced, so the frontend renders them as
+text nodes only.
 
 ## Network isolation
 
@@ -777,7 +946,16 @@ orchestrator/src/
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log
   sessions.ts           Session lifecycle, the owner of every UpstreamSession
+  workspaces.ts         Workspace directories on the data volume: paths, ownership
   docker.ts             Containers, networks, volumes, the adapter exec
+  review/
+    service.ts          Per-session façade: root, the REVIEW.md read-modify-write, the fingerprint
+    store.ts            REVIEW.md: parse, serialize, mutate, drift (pure)
+    gitstatus.ts        Porcelain and name-status parsing, base resolution
+    difflines.ts        Unified diff to line markers, hunks and deletion markers (pure)
+    tree.ts             git ls-files or a walk into a tree, and the ignore lists
+    fs.ts               Contained reads and writes under one root: the symlink invariant
+    git.ts              The one place a git process is spawned: fixed argv, scrubbed env
   subnet.ts             Per-session /24 allocation
   reaper.ts             The idle reaper and the proxy reconciler
   log.ts                Structured stderr logging with secret redaction
@@ -840,6 +1018,20 @@ subscription auth inside the container, a turn running to completion after the
 browser leaves, the thread replaying on reattach, and a permission request held
 with nobody watching.
 
+The review surface is tested at three levels, because it has three kinds of
+thing to get wrong. The format is asserted byte-for-byte against REVIEW.md
+files the desktop tool's own Go code wrote (`orchestrator/src/review/fixtures/`,
+with its own README on provenance), the same reviews being rebuilt from the same
+inputs and each file round-tripped. The invariants have tests that are the
+attacks: a symlink out of the workspace, a symlink through a directory, and a
+traversal all coming back as the same 404, and a repository-local
+`core.fsmonitor` and `textconv` planted in a real repository with an assertion
+that neither ever ran. The seven routes are driven over their real handlers, a
+real database and a real git repository in a temp directory — no Docker at all,
+which is what stage one bought for the tests as much as for the feature —
+covering root resolution, drift, concurrent writes and that none of them touches
+a session's activity timestamp.
+
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update
 routing with two browsers attached — including two on *two* threads, where an
@@ -867,6 +1059,13 @@ path, so a fresh thread starting empty, a fork carrying the source's messages,
 a switch bringing the first thread's transcript back, and two tabs on two
 threads each keeping to their own conversation are asserted against a gateway
 that behaves like the real one.
+The review pages are in that suite too, on a phone viewport and a desktop one,
+because the two arrangements are different enough that one passing says little
+about the other: browse the tree, open a file, tap a gutter marker for the hunk,
+comment on a line and see the write reach the API, edit and delete it, set a
+base revision, and hand the review to the agent with the prompt staged unsent.
+The degraded shapes are there as well — no git, an empty workspace, and a
+session whose workspace is still a volume.
 That is what asserts the UX properties this frontend exists for, and it is
 where a component upgrade is reviewed: `/playground` renders every part kind over a
 canned store, so a registry re-run shows up on one page.

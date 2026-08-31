@@ -1,4 +1,4 @@
-import { GitBranch, Info } from 'lucide-react';
+import { FileSearch, GitBranch, Info } from 'lucide-react';
 import { Link } from 'react-router';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
@@ -141,6 +141,19 @@ export function ThreadHeader({
           <GitBranch />
         </Button>
       ) : null}
+
+      {/* Reviewing sits next to forking because it is the other thing you do
+          from inside a thread when the agent has produced something: read what
+          it wrote, comment on it, and hand the comments back. */}
+      <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
+        <Link
+          to={`/sessions/${sessionId}/review`}
+          aria-label="Review this session's code"
+          title="Review this session's code"
+        >
+          <FileSearch />
+        </Link>
+      </Button>
 
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link

@@ -13,6 +13,9 @@ import type {
   HealthResponse,
   PushKeyResponse,
   PushSubscribeBody,
+  ReviewAnnotationBody,
+  ReviewAnnotationsResponse,
+  ReviewBaseBody,
 } from '../../shared/types.ts';
 import type { config } from './config.ts';
 import {
@@ -25,6 +28,7 @@ import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
+import { ReviewService, ReviewUnavailable } from './review/service.ts';
 import { HttpError, SessionManager } from './sessions.ts';
 
 /**
@@ -52,6 +56,8 @@ export interface Orchestrator {
   egress: EgressManager;
   /** Where "a thread wants you" goes; see notify.ts. */
   notifier: Notifier;
+  /** Reads and writes review data over the sessions' workspace directories. */
+  review: ReviewService;
   /** Session ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -70,6 +76,9 @@ export function buildApp(
 const egress = new EgressManager(cfg);
 const notifier = new Notifier(db, cfg);
 const manager = new SessionManager(db, cfg, egress, notifier);
+// The review surface reaches the files through the manager, which is the one
+// thing that knows whether a session is directory-backed yet.
+const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
 
 let proxyWarnings: string[] = [];
 
@@ -78,7 +87,7 @@ const app = Fastify({ logger: false });
 // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
 app.setErrorHandler((err, _req, reply) => {
-  if (err instanceof HttpError) {
+  if (err instanceof HttpError || err instanceof ReviewUnavailable) {
     return reply.code(err.statusCode).send({ error: err.message });
   }
   log.error('unhandled request error', { error: (err as Error).message });
@@ -125,6 +134,8 @@ app.post('/api/sessions/:id/stop', async (req) => {
 app.delete('/api/sessions/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
   await manager.remove(id);
+  // The review service caches per session; a deleted one has nothing to cache.
+  review.forget(id);
   return reply.code(204).send();
 });
 
@@ -222,6 +233,83 @@ app.get('/api/sessions/:id/exec', async (req): Promise<ExecLogPage> => {
   const row = manager.getRow(id);
   if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
   return { records: execs.history(db, id) };
+});
+
+// --- Code review over a session's workspace ---------------------------------
+
+/**
+ * The review surface. None of these routes starts or touches a session
+ * container: the workspace is a directory this process can read, which is what
+ * makes reviewing a stopped session — the natural moment, once the agent is
+ * done — cost nothing.
+ *
+ * The responses are batched on purpose. Boxes is driven from a phone, and a
+ * phone on a slow link should get one round trip per screen rather than one
+ * per piece of it: the tree endpoint carries the whole left panel, the file
+ * endpoint the whole file view.
+ *
+ * They also do not touch a session's activity timestamp. Reviewing is not the
+ * agent working, so polling a review must not hold off the reaper.
+ */
+
+/** Where the review view polls, which is the only thing it asks for while idle. */
+app.get('/api/sessions/:id/review/status', async (req) => {
+  const { id } = req.params as { id: string };
+  return review.status(id);
+});
+
+app.get('/api/sessions/:id/review/tree', async (req) => {
+  const { id } = req.params as { id: string };
+  return review.tree(id);
+});
+
+app.get('/api/sessions/:id/review/file', async (req) => {
+  const { id } = req.params as { id: string };
+  const { path } = req.query as { path?: string };
+  if (!path) throw new HttpError(400, 'path is required');
+  return review.file(id, path);
+});
+
+/**
+ * Creates or replaces the comment on one line. The same route for both,
+ * because REVIEW.md holds at most one comment per line and the reviewer
+ * editing one is not a different operation from writing it.
+ */
+app.put('/api/sessions/:id/review/annotations', async (req) => {
+  const { id } = req.params as { id: string };
+  const body = req.body as ReviewAnnotationBody | undefined;
+  if (!body?.path) throw new HttpError(400, 'path is required');
+  const annotations = await review.setAnnotation(
+    id,
+    body.path,
+    Number(body.line),
+    String(body.comment ?? ''),
+  );
+  return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
+});
+
+app.delete('/api/sessions/:id/review/annotations', async (req) => {
+  const { id } = req.params as { id: string };
+  const { path, line } = req.query as { path?: string; line?: string };
+  if (!path) throw new HttpError(400, 'path is required');
+  const annotations = await review.deleteAnnotation(id, path, Number(line));
+  return { path, annotations } satisfies ReviewAnnotationsResponse;
+});
+
+/** Sets the revision the review is compared against, or clears it back to HEAD. */
+app.put('/api/sessions/:id/review/base', async (req) => {
+  const { id } = req.params as { id: string };
+  const body = req.body as ReviewBaseBody | undefined;
+  const rev = body?.rev ?? null;
+  if (rev !== null && typeof rev !== 'string') throw new HttpError(400, 'rev must be a string');
+  return review.setBase(id, rev);
+});
+
+/** Deletes REVIEW.md — the "New review" button. The file is the review. */
+app.delete('/api/sessions/:id/review', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  await review.deleteReview(id);
+  return reply.code(204).send();
 });
 
 // --- Web Push --------------------------------------------------------------
@@ -363,6 +451,7 @@ app.setNotFoundHandler((req, reply) => {
     cfg,
     egress,
     notifier,
+    review,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

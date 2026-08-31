@@ -1,4 +1,4 @@
-import { StrictMode } from 'react';
+import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { refreshPush } from './stores/push.ts';
@@ -10,6 +10,18 @@ import { SessionInfo } from './views/SessionInfo.tsx';
 import { SessionList } from './views/SessionList.tsx';
 import { SessionThread } from './views/SessionThread.tsx';
 import './globals.css';
+
+/**
+ * The review view is its own chunk.
+ *
+ * Everything it needs — the code pane, the tree, the sheet primitives, and
+ * behind them Shiki's engine and one grammar per file type — is weight the
+ * thread view must not carry. Lazily loaded here, none of it is in the bundle
+ * a browser opening a conversation downloads.
+ */
+const SessionReview = lazy(async () => ({
+  default: (await import('./views/SessionReview.tsx')).SessionReview,
+}));
 
 /**
  * One app, one origin. The session list is the thread list, and a session's
@@ -28,6 +40,23 @@ function App() {
             — so every link and bookmark from before survives. */}
         <Route path="/sessions/:id" element={<SessionThread />} />
         <Route path="/sessions/:id/threads/:threadId" element={<SessionThread />} />
+        {/* Reviewing owns the whole viewport too: a code pane in the reading
+            column is not a code pane. The open file is in the search string,
+            so a file is linkable and the back button works. */}
+        <Route
+          path="/sessions/:id/review"
+          element={
+            <Suspense
+              fallback={
+                <div className="flex h-dvh items-center justify-center text-sm text-muted-foreground">
+                  Loading the review…
+                </div>
+              }
+            >
+              <SessionReview />
+            </Suspense>
+          }
+        />
         {/* The installed components over a canned store: where a registry
             upgrade is reviewed as a diff and a screenshot. */}
         <Route path="/playground" element={<Playground />} />

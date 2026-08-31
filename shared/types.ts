@@ -91,7 +91,18 @@ export interface SessionDetail extends SessionSummary {
   containerId: string | null;
   networkName: string;
   subnet: string;
+  /**
+   * The named volume that used to hold the workspace, and still does for a
+   * session created before workspaces became directories. Empty once the
+   * session is directory-backed, which it becomes at its next start.
+   */
   wsVolume: string;
+  /**
+   * Where the session's files are on the orchestrator's own filesystem, or
+   * null while the session is still volume-backed — which is also what says
+   * the review surface cannot read it yet.
+   */
+  workspaceDir: string | null;
   homeVolume: string;
   /** The adapter's id for the session's default thread, or null before one exists. */
   acpSessionId: string | null;
@@ -267,4 +278,153 @@ export interface EgressHealth {
   denials: Record<string, number>;
   /** Why the last push or status read failed, or null. */
   error: string | null;
+}
+
+// --- code review over a session's workspace ---------------------------------
+
+/** The git status of a file, as the review tree colours it. */
+export type ReviewFileStatus =
+  | 'modified'
+  | 'staged'
+  | 'untracked'
+  | 'added'
+  | 'deleted'
+  | 'conflict';
+
+/** What happened to a line of a file, relative to the base revision. */
+export type ReviewLineChange = 'added' | 'modified';
+
+/** One file or directory of the review tree. */
+export interface ReviewTreeEntry {
+  name: string;
+  /** Path relative to the review root, slash-separated. */
+  path: string;
+  isDir: boolean;
+  /** Absent on files, which are the bulk of a tree. */
+  children?: ReviewTreeEntry[];
+}
+
+/**
+ * The revision a review is compared against. Both fields empty means the
+ * working tree's HEAD, which is the default.
+ */
+export interface ReviewBase {
+  /** What the user asked for: a branch, a tag, a short id. */
+  rev: string;
+  /** What that resolved to, through the merge base with HEAD. */
+  commit: string;
+}
+
+/**
+ * The whole left panel in one response: a phone on a slow link gets one round
+ * trip per screen rather than one per piece of it.
+ */
+export interface ReviewTreeResponse {
+  /**
+   * The review root, relative to the workspace. Empty when the workspace
+   * itself is the root — `/workspace` starts empty and an agent usually clones
+   * into a subdirectory, so it usually names that.
+   */
+  root: string;
+  /** False when the root is no git repository, which turns the git features off. */
+  hasGit: boolean;
+  entries: ReviewTreeEntry[];
+  /** True when the tree hit the entry cap and was cut short. */
+  truncated: boolean;
+  /** Git status per path. Empty without git. */
+  statuses: Record<string, ReviewFileStatus>;
+  /** How many comments each annotated file has. */
+  counts: Record<string, number>;
+  base: ReviewBase;
+  /** True when the workspace holds a REVIEW.md. */
+  hasReview: boolean;
+  /** The date the review was started, or '' when there is no review yet. */
+  started: string;
+}
+
+/** One comment on one line, as the API reports it. */
+export interface ReviewAnnotation {
+  line: number;
+  comment: string;
+  /** True when the code the comment was written against is gone. */
+  outdated: boolean;
+}
+
+/** A diff hunk, with the range of lines it covers in the current file. */
+export interface ReviewDiffHunk {
+  startLine: number;
+  endLine: number;
+  /** The hunk's raw diff text, which is what the hunk sheet shows. */
+  diff: string;
+}
+
+/**
+ * A block of lines deleted between two lines of the current file. How many is
+ * not recorded: the hunk it points at shows them.
+ */
+export interface ReviewDiffDeletion {
+  /** The deletion sits after this line; 0 means the top of the file. */
+  afterLine: number;
+  /** Index into a response's `hunks`. */
+  hunkIndex: number;
+}
+
+/** The diff markers a file view draws in its gutter. */
+export interface ReviewFileDiff {
+  /** Changed lines, keyed by line number as a string, since JSON has no int keys. */
+  lines: Record<string, ReviewLineChange>;
+  hunks: ReviewDiffHunk[];
+  deletions: ReviewDiffDeletion[];
+}
+
+/** The whole file view in one response. */
+export interface ReviewFileResponse {
+  path: string;
+  /** Plain text. The browser tokenizes it; nothing here is render markup. */
+  content: string;
+  /** True when the file was longer than the cap and the rest was dropped. */
+  truncated: boolean;
+  /** True when the file holds a NUL byte, in which case content is empty. */
+  binary: boolean;
+  /** The file's real size in bytes, whatever was returned. */
+  size: number;
+  /** Lines in what was returned. */
+  lines: number;
+  /** Language guess for the highlighter, or '' when there is none. */
+  language: string;
+  /** This file's git status, or null when it has none. */
+  status: ReviewFileStatus | null;
+  diff: ReviewFileDiff;
+  annotations: ReviewAnnotation[];
+}
+
+/** A file's comments, as the mutation endpoints answer with. */
+export interface ReviewAnnotationsResponse {
+  path: string;
+  annotations: ReviewAnnotation[];
+}
+
+/**
+ * The poll fingerprint. Three local hashes rather than three execs, and the
+ * only thing the review view asks for while nothing is happening.
+ */
+export interface ReviewStatusResponse {
+  /** Hash of REVIEW.md, or '' when there is none. */
+  reviewHash: string;
+  /** The commit HEAD names, or '' outside a repository. */
+  headCommit: string;
+  /** Hash of the whole status map, so a working-tree edit moves it. */
+  statusHash: string;
+}
+
+/** Body of a create-or-update annotation request. */
+export interface ReviewAnnotationBody {
+  path: string;
+  line: number;
+  comment: string;
+}
+
+/** Body of a set-base request. Null clears the base back to HEAD. */
+export interface ReviewBaseBody {
+  rev: string | null;
 }

@@ -93,6 +93,9 @@ async function main(): Promise<void> {
     });
   }
 
+  // Before anything creates or starts a container: a workspace bind names a
+  // host-side path, and this is what resolves it.
+  await manager.resolveHostDataDir();
   await manager.reconcile();
   startReaper(db, cfg, manager);
   startProxyReconciler(manager, egress, setProxyWarnings);
