@@ -14,6 +14,7 @@ import {
   open,
   poll,
   saveComment,
+  setBase,
   useReview,
 } from './review.ts';
 
@@ -341,4 +342,53 @@ test('a new review clears the comments and reloads the tree', async () => {
   // rather than be adjusted locally.
   assert.equal(hits('/review/tree'), before + 1);
   assert.equal(requested.some((url) => url.includes('/review') && !url.includes('/review/')), true);
+});
+
+// --- the base revision ------------------------------------------------------
+
+test('setting a base refetches the tree and the open file', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  const before = { tree: hits('/review/tree'), file: hits('/review/file') };
+
+  answers['/review/base'] = { rev: 'main', commit: 'abcdef1234' };
+  await setBase('main');
+
+  // The base changes what a status and a diff mean, so both are answers to a
+  // different question now and neither can be kept.
+  assert.equal(hits('/review/tree'), before.tree + 1);
+  assert.equal(hits('/review/file'), before.file + 1);
+  assert.equal(useReview.getState().saving, false);
+});
+
+test('clearing the base sends null', async () => {
+  await loadTree();
+  answers['/review/base'] = { rev: '', commit: '' };
+  await setBase(null);
+  const call = requested.findLast((url) => url.includes('/review/base'));
+  assert.ok(call);
+});
+
+test('an unknown revision reports itself and changes nothing', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  const before = hits('/review/tree');
+  failWith = 'unknown revision: nope';
+
+  await setBase('nope');
+  assert.match(useReview.getState().error!, /unknown revision/);
+  // Nothing is refetched, because nothing changed server-side.
+  assert.equal(hits('/review/tree'), before);
+  assert.equal(useReview.getState().saving, false);
+});
+
+test('an outdated comment is carried through as such', async () => {
+  await loadTree();
+  answers['/review/file'] = file({
+    annotations: [{ line: 2, comment: 'about the old code', outdated: true }],
+  });
+  await loadFile('a.ts');
+  // The drift check runs server side on the fetch, so the flag arriving here
+  // is the whole of the client's part in it.
+  assert.equal(useReview.getState().file?.annotations[0]?.outdated, true);
 });

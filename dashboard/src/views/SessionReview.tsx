@@ -2,6 +2,7 @@ import { ArrowLeft, FilePlus2, FolderTree, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk } from '../../../shared/types.ts';
+import { BasePicker } from '@/components/review/BasePicker';
 import { CodePane } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
 import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
@@ -22,6 +23,7 @@ import {
   newReview,
   open as openReview,
   saveComment,
+  setBase,
   startPolling,
   useReview,
 } from '../stores/review.ts';
@@ -208,8 +210,21 @@ export function SessionReview() {
             {name}
             {tree?.root ? ` · ${tree.root}` : ''}
             {tree && !tree.hasGit ? ' · no git' : ''}
+            {/* Which base is active belongs in the status line, the way the
+                desktop tool's does: it changes what every colour in the tree
+                and every marker in the gutter means. */}
+            {tree?.base.commit
+              ? ` · vs ${tree.base.rev} (${tree.base.commit.slice(0, 8)})`
+              : tree?.hasGit
+                ? ' · vs working tree'
+                : ''}
           </span>
         </div>
+
+        {/* Only where there is a repository to compare in. */}
+        {tree?.hasGit ? (
+          <BasePicker base={tree.base} busy={saving} onSet={(rev) => void setBase(rev)} />
+        ) : null}
 
         {/* The reason this feature belongs inside Boxes at all: the review is
             a file of the project the agent is working on, so handing it over is
