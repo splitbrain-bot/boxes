@@ -39,6 +39,8 @@ export function stubThread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     acpSessionId: 'acp-thread-1',
     title: null,
     ordinal: 1,
+    turnActive: false,
+    pendingCount: 0,
     createdAt: Date.parse('2026-08-01T10:00:00Z'),
     lastActiveAt: Date.parse('2026-08-30T09:30:00Z'),
     ...over,
@@ -201,15 +203,26 @@ export async function startStubOrchestrator(
 
   // Same origin as the dashboard, which is how the deployment serves it and
   // why the browser can derive the WebSocket URL from its own location.
-  const gateway = attachStubGateway(server, {
-    token: initial[0]?.wsToken ?? 'stub-token',
-    modes: null,
-    configOptions: [],
-    prompts: [],
-    permissions: [],
-    queuedPermission: null,
-    ...gatewayScript,
-  });
+  const gateway = attachStubGateway(
+    server,
+    {
+      token: initial[0]?.wsToken ?? 'stub-token',
+      modes: null,
+      configOptions: [],
+      prompts: [],
+      permissions: [],
+      queuedPermission: null,
+      ...gatewayScript,
+    },
+    // The mapping the real gateway does out of the threads table: the path
+    // carries a Boxes thread id, the adapter knows its own.
+    (sessionId, threadId) => {
+      const session = state.sessions.find((s) => s.id === sessionId);
+      if (!session) return null;
+      const wanted = threadId ?? session.currentThreadId;
+      return session.threads.find((t) => t.id === wanted)?.acpSessionId ?? null;
+    },
+  );
 
   await new Promise<void>((ok) => server.listen(0, '127.0.0.1', ok));
   const { port } = server.address() as AddressInfo;

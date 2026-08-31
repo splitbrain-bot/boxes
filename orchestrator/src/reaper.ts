@@ -1,5 +1,5 @@
 import type { Config } from './config.ts';
-import type { Db, SessionRow } from './db.ts';
+import { sessionsWithActiveTurns, type Db, type SessionRow } from './db.ts';
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
 import type { SessionManager } from './sessions.ts';
@@ -21,10 +21,14 @@ export function startReaper(
       .prepare("SELECT * FROM sessions WHERE status = 'running'")
       .all() as SessionRow[];
     const pendingCounts = manager.pending.countsBySession();
+    // A turn runs on a thread, so "is this session busy" is any of its
+    // threads being busy. The other three counts stay session-scoped: they
+    // are about the box, not the conversation.
+    const running = sessionsWithActiveTurns(db);
     const now = Date.now();
 
     for (const row of rows) {
-      if (row.turn_active === 1) continue;
+      if (running.has(row.id)) continue;
       if ((pendingCounts.get(row.id) ?? 0) > 0) continue;
       if (manager.upstream(row.id).attachedCount > 0) continue;
       if (now - row.last_active_at < idleMs) continue;

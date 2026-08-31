@@ -27,15 +27,24 @@ function Meta({ label, value }: { label: string; value: string }) {
  * lives at /sessions/:id; this route is the ops side of the same session.
  *
  * Back goes where the visitor came from: the list when the list sent them,
- * the thread otherwise, which is also where a reload or a pasted URL lands.
+ * and otherwise the exact thread they were reading, which a header link says
+ * — a session has several, and landing on whichever is current is not the
+ * same as going back. A reload or a pasted URL carries no such state and
+ * falls back to the session's current thread.
  */
 export function SessionInfo() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
-  const cameFromList = (useLocation().state as { from?: string } | null)?.from === 'list';
-  const back = cameFromList
-    ? { to: '/', label: 'Sessions' }
-    : { to: `/sessions/${id}`, label: 'Back to the thread' };
+  const from = useLocation().state as { from?: string; threadId?: string } | null;
+  const back =
+    from?.from === 'list'
+      ? { to: '/', label: 'Sessions' }
+      : {
+          to: from?.threadId
+            ? `/sessions/${id}/threads/${from.threadId}`
+            : `/sessions/${id}`,
+          label: 'Back to the thread',
+        };
 
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);

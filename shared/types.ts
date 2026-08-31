@@ -26,6 +26,14 @@ export interface ThreadSummary {
   title: string | null;
   /** Per session and never reused; what an untitled thread is called. */
   ordinal: number;
+  /**
+   * True while a prompt turn is running on this thread. Threads run in
+   * parallel, so with two of them live this is the only thing that says which
+   * one is busy.
+   */
+  turnActive: boolean;
+  /** Permission requests from this thread waiting for a browser to answer. */
+  pendingCount: number;
   createdAt: number;
   lastActiveAt: number;
 }
@@ -38,11 +46,18 @@ export interface SessionSummary {
   status: SessionStatus;
   /** Live container state, resolved against Docker on every request. */
   dockerState: DockerState;
-  /** True while a prompt turn is running upstream. */
+  /**
+   * True while a prompt turn is running on any of the session's threads.
+   * Derived from them rather than stored beside them, so the two can never
+   * disagree.
+   */
   turnActive: boolean;
-  /** Permission requests waiting for a browser to answer them. */
+  /** Permission requests waiting for a browser to answer them, on any thread. */
   pendingCount: number;
-  /** Number of browsers currently attached to the session's /ws route. */
+  /**
+   * Number of browsers currently attached to the session, across all of its
+   * threads. Two tabs on two threads is two attachments.
+   */
   attachedCount: number;
   /**
    * Bearer token an ACP client authenticates the WebSocket upgrade with,
@@ -52,7 +67,12 @@ export interface SessionSummary {
   wsToken: string;
   /** Every conversation this session owns, oldest first. */
   threads: ThreadSummary[];
-  /** The one the gateway answers `session/new` with, or null before one exists. */
+  /**
+   * The thread a connection that names none gets — `/sessions/:id`, the short
+   * WebSocket path, an external ACP client, a bookmark from before per-thread
+   * routes existed. A default rather than the truth about what is loaded, and
+   * null before the session has any thread at all.
+   */
   currentThreadId: string | null;
   /**
    * True when the adapter advertised `sessionCapabilities.fork`. The capability
@@ -73,7 +93,7 @@ export interface SessionDetail extends SessionSummary {
   subnet: string;
   wsVolume: string;
   homeVolume: string;
-  /** The adapter's id for the current thread, or null before one exists. */
+  /** The adapter's id for the session's default thread, or null before one exists. */
   acpSessionId: string | null;
   /** True when the egress proxy is attached to this session's network. */
   proxyAttached: boolean;

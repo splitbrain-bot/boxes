@@ -12,6 +12,10 @@ import { cn } from '@/lib/utils';
 /**
  * Builds the badges for a session: waiting approvals, a running turn, the
  * session's own state, and how many browsers are watching.
+ *
+ * The turn and approval counts are the session's, derived from every thread
+ * it owns, so a box with one busy thread reads as busy. Which thread that is
+ * is the rows' job, below.
  */
 export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label: string }> {
   const badges: Array<{ kind: BadgeKind; label: string }> = [];
@@ -36,15 +40,18 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
 
 /**
  * One session in the list, with its conversations under it. Tapping the card
- * opens whichever one is current; tapping a thread opens that one instead.
+ * opens whichever one is current; tapping a thread opens that one.
+ *
+ * The thread rows are plain links, because opening a thread is now a plain
+ * navigation: the connection names its own thread, so nothing has to be
+ * switched first. Opening one still makes it the session's default, but as a
+ * fire-and-forget POST that neither blocks the navigation nor disturbs
+ * anybody — no live connection is pinned to the default.
  *
  * Ops live behind the info corner, and the two sit side by side rather than
- * nested, because an anchor inside an anchor is invalid markup. The threads
- * are buttons for the same reason, and because opening one that is not
- * current is a call before it is a navigation.
- *
- * The info link says it came from the list, which is where the details view
- * then goes back to.
+ * nested, because an anchor inside an anchor is invalid markup. The info link
+ * says it came from the list, which is where the details view then goes back
+ * to.
  */
 export function SessionCard({ session }: { session: SessionSummary }) {
   const navigate = useNavigate();
@@ -52,32 +59,23 @@ export function SessionCard({ session }: { session: SessionSummary }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /** Runs one thread call, then opens the session on whatever it made current. */
-  async function open(work: () => Promise<unknown>): Promise<void> {
+  /** Runs one thread call, then opens the thread it made. */
+  async function open(work: () => Promise<ThreadSummary>): Promise<void> {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      await work();
+      const created = await work();
       // The card's own thread list comes from the poll, so a change made here
       // is visible on the way back rather than a reload later.
       void refresh();
-      await navigate(`/sessions/${session.id}`);
+      await navigate(`/sessions/${session.id}/threads/${created.id}`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
-
-  /** Current already: a plain navigation, with nothing to switch. */
-  const openThread = (thread: ThreadSummary): void => {
-    if (thread.id === session.currentThreadId) {
-      void navigate(`/sessions/${session.id}`);
-      return;
-    }
-    void open(() => api.selectThread(session.id, thread.id));
-  };
 
   const current = session.threads.find((t) => t.id === session.currentThreadId);
 
@@ -108,17 +106,17 @@ export function SessionCard({ session }: { session: SessionSummary }) {
 
       <div className="flex flex-col border-t px-2 py-2">
         {session.threads.map((thread) => (
-          <button
+          <Link
             key={thread.id}
-            type="button"
-            disabled={busy}
-            onClick={() => openThread(thread)}
+            to={`/sessions/${session.id}/threads/${thread.id}`}
+            // Selecting is a side effect of opening, not a step before it:
+            // the navigation does not wait for it, and nothing breaks if it
+            // never lands.
+            onClick={() => void api.selectThread(session.id, thread.id).catch(() => {})}
             aria-current={thread.id === session.currentThreadId ? 'true' : undefined}
             className={cn(
-              'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-60',
-              thread.id === session.currentThreadId
-                ? 'font-medium'
-                : 'text-muted-foreground',
+              'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline hover:bg-accent',
+              thread.id === session.currentThreadId ? 'font-medium' : 'text-muted-foreground',
             )}
           >
             <span
@@ -129,7 +127,12 @@ export function SessionCard({ session }: { session: SessionSummary }) {
               )}
             />
             <span className="truncate">{threadName(thread)}</span>
-          </button>
+            {/* With two threads live this is the only place that says which
+                one is busy, and which one is holding a question. */}
+            {threadBadges(thread).map((b) => (
+              <StatusBadge key={b.label} kind={b.kind} label={b.label} />
+            ))}
+          </Link>
         ))}
 
         <div className="flex gap-1 pt-1">
@@ -166,4 +169,29 @@ export function SessionCard({ session }: { session: SessionSummary }) {
       </div>
     </Card>
   );
+}
+
+/**
+ * What one thread is doing, if anything: a turn running on it, and a question
+ * waiting on it.
+ *
+ * A quiet thread gets nothing. Its row already carries its name and whether
+ * it is the session's default, and a badge on every row would say only that
+ * threads exist.
+ */
+export function threadBadges(
+  thread: ThreadSummary,
+): Array<{ kind: BadgeKind; label: string }> {
+  const badges: Array<{ kind: BadgeKind; label: string }> = [];
+  if (thread.pendingCount > 0) {
+    badges.push({
+      kind: 'waiting',
+      label:
+        thread.pendingCount === 1
+          ? 'waiting for approval'
+          : `${thread.pendingCount} approvals waiting`,
+    });
+  }
+  if (thread.turnActive) badges.push({ kind: 'turn', label: 'running turn' });
+  return badges;
 }

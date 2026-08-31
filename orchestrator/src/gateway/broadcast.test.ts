@@ -4,15 +4,25 @@ import { Broadcast } from './broadcast.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
 /**
- * Update routing, with two browsers attached — which is the case the two
- * rules exist for.
+ * Update routing, with two browsers attached — which is the case every rule
+ * in the class exists for, whether the two watch one thread or two.
  */
 
-/** A browser that records what it was sent. */
-function fakeDownstream(id: number, lastActiveAt = 0): DownstreamHandle & { sent: unknown[] } {
+/** The thread most of these tests are about. */
+const T1 = 'acp-1';
+/** A second thread of the same session, watched by nobody unless said. */
+const T2 = 'acp-2';
+
+/** A browser that records what it was sent, watching one thread. */
+function fakeDownstream(
+  id: number,
+  acpThreadId: string | null = T1,
+  lastActiveAt = 0,
+): DownstreamHandle & { sent: unknown[] } {
   const sent: unknown[] = [];
   return {
     id,
+    acpThreadId,
     lastActiveAt,
     sent,
     notify: (_method, params) => sent.push(params),
@@ -22,8 +32,8 @@ function fakeDownstream(id: number, lastActiveAt = 0): DownstreamHandle & { sent
 }
 
 /** A session/update notification, as the adapter sends it. */
-function update(sessionUpdate: string, text: string): unknown {
-  return { sessionId: 'acp-1', update: { sessionUpdate, content: { type: 'text', text } } };
+function update(sessionUpdate: string, text: string, thread = T1): unknown {
+  return { sessionId: thread, update: { sessionUpdate, content: { type: 'text', text } } };
 }
 
 /** The text of each user_message_chunk a browser received. */
@@ -37,7 +47,7 @@ function userChunks(d: { sent: unknown[] }): string[] {
     .map((p) => (p as { update: { content: { text: string } } }).update.content.text);
 }
 
-test('an ordinary update reaches every attached browser', () => {
+test('an ordinary update reaches every browser watching its thread', () => {
   const b = new Broadcast('s1');
   const [a, c] = [fakeDownstream(1), fakeDownstream(2)];
   b.add(a);
@@ -48,13 +58,62 @@ test('an ordinary update reaches every attached browser', () => {
   assert.equal(c.sent.length, 1);
 });
 
-test('a forwarded prompt is echoed to every browser, the sender included', () => {
+test('an update for one thread does not reach a browser watching another', () => {
+  const b = new Broadcast('s1');
+  const working = fakeDownstream(1, T1);
+  const exploring = fakeDownstream(2, T2);
+  b.add(working);
+  b.add(exploring);
+
+  b.update(update('agent_message_chunk', 'from the long turn', T1));
+  b.update(update('agent_message_chunk', 'from the fork', T2));
+
+  // Two tabs, two conversations, one box: neither shows the other's stream.
+  assert.equal(working.sent.length, 1);
+  assert.equal(exploring.sent.length, 1);
+  assert.deepEqual(working.sent, [update('agent_message_chunk', 'from the long turn', T1)]);
+  assert.deepEqual(exploring.sent, [update('agent_message_chunk', 'from the fork', T2)]);
+});
+
+test('an update for a thread nobody watches is dropped', () => {
+  const b = new Broadcast('s1');
+  const watching = fakeDownstream(1, T1);
+  b.add(watching);
+
+  // A thread running in the background with its tab closed. Broadcasting this
+  // is what would put one conversation into another's transcript.
+  b.update(update('agent_message_chunk', 'nobody asked for this', T2));
+  assert.equal(watching.sent.length, 0);
+});
+
+test('an update naming no thread at all is dropped rather than broadcast', () => {
+  const b = new Broadcast('s1');
+  const a = fakeDownstream(1);
+  b.add(a);
+
+  b.update({ update: { sessionUpdate: 'agent_message_chunk' } });
+  assert.equal(a.sent.length, 0);
+});
+
+test('a browser whose thread is still resolving receives nothing', () => {
+  const b = new Broadcast('s1');
+  const resolving = fakeDownstream(1, null);
+  b.add(resolving);
+
+  // Counted as attached — it holds a socket open — but it has not been told
+  // which thread it is on, so nothing is its.
+  assert.equal(b.size, 1);
+  b.update(update('agent_message_chunk', 'hello'));
+  assert.equal(resolving.sent.length, 0);
+});
+
+test('a forwarded prompt is echoed to every browser on its thread, the sender included', () => {
   const b = new Broadcast('s1');
   const [phone, desktop] = [fakeDownstream(1), fakeDownstream(2)];
   b.add(phone);
   b.add(desktop);
 
-  b.beginPrompt({ sessionId: 'acp-1', prompt: [{ type: 'text', text: 'run the tests' }] });
+  b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'run the tests' }] });
 
   // The adapter only has to replay a prompt, not echo it live, so without
   // this neither device would show what was just asked.
@@ -62,19 +121,46 @@ test('a forwarded prompt is echoed to every browser, the sender included', () =>
   assert.deepEqual(userChunks(desktop), ['run the tests']);
 });
 
+test('a prompt echo reaches only the browsers watching its own thread', () => {
+  const b = new Broadcast('s1');
+  const working = fakeDownstream(1, T1);
+  const exploring = fakeDownstream(2, T2);
+  b.add(working);
+  b.add(exploring);
+
+  b.beginPrompt({ sessionId: T2, prompt: [{ type: 'text', text: 'what are you doing?' }] });
+
+  assert.deepEqual(userChunks(exploring), ['what are you doing?']);
+  assert.deepEqual(userChunks(working), []);
+});
+
 test('an adapter that echoes the prompt back does not produce a second copy', () => {
   const b = new Broadcast('s1');
   const a = fakeDownstream(1);
   b.add(a);
 
-  b.beginPrompt({ sessionId: 'acp-1', prompt: [{ type: 'text', text: 'hello' }] });
+  b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'hello' }] });
   b.update(update('user_message_chunk', 'hello'));
   assert.deepEqual(userChunks(a), ['hello']);
 
-  b.endPrompt();
+  b.endPrompt({ sessionId: T1 });
   // Once the prompt is done the adapter is the authority again.
   b.update(update('user_message_chunk', 'from somewhere else'));
   assert.deepEqual(userChunks(a), ['hello', 'from somewhere else']);
+});
+
+test('echo suppression on one thread does not silence another thread user messages', () => {
+  const b = new Broadcast('s1');
+  const working = fakeDownstream(1, T1);
+  const exploring = fakeDownstream(2, T2);
+  b.add(working);
+  b.add(exploring);
+
+  b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'mine' }] });
+  // The other thread's own user message, which this gateway never echoed.
+  b.update(update('user_message_chunk', 'theirs', T2));
+
+  assert.deepEqual(userChunks(exploring), ['theirs']);
 });
 
 test('a multi-block prompt is echoed block by block', () => {
@@ -82,7 +168,7 @@ test('a multi-block prompt is echoed block by block', () => {
   const a = fakeDownstream(1);
   b.add(a);
   b.beginPrompt({
-    sessionId: 'acp-1',
+    sessionId: T1,
     prompt: [
       { type: 'text', text: 'first' },
       { type: 'text', text: 'second' },
@@ -97,7 +183,7 @@ test('a replay goes only to the browser that asked for it', () => {
   b.add(reattaching);
   b.add(watching);
 
-  b.beginReplay(reattaching);
+  b.beginReplay(reattaching, T1);
   b.update(update('user_message_chunk', 'old question'));
   b.update(update('agent_message_chunk', 'old answer'));
 
@@ -106,10 +192,27 @@ test('a replay goes only to the browser that asked for it', () => {
   assert.equal(reattaching.sent.length, 2);
   assert.equal(watching.sent.length, 0);
 
-  b.endReplay(reattaching);
+  b.endReplay(reattaching, T1);
   b.update(update('agent_message_chunk', 'something new'));
   assert.equal(reattaching.sent.length, 3);
   assert.equal(watching.sent.length, 1);
+});
+
+test('a replay of one thread does not silence another thread live updates', () => {
+  const b = new Broadcast('s1');
+  const reattaching = fakeDownstream(1, T2);
+  const working = fakeDownstream(2, T1);
+  b.add(reattaching);
+  b.add(working);
+
+  // The explorer's tab reloads and replays, while the working thread is
+  // mid-turn. This is the bug two open tabs hit first.
+  b.beginReplay(reattaching, T2);
+  b.update(update('agent_message_chunk', 'still working', T1));
+  b.update(update('agent_message_chunk', 'replayed history', T2));
+
+  assert.equal(working.sent.length, 1);
+  assert.equal(reattaching.sent.length, 1);
 });
 
 test('a replayed user message is delivered even during a prompt', () => {
@@ -119,8 +222,8 @@ test('a replayed user message is delivered even during a prompt', () => {
 
   // A load running while a prompt is in flight: the echo suppression must
   // not eat the history the adapter is reading back.
-  b.beginPrompt({ sessionId: 'acp-1', prompt: [{ type: 'text', text: 'now' }] });
-  b.beginReplay(a);
+  b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'now' }] });
+  b.beginReplay(a, T1);
   b.update(update('user_message_chunk', 'from the transcript'));
   assert.deepEqual(userChunks(a), ['now', 'from the transcript']);
 });
@@ -132,15 +235,15 @@ test('two replays at once each get the history', () => {
   b.add(two);
   b.add(idle);
 
-  b.beginReplay(one);
-  b.beginReplay(two);
+  b.beginReplay(one, T1);
+  b.beginReplay(two, T1);
   b.update(update('agent_message_chunk', 'history'));
   assert.equal(one.sent.length, 1);
   assert.equal(two.sent.length, 1);
   assert.equal(idle.sent.length, 0);
 
-  b.endReplay(one);
-  b.endReplay(two);
+  b.endReplay(one, T1);
+  b.endReplay(two, T1);
   b.update(update('agent_message_chunk', 'live'));
   assert.equal(idle.sent.length, 1);
 });
@@ -151,10 +254,11 @@ test('a browser that leaves mid-replay does not strand the others', () => {
   b.add(leaving);
   b.add(watching);
 
-  b.beginReplay(leaving);
+  b.beginReplay(leaving, T1);
   b.remove(leaving);
 
-  // With the replay target gone, updates go back to everyone left.
+  // With the replay target gone, updates go back to everyone left on the
+  // thread.
   b.update(update('agent_message_chunk', 'still here'));
   assert.equal(watching.sent.length, 1);
 });
@@ -163,6 +267,7 @@ test('one browser failing does not stop the others being told', () => {
   const b = new Broadcast('s1');
   const broken: DownstreamHandle = {
     id: 1,
+    acpThreadId: T1,
     lastActiveAt: 0,
     notify: () => {
       throw new Error('socket gone');
@@ -178,13 +283,35 @@ test('one browser failing does not stop the others being told', () => {
   assert.equal(ok.sent.length, 1);
 });
 
-test('permission requests target the most recently active browser', () => {
+test('permission requests target the most recently active browser on the asking thread', () => {
   const b = new Broadcast('s1');
-  const older = fakeDownstream(1, 1000);
-  const newer = fakeDownstream(2, 2000);
+  const older = fakeDownstream(1, T1, 1000);
+  const newer = fakeDownstream(2, T1, 2000);
+  const elsewhere = fakeDownstream(3, T2, 3000);
   b.add(older);
   b.add(newer);
-  assert.equal(b.byRecency[0], newer);
+  b.add(elsewhere);
+
+  // The most recent browser overall is on the other thread, and is not the
+  // one being asked.
+  assert.equal(b.byRecency(T1)[0], newer);
+  assert.equal(b.byRecency(T2)[0], elsewhere);
+  assert.deepEqual(b.byRecency('acp-nobody'), []);
+});
+
+test('the watched threads are what a respawn has to reload', () => {
+  const b = new Broadcast('s1');
+  const working = fakeDownstream(1, T1);
+  b.add(working);
+  b.add(fakeDownstream(2, T2));
+  b.add(fakeDownstream(3, T2));
+  b.add(fakeDownstream(4, null));
+
+  assert.deepEqual(b.watchedThreads.sort(), [T1, T2]);
+
+  // The set shrinks as tabs close, so it needs no storage of its own.
+  b.remove(working);
+  assert.deepEqual(b.watchedThreads, [T2]);
 });
 
 test('a prompt with no blocks echoes nothing but still guards the window', () => {
@@ -192,11 +319,11 @@ test('a prompt with no blocks echoes nothing but still guards the window', () =>
   const a = fakeDownstream(1);
   b.add(a);
 
-  b.beginPrompt({ sessionId: 'acp-1' });
+  b.beginPrompt({ sessionId: T1 });
   b.update(update('user_message_chunk', 'adapter said it'));
   assert.deepEqual(userChunks(a), []);
 
-  b.endPrompt();
+  b.endPrompt({ sessionId: T1 });
   b.update(update('user_message_chunk', 'now allowed'));
   assert.deepEqual(userChunks(a), ['now allowed']);
 });
@@ -206,13 +333,13 @@ test('nested prompts hold the window until the last one ends', () => {
   const a = fakeDownstream(1);
   b.add(a);
 
-  b.beginPrompt({ sessionId: 'acp-1', prompt: [{ type: 'text', text: 'one' }] });
-  b.beginPrompt({ sessionId: 'acp-1', prompt: [{ type: 'text', text: 'two' }] });
-  b.endPrompt();
+  b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'one' }] });
+  b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'two' }] });
+  b.endPrompt({ sessionId: T1 });
   b.update(update('user_message_chunk', 'echoed by the adapter'));
   assert.deepEqual(userChunks(a), ['one', 'two']);
 
-  b.endPrompt();
+  b.endPrompt({ sessionId: T1 });
   b.update(update('user_message_chunk', 'after'));
   assert.deepEqual(userChunks(a), ['one', 'two', 'after']);
 });

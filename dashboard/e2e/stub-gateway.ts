@@ -11,10 +11,11 @@ import type {
  * from canned scripts.
  *
  * It mirrors what the real gateway does rather than what a browser wishes it
- * did — a session owning several threads with one of them current,
- * session/new answered with the current thread's id, session/load replaying
- * that thread's stored history as notifications, and every update broadcast
- * to every attached socket.
+ * did — a session owning several threads, each socket pinned to one of them
+ * by the thread in its upgrade path, session/new answered with that thread's
+ * id, session/load replaying that thread's stored history to that socket
+ * alone, and every update going only to the sockets watching the thread it is
+ * about.
  */
 
 /** What the stub streams in answer to one prompt. */
@@ -55,26 +56,26 @@ export interface GatewayScript {
 /** A running stub gateway. */
 export interface StubGateway {
   script: GatewayScript;
-  /** The current thread's updates, in order. */
+  /** The default thread's updates, in order. */
   history: SessionUpdate[];
-  /** One thread's updates, whichever is current. */
+  /** One thread's updates, by its ACP id. */
   historyOf: (threadId: string) => SessionUpdate[];
   /** Prompt texts the stub received, across every thread. */
   prompts: string[];
-  /** How many sockets are attached right now. */
+  /** How many sockets are attached right now, across every thread. */
   attached: () => number;
-  /** The ACP id of the thread session/new is answered with. */
+  /** The ACP id a socket naming no thread is pinned to. */
   current: () => string;
-  /** Mints an empty thread and makes it current; returns its ACP id. */
+  /** Mints an empty thread and makes it the default; returns its ACP id. */
   newThread: () => string;
-  /** Mints a thread carrying another's history and makes it current. */
+  /** Mints a thread carrying another's history and makes it the default. */
   forkThread: (from: string) => string;
-  /** Makes an existing thread current, dropping the attached sockets. */
+  /** Makes an existing thread the default. Nobody is dropped. */
   select: (threadId: string) => void;
   /** Releases a held prompt, ending the turn. */
   release: () => void;
-  /** Broadcasts one update to every attached socket and records it. */
-  emit: (update: SessionUpdate) => void;
+  /** Sends one update to the sockets watching a thread, and records it. */
+  emit: (update: SessionUpdate, threadId?: string) => void;
   close: () => void;
 }
 
@@ -90,13 +91,25 @@ interface Rpc {
 
 const THREAD_ID = 'acp-thread-1';
 
-/** Attaches a stub gateway to an existing HTTP server at /ws/sessions/:id/acp. */
-export function attachStubGateway(server: Server, script: GatewayScript): StubGateway {
+/**
+ * Attaches a stub gateway to an existing HTTP server at
+ * `/ws/sessions/:id/acp` and `/ws/sessions/:id/threads/:threadId/acp`.
+ *
+ * `resolve` turns the Boxes thread id in the path into the adapter's own id
+ * for it, which is the mapping the real gateway does out of the threads
+ * table. A path naming no thread resolves to the session's default.
+ */
+export function attachStubGateway(
+  server: Server,
+  script: GatewayScript,
+  resolve?: (sessionId: string, threadId: string | null) => string | null,
+): StubGateway {
   const wss = new WebSocketServer({ noServer: true });
-  const sockets = new Set<WebSocket>();
+  /** Every attached socket, each recording the thread it is pinned to. */
+  const sockets = new Map<WebSocket, string>();
   /** One transcript per thread, which is what session/load replays. */
   const threads = new Map<string, SessionUpdate[]>([[THREAD_ID, []]]);
-  /** The thread session/new is answered with, and that a prompt runs on. */
+  /** The thread a socket naming none is pinned to. */
   let current = THREAD_ID;
   let nextThread = 2;
   const prompts: string[] = [];
@@ -112,29 +125,37 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
     return found;
   };
 
-  const emit = (update: SessionUpdate): void => {
-    historyOf(current).push(update);
-    for (const ws of sockets) send(ws, { jsonrpc: '2.0', method: 'session/update', params: { sessionId: current, update } });
-  };
+  /** The sockets watching one thread. Nobody else is told. */
+  const watchers = (threadId: string): WebSocket[] =>
+    [...sockets].filter(([, pinned]) => pinned === threadId).map(([ws]) => ws);
 
-  /** Closes every attached socket, as the real gateway does on a switch. */
-  const dropSockets = (): void => {
-    for (const ws of sockets) ws.close(1012, 'thread changed');
-    sockets.clear();
+  const emit = (update: SessionUpdate, threadId: string = current): void => {
+    historyOf(threadId).push(update);
+    for (const ws of watchers(threadId)) {
+      send(ws, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: threadId, update },
+      });
+    }
   };
 
   /** Mints a thread, seeded with a source thread's history when forking. */
   const mint = (from: string | null): string => {
     const id = `acp-thread-${nextThread++}`;
     threads.set(id, from ? [...historyOf(from)] : []);
+    // The new thread becomes the default, and nobody is moved onto it: a
+    // socket already pinned to another thread keeps watching that one.
     current = id;
-    dropSockets();
     return id;
   };
 
   server.on('upgrade', (req, socket, head) => {
     const url = (req.url ?? '').split('?')[0] ?? '';
-    if (!/^\/ws\/sessions\/[^/]+\/acp$/.test(url)) return;
+    const path = /^\/ws\/sessions\/([^/]+)(?:\/threads\/([^/]+))?\/acp$/.exec(url);
+    if (!path) return;
+    const sessionId = path[1]!;
+    const threadId = path[2] ?? null;
 
     // The same handshake check the real gateway makes: acp.v1 plus the
     // bearer entry, both offered as subprotocols.
@@ -147,14 +168,21 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
       return;
     }
 
+    // Which conversation this socket is for, settled at the handshake and
+    // fixed for its whole life, exactly as the real gateway pins it.
+    const pinned = (resolve ? resolve(sessionId, threadId) : null) ?? current;
+    if (!threads.has(pinned)) threads.set(pinned, []);
+
     wss.handleUpgrade(req, socket, head, (ws) => {
-      sockets.add(ws);
+      sockets.set(ws, pinned);
       ws.on('close', () => sockets.delete(ws));
       ws.on('message', (data) => void handle(ws, String(data)));
     });
   });
 
   async function handle(ws: WebSocket, text: string): Promise<void> {
+    /** The thread this socket is about, which is never another's. */
+    const pinned = sockets.get(ws) ?? current;
     let msg: Rpc;
     try {
       msg = JSON.parse(text) as Rpc;
@@ -169,10 +197,10 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         return reply({ protocolVersion: 1, agentCapabilities: {} });
 
       case 'session/new':
-        // The session's current thread, whichever it is. A response without
-        // modes is how the browser learns to load it rather than treat it as
-        // brand new.
-        return reply({ sessionId: current });
+        // The thread this connection is pinned to, whichever it is. A
+        // response without modes is how the browser learns to load it rather
+        // than treat it as brand new.
+        return reply({ sessionId: pinned });
 
       case 'session/fork':
         // The fork answer carries modes and configOptions, the same as a
@@ -184,7 +212,7 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         });
 
       case 'session/load': {
-        const threadId = String(params(msg)['sessionId'] ?? current);
+        const threadId = String(params(msg)['sessionId'] ?? pinned);
         reply({ modes: script.modes, configOptions: script.configOptions });
         // Replay is that thread's stored history re-sent as notifications, to
         // this socket only.
@@ -198,7 +226,7 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         if (script.queuedPermission) {
           const queued = script.queuedPermission;
           script.queuedPermission = null;
-          void askPermission(ws, queued);
+          void askPermission(ws, queued, threadId);
         }
         return undefined;
       }
@@ -207,7 +235,10 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         const modeId = String(params(msg)['modeId'] ?? '');
         if (script.modes) script.modes = { ...script.modes, currentModeId: modeId };
         reply({});
-        return void emit({ sessionUpdate: 'current_mode_update', currentModeId: modeId });
+        return void emit(
+          { sessionUpdate: 'current_mode_update', currentModeId: modeId },
+          pinned,
+        );
       }
 
       case 'session/set_config_option': {
@@ -217,26 +248,32 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
           option.id === configId ? { ...option, currentValue: value } : option,
         );
         reply({ configOptions: script.configOptions });
-        return void emit({
-          sessionUpdate: 'config_option_update',
-          configOptions: script.configOptions,
-        });
+        return void emit(
+          { sessionUpdate: 'config_option_update', configOptions: script.configOptions },
+          pinned,
+        );
       }
 
       case 'session/prompt': {
+        // The thread the prompt names, which is this socket's own: a turn
+        // runs on a conversation, never on whichever is the default.
+        const onThread = String(params(msg)['sessionId'] ?? pinned);
         const blocks = (params(msg)['prompt'] ?? []) as Array<{ type: string; text?: string }>;
         const promptText = blocks.map((b) => b.text ?? '').join('');
         prompts.push(promptText);
         if (script.echoPrompt !== false) {
-          emit({
-            sessionUpdate: 'user_message_chunk',
-            content: { type: 'text', text: promptText },
-          } as SessionUpdate);
+          emit(
+            {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: promptText },
+            } as SessionUpdate,
+            onThread,
+          );
         }
 
         const permission = script.permissions.find((p) => p.match(promptText));
         if (permission) {
-          await askPermission(ws, permission);
+          await askPermission(ws, permission, onThread);
           return reply({ stopReason: 'end_turn' });
         }
 
@@ -244,7 +281,7 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
         if (found) {
           for (const update of found.updates) {
             if (found.gapMs) await sleep(found.gapMs);
-            emit(update);
+            emit(update, onThread);
           }
           if (found.hold) {
             await new Promise<void>((resolve) => {
@@ -262,16 +299,20 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
   }
 
   /** Puts a permission question to one socket and streams the aftermath. */
-  async function askPermission(ws: WebSocket, permission: PermissionScript): Promise<void> {
-    emit({ sessionUpdate: 'tool_call', ...permission.toolCall } as SessionUpdate);
+  async function askPermission(
+    ws: WebSocket,
+    permission: PermissionScript,
+    onThread: string,
+  ): Promise<void> {
+    emit({ sessionUpdate: 'tool_call', ...permission.toolCall } as SessionUpdate, onThread);
     const answer = await request(ws, 'session/request_permission', {
-      sessionId: current,
+      sessionId: onThread,
       toolCall: { toolCallId: permission.toolCall.toolCallId },
       options: permission.options,
     });
     const outcome = (answer as { outcome?: { outcome?: string; optionId?: string } })?.outcome;
     const optionId = outcome?.outcome === 'selected' ? (outcome.optionId ?? null) : null;
-    for (const update of permission.after(optionId)) emit(update);
+    for (const update of permission.after(optionId)) emit(update, onThread);
   }
 
   /** Sends a request to a browser and waits for its answer. */
@@ -312,13 +353,14 @@ export function attachStubGateway(server: Server, script: GatewayScript): StubGa
     forkThread: (from) => mint(from),
     select: (threadId) => {
       historyOf(threadId);
+      // An ordinary write. No socket is pinned to the default, so selecting
+      // one moves nobody and drops nothing.
       current = threadId;
-      dropSockets();
     },
     release: () => releaseHeld?.(),
     emit,
     close: () => {
-      for (const ws of sockets) ws.close();
+      for (const ws of sockets.keys()) ws.close();
       wss.close();
     },
   };

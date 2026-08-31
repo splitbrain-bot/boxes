@@ -10,10 +10,13 @@ import type {
 import type { Config } from './config.ts';
 import type { EgressManager } from './egress.ts';
 import {
+  clearSessionTurns,
   currentThread,
   getThread,
   listThreads,
   nextSubnetIndex,
+  sessionTurnActive,
+  sessionsWithActiveTurns,
   type Db,
   type SessionRow,
   type ThreadRow,
@@ -118,7 +121,6 @@ export class SessionManager {
       home_volume: dk.names.homeVolume(id),
       status: 'creating',
       current_thread_id: null,
-      turn_active: 0,
       created_at: now,
       last_active_at: now,
     };
@@ -127,10 +129,10 @@ export class SessionManager {
       .prepare(
         `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
            network_name, subnet, ws_volume, home_volume, status, current_thread_id,
-           turn_active, created_at, last_active_at)
+           created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @status, @current_thread_id,
-           @turn_active, @created_at, @last_active_at)`,
+           @created_at, @last_active_at)`,
       )
       .run(row);
 
@@ -269,25 +271,38 @@ export class SessionManager {
   async list(): Promise<SessionSummary[]> {
     const rows = this.allRows();
     const counts = this.pending.countsBySession();
+    const running = sessionsWithActiveTurns(this.db);
     return Promise.all(
-      rows.map(async (row) => this.summarize(row, counts.get(row.id) ?? 0)),
+      rows.map(async (row) =>
+        this.summarize(row, counts.get(row.id) ?? 0, running.has(row.id)),
+      ),
     );
   }
 
   /** Builds a summary, resolving the container state against Docker. */
-  private async summarize(row: SessionRow, pendingCount: number): Promise<SessionSummary> {
+  private async summarize(
+    row: SessionRow,
+    pendingCount: number,
+    turnActive: boolean,
+  ): Promise<SessionSummary> {
     const dockerState = (await dk.containerState(row.container_id)) as DockerState;
+    const pendingByThread = this.pending.countsByThread(row.id);
     return {
       id: row.id,
       name: row.name,
       profile: row.profile,
       status: row.status,
       dockerState,
-      turnActive: row.turn_active === 1,
+      // Derived from the threads rather than stored beside them: a turn runs
+      // on a conversation, and the session's answer is that any of them has
+      // one.
+      turnActive,
       pendingCount,
       attachedCount: this.upstreams.get(row.id)?.attachedCount ?? 0,
       wsToken: this.cfg.WS_AUTH_TOKEN,
-      threads: listThreads(this.db, row.id).map(toThreadSummary),
+      threads: listThreads(this.db, row.id).map((thread) =>
+        toThreadSummary(thread, pendingByThread),
+      ),
       currentThreadId: row.current_thread_id,
       // False until the adapter has been reached and has advertised it. The
       // capability is unstable, so an absent one is taken at face value.
@@ -300,7 +315,11 @@ export class SessionManager {
   /** A summary plus the Docker object names the detail view shows. */
   async detail(id: string): Promise<SessionDetail> {
     const row = this.mustGet(id);
-    const summary = await this.summarize(row, this.pending.countForSession(id));
+    const summary = await this.summarize(
+      row,
+      this.pending.countForSession(id),
+      sessionTurnActive(this.db, id),
+    );
     return {
       ...summary,
       image: row.image,
@@ -319,7 +338,18 @@ export class SessionManager {
   /** Every conversation of a session, oldest first. */
   threads(id: string): ThreadSummary[] {
     this.mustGet(id);
-    return listThreads(this.db, id).map(toThreadSummary);
+    const pendingByThread = this.pending.countsByThread(id);
+    return listThreads(this.db, id).map((thread) => toThreadSummary(thread, pendingByThread));
+  }
+
+  /**
+   * Whether a thread belongs to a session. The WebSocket upgrade asks before
+   * a socket exists, so a path naming another session's thread is a 404
+   * rather than a connection that fails later.
+   */
+  hasThread(sessionId: string, threadId: string): boolean {
+    const row = getThread(this.db, threadId);
+    return row !== undefined && row.session_id === sessionId;
   }
 
   /**
@@ -334,7 +364,7 @@ export class SessionManager {
     const up = this.upstream(id);
     try {
       const row = from ? await up.forkThread(from) : await up.newThread();
-      return toThreadSummary(row);
+      return toThreadSummary(row, this.pending.countsByThread(id));
     } catch (err) {
       const message = (err as Error).message;
       if (message === 'Thread not found') throw new HttpError(404, message);
@@ -384,8 +414,8 @@ export class SessionManager {
       }
       this.setStatus(row.id, container.running ? 'running' : 'stopped');
       // A turn cannot survive an orchestrator restart: the upstream
-      // connection that owned it is gone.
-      this.db.prepare('UPDATE sessions SET turn_active = 0 WHERE id = ?').run(row.id);
+      // connection that owned it is gone, on every thread of the session.
+      clearSessionTurns(this.db, row.id);
       await dk.ensureProxyAttached(row.network_name, this.cfg);
     }
     log.info('boot reconciliation complete', { sessions: this.allRows().length });
@@ -417,13 +447,24 @@ export class SessionManager {
   }
 }
 
-/** One stored thread, as the API reports it. */
-function toThreadSummary(row: ThreadRow): ThreadSummary {
+/**
+ * One stored thread, as the API reports it.
+ *
+ * `pendingByThread` is keyed by the adapter's own id, which is what a queued
+ * permission request records, and a thread the adapter has forgotten has no
+ * queued requests by definition.
+ */
+function toThreadSummary(
+  row: ThreadRow,
+  pendingByThread: Map<string, number> = new Map(),
+): ThreadSummary {
   return {
     id: row.id,
     acpSessionId: row.acp_session_id,
     title: row.title,
     ordinal: row.ordinal,
+    turnActive: row.turn_active === 1,
+    pendingCount: row.acp_session_id ? (pendingByThread.get(row.acp_session_id) ?? 0) : 0,
     createdAt: row.created_at,
     lastActiveAt: row.last_active_at,
   };

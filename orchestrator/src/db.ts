@@ -23,9 +23,12 @@ export interface SessionRow {
   ws_volume: string;
   home_volume: string;
   status: SessionStatus;
-  /** The thread the gateway answers `session/new` with, or null before one exists. */
+  /**
+   * The thread a connection that names none gets, or null before one exists.
+   * A default rather than the truth: a connection may pin itself to any of
+   * the session's threads instead.
+   */
   current_thread_id: string | null;
-  turn_active: number;
   created_at: number;
   last_active_at: number;
 }
@@ -45,6 +48,13 @@ export interface ThreadRow {
   title: string | null;
   /** Per session and never reused; what an untitled thread is called. */
   ordinal: number;
+  /**
+   * 1 while a prompt turn is running on this thread. The session's own
+   * "a turn is running" is derived from its threads rather than stored
+   * beside them, because two sources of truth for that is precisely the
+   * thing that goes stale.
+   */
+  turn_active: number;
   created_at: number;
   last_active_at: number;
 }
@@ -67,6 +77,12 @@ export interface PendingRequestRow {
   id: number;
   session_id: string;
   upstream_id: string;
+  /**
+   * The ACP thread that asked, so a browser is given only the requests for
+   * the thread it is watching. Null on a row from before the column existed,
+   * which no live process can have: `clearStale` drops those at boot.
+   */
+  acp_session_id: string | null;
   method: string;
   params: string;
   created_at: number;
@@ -151,6 +167,15 @@ export const MIGRATIONS: string[] = [
     WHERE acp_session_id IS NOT NULL;
 
   ALTER TABLE sessions DROP COLUMN acp_session_id;
+  `,
+  // Threads run in parallel, so what was session-wide moves onto the thread
+  // it is actually about. Nothing needs moving with it: a turn cannot survive
+  // the restart that applies this, and pending_requests is cleared at every
+  // boot, so every thread starting at 0 is not a loss of state but the truth.
+  `
+  ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE pending_requests ADD COLUMN acp_session_id TEXT;
+  ALTER TABLE sessions DROP COLUMN turn_active;
   `,
 ];
 
@@ -315,15 +340,16 @@ export function insertThread(
     acp_session_id: acpSessionId,
     title: null,
     ordinal: next.n,
+    turn_active: 0,
     created_at: now,
     last_active_at: now,
   };
   db.transaction(() => {
     db.prepare(
       `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
-         created_at, last_active_at)
+         turn_active, created_at, last_active_at)
        VALUES (@id, @session_id, @acp_session_id, @title, @ordinal,
-         @created_at, @last_active_at)`,
+         @turn_active, @created_at, @last_active_at)`,
     ).run(row);
     db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(id, sessionId);
   })();
@@ -350,4 +376,56 @@ export function setThreadTitle(db: Db, threadId: string, title: string | null): 
 /** Marks a thread active now, alongside its session. */
 export function touchThread(db: Db, threadId: string): void {
   db.prepare('UPDATE threads SET last_active_at = ? WHERE id = ?').run(Date.now(), threadId);
+}
+
+/**
+ * Records whether a prompt turn is running on the thread the adapter knows by
+ * `acpSessionId`, and marks both it and its session active.
+ *
+ * Addressed by the adapter's own id because that is what a prompt's params
+ * carry: the row is found by which conversation the turn is on, never by
+ * which one happens to be the session's default.
+ */
+export function setThreadTurnActive(
+  db: Db,
+  sessionId: string,
+  acpSessionId: string,
+  active: boolean,
+): void {
+  const now = Date.now();
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE threads SET turn_active = ?, last_active_at = ?
+        WHERE session_id = ? AND acp_session_id = ?`,
+    ).run(active ? 1 : 0, now, sessionId, acpSessionId);
+    db.prepare('UPDATE sessions SET last_active_at = ? WHERE id = ?').run(now, sessionId);
+  })();
+}
+
+/**
+ * Clears the running-turn flag on every thread of a session.
+ *
+ * What the callers have in common is that none of them leaves a turn running:
+ * a deliberate stop, an adapter exit, a cancel, and boot reconciliation.
+ */
+export function clearSessionTurns(db: Db, sessionId: string): void {
+  db.prepare('UPDATE threads SET turn_active = 0 WHERE session_id = ?').run(sessionId);
+}
+
+/** Whether any of a session's threads has a turn running. */
+export function sessionTurnActive(db: Db, sessionId: string): boolean {
+  const row = db
+    .prepare(
+      'SELECT 1 AS hit FROM threads WHERE session_id = ? AND turn_active = 1 LIMIT 1',
+    )
+    .get(sessionId) as { hit: number } | undefined;
+  return row !== undefined;
+}
+
+/** The session ids that have a turn running on any of their threads. */
+export function sessionsWithActiveTurns(db: Db): Set<string> {
+  const rows = db
+    .prepare('SELECT DISTINCT session_id FROM threads WHERE turn_active = 1')
+    .all() as Array<{ session_id: string }>;
+  return new Set(rows.map((r) => r.session_id));
 }

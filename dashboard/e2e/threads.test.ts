@@ -5,13 +5,13 @@ import { closeBrowser, openPage } from './browser.ts';
 import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
 
 /**
- * Several conversations on one session.
+ * Several conversations on one session, and two of them watched at once.
  *
  * A session shares its container and both volumes across its threads, so the
  * difference between them is the transcript and nothing else. What is asserted
  * here is that difference: a fresh thread starts empty, a fork starts from
- * what the source had, and going back to a thread brings its own transcript
- * back.
+ * what the source had, going back to a thread brings its own transcript back,
+ * and two tabs on two threads each keep to their own.
  */
 
 const DIST = resolve(import.meta.dirname, '../dist');
@@ -56,7 +56,8 @@ test('a new thread starts empty on the same session', async () => {
 
     await page.getByLabel('Back to sessions').click();
     await page.getByRole('button', { name: 'New thread' }).click();
-    await page.waitForURL(`**/sessions/${ID}`);
+    // Opening a thread is a navigation to that thread's own route.
+    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The second thread has a transcript of its own, which is empty.
@@ -76,7 +77,7 @@ test('a fork carries the source thread messages into the new one', async () => {
 
     await page.getByLabel('Back to sessions').click();
     await page.getByRole('button', { name: 'Fork' }).click();
-    await page.waitForURL(`**/sessions/${ID}`);
+    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // A branch of the first conversation, not a copy of the session: the
@@ -97,13 +98,13 @@ test('switching back to the first thread returns its transcript', async () => {
 
     await page.getByLabel('Back to sessions').click();
     await page.getByRole('button', { name: 'New thread' }).click();
-    await page.waitForURL(`**/sessions/${ID}`);
+    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('Thread 2').isVisible()).toBe(true);
     expect(await page.getByText('First answer.').count()).toBe(0);
 
     await page.getByLabel('Back to sessions').click();
-    await page.getByRole('button', { name: 'Thread 1' }).click();
-    await page.waitForURL(`**/sessions/${ID}`);
+    await page.getByRole('link', { name: 'Thread 1' }).click();
+    await page.waitForURL(`**/sessions/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The first thread was left where it was, and comes back whole.
@@ -112,6 +113,99 @@ test('switching back to the first thread returns its transcript', async () => {
     expect(errors).toEqual([]);
   } finally {
     await close();
+  }
+});
+
+test('the thread names itself even when the session has only one', async () => {
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    // Two tabs on one session are otherwise indistinguishable, which is the
+    // whole point of putting the thread in the URL.
+    await expect.poll(() => page.getByText('Thread 1').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a fork from inside the thread leaves it where it is and offers a new tab', async () => {
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
+  try {
+    await askOnce(page);
+
+    await page.getByLabel('Fork this thread').click();
+
+    // The link is revealed rather than followed: a window.open after the
+    // await is what popup blockers exist to stop.
+    const link = page.getByRole('link', { name: 'Open it in a new tab' });
+    await expect.poll(() => link.isVisible()).toBe(true);
+    expect(await link.getAttribute('href')).toBe(`/sessions/${ID}/threads/th2`);
+    expect(await link.getAttribute('target')).toBe('_blank');
+
+    // This thread stayed exactly where it was: same route, same transcript,
+    // same connection. Nothing was switched out from under it.
+    expect(page.url()).toContain(`/sessions/${ID}/threads/th1`);
+    expect(await page.getByText('First answer.').isVisible()).toBe(true);
+    expect(await page.getByText('connected').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('two tabs on two threads each keep to their own conversation', async () => {
+  await stub.close();
+  // A prompt that never finishes, which is the thread you fork *because* it
+  // is busy.
+  stub = await startStubOrchestrator(DIST, [stubSession()], {
+    prompts: [
+      { match: (t) => t === 'the long job', updates: reply('Working on it.'), hold: true },
+      { match: () => true, updates: reply('A quick answer.') },
+    ],
+  });
+
+  const working = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
+  try {
+    await expect.poll(() => working.page.getByText('connected').isVisible()).toBe(true);
+    const first = working.page.getByLabel('Message input');
+    await first.fill('the long job');
+    await first.press('Enter');
+    await expect.poll(() => working.page.getByText('Working on it.').isVisible()).toBe(true);
+
+    // Fork it and open the fork in its own tab, which is the motion the whole
+    // change exists for.
+    await working.page.getByLabel('Fork this thread').click();
+    await expect.poll(() =>
+      working.page.getByRole('link', { name: 'Open it in a new tab' }).isVisible(),
+    ).toBe(true);
+
+    const exploring = await openPage(stub.url, `/sessions/${ID}/threads/th2`);
+    try {
+      await expect.poll(() => exploring.page.getByText('connected').isVisible()).toBe(true);
+      // Both sockets are up at once, on two threads of one box.
+      await expect.poll(() => stub.gateway.attached()).toBe(2);
+
+      // The fork carries what the original had said so far, and its composer
+      // is usable while the original's turn is still open.
+      await expect.poll(() => exploring.page.getByText('Working on it.').isVisible()).toBe(true);
+      const second = exploring.page.getByLabel('Message input');
+      await second.fill('what are you doing?');
+      await second.press('Enter');
+      await expect.poll(() => exploring.page.getByText('A quick answer.').isVisible()).toBe(true);
+
+      // And none of that reached the thread that is still working: its
+      // transcript is untouched by the other tab.
+      expect(await working.page.getByText('A quick answer.').count()).toBe(0);
+      expect(await working.page.getByText('what are you doing?').count()).toBe(0);
+      expect(working.errors).toEqual([]);
+      expect(exploring.errors).toEqual([]);
+    } finally {
+      stub.gateway.release();
+      await exploring.close();
+    }
+  } finally {
+    await working.close();
   }
 });
 

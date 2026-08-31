@@ -1,4 +1,4 @@
-import { Info } from 'lucide-react';
+import { GitBranch, Info } from 'lucide-react';
 import { Link } from 'react-router';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
@@ -16,25 +16,36 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
 /**
  * The thread's own chrome: where it goes back to, which of the session's
  * conversations it is, what it is connected to, which of the adapter's modes
- * it is in, and which model it answers with.
+ * it is in, which model it answers with, and how to branch it.
  */
 export function ThreadHeader({
   sessionId,
+  threadId,
   name,
   threadLabel,
   connection,
   modes,
   configOptions,
+  canFork,
+  forking,
+  onFork,
   onSetMode,
   onSetConfigOption,
 }: {
   sessionId: string;
+  /** Which thread this is, so the info view can come back to it exactly. */
+  threadId: string | null;
   name: string;
   /** Which conversation of the session this is, or null while it is unknown. */
   threadLabel: string | null;
   connection: ConnectionState;
   modes: SessionModeState | null;
   configOptions: readonly SessionConfigOption[];
+  /** Whether the adapter advertised the fork capability; see SessionSummary. */
+  canFork: boolean;
+  /** Held while a fork is in flight, so a double tap cannot branch twice. */
+  forking: boolean;
+  onFork: () => void;
   onSetMode: (modeId: string) => void;
   onSetConfigOption: (configId: string, value: string) => void;
 }) {
@@ -113,8 +124,30 @@ export function ThreadHeader({
         </select>
       ) : null}
 
+      {/* Branching belongs here rather than only on the list, because this is
+          where the motion starts: you are in a thread that is doing something
+          long, and you want a second one to ask about it. The fork keeps
+          running alongside this thread rather than replacing it. */}
+      {canFork ? (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0"
+          disabled={forking}
+          onClick={onFork}
+          aria-label="Fork this thread"
+          title="Fork this thread into a second one"
+        >
+          <GitBranch />
+        </Button>
+      ) : null}
+
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
-        <Link to={`/sessions/${sessionId}/info`} aria-label="Session details and controls">
+        <Link
+          to={`/sessions/${sessionId}/info`}
+          state={{ threadId }}
+          aria-label="Session details and controls"
+        >
           <Info />
         </Link>
       </Button>

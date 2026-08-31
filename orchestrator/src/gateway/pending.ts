@@ -43,6 +43,7 @@ export class PendingStore {
   add(
     sessionId: string,
     upstreamId: string,
+    acpSessionId: string | null,
     method: string,
     params: unknown,
     handlers: { resolve: (r: unknown) => void; reject: (e: Error) => void },
@@ -52,15 +53,24 @@ export class PendingStore {
     const createdAt = Date.now();
     const info = this.db
       .prepare(
-        `INSERT INTO pending_requests (session_id, upstream_id, method, params, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO pending_requests
+           (session_id, upstream_id, acp_session_id, method, params, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(sessionId, upstreamId, method, JSON.stringify(params ?? null), createdAt);
+      .run(
+        sessionId,
+        upstreamId,
+        acpSessionId,
+        method,
+        JSON.stringify(params ?? null),
+        createdAt,
+      );
     const id = Number(info.lastInsertRowid);
     const row: PendingRequestRow = {
       id,
       session_id: sessionId,
       upstream_id: upstreamId,
+      acp_session_id: acpSessionId,
       method,
       params: JSON.stringify(params ?? null),
       created_at: createdAt,
@@ -87,9 +97,20 @@ export class PendingStore {
     return entry;
   }
 
-  /** The answerable entries of one session. */
+  /** The answerable entries of one session, across every thread. */
   listForSession(sessionId: string): PendingEntry[] {
     return [...this.entries.values()].filter((e) => e.row.session_id === sessionId);
+  }
+
+  /**
+   * The answerable entries of one thread, which is what a browser watching
+   * that thread is given. A request from another conversation is not this
+   * browser's to answer.
+   */
+  listForThread(sessionId: string, acpSessionId: string): PendingEntry[] {
+    return this.listForSession(sessionId).filter(
+      (e) => e.row.acp_session_id === acpSessionId,
+    );
   }
 
   /** How many requests of one session are waiting. */
@@ -98,6 +119,23 @@ export class PendingStore {
       .prepare('SELECT COUNT(*) AS n FROM pending_requests WHERE session_id = ?')
       .get(sessionId) as { n: number } | undefined;
     return row?.n ?? 0;
+  }
+
+  /**
+   * Waiting request counts of one session, keyed by the adapter's thread id.
+   *
+   * A column rather than the stored params: the params carry the thread too,
+   * but a query wants a column, and this is what the per-thread badge counts.
+   */
+  countsByThread(sessionId: string): Map<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT acp_session_id, COUNT(*) AS n FROM pending_requests
+          WHERE session_id = ? AND acp_session_id IS NOT NULL
+          GROUP BY acp_session_id`,
+      )
+      .all(sessionId) as Array<{ acp_session_id: string; n: number }>;
+    return new Map(rows.map((r) => [r.acp_session_id, r.n]));
   }
 
   /** Waiting request counts, keyed by session id. */

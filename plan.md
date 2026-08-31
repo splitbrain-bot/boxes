@@ -1,7 +1,7 @@
 # Threads in parallel
 
 Last modified: 2026-08-31
-Repo state: commit `b2d562a`, a clean tree.
+Repo state: implemented on top of commit `0ad8a8b`.
 
 ## Where the last change left this
 
@@ -121,6 +121,28 @@ Record the answer in this file. If it queues, stop and re-scope: the gateway
 work below is still correct, but step 8's UI must say "queued behind the other
 thread" rather than implying two turns run at once, and the payoff is smaller
 than this plan assumes.
+
+**Not run, and still unanswered.** The environment this was implemented in has
+no Docker daemon and no Claude token, so there was no real session container
+to put the question to, and there is no way to answer it short of one — a
+stand-in adapter would only report what the stand-in was written to do.
+
+What was built instead is the half the answer does not change. Everything in
+steps 1–7 is correct either way: routing an update to the thread it names,
+recording a turn against the thread it runs on, asking the browser watching the
+thread that asked, and reloading every watched thread on a respawn are all
+right whether the adapter interleaves two turns or queues the second. And step
+8's UI was written to claim nothing about it: the per-thread badges report what
+a thread *is* doing, which is true under either answer, and no copy anywhere
+promises that two turns run at once.
+
+What is still owed, once a real deployment can run the experiment: if the
+adapter interleaves, this is done as written. If it queues, the explorer's
+answer arrives after the working turn's next pause rather than during it, and
+the thread view should say so — a queued-behind-another-thread note in the
+composer's place, driven by the session's other threads' `turnActive`, which
+the API already reports per thread. That is a small addition on top of what is
+here, not a change to it.
 
 ### 1. Gateway: a connection names its thread
 
@@ -317,4 +339,59 @@ Worth noting, because it is unusual for a change of this size:
 
 ## Progress
 
-Not started.
+Done, except step 0, which could not be run here — see the note under it, and
+the paragraph it ends with for what is still owed.
+
+Steps 1–10 are implemented, and both suites are green: 104 orchestrator tests
+and 80 dashboard tests, the browser suite included.
+
+What landed, against the plan:
+
+- **`Broadcast` is keyed by thread** (step 2), and its four new tests were
+  written before it changed, as the risk section asked. `replayTargets` became
+  a map from thread to the browsers replaying it, `echoingPrompts` a count per
+  thread, and `byRecency` takes the thread to ask. An update naming a thread
+  nobody watches is dropped.
+- **A connection names its thread** (step 1). `WS_PATH` gained the optional
+  `/threads/:threadId` shape, and a path naming another session's thread is a
+  404 at the handshake. Which thread a connection is on is settled once, at
+  attach, after `ensureStarted` — and a thread whose row has no
+  `acp_session_id` gets one minted into it there, which covers the
+  minted-never-prompted case for every thread rather than only the current one.
+- **`turn_active` moved onto the thread** (steps 3, 6), with the session's
+  answer derived from its threads, and the reaper reading the derived value.
+- **Permissions go to a browser watching the asking thread** (step 4), with
+  `pending_requests.acp_session_id` carrying the thread and per-thread counts
+  feeding step 8's badges.
+- **A respawn reloads every watched thread** (step 5). The reload was preferred
+  over dropping every socket, as the plan said; the fallback is used only for
+  the narrow case it is right for — a watched thread the adapter cannot bring
+  back, whose browsers are holding an id it would now reject.
+- **The dashboard** (step 8) has the per-thread route, thread rows as plain
+  links with per-thread badges, a thread that always names itself, and Fork
+  inside the thread revealing a `target="_blank"` link.
+
+Three deliberate departures, each small:
+
+- **A cancel clears only its own thread**, not every thread of the session.
+  Step 3 grouped a cancel with the stop, exit and boot cases as "clear every
+  thread ... none of those leave a turn running", which stopped being true the
+  moment threads run in parallel: cancelling one thread says nothing about
+  another that is mid-turn. The other three still clear every thread.
+- **Adding a thread stops dropping browsers too**, not only switching. Step 3
+  called out `switchThread`; `newThread` and `forkThread` dropped browsers for
+  the same reason, and step 8's fork-from-inside-the-thread requires that the
+  thread you forked from stays exactly where it is. With nothing left dropping
+  every socket, `dropDownstreams` became `dropWatchers(thread)`, whose only
+  caller is the respawn case above.
+- **`Broadcast.add` did not gain the thread as a parameter.** The thread is a
+  field on the handle instead, mutable until the pin settles, because the
+  handle has to be counted as attached from the moment its socket opens — the
+  reaper counts it — while its thread cannot be known until the adapter
+  answers. A handle with no thread yet receives nothing, which is right: it
+  has not asked for anything either. `UpstreamSession` reads the same field to
+  derive the watched-thread set for a respawn.
+
+Also carried through: `ARCHITECTURE.md` and `README.md` both describe pinned
+connections with a default, and the info view now returns to the exact thread
+it was opened from rather than to whichever one is current.
