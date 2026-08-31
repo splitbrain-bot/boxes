@@ -100,8 +100,10 @@ export const api = {
     request<ReviewFileResponse>(
       `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,
     ),
-  reviewStatus: (id: string) =>
-    request<ReviewStatusResponse>(`/api/sessions/${id}/review/status`),
+  reviewStatus: (id: string, path?: string) =>
+    request<ReviewStatusResponse>(
+      `/api/sessions/${id}/review/status${path ? `?path=${encodeURIComponent(path)}` : ''}`,
+    ),
   setAnnotation: (id: string, body: ReviewAnnotationBody) =>
     request<ReviewAnnotationsResponse>(`/api/sessions/${id}/review/annotations`, {
       method: 'PUT',

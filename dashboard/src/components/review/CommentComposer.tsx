@@ -21,6 +21,19 @@ import {
  * a resize cannot leave the wrong one mounted.
  */
 
+/**
+ * The key that saves, written the way this platform writes it.
+ *
+ * The shortcut takes either modifier, so the hint is the only thing that has
+ * to choose — and telling a Linux or Android reader to press ⌘ is telling
+ * them about a key their keyboard does not have.
+ */
+const SAVE_KEY = /mac|iphone|ipad|ipod/i.test(
+  typeof navigator === 'undefined' ? '' : navigator.platform || navigator.userAgent,
+)
+  ? '⌘↵'
+  : 'Ctrl+↵';
+
 /** The form both arrangements render. */
 function Form({
   line,
@@ -84,7 +97,7 @@ function Form({
           Cancel
         </Button>
         <span className="ml-auto hidden text-xs text-muted-foreground md:inline">
-          ⌘↵ to save, Esc to cancel
+          {SAVE_KEY} to save, Esc to cancel
         </span>
       </div>
     </div>

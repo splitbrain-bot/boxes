@@ -402,7 +402,14 @@ function answerReview(
     const body: ReviewTreeResponse = {
       root: review.root,
       hasGit: review.hasGit,
-      entries: buildStubTree(Object.keys(review.files)),
+      // Files, plus the ones a status reports as deleted — they are on no
+      // disk, and the real service puts them back the same way.
+      entries: buildStubTree([
+        ...Object.keys(review.files),
+        ...Object.entries(review.statuses)
+          .filter(([path, status]) => status === 'deleted' && !review.files[path])
+          .map(([path]) => path),
+      ]),
       truncated: review.truncated,
       statuses: review.statuses,
       counts: Object.fromEntries(
@@ -420,12 +427,30 @@ function answerReview(
   if (endpoint === 'file' && req.method === 'GET') {
     const path = query.get('path') ?? '';
     const content = review.files[path];
+    // A file the change deleted is listed by its status and has no content:
+    // the real service answers for it rather than 404ing, so the stub does.
+    if (content === undefined && review.statuses[path] === 'deleted') {
+      return json(res, 200, {
+        path,
+        content: '',
+        truncated: false,
+        binary: false,
+        deleted: true,
+        size: 0,
+        lines: 0,
+        language: languageOf(path),
+        status: 'deleted',
+        diff: { lines: {}, hunks: [], deletions: [] },
+        annotations: [],
+      } satisfies ReviewFileResponse);
+    }
     if (content === undefined) return json(res, 404, { error: 'File not found' });
     const body: ReviewFileResponse = {
       path,
       content,
       truncated: false,
       binary: false,
+      deleted: false,
       size: content.length,
       lines: content.split('\n').filter((_, i, all) => i < all.length - 1 || all[i] !== '').length,
       language: languageOf(path),
@@ -437,12 +462,16 @@ function answerReview(
   }
 
   if (endpoint === 'status' && req.method === 'GET') {
+    const open = query.get('path') ?? '';
     const body: ReviewStatusResponse = {
-      // Derived from the state so a mutation moves it, the way three real
+      // Derived from the state so a mutation moves it, the way the real
       // hashes would.
       reviewHash: review.hasReview ? JSON.stringify(review.annotations).length.toString(16) : '',
       headCommit: review.hasGit ? review.headCommit : '',
       statusHash: review.hasGit ? JSON.stringify(review.statuses).length.toString(16) : '',
+      // The open file's own hash, which is what makes the pane follow an edit
+      // to a file git already calls modified.
+      fileHash: open === '' ? '' : (review.files[open]?.length ?? 0).toString(16),
     };
     return json(res, 200, body);
   }

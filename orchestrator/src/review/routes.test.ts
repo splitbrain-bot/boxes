@@ -187,6 +187,72 @@ describe('the tree endpoint', () => {
     assert.equal(row.review_root, 'project');
   });
 
+  test('a repository that appears later takes over as the root', async () => {
+    const ws = insertSession('ggg');
+    // What a curious user does: open the review on a fresh box, before the
+    // agent has fetched anything.
+    const empty = await get<ReviewTreeResponse>('/api/sessions/ggg/review/tree');
+    assert.equal(empty.body.hasGit, false);
+    assert.deepEqual(empty.body.entries, []);
+
+    const repo = join(ws, 'project');
+    mkdirSync(repo);
+    initRepo(repo);
+    write(repo, 'a.txt', 'x\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'init');
+
+    const { body } = await get<ReviewTreeResponse>('/api/sessions/ggg/review/tree');
+    assert.equal(body.root, 'project');
+    assert.equal(body.hasGit, true);
+  });
+
+  test('a root that already holds a review stays where it is', async () => {
+    const ws = insertSession('hhh');
+    write(ws, 'notes.txt', 'x\n');
+    await orchestrator.app.inject({
+      method: 'PUT',
+      url: '/api/sessions/hhh/review/annotations',
+      payload: { path: 'notes.txt', line: 1, comment: 'before the clone' },
+    });
+
+    const repo = join(ws, 'project');
+    mkdirSync(repo);
+    initRepo(repo);
+    write(repo, 'a.txt', 'x\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'init');
+
+    // Re-rooting now would leave REVIEW.md, and the comment in it, outside
+    // the review — so the root does not move.
+    const { body } = await get<ReviewTreeResponse>('/api/sessions/hhh/review/tree');
+    assert.equal(body.root, '');
+    assert.equal(body.hasGit, false);
+    assert.deepEqual(body.counts, { 'notes.txt': 1 });
+  });
+
+  test('a file the change deleted is still listed', async () => {
+    const ws = insertSession('iii');
+    initRepo(ws);
+    write(ws, 'keep.txt', 'x\n');
+    write(ws, 'gone.txt', 'y\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    git(ws, 'rm', '-q', 'gone.txt');
+    git(ws, 'commit', '-q', '-m', 'drop it');
+    await orchestrator.app.inject({
+      method: 'PUT',
+      url: '/api/sessions/iii/review/base',
+      payload: { rev: 'HEAD~1' },
+    });
+
+    // Committed, so neither on disk nor in ls-files. A review that cannot
+    // show a deletion is missing one of the three things a change can do.
+    const { body } = await get<ReviewTreeResponse>('/api/sessions/iii/review/tree');
+    assert.deepEqual([...treePaths(body.entries)].toSorted(), ['gone.txt', 'keep.txt']);
+    assert.equal(body.statuses['gone.txt'], 'deleted');
+  });
+
   test('statuses come back per path', async () => {
     const ws = insertSession('fff');
     initRepo(ws);
@@ -314,6 +380,23 @@ describe('the file endpoint', () => {
     repoSession('fff');
     const res = await orchestrator.app.inject({ url: '/api/sessions/fff/review/file?path=.' });
     assert.equal(res.statusCode, 404);
+  });
+
+  test('a file the change deleted answers as deleted, not as missing', async () => {
+    const ws = insertSession('del');
+    initRepo(ws);
+    write(ws, 'gone.txt', 'y\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    rmSync(join(ws, 'gone.txt'));
+
+    const { status, body } = await get<ReviewFileResponse>(
+      '/api/sessions/del/review/file?path=gone.txt',
+    );
+    assert.equal(status, 200);
+    assert.equal(body.deleted, true);
+    assert.equal(body.status, 'deleted');
+    assert.equal(body.content, '');
   });
 
   test('a missing path parameter is a 400', async () => {
@@ -496,6 +579,24 @@ describe('annotations', () => {
       assert.equal(res.statusCode, 400, JSON.stringify(payload));
     }
     assert.equal(existsSync(join(ws, 'REVIEW.md')), false);
+  });
+
+  test('a comment on a file the change deleted is refused', async () => {
+    const ws = insertSession('rip');
+    initRepo(ws);
+    write(ws, 'gone.txt', 'y\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    rmSync(join(ws, 'gone.txt'));
+
+    const res = await orchestrator.app.inject({
+      method: 'PUT',
+      url: '/api/sessions/rip/review/annotations',
+      payload: { path: 'gone.txt', line: 1, comment: 'x' },
+    });
+    // The file is in the tree, so this is not a 404 — there is simply no line
+    // to attach a comment to.
+    assert.equal(res.statusCode, 409);
   });
 
   test('a comment on a path outside the root is a 404', async () => {
@@ -699,6 +800,38 @@ describe('the status fingerprint', () => {
     assert.notEqual(afterCommit.headCommit, afterEdit.headCommit);
   });
 
+  test('an edit to the open file moves the fingerprint on its own', async () => {
+    const ws = insertSession('fff');
+    initRepo(ws);
+    write(ws, 'code.ts', 'one\ntwo\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    write(ws, 'code.ts', 'one\nTWO\n');
+
+    const before = (
+      await get<ReviewStatusResponse>('/api/sessions/fff/review/status?path=code.ts')
+    ).body;
+    assert.notEqual(before.fileHash, '');
+
+    // Already modified, so its status letter does not change and neither does
+    // HEAD. Without the file's own hash the pane would keep showing the text
+    // the agent has just replaced.
+    write(ws, 'code.ts', 'one\nthree\n');
+    const after = (
+      await get<ReviewStatusResponse>('/api/sessions/fff/review/status?path=code.ts')
+    ).body;
+    assert.equal(after.statusHash, before.statusHash);
+    assert.equal(after.headCommit, before.headCommit);
+    assert.notEqual(after.fileHash, before.fileHash);
+  });
+
+  test('a fingerprint asked for without a file carries no file hash', async () => {
+    const ws = insertSession('ggg');
+    write(ws, 'a.txt', 'x\n');
+    const { body } = await get<ReviewStatusResponse>('/api/sessions/ggg/review/status');
+    assert.equal(body.fileHash, '');
+  });
+
   test('polling a review does not hold off the reaper', async () => {
     const ws = insertSession('bbb');
     write(ws, 'a.txt', 'x\n');
@@ -719,6 +852,6 @@ describe('the status fingerprint', () => {
     const ws = insertSession('ccc');
     write(ws, 'a.txt', 'x\n');
     const { body } = await get<ReviewStatusResponse>('/api/sessions/ccc/review/status');
-    assert.deepEqual(body, { reviewHash: '', headCommit: '', statusHash: '' });
+    assert.deepEqual(body, { reviewHash: '', headCommit: '', statusHash: '', fileHash: '' });
   });
 });

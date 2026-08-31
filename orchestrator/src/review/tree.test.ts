@@ -4,7 +4,15 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
-import { buildTree, MAX_ENTRIES, reviewTree, treePaths, walkPaths, type TreeEntry } from './tree.ts';
+import {
+  buildTree,
+  MAX_ENTRIES,
+  reviewTree,
+  treePaths,
+  walkPaths,
+  withDeleted,
+  type TreeEntry,
+} from './tree.ts';
 
 /** The file tree, ported from the Go implementation's tests. */
 
@@ -186,5 +194,24 @@ describe('reviewTree', () => {
     // repository" — and both lead to the same walk, which finds nothing.
     const { entries } = await reviewTree(dir, true);
     assert.deepEqual(entries as TreeEntry[], []);
+  });
+});
+
+describe('withDeleted', () => {
+  test('a file the change removed is put back into the tree', () => {
+    const entries = withDeleted(buildTree(['src/keep.ts']), ['src/gone.ts']);
+    assert.deepEqual([...treePaths(entries)].toSorted(), ['src/gone.ts', 'src/keep.ts']);
+  });
+
+  test('a deletion of a file that is still there changes nothing', () => {
+    const before = buildTree(['a.ts']);
+    // Same array back, not a rebuilt copy: the common case is no deletions at
+    // all, and every tree response goes through here.
+    assert.equal(withDeleted(before, ['a.ts']), before);
+  });
+
+  test('the review file and ignored paths stay out', () => {
+    const entries = withDeleted(buildTree(['a.ts']), ['REVIEW.md', 'logo.png', 'b.ts']);
+    assert.deepEqual([...treePaths(entries)].toSorted(), ['a.ts', 'b.ts']);
   });
 });

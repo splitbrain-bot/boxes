@@ -252,10 +252,15 @@ app.get('/api/sessions/:id/exec', async (req): Promise<ExecLogPage> => {
  * agent working, so polling a review must not hold off the reaper.
  */
 
-/** Where the review view polls, which is the only thing it asks for while idle. */
+/**
+ * Where the review view polls, which is the only thing it asks for while idle.
+ * `path` names the file the pane has open, so an edit to it is part of the
+ * fingerprint.
+ */
 app.get('/api/sessions/:id/review/status', async (req) => {
   const { id } = req.params as { id: string };
-  return review.status(id);
+  const { path } = req.query as { path?: string };
+  return review.status(id, path);
 });
 
 app.get('/api/sessions/:id/review/tree', async (req) => {

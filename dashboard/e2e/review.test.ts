@@ -153,6 +153,29 @@ test('a gutter marker opens the hunk, deleted lines included', async () => {
   }
 });
 
+test('a file the change deleted is listed, and says it is gone', async () => {
+  // Listed by its status alone: it is on no disk and in no ls-files, which is
+  // exactly why it used to fall out of the tree the moment it mattered.
+  stub.state.reviews[SESSION]!.statuses['src/old.ts'] = 'deleted';
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=src%2Fold.ts`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect
+      .poll(() => page.getByText('This file was deleted, so there is nothing left to read.').isVisible())
+      .toBe(true);
+    // And it is in the tree, under the directory it was in.
+    await page.getByRole('button', { name: 'src' }).click();
+    await expect.poll(() => page.getByRole('button', { name: /old\.ts/ }).isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('prev/next steps through the changes', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
@@ -161,8 +184,10 @@ test('prev/next steps through the changes', async () => {
     'desktop',
   );
   try {
-    // Two changed lines in the fixture, counted in the toolbar.
-    await expect.poll(() => page.getByLabel('2 changes').isVisible()).toBe(true);
+    // Two changed lines in the fixture and one block deleted between them,
+    // which is three places to step through: a deletion has no line of its
+    // own, so it counts at the line its marker sits under.
+    await expect.poll(() => page.getByLabel('3 changes').isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Next change' }).click();
     // Comments start at zero, and their buttons are disabled until there are
     // some — a step button that does nothing is worse than one that is off.
@@ -268,6 +293,12 @@ test('a comment can be edited and deleted', async () => {
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(true);
 
     await page.getByRole('button', { name: 'Delete the comment on line 2' }).click();
+    // Asked about first: the bin sits beside the pencil and a comment is
+    // typed prose with no undo.
+    await expect
+      .poll(() => page.getByText('Delete the comment on line 2?').isVisible())
+      .toBe(true);
+    await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(false);
     expect(stub.state.reviews[SESSION]!.annotations['src/app.ts']).toBeUndefined();
     expect(errors).toEqual([]);

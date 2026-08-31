@@ -57,6 +57,7 @@ function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
     content: 'one\ntwo\n',
     truncated: false,
     binary: false,
+    deleted: false,
     size: 8,
     lines: 2,
     // No language, so the store never reaches the highlighter: tokenizing is
@@ -70,7 +71,7 @@ function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
 }
 
 function status(over: Partial<ReviewStatusResponse> = {}): ReviewStatusResponse {
-  return { reviewHash: '', headCommit: 'abc', statusHash: 'def', ...over };
+  return { reviewHash: '', headCommit: 'abc', statusHash: 'def', fileHash: 'ghi', ...over };
 }
 
 beforeEach(() => {
@@ -184,6 +185,31 @@ test('a moved fingerprint refetches the tree and the open file', async () => {
 
   assert.equal(hits('/review/tree'), before.tree + 1);
   assert.equal(hits('/review/file'), before.file + 1);
+});
+
+test('an edit to the open file alone refetches it', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  await poll();
+  const before = hits('/review/file');
+
+  // What the agent does most: rewrite a file that git already calls modified.
+  // Nothing else about the workspace moves, so this hash is the only thing
+  // that says the pane is showing text that is no longer there.
+  answers['/review/status'] = status({ fileHash: 'rewritten' });
+  await poll();
+
+  assert.equal(hits('/review/file'), before + 1);
+});
+
+test('the poll names the open file, so the server can hash it', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  await poll();
+  assert.equal(
+    requested.filter((url) => url.includes('/review/status')).at(-1)?.includes('path=a.ts'),
+    true,
+  );
 });
 
 test('a moved fingerprint with no file open refetches only the tree', async () => {

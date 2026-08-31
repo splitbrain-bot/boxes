@@ -148,6 +148,10 @@ export function ThreadHeader({
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link
           to={`/sessions/${sessionId}/review`}
+          // Which conversation the review was opened from, so its back link
+          // and its handoff come back here rather than to whichever thread the
+          // session has current — the two differ as soon as one is forked.
+          state={{ threadId }}
           aria-label="Review this session's code"
           title="Review this session's code"
         >

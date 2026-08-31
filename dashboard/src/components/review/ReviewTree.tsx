@@ -60,7 +60,9 @@ export function ReviewTree({
    * The directories that hold a commented file, so a collapsed branch still
    * says there is something in it.
    */
-  const commentedDirs = useMemo(() => dirsWithComments(Object.keys(tree.counts)), [tree.counts]);
+  const commentedDirs = useMemo(() => parentDirs(Object.keys(tree.counts)), [tree.counts]);
+  /** The same for the files git reports as changed. */
+  const changedDirs = useMemo(() => parentDirs(Object.keys(tree.statuses)), [tree.statuses]);
 
   const toggle = (path: string): void => {
     setOpen((current) => {
@@ -95,6 +97,7 @@ export function ReviewTree({
         statuses={tree.statuses}
         counts={tree.counts}
         commentedDirs={commentedDirs}
+        changedDirs={changedDirs}
         activePath={activePath}
         onOpen={onOpen}
       />
@@ -111,6 +114,7 @@ function Level({
   statuses,
   counts,
   commentedDirs,
+  changedDirs,
   activePath,
   onOpen,
 }: {
@@ -121,6 +125,7 @@ function Level({
   statuses: Record<string, ReviewFileStatus>;
   counts: Record<string, number>;
   commentedDirs: Set<string>;
+  changedDirs: Set<string>;
   activePath: string | null;
   onOpen: (path: string) => void;
 }) {
@@ -171,6 +176,14 @@ function Level({
                 >
                   {STATUS[status].mark}
                 </span>
+              ) : entry.isDir && !isOpen && changedDirs.has(entry.path) ? (
+                // Collapsed, with changed files inside: the letters belong to
+                // the files, but a branch that hides one has to say so.
+                <span
+                  aria-label="contains changes"
+                  title="contains changes"
+                  className="size-1.5 shrink-0 rounded-full bg-warn"
+                />
               ) : null}
               {count > 0 ? (
                 <span
@@ -199,6 +212,7 @@ function Level({
                 statuses={statuses}
                 counts={counts}
                 commentedDirs={commentedDirs}
+                changedDirs={changedDirs}
                 activePath={activePath}
                 onOpen={onOpen}
               />
@@ -210,8 +224,8 @@ function Level({
   );
 }
 
-/** Every directory on the way to a commented file. */
-function dirsWithComments(paths: string[]): Set<string> {
+/** Every directory on the way to one of these paths. */
+function parentDirs(paths: string[]): Set<string> {
   const dirs = new Set<string>();
   for (const path of paths) {
     const parts = path.split('/');

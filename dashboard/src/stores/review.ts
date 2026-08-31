@@ -264,15 +264,20 @@ function same(a: ReviewStatusResponse | null, b: ReviewStatusResponse): boolean 
     a !== null &&
     a.reviewHash === b.reviewHash &&
     a.headCommit === b.headCommit &&
-    a.statusHash === b.statusHash
+    a.statusHash === b.statusHash &&
+    a.fileHash === b.fileHash
   );
 }
 
 /**
  * Asks for the fingerprint and refetches only what moved.
  *
- * This is the whole cost of an idle review view: one request answering three
+ * This is the whole cost of an idle review view: one request answering a few
  * local hashes. Nothing is refetched while they stand still.
+ *
+ * The open file is named in the request, because its own hash is one of those
+ * hashes: the agent editing the file being read changes nothing else about the
+ * workspace.
  */
 export async function poll(): Promise<void> {
   const { sessionId, fingerprint, file, saving, composing } = get();
@@ -281,7 +286,7 @@ export async function poll(): Promise<void> {
   // fight the optimistic list, or drop what is being typed.
   if (saving || composing !== null) return;
   try {
-    const next = await api.reviewStatus(sessionId);
+    const next = await api.reviewStatus(sessionId, file?.path);
     if (same(fingerprint, next)) return;
     set({ fingerprint: next });
     await loadTree();

@@ -3,6 +3,7 @@ import type {
   ReviewAnnotation,
   ReviewBase,
   ReviewFileResponse,
+  ReviewFileStatus,
   ReviewStatusResponse,
   ReviewTreeResponse,
 } from '../../../shared/types.ts';
@@ -34,7 +35,7 @@ import {
   todayStamp,
   type Review,
 } from './store.ts';
-import { REVIEW_FILE, reviewTree, treePaths } from './tree.ts';
+import { REVIEW_FILE, reviewTree, treePaths, withDeleted } from './tree.ts';
 
 /**
  * The per-session review façade: root resolution, the REVIEW.md
@@ -134,13 +135,19 @@ export class ReviewService {
   }
 
   /**
-   * Where the review is rooted, resolved once and remembered on the session
-   * row.
+   * Where the review is rooted, remembered on the session row.
    *
    * `/workspace` starts empty and an agent usually clones a project into a
    * subdirectory, so the workspace itself is frequently not the repository.
    * The stored value is re-validated rather than trusted: the agent can delete
    * the directory it named.
+   *
+   * A stored root without git is resolved again, because the review is often
+   * opened on an empty box and the repository arrives afterwards — a root
+   * decided before it existed would otherwise keep the git features off for
+   * the life of the session. Once a comment has been written the root stays
+   * where it is: REVIEW.md lives at the root, and moving it would leave the
+   * review behind.
    */
   private async root(id: string): Promise<Root> {
     const workspace = this.workspace(id);
@@ -150,16 +157,32 @@ export class ReviewService {
     if (stored !== null) {
       const path = stored === '' ? workspace : join(workspace, stored);
       if (isDirectory(path)) {
-        return { path, relative: stored, hasGit: (await topLevel(path)) === path };
+        const root: Root = { path, relative: stored, hasGit: (await topLevel(path)) === path };
+        if (root.hasGit || fileHash(this.reviewPath(root)) !== '') return root;
+        const again = await this.resolveRoot(workspace);
+        if (!again.hasGit) return root;
+        log.session(id).info('a repository appeared; re-rooting the review', {
+          from: stored,
+          to: again.relative,
+        });
+        return this.remember(id, again);
       }
       log.session(id).info('review root is gone; resolving again', { root: stored });
     }
 
-    const resolved = await this.resolveRoot(workspace);
-    this.db
-      .prepare('UPDATE sessions SET review_root = ? WHERE id = ?')
-      .run(resolved.relative, id);
-    return resolved;
+    return this.remember(id, await this.resolveRoot(workspace));
+  }
+
+  /**
+   * Records where a session's review is rooted and hands the root back.
+   *
+   * The remembered tree goes with it: its paths are relative to the root that
+   * has just been replaced.
+   */
+  private remember(id: string, root: Root): Root {
+    this.db.prepare('UPDATE sessions SET review_root = ? WHERE id = ?').run(root.relative, id);
+    this.treePaths.delete(id);
+    return root;
   }
 
   /**
@@ -221,11 +244,12 @@ export class ReviewService {
     ]);
 
     const review = await this.driftAll(id, root);
+    const entries = withDeleted(tree.entries, deletedPaths(statuses));
 
     return {
       root: root.relative,
       hasGit: root.hasGit,
-      entries: tree.entries,
+      entries,
       truncated: tree.truncated,
       statuses: statuses ?? {},
       counts: Object.fromEntries(annotationCounts(review)),
@@ -245,6 +269,7 @@ export class ReviewService {
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
     const root = await this.root(id);
     const path = await this.resolveListed(root, id, relPath);
+    if (path === null) return this.goneFile(relPath);
     const read = readTextFile(path);
     const base = this.base(id);
 
@@ -264,6 +289,7 @@ export class ReviewService {
       content: read.content,
       truncated: read.truncated,
       binary: read.binary,
+      deleted: false,
       size: read.size,
       lines: read.binary ? 0 : fileLines(read.content).length,
       language: detectLang(relPath),
@@ -278,20 +304,47 @@ export class ReviewService {
   }
 
   /**
-   * The poll fingerprint: three cheap local hashes. The review view asks for
+   * The answer for a file the change removed: it is in the tree because git
+   * reports it deleted, and there is nothing on disk to read.
+   */
+  private goneFile(relPath: string): ReviewFileResponse {
+    return {
+      path: relPath,
+      content: '',
+      truncated: false,
+      binary: false,
+      deleted: true,
+      size: 0,
+      lines: 0,
+      language: detectLang(relPath),
+      status: 'deleted',
+      diff: { lines: {}, hunks: [], deletions: [] },
+      annotations: [],
+    };
+  }
+
+  /**
+   * The poll fingerprint: four cheap local hashes. The review view asks for
    * this every few seconds while its tab is visible and refetches only when one
    * of them moved.
+   *
+   * `relPath` is the file the pane is showing, and its own hash is part of the
+   * answer. Without it an edit to a file that is already modified moves
+   * nothing — its status letter does not change, and neither does HEAD — so
+   * the reviewer would go on reading text the agent has already replaced.
    */
-  async status(id: string): Promise<ReviewStatusResponse> {
+  async status(id: string, relPath?: string): Promise<ReviewStatusResponse> {
     const root = await this.root(id);
     const base = this.base(id);
     const statuses = root.hasGit ? await fileStatuses(root.path, base) : null;
+    const open = relPath ? resolveInRoot(root.path, relPath) : null;
     return {
       reviewHash: fileHash(this.reviewPath(root)),
       headCommit: root.hasGit ? await headCommit(root.path) : '',
       // The map is serialized in key order so an unchanged working tree hashes
       // the same every time.
       statusHash: statuses ? textHash(JSON.stringify(Object.entries(statuses).toSorted())) : '',
+      fileHash: open?.ok ? fileHash(open.path) : '',
     };
   }
 
@@ -315,6 +368,9 @@ export class ReviewService {
     // The path has to name a file of the tree, not merely resolve inside it:
     // an annotation on something the tree never listed could never be shown.
     const path = await this.resolveListed(root, id, relPath);
+    if (path === null) {
+      throw new ReviewUnavailable(409, 'This file was deleted, so there is no line to comment on.');
+    }
     const source = fileLines(readTextFile(path).content);
 
     return this.mutate(id, root, relPath, (review) => {
@@ -507,24 +563,38 @@ export class ReviewService {
    * that the API serves what the browser was shown. Every refusal is the same
    * 404, so an escape attempt learns nothing an unknown file would not have
    * told it.
+   *
+   * Null is not a refusal: the tree lists the path and the working tree does
+   * not have it, which is a file the change deleted. What to say about one is
+   * the caller's to decide.
    */
-  private async resolveListed(root: Root, id: string, relPath: string): Promise<string> {
-    const resolved = resolveInRoot(root.path, relPath);
-    if (!resolved.ok || isDirectory(resolved.path)) {
-      throw new ReviewUnavailable(404, 'File not found');
-    }
+  private async resolveListed(root: Root, id: string, relPath: string): Promise<string | null> {
     if (!(await this.listed(id, root)).has(relPath)) {
       throw new ReviewUnavailable(404, 'File not found');
     }
-    return resolved.path;
+    const resolved = resolveInRoot(root.path, relPath);
+    if (resolved.ok) {
+      if (isDirectory(resolved.path)) throw new ReviewUnavailable(404, 'File not found');
+      return resolved.path;
+    }
+    if (resolved.reason === 'missing') return null;
+    throw new ReviewUnavailable(404, 'File not found');
   }
 
-  /** The path set of a session's tree, rebuilt when the cached one is stale. */
+  /**
+   * The path set of a session's tree, rebuilt when the cached one is stale.
+   *
+   * The files a change deleted are in it, because the tree offers them: what
+   * this set decides is whether the API serves what the browser was shown.
+   */
   private async listed(id: string, root: Root): Promise<Set<string>> {
     const cached = this.treePaths.get(id);
     if (cached && Date.now() - cached.at < ReviewService.TREE_CACHE_MS) return cached.paths;
-    const tree = await reviewTree(root.path, root.hasGit);
-    const paths = treePaths(tree.entries);
+    const [tree, statuses] = await Promise.all([
+      reviewTree(root.path, root.hasGit),
+      root.hasGit ? fileStatuses(root.path, this.base(id)) : Promise.resolve(null),
+    ]);
+    const paths = treePaths(withDeleted(tree.entries, deletedPaths(statuses)));
     this.treePaths.set(id, { at: Date.now(), paths });
     return paths;
   }
@@ -542,6 +612,14 @@ export class ReviewService {
   async rootRelative(id: string): Promise<string> {
     return (await this.root(id)).relative;
   }
+}
+
+/** The paths a status map reports as gone from the working tree. */
+function deletedPaths(statuses: Record<string, ReviewFileStatus> | null): string[] {
+  if (!statuses) return [];
+  return Object.entries(statuses)
+    .filter(([, status]) => status === 'deleted')
+    .map(([path]) => path);
 }
 
 /** One file's annotations, as the API reports them: a list, in line order. */

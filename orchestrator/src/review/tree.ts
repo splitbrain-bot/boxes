@@ -225,6 +225,24 @@ export async function reviewTree(root: string, hasGit: boolean): Promise<Tree> {
   return { entries: buildTree(paths), truncated };
 }
 
+/**
+ * Puts the files a change removed back into the tree.
+ *
+ * Neither `git ls-files` nor a walk can name a file that is no longer on disk,
+ * so without this a deletion is the one kind of change a review cannot show —
+ * and once it is committed, the file leaves the tree the moment it starts to
+ * matter. The paths come from the status map, which reports a deletion whether
+ * it is staged, unstaged or committed against the base.
+ */
+export function withDeleted(entries: TreeEntry[], deleted: string[]): TreeEntry[] {
+  const paths = treePaths(entries);
+  const gone = deleted.filter(
+    (path) => !paths.has(path) && path !== REVIEW_FILE && !ignored(path),
+  );
+  if (gone.length === 0) return entries;
+  return buildTree([...paths, ...gone]);
+}
+
 /** Every file path in a tree, for validating a client-supplied path against it. */
 export function treePaths(entries: TreeEntry[], into: Set<string> = new Set()): Set<string> {
   for (const entry of entries) {

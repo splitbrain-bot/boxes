@@ -386,6 +386,12 @@ export interface ReviewFileResponse {
   truncated: boolean;
   /** True when the file holds a NUL byte, in which case content is empty. */
   binary: boolean;
+  /**
+   * True when the change under review deleted the file. The tree still lists
+   * it, because a deletion is part of what is being reviewed, but there is
+   * nothing on disk to show.
+   */
+  deleted: boolean;
   /** The file's real size in bytes, whatever was returned. */
   size: number;
   /** Lines in what was returned. */
@@ -405,16 +411,22 @@ export interface ReviewAnnotationsResponse {
 }
 
 /**
- * The poll fingerprint. Three local hashes rather than three execs, and the
- * only thing the review view asks for while nothing is happening.
+ * The poll fingerprint. Local hashes rather than execs, and the only thing the
+ * review view asks for while nothing is happening.
  */
 export interface ReviewStatusResponse {
   /** Hash of REVIEW.md, or '' when there is none. */
   reviewHash: string;
   /** The commit HEAD names, or '' outside a repository. */
   headCommit: string;
-  /** Hash of the whole status map, so a working-tree edit moves it. */
+  /** Hash of the whole status map, so a file's status changing moves it. */
   statusHash: string;
+  /**
+   * Hash of the file the pane has open, or '' when it has none. An edit to an
+   * already-modified file moves nothing else, and this is what makes the open
+   * file follow the agent's work.
+   */
+  fileHash: string;
 }
 
 /** Body of a create-or-update annotation request. */

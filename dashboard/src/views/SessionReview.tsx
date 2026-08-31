@@ -1,6 +1,6 @@
 import { ArrowLeft, FilePlus2, FolderTree, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk } from '../../../shared/types.ts';
 import { BasePicker } from '@/components/review/BasePicker';
 import { CodePane } from '@/components/review/CodePane';
@@ -58,6 +58,7 @@ function handoffPrompt(root: string): string {
 export function SessionReview() {
   const { id = '' } = useParams();
   const [params, setParams] = useSearchParams();
+  const location = useLocation();
   const path = params.get('path');
 
   const { tree, file, loadingTree, loadingFile, error, composing, saving } = useReview();
@@ -70,6 +71,21 @@ export function SessionReview() {
   /** A line to scroll to once, set by the prev/next toolbar. */
   const [scrollTo, setScrollTo] = useState<number | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
+  /** The comment a tap on a bin is asking to remove, or null. */
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  /**
+   * The conversation this review was opened from, so leaving it goes back
+   * there rather than to whichever thread the session has current — after a
+   * fork those are two different conversations, and the fork cannot act on
+   * the comments while it is in plan mode.
+   *
+   * Read once: opening a file is a navigation of this same route, which keeps
+   * the component mounted but carries no state of its own. A reload has none
+   * either, and falls back to the session's current thread.
+   */
+  const [origin] = useState<string | null>(
+    () => (location.state as { threadId?: string } | null)?.threadId ?? null,
+  );
   const navigate = useNavigate();
   /**
    * Which composer arrangement to mount. A media query in JavaScript rather
@@ -123,14 +139,21 @@ export function SessionReview() {
     () => new Map((file?.annotations ?? []).map((a) => [a.line, a])),
     [file?.annotations],
   );
-  /** The changed lines, in order, for stepping through them. */
-  const changedLines = useMemo(
-    () =>
-      Object.keys(file?.diff.lines ?? {})
-        .map(Number)
-        .sort((a, b) => a - b),
-    [file?.diff.lines],
-  );
+  /**
+   * The changed lines, in order, for counting and stepping through them.
+   *
+   * A deletion has no line of its own, and its marker sits under the line it
+   * followed — so that line is where stepping stops and what the count
+   * counts. Without it a file whose only change is a deletion reports none,
+   * while the tree calls it modified and the gutter marks it.
+   */
+  const changedLines = useMemo(() => {
+    const lines = new Set(Object.keys(file?.diff.lines ?? {}).map(Number));
+    for (const deletion of file?.diff.deletions ?? []) {
+      lines.add(Math.max(1, deletion.afterLine));
+    }
+    return [...lines].sort((a, b) => a - b);
+  }, [file?.diff.lines, file?.diff.deletions]);
   const commentedLines = useMemo(
     () => (file?.annotations ?? []).map((a) => a.line).sort((a, b) => a - b),
     [file?.annotations],
@@ -156,7 +179,9 @@ export function SessionReview() {
               annotation={annotation}
               busy={saving}
               onEdit={() => compose(line)}
-              onDelete={() => void deleteComment(file.path, line)}
+              // Asked about first: a comment is typed prose with no undo, and
+              // the bin sits a thumb's width from the pencil.
+              onDelete={() => setConfirmDelete(line)}
             />
           ) : null}
           {/* On touch the composer is a bottom sheet instead — the keyboard is
@@ -189,7 +214,7 @@ export function SessionReview() {
   };
 
   const name = session?.name ?? id;
-  const thread = session?.currentThreadId;
+  const thread = origin ?? session?.currentThreadId;
 
   return (
     <div className="flex h-dvh flex-col">
@@ -320,7 +345,9 @@ export function SessionReview() {
                 onStepChange={(direction) => step(changedLines, direction)}
                 onStepComment={(direction) => step(commentedLines, direction)}
               />
-              {file.binary ? (
+              {file.deleted ? (
+                <Empty>This file was deleted, so there is nothing left to read.</Empty>
+              ) : file.binary ? (
                 <Empty>This file is binary, so there is nothing to show.</Empty>
               ) : (
                 <>
@@ -383,6 +410,22 @@ export function SessionReview() {
         }}
         onCancel={() => compose(null)}
       />
+
+      {confirmDelete !== null && file ? (
+        <ConfirmDialog
+          title={`Delete the comment on line ${confirmDelete}?`}
+          description="It is removed from REVIEW.md. The code itself is untouched."
+          confirmLabel="Delete"
+          danger
+          busy={saving}
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            const line = confirmDelete;
+            setConfirmDelete(null);
+            void deleteComment(file.path, line);
+          }}
+        />
+      ) : null}
 
       {confirmNew ? (
         <ConfirmDialog
