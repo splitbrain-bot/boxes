@@ -29,79 +29,71 @@ phone, because Boxes is driven from one. That rules out porting the desktop
 tool's three-panel layout and its hover interactions as they are; the feature
 set survives, the layout does not.
 
-## The constraint everything is designed around
+## Where the files live: the workspace becomes a bind mount
 
-**The reviewed files are inside the session container, and the orchestrator
-has no mount into it.** The desktop tool reads the filesystem it runs on;
-Boxes cannot. The workspace is a named volume mounted only into the session
-container, and the one road the orchestrator already has into it is
-`docker exec` — the same road the `!bang` commands take (`exec.ts`,
-`dk.runCommandExec`).
+Today a session's workspace is the named volume `ws-<id>`, mounted only into
+the session container — the orchestrator has no filesystem path to it, and
+reaching the files means `docker exec`. This plan changes that first:
+**session workspaces become directories under the orchestrator's own data
+volume, bind-mounted into their session containers.** The orchestrator then
+reads and writes review data as ordinary files, and runs git itself.
 
-So every review operation is an exec: listing files is `git ls-files`, reading
-a file is `cat`, git status is `git status --porcelain`, writing `REVIEW.md`
-is a `cat > tmp && mv` with the content on stdin. That settles several things
-at once:
+An exec-based design (every read a `docker exec`) was considered and set
+aside: the orchestrator already holds the Docker socket, so direct access
+grants it no privilege it lacks, and the exec tax was real — an exec round
+trip per interaction, no review without booting the container, no honest file
+watching. The residual concerns direct access does raise — symlinks in an
+agent-controlled tree, git executing repo-local config — are handled as
+maintained invariants in the security section below, not by architecture.
 
-- **No new privilege.** Review sees exactly what the agent sees, inside the
-  container's existing isolation. Nothing mounts the volume anywhere new.
-- **The container must be running.** Opening the review view starts a stopped
-  container, exactly as opening a thread does (`execTarget` already does
-  this).
-- **Latency is an exec round trip** — tens of milliseconds per call. Fine for
-  interactive browsing, poor for chatty protocols, which is why the API below
-  batches (tree + statuses + annotation markers in one response, file content
-  + diff + annotations in one response) and why live updates poll instead of
-  pretending we can watch files.
-- **No fsnotify.** The desktop tool watches the filesystem and pushes over a
-  WebSocket. There is no inotify across the exec boundary worth trusting, so
-  freshness comes from polling a cheap fingerprint endpoint, below.
+What direct access buys, concretely:
 
-The alternatives were considered and rejected: mounting session volumes into
-the orchestrator breaks the "nothing shares a filesystem with the sandbox"
-property and fights the one-container-per-volume lifecycle; running a helper
-server inside the session image adds a second listener inside the sandbox and
-a version coupling between images. Exec is slower and simpler and uses only
-machinery that exists.
+- **Reviewing a stopped session.** File reads and every git operation run in
+  the orchestrator, so the natural moment for a review — the agent is done,
+  the box has idled out — needs no container start at all, and review
+  polling never holds off the reaper.
+- **Plain code.** The desktop tool's design ports nearly one-to-one:
+  filesystem reads, git as a child process, atomic REVIEW.md writes.
+- **Real file watching** later, instead of polling forever: fs events work on
+  a directory the process can see.
 
-### Exec plumbing this needs
+### The storage change
 
-`runCommandExec` takes a shell string (`bash -lc <command>`), which is right
-for `!bang` and wrong for review: review paths are user input and must never
-be spliced into a shell string. Two additions to `docker.ts`:
+- New sessions get a workspace directory `${DATA_DIR}/workspaces/<id>`,
+  created at session create (the `workspaces/` parent mode 0700; the
+  directory chowned to uid 1000, the session image's `agent` user, since a
+  bind mount — unlike a named volume — is not ownership-initialised by
+  Docker), and `rm -rf`ed at delete where `removeVolume` runs today.
+- The container template's `Binds` entry becomes
+  `<hostWorkspacesPath>/<id>:/workspace`. Bind sources are resolved by the
+  daemon, so the orchestrator must name the **host-side** path of its own
+  `/data`: at boot it inspects its own container (id from `/etc/hostname`)
+  and takes the `Source` of the mount whose `Destination` is `DATA_DIR`.
+  With the shipped compose that resolves to
+  `/var/lib/docker/volumes/boxes-data/_data`, a plain daemon-side directory
+  that binds fine on Linux and inside Docker Desktop's VM alike. Outside a
+  container (`npm run dev`, tests) the two paths are the same and the
+  inspection is skipped.
+- **The home volume stays a named volume.** It holds transcripts and
+  whatever credentials a user creates by logging in inside the session;
+  review has no business there and nothing else needs it mounted.
+- `sessions` gains a `workspace_dir` column; `ws_volume` stays for legacy
+  rows. **Legacy sessions migrate on their next start:** the start path sees
+  a volume-backed row, copies the volume's content into the new directory
+  (a one-shot helper container running `cp -a`, since the orchestrator has
+  no path to the volume — the very problem being removed), recreates the
+  session container with the bind (containers are disposable here: read-only
+  rootfs, everything durable is in the two mounts), and deletes the volume.
+  A *running* legacy session keeps working untouched and migrates at its
+  next stop/start cycle; the review view tells it to.
+- `scripts/smoke-test.sh` grows the matching assertions: the workspace is
+  still writable from inside, one session cannot see another's workspace,
+  and `workspaces/` on the data volume is 0700.
 
-- `runArgvExec(containerId, argv, workingDir, { stdin? })` — same demux and
-  exit-code handling as today, but `Cmd` is the argv array itself, no shell,
-  with optional `AttachStdin` for the write path.
-- On top of it in a new `orchestrator/src/review/exec.ts`: `capture(argv,
-  limit)` (buffer output up to a byte cap, return `{output, exitCode,
-  truncated}`) and `writeFile(relPath, content)` — argv
-  `['sh', '-c', 'cat > "$1.tmp" && mv -- "$1.tmp" "$1"', 'sh', <abs path>]`,
-  content on stdin. The path travels as a positional parameter, not as shell
-  text, and the write is atomic, matching the desktop tool's flush.
-
-Review execs do not go through `exec.ts`'s `runCommand`: they must not land in
-`exec_log` (they are not user commands), and they want per-call output caps
-(a 2 MiB file read, a 64 KiB status). They do call `manager.touch(id)` so an
-active review holds off the idle reaper, which otherwise cannot see a REST
-poller the way it sees an attached WebSocket.
-
-### Where the review roots
-
-`/workspace` starts empty and the agent usually clones a project into a
-subdirectory, so `/workspace` itself is frequently not the repo. Root
-resolution, at review open and cached on the session row:
-
-1. If `/workspace` is a git work tree (`git -C /workspace rev-parse
-   --show-toplevel`), root there.
-2. Else, if `/workspace` contains exactly one directory and it is a git work
-   tree, root there — the overwhelmingly common shape.
-3. Else root at `/workspace` with git features off (the desktop tool degrades
-   the same way: plain tree, no statuses, no diff).
-
-`REVIEW.md` is written at that root, which is what makes it visible to the
-agent as a file of the project it is working on, and what keeps the format
-contract with the desktop tool (it also writes at the reviewed root).
+Verify early (first thing in stage 1, on both OSes the README supports): the
+subpath-of-a-volume bind on Docker Desktop, and uid-1000 ownership surviving
+the round trip. This is the plan's one load-bearing assumption about Docker
+behaviour.
 
 ## The REVIEW.md contract
 
@@ -139,31 +131,48 @@ tables port with them.
 
 **REVIEW.md is the single source of truth, and it is shared with the agent.**
 The orchestrator holds no annotation table; every mutation is
-read → parse → apply → serialize → write, under a per-session mutex, with the
-file's hash checked between read and write. If the hash moved (the agent
-edited REVIEW.md mid-mutation), re-read and re-apply once. This is the same
-last-writer honesty the desktop tool has with its file watcher, without the
-watcher.
+read → parse → apply → serialize → write-tmp-then-rename, under a per-session
+mutex, with the file's hash checked between read and write. If the hash moved
+(the agent edited REVIEW.md mid-mutation), re-read and re-apply once. The
+file is chowned to uid 1000 after write so the agent can edit or delete it.
+
+`REVIEW.md` is written at the review root — see below — which is what makes
+it visible to the agent as a file of the project it is working on, and what
+keeps the format contract with the desktop tool (it also writes at the
+reviewed root).
 
 Drift detection ports as-is: on file fetch and on each poll tick that reports
 a changed workspace, compare each annotation's stored context against the
 current source; relocate on an exact context match elsewhere, mark
 `(outdated)` when it is gone, flush when anything changed.
 
+### Where the review roots
+
+`/workspace` starts empty and the agent usually clones a project into a
+subdirectory, so the workspace directory itself is frequently not the repo.
+Root resolution, at review open and cached on the session row:
+
+1. If the workspace is a git work tree (`git rev-parse --show-toplevel`),
+   root there.
+2. Else, if it contains exactly one directory and that is a git work tree,
+   root there — the overwhelmingly common shape.
+3. Else root at the workspace with git features off (the desktop tool
+   degrades the same way: plain tree, no statuses, no diff).
+
 ## Backend: module and API
 
-New module `orchestrator/src/review/`, pure logic separated from exec I/O so
-the tests need no Docker:
+New module `orchestrator/src/review/`, pure logic separated from I/O so the
+parser tests need no filesystem:
 
 ```
 orchestrator/src/review/
   store.ts        parse/serialize REVIEW.md, mutation, drift (pure; port of internal/store)
   gitstatus.ts    porcelain/name-status parsing, base resolution (pure parsers; port)
   difflines.ts    unified-diff → line markers, hunks, deletion markers (pure; port)
-  tree.ts         git ls-files / find output → tree, ignore lists (port of internal/filetree)
-  safepath.ts     path containment under the review root (port of internal/safepath)
-  exec.ts         capture/writeFile on runArgvExec; root resolution
-  service.ts      the per-session review façade: cache, mutex, fingerprint
+  tree.ts         git ls-files / directory walk → tree, ignore lists (port of internal/filetree)
+  fs.ts           contained reads/writes under one workspace: containment, caps, atomic write
+  git.ts          the one place a git process is spawned: fixed argv, hardened env
+  service.ts      the per-session review façade: root resolution, cache, mutex, fingerprint
 ```
 
 Routes in `app.ts`, shapes in `shared/types.ts` like every other endpoint.
@@ -175,42 +184,69 @@ Batched deliberately — a phone on a slow link gets one round trip per screen:
 | `GET /api/sessions/:id/review/file?path=` | `{ content, truncated, binary, size, lines, diff: {lines, hunks, deletions}, annotations }` — the whole file view in one response |
 | `PUT /api/sessions/:id/review/annotations` | `{path, line, comment}` — create or update, returns the file's annotations |
 | `DELETE /api/sessions/:id/review/annotations?path=&line=` | Delete one |
-| `GET /api/sessions/:id/review/status` | `{ reviewHash, headCommit, statusHash }` — the poll fingerprint, three cheap execs |
-| `PUT /api/sessions/:id/review/base` | `{rev}` or `{rev: null}` — resolve via `git rev-parse` + `git merge-base` in the container, persist on the session row |
+| `GET /api/sessions/:id/review/status` | `{ reviewHash, headCommit, statusHash }` — the poll fingerprint, cheap local hashing |
+| `PUT /api/sessions/:id/review/base` | `{rev}` or `{rev: null}` — resolve via `git rev-parse` + `git merge-base`, persist on the session row |
 | `DELETE /api/sessions/:id/review` | Delete REVIEW.md — the "New review" button |
 
-Git invocations are the desktop tool's, verbatim where possible:
-`-c core.quotepath=false status --porcelain -uall`, `diff --name-status
-<base>`, `ls-files --others --exclude-standard`, `diff <rev> --unified=3
---no-color -- <path>`, `merge-base <commit> HEAD` — each as argv with `--`
-before any path.
+None of these start or touch the session container. Git invocations are the
+desktop tool's, verbatim where possible: `-c core.quotepath=false status
+--porcelain -uall`, `diff --name-status <base>`, `ls-files --others
+--exclude-standard`, `diff <rev> --unified=3 --no-color -- <path>`,
+`merge-base <commit> HEAD` — all local operations, no network, no hooks. The
+orchestrator image gains the `git` package.
 
-One migration: `review_base` (the resolved base commit and the rev as given)
-and `review_root` columns on `sessions`. Nothing else touches the schema —
-annotations live in the file.
+One migration beyond the storage change: `review_base` (the resolved base
+commit and the rev as given) and `review_root` columns on `sessions`.
+Annotations live in the file.
 
-Freshness is polling, not push, in v1. The dashboard already polls
-`/api/sessions` every 5 s while visible; the review view polls
-`review/status` the same way and refetches tree/file/annotations only when a
-fingerprint moved, running drift server-side on that transition. The desktop
-tool's WebSocket push is a later stage if polling feels laggy — it would be a
-new upgrade path (`/ws/sessions/:id/review`) beside the ACP gateway, not a
-change to it — but nothing below depends on it.
+Freshness is polling in v1: the review view polls `review/status` every 5 s
+while the tab is visible — the pattern the session list already uses — and
+refetches tree/file/annotations only when a fingerprint moved, running drift
+on that transition. With the files local this costs three hashes, not three
+execs. The desktop tool's push model becomes an honest later stage: fs
+watching works on a directory the orchestrator can see, and a
+`/ws/sessions/:id/review` upgrade path beside the ACP gateway (same bearer
+subprotocol) can replace the poll without touching the gateway. Nothing below
+depends on it.
 
-### Security
+## Security
 
-- Every client-supplied path goes through the `safepath` port against the
-  review root before any exec; escape attempts 404 like an unknown session.
-- No user input ever reaches a shell string; argv arrays only, `--`
-  separators for git, content over stdin.
+The boundary shift is deliberate and accepted: the orchestrator — which holds
+the Docker socket — now reads an agent-controlled tree and runs git over it.
+The mount adds no privilege it lacks; what it adds is exposure of that
+process to hostile *content*. Two invariants keep that exposure bounded, and
+both live in exactly one file each so they stay reviewable:
+
+- **Symlink containment, in `review/fs.ts`.** Every client-supplied path is
+  resolved with `realpath` and must land under the review root's own
+  realpath; the final component is `lstat`ed and a symlink is refused. That
+  contains the obvious attack — `ln -s /data x` in the workspace serving the
+  deployment's secrets through the file endpoint. A determined agent racing
+  the check against the open remains theoretically possible (Node exposes no
+  race-free beneath-only open); accepted, documented in the code, and the
+  reads still run with this process's own file descriptors only — no shell.
+- **Git hardening, in `review/git.ts`.** Repo-local config can execute
+  commands on exactly the operations review runs (`core.fsmonitor` on
+  status; external diff drivers, `textconv` and filters on diff). Every git
+  process therefore gets a fixed argv prefix and a scrubbed env from one
+  builder: `GIT_CONFIG_NOSYSTEM=1`, `HOME` pointed at an empty directory (no
+  global config), `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`,
+  `safe.directory` for the root, `-c core.fsmonitor=false`, and diff run
+  with `--no-ext-diff --no-textconv`. A unit test asserts the flag set, so
+  removing one is a visible act.
+
+The rest is the ordinary hygiene the exec design needed too:
+
+- Paths validated against the tree before use; escape attempts 404 like an
+  unknown session.
 - Output caps per endpoint (file reads 2 MiB then `truncated: true`; binary
   sniffed by NUL byte and refused with `binary: true`).
 - File content and comments are agent-influenced and hostile by assumption:
   the frontend renders them as text nodes only — highlight tokens become
   React elements, never `dangerouslySetInnerHTML`. Comments render as plain
-  text in v1 (no markdown rendering of comment bodies).
-- The endpoints sit under `/api` behind whatever authenticates it, and change
-  nothing about the reverse-proxy contract.
+  text in v1.
+- The endpoints sit under `/api` behind whatever authenticates it, and
+  change nothing about the reverse-proxy contract.
 
 ## Frontend
 
@@ -219,7 +255,8 @@ change to it — but nothing below depends on it.
 `/sessions/:id/review`, with the open file in the search string
 (`?path=src/app.ts`) so a file is linkable and back-button works. Entry
 points: a Review action in the thread header next to Fork, and on the session
-card. The view owns the whole viewport like the thread view does.
+card — where it works whether or not the box is running. The view owns the
+whole viewport like the thread view does.
 
 ### Layout: one commenting UI, two arrangements
 
@@ -282,7 +319,7 @@ the reason this feature belongs inside Boxes at all.
 ## What is deliberately not ported
 
 - **WebSocket live updates and file watching** — polling a fingerprint
-  instead (v1; push is an additive later stage).
+  instead (v1; push is an additive later stage, and genuinely possible now).
 - **The hover scrollbar minimap** — replaced by prev/next navigation.
 - **Graceful shutdown closing the tab** — meaningless here; the view is a
   route, not an app.
@@ -293,45 +330,60 @@ the reason this feature belongs inside Boxes at all.
 
 Each lands green and shippable on its own.
 
-1. **Pure ports + exec plumbing.** `review/{store,gitstatus,difflines,tree,
-   safepath}.ts` with the Go tests' tables ported (round-trip fixtures
-   asserted byte-for-byte against files the Go tool wrote); `runArgvExec` with
-   stdin support in `docker.ts`; `review/exec.ts` capture/write/root
-   resolution. No routes yet.
-2. **REST surface.** `service.ts`, the seven routes, `shared/types.ts`
-   shapes, the `sessions` migration, `app.test.ts` coverage driving the real
-   routes over a fake exec layer (the same pattern the exec endpoint's tests
-   use).
-3. **Read-only viewer.** Route, entry points, tree (desktop column + mobile
+1. **Workspace storage.** Bind-mounted workspace directories: the host-path
+   resolution at boot, create/delete, the `workspace_dir` migration, the
+   legacy copy-and-recreate on start, smoke-test assertions. Proves the
+   Docker Desktop bind assumption first. No review code yet — this stage is
+   also just a better storage story (a session's files become inspectable on
+   the host).
+2. **Pure ports + I/O layer.** `review/{store,gitstatus,difflines,tree}.ts`
+   with the Go tests' tables ported (round-trip fixtures asserted
+   byte-for-byte against files the Go tool wrote); `fs.ts` containment and
+   atomic writes; `git.ts` with the hardened invocation builder and its
+   flag-set test; git added to the orchestrator image.
+3. **REST surface.** `service.ts`, the seven routes, `shared/types.ts`
+   shapes, the `review_base`/`review_root` migration, `app.test.ts` coverage
+   driving the real routes over a temp-directory workspace with a real git
+   repo — no Docker needed, which is the payoff of stage 1 for tests too.
+4. **Read-only viewer.** Route, entry points, tree (desktop column + mobile
    sheet), file view with Shiki tokens, git status colours, diff gutter
    markers, hunk sheet, prev/next navigation. Usable as a browse-the-
-   workspace feature by itself.
-4. **Commenting.** Composer (inline / bottom sheet), annotation CRUD against
+   workspace feature by itself, stopped sessions included.
+5. **Commenting.** Composer (inline / bottom sheet), annotation CRUD against
    REVIEW.md, inline comment cards, comment badges in tree and toolbar, "New
    review", "Hand to agent".
-5. **Base revision + drift.** Base picker in the header (status bar shows the
+6. **Base revision + drift.** Base picker in the header (status bar shows the
    active base, as the desktop tool does), `statusesSince` behaviour, drift
    check on fetch and on fingerprint change, `(outdated)` rendering.
-6. **Polish and the browser suite.** Review pages in the dashboard e2e suite
+7. **Polish and the browser suite.** Review pages in the dashboard e2e suite
    against a stub orchestrator serving canned review responses (tree → open →
    comment → REVIEW.md write asserted, on desktop and mobile viewports);
-   optional WS push and overview rail if polling proves laggy.
+   optional fs-watcher + WS push and overview rail if polling proves laggy.
 
 ## Risks and open ends
 
+- **The bind assumption.** Binding a subdirectory of a named volume's
+  daemon-side path is the one Docker behaviour this leans on; verified on
+  Linux and Docker Desktop before anything is built on it (stage 1). If
+  Docker Desktop refuses it, the fallback is compose mounting a real host
+  directory for `/data` — a README-visible change, not a redesign.
+- **Symlink containment and git hardening are invariants, not one-time
+  fixes.** Each lives in one file with a test; the accepted residual (the
+  realpath TOCTOU race) is documented where the check lives.
 - **Adapter and reviewer writing REVIEW.md concurrently.** Hash-guarded
   read-modify-write with one retry keeps it honest; a lost race costs one
   visible refresh, not data, because every write re-serializes the whole
   parsed file.
+- **Legacy migration.** Copy-and-recreate on start is the risky moment for
+  existing deployments; it runs only on stopped containers, copies before it
+  recreates, and deletes the volume only after the new container started.
+- **Ownership drift.** Everything review writes is chowned to uid 1000; the
+  uid is a named constant beside the bind template, with the comment
+  pointing at the session image's user.
 - **Huge workspaces.** Tree capped (~20k entries, then a "tree truncated"
   notice); `git ls-files` does the heavy lifting where there is a repo; the
   desktop tool's ignore lists (node_modules, dist, binaries…) port as-is.
-- **Exec churn from polling.** Three tiny execs per open review view per 5 s,
-  visible-tab only. If it shows up, the fingerprint collapses to one exec
-  (one `sh -c` computing all three hashes — static script, no user input).
 - **Shiki bundle weight.** Grammars and engine lazy-loaded; the thread view's
-  bundle must not grow. Verified in stage 3 by the build's chunk report.
+  bundle must not grow. Verified in stage 4 by the build's chunk report.
 - **A session with no git.** Everything degrades to tree + read + comment,
   statuses and diffs empty — same as the desktop tool outside a repo.
-- **Reaper interplay.** Review polling touches the session; without that an
-  idle-looking session under active review would be stopped mid-read.
