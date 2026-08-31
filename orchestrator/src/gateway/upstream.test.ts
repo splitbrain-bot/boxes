@@ -9,6 +9,7 @@ import { config } from '../config.ts';
 import { openDb, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
 import { EgressManager } from '../egress.ts';
+import { Notifier, type NotifyEvent } from '../notify.ts';
 import { SessionManager } from '../sessions.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -115,6 +116,15 @@ function fakeDocker(adapter: FakeAdapter | (() => FakeAdapter)): void {
 let dir: string;
 let db: Db;
 let manager: SessionManager;
+/** Every event the gateway announced, in order; see notifications below. */
+let announced: NotifyEvent[];
+
+/** A notifier that records instead of sending. */
+class RecordingNotifier extends Notifier {
+  override async notify(event: NotifyEvent): Promise<void> {
+    announced.push(event);
+  }
+}
 
 /** A running session with two threads, the first of which is current. */
 function seed(): void {
@@ -143,7 +153,8 @@ beforeEach(() => {
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
   const cfg = config();
-  manager = new SessionManager(db, cfg, new EgressManager(cfg));
+  announced = [];
+  manager = new SessionManager(db, cfg, new EgressManager(cfg), new RecordingNotifier(db, cfg));
   seed();
 });
 
@@ -643,4 +654,96 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
     { session: 'acp-fresh', mode: 'auto' },
     { session: 'acp-branch', mode: 'plan' },
   ]);
+});
+
+// --- notifications ----------------------------------------------------------
+
+/**
+ * What the gateway announces, and when.
+ *
+ * Both events are gated on the same thing — nobody is watching that thread —
+ * because both exist for the same moment: the browser is gone and the box
+ * still wants something. A notification for a turn you are looking at is
+ * noise, and noise is what gets notifications turned off.
+ */
+
+/** An adapter that answers everything, with prompts finishing immediately. */
+function plainAdapter(): FakeAdapter {
+  return new FakeAdapter((msg) =>
+    msg.method === 'initialize' ? { protocolVersion: 1, agentCapabilities: {} } : {},
+  );
+}
+
+test('a turn that finishes with nobody watching is announced, naming the thread', async () => {
+  fakeDocker(plainAdapter());
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-gone',
+    prompt: [{ type: 'text', text: 'go' }],
+  });
+
+  assert.deepEqual(announced, [
+    {
+      kind: 'idle',
+      sessionId: 's1',
+      sessionName: 'test',
+      // The dashboard's own id, so the notification can link straight at the
+      // conversation rather than at the box.
+      threadId: 't1',
+      // Untitled until a turn produces one, so it goes by its ordinal — the
+      // same name the session list shows.
+      threadName: 'Thread 1',
+    },
+  ]);
+});
+
+test('a turn that finishes in front of a browser is not announced', async () => {
+  fakeDocker(plainAdapter());
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  up.attach(fakeHandle(1, 'acp-gone'));
+
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-gone',
+    prompt: [{ type: 'text', text: 'go' }],
+  });
+  assert.deepEqual(announced, []);
+});
+
+test('a browser on another thread does not count as watching this one', async () => {
+  fakeDocker(plainAdapter());
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  // Watching the session's other conversation: this turn still finished with
+  // nobody on it.
+  up.attach(fakeHandle(1, 'acp-kept'));
+
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-gone',
+    prompt: [{ type: 'text', text: 'go' }],
+  });
+  assert.deepEqual(
+    announced.map((e) => [e.kind, e.threadId]),
+    [['idle', 't1']],
+  );
+});
+
+test('a queued permission request is announced as one', async () => {
+  const adapter = plainAdapter();
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // Nobody is attached, so the request is queued rather than delivered.
+  adapter.push(permissionFrame('acp-kept'));
+  await expect.poll(() => announced.length).toBe(1);
+  assert.deepEqual(announced[0], {
+    kind: 'approval',
+    sessionId: 's1',
+    sessionName: 'test',
+    threadId: 't2',
+    threadName: 'Thread 2',
+  });
 });

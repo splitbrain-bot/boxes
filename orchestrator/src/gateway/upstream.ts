@@ -13,6 +13,7 @@ import {
   setThreadAcpId,
   setThreadTitle,
   setThreadTurnActive,
+  threadByAcpId,
   touchThread,
   type Db,
   type SessionRow,
@@ -20,6 +21,7 @@ import {
 } from '../db.ts';
 import * as dk from '../docker.ts';
 import { log, type Logger } from '../log.ts';
+import type { NotifyKind, Notifier } from '../notify.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
 
@@ -149,6 +151,7 @@ export class UpstreamSession {
     private readonly db: Db,
     private readonly cfg: Config,
     private readonly pending: PendingStore,
+    private readonly notifier: Notifier,
     private readonly onStatus: (status: SessionRow['status']) => void,
   ) {
     this.slog = log.session(sessionId);
@@ -760,7 +763,7 @@ export class UpstreamSession {
         (timedOut) => this.applyPermissionFallback(timedOut.row.id, params, resolve),
       );
       this.slog.info('permission request queued', { pendingId: entry.row.id });
-      void this.notifyNtfy();
+      this.announce('approval', threadOf(params) ?? null);
     });
   }
 
@@ -795,18 +798,35 @@ export class UpstreamSession {
     }
   }
 
-  /** Posts an approval-waiting notification to NTFY_URL, when one is set. */
-  private async notifyNtfy(): Promise<void> {
-    if (!this.cfg.NTFY_URL) return;
+  /**
+   * Tells the notifier that a thread wants somebody, naming the conversation
+   * rather than only the box: with two threads live, "your session needs you"
+   * is not enough to act on from a lock screen.
+   *
+   * Fire and forget by construction — see notify.ts. A turn already waiting
+   * on a human must not also wait on a push service.
+   */
+  private announce(kind: NotifyKind, acpThreadId: string | null): void {
+    const thread = acpThreadId
+      ? threadByAcpId(this.db, this.sessionId, acpThreadId)
+      : undefined;
+    let sessionName: string;
     try {
-      await fetch(this.cfg.NTFY_URL, {
-        method: 'POST',
-        headers: { Title: 'Boxes: approval needed' },
-        body: `Session ${this.row().name} is waiting for a permission decision.`,
-      });
-    } catch (err) {
-      this.slog.warn('ntfy notification failed', { error: (err as Error).message });
+      sessionName = this.row().name;
+    } catch {
+      // The session was deleted between the event and this call; there is
+      // nothing left to notify anybody about.
+      return;
     }
+    void this.notifier.notify({
+      kind,
+      sessionId: this.sessionId,
+      sessionName,
+      threadId: thread?.id ?? null,
+      // The same name the dashboard shows, so a notification and the list
+      // agree about which conversation this is.
+      threadName: thread ? thread.title?.trim() || `Thread ${thread.ordinal}` : null,
+    });
   }
 
   /**
@@ -867,6 +887,13 @@ export class UpstreamSession {
       if (isPrompt) {
         this.setTurnActive(thread, false);
         this.downstreams.endPrompt(params);
+        // Only when nobody is left watching this conversation. A turn
+        // finishing in front of you needs no notification, and the same test
+        // already decides whether a permission request is queued — so the two
+        // events agree about what "you are not here" means.
+        if (this.downstreams.byRecency(thread).length === 0) {
+          this.announce('idle', thread);
+        }
       }
       if (isLoad) this.downstreams.endReplay(from, thread);
     }

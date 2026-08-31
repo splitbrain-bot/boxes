@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
+    <!-- Installability, which is not decoration here: on iOS the Notification
+         and Push APIs exist only for a page added to the Home Screen. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon-192.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="theme-color" content="#18181b" />
     <title>Boxes</title>
     <script>
       // Applied before first paint, so the page never flashes the wrong

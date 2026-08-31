@@ -112,3 +112,17 @@ test('the info corner opens the ops route instead', async () => {
     await close();
   }
 });
+
+test('the session list offers to notify this browser', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/', 'dark');
+  try {
+    // A browser that can subscribe is offered the choice rather than
+    // subscribed for it: the permission prompt has to come from a click.
+    const toggle = page.getByRole('button', { name: 'Notify me' });
+    await expect.poll(() => toggle.isVisible()).toBe(true);
+    expect(await toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
