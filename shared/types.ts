@@ -154,6 +154,25 @@ export interface HealthResponse {
    * run a turn unless somebody logs in inside it.
    */
   claudeTokenConfigured: boolean;
+  /** How many browsers are registered for Web Push. */
+  pushSubscriptions: number;
+}
+
+/** The deployment's VAPID public key, which a browser subscribes with. */
+export interface PushKeyResponse {
+  /** Uncompressed P-256 point, base64url. Not a secret. */
+  publicKey: string;
+}
+
+/**
+ * Body of a push registration, shaped like the browser's own
+ * PushSubscription.toJSON() so the page can pass it through unchanged.
+ */
+export interface PushSubscribeBody {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  /** What this browser calls itself, for the deployment's own reference. */
+  label?: string;
 }
 
 /** Body of any 4xx or 5xx answer from the API. */

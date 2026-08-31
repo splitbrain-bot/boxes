@@ -1,6 +1,7 @@
 import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { refreshPush } from './stores/push.ts';
 import { startPolling } from './stores/sessions.ts';
 import { Playground } from './views/Playground.tsx';
 import { SessionCreate } from './views/SessionCreate.tsx';
@@ -78,4 +79,10 @@ if (root) {
     </StrictMode>,
   );
   startPolling();
+  // Registers the service worker and re-registers a browser that is already
+  // subscribed — a push service may have handed it a new subscription since
+  // the last load, and this is the only place the orchestrator hears about
+  // that. Never asks for permission: that needs a click, and the toggle in
+  // the session list is where it happens.
+  void refreshPush();
 }

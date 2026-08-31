@@ -45,6 +45,19 @@ const schema = z.object({
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
   NTFY_URL: z.string().url().or(z.literal('')).default(''),
 
+  /**
+   * Who operates this deployment, for the VAPID assertion every Web Push
+   * carries. A push service with a problem contacts this rather than
+   * silently dropping the messages; RFC 8292 allows a mailto: or an https:
+   * URL and nothing else.
+   */
+  PUSH_SUBJECT: z
+    .string()
+    .refine((v) => v.startsWith('mailto:') || v.startsWith('https://'), {
+      message: 'must be a mailto: or https: URL',
+    })
+    .default('https://github.com/splitbrain/boxes'),
+
   /** Container name of the egress proxy the orchestrator attaches. */
   EGRESS_PROXY_CONTAINER: z.string().min(1).default('boxes-egress-proxy'),
   EGRESS_PROXY_ALIAS: z.string().min(1).default('proxy'),

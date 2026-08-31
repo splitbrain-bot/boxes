@@ -209,6 +209,7 @@ export async function startStubOrchestrator(
         proxyWarnings: [],
         egress: null,
         claudeTokenConfigured: state.claudeTokenConfigured,
+        pushSubscriptions: 0,
       };
       return json(res, 200, health);
     }

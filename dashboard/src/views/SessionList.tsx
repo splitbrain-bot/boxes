@@ -1,5 +1,6 @@
 import { Plus } from 'lucide-react';
 import { Link } from 'react-router';
+import { PushToggle } from '@/components/PushToggle';
 import { SessionCard } from '@/components/SessionCard';
 import { TokenWarning } from '@/components/TokenWarning';
 import { Button } from '@/components/ui/button';
@@ -13,12 +14,18 @@ export function SessionList() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Sessions</h1>
-        <Button asChild size="sm">
-          <Link to="/new">
-            <Plus />
-            New
-          </Link>
-        </Button>
+        <div className="flex items-center gap-1">
+          {/* Whether this browser hears about a box that wants something. A
+              subscription belongs to the browser rather than to a session, so
+              it lives with the list rather than inside one. */}
+          <PushToggle />
+          <Button asChild size="sm">
+            <Link to="/new">
+              <Plus />
+              New
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {claudeTokenConfigured ? null : <TokenWarning className="rounded-md border px-3 py-2" />}

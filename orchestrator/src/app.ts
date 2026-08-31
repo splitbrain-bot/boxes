@@ -11,15 +11,23 @@ import type {
   ExecLogPage,
   ExecRequest,
   HealthResponse,
+  PushKeyResponse,
+  PushSubscribeBody,
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseBody,
 } from '../../shared/types.ts';
 import type { config } from './config.ts';
-import type { openDb } from './db.ts';
+import {
+  countPushSubscriptions,
+  deletePushSubscription,
+  upsertPushSubscription,
+  type openDb,
+} from './db.ts';
 import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
 import { log } from './log.ts';
+import { Notifier } from './notify.ts';
 import { ReviewService, ReviewUnavailable } from './review/service.ts';
 import { HttpError, SessionManager } from './sessions.ts';
 
@@ -46,6 +54,8 @@ export interface Orchestrator {
   cfg: ReturnType<typeof config>;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
+  /** Where "a thread wants you" goes; see notify.ts. */
+  notifier: Notifier;
   /** Reads and writes review data over the sessions' workspace directories. */
   review: ReviewService;
   /** Session ids whose network is missing the egress proxy. */
@@ -64,7 +74,8 @@ export function buildApp(
   db: ReturnType<typeof openDb>,
 ): Orchestrator {
 const egress = new EgressManager(cfg);
-const manager = new SessionManager(db, cfg, egress);
+const notifier = new Notifier(db, cfg);
+const manager = new SessionManager(db, cfg, egress, notifier);
 // The review surface reaches the files through the manager, which is the one
 // thing that knows whether a session is directory-backed yet.
 const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
@@ -94,6 +105,7 @@ app.get('/healthz', async (): Promise<HealthResponse> => {
     proxyWarnings,
     egress: egress.status(),
     claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
+    pushSubscriptions: countPushSubscriptions(db),
   };
 });
 
@@ -300,6 +312,46 @@ app.delete('/api/sessions/:id/review', async (req, reply) => {
   return reply.code(204).send();
 });
 
+// --- Web Push --------------------------------------------------------------
+
+/**
+ * The deployment's VAPID public key, which a browser needs before it can
+ * subscribe at all.
+ *
+ * Not a secret: it is the identity a push service checks the signature
+ * against, and it is meant to be handed to every browser.
+ */
+app.get('/api/push/key', async (): Promise<PushKeyResponse> => ({
+  publicKey: notifier.publicKey,
+}));
+
+/**
+ * Registers a browser for push, or refreshes what is stored for it.
+ *
+ * There is no user to attach this to — Boxes has no accounts — so a
+ * subscription is simply one more browser this deployment notifies, and
+ * whatever authenticates the rest of `/api` is what decides who may add one.
+ */
+app.post('/api/push/subscribe', async (req, reply) => {
+  const body = req.body as PushSubscribeBody | undefined;
+  const endpoint = validEndpoint(body?.endpoint);
+  const p256dh = validKey(body?.keys?.p256dh, 65, 'p256dh');
+  const auth = validKey(body?.keys?.auth, 16, 'auth');
+  const label = typeof body?.label === 'string' ? body.label.slice(0, 100) : null;
+
+  upsertPushSubscription(db, endpoint, p256dh, auth, label);
+  log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
+  return reply.code(204).send();
+});
+
+/** Forgets a browser's subscription, on its own way out. */
+app.delete('/api/push/subscribe', async (req, reply) => {
+  const body = req.body as { endpoint?: unknown } | undefined;
+  if (typeof body?.endpoint !== 'string') throw new HttpError(400, 'endpoint is required');
+  deletePushSubscription(db, body.endpoint);
+  return reply.code(204).send();
+});
+
 // --- Static bundles with a single-page fallback -----------------------------
 
 /** Content types served from the bundles, by file extension. */
@@ -321,6 +373,40 @@ const CONTENT_TYPES: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
   '.webmanifest': 'application/manifest+json',
 };
+
+/**
+ * Checks a push endpoint before the orchestrator will ever POST to it.
+ *
+ * https only, and never an address literal: a push service is always a named
+ * host, and accepting a literal would turn this route into a way to aim the
+ * orchestrator at the LAN it can see. A hostname that resolves into private
+ * space is not caught here — the API is root-equivalent either way, and
+ * whatever authenticates it is the real boundary.
+ */
+function validEndpoint(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 2000) {
+    throw new HttpError(400, 'endpoint is required');
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new HttpError(400, 'endpoint must be a URL');
+  }
+  if (url.protocol !== 'https:') throw new HttpError(400, 'endpoint must be https');
+  if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname === 'localhost') {
+    throw new HttpError(400, 'endpoint must name a host, not an address');
+  }
+  return value;
+}
+
+/** Checks one base64url key from a subscription decodes to the expected size. */
+function validKey(value: unknown, bytes: number, name: string): string {
+  if (typeof value !== 'string' || Buffer.from(value, 'base64url').length !== bytes) {
+    throw new HttpError(400, `${name} must be ${bytes} base64url-encoded bytes`);
+  }
+  return value;
+}
 
 /**
  * Serves one single-page bundle: a real file when the path names one, else the
@@ -364,6 +450,7 @@ app.setNotFoundHandler((req, reply) => {
     manager,
     cfg,
     egress,
+    notifier,
     review,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;

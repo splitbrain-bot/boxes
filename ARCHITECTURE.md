@@ -129,6 +129,9 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id/review/status` | The poll fingerprint: three cheap local hashes |
 | `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it |
 | `DELETE /api/sessions/:id/review` | Deletes `REVIEW.md` — "New review" |
+| `GET /api/push/key` | The deployment's VAPID public key, which a browser subscribes with |
+| `POST /api/push/subscribe` | Registers a browser for Web Push, or refreshes what is stored for it |
+| `DELETE /api/push/subscribe` | Forgets one browser's subscription |
 
 The API carries no authentication of its own; a reverse proxy is expected to
 provide it for `/` and `/api`, and the published port binds to loopback so
@@ -466,6 +469,57 @@ proceeding without consent.
   options list, never an invented one, and cancels the request when none is
   offered. Nothing auto-approves.
 
+### Notifications
+
+Two events are worth interrupting somebody for: a permission request has been
+queued, and a turn has finished. Both are announced from the gateway through
+`notify.ts`, and both are gated on the same condition — **no browser is
+watching that thread**. That is not a heuristic about attention, it is the
+same test that decides whether a permission request is queued in the first
+place, so the two agree about what "you are not here" means. A turn finishing
+in front of you is the screen you are already looking at.
+
+The announcement names the conversation, not only the box. With two threads
+live, "your session needs you" is not something you can act on from a lock
+screen.
+
+`Notifier` fans one event out to two channels and awaits neither of them from
+the gateway's side. A turn already waiting on a human must not also wait on a
+push service, so every failure inside is logged and swallowed.
+
+- **`NTFY_URL`**, when set: one POST, no other requirement, and it reaches a
+  phone with no browser running at all.
+- **Web Push** (`push.ts`), to every browser that subscribed: RFC 8291
+  `aes128gcm` payload encryption over RFC 8188, authenticated with an RFC 8292
+  VAPID assertion. This is what survives the app being closed, which is the
+  reason the feature exists.
+
+The crypto is implemented on `node:crypto` rather than taken as a dependency.
+It is about a hundred lines, and `push.test.ts` drives it against the RFC's
+own published example — matching that byte for byte is worth more than a
+round-trip test, because an implementation can be self-consistent and still
+produce a body no browser can open.
+
+The VAPID keypair is generated into `DATA_DIR/vapid-keys.json` on first use
+and reused from then on, the same shape as the WebSocket token in `secret.ts`
+and for the same reason: regenerating it would silently invalidate every
+subscription anybody had made. It is generated lazily, so a deployment nobody
+subscribes from never writes one.
+
+A subscription is one browser, not one user — Boxes has no accounts, so
+whatever authenticates `/api` is what decides who may register. An endpoint
+must be `https` and must name a host rather than an address literal, so the
+route cannot be used to aim the orchestrator at the LAN it can see. A
+subscription the push service answers with 404 or 410 is dropped on the spot:
+that is the ordinary end of one, not an error.
+
+Delivery needs two things Boxes cannot provide for itself. The Push API does
+not exist on a page served over plain HTTP (`http://localhost` excepted), so
+push works on the loopback default and behind a TLS reverse proxy and nowhere
+else. And iOS exposes it only to a page added to the Home Screen, which is why
+the dashboard ships a manifest and why the toggle tells an uninstalled iPhone
+to install rather than that it cannot.
+
 ## Session lifecycle
 
 Creating a session, in `SessionManager.create`:
@@ -787,6 +841,7 @@ applies migrations tracked by `user_version`.
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
 | `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session |
 | `exec_log` | Local commands and their output, ring-pruned to 200 rows per session |
+| `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
 | `counters` | The subnet allocation counter |
 
 Two kinds of state deliberately stay out of the database. Secrets live only in
@@ -886,6 +941,8 @@ orchestrator/src/
   exec.ts               Local commands: limits, streaming, the exec log
   config.ts             Environment parsing, and the translatable credential set
   secret.ts             WS auth token: configured, stored, or generated
+  notify.ts             "A thread wants you", fanned out to ntfy and Web Push
+  push.ts               VAPID and RFC 8291 payload encryption, on node:crypto
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log
   sessions.ts           Session lifecycle, the owner of every UpstreamSession
@@ -918,6 +975,7 @@ proxy/src/
 
 dashboard/
   index.html            Vite entry; sets the dark class before first paint
+  public/               Served from the bundle root: the service worker, the manifest, the icons
   vite.config.ts        React, Tailwind, the dev proxy, both test projects
   components.json       Where the shadcn and assistant-ui CLIs install to
   e2e/                  Browser tests, and the stub orchestrator and gateway
@@ -927,6 +985,7 @@ dashboard/
     api.ts              Typed fetch client
     stores/
       sessions.ts       Polled session list and health, read by useSyncExternalStore
+      push.ts           Web Push registration: the service worker, the subscription, the toggle's state
       thread/
         acp-types.ts    The slice of the ACP schema the browser speaks
         acp-client.ts   JSON-RPC over the WebSocket, and the handshake
@@ -982,9 +1041,15 @@ limits, the schema migrations that turned one thread per session into several
 and then moved the running turn onto them, the spawn path against a stand-in
 adapter — a forgotten thread costing the session only that thread, a turn
 recorded against its own thread, a permission request reaching only a browser
-on the asking thread, and a respawn reloading every watched thread — and the
-translation of ACP notifications into the thread's message model — including
-replay, out-of-order tool updates, and an update kind this build predates.
+on the asking thread, a turn announced only when nobody was watching it, and a
+respawn reloading every watched thread — and the translation of ACP
+notifications into the thread's message model — including replay, out-of-order
+tool updates, and an update kind this build predates.
+
+Web Push is the one piece tested against somebody else's numbers: `push.ts`
+has to produce a body a browser can open, and no round-trip test can show
+that, so `push.test.ts` reproduces the worked example in RFC 8291 byte for
+byte and verifies the VAPID assertion against the key it advertises.
 
 The dashboard also runs a browser suite. It builds the production bundle and
 serves it the way the orchestrator does, from a stub orchestrator and a stub

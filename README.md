@@ -99,7 +99,8 @@ docker exec -it session-<id> claude /login
 | `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
 | `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
-| `NTFY_URL` | — | POSTed when a permission request is waiting |
+| `NTFY_URL` | — | POSTed when a session wants you |
+| `PUSH_SUBJECT` | project URL | Contact in the VAPID assertion Web Push carries |
 | `DATA_DIR` | `/data` | Database, generated token and session workspaces, inside the volume |
 | `HOST_DATA_DIR` | resolved | Host-side path of `DATA_DIR`, which a workspace bind mount has to name. Resolved at boot by inspecting the orchestrator's own container; set it only where that cannot work |
 | `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Proxy container the orchestrator attaches to session networks |
@@ -187,8 +188,8 @@ workspaces this way says so and asks you to start it once, which migrates it.
 
 **Answer permission requests.** When the agent asks to do something requiring
 consent, the request goes to a browser watching the thread that asked. With
-nobody on that thread it is queued (and posted to `NTFY_URL` if set) and
-delivered to the next browser to open it. Nothing is ever auto-approved.
+nobody on that thread it is queued, you are notified, and it is delivered to
+the next browser to open it. Nothing is ever auto-approved.
 
 **Manage the session.** The ⓘ corner of a card opens its details and controls:
 start, stop, delete, the container and network names, and the WebSocket URL and
@@ -197,6 +198,40 @@ too, so the agent's work and the thread history go with it.
 
 Idle sessions — no turn on any thread, no waiting request, no attached browser
 — are stopped after `IDLE_STOP_MINUTES`. They are never deleted.
+
+## Notifications
+
+A box that wants something tells you, on two channels, whenever **nobody is
+watching that thread**: a permission request has been queued, or a turn has
+finished. A turn finishing in front of you is not announced — that is the
+screen you are already looking at.
+
+**Web Push** reaches a browser with no tab open, which is the case the feature
+exists for: lock your phone mid-turn and the answer arrives on the lock screen.
+Tap *Notify me* on the session list to subscribe this browser. Nothing to
+configure — the deployment generates its own VAPID keypair into
+`/data/vapid-keys.json` on first use, and the tap is the whole setup.
+
+Two things it needs, both outside Boxes:
+
+- **HTTPS.** The Push API does not exist on a page served over plain HTTP,
+  `http://localhost` excepted. So push works on the loopback default and
+  behind a TLS [reverse proxy](#behind-a-reverse-proxy), and not at all on a
+  bare `http://192.168.x.x:3000` — the toggle says so rather than failing
+  quietly. Set `PUSH_SUBJECT` to your own `mailto:` or `https:` URL so a push
+  service with a problem has somebody to contact.
+- **Add to Home Screen, on iOS.** Safari gives a page the Push API only once
+  it has been installed. Share → Add to Home Screen, open it from there, then
+  subscribe. Android and desktop browsers need no install.
+
+**`NTFY_URL`** is the other channel and needs neither: the same events are
+POSTed to whatever [ntfy](https://ntfy.sh) topic you point it at, from a
+deployment with no TLS and to a phone with no browser open. Setting both is
+reasonable — they fail in different ways.
+
+Unsubscribing is the same toggle. A subscription the push service reports as
+finished — permission revoked, browser uninstalled, Safari expiring it on its
+own schedule — is dropped on the next attempt without anybody doing anything.
 
 ## Behind a reverse proxy
 

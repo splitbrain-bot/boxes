@@ -143,7 +143,11 @@ test('a queued permission request gains the thread that asked', () => {
   }
 });
 
-/** Builds a database at the version just before workspaces became directories. */
+/**
+ * Builds a database at the version before push subscriptions, workspace
+ * directories and the review columns — the last state a deployment could be in
+ * without any of the three.
+ */
 function atVersion5(): void {
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS.slice(0, 5)) db.exec(sql);
@@ -174,5 +178,59 @@ test('a volume-backed session keeps its volume and gains no directory', () => {
     assert.ok(columns(db, 'sessions').includes('workspace_dir'));
   } finally {
     db.close();
+  }
+});
+
+/**
+ * A deployment already running the push-notification release, upgrading to
+ * this one.
+ *
+ * The two features were built on separate branches and both added a migration
+ * at the same index. Whichever shipped first has to keep its index, or a
+ * database that already applied it skips it and runs the wrong statement in
+ * its place — so this asserts the order rather than trusting the merge that
+ * chose it.
+ */
+test('a deployment on the previous release upgrades cleanly', () => {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 6)) db.exec(sql);
+  db.pragma('user_version = 6');
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES ('live', 'on the old release', 'DEFAULT', 'img', '[]', 'c1',
+       'sn-live', '10.200.0.0/24', 'ws-live', 'home-live', 'stopped', NULL, 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label,
+       created_at, last_used_at)
+     VALUES ('https://push.example/x', 'key', 'auth', 'phone', 1000, 2000)`,
+  ).run();
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    const sessions = columns(upgraded, 'sessions');
+    assert.ok(sessions.includes('workspace_dir'));
+    assert.ok(sessions.includes('review_root'));
+    assert.ok(sessions.includes('review_base_commit'));
+
+    // The migration that shipped first kept its index, so what it created is
+    // still there and still holds its rows.
+    assert.ok(columns(upgraded, 'push_subscriptions').includes('endpoint'));
+    const push = upgraded
+      .prepare('SELECT COUNT(*) AS n FROM push_subscriptions')
+      .get() as { n: number };
+    assert.equal(push.n, 1);
+
+    // And the session that predates workspace directories is untouched: it
+    // migrates at its next start, not here.
+    const row = upgraded
+      .prepare("SELECT ws_volume, workspace_dir FROM sessions WHERE id = 'live'")
+      .get() as { ws_volume: string; workspace_dir: string | null };
+    assert.deepEqual(row, { ws_volume: 'ws-live', workspace_dir: null });
+  } finally {
+    upgraded.close();
   }
 });
