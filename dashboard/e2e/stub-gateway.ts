@@ -223,6 +223,10 @@ export function attachStubGateway(
             params: { sessionId: threadId, update },
           });
         }
+        // After the replay, which is where the real gateway flushes them
+        // (orchestrator/src/gateway/downstream.ts). Delivering one earlier
+        // means delivering it into a transcript the client is about to throw
+        // away, and a queued request is only ever sent once.
         if (script.queuedPermission) {
           const queued = script.queuedPermission;
           script.queuedPermission = null;

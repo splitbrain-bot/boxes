@@ -204,17 +204,14 @@ export function attachDownstream(
   // thread.
   up.attach(handle);
   const pinned = up.pin(handle, threadId);
-  pinned.then(
-    () => up.flushPendingTo(handle),
-    (err: Error) => {
-      slog.error('could not pin the connection to a thread', { error: err.message });
-      try {
-        ws.close(1011, 'upstream unavailable');
-      } catch {
-        // already closing
-      }
-    },
-  );
+  pinned.catch((err: Error) => {
+    slog.error('could not pin the connection to a thread', { error: err.message });
+    try {
+      ws.close(1011, 'upstream unavailable');
+    } catch {
+      // already closing
+    }
+  });
 
   const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
     // Answered from the cached upstream response, so its _meta extensions
@@ -244,6 +241,12 @@ export function attachDownstream(
       // The handle goes with the request: a replay belongs to the browser
       // that asked for it, and a prompt is echoed on that browser's behalf.
       const result = await up.forwardRequest(method, params, handle);
+      // Queued permission requests wait for the replay rather than going out
+      // the moment the socket opens. A client rebuilds its whole thread from
+      // the replay, so a question delivered before it lands is thrown away
+      // with everything else that was on screen — and it is only ever sent
+      // once, which left the turn paused with nobody able to answer.
+      if (method === 'session/load') up.flushPendingTo(handle);
       // An empty answer is not an error: session/load delivers the replay as
       // session/update notifications rather than as its result.
       return result ?? {};

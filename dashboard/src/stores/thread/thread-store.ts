@@ -180,11 +180,19 @@ export class ThreadStore {
   }
 
   /**
-   * Drops approvals whose JSON-RPC request died with the connection. The
-   * adapter re-asks on the new one, so answering the old ids would answer
-   * nothing.
+   * Gives up the approvals this store can no longer show, answering each as
+   * cancelled on the way out.
+   *
+   * The usual caller is a connection that died, where the answer reaches
+   * nobody and the adapter asks again on the next one. Where the connection is
+   * still up — a replay this browser asked for — the answer is what keeps the
+   * turn moving: an abandoned question no card is left for would otherwise
+   * block the adapter until the hold expires.
    */
   private failOpenApprovals(): void {
+    for (const open of this.approvals.values()) {
+      open.resolve({ outcome: { outcome: 'cancelled' } });
+    }
     this.approvals.clear();
   }
 

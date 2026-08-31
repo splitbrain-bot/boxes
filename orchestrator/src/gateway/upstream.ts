@@ -832,6 +832,10 @@ export class UpstreamSession {
   /**
    * Puts the queued permission requests of a browser's own thread to it, once
    * it has one. Another thread's questions are not this browser's to answer.
+   *
+   * Called when that browser has taken the thread's replay, not when it
+   * attaches: a client rebuilds its transcript from the replay and drops
+   * whatever it held before, and a queued request is delivered once.
    */
   flushPendingTo(handle: DownstreamHandle): void {
     const thread = handle.acpThreadId;
