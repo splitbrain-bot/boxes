@@ -142,3 +142,37 @@ test('a queued permission request gains the thread that asked', () => {
     db.close();
   }
 });
+
+/** Builds a database at the version just before workspaces became directories. */
+function atVersion5(): void {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 5)) db.exec(sql);
+  db.pragma('user_version = 5');
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES ('s1', 'volume session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'stopped', NULL, 1000, 2000)`,
+  ).run();
+  db.close();
+}
+
+test('a volume-backed session keeps its volume and gains no directory', () => {
+  atVersion5();
+  const db = openDb(dir);
+  try {
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+      string,
+      unknown
+    >;
+    // Nothing is moved by the migration itself: the files are in a named
+    // volume this process has no path to, and only a start can recreate the
+    // container with the new mount.
+    assert.equal(session['ws_volume'], 'ws-s1');
+    assert.equal(session['workspace_dir'], null);
+    assert.ok(columns(db, 'sessions').includes('workspace_dir'));
+  } finally {
+    db.close();
+  }
+});

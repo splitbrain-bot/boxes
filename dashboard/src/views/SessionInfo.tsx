@@ -219,7 +219,7 @@ export function SessionInfo() {
       {confirmDelete ? (
         <ConfirmDialog
           title={`Delete ${session.name}?`}
-          description="The container, the network and both volumes are removed, so the workspace and the thread history go with them."
+          description="The container, the network, the workspace directory and the home volume are removed, so the files and the thread history go with them."
           confirmLabel="Delete"
           danger
           busy={busy}

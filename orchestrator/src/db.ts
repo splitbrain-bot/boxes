@@ -20,8 +20,21 @@ export interface SessionRow {
   container_id: string | null;
   network_name: string;
   subnet: string;
+  /**
+   * The named volume that used to hold the workspace, and still does for a
+   * session created before workspaces became directories. Empty on a session
+   * that is directory-backed, which every new one is.
+   */
   ws_volume: string;
   home_volume: string;
+  /**
+   * Where the session's files are, as this process saw them when the session
+   * was created or migrated, and null while the session is still
+   * volume-backed. The path actually used is derived from the current
+   * DATA_DIR, so moving the data volume moves the workspaces with it; what
+   * this column decides is only whether the session has a directory at all.
+   */
+  workspace_dir: string | null;
   status: SessionStatus;
   /**
    * The thread a connection that names none gets, or null before one exists.
@@ -176,6 +189,15 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE pending_requests ADD COLUMN acp_session_id TEXT;
   ALTER TABLE sessions DROP COLUMN turn_active;
+  `,
+  // A workspace becomes a directory on the orchestrator's data volume,
+  // bind-mounted into the session container, so the orchestrator can read the
+  // agent's files without an exec. Nothing is moved here: an existing row
+  // keeps its ws_volume and a null workspace_dir, and migrates at its next
+  // start — which is the only moment its container can be recreated with the
+  // new mount.
+  `
+  ALTER TABLE sessions ADD COLUMN workspace_dir TEXT;
   `,
 ];
 

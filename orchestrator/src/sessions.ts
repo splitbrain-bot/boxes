@@ -7,7 +7,7 @@ import type {
   SessionSummary,
   ThreadSummary,
 } from '../../shared/types.ts';
-import type { Config } from './config.ts';
+import type { Config, SessionProfile } from './config.ts';
 import type { EgressManager } from './egress.ts';
 import {
   clearSessionTurns,
@@ -23,6 +23,7 @@ import {
 } from './db.ts';
 import * as dk from './docker.ts';
 import { log } from './log.ts';
+import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, UpstreamSession } from './gateway/upstream.ts';
 import { allocateSubnet } from './subnet.ts';
@@ -42,12 +43,64 @@ export class SessionManager {
   /** Permission requests waiting for a browser, across all sessions. */
   readonly pending: PendingStore;
 
+  /**
+   * Host-side path of DATA_DIR, which is what a workspace bind source has to
+   * name. Starts as this process's own path — the truth outside a container,
+   * where `npm run dev` and the tests run — and is replaced at boot by
+   * resolveHostDataDir().
+   */
+  private hostDataDir: string;
+
   constructor(
     private readonly db: Db,
     private readonly cfg: Config,
     private readonly egress: EgressManager,
   ) {
     this.pending = new PendingStore(db);
+    this.hostDataDir = cfg.HOST_DATA_DIR || cfg.DATA_DIR;
+  }
+
+  // --- workspaces -----------------------------------------------------------
+
+  /**
+   * Resolves the host-side path of DATA_DIR, once, at boot.
+   *
+   * Inside a container the orchestrator's own path for its data volume is not
+   * the path the daemon would resolve a bind source against, and getting this
+   * wrong is silent: the daemon would happily create an empty directory at
+   * that path on the host and mount that instead, leaving the agent's files
+   * somewhere the orchestrator cannot see. So a failure here is fatal, and
+   * says which setting fixes it.
+   */
+  async resolveHostDataDir(): Promise<void> {
+    ws.ensureWorkspacesRoot(this.cfg.DATA_DIR);
+    if (this.cfg.HOST_DATA_DIR) {
+      log.info('using the configured host path for the data directory', {
+        hostDataDir: this.hostDataDir,
+      });
+      return;
+    }
+    if (!dk.inContainer()) return;
+    const source = await dk.resolveHostMountSource(this.cfg.DATA_DIR);
+    if (!source) {
+      throw new Error(
+        `Could not resolve the host-side path of ${this.cfg.DATA_DIR}: this process is in a ` +
+          'container but has no mount there, or its own container could not be identified. ' +
+          'Mount the data directory, or set HOST_DATA_DIR to the path the Docker daemon knows it by.',
+      );
+    }
+    this.hostDataDir = source;
+    log.info('resolved the host path of the data directory', { hostDataDir: source });
+  }
+
+  /**
+   * Where a session's files are on this process's own filesystem, or null for
+   * a session still backed by a named volume — which the review surface reads
+   * as "not reviewable until this session is started once".
+   */
+  workspacePath(id: string): string | null {
+    const row = this.mustGet(id);
+    return row.workspace_dir ? ws.workspacePath(this.cfg.DATA_DIR, row.id) : null;
   }
 
   // --- helpers --------------------------------------------------------------
@@ -75,6 +128,46 @@ export class SessionManager {
     this.db
       .prepare("UPDATE sessions SET status = ? WHERE id = ? AND status != 'deleted'")
       .run(status, id);
+  }
+
+  /**
+   * Everything createContainer needs about a session, built from its stored
+   * row and the deployment's current credentials.
+   *
+   * One place rather than two, because a session's container is created twice:
+   * once at create, and once more when a volume-backed workspace migrates to a
+   * directory and the container has to be recreated with the new mount.
+   */
+  private containerSpec(row: SessionRow, profile: SessionProfile): dk.CreateContainerSpec {
+    return {
+      sessionId: row.id,
+      image: row.image,
+      networkName: row.network_name,
+      subnet: row.subnet,
+      workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
+      homeVolume: row.home_volume,
+      profile,
+      egress: {
+        claudeOauthToken: this.egress.sessionValue('claude', profile.claudeOauthToken),
+        ghToken: this.egress.sessionValue('github', profile.ghToken),
+        caCertificate: this.egress.caCertificate(),
+      },
+    };
+  }
+
+  /**
+   * The profile a session was created with, or the default when the deployment
+   * has since dropped it. A session that outlived its profile must still start.
+   */
+  private profileFor(row: SessionRow): SessionProfile {
+    const profile = this.cfg.profiles[row.profile];
+    if (profile) return profile;
+    const fallback = this.cfg.profiles['DEFAULT'];
+    if (!fallback) throw new HttpError(500, `Unknown profile: ${row.profile}`);
+    log.session(row.id).warn('profile is gone; falling back to DEFAULT', {
+      profile: row.profile,
+    });
+    return fallback;
   }
 
   /** The persistent upstream for a session, created on first use. */
@@ -117,8 +210,11 @@ export class SessionManager {
       container_id: null,
       network_name: dk.names.network(id),
       subnet,
-      ws_volume: dk.names.wsVolume(id),
+      // Directory-backed from the start, so no workspace volume is created
+      // and the column that named one stays empty.
+      ws_volume: '',
       home_volume: dk.names.homeVolume(id),
+      workspace_dir: ws.workspacePath(this.cfg.DATA_DIR, id),
       status: 'creating',
       current_thread_id: null,
       created_at: now,
@@ -128,11 +224,11 @@ export class SessionManager {
     this.db
       .prepare(
         `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
-           network_name, subnet, ws_volume, home_volume, status, current_thread_id,
-           created_at, last_active_at)
+           network_name, subnet, ws_volume, home_volume, workspace_dir, status,
+           current_thread_id, created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
-           @network_name, @subnet, @ws_volume, @home_volume, @status, @current_thread_id,
-           @created_at, @last_active_at)`,
+           @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @status,
+           @current_thread_id, @created_at, @last_active_at)`,
       )
       .run(row);
 
@@ -140,23 +236,10 @@ export class SessionManager {
     try {
       await dk.createNetwork(row.network_name, subnet, id);
       await dk.ensureProxyAttached(row.network_name, this.cfg);
-      await dk.createVolume(row.ws_volume, id);
+      ws.createWorkspace(this.cfg.DATA_DIR, id);
       await dk.createVolume(row.home_volume, id);
       const containerId = await dk.createContainer(
-        {
-          sessionId: id,
-          image: row.image,
-          networkName: row.network_name,
-          subnet,
-          wsVolume: row.ws_volume,
-          homeVolume: row.home_volume,
-          profile,
-          egress: {
-            claudeOauthToken: this.egress.sessionValue('claude', profile.claudeOauthToken),
-            ghToken: this.egress.sessionValue('github', profile.ghToken),
-            caCertificate: this.egress.caCertificate(),
-          },
-        },
+        this.containerSpec(row, profile),
         this.cfg,
       );
       await dk.startContainer(containerId);
@@ -178,14 +261,72 @@ export class SessionManager {
 
   /** Starts a stopped session's container and re-attaches the egress proxy. */
   async start(id: string): Promise<SessionDetail> {
-    const row = this.mustGet(id);
+    let row = this.mustGet(id);
     if (!row.container_id) throw new HttpError(409, 'Session has no container');
-    await dk.startContainer(row.container_id);
+    row = await this.migrateWorkspace(row);
+    await dk.startContainer(row.container_id!);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.setStatus(id, 'running');
     // The upstream reconnects on the next forwarded message, which re-issues
     // session/load and restores the thread.
     return this.detail(id);
+  }
+
+  /**
+   * Moves a session created before this change off its workspace volume and
+   * onto a directory, and returns the row as it now stands.
+   *
+   * Start is the only moment this can happen: the mount is fixed when a
+   * container is created, so the container has to be replaced. That is cheap
+   * here — a session container has a read-only rootfs and everything durable
+   * lives in its two mounts — but it is not free of risk, so the order is
+   * chosen to lose nothing at any step: copy first, recreate second, and drop
+   * the volume only once the new container has started. A crash anywhere
+   * before the row is updated leaves a volume-backed session that migrates
+   * again on the next attempt.
+   *
+   * A running legacy session is left alone. Its container works, and it will
+   * come through here at its next stop/start cycle.
+   */
+  private async migrateWorkspace(row: SessionRow): Promise<SessionRow> {
+    if (row.workspace_dir) return row;
+    const slog = log.session(row.id);
+    if ((await dk.containerState(row.container_id)) === 'running') {
+      slog.info('workspace migration deferred: the container is still running');
+      return row;
+    }
+
+    slog.info('migrating the workspace volume to a directory', { volume: row.ws_volume });
+    const directory = ws.createWorkspace(this.cfg.DATA_DIR, row.id);
+    const hostDirectory = ws.hostWorkspacePath(this.hostDataDir, row.id);
+
+    if (row.ws_volume) {
+      await dk.copyVolumeToDirectory(row.ws_volume, hostDirectory, row.image, row.id);
+    }
+    // The agent has to own what it works in, and cp -a brought the volume's
+    // own ownership with it, which a Docker-initialised volume gets right.
+    ws.chownToAgent(directory);
+
+    if (row.container_id) {
+      await dk.stopContainer(row.container_id);
+      await dk.removeContainer(row.container_id);
+    }
+    const containerId = await dk.createContainer(
+      this.containerSpec(row, this.profileFor(row)),
+      this.cfg,
+    );
+    await dk.startContainer(containerId);
+
+    this.db
+      .prepare(
+        `UPDATE sessions SET container_id = ?, workspace_dir = ?, ws_volume = ''
+          WHERE id = ?`,
+      )
+      .run(containerId, directory, row.id);
+
+    if (row.ws_volume) await dk.removeVolume(row.ws_volume);
+    slog.info('workspace migrated', { directory });
+    return this.mustGet(row.id);
   }
 
   /** Stops the container and drops the upstream connection. */
@@ -232,10 +373,19 @@ export class SessionManager {
     } catch (err) {
       slog.warn('network teardown failed', { error: (err as Error).message });
     }
-    // The volumes hold the agent's work and the adapter's thread history.
-    // Nothing else refers to them once the session is gone, so a session that
-    // is deleted takes them with it rather than leaving them orphaned.
-    await dk.removeVolume(row.ws_volume);
+    // The workspace and the home volume hold the agent's work and the
+    // adapter's thread history. Nothing else refers to either once the session
+    // is gone, so a session that is deleted takes them with it rather than
+    // leaving them orphaned.
+    if (row.workspace_dir) {
+      try {
+        ws.removeWorkspace(this.cfg.DATA_DIR, row.id);
+      } catch (err) {
+        slog.warn('workspace removal failed', { error: (err as Error).message });
+      }
+    }
+    // Only a session that never migrated still has one.
+    if (row.ws_volume) await dk.removeVolume(row.ws_volume);
     await dk.removeVolume(row.home_volume);
   }
 
@@ -327,6 +477,7 @@ export class SessionManager {
       networkName: row.network_name,
       subnet: row.subnet,
       wsVolume: row.ws_volume,
+      workspaceDir: row.workspace_dir,
       homeVolume: row.home_volume,
       acpSessionId: currentThread(this.db, id)?.acp_session_id ?? null,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),

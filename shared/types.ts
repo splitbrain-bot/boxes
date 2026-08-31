@@ -91,7 +91,18 @@ export interface SessionDetail extends SessionSummary {
   containerId: string | null;
   networkName: string;
   subnet: string;
+  /**
+   * The named volume that used to hold the workspace, and still does for a
+   * session created before workspaces became directories. Empty once the
+   * session is directory-backed, which it becomes at its next start.
+   */
   wsVolume: string;
+  /**
+   * Where the session's files are on the orchestrator's own filesystem, or
+   * null while the session is still volume-backed — which is also what says
+   * the review surface cannot read it yet.
+   */
+  workspaceDir: string | null;
   homeVolume: string;
   /** The adapter's id for the session's default thread, or null before one exists. */
   acpSessionId: string | null;

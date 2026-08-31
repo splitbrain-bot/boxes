@@ -26,8 +26,9 @@ Two consequences shape the rest of the design:
 
 A session owns several *threads* — ACP calls one conversation a session, and
 this document calls it a thread to keep it apart from a Boxes session. The
-container, both volumes, the network and the egress policy are the session's
-and are shared, so a second thread costs nothing but its own transcript. Each
+container, the workspace, the home volume, the network and the egress policy
+are the session's and are shared, so a second thread costs nothing but its own
+transcript. Each
 connection is pinned to one thread, so two of them can be watched at once; see
 [Several threads per session](#several-threads-per-session).
 
@@ -114,7 +115,7 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id` | One session with its Docker object names |
 | `POST /api/sessions/:id/start` | Starts a stopped container |
 | `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
-| `DELETE /api/sessions/:id` | Deletes the session, its volumes included |
+| `DELETE /api/sessions/:id` | Deletes the session, its workspace and home volume included |
 | `GET /api/sessions/:id/threads` | Every conversation the session owns |
 | `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `{"from":"<threadId>"}` forks that one instead of starting empty |
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
@@ -467,8 +468,9 @@ Creating a session, in `SessionManager.create`:
    name.
 3. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
    `creating`.
-4. Create the network `sn-<id>`, attach the egress proxy, create the volumes
-   `ws-<id>` and `home-<id>`, create the container `session-<id>`, and start it.
+4. Create the network `sn-<id>`, attach the egress proxy, create the workspace
+   directory `${DATA_DIR}/workspaces/<id>` and the volume `home-<id>`, create
+   the container `session-<id>`, and start it.
 
 Any failed step tears the whole session down and marks it `error`.
 
@@ -483,7 +485,7 @@ caller-supplied values are the session id and the profile secrets.
 The entrypoint sets the git and gh identity and then holds the container open.
 The adapter is spawned separately by the gateway, so browser churn never
 restarts the container. Both run in `/workspace`, which is the session's own
-volume and starts empty.
+workspace directory and starts empty.
 
 | Status | Means |
 |---|---|
@@ -494,15 +496,66 @@ volume and starts empty.
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
-network and both volumes, and clears the session's pending requests and log
-rows. Nothing refers to the volumes once the session is gone, so they go with
-it rather than being left orphaned.
+network, the workspace directory and the home volume, and clears the session's
+pending requests and log rows. Nothing refers to either once the session is
+gone, so they go with it rather than being left orphaned.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
 the stored rows with them: live containers are adopted, missing ones are marked
 stopped, and every running session's proxy attachment is re-checked. Turn flags
 are cleared, because a turn cannot survive the restart that killed the
 connection owning it.
+
+## Where a session's files live
+
+A session's workspace is a directory under the orchestrator's own data
+directory — `${DATA_DIR}/workspaces/<id>` — bind-mounted at `/workspace` in
+the session container. It used to be the named volume `ws-<id>`, mounted only
+into that container, which left the orchestrator with no filesystem path to
+the agent's work at all: reaching a file meant a `docker exec`.
+
+The change is what makes reviewing a session's code possible without an exec
+round trip per read, without booting a stopped container, and with git run as
+an ordinary child process. It grants the orchestrator no privilege it did not
+already have — it holds the Docker socket — but it does expose that process to
+hostile *content*, which is why the review layer keeps symlink containment and
+git hardening as maintained invariants, each in one file with a test.
+
+The home volume stays a named volume. It holds thread transcripts and whatever
+credentials a login inside the session created; nothing outside the container
+reads it, and review has no business there.
+
+**Naming the bind source.** Bind sources are resolved by the Docker daemon,
+not by the process asking for the mount, so the orchestrator cannot hand the
+daemon its own `/data/workspaces/<id>`. At boot it identifies its own
+container — from `/proc/self/mountinfo`, `/proc/self/cgroup` or
+`/etc/hostname`, whichever answers — and takes the `Source` of the mount whose
+`Destination` is `DATA_DIR`. With the shipped compose that is
+`/var/lib/docker/volumes/boxes-data/_data`, a plain daemon-side directory that
+binds the same way on Linux and inside Docker Desktop's VM. Outside a
+container the two paths are the same and the inspection is skipped. Where
+neither works — a nested or rootless daemon, a compose file mounting a real
+host directory — `HOST_DATA_DIR` names it outright. Getting this wrong would
+be silent, since the daemon would create an empty directory at the unresolved
+path and mount that, so a failure to resolve it is fatal at boot.
+
+**Ownership.** A bind mount, unlike a named volume, is not
+ownership-initialised by Docker, so every path the orchestrator creates in a
+workspace is chowned to uid 1000 — the session image's `agent` user, named as
+a constant in `workspaces.ts`. That is what lets the agent write in its own
+workspace, and lets it edit or delete the `REVIEW.md` the review surface
+writes there. `workspaces/` itself is 0700: one session's files are not
+another's, and the only thing that reads across all of them is this process.
+
+**Sessions from before the change** keep their `ws_volume` and a null
+`workspace_dir`, and migrate at their next start, which is the only moment a
+container can be recreated with a different mount. The order loses nothing at
+any step: create the directory, copy the volume into it through a one-shot
+helper container that can see both (`cp -a`, which preserves the agent's
+ownership), recreate the session container with the bind, start it, and only
+then delete the volume. A crash before the row is updated leaves a
+volume-backed session that migrates again on the next attempt. A *running*
+legacy session is left alone and comes through at its next stop/start cycle.
 
 ## Network isolation
 
@@ -720,6 +773,7 @@ orchestrator/src/
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log
   sessions.ts           Session lifecycle, the owner of every UpstreamSession
+  workspaces.ts         Workspace directories on the data volume: paths, ownership
   docker.ts             Containers, networks, volumes, the adapter exec
   subnet.ts             Per-session /24 allocation
   reaper.ts             The idle reaper and the proxy reconciler

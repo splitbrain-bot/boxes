@@ -2,7 +2,7 @@
 
 Boxes runs AI coding-agent sessions in isolated Docker containers and gives you
 a mobile-friendly web UI to drive them. Each session is a long-lived container
-with its own workspace volume, its own internal network, and no route out
+with its own workspace directory, its own internal network, and no route out
 except through a proxy that vets every destination.
 
 Agent turns keep running when your browser goes away. The orchestrator — not
@@ -100,7 +100,8 @@ docker exec -it session-<id> claude /login
 | `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
 | `NTFY_URL` | — | POSTed when a permission request is waiting |
-| `DATA_DIR` | `/data` | Database and generated token, inside the volume |
+| `DATA_DIR` | `/data` | Database, generated token and session workspaces, inside the volume |
+| `HOST_DATA_DIR` | resolved | Host-side path of `DATA_DIR`, which a workspace bind mount has to name. Resolved at boot by inspecting the orchestrator's own container; set it only where that cannot work |
 | `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Proxy container the orchestrator attaches to session networks |
 | `EGRESS_ALLOWED_HOSTS` | — | Hosts sessions may reach; empty means every public host |
 
@@ -133,7 +134,7 @@ real credential is inside a session and that the allowlist bites.
 Open <http://localhost:3000>.
 
 **Create a session.** Give it a name. The session gets its own container,
-network and volumes, and its workspace starts empty — tell the agent what to
+network and storage, and its workspace starts empty — tell the agent what to
 fetch into it.
 
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
@@ -168,7 +169,7 @@ delivered to the next browser to open it. Nothing is ever auto-approved.
 
 **Manage the session.** The ⓘ corner of a card opens its details and controls:
 start, stop, delete, the container and network names, and the WebSocket URL and
-bearer token for attaching your own ACP client. Deleting removes the volumes
+bearer token for attaching your own ACP client. Deleting removes the storage
 too, so the agent's work and the thread history go with it.
 
 Idle sessions — no turn on any thread, no waiting request, no attached browser
