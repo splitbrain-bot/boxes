@@ -3,6 +3,12 @@ import type {
   CreateSessionBody,
   CreateThreadBody,
   HealthResponse,
+  ReviewAnnotationBody,
+  ReviewAnnotationsResponse,
+  ReviewBase,
+  ReviewFileResponse,
+  ReviewStatusResponse,
+  ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
   ThreadSummary,
@@ -69,4 +75,35 @@ export const api = {
   getLog: (id: string, after = 0) =>
     request<AcpLogPage>(`/api/sessions/${id}/log?after=${after}&limit=200`),
   health: () => request<HealthResponse>('/healthz'),
+
+  // --- code review over the session's workspace ---------------------------
+  //
+  // Batched to match the endpoints: the tree call carries the whole left
+  // panel and the file call the whole file view, so a phone on a slow link
+  // makes one request per screen.
+
+  reviewTree: (id: string) => request<ReviewTreeResponse>(`/api/sessions/${id}/review/tree`),
+  reviewFile: (id: string, path: string) =>
+    request<ReviewFileResponse>(
+      `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,
+    ),
+  reviewStatus: (id: string) =>
+    request<ReviewStatusResponse>(`/api/sessions/${id}/review/status`),
+  setAnnotation: (id: string, body: ReviewAnnotationBody) =>
+    request<ReviewAnnotationsResponse>(`/api/sessions/${id}/review/annotations`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteAnnotation: (id: string, path: string, line: number) =>
+    request<ReviewAnnotationsResponse>(
+      `/api/sessions/${id}/review/annotations?path=${encodeURIComponent(path)}&line=${line}`,
+      { method: 'DELETE' },
+    ),
+  setReviewBase: (id: string, rev: string | null) =>
+    request<ReviewBase>(`/api/sessions/${id}/review/base`, {
+      method: 'PUT',
+      body: JSON.stringify({ rev }),
+    }),
+  deleteReview: (id: string) =>
+    request<void>(`/api/sessions/${id}/review`, { method: 'DELETE' }),
 };

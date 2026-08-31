@@ -625,6 +625,48 @@ the agent controls:
   and environment from one builder there, and a test plants both configs in a
   repository and asserts the hook never ran.
 
+### The review view
+
+`/sessions/:id/review`, with the open file in the search string
+(`?path=src/app.ts`) so a file is linkable and the back button works — which on
+a phone is also how you get from a file back to the tree. Entry points: a
+Review action in the thread header next to Fork, and one on the session card,
+where it works whether or not the box is running. The view owns the whole
+viewport the way the thread view does.
+
+Boxes is driven from a phone, so the desktop tool's three panels and hover
+interactions do not survive. The feature set does; the layout does not. What
+replaces it is one set of components in two arrangements rather than two
+parallel UIs:
+
+- **The tree** is a column from `md` up and a shadcn Sheet below it, closing on
+  selection. Same component, same status colours and comment badges.
+- **Comments are inline**, GitHub-style, on every screen size. There is no
+  right-hand sidebar to reflow away.
+- **Tap replaces hover.** Tapping a line's gutter is how a comment starts;
+  tapping a gutter marker opens the diff hunk as a sheet, which is also the
+  only place deleted lines exist. Gutter targets are 44 px on touch.
+- **Prev/next replaces the scrollbar minimap.** Annotation markers on a
+  scrollbar are unusable on touch, and "the next thing that needs me" is what
+  the minimap was for — so the toolbar says it directly, with counts and paired
+  step buttons for changes and comments.
+- **The code pane** is a CSS grid per line: a sticky line-number gutter, the
+  code cell scrolling horizontally as one block, and a wrap toggle. Every line
+  being its own element is what makes it addressable at all.
+
+Highlighting is client-side, with Shiki: the API ships plain text and the
+browser tokenizes it. Both themes are tokenized at once and travel as
+`--shiki-light`/`--shiki-dark` custom properties on each span, so a light/dark
+switch costs no re-tokenize. The engine is Shiki's JavaScript regex engine, so
+there is no wasm fetch, and grammars load per file type on demand. The whole
+review route is lazily imported, so none of it — the pane, the tree, the sheet
+primitives, the engine, the grammars — is in the bundle a browser opening a
+conversation downloads.
+
+Server-side highlighting was considered and dropped: it puts render markup on
+the wire, couples the orchestrator to presentation, and the phone still has to
+paint it.
+
 Beyond that: paths are validated against the tree, not merely against the root,
 so the API serves what the browser was offered; every refusal is the same 404;
 file reads are capped at 2 MiB and binaries are refused by a NUL sniff; and

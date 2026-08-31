@@ -1,0 +1,241 @@
+import { Fragment } from 'react';
+import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
+import type { Token } from '@/lib/highlight';
+import { cn } from '@/lib/utils';
+
+/**
+ * The file, one addressable row per line.
+ *
+ * A CSS grid rather than a `<pre>`: the line-number gutter is sticky against
+ * the pane's horizontal scroll, the code cell scrolls as one block so the
+ * numbers stay put, and every line is its own element — which is what makes
+ * tapping one to comment possible at all.
+ *
+ * Tap replaces hover throughout. The desktop tool shows a diff hunk on gutter
+ * hover and a comment in a tooltip; neither exists on a phone, so a gutter
+ * marker is a button that opens the hunk, and comments are inline cards under
+ * their line on every screen size.
+ *
+ * File content and comments are agent-influenced and hostile by assumption, so
+ * both are rendered as text nodes only. Highlight tokens become React
+ * elements; nothing here goes near `dangerouslySetInnerHTML`.
+ */
+
+/** What a changed line gets in its gutter and behind its code. */
+const CHANGE: Record<ReviewLineChange, { bar: string; row: string; label: string }> = {
+  added: { bar: 'bg-ok', row: 'bg-ok/8', label: 'added' },
+  modified: { bar: 'bg-warn', row: 'bg-warn/8', label: 'modified' },
+};
+
+export interface CodePaneProps {
+  content: string;
+  /** One token list per line, or null to render the file plain. */
+  tokens: Token[][] | null;
+  /** Changed lines, keyed by line number as the API sends them. */
+  diffLines: Record<string, ReviewLineChange>;
+  /** Deletion markers, by the line they sit after. */
+  deletions: Map<number, number>;
+  annotations: Map<number, ReviewAnnotation>;
+  /** The line whose composer is open, or null. */
+  composing: number | null;
+  /** Wrap long lines instead of scrolling them. */
+  wrap: boolean;
+  /** A line to scroll to once, when prev/next or a link asks for it. */
+  scrollTo: number | null;
+  onSelectLine: (line: number) => void;
+  onShowHunk: (hunkIndex: number) => void;
+  /** Renders the card and composer that sit under a line. */
+  renderUnderLine?: (line: number) => React.ReactNode;
+}
+
+export function CodePane({
+  content,
+  tokens,
+  diffLines,
+  deletions,
+  annotations,
+  composing,
+  wrap,
+  scrollTo,
+  onSelectLine,
+  onShowHunk,
+  renderUnderLine,
+}: CodePaneProps) {
+  const lines = splitLines(content);
+  // The gutter's width follows the file's size rather than being fixed, so a
+  // 30-line file does not reserve room for five digits.
+  const digits = Math.max(String(lines.length).length, 2);
+
+  return (
+    <div
+      className={cn(
+        'min-h-0 flex-1 overflow-auto font-mono text-[13px] leading-[1.55]',
+        // The pane scrolls, not the page: the header and the toolbar stay put.
+        wrap ? 'overflow-x-hidden' : 'overflow-x-auto',
+      )}
+    >
+      <div className="min-w-full">
+        {deletions.has(0) ? (
+          <DeletionMarker hunkIndex={deletions.get(0)!} digits={digits} onShowHunk={onShowHunk} />
+        ) : null}
+
+        {lines.map((text, index) => {
+          const line = index + 1;
+          const change = diffLines[String(line)];
+          const annotation = annotations.get(line);
+          const under = renderUnderLine?.(line);
+
+          return (
+            <Fragment key={line}>
+              <div
+                data-line={line}
+                ref={line === scrollTo ? scrollIntoView : undefined}
+                className={cn(
+                  'group grid grid-cols-[auto_1fr] items-start',
+                  change && CHANGE[change].row,
+                  (composing === line || annotation) && 'bg-primary/8',
+                )}
+              >
+                {/* The gutter is one button: tapping a line is how a comment
+                    starts, and the number is the largest thing on the row that
+                    is not code. */}
+                <button
+                  type="button"
+                  onClick={() => onSelectLine(line)}
+                  aria-label={`Comment on line ${line}`}
+                  className={cn(
+                    'sticky left-0 z-10 flex select-none items-stretch gap-1 border-r bg-background pr-1.5 pl-2 text-right text-muted-foreground',
+                    // 44px of tap target on touch. The line height is smaller
+                    // than that, so the padding does the work.
+                    'min-h-[1.55em] py-0 hover:bg-accent hover:text-accent-foreground',
+                    change && CHANGE[change].row,
+                    (composing === line || annotation) && 'bg-primary/8',
+                  )}
+                  style={{ minWidth: `${digits + 3.5}ch` }}
+                >
+                  <span
+                    aria-hidden
+                    className={cn('w-1 shrink-0 rounded-sm', change ? CHANGE[change].bar : '')}
+                  />
+                  <span className="flex-1 tabular-nums">{line}</span>
+                  {annotation ? (
+                    <span
+                      aria-hidden
+                      className={cn(
+                        'w-1 shrink-0 rounded-sm',
+                        annotation.outdated ? 'bg-idle' : 'bg-primary',
+                      )}
+                    />
+                  ) : (
+                    <span aria-hidden className="w-1 shrink-0" />
+                  )}
+                </button>
+
+                <code
+                  className={cn(
+                    'block pr-3 pl-2',
+                    wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre',
+                  )}
+                >
+                  {tokens?.[index] ? <Tokens tokens={tokens[index]!} /> : text}
+                  {/* A zero-width space keeps an empty line the height of a
+                      full one, so the gutter and the code never drift apart. */}
+                  {text === '' ? '​' : null}
+                </code>
+              </div>
+
+              {deletions.has(line) ? (
+                <DeletionMarker
+                  hunkIndex={deletions.get(line)!}
+                  digits={digits}
+                  onShowHunk={onShowHunk}
+                />
+              ) : null}
+
+              {under ? (
+                <div className="grid grid-cols-[auto_1fr]">
+                  <span aria-hidden style={{ minWidth: `${digits + 3.5}ch` }} />
+                  <div className="min-w-0 px-2 py-1.5">{under}</div>
+                </div>
+              ) : null}
+            </Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** One line's coloured spans. */
+function Tokens({ tokens }: { tokens: Token[] }) {
+  return (
+    <>
+      {tokens.map((token, i) => (
+        // Both themes travel as custom properties on the span, and globals.css
+        // picks which one paints. Switching theme needs no re-tokenize.
+        <span key={i} style={token.style as React.CSSProperties}>
+          {token.content}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/**
+ * A block of lines removed between two that survived.
+ *
+ * Tapping it opens the hunk, which is the only place the removed lines exist:
+ * the marker deliberately does not say how many there were, because the number
+ * without the content is not information anybody acts on.
+ */
+function DeletionMarker({
+  hunkIndex,
+  digits,
+  onShowHunk,
+}: {
+  hunkIndex: number;
+  digits: number;
+  onShowHunk: (hunkIndex: number) => void;
+}) {
+  return (
+    <div className="grid grid-cols-[auto_1fr] items-center">
+      <button
+        type="button"
+        onClick={() => onShowHunk(hunkIndex)}
+        aria-label="Show the lines deleted here"
+        className="sticky left-0 z-10 flex min-h-6 items-center justify-end gap-1 border-r bg-background pr-1.5 pl-2 text-danger hover:bg-accent"
+        style={{ minWidth: `${digits + 3.5}ch` }}
+      >
+        <span aria-hidden className="text-xs">
+          ⋯
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={() => onShowHunk(hunkIndex)}
+        className="flex min-h-6 items-center px-2 text-left text-xs text-danger hover:underline"
+      >
+        lines deleted here — tap to see them
+      </button>
+    </div>
+  );
+}
+
+/** Splits content into the lines the pane renders. */
+function splitLines(content: string): string[] {
+  if (content === '') return [];
+  const lines = content.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
+/**
+ * Brings a line into view when it is first rendered.
+ *
+ * A ref callback rather than an effect, because the element does not exist
+ * until the row it belongs to renders, and the row that needs scrolling to may
+ * be the one that just appeared.
+ */
+function scrollIntoView(element: HTMLDivElement | null): void {
+  element?.scrollIntoView({ block: 'center' });
+}

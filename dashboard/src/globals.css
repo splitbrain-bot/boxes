@@ -141,3 +141,18 @@
  */
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
 @custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/*
+ * The review's code pane.
+ *
+ * Shiki tokenizes with both themes at once and puts each token's two colours
+ * on the span as custom properties, so which one paints is a CSS decision and
+ * switching theme costs no re-tokenize at all.
+ */
+[data-line] code span {
+  color: var(--shiki-light);
+}
+
+.dark [data-line] code span {
+  color: var(--shiki-dark);
+}
