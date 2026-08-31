@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { useMediaQuery } from '@/hooks/use-media-query';
+import { cn } from '@/lib/utils';
 import { useSessions } from '../stores/sessions.ts';
 import {
   closeFile,
@@ -288,9 +289,17 @@ export function SessionReview() {
       ) : null}
 
       <div className="flex min-h-0 flex-1">
-        {/* The desktop column. Hidden below md, where the Sheet below takes
-            over — the same component either way. */}
-        <aside className="hidden w-72 shrink-0 overflow-auto border-r md:block lg:w-80">
+        {/* One tree in the document, two arrangements.
+            From md up it is the left column, whatever is open. Below md it is
+            the whole screen until a file is picked and gone once one is —
+            where the Sheet in the header brings it back. Rendering it twice
+            and hiding one would put two of every row in the page. */}
+        <aside
+          className={cn(
+            'shrink-0 overflow-auto md:block md:w-72 md:border-r lg:w-80',
+            file ? 'hidden' : 'w-full',
+          )}
+        >
           {tree ? (
             <ReviewTree tree={tree} activePath={file?.path ?? null} onOpen={openPath} />
           ) : (
@@ -337,21 +346,12 @@ export function SessionReview() {
               )}
             </>
           ) : (
-            <div className="flex min-h-0 flex-1 flex-col">
-              {/* On a phone there is no column, so the tree is the whole
-                  screen until a file is picked. */}
-              <div className="min-h-0 flex-1 overflow-auto md:hidden">
-                {tree ? (
-                  <ReviewTree tree={tree} activePath={null} onOpen={openPath} />
-                ) : (
-                  <Empty>{loadingTree ? 'Loading…' : 'Nothing to show.'}</Empty>
-                )}
-              </div>
-              <div className="hidden min-h-0 flex-1 md:flex">
-                <Empty>
-                  {loadingFile ? 'Loading…' : 'Pick a file from the tree to start reading.'}
-                </Empty>
-              </div>
+            // Below md the tree above has the screen, so this belongs to the
+            // pointer arrangement only.
+            <div className="hidden min-h-0 flex-1 md:flex">
+              <Empty>
+                {loadingFile ? 'Loading…' : 'Pick a file from the tree to start reading.'}
+              </Empty>
             </div>
           )}
         </main>

@@ -6,6 +6,11 @@ import type {
   CreateThreadBody,
   ExecRecord,
   HealthResponse,
+  ReviewAnnotation,
+  ReviewAnnotationBody,
+  ReviewFileResponse,
+  ReviewStatusResponse,
+  ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
   ThreadSummary,
@@ -78,11 +83,79 @@ export function stubSession(over: Partial<SessionDetail> = {}): SessionDetail {
   };
 }
 
+/**
+ * A session's review, as the stub keeps it.
+ *
+ * Enough of a model to answer all seven endpoints consistently — a comment
+ * written through the API comes back in the next tree and file fetch, and moves
+ * the poll fingerprint — without duplicating the orchestrator's own store,
+ * whose byte-level behaviour is proven against the desktop tool's fixtures in
+ * the orchestrator's tests.
+ */
+export interface StubReview {
+  /** Files, by path, with their content. The tree is built from these. */
+  files: Record<string, string>;
+  statuses: ReviewTreeResponse['statuses'];
+  /** Diff markers per file path. Absent means no change. */
+  diffs: Record<string, ReviewFileResponse['diff']>;
+  /** Comments per file path, by line. */
+  annotations: Record<string, Record<number, ReviewAnnotation>>;
+  root: string;
+  hasGit: boolean;
+  base: ReviewTreeResponse['base'];
+  /** True once a comment has been written, as REVIEW.md existing. */
+  hasReview: boolean;
+  started: string;
+  headCommit: string;
+  truncated: boolean;
+  /** A status to answer every review request with instead, for the error path. */
+  fail: { status: number; error: string } | null;
+}
+
+/** A review with a small project in it, which is what the tests browse. */
+export function stubReview(over: Partial<StubReview> = {}): StubReview {
+  return {
+    files: {
+      'src/app.ts': 'import { boot } from "./boot";\n\nboot();\n',
+      'src/boot.ts':
+        'export function boot(): void {\n  // TODO: wire the router\n  console.log("up");\n}\n',
+      'README.md': '# demo\n\nA project the agent cloned.\n',
+      'notes.txt': 'plain text, no grammar\n',
+    },
+    statuses: { 'src/boot.ts': 'modified', 'notes.txt': 'untracked' },
+    diffs: {
+      'src/boot.ts': {
+        lines: { 2: 'added', 3: 'modified' },
+        hunks: [
+          {
+            startLine: 1,
+            endLine: 4,
+            diff: ' export function boot(): void {\n+  // TODO: wire the router\n-  console.log("boot");\n+  console.log("up");\n }\n',
+          },
+        ],
+        deletions: [{ afterLine: 1, hunkIndex: 0 }],
+      },
+    },
+    annotations: {},
+    root: 'project',
+    hasGit: true,
+    base: { rev: '', commit: '' },
+    hasReview: false,
+    started: '2026-08-31',
+    headCommit: 'a'.repeat(40),
+    truncated: false,
+    fail: null,
+    ...over,
+  };
+}
+
 /** What the stub answers with, mutable between navigations. */
 export interface StubState {
   sessions: SessionDetail[];
   /** What the health probe reports about the deployment's Claude token. */
   claudeTokenConfigured: boolean;
+  /** Review data per session id. A session without one has no review at all. */
+  reviews: Record<string, StubReview>;
 }
 
 /** A running stub, with the base URL to point a browser at. */
@@ -97,6 +170,8 @@ export interface StubOrchestrator {
   execOutput: (command: string) => { output: string; exitCode: number };
   /** What GET /exec reports, as if from a previous session. */
   execLog: ExecRecord[];
+  /** Every review mutation the browser made, in order. */
+  reviewCalls: Array<{ method: string; sessionId: string; body: unknown }>;
   server: Server;
   close(): Promise<void>;
 }
@@ -108,7 +183,12 @@ export async function startStubOrchestrator(
   gatewayScript?: Partial<GatewayScript>,
 ): Promise<StubOrchestrator> {
   const dir = resolve(distDir);
-  const state: StubState = { sessions: initial, claudeTokenConfigured: true };
+  const state: StubState = {
+    sessions: initial,
+    claudeTokenConfigured: true,
+    reviews: Object.fromEntries(initial.map((s) => [s.id, stubReview()])),
+  };
+  const reviewCalls: StubOrchestrator['reviewCalls'] = [];
   const execCalls: StubOrchestrator['execCalls'] = [];
   const execLog: ExecRecord[] = [];
   let execOutput: StubOrchestrator['execOutput'] = (command) => ({
@@ -196,6 +276,13 @@ export async function startStubOrchestrator(
     }
     if (exec && req.method === 'GET') return json(res, 200, { records: execLog });
 
+    const review = /^\/api\/sessions\/([^/]+)\/review(?:\/(tree|file|status|annotations|base))?$/.exec(
+      url,
+    );
+    if (review) {
+      return answerReview(req, res, state, reviewCalls, review[1]!, review[2] ?? '');
+    }
+
     if (url.startsWith('/api') || url.startsWith('/ws')) {
       return json(res, 404, { error: 'Not found' });
     }
@@ -234,6 +321,7 @@ export async function startStubOrchestrator(
     gateway,
     execCalls,
     execLog,
+    reviewCalls,
     get execOutput() {
       return execOutput;
     },
@@ -273,4 +361,179 @@ function sendBundle(res: import('node:http').ServerResponse, dir: string, path: 
   }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(readFileSync(index));
+}
+
+// --- the review endpoints ---------------------------------------------------
+
+/**
+ * Answers the seven review routes from the stub's in-memory review.
+ *
+ * The point of keeping real state rather than canned bodies: a comment written
+ * through the API has to come back in the next tree and file fetch and move the
+ * poll fingerprint, because that loop is what the browser tests are about.
+ */
+function answerReview(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  state: StubState,
+  calls: Array<{ method: string; sessionId: string; body: unknown }>,
+  sessionId: string,
+  endpoint: string,
+): void {
+  const review = state.reviews[sessionId];
+  if (!review) return json(res, 404, { error: 'Session not found' });
+  if (review.fail) return json(res, review.fail.status, { error: review.fail.error });
+
+  const query = new URL(req.url ?? '/', 'http://stub').searchParams;
+
+  /** One file's comments, in line order, as the API reports them. */
+  const annotationsOf = (path: string): ReviewAnnotation[] =>
+    Object.values(review.annotations[path] ?? {}).sort((a, b) => a.line - b.line);
+
+  /** Reads a JSON body and hands it over. */
+  const withBody = (fn: (body: unknown) => void): void => {
+    let raw = '';
+    req.on('data', (chunk: Buffer) => (raw += chunk.toString('utf8')));
+    req.on('end', () => fn(JSON.parse(raw || '{}')));
+  };
+
+  if (endpoint === 'tree' && req.method === 'GET') {
+    const body: ReviewTreeResponse = {
+      root: review.root,
+      hasGit: review.hasGit,
+      entries: buildStubTree(Object.keys(review.files)),
+      truncated: review.truncated,
+      statuses: review.statuses,
+      counts: Object.fromEntries(
+        Object.entries(review.annotations)
+          .map(([path, lines]) => [path, Object.keys(lines).length] as const)
+          .filter(([, count]) => count > 0),
+      ),
+      base: review.base,
+      hasReview: review.hasReview,
+      started: review.hasReview ? review.started : '',
+    };
+    return json(res, 200, body);
+  }
+
+  if (endpoint === 'file' && req.method === 'GET') {
+    const path = query.get('path') ?? '';
+    const content = review.files[path];
+    if (content === undefined) return json(res, 404, { error: 'File not found' });
+    const body: ReviewFileResponse = {
+      path,
+      content,
+      truncated: false,
+      binary: false,
+      size: content.length,
+      lines: content.split('\n').filter((_, i, all) => i < all.length - 1 || all[i] !== '').length,
+      language: languageOf(path),
+      status: review.statuses[path] ?? null,
+      diff: review.diffs[path] ?? { lines: {}, hunks: [], deletions: [] },
+      annotations: annotationsOf(path),
+    };
+    return json(res, 200, body);
+  }
+
+  if (endpoint === 'status' && req.method === 'GET') {
+    const body: ReviewStatusResponse = {
+      // Derived from the state so a mutation moves it, the way three real
+      // hashes would.
+      reviewHash: review.hasReview ? JSON.stringify(review.annotations).length.toString(16) : '',
+      headCommit: review.hasGit ? review.headCommit : '',
+      statusHash: review.hasGit ? JSON.stringify(review.statuses).length.toString(16) : '',
+    };
+    return json(res, 200, body);
+  }
+
+  if (endpoint === 'annotations' && req.method === 'PUT') {
+    return withBody((body) => {
+      calls.push({ method: 'PUT', sessionId, body });
+      const { path, line, comment } = body as ReviewAnnotationBody;
+      if (!review.files[path]) return json(res, 404, { error: 'File not found' });
+      review.annotations[path] = {
+        ...review.annotations[path],
+        [line]: { line, comment: comment.trim(), outdated: false },
+      };
+      review.hasReview = true;
+      return json(res, 200, { path, annotations: annotationsOf(path) });
+    });
+  }
+
+  if (endpoint === 'annotations' && req.method === 'DELETE') {
+    const path = query.get('path') ?? '';
+    const line = Number(query.get('line'));
+    calls.push({ method: 'DELETE', sessionId, body: { path, line } });
+    const lines = { ...review.annotations[path] };
+    delete lines[line];
+    if (Object.keys(lines).length > 0) review.annotations[path] = lines;
+    else delete review.annotations[path];
+    return json(res, 200, { path, annotations: annotationsOf(path) });
+  }
+
+  if (endpoint === 'base' && req.method === 'PUT') {
+    return withBody((body) => {
+      calls.push({ method: 'PUT base', sessionId, body });
+      const { rev } = body as { rev: string | null };
+      if (rev === null || rev.trim() === '') review.base = { rev: '', commit: '' };
+      else if (rev === 'nope') return json(res, 400, { error: `unknown revision: ${rev}` });
+      else review.base = { rev: rev.trim(), commit: 'b'.repeat(40) };
+      return json(res, 200, review.base);
+    });
+  }
+
+  if (endpoint === '' && req.method === 'DELETE') {
+    calls.push({ method: 'DELETE review', sessionId, body: null });
+    review.annotations = {};
+    review.hasReview = false;
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  return json(res, 404, { error: 'Not found' });
+}
+
+/** The same shape the orchestrator's tree builder produces, from a path list. */
+function buildStubTree(paths: string[]): ReviewTreeResponse['entries'] {
+  type Node = { entry: ReviewTreeResponse['entries'][number]; children: Map<string, Node> };
+  const root: Node = { entry: { name: '', path: '', isDir: true }, children: new Map() };
+
+  for (const path of paths.toSorted()) {
+    const parts = path.split('/');
+    let current = root;
+    parts.forEach((part, i) => {
+      const isLeaf = i === parts.length - 1;
+      let next = current.children.get(part);
+      if (!next) {
+        next = {
+          entry: {
+            name: part,
+            path: isLeaf ? path : parts.slice(0, i + 1).join('/'),
+            isDir: !isLeaf,
+          },
+          children: new Map(),
+        };
+        current.children.set(part, next);
+      }
+      current = next;
+    });
+  }
+
+  const collect = (node: Node): ReviewTreeResponse['entries'] =>
+    [...node.children.values()]
+      .map((child) => {
+        if (!child.entry.isDir) return child.entry;
+        return { ...child.entry, children: collect(child) };
+      })
+      .sort((a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name)));
+
+  return collect(root);
+}
+
+/** The language the real API would report, for the handful the stub serves. */
+function languageOf(path: string): string {
+  if (path.endsWith('.ts')) return 'typescript';
+  if (path.endsWith('.md')) return 'markdown';
+  return '';
 }

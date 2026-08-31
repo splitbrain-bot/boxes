@@ -959,6 +959,20 @@ subscription auth inside the container, a turn running to completion after the
 browser leaves, the thread replaying on reattach, and a permission request held
 with nobody watching.
 
+The review surface is tested at three levels, because it has three kinds of
+thing to get wrong. The format is asserted byte-for-byte against REVIEW.md
+files the desktop tool's own Go code wrote (`orchestrator/src/review/fixtures/`,
+with its own README on provenance), the same reviews being rebuilt from the same
+inputs and each file round-tripped. The invariants have tests that are the
+attacks: a symlink out of the workspace, a symlink through a directory, and a
+traversal all coming back as the same 404, and a repository-local
+`core.fsmonitor` and `textconv` planted in a real repository with an assertion
+that neither ever ran. The seven routes are driven over their real handlers, a
+real database and a real git repository in a temp directory — no Docker at all,
+which is what stage one bought for the tests as much as for the feature —
+covering root resolution, drift, concurrent writes and that none of them touches
+a session's activity timestamp.
+
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update
 routing with two browsers attached — including two on *two* threads, where an
@@ -980,6 +994,13 @@ path, so a fresh thread starting empty, a fork carrying the source's messages,
 a switch bringing the first thread's transcript back, and two tabs on two
 threads each keeping to their own conversation are asserted against a gateway
 that behaves like the real one.
+The review pages are in that suite too, on a phone viewport and a desktop one,
+because the two arrangements are different enough that one passing says little
+about the other: browse the tree, open a file, tap a gutter marker for the hunk,
+comment on a line and see the write reach the API, edit and delete it, set a
+base revision, and hand the review to the agent with the prompt staged unsent.
+The degraded shapes are there as well — no git, an empty workspace, and a
+session whose workspace is still a volume.
 That is what asserts the UX properties this frontend exists for, and it is
 where a component upgrade is reviewed: `/playground` renders every part kind over a
 canned store, so a registry re-run shows up on one page.

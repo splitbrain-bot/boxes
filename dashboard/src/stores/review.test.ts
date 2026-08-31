@@ -365,8 +365,7 @@ test('clearing the base sends null', async () => {
   await loadTree();
   answers['/review/base'] = { rev: '', commit: '' };
   await setBase(null);
-  const call = requested.findLast((url) => url.includes('/review/base'));
-  assert.ok(call);
+  assert.ok(requested.some((url) => url.includes('/review/base')));
 });
 
 test('an unknown revision reports itself and changes nothing', async () => {
