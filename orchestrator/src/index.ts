@@ -6,7 +6,7 @@ import { config } from './config.ts';
 import { openDb } from './db.ts';
 import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { log } from './log.ts';
-import { startProxyReconciler, startReaper } from './reaper.ts';
+import { startImageRefresher, startProxyReconciler, startReaper } from './reaper.ts';
 
 // --- boot ------------------------------------------------------------------
 
@@ -96,8 +96,23 @@ async function main(): Promise<void> {
   // Before anything creates or starts a container: a workspace bind names a
   // host-side path, and this is what resolves it.
   await manager.resolveHostDataDir();
+
+  // Before the first session is created, and best-effort: a deployment whose
+  // registry is unreachable should still come up and serve what it has. The
+  // create path pulls again, and reports properly when there is nothing to
+  // create a session from.
+  try {
+    await manager.ensureSessionImage();
+  } catch (err) {
+    log.warn('could not pull the session image at boot', {
+      image: cfg.SESSION_IMAGE,
+      error: (err as Error).message,
+    });
+  }
+
   await manager.reconcile();
   startReaper(db, cfg, manager);
+  startImageRefresher(cfg, manager);
   startProxyReconciler(manager, egress, setProxyWarnings);
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });

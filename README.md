@@ -37,13 +37,22 @@ mid-task and find the finished thread when you come back.
 git clone https://github.com/splitbrain/experiments.git boxes
 cd boxes
 
-docker build -t boxes-session:latest session-image/
 docker compose up -d
 ```
 
 The session image is deliberately **not** part of `compose.yaml` — the
-orchestrator creates session containers at runtime. Build it once as shown,
-and rebuild it whenever `session-image/` changes.
+orchestrator creates session containers at runtime, so it fetches that image
+itself: once at boot when it is missing, and again every
+`SESSION_IMAGE_PULL_MINUTES` so a moving tag moves here too. A session adopts
+what has arrived the next time it is started.
+
+To run one you built rather than one you pull, build it and turn the refresh
+off — there is no registry to pull a local tag from:
+
+```sh
+docker build -t boxes-session:latest session-image/
+echo SESSION_IMAGE_PULL_MINUTES=0 >> .env
+```
 
 Boxes is now on <http://localhost:3000>, bound to loopback because it ships
 with no authentication of its own. See
@@ -64,10 +73,13 @@ Each carries `latest` and an immutable `sha-<short>`. A deployment that wants
 to be rolled forward by something like watchtower follows `latest`; one that
 must not move under itself pins the sha.
 
-The session image is the one to think about: because the orchestrator creates
-those containers rather than compose, an updater watching `latest` would
-recreate a running session behind its back. Pin `SESSION_IMAGE` to a sha tag
-and pull it yourself — the orchestrator creates containers, it never pulls.
+The session image needs nothing special of the deployment: point
+`SESSION_IMAGE` at `latest` and the orchestrator keeps it current itself. What
+it must **not** have is an outside updater, because compose does not own those
+containers and recreating one loses the id the orchestrator tracks it by and
+the proxy attachment that is the session's only way out. Session containers
+therefore carry `com.centurylinklabs.watchtower.enable=false`, which watchtower
+and the tools that copy it honour.
 
 `.github/workflows/publish.yml` is the workflow, and the test suites gate it.
 A pull request runs the same suites and builds all three images without
@@ -116,6 +128,7 @@ docker exec -it session-<id> claude /login
 | `PROFILE_DEFAULT_GIT_EMAIL` | `boxes-bot@users.noreply.github.com` | Git author email |
 | `WS_AUTH_TOKEN` | generated | Gateway bearer token; generated on first boot into `/data/ws-auth-token` and reused |
 | `SESSION_IMAGE` | `boxes-session:latest` | Image sessions run |
+| `SESSION_IMAGE_PULL_MINUTES` | `60` | How often that image is pulled again; `0` never, for one built on the host |
 | `SESSION_SUBNET_POOL` | `10.200.0.0/16` | Pool sessions get a `/24` from |
 | `SESSION_MEM_LIMIT` | `4g` | Per-session memory cap |
 | `SESSION_CPUS` | `2` | Per-session CPU cap |

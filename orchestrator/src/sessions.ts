@@ -113,6 +113,111 @@ export class SessionManager {
     return ws.workspacePath(this.cfg.DATA_DIR, row.id);
   }
 
+  // --- the session image ----------------------------------------------------
+
+  /**
+   * Makes sure the session image is on this host, pulling it when it is not.
+   *
+   * Absent, there is nothing to create a session out of, so this is the one
+   * pull that is allowed to fail loudly. Present, it costs one inspect and
+   * says nothing.
+   */
+  async ensureSessionImage(): Promise<void> {
+    if (await dk.imageId(this.cfg.SESSION_IMAGE)) return;
+    log.info('the session image is not on this host; pulling it', {
+      image: this.cfg.SESSION_IMAGE,
+    });
+    await dk.pullImage(this.cfg.SESSION_IMAGE);
+    log.info('pulled the session image', { image: this.cfg.SESSION_IMAGE });
+  }
+
+  /**
+   * Pulls the session image again, so a tag that moves actually moves here.
+   *
+   * Best-effort on purpose: the image already on the host still works, and a
+   * registry that is down — or a tag that was built locally and can be pulled
+   * from nowhere — must not become the orchestrator's problem. Nothing
+   * running is touched; a session adopts what arrived the next time it is
+   * started.
+   */
+  async refreshSessionImage(): Promise<void> {
+    const before = await dk.imageId(this.cfg.SESSION_IMAGE);
+    await dk.pullImage(this.cfg.SESSION_IMAGE);
+    const after = await dk.imageId(this.cfg.SESSION_IMAGE);
+    if (after && after !== before) {
+      log.info('the session image moved; sessions adopt it as they are started', {
+        image: this.cfg.SESSION_IMAGE,
+      });
+    }
+  }
+
+  /**
+   * Moves a session onto the current session image, when what its container
+   * was created from is no longer what SESSION_IMAGE resolves to.
+   *
+   * Recreating is how a session container changes anything about itself —
+   * migrateWorkspace does the same for its mount — and it is cheap: the
+   * rootfs is read-only and everything durable lives in the two mounts, so
+   * the workspace and the adapter's thread history come across untouched.
+   *
+   * Start is the only moment this can happen. Under a running container it
+   * would kill the adapter exec mid-turn, so a running session is left alone
+   * and comes through here at its next stop/start cycle — which the idle
+   * reaper produces on its own within IDLE_STOP_MINUTES.
+   *
+   * The comparison is on image ids, not on the tag, because the case worth
+   * catching is `latest` having moved under a name that did not change.
+   */
+  private async rollOntoCurrentImage(row: SessionRow): Promise<SessionRow> {
+    if (!row.container_id) return row;
+    const slog = log.session(row.id);
+
+    let wanted: string | null;
+    let current: string | null;
+    try {
+      wanted = await dk.imageId(this.cfg.SESSION_IMAGE);
+      current = await dk.containerImageId(row.container_id);
+    } catch (err) {
+      // Whatever the daemon is unhappy about, it is not worth refusing to
+      // start a session that already has a container over.
+      slog.warn('could not compare the session image; starting as it is', {
+        error: (err as Error).message,
+      });
+      return row;
+    }
+    // Nothing on the host to move to, or a container Docker no longer has:
+    // either way there is nothing to decide, and start() surfaces the second.
+    if (!wanted || !current || wanted === current) return row;
+
+    if ((await dk.containerState(row.container_id)) === 'running') {
+      slog.info('session image change deferred: the container is still running');
+      return row;
+    }
+
+    slog.info('recreating the container on the current session image', {
+      from: current,
+      image: this.cfg.SESSION_IMAGE,
+    });
+    // The adapter ran as an exec inside the container about to be removed, so
+    // anything the gateway still holds for this session is already dead.
+    this.upstreams.get(row.id)?.stop();
+
+    await dk.removeContainer(row.container_id);
+    const containerId = await dk.createContainer(
+      this.containerSpec({ ...row, image: this.cfg.SESSION_IMAGE }, this.profileFor(row)),
+      this.cfg,
+    );
+    await dk.startContainer(containerId);
+
+    this.db
+      .prepare('UPDATE sessions SET container_id = ?, image = ? WHERE id = ?')
+      .run(containerId, this.cfg.SESSION_IMAGE, row.id);
+    slog.info('session moved onto the current session image', {
+      image: this.cfg.SESSION_IMAGE,
+    });
+    return this.mustGet(row.id);
+  }
+
   // --- helpers --------------------------------------------------------------
 
   /** The stored row for a session, including deleted ones. */
@@ -207,6 +312,18 @@ export class SessionManager {
     const profile = this.cfg.profiles[profileName];
     if (!profile) throw new HttpError(400, `Unknown profile: ${profileName}`);
 
+    // Before anything is allocated. A deployment whose first pull failed
+    // would otherwise get the daemon's "no such image" halfway through
+    // creating one, and a teardown to go with it.
+    try {
+      await this.ensureSessionImage();
+    } catch (err) {
+      throw new HttpError(
+        503,
+        `Session image ${this.cfg.SESSION_IMAGE} is not available: ${(err as Error).message}`,
+      );
+    }
+
     // Server-generated: user input never reaches a Docker object name.
     const id = randomBytes(4).toString('hex');
     const now = Date.now();
@@ -279,6 +396,7 @@ export class SessionManager {
     let row = this.mustGet(id);
     if (!row.container_id) throw new HttpError(409, 'Session has no container');
     row = await this.migrateWorkspace(row);
+    row = await this.rollOntoCurrentImage(row);
     await dk.startContainer(row.container_id!);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.setStatus(id, 'running');
