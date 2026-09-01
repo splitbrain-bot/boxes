@@ -1,4 +1,9 @@
-# Build the three Boxes images and publish them to GHCR on every push to main.
+# Build the three Boxes images, and publish them to GHCR on every push to main.
+#
+# A pull request runs the same thing minus the push: the suites, and a build
+# of all three images that goes nowhere. A Dockerfile that no longer builds is
+# then a red check rather than a main that cannot publish, and the layer cache
+# makes the repeat cheap for a branch that did not touch the image.
 #
 # One image per process in ARCHITECTURE.md's table:
 #
@@ -20,11 +25,12 @@
 # `latest` is a tag something else deploys unattended, so the test job gates
 # the build rather than running beside it.
 
-name: Publish images
+name: Build and publish images
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 # Two commits in a row: the second one's images are the ones worth having.
@@ -110,7 +116,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      # Skipped on a pull request: nothing is pushed there, and a PR from a
+      # fork has no token that could log in anyway.
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -133,7 +142,10 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          push: true
+          # Built on a pull request, pushed only once it is on main. The tags
+          # are computed either way, so a PR proves the whole step bar the
+          # upload.
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # linux/amd64 is what the deployment host runs. Adding arm64 is one

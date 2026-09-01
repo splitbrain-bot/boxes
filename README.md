@@ -70,6 +70,8 @@ recreate a running session behind its back. Pin `SESSION_IMAGE` to a sha tag
 and pull it yourself — the orchestrator creates containers, it never pulls.
 
 `.github/workflows/publish.yml` is the workflow, and the test suites gate it.
+A pull request runs the same suites and builds all three images without
+pushing any of them.
 
 ## Configure
 
