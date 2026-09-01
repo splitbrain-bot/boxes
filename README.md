@@ -49,6 +49,28 @@ Boxes is now on <http://localhost:3000>, bound to loopback because it ships
 with no authentication of its own. See
 [Behind a reverse proxy](#behind-a-reverse-proxy) before moving it.
 
+### Published images
+
+Every push to `main` builds the three images and pushes them to GHCR, so a
+deployment needs no checkout and no build:
+
+| Image | Is |
+|---|---|
+| `ghcr.io/splitbrain/boxes/orchestrator` | What `compose.yaml` builds from `orchestrator/Dockerfile` |
+| `ghcr.io/splitbrain/boxes/egress-proxy` | The same for `proxy/Dockerfile` |
+| `ghcr.io/splitbrain/boxes/session` | The session image, which is a service in no compose file |
+
+Each carries `latest` and an immutable `sha-<short>`. A deployment that wants
+to be rolled forward by something like watchtower follows `latest`; one that
+must not move under itself pins the sha.
+
+The session image is the one to think about: because the orchestrator creates
+those containers rather than compose, an updater watching `latest` would
+recreate a running session behind its back. Pin `SESSION_IMAGE` to a sha tag
+and pull it yourself — the orchestrator creates containers, it never pulls.
+
+`.github/workflows/publish.yml` is the workflow, and the test suites gate it.
+
 ## Configure
 
 There is no required configuration — every setting has a working default. To
