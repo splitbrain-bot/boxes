@@ -1,12 +1,42 @@
 # Boxes session image: one long-lived container per agent session.
 # PID 1 only holds the container open; the ACP adapter runs as a gateway-owned
 # docker exec, so browser churn never restarts it.
-FROM node:22-bookworm
+#
+# Ubuntu, and Node from NodeSource rather than from the official node image,
+# because those are two independent choices and this image wants both current.
+# The OS is picked for its language toolchains: 26.04 carries PHP 8.5, Go 1.26
+# and Rust 1.93 where Debian stable carries 8.4, 1.24 and 1.85, and Debian
+# oldstable -- what the node image was pinning us to -- carried 8.2, 1.19 and
+# 1.63. Node is picked for the two npm globals the agent itself runs. Basing
+# on the node image would have tied the first choice to the second, and all it
+# ever supplied was Node, npm, and a uid 1000 this file renamed anyway.
+FROM ubuntu:26.04
+
+# What the repositories below need before they can be added. apt reaches the
+# Ubuntu archive over plain http, but curl needs a trust store.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node from NodeSource, because Ubuntu's own is frozen at whatever the release
+# shipped for the whole of its life -- 26.04 is on 22.x with npm 9, and the
+# runtime the agent itself depends on should not be stuck there. The signing
+# key is ASCII-armoured, so a .asc name is all `signed-by` needs and there is
+# no gnupg to install for a dearmor. `nodistro` is NodeSource's one
+# distribution-independent suite, so nothing here names a codename.
+ARG NODE_MAJOR=22
+RUN install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      -o /etc/apt/keyrings/nodesource.asc \
+ && chmod go+r /etc/apt/keyrings/nodesource.asc \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
-      curl \
-      ca-certificates \
       ripgrep \
       jq \
       build-essential \
@@ -19,7 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI from the official apt repo, for the bot's fork and PR flow.
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+# Ubuntu packages a `gh` of its own now, but it freezes with the release the
+# same way Node does, and this is the tool the PR flow depends on.
+RUN install -d -m 0755 /usr/share/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -28,9 +61,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && rm -rf /var/lib/apt/lists/*
 
 # Go, Rust and PHP, so a session can work in them without installing a
-# toolchain first. Debian's own packages rather than upstream tarballs: they
-# come with the distribution's security updates and need no checksum pinned
-# here. What that costs is the version -- see README, "Language toolchains".
+# toolchain first. The distribution's own packages rather than upstream
+# tarballs: they carry its security updates and pin no checksum here. This is
+# the reason the base image is Ubuntu -- see README, "Language toolchains".
 #
 # pkg-config and libssl-dev are not toolchains but are what the common
 # native-dependency crates and extensions look for; build-essential, already
@@ -63,9 +96,9 @@ RUN npm install -g \
       @agentclientprotocol/claude-agent-acp@0.70.0 \
  && npm cache clean --force
 
-# node:22-bookworm ships uid 1000 as node; rename it to agent so the container
-# user, the volume owner and the exec user all line up, and move it off 1000,
-# which on a real host is usually a person.
+# The agent's own account, created rather than renamed: an Ubuntu base ships
+# no developer user to reuse, and 1020 keeps clear of the `ubuntu` account it
+# does carry at 1000 -- which on a real host is usually a person.
 #
 # These have to match the orchestrator's SESSION_UID and SESSION_GID -- their
 # defaults are the same numbers, in orchestrator/src/workspaces.ts. A session's
@@ -75,16 +108,19 @@ RUN npm install -g \
 ARG AGENT_UID=1020
 ARG AGENT_GID=1020
 
-RUN usermod -l agent -d /home/agent -m node \
- && groupmod -n agent node \
- && groupmod -g "${AGENT_GID}" agent \
- && usermod -u "${AGENT_UID}" -g "${AGENT_GID}" agent
+RUN groupadd -g "${AGENT_GID}" agent \
+ && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -m -d /home/agent -s /bin/bash agent
 
 # HOME is named outright rather than left to Docker's /etc/passwd lookup: it
 # is what GOPATH, GOCACHE, CARGO_HOME and COMPOSER_HOME are each derived from,
 # so a session that resolved it differently would put every build cache
 # somewhere other than its own volume.
+#
+# LANG likewise: the node image carried the locales package and this base does
+# not, and a session that ran in the C locale would mangle any non-ASCII path
+# or diff it touched. C.UTF-8 is built into glibc, so it needs no package.
 ENV HOME=/home/agent \
+    LANG=C.UTF-8 \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
     TERM=dumb \
     NPM_CONFIG_UPDATE_NOTIFIER=false
@@ -120,12 +156,13 @@ ENV PATH=/home/agent/.local/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
-# Debian's /etc/profile replaces PATH outright for a non-root login shell, so
-# every ENV PATH above survives a plain `docker exec` but not the `bash -lc`
-# that the command surface and the agent's own shell tools run under.
-# /etc/profile.d is sourced after that reset, so the snippet below restores
-# what was lost -- from this snapshot of PATH rather than from a second copy of
-# the list, which would be free to drift from the real one.
+# A login shell has to end up with every directory above, because `bash -lc`
+# is what the command surface and the agent's own shell tools run under.
+# Ubuntu's /etc/profile leaves PATH alone, so today they survive it; Debian's
+# assigns PATH outright and drops all of them, and this image has been based
+# on both. /etc/profile.d is sourced after that assignment either way, so the
+# snippet below puts them back -- from this snapshot of PATH rather than from
+# a second copy of the list, which would be free to drift from the real one.
 #
 # Taken here, after every ENV that adds to PATH and before nothing else does.
 RUN mkdir -p /etc/boxes \
@@ -164,6 +201,17 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && bash -lc 'set -eu; . /etc/boxes/image-path; IFS=:; for d in $BOXES_IMAGE_PATH; do \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \
     done'
+
+# Node is the one thing here that does not come from the distribution, so both
+# halves of that get checked. The major is the one asked for -- and because
+# Ubuntu's own nodejs is on the same major, which would make that check pass
+# on the wrong package, the vendor is checked too: apt quietly preferring the
+# distribution's build would leave a working image whose npm is a separate
+# package nobody installed.
+RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
+ && test "$(command -v node)" = "/usr/bin/node" \
+ && dpkg-query -W -f='${Version}' nodejs | grep -q nodesource \
+ && npm --version >/dev/null
 
 # The toolchains build something, as the agent, with their caches where a
 # session will really put them.

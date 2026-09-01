@@ -62,9 +62,9 @@ with no authentication of its own. See
 
 `SESSION_UID` and `SESSION_GID` are the uid and gid every session process runs
 as, and therefore the owner of every file in a workspace. They default to
-**1020** rather than 1000: 1000 is what `node:22-bookworm` ships and what a
-host usually gives its first login user, and a service sharing a uid with a
-person is what a per-service uid exists to avoid.
+**1020** rather than 1000: 1000 is the `ubuntu` account the base image
+carries and what a host usually gives its first login user, and a service
+sharing a uid with a person is what a per-service uid exists to avoid.
 
 One thing has to agree with them: the session image builds its `agent` user on
 the same numbers, through `AGENT_UID` and `AGENT_GID` build args whose defaults
@@ -452,16 +452,16 @@ toolchain is already in the image.
 
 ### Language toolchains
 
-The image carries Node, Python, Go, Rust and PHP, all from Debian bookworm
-except Node, so a session can work in any of them without installing anything:
+The image carries Node, Python, Go, Rust and PHP, so a session can work in any
+of them without installing anything:
 
-| | Version | Also |
-|---|---|---|
-| Node | 22 | npm; `NPM_CONFIG_PREFIX` is `~/.local` |
-| Python | 3.11 | `python3-venv`, `pipx` |
-| Go | **1.19** | `GOPATH` is `~/go`, cache `~/.cache/go-build` |
-| Rust | **1.63** | `cargo`, `rustfmt`, `cargo-clippy`, `rust-src` |
-| PHP | 8.2 | Composer 2.5, and the mbstring, xml, curl, zip, intl, sqlite3, gd and bcmath extensions |
+| | Version | From | Also |
+|---|---|---|---|
+| Node | 22 | NodeSource | npm; `NPM_CONFIG_PREFIX` is `~/.local` |
+| Python | 3.14 | Ubuntu 26.04 | `python3-venv`, `pipx` |
+| Go | 1.26 | Ubuntu 26.04 | `GOPATH` is `~/go`, cache `~/.cache/go-build` |
+| Rust | 1.93 | Ubuntu 26.04 | `cargo`, `rustfmt`, `cargo-clippy`, `rust-src` |
+| PHP | 8.5 | Ubuntu 26.04 | Composer 2.9, and the mbstring, xml, curl, zip, intl, sqlite3, gd and bcmath extensions |
 
 `build-essential`, `pkg-config` and `libssl-dev` are there too, so a crate or
 an extension with a native dependency builds. Three toolchains cost roughly a
@@ -469,14 +469,20 @@ gigabyte and a half of image, most of it Rust — worth knowing before a first
 pull on a slow link, and the reason a deployment that needs none of them is
 better off with a derived image that strips them than with this one.
 
-Go and Rust are bold because their Debian versions are old enough to matter.
-**Go 1.19 refuses a `go.mod` that asks for a newer Go** — most current projects
-do — and it predates the automatic toolchain download that would otherwise fix
-that. **Rust 1.63 cannot build a crate on edition 2024**, and a good many
-crates now set a `rust-version` above it.
+**Why Ubuntu, and why not the official node image.** These are two independent
+choices, and basing on `node:22-<debian>` made them one. The base is picked for
+its language toolchains, where the spread is wide: Debian oldstable, which the
+node image was pinning this to, ships PHP 8.2, Go 1.19 and Rust 1.63 — a Go
+that refuses any `go.mod` asking for a newer one, and a Rust that cannot build
+an edition 2024 crate. Debian stable is 8.4 / 1.24 / 1.85; Ubuntu 26.04 is
+8.5 / 1.26 / 1.93. Node is picked separately, for the two npm globals the agent
+itself runs, and comes from NodeSource because a distribution's Node freezes
+with the release — 26.04's own is 22.x paired with npm 9. Change the major with
+`--build-arg NODE_MAJOR=24`.
 
-Neither is a wall, because the agent can install a current toolchain into its
-own home with no privileges at all:
+A toolchain from a distribution still ages, whichever one it is. When a project
+needs newer than the image has, the agent can install it into its own home with
+no privileges at all:
 
 ```sh
 # Go, into the home volume
@@ -488,9 +494,11 @@ curl -fsSL https://sh.rustup.rs | sh -s -- -y
 ```
 
 Both land in `/home/agent`, so they survive restarts and image updates like
-anything else there. Make it the deployment's default instead by putting the
-same thing in a derived image — see below — which is the better answer if every
-session is going to want it.
+anything else there. Go needs this least: 1.26 honours `GOTOOLCHAIN`, so a
+`go.mod` asking for a newer Go makes it fetch that toolchain by itself. Make a
+newer toolchain the deployment's default instead by putting the same thing in a
+derived image — see below — which is the better answer if every session is
+going to want it.
 
 ### The agent installs it itself
 
@@ -509,7 +517,7 @@ python3 -m venv ~/.local/venvs/<name>
 that compile on install do compile. `~/.local/bin` is ahead of the system path
 for both a plain `docker exec` and a login shell.
 
-A Debian package whose *contents* are all you need takes no root either —
+A `.deb` whose *contents* are all you need takes no root either —
 unpacking a `.deb` into the home volume is an ordinary file write:
 
 ```sh

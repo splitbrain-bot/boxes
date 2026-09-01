@@ -565,7 +565,7 @@ Any failed step tears the whole session down and marks it `error`.
 The container's `HostConfig` is a fixed template that user input never reaches.
 It runs as `SESSION_UID:SESSION_GID` — numbers rather than the image's `agent`,
 so one setting decides who a session is. The default is 1020, deliberately off
-the 1000 `node:22-bookworm` ships and a host's first login user usually holds.
+the 1000 the `ubuntu` base account holds, as does a host's first login user.
 The session image builds its `agent` user on the same numbers, because a
 session's home is a named volume Docker ownership-initialises from the image
 and nothing outside the container can chown it afterwards; `ensureSessionImage`
