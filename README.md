@@ -438,6 +438,95 @@ Rotating the CA is deleting `egress-secrets.json` from the data volume and
 restarting; sessions created before that keep the old certificate and must be
 recreated.
 
+## When an agent needs a tool the image lacks
+
+`apt-get install` cannot work inside a session, and not by accident: the root
+filesystem is mounted read-only, the agent is not root, and every capability is
+dropped, so all three of the things that install needs are missing. Handing any
+of them back would hand them to every session, for the sake of the one that
+wanted a package.
+
+There are two ways in, and which one you want depends on whether the tool is
+this session's business or the deployment's.
+
+### The agent installs it itself
+
+`/home/agent` is a persistent volume, so anything the agent puts there survives
+restarts and image updates. The image points the user-level package managers at
+`/home/agent/.local` and puts `/home/agent/.local/bin` on `PATH`, so an agent
+can equip itself with no privilege at all:
+
+```sh
+npm install -g <pkg>            # prefix is ~/.local, not /usr/local
+pipx install <pkg>              # PEP 668 clean; binaries land in ~/.local/bin
+python3 -m venv ~/.local/venvs/<name>
+```
+
+`build-essential`, `python3` and `git` are already in the image, so packages
+that compile on install do compile. `~/.local/bin` is ahead of the system path
+for both a plain `docker exec` and a login shell.
+
+A Debian package whose *contents* are all you need takes no root either —
+unpacking a `.deb` into the home volume is an ordinary file write:
+
+```sh
+apt-get download ripgrep                    # apt honours the proxy variables
+dpkg -x ripgrep_*.deb ~/.local              # binaries, libs, no maintainer scripts
+```
+
+The limits are worth knowing before you rely on it: `apt-get download` fetches
+the one package and not its dependencies (`apt-get install --print-uris -qq
+<pkg>` lists those URLs), maintainer scripts never run, and a package that
+expects to live under `/usr` may need `LD_LIBRARY_PATH=~/.local/usr/lib`. For a
+CLI binary it is usually enough; for anything with a postinst it is not.
+
+### The deployment bakes it in
+
+For a package the sessions on this deployment should simply have — a language
+runtime, a headless browser and its libraries, a database client — build an
+image on top of the published one and point `SESSION_IMAGE` at it. Root at
+build time, no root at runtime, and none of the container hardening changes:
+
+```dockerfile
+FROM ghcr.io/splitbrain/boxes/session:latest
+
+# Root here, and only here.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
+# Back to the agent, on the uid the deployment runs sessions as.
+USER 1020
+```
+
+Two rules a derived image has to keep:
+
+- **End on the agent user, not root.** The orchestrator runs the container as
+  `SESSION_UID` regardless, so a stray `USER root` does not get root — but it
+  does make the image's own uid wrong for the next rule.
+- **Do not change the uid.** A session's home is a named volume Docker
+  initialises from the image, owned by the uid the *image* was built on, and
+  nothing outside the container can chown it afterwards. Build with the same
+  `AGENT_UID`/`AGENT_GID` as `SESSION_UID`/`SESSION_GID`. The orchestrator
+  reads the image's user back at boot and warns when they have drifted.
+
+Set `SESSION_IMAGE_PULL_MINUTES=0` for an image built on the host, since there
+is no registry to pull it from.
+
+### What is deliberately not offered
+
+Neither Docker-in-Docker nor a mounted Docker socket. A session with the host's
+socket would have root-equivalent control of the host *and* of this deployment:
+it could read every other session's workspace and `egress-secrets.json` — the
+CA key and the placeholder map — which is precisely what token translation
+exists to prevent. `--privileged` for a nested daemon is host root by another
+route, and would apply to every session rather than the one that asked. A
+session that genuinely needs to run containers wants either an opt-in
+`sysbox-runc` runtime on the host, or a facility where the orchestrator creates
+the container on the session's behalf from the same hardened template. Neither
+exists today.
+
 ## Security model
 
 Isolation rests on two Docker primitives, with nothing touching the host

@@ -22,6 +22,14 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
+# --- the agent's own tool directory -----------------------------------------
+# npm's prefix has to exist before `npm install -g` will use it, and a home
+# volume created before this directory was part of the image does not have it:
+# Docker initialises a named volume from the image once and never again.
+if ! mkdir -p /home/agent/.local/bin; then
+  log "WARNING: could not create /home/agent/.local/bin; installing tools will fail"
+fi
+
 # --- agent configuration ----------------------------------------------------
 # The orchestrator materializes this box's merged AGENTS.md, skills and slash
 # commands into a read-only bind at /boxes/agent, laid out exactly as they have
