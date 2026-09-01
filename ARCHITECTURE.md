@@ -75,6 +75,18 @@ connection is pinned to one thread, so two of them can be watched at once; see
 The orchestrator and the proxy are compose services. Session containers are
 created at runtime through the Docker API, so they appear in no compose file.
 
+That makes the session image the orchestrator's to keep, not compose's: it
+pulls `SESSION_IMAGE` when it is missing and again every
+`SESSION_IMAGE_PULL_MINUTES`, and a session moves onto what arrived the next
+time it is *started* — never while it runs, where recreating the container
+would kill the adapter exec mid-turn. Recreating is otherwise cheap and is how
+a session container changes anything about itself: the rootfs is read-only and
+everything durable is in the two mounts, so the workspace and the thread
+history come across untouched. For the same reason nothing outside the
+orchestrator may recreate one — the container id in the database and the
+runtime proxy attachment would both be lost — so the template carries
+`com.centurylinklabs.watchtower.enable=false`.
+
 `compose.yaml` publishes one port, on loopback, and names no reverse proxy:
 what sits in front is a deployment decision, not part of the system. The one
 constraint it places on that decision is that `/ws` must not be behind HTTP

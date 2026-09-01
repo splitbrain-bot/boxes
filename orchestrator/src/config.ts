@@ -28,6 +28,17 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
 
   SESSION_IMAGE: z.string().min(1).default('boxes-session:latest'),
+  /**
+   * How often the session image is pulled again, so that a moving tag such as
+   * `:latest` actually moves. A session adopts what has arrived when it is
+   * next started; nothing running is disturbed.
+   *
+   * 0 turns the refresh off, which is what an image built on the host wants —
+   * there is no registry to pull it from, and trying every hour would only
+   * fill the log. The image is still pulled once when it is missing
+   * altogether, because a session cannot be created without it.
+   */
+  SESSION_IMAGE_PULL_MINUTES: z.coerce.number().int().nonnegative().default(60),
   SESSION_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
   SESSION_MEM_LIMIT: z.string().regex(/^\d+[kmgKMG]?$/).default('4g'),
   SESSION_CPUS: z.coerce.number().positive().default(2),

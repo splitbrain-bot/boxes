@@ -55,6 +55,41 @@ export function startReaper(
 }
 
 /**
+ * Starts the loop that pulls the session image again every
+ * SESSION_IMAGE_PULL_MINUTES, and returns a handle that stops it. Returns a
+ * no-op handle when the setting is 0.
+ *
+ * This is the whole of "keep the session image current": the pull puts the
+ * new image on the host, and each session moves onto it the next time it is
+ * started. Nothing running is disturbed, and a failed pull is a log line —
+ * the image already here still works.
+ */
+export function startImageRefresher(
+  cfg: Config,
+  manager: SessionManager,
+): { stop: () => void } {
+  if (cfg.SESSION_IMAGE_PULL_MINUTES === 0) {
+    log.info('session image refresh is off', { image: cfg.SESSION_IMAGE });
+    return { stop: () => {} };
+  }
+
+  const timer = setInterval(
+    () => {
+      void manager.refreshSessionImage().catch((err: Error) => {
+        log.warn('could not refresh the session image', {
+          image: cfg.SESSION_IMAGE,
+          error: err.message,
+        });
+      });
+    },
+    cfg.SESSION_IMAGE_PULL_MINUTES * 60_000,
+  );
+  timer.unref?.();
+
+  return { stop: () => clearInterval(timer) };
+}
+
+/**
  * Starts the loop that re-asserts the proxy's state every minute: its
  * attachment to each session network, and the policy it is running.
  *

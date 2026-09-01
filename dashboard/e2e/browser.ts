@@ -16,11 +16,22 @@ let browser: Browser | null = null;
  */
 const PROVIDED_CHROMIUM = process.env['CHROMIUM_PATH'] ?? '/opt/pw-browsers/chromium';
 
-/** Launches Chromium once and reuses it for the whole run. */
+/**
+ * Launches Chromium once and reuses it for the whole run.
+ *
+ * `channel: 'chromium'` rather than the default, which is the
+ * chromium-headless-shell build: that one has no permission UI and so reports
+ * `Notification.permission` as a permanent `denied`, which the push toggle
+ * reads as a browser that can never subscribe. The suite would then be
+ * asserting one thing on a machine that provides its own Chromium and
+ * another on CI, which is worse than either.
+ */
 export async function getBrowser(): Promise<Browser> {
   if (!browser) {
     browser = await chromium.launch(
-      existsSync(PROVIDED_CHROMIUM) ? { executablePath: PROVIDED_CHROMIUM } : {},
+      existsSync(PROVIDED_CHROMIUM)
+        ? { executablePath: PROVIDED_CHROMIUM }
+        : { channel: 'chromium' },
     );
   }
   return browser;
