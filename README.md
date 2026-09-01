@@ -447,7 +447,50 @@ of them back would hand them to every session, for the sake of the one that
 wanted a package.
 
 There are two ways in, and which one you want depends on whether the tool is
-this session's business or the deployment's.
+this session's business or the deployment's. Before either, check whether the
+toolchain is already in the image.
+
+### Language toolchains
+
+The image carries Node, Python, Go, Rust and PHP, all from Debian bookworm
+except Node, so a session can work in any of them without installing anything:
+
+| | Version | Also |
+|---|---|---|
+| Node | 22 | npm; `NPM_CONFIG_PREFIX` is `~/.local` |
+| Python | 3.11 | `python3-venv`, `pipx` |
+| Go | **1.19** | `GOPATH` is `~/go`, cache `~/.cache/go-build` |
+| Rust | **1.63** | `cargo`, `rustfmt`, `cargo-clippy`, `rust-src` |
+| PHP | 8.2 | Composer 2.5, and the mbstring, xml, curl, zip, intl, sqlite3, gd and bcmath extensions |
+
+`build-essential`, `pkg-config` and `libssl-dev` are there too, so a crate or
+an extension with a native dependency builds. Three toolchains cost roughly a
+gigabyte and a half of image, most of it Rust — worth knowing before a first
+pull on a slow link, and the reason a deployment that needs none of them is
+better off with a derived image that strips them than with this one.
+
+Go and Rust are bold because their Debian versions are old enough to matter.
+**Go 1.19 refuses a `go.mod` that asks for a newer Go** — most current projects
+do — and it predates the automatic toolchain download that would otherwise fix
+that. **Rust 1.63 cannot build a crate on edition 2024**, and a good many
+crates now set a `rust-version` above it.
+
+Neither is a wall, because the agent can install a current toolchain into its
+own home with no privileges at all:
+
+```sh
+# Go, into the home volume
+curl -fsSL https://go.dev/dl/go1.27.0.linux-amd64.tar.gz | tar -C ~/.local -xz
+export PATH=~/.local/go/bin:$PATH
+
+# Rust, which is where rustup installs by default anyway
+curl -fsSL https://sh.rustup.rs | sh -s -- -y
+```
+
+Both land in `/home/agent`, so they survive restarts and image updates like
+anything else there. Make it the deployment's default instead by putting the
+same thing in a derived image — see below — which is the better answer if every
+session is going to want it.
 
 ### The agent installs it itself
 
