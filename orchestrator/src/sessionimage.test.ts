@@ -229,3 +229,36 @@ describe('having the session image at all', () => {
     assert.equal(fake.images.get(IMAGE), 'sha256:two');
   });
 });
+
+describe('reading the uid back off the session image', () => {
+  /** Installs a daemon whose image reports `user` as its own `USER`. */
+  function withImageUser(user: string | undefined): void {
+    dk.setDockerForTests({
+      getImage: () => ({
+        inspect: async () => ({ Id: 'sha256:one', Config: user === undefined ? {} : { User: user } }),
+      }),
+    } as unknown as Docker);
+  }
+
+  it('reads a numeric USER, which is what the image is built with', async () => {
+    withImageUser('1020');
+    assert.equal(await dk.imageUserUid(IMAGE), 1020);
+  });
+
+  it('ignores a uid:gid pair beyond its uid', async () => {
+    withImageUser('1020:1020');
+    assert.equal(await dk.imageUserUid(IMAGE), 1020);
+  });
+
+  it('says nothing about an image whose USER is a name', async () => {
+    // An older image, or one built elsewhere: there is no uid to compare, and
+    // guessing at one would be worse than staying quiet.
+    withImageUser('agent');
+    assert.equal(await dk.imageUserUid(IMAGE), null);
+  });
+
+  it('says nothing about an image with no USER at all', async () => {
+    withImageUser(undefined);
+    assert.equal(await dk.imageUserUid(IMAGE), null);
+  });
+});

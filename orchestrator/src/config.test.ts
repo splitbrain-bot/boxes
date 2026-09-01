@@ -141,3 +141,23 @@ test('only a credential with a configured secret is translated', () => {
     );
   });
 });
+
+test('the session uid defaults off 1000 and is settable', () => {
+  withDataDir((dir) => {
+    // 1000 is the base image's own uid and, on a real host, usually a person's.
+    // The default moves off it so a deployment can give the agent a uid of its
+    // own the way it would any other service.
+    const base = loadConfig({ DATA_DIR: dir });
+    assert.equal(base.SESSION_UID, 1020);
+    assert.equal(base.SESSION_GID, 1020);
+
+    const set = loadConfig({ DATA_DIR: dir, SESSION_UID: '1000', SESSION_GID: '1000' });
+    assert.equal(set.SESSION_UID, 1000);
+    assert.equal(set.SESSION_GID, 1000);
+
+    // Root would put a session's every process back at uid 0, which the whole
+    // container template exists to avoid, so it is not a value to accept.
+    assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_UID: '0' }));
+    assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_UID: 'agent' }));
+  });
+});

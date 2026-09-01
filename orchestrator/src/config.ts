@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { resolveWsAuthToken } from './secret.ts';
+import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 
 /**
  * Environment parsing. Every setting the orchestrator reads comes from the
@@ -28,6 +29,21 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
 
   SESSION_IMAGE: z.string().min(1).default('boxes-session:latest'),
+  /**
+   * uid and gid session containers run as, and so the owner of every file in
+   * a workspace.
+   *
+   * The session image has to agree: it builds its `agent` user on these same
+   * numbers through the AGENT_UID and AGENT_GID build args, and a session's
+   * home is a named volume Docker ownership-initialises from the image, which
+   * nothing outside the container can then chown. ensureSessionImage() reads
+   * the image's own user back and says so when the two have drifted.
+   *
+   * Setting these to the uid the orchestrator itself runs as is what lets it
+   * drop root: there is then nothing to give away. See workspaces.ts.
+   */
+  SESSION_UID: z.coerce.number().int().positive().default(DEFAULT_SESSION_UID),
+  SESSION_GID: z.coerce.number().int().positive().default(DEFAULT_SESSION_GID),
   /**
    * How often the session image is pulled again, so that a moving tag such as
    * `:latest` actually moves. A session adopts what has arrived when it is

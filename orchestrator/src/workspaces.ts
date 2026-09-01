@@ -19,16 +19,46 @@ import { log } from './log.ts';
  */
 
 /**
- * uid and gid the session container runs as.
+ * Default uid and gid the session container runs as.
  *
- * session-image/Dockerfile renames the base image's uid 1000 to `agent`, and
- * everything in the container runs as that user. A bind mount — unlike a named
- * volume — is not ownership-initialised by Docker, so every directory and file
- * the orchestrator creates in a workspace has to be given away explicitly or
- * the agent cannot write to its own workspace.
+ * This is the one number the session image and the orchestrator have to agree
+ * on, so it is defined once here: `SESSION_UID`/`SESSION_GID` default to it in
+ * config.ts, and `session-image/Dockerfile` builds its `agent` user on it
+ * through build args of the same name. Outside the range a login user is
+ * normally given, because a service sharing a uid with a person is exactly
+ * what a per-service uid is for.
+ *
+ * A bind mount — unlike a named volume — is not ownership-initialised by
+ * Docker, so every directory and file the orchestrator creates in a workspace
+ * has to be given away explicitly, or the agent cannot write to its own
+ * workspace. Unless the orchestrator is already running as this uid, in which
+ * case there is nothing to give away; see chownToAgent.
  */
-export const AGENT_UID = 1000;
-export const AGENT_GID = 1000;
+export const DEFAULT_SESSION_UID = 1020;
+export const DEFAULT_SESSION_GID = 1020;
+
+/**
+ * The uid and gid in force, installed once at boot from the parsed config.
+ *
+ * Module state with an explicit installer, like docker.ts's client and
+ * config.ts's own cache: the alternative is threading two numbers through
+ * ReviewService and every atomic write under it, for a value that is fixed for
+ * the life of the process.
+ */
+let owner: { uid: number; gid: number } = {
+  uid: DEFAULT_SESSION_UID,
+  gid: DEFAULT_SESSION_GID,
+};
+
+/** Installs the uid and gid session containers run as. Called from buildApp. */
+export function setSessionOwner(uid: number, gid: number): void {
+  owner = { uid, gid };
+}
+
+/** The uid and gid session containers run as. */
+export function sessionOwner(): { readonly uid: number; readonly gid: number } {
+  return owner;
+}
 
 /** Directory under DATA_DIR holding one directory per session workspace. */
 export const WORKSPACES_SUBDIR = 'workspaces';
@@ -93,19 +123,21 @@ export function removeWorkspace(dataDir: string, sessionId: string): void {
  * what the orchestrator wrote — REVIEW.md above all, which is the point of
  * putting it in the workspace.
  *
- * Only root can give a file away, and the orchestrator container runs as root.
- * A development process that does not is left with files it owns itself, which
- * works for everything but a container actually mounting them, so the failure
- * is logged rather than thrown.
+ * Only root can give a file away. A deployment that runs the orchestrator as
+ * the session uid itself needs none of this and returns immediately, which is
+ * the arrangement that lets the orchestrator drop root; one that runs it as
+ * some other non-root user is left with files it owns itself, which works for
+ * everything but a container actually mounting them, so the failure is logged
+ * rather than thrown.
  */
 export function chownToAgent(path: string): void {
-  if (process.getuid?.() === AGENT_UID) return;
+  if (process.getuid?.() === owner.uid) return;
   try {
-    chownSync(path, AGENT_UID, AGENT_GID);
+    chownSync(path, owner.uid, owner.gid);
   } catch (err) {
     log.warn('could not give a workspace path to the agent user', {
       path,
-      uid: AGENT_UID,
+      uid: owner.uid,
       error: (err as Error).message,
     });
   }
