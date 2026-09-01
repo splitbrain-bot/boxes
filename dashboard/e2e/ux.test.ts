@@ -44,6 +44,16 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
       await input.fill(text);
       await input.press('Enter');
       await expect.poll(() => input.inputValue()).toBe('');
+      // The composer clearing is local and immediate; the message itself
+      // reaches the thread only when the gateway echoes it back. Recall walks
+      // the thread's own user messages, so this — not the empty composer — is
+      // when the history has what the rest of the test asks it for.
+      // Longer than the default poll: this one waits on a round trip rather
+      // than on a render, and every assertion below depends on it having
+      // happened.
+      await expect
+        .poll(() => page.getByText(text).isVisible(), { timeout: 10_000 })
+        .toBe(true);
     }
 
     await input.press('ArrowUp');
