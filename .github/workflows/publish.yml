@@ -55,9 +55,9 @@ jobs:
       matrix:
         package: [orchestrator, proxy, dashboard]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -112,7 +112,7 @@ jobs:
             context: session-image
             dockerfile: session-image/Dockerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
