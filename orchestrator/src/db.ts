@@ -51,6 +51,11 @@ export interface SessionRow {
   review_base_commit: string | null;
   status: SessionStatus;
   /**
+   * The extra agent set this session was created with, or null for the global
+   * set alone. Cleared by the database if that set is later deleted.
+   */
+  agent_set_id: string | null;
+  /**
    * The thread a connection that names none gets, or null before one exists.
    * A default rather than the truth: a connection may pin itself to any of
    * the session's threads instead.
@@ -134,6 +139,34 @@ export interface PushSubscriptionRow {
   label: string | null;
   created_at: number;
   last_used_at: number;
+}
+
+/**
+ * One named collection of agent configuration: an AGENTS.md, plus any number
+ * of skills and slash commands.
+ *
+ * The row with id `global` is seeded by the migration that creates the table
+ * and is applied to every session. Every other set is optional and is chosen
+ * when a session is created, and its contents are merged over the global ones.
+ */
+export interface AgentSetRow {
+  id: string;
+  name: string;
+  /** This set's own AGENTS.md, or '' when it contributes none. */
+  agents_md: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One skill or slash command belonging to an agent set. */
+export interface AgentItemRow {
+  set_id: string;
+  kind: 'skill' | 'command';
+  /** A safe single path component; see the check in agents.ts. */
+  name: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
 }
 
 /**
@@ -259,6 +292,38 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE sessions ADD COLUMN review_root TEXT;
   ALTER TABLE sessions ADD COLUMN review_base_rev TEXT;
   ALTER TABLE sessions ADD COLUMN review_base_commit TEXT;
+  `,
+  // What the agent is configured with, managed from the dashboard: an
+  // AGENTS.md, skills and slash commands, in named sets. The `global` row is
+  // seeded here rather than created on demand, so every deployment has exactly
+  // one always-applied set from its first boot and nothing has to decide
+  // later whether to make it.
+  //
+  // A session names at most one further set. Deleting that set is not blocked
+  // — the session's files are already materialized — so the reference clears
+  // itself, and the session falls back to the global set alone at its next
+  // start.
+  `
+  CREATE TABLE agent_sets (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    agents_md  TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE agent_items (
+    set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('skill', 'command')),
+    name       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (set_id, kind, name)
+  );
+  INSERT INTO agent_sets (id, name, agents_md, created_at, updated_at)
+    VALUES ('global', 'Global', '', 0, 0);
+  ALTER TABLE sessions ADD COLUMN agent_set_id TEXT
+    REFERENCES agent_sets(id) ON DELETE SET NULL;
   `,
 ];
 

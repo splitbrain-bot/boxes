@@ -164,6 +164,10 @@ export function SessionInfo() {
               value={session.containerId ? session.containerId.slice(0, 12) : '—'}
             />
             <Meta label="Network" value={`${session.networkName} (${session.subnet})`} />
+            {/* Which agent set this box was created with. The global one is
+                applied on top of it either way, so "global only" is the
+                truthful reading of no set rather than "none". */}
+            <Meta label="Agent set" value={session.agentSetName ?? 'global only'} />
             <Meta label="Last active" value={new Date(session.lastActiveAt).toLocaleString()} />
           </dl>
         </CardContent>

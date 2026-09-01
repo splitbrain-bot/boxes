@@ -48,6 +48,7 @@ async function envFor(over: Record<string, string>): Promise<Record<string, stri
     networkName: 'sn-abcd1234',
     subnet: '10.200.0.0/29',
     workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
+    agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
     homeVolume: 'home-abcd1234',
     profile,
     egress: {
@@ -132,6 +133,7 @@ describe('the container template', () => {
           networkName: 'sn-abcd1234',
           subnet: '10.200.0.0/29',
           workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
+          agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
           homeVolume: 'home-abcd1234',
           profile,
           egress: {
@@ -156,6 +158,9 @@ describe('the container template', () => {
     assert.deepEqual(host.Binds, [
       '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234:/workspace',
       'home-abcd1234:/home/agent',
+      // The agent configuration is read-only: what the dashboard says a box is
+      // configured with is not the agent's to rewrite.
+      '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234:/boxes/agent:ro',
     ]);
   }, 30_000);
 

@@ -10,6 +10,7 @@ import { openDb, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
 import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
+import { AgentStore } from '../agents.ts';
 import { SessionManager } from '../sessions.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -154,7 +155,13 @@ beforeEach(() => {
   db = openDb(dir);
   const cfg = config();
   announced = [];
-  manager = new SessionManager(db, cfg, new EgressManager(cfg), new RecordingNotifier(db, cfg));
+  manager = new SessionManager(
+    db,
+    cfg,
+    new EgressManager(cfg),
+    new RecordingNotifier(db, cfg),
+    new AgentStore(db, cfg.DATA_DIR),
+  );
   seed();
 });
 

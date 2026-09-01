@@ -3,6 +3,8 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type {
+  AgentItem,
+  AgentSetDetail,
   CreateThreadBody,
   ExecRecord,
   HealthResponse,
@@ -68,6 +70,8 @@ export function stubSession(over: Partial<SessionDetail> = {}): SessionDetail {
     threads: [stubThread()],
     currentThreadId: 'th1',
     canFork: true,
+    agentSetId: null,
+    agentSetName: null,
     createdAt: Date.parse('2026-08-01T10:00:00Z'),
     lastActiveAt: Date.parse('2026-08-30T09:30:00Z'),
     image: 'boxes-session:latest',
@@ -149,9 +153,37 @@ export function stubReview(over: Partial<StubReview> = {}): StubReview {
   };
 }
 
+/**
+ * An agent set the stub reports. Defaults to the global one, which every
+ * deployment has from its first boot.
+ */
+export function stubAgentSet(over: Partial<AgentSetDetail> = {}): AgentSetDetail {
+  const items = over.items ?? [];
+  return {
+    id: 'global',
+    name: 'Global',
+    global: true,
+    agentsMd: '',
+    items,
+    hasAgentsMd: (over.agentsMd ?? '').trim() !== '',
+    skillCount: items.filter((i) => i.kind === 'skill').length,
+    commandCount: items.filter((i) => i.kind === 'command').length,
+    sessionCount: 0,
+    createdAt: Date.parse('2026-08-01T10:00:00Z'),
+    updatedAt: Date.parse('2026-08-01T10:00:00Z'),
+    ...over,
+  };
+}
+
 /** What the stub answers with, mutable between navigations. */
 export interface StubState {
   sessions: SessionDetail[];
+  /**
+   * The agent sets, global first, exactly as the orchestrator would answer.
+   * Held whole rather than summarized so the stub can serve the list, the
+   * detail and the merge from one place.
+   */
+  agentSets: AgentSetDetail[];
   /** What the health probe reports about the deployment's Claude token. */
   claudeTokenConfigured: boolean;
   /** Review data per session id. A session without one has no review at all. */
@@ -187,6 +219,7 @@ export async function startStubOrchestrator(
     sessions: initial,
     claudeTokenConfigured: true,
     reviews: Object.fromEntries(initial.map((s) => [s.id, stubReview()])),
+    agentSets: [stubAgentSet()],
   };
   const reviewCalls: StubOrchestrator['reviewCalls'] = [];
   const execCalls: StubOrchestrator['execCalls'] = [];
@@ -282,6 +315,11 @@ export async function startStubOrchestrator(
     );
     if (review) {
       return answerReview(req, res, state, reviewCalls, review[1]!, review[2] ?? '');
+    }
+
+    const agentSets = /^\/api\/agent-sets(?:\/([^/]+))?(?:\/(items|preview))?$/.exec(url);
+    if (agentSets) {
+      return answerAgentSets(req, res, state, agentSets[1], agentSets[2] ?? '');
     }
 
     if (url.startsWith('/api') || url.startsWith('/ws')) {
@@ -566,4 +604,106 @@ function languageOf(path: string): string {
   if (path.endsWith('.ts')) return 'typescript';
   if (path.endsWith('.md')) return 'markdown';
   return '';
+}
+
+/**
+ * The agent-set endpoints, over an in-memory list.
+ *
+ * Enough of a model for the editor to be exercised end to end: a written item
+ * comes back in the next read, and the preview merges the global set with the
+ * one asked for, which is the behaviour the view actually renders.
+ */
+function answerAgentSets(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  state: StubState,
+  setId: string | undefined,
+  endpoint: string,
+): void {
+  const summarize = (set: AgentSetDetail): AgentSetDetail => ({
+    ...set,
+    hasAgentsMd: set.agentsMd.trim() !== '',
+    skillCount: set.items.filter((i) => i.kind === 'skill').length,
+    commandCount: set.items.filter((i) => i.kind === 'command').length,
+  });
+
+  const withBody = (fn: (body: Record<string, unknown>) => void): void => {
+    let raw = '';
+    req.on('data', (c: Buffer) => (raw += c.toString('utf8')));
+    req.on('end', () => fn(JSON.parse(raw || '{}') as Record<string, unknown>));
+  };
+
+  if (setId === undefined) {
+    if (req.method === 'GET') return json(res, 200, state.agentSets.map(summarize));
+    if (req.method === 'POST') {
+      return withBody((body) => {
+        const created = stubAgentSet({
+          id: `as${state.agentSets.length}`,
+          name: String(body['name'] ?? ''),
+          global: false,
+          items: [],
+        });
+        state.agentSets.push(created);
+        return json(res, 201, summarize(created));
+      });
+    }
+  }
+
+  const set = state.agentSets.find((s) => s.id === setId);
+  if (!set) return json(res, 404, { error: 'Agent set not found' });
+
+  if (endpoint === '' && req.method === 'GET') return json(res, 200, summarize(set));
+  if (endpoint === '' && req.method === 'PATCH') {
+    return withBody((body) => {
+      if (typeof body['name'] === 'string') set.name = body['name'];
+      if (typeof body['agentsMd'] === 'string') set.agentsMd = body['agentsMd'];
+      return json(res, 200, summarize(set));
+    });
+  }
+  if (endpoint === '' && req.method === 'DELETE') {
+    state.agentSets = state.agentSets.filter((s) => s.id !== setId);
+    res.writeHead(204).end();
+    return undefined;
+  }
+  if (endpoint === 'items' && req.method === 'PUT') {
+    return withBody((body) => {
+      const kind = body['kind'] as AgentItem['kind'];
+      const name = String(body['name'] ?? '').toLowerCase();
+      const content = String(body['content'] ?? '');
+      set.items = [
+        ...set.items.filter((i) => !(i.kind === kind && i.name === name)),
+        { kind, name, content, updatedAt: Date.now() },
+      ].sort((a, b) => b.kind.localeCompare(a.kind) || a.name.localeCompare(b.name));
+      return json(res, 200, summarize(set));
+    });
+  }
+  if (endpoint === 'items' && req.method === 'DELETE') {
+    const query = new URL(req.url ?? '', 'http://stub').searchParams;
+    set.items = set.items.filter(
+      (i) => !(i.kind === query.get('kind') && i.name === query.get('name')),
+    );
+    return json(res, 200, summarize(set));
+  }
+  if (endpoint === 'preview' && req.method === 'GET') {
+    const global = state.agentSets.find((s) => s.global);
+    const byKey = new Map<string, AgentItem>();
+    for (const item of global?.items ?? []) byKey.set(`${item.kind}/${item.name}`, item);
+    const overrides: Array<{ kind: AgentItem['kind']; name: string }> = [];
+    if (!set.global) {
+      for (const item of set.items) {
+        const key = `${item.kind}/${item.name}`;
+        if (byKey.has(key)) overrides.push({ kind: item.kind, name: item.name });
+        byKey.set(key, item);
+      }
+    }
+    return json(res, 200, {
+      agentsMd: [global?.agentsMd ?? '', set.global ? '' : set.agentsMd]
+        .map((p) => p.trim())
+        .filter((p) => p !== '')
+        .join('\n\n'),
+      items: [...byKey.values()],
+      overrides,
+    });
+  }
+  return json(res, 404, { error: 'Not found' });
 }

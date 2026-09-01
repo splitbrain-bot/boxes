@@ -153,6 +153,14 @@ export class UpstreamSession {
     private readonly pending: PendingStore,
     private readonly notifier: Notifier,
     private readonly onStatus: (status: SessionRow['status']) => void,
+    /**
+     * Run just before the container is started, to write out this session's
+     * agent configuration. Opening a thread on a stopped box is the other way
+     * a container starts, and the entrypoint installs whatever is on disk at
+     * that moment — so it has to be current here too, not only after an
+     * explicit start.
+     */
+    private readonly beforeStart: () => void,
   ) {
     this.slog = log.session(sessionId);
     this.downstreams = new Broadcast(sessionId);
@@ -307,6 +315,7 @@ export class UpstreamSession {
     const row = this.row();
     if (!row.container_id) throw new Error('Session has no container');
 
+    this.beforeStart();
     await dk.startContainer(row.container_id);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
 

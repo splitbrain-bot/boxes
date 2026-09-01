@@ -1,5 +1,10 @@
 import type {
   AcpLogPage,
+  AgentBundlePreview,
+  AgentItemBody,
+  AgentItemKind,
+  AgentSetDetail,
+  AgentSetSummary,
   CreateSessionBody,
   CreateThreadBody,
   HealthResponse,
@@ -121,4 +126,36 @@ export const api = {
     }),
   deleteReview: (id: string) =>
     request<void>(`/api/sessions/${id}/review`, { method: 'DELETE' }),
+
+  // --- agent configuration -------------------------------------------------
+  //
+  // Every mutation answers with the whole set, so the editor never has to
+  // stitch a patch into what it already holds.
+
+  listAgentSets: () => request<AgentSetSummary[]>('/api/agent-sets'),
+  getAgentSet: (setId: string) => request<AgentSetDetail>(`/api/agent-sets/${setId}`),
+  createAgentSet: (name: string) =>
+    request<AgentSetDetail>('/api/agent-sets', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  updateAgentSet: (setId: string, body: { name?: string; agentsMd?: string }) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteAgentSet: (setId: string) =>
+    request<void>(`/api/agent-sets/${setId}`, { method: 'DELETE' }),
+  putAgentItem: (setId: string, body: AgentItemBody) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/items`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteAgentItem: (setId: string, kind: AgentItemKind, name: string) =>
+    request<AgentSetDetail>(
+      `/api/agent-sets/${setId}/items?kind=${kind}&name=${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    ),
+  agentSetPreview: (setId: string) =>
+    request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),
 };

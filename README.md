@@ -136,7 +136,8 @@ Open <http://localhost:3000>.
 
 **Create a session.** Give it a name. The session gets its own container,
 network and storage, and its workspace starts empty — tell the agent what to
-fetch into it.
+fetch into it. If the deployment has any agent sets beyond the global one, pick
+which of them this box gets.
 
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
 interface: type, and the turn runs in the container. Close the tab or lock your
@@ -185,6 +186,31 @@ Reviewing needs no running container — the files are a directory on the
 orchestrator's data volume — so the natural moment, once the agent is done and
 the box has idled out, costs nothing. A session created before Boxes stored
 workspaces this way says so and asks you to start it once, which migrates it.
+
+**Configure the agent.** The sliders in the session list header open **Agent
+configuration**: an `AGENTS.md`, skills and slash commands, managed here rather
+than pasted into every box.
+
+They live in *sets*. The **Global** set goes into every box and cannot be
+deleted. Any other set is optional: a box names at most one when it is created,
+and the two are merged —
+
+| | How the two sets combine |
+|---|---|
+| `AGENTS.md` | Concatenated, global first, separated by a blank line |
+| Skills | Union by name; the named set's replaces the global one of the same name |
+| Slash commands | Same |
+
+— and the set's editor shows the result, so an override is never silent.
+
+Inside the box, the merged set is installed into the agent's own configuration:
+the `AGENTS.md` as its user-level memory, so it applies wherever in the box the
+agent is working; a skill as `skills/<name>/SKILL.md`, which needs YAML front
+matter naming and describing it or it is not loaded at all; a command as
+`commands/<name>.md`, invoked as `/<name>` in the composer.
+
+**An edit reaches a box the next time that box starts.** Nothing is pushed into
+a running one. Stop and start it, or create a new one.
 
 **Answer permission requests.** When the agent asks to do something requiring
 consent, the request goes to a browser watching the thread that asked. With

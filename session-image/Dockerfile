@@ -47,7 +47,10 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 # The root filesystem is mounted read-only at runtime. /workspace and
 # /home/agent are the writable volumes, and /tmp is a tmpfs.
-RUN mkdir -p /workspace /home/agent \
+# /boxes/agent is where the orchestrator binds this session's merged agent
+# configuration, read-only. Created here rather than left to the daemon so the
+# mount point exists on a read-only rootfs.
+RUN mkdir -p /workspace /home/agent /boxes/agent \
  && chown agent:agent /workspace /home/agent
 
 USER agent
