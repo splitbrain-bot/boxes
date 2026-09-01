@@ -123,12 +123,50 @@ export class SessionManager {
    * says nothing.
    */
   async ensureSessionImage(): Promise<void> {
-    if (await dk.imageId(this.cfg.SESSION_IMAGE)) return;
-    log.info('the session image is not on this host; pulling it', {
-      image: this.cfg.SESSION_IMAGE,
-    });
-    await dk.pullImage(this.cfg.SESSION_IMAGE);
-    log.info('pulled the session image', { image: this.cfg.SESSION_IMAGE });
+    if (!(await dk.imageId(this.cfg.SESSION_IMAGE))) {
+      log.info('the session image is not on this host; pulling it', {
+        image: this.cfg.SESSION_IMAGE,
+      });
+      await dk.pullImage(this.cfg.SESSION_IMAGE);
+      log.info('pulled the session image', { image: this.cfg.SESSION_IMAGE });
+    }
+    await this.warnOnSessionUidDrift();
+  }
+
+  /**
+   * Says so when the session image was built on a different uid than
+   * SESSION_UID.
+   *
+   * A container can be run as any uid, so the workspace bind is fine either
+   * way. The home volume is not: Docker initialises a new one from the image's
+   * own `/home/agent`, so it arrives owned by the uid the *image* was built
+   * on, and nothing outside the container can chown it afterwards. Mismatched,
+   * the agent cannot write its own home and every turn fails on something
+   * obscure — so it is worth one loud line at boot rather than being
+   * discovered later.
+   *
+   * A warning and not a refusal: the image is the deployment's to fix, the
+   * rest of the orchestrator works, and reviewing an existing session does not
+   * need a container at all.
+   */
+  private async warnOnSessionUidDrift(): Promise<void> {
+    let imageUid: number | null;
+    try {
+      imageUid = await dk.imageUserUid(this.cfg.SESSION_IMAGE);
+    } catch (err) {
+      log.warn('could not read the session image user', { error: (err as Error).message });
+      return;
+    }
+    if (imageUid === null || imageUid === this.cfg.SESSION_UID) return;
+    log.warn(
+      'the session image was built on a different uid than SESSION_UID; ' +
+        "a session's home volume will not be writable by the agent",
+      {
+        image: this.cfg.SESSION_IMAGE,
+        imageUid,
+        sessionUid: this.cfg.SESSION_UID,
+      },
+    );
   }
 
   /**

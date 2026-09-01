@@ -58,6 +58,55 @@ Boxes is now on <http://localhost:3000>, bound to loopback because it ships
 with no authentication of its own. See
 [Behind a reverse proxy](#behind-a-reverse-proxy) before moving it.
 
+### Who a session runs as
+
+`SESSION_UID` and `SESSION_GID` are the uid and gid every session process runs
+as, and therefore the owner of every file in a workspace. They default to
+**1020** rather than 1000: 1000 is what `node:22-bookworm` ships and what a
+host usually gives its first login user, and a service sharing a uid with a
+person is what a per-service uid exists to avoid.
+
+One thing has to agree with them: the session image builds its `agent` user on
+the same numbers, through `AGENT_UID` and `AGENT_GID` build args whose defaults
+match. A session's home is a named volume, and Docker ownership-initialises a
+new one from the image's own `/home/agent` — so an image built on a different
+uid leaves the agent unable to write its own home, and nothing outside the
+container can chown a named volume afterwards. The orchestrator reads the
+image's user back at boot and warns when the two have drifted.
+
+To run on some other uid, set both and build to match:
+
+```sh
+docker build --build-arg AGENT_UID=1000 --build-arg AGENT_GID=1000 \
+  -t boxes-session:latest session-image/
+echo SESSION_UID=1000 >> .env
+echo SESSION_GID=1000 >> .env
+```
+
+Sessions created before a change keep the old ownership, so changing this on a
+live deployment means recreating them.
+
+### The orchestrator does not need root
+
+It has needed it for one thing: giving each workspace directory away to the
+session uid, which only root can do. Set the orchestrator's own user to
+`SESSION_UID` and there is nothing to give away — `chownToAgent` returns
+immediately — so it can run as an ordinary user:
+
+```yaml
+services:
+  orchestrator:
+    user: "1020:1020"
+    group_add:
+      - "<the host's docker gid>"     # getent group docker | cut -d: -f3
+```
+
+`group_add` is what keeps the Docker socket reachable. Two caveats worth being
+clear about: the data directory has to be owned by that uid already
+(`chown -R 1020:1020` on it), and this is tidiness rather than containment —
+a process holding the Docker socket is root-equivalent on the host whatever
+uid it runs as, so the authentication in front of `/api` is still what matters.
+
 ### Published images
 
 Every push to `main` builds the three images and pushes them to GHCR, so a
@@ -128,6 +177,8 @@ docker exec -it session-<id> claude /login
 | `PROFILE_DEFAULT_GIT_EMAIL` | `boxes-bot@users.noreply.github.com` | Git author email |
 | `WS_AUTH_TOKEN` | generated | Gateway bearer token; generated on first boot into `/data/ws-auth-token` and reused |
 | `SESSION_IMAGE` | `boxes-session:latest` | Image sessions run |
+| `SESSION_UID` | `1020` | uid session processes run as, and the owner of every workspace file. The session image must be built on it |
+| `SESSION_GID` | `1020` | gid to match |
 | `SESSION_IMAGE_PULL_MINUTES` | `60` | How often that image is pulled again; `0` never, for one built on the host |
 | `SESSION_SUBNET_POOL` | `10.200.0.0/16` | Pool sessions get a `/24` from |
 | `SESSION_MEM_LIMIT` | `4g` | Per-session memory cap |

@@ -159,6 +159,13 @@ describe('the container template', () => {
     ]);
   }, 30_000);
 
+  it('runs as the configured uid and gid, not the image\'s user name', async () => {
+    const opts = await capture();
+    // Numbers, so SESSION_UID alone decides who a session is. The default
+    // is off 1000 deliberately: on a real host that is usually a person.
+    assert.equal(opts['User'], '1020:1020');
+  }, 30_000);
+
   it('tells an outside updater to leave session containers alone', async () => {
     const opts = await capture();
     const labels = opts['Labels'] as Record<string, string>;
@@ -174,7 +181,7 @@ describe('the container template', () => {
   it('keeps the isolation the workspace change does not touch', async () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
-    assert.equal(opts['User'], 'agent');
+    assert.equal(opts['User'], '1020:1020');
     assert.equal(host['ReadonlyRootfs'], true);
     assert.deepEqual(host['CapDrop'], ['ALL']);
     assert.equal(host['Privileged'], false);

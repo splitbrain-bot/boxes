@@ -548,7 +548,17 @@ Creating a session, in `SessionManager.create`:
 Any failed step tears the whole session down and marks it `error`.
 
 The container's `HostConfig` is a fixed template that user input never reaches.
-It runs as the non-root `agent` user with `ReadonlyRootfs`, `CapDrop: ALL`,
+It runs as `SESSION_UID:SESSION_GID` — numbers rather than the image's `agent`,
+so one setting decides who a session is. The default is 1020, deliberately off
+the 1000 `node:22-bookworm` ships and a host's first login user usually holds.
+The session image builds its `agent` user on the same numbers, because a
+session's home is a named volume Docker ownership-initialises from the image
+and nothing outside the container can chown it afterwards; `ensureSessionImage`
+reads the image's own user back and warns when the two have drifted. Pointing
+the orchestrator's own user at `SESSION_UID` is what lets it drop root, since
+the workspace chown then has nothing to do.
+
+It runs non-root with `ReadonlyRootfs`, `CapDrop: ALL`,
 `no-new-privileges`, a tmpfs `/tmp`, memory, CPU and pids limits, and
 `Init: true`. That last one matters: the kernel discards default-disposition
 signals for PID 1, so without docker-init the entrypoint's `sleep` would never

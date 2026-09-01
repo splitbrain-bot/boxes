@@ -34,9 +34,21 @@ RUN npm install -g \
  && npm cache clean --force
 
 # node:22-bookworm ships uid 1000 as node; rename it to agent so the container
-# user, the volume owner and the exec user all line up.
+# user, the volume owner and the exec user all line up, and move it off 1000,
+# which on a real host is usually a person.
+#
+# These have to match the orchestrator's SESSION_UID and SESSION_GID -- their
+# defaults are the same numbers, in orchestrator/src/workspaces.ts. A session's
+# home is a named volume Docker ownership-initialises from /home/agent below,
+# so a mismatch leaves the agent unable to write its own home; the orchestrator
+# reads this image's user back at boot and says so if they have drifted.
+ARG AGENT_UID=1020
+ARG AGENT_GID=1020
+
 RUN usermod -l agent -d /home/agent -m node \
- && groupmod -n agent node
+ && groupmod -n agent node \
+ && groupmod -g "${AGENT_GID}" agent \
+ && usermod -u "${AGENT_UID}" -g "${AGENT_GID}" agent
 
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude \
     TERM=dumb \
@@ -50,7 +62,8 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 RUN mkdir -p /workspace /home/agent \
  && chown agent:agent /workspace /home/agent
 
-USER agent
+# Numeric rather than `agent`, so the uid is readable from the image itself.
+USER ${AGENT_UID}
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

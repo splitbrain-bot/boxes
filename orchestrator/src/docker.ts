@@ -4,6 +4,7 @@ import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { Config, SessionProfile } from './config.ts';
 import { log } from './log.ts';
+import { sessionOwner } from './workspaces.ts';
 
 /**
  * Container, network and volume lifecycle, plus the long-lived adapter exec.
@@ -15,6 +16,19 @@ import { log } from './log.ts';
 
 /** Docker label carrying the session id on every object Boxes creates. */
 export const LABEL = 'boxes.session';
+
+/**
+ * The `uid:gid` every session process runs as, as Docker wants it written.
+ *
+ * Numbers rather than the image's `agent`, so SESSION_UID alone decides who a
+ * session is and the image needs no rebuild to be read differently. The two
+ * still have to agree about the *home volume*, which Docker initialises from
+ * the image — see ensureSessionImage().
+ */
+function sessionUser(): string {
+  const { uid, gid } = sessionOwner();
+  return `${uid}:${gid}`;
+}
 
 /** The session's writable workspace, and the working directory of everything in it. */
 export const WORKSPACE_DIR = '/workspace';
@@ -243,6 +257,24 @@ export async function pullImage(image: string): Promise<void> {
 }
 
 /**
+ * The uid an image's own `USER` names, or null when it names something this
+ * cannot read as a number.
+ *
+ * An older image, or one built elsewhere, may carry a user *name* — there is
+ * no uid to compare then, and saying nothing beats guessing.
+ */
+export async function imageUserUid(image: string): Promise<number | null> {
+  try {
+    const info = await docker().getImage(image).inspect();
+    const user = (info.Config?.User ?? '').split(':')[0] ?? '';
+    return /^\d+$/.test(user) ? Number(user) : null;
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+}
+
+/**
  * The id of an image on this host, or null when it is not here.
  *
  * The id and not the tag, because the question this answers is whether a
@@ -351,7 +383,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
   const container = await docker().createContainer({
     name: names.container(spec.sessionId),
     Image: spec.image,
-    User: 'agent',
+    User: sessionUser(),
     WorkingDir: WORKSPACE_DIR,
     Env: sessionEnv(spec, cfg),
     Labels: {
@@ -518,7 +550,7 @@ export async function spawnAdapterExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
-    User: 'agent',
+    User: sessionUser(),
     WorkingDir: workingDir,
   });
 
@@ -593,7 +625,7 @@ export async function runCommandExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
-    User: 'agent',
+    User: sessionUser(),
     WorkingDir: workingDir,
   });
 
