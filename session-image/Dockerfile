@@ -66,4 +66,14 @@ RUN mkdir -p /workspace /home/agent \
 USER ${AGENT_UID}
 WORKDIR /workspace
 
+# Proof rather than assumption, because the failure this guards against is
+# silent: an ARG out of scope leaves USER empty, which means root, and the
+# build succeeds anyway having quietly undone both the uid and the non-root
+# part of the security model. Runs as the user it is checking, so it needs no
+# privileges of its own.
+RUN test "$(id -u)" = "${AGENT_UID}" \
+ && test "$(id -g)" = "${AGENT_GID}" \
+ && test "$(id -un)" = "agent" \
+ && test -w /workspace && test -w /home/agent
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
