@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pipx \
       less \
       netcat-openbsd \
-      dnsutils \
+      bind9-dnsutils \
  && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI from the official apt repo, for the bot's fork and PR flow.
@@ -88,6 +88,62 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config \
       libssl-dev \
  && rm -rf /var/lib/apt/lists/*
+
+# The tools an agent reaches for that are not a language: reading a PDF a
+# ticket linked to, unpacking whatever a download turned out to be, converting
+# a document, poking at a database file. All of it is stuck behind a read-only
+# /usr at runtime, so a tool that is not here is one the agent has to build or
+# do without in the middle of a task.
+#
+# Chosen for what a coding agent actually hits, not for completeness -- these
+# add a few hundred megabytes between them, and a deployment that wants a
+# leaner image strips them in a derived one.
+#
+# Two names are not the obvious ones: fd-find installs itself as `fdfind` to
+# avoid a collision, and `7zip` replaced `p7zip-full`, which is now virtual.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      poppler-utils \
+      qpdf \
+      mupdf-tools \
+      ghostscript \
+      pandoc \
+      tesseract-ocr \
+      tesseract-ocr-eng \
+      ocrmypdf \
+      imagemagick \
+      graphviz \
+      unzip \
+      zip \
+      xz-utils \
+      zstd \
+      7zip \
+      bzip2 \
+      file \
+      tree \
+      patch \
+      wget \
+      git-lfs \
+      sqlite3 \
+      fd-find \
+      shellcheck \
+      yq \
+      cmake \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+ && rm -rf /var/lib/apt/lists/*
+
+# uv, the one tool here the archive does not carry. Installed with the pipx
+# that is already present, both of its directories pointed at /usr/local for
+# this one command: the runtime values below put the agent's own `pipx install`
+# in the home volume, and uv belongs on the image beside the npm globals for
+# the same reason -- Docker initialises a named volume once and never again, so
+# anything durable landing there is frozen at the version the volume was born
+# with.
+#
+# It earns its place twice over under a read-only /usr: `uv tool install` and
+# `uv python install` both write to the home volume, so the agent can fetch a
+# Python it does not have without any privilege at all.
+RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
+ && rm -rf /root/.cache
 
 # The adapter is pinned here and nowhere else. Do not switch to
 # @zed-industries/claude-code-acp, which is stale at 0.16.2.
@@ -212,6 +268,18 @@ RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
  && test "$(command -v node)" = "/usr/bin/node" \
  && dpkg-query -W -f='${Version}' nodejs | grep -q nodesource \
  && npm --version >/dev/null
+
+# Every added tool resolves, as the agent, under the name it will be reached
+# for. This is the check that catches a package renamed out from under the
+# list -- `p7zip-full` going virtual, or `dnsutils` doing the same -- which apt
+# reports as an unsatisfiable dependency only if the name is gone entirely,
+# and silently installs nothing useful if some other package still provides it.
+RUN set -eu; \
+    for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
+             magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
+             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig; do \
+      command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
+    done
 
 # The toolchains build something, as the agent, with their caches where a
 # session will really put them.

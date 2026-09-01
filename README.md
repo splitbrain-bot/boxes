@@ -463,11 +463,41 @@ of them without installing anything:
 | Rust | 1.93 | Ubuntu 26.04 | `cargo`, `rustfmt`, `cargo-clippy`, `rust-src` |
 | PHP | 8.5 | Ubuntu 26.04 | Composer 2.9, and the mbstring, xml, curl, zip, intl, sqlite3, gd and bcmath extensions |
 
-`build-essential`, `pkg-config` and `libssl-dev` are there too, so a crate or
-an extension with a native dependency builds. Three toolchains cost roughly a
-gigabyte and a half of image, most of it Rust — worth knowing before a first
-pull on a slow link, and the reason a deployment that needs none of them is
-better off with a derived image that strips them than with this one.
+`build-essential`, `cmake`, `pkg-config` and `libssl-dev` are there too, so a
+crate or an extension with a native dependency builds. `uv` is installed as
+well, which is worth knowing under a read-only `/usr`: `uv tool install` and
+`uv python install` both write to the home volume, so a session can fetch a
+Python it does not have without any privilege at all.
+
+### Everything else in the image
+
+The tools an agent reaches for that are not a language — reading the PDF a
+ticket linked to, unpacking whatever a download turned out to be, converting a
+document, poking at a database file. A read-only `/usr` means a tool that is
+not here is one the agent has to build or do without mid-task, so the list
+leans generous:
+
+| | |
+|---|---|
+| PDF | `pdftotext`, `pdftoppm`, `pdfinfo` and the rest of poppler; `qpdf`; `mutool`; `gs`; `ocrmypdf` with `tesseract` (English) |
+| Documents | `pandoc` |
+| Images, diagrams | `magick` (ImageMagick 7), `dot` and the rest of graphviz |
+| Archives | `unzip`, `zip`, `xz`, `zstd`, `7z`, `bzip2` |
+| Files, text | `file`, `tree`, `patch`, `fd`, `rg`, `jq`, `yq`, `shellcheck`, `less` |
+| Data | `sqlite3` |
+| Network, VCS | `curl`, `wget`, `git`, `git-lfs`, `gh`, `dig`, `nc` |
+
+Two notes that will otherwise cost someone an hour. `fd` is a symlink the
+image adds, because Debian and Ubuntu install fd-find as `fdfind` to avoid a
+name collision. And ImageMagick's shipped policy refuses PDF and PostScript
+input — that is its Ghostscript hardening, left alone here — so rasterise a
+PDF with `pdftoppm` or `mutool draw`, not `magick`.
+
+Between the toolchains and these, the image is a few gigabytes; most of the
+toolchain half is Rust and most of the tool half is pandoc. Worth knowing
+before a first pull on a slow link, and the reason a deployment that wants a
+leaner image is better off stripping what it does not need in a derived one
+than with this image as shipped.
 
 **Why Ubuntu, and why not the official node image.** These are two independent
 choices, and basing on `node:22-<debian>` made them one. The base is picked for
