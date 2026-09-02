@@ -1,10 +1,21 @@
-import { useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router';
+import { useEffect, useState, type FormEvent } from 'react';
+import { Link, useNavigate } from 'react-router';
+import type { AgentSetSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/sessions.ts';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+
+/** What the picker calls "no extra set", which the API treats as absent. */
+const NO_SET = 'none';
 
 /** The new-session form, which opens the session's thread on success. */
 export function SessionCreate() {
@@ -12,6 +23,26 @@ export function SessionCreate() {
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * The sets a box may be created with, which is every set but the global
+   * one: that goes in either way, so offering it would only suggest it were
+   * optional. Null while they are still loading, and an empty list where the
+   * deployment has never made one — in both cases the picker stays out of the
+   * way rather than showing a control with nothing in it.
+   */
+  const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
+  const [agentSet, setAgentSet] = useState(NO_SET);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setAgentSets((await api.listAgentSets()).filter((s) => !s.global));
+      } catch {
+        // A box can be created without one; the form does not need this to work.
+        setAgentSets([]);
+      }
+    })();
+  }, []);
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
@@ -19,7 +50,10 @@ export function SessionCreate() {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createSession({ name: name.trim() });
+      const created = await api.createSession({
+        name: name.trim(),
+        agentSet: agentSet === NO_SET ? null : agentSet,
+      });
       await refresh();
       void navigate(`/sessions/${created.id}`);
     } catch (err) {
@@ -43,6 +77,32 @@ export function SessionCreate() {
           onChange={(e) => setName(e.target.value)}
         />
       </div>
+
+      {agentSets && agentSets.length > 0 ? (
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="session-agent-set">Agent set</Label>
+          <Select value={agentSet} onValueChange={setAgentSet}>
+            <SelectTrigger id="session-agent-set" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_SET}>Global set only</SelectItem>
+              {agentSets.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Merged over the global AGENTS.md, skills and commands, which every box gets.{' '}
+            <Link to="/agents" className="underline hover:text-foreground">
+              Edit the sets
+            </Link>
+            .
+          </p>
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">

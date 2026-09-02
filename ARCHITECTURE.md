@@ -141,6 +141,14 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id/review/status` | The poll fingerprint: three cheap local hashes |
 | `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it |
 | `DELETE /api/sessions/:id/review` | Deletes `REVIEW.md` — "New review" |
+| `GET /api/agent-sets` | Every agent set, the global one first |
+| `POST /api/agent-sets` | Adds a set |
+| `GET /api/agent-sets/:setId` | One set with its `AGENTS.md`, skills and commands |
+| `PATCH /api/agent-sets/:setId` | Renames a set, or replaces its `AGENTS.md` |
+| `DELETE /api/agent-sets/:setId` | Deletes a set. The global one is refused |
+| `PUT /api/agent-sets/:setId/items` | Creates a skill or command, or replaces the one under that name |
+| `DELETE /api/agent-sets/:setId/items?kind=&name=` | Deletes one |
+| `GET /api/agent-sets/:setId/preview` | What a session naming this set would get, global set merged in |
 | `GET /api/push/key` | The deployment's VAPID public key, which a browser subscribes with |
 | `POST /api/push/subscribe` | Registers a browser for Web Push, or refreshes what is stored for it |
 | `DELETE /api/push/subscribe` | Forgets one browser's subscription |
@@ -188,6 +196,9 @@ One React app, served at `/`. The session list is the thread list: a thread is
 session has current — so every older link and bookmark still works. The ops
 that used to share that page — start, stop, delete, the details, the
 connection fields for an external ACP client — live at `/sessions/:id/info`.
+What the agent is configured with belongs to the deployment rather than to any
+one box, so it hangs off the list instead: `/agents` lists the sets and
+`/agents/:setId` edits one.
 
 Each card carries its session's threads under its badges, the default one
 marked, so the list is the tree. Each row is a plain link to that thread,
@@ -536,14 +547,18 @@ to install rather than that it cannot.
 
 Creating a session, in `SessionManager.create`:
 
-1. Validate the name.
-2. Generate a session id server-side. User input never reaches a Docker object
+1. Validate the name, and the agent set if one was named.
+2. Make sure the session image is on the host, pulling it if it is not. Before
+   anything is allocated, so a deployment whose first pull failed gets one
+   clear answer rather than a half-created session and a teardown.
+3. Generate a session id server-side. User input never reaches a Docker object
    name.
-3. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
+4. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
    `creating`.
-4. Create the network `sn-<id>`, attach the egress proxy, create the workspace
-   directory `${DATA_DIR}/workspaces/<id>` and the volume `home-<id>`, create
-   the container `session-<id>`, and start it.
+5. Create the network `sn-<id>`, attach the egress proxy, create the workspace
+   directory `${DATA_DIR}/workspaces/<id>`, write the merged agent
+   configuration to `${DATA_DIR}/agents/<id>`, create the volume `home-<id>`,
+   create the container `session-<id>`, and start it.
 
 Any failed step tears the whole session down and marks it `error`.
 
@@ -565,7 +580,8 @@ signals for PID 1, so without docker-init the entrypoint's `sleep` would never
 see SIGTERM and every stop would wait out the grace period. The only
 caller-supplied values are the session id and the profile secrets.
 
-The entrypoint sets the git and gh identity and then holds the container open.
+The entrypoint installs the agent configuration into `~/.claude`, sets the git
+and gh identity, and then holds the container open.
 The adapter is spawned separately by the gateway, so browser churn never
 restarts the container. Both run in `/workspace`, which is the session's own
 workspace directory and starts empty.
@@ -579,8 +595,8 @@ workspace directory and starts empty.
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
-network, the workspace directory and the home volume, and clears the session's
-pending requests and log rows. Nothing refers to either once the session is
+network, the workspace directory, the materialized agent configuration and the
+home volume, and clears the session's pending requests and log rows. Nothing refers to either once the session is
 gone, so they go with it rather than being left orphaned.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
@@ -639,6 +655,60 @@ ownership), recreate the session container with the bind, start it, and only
 then delete the volume. A crash before the row is updated leaves a
 volume-backed session that migrates again on the next attempt. A *running*
 legacy session is left alone and comes through at its next stop/start cycle.
+
+## What the agent is configured with
+
+An `AGENTS.md`, skills and slash commands are managed from the dashboard and
+stored in the database, in named *sets*. The set `global` is seeded by the
+migration that creates the tables and goes into every session; a session may
+name one more, and `agents.ts` merges the two. `AGENTS.md` files are
+concatenated, global first — prose accumulates, and a set should add to the
+house rules rather than silently replace them. Skills and commands are a union
+by name, the named set winning, because two files cannot share one name and
+"the same command, but for this project" is the thing the second set exists to
+express.
+
+**The database is the truth and the files are derived from it.** At every
+create and every start, a session's merged set is written to
+`${DATA_DIR}/agents/<id>` and bind-mounted **read-only** at `/boxes/agent`. The
+layout is already the one it takes under `~/.claude` — `CLAUDE.md`,
+`skills/<name>/SKILL.md`, `commands/<name>.md` — so the entrypoint copies and
+interprets nothing.
+
+**Why the copy exists at all.** `~/.claude` is on the home volume, which the
+orchestrator has no path to and has no business in: it holds the transcripts
+and whatever a login inside the box created. Mounting over it read-only would
+break the box; mounting it writable would let the agent edit what the dashboard
+says is configured. So the configuration arrives beside `~/.claude` and the
+entrypoint installs it.
+
+**The manifest is what makes the install reversible.** The materialized
+directory carries a `manifest` naming every path in it. The entrypoint removes
+exactly what the *previous* start recorded in `~/.claude/.boxes-managed`,
+installs the current manifest, and leaves a copy of it behind. So a skill
+deleted in the dashboard disappears from the box, while anything the agent
+itself put in `~/.claude` is never touched. Manifest lines are checked, not
+trusted: they decide what gets deleted.
+
+**An edit reaches a box at its next start**, and the UI says so. A half-live
+mechanism that reloaded an `AGENTS.md` but not a skill would be worse than a
+rule anyone can state.
+
+Two details follow from Docker rather than from the design. The materialized
+directory's contents are replaced in place and its inode kept, because a
+running container has it bind-mounted and swapping the directory would leave
+that container mounted on an unlinked one. And a session created before this
+existed has no such mount — mounts are fixed when a container is created — so
+`start` recreates its container once, the same trade `migrateWorkspace` and
+`rollOntoCurrentImage` make and cheap for the same reason. That check runs
+*after* the image roll, because a roll recreates the container from
+`containerSpec`, which already binds the configuration: a session that moves
+image comes back with the mount and the check finds nothing left to do. The
+other order would recreate the same container twice.
+
+Deleting a set is not blocked. Sessions that named it keep running and keep
+what is installed in them; the foreign key clears the column and they fall back
+to the global set alone at their next start.
 
 ## Code review
 
@@ -864,6 +934,8 @@ applies migrations tracked by `user_version`.
 | `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session |
 | `exec_log` | Local commands and their output, ring-pruned to 200 rows per session |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
+| `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |
+| `agent_items` | The skills and slash commands of a set, keyed by set, kind and name |
 | `counters` | The subnet allocation counter |
 
 Two kinds of state deliberately stay out of the database. Secrets live only in
@@ -969,6 +1041,7 @@ orchestrator/src/
   db.ts                 SQLite, schema migrations, the debug log
   sessions.ts           Session lifecycle, the owner of every UpstreamSession
   workspaces.ts         Workspace directories on the data volume: paths, ownership
+  agents.ts             Agent sets: AGENTS.md, skills, commands; the merge and the materialized bundle
   docker.ts             Containers, networks, volumes, the adapter exec
   review/
     service.ts          Per-session façade: root, the REVIEW.md read-modify-write, the fingerprint
@@ -1015,7 +1088,7 @@ dashboard/
         thread-store.ts The live thread: messages, modes, models, approvals, exec
         convert.ts      That model in the shape the runtime reads
         exec.ts         !bang commands against the exec endpoint
-    views/              SessionList, SessionCreate, SessionThread, SessionInfo
+    views/              SessionList, SessionCreate, SessionThread, SessionInfo, AgentSets
     components/
       assistant-ui/     Installed registry sources, ours to edit
       ui/               Installed shadcn primitives

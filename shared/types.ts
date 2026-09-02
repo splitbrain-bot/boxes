@@ -81,6 +81,14 @@ export interface SessionSummary {
    * reports.
    */
   canFork: boolean;
+  /**
+   * The agent set selected when this session was created, or null for the
+   * global set alone. Null is also what a session whose set has since been
+   * deleted reports.
+   */
+  agentSetId: string | null;
+  /** That set's current name, for the UI. Null whenever `agentSetId` is. */
+  agentSetName: string | null;
   createdAt: number;
   lastActiveAt: number;
 }
@@ -123,6 +131,12 @@ export interface CreateThreadBody {
 export interface CreateSessionBody {
   name: string;
   profile?: string;
+  /**
+   * Id of the agent set whose AGENTS.md, skills and commands are merged over
+   * the global ones for this session. Absent, empty or the global set's own id
+   * all mean "the global set alone" — it is applied either way.
+   */
+  agentSet?: string | null;
 }
 
 /** One tapped ACP message from the debug log. */
@@ -439,4 +453,91 @@ export interface ReviewAnnotationBody {
 /** Body of a set-base request. Null clears the base back to HEAD. */
 export interface ReviewBaseBody {
   rev: string | null;
+}
+
+// --- agent configuration ----------------------------------------------------
+
+/**
+ * The id of the set that is applied to every session.
+ *
+ * A constant rather than a flag column: there is exactly one, it is seeded by
+ * the migration that creates the table, and both ends need to name it.
+ */
+export const GLOBAL_AGENT_SET = 'global';
+
+/** What an item of an agent set becomes inside the session container. */
+export type AgentItemKind = 'skill' | 'command';
+
+/** One skill or one slash command, as stored and as the API reports it. */
+export interface AgentItem {
+  kind: AgentItemKind;
+  /**
+   * The name the agent sees: a skill's directory (`skills/<name>/SKILL.md`) and
+   * a command's file (`commands/<name>.md`), which is also what invokes it as
+   * `/<name>`. Lowercase, digits and dashes, so it is a safe path component.
+   */
+  name: string;
+  /** The file's whole content: a SKILL.md, or a command's markdown. */
+  content: string;
+  updatedAt: number;
+}
+
+/** An agent set as the list endpoint reports it, without the content. */
+export interface AgentSetSummary {
+  id: string;
+  name: string;
+  /** True for the one set every session gets. It cannot be deleted. */
+  global: boolean;
+  /** True when this set contributes an AGENTS.md of its own. */
+  hasAgentsMd: boolean;
+  skillCount: number;
+  commandCount: number;
+  /** How many live sessions were created with this set selected. */
+  sessionCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** An agent set with everything in it, which is what the editor loads. */
+export interface AgentSetDetail extends AgentSetSummary {
+  /** This set's own AGENTS.md, or '' when it contributes none. */
+  agentsMd: string;
+  /** Its skills and commands, by kind and then by name. */
+  items: AgentItem[];
+}
+
+/** Body of a create-set request. */
+export interface CreateAgentSetBody {
+  name: string;
+}
+
+/** Body of a set update. An absent field is left as it stands. */
+export interface UpdateAgentSetBody {
+  name?: string;
+  agentsMd?: string;
+}
+
+/** Body of an item write. Creates the item, or replaces it under its name. */
+export interface AgentItemBody {
+  kind: AgentItemKind;
+  name: string;
+  content: string;
+}
+
+/**
+ * What one session's merged configuration comes to: the global set, with the
+ * selected set laid over it.
+ *
+ * Returned by the preview endpoint so the editor can show what a session would
+ * actually get, which is the one thing a two-set merge makes non-obvious.
+ */
+export interface AgentBundlePreview {
+  /** The global AGENTS.md and the set's, joined by a blank line. */
+  agentsMd: string;
+  items: AgentItem[];
+  /**
+   * Names the selected set took over from the global one, by kind. The editor
+   * marks these, since an override is silent otherwise.
+   */
+  overrides: Array<{ kind: AgentItemKind; name: string }>;
 }

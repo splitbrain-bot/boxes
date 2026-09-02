@@ -356,6 +356,64 @@ absent "B10" "the real GitHub token is nowhere in the session" "$REAL_GH"
 matches "B11" "the proxy is attached to the session network" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/api/sessions/$SESSION_ID' | jq -r '.proxyAttached'"
 
+# ------------------------------------------------- B2. agent configuration ---
+
+head1 "B2. an agent set reaches the box that named it"
+
+# The whole path in one go: a global set and a named one, a box created against
+# the named one, and what the entrypoint installed in ~/.claude. The merge rule
+# is unit-tested; what only a real deployment proves is that the bind mount and
+# the copy work at all.
+api() {
+  local method="$1" path="$2" body="${3:-}" args=()
+  [ -n "$body" ] && args=(-H 'Content-Type: application/json' -d "$body")
+  curl -sS -m 30 -X "$method" "$API_BASE$path" "${args[@]}"
+}
+
+api PATCH /api/agent-sets/global '{"agentsMd":"Verify: the house rules."}' >/dev/null
+api PUT /api/agent-sets/global/items \
+  '{"kind":"command","name":"housecmd","content":"the global command"}' >/dev/null
+SET_ID=$(api POST /api/agent-sets '{"name":"verify set"}' | jq -r '.id')
+api PUT "/api/agent-sets/$SET_ID/items" \
+  '{"kind":"skill","name":"verifyskill","content":"---\nname: verifyskill\ndescription: x\n---\n"}' \
+  >/dev/null
+
+CFG_SESSION=$(curl -sS -m 60 -X POST "$API_BASE/api/sessions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"verify-agents\",\"agentSet\":\"$SET_ID\"}" | jq -r '.id')
+if [ -z "$CFG_SESSION" ] || [ "$CFG_SESSION" = null ]; then
+  bad "B12" "could not create a session against an agent set"
+  for id in B13 B14 B15 B16; do skipped "$id" "no session to inspect"; done
+else
+  CFG_CONTAINER="session-$CFG_SESSION"
+  installed=0
+  for _ in $(seq 1 40); do
+    docker exec "$CFG_CONTAINER" test -f /home/agent/.claude/.boxes-managed >/dev/null 2>&1 \
+      && { installed=1; break; }
+    sleep 1
+  done
+  if [ "$installed" = 1 ]; then ok "B12" "the entrypoint installed the merged set into ~/.claude"
+  else bad "B12" "nothing was installed"; why "$(docker logs "$CFG_CONTAINER" 2>&1 | tail -20)"; fi
+
+  matches "B13" "the AGENTS.md landed as the agent's own memory" 'Verify: the house rules' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/CLAUDE.md
+  matches "B14" "the global set's command came along" 'the global command' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/commands/housecmd.md
+  matches "B15" "the named set's skill is there too" 'name: verifyskill' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/skills/verifyskill/SKILL.md
+  # Read-only: what the dashboard says a box is configured with is not the
+  # agent's to rewrite.
+  mustnot "B16" "the mounted configuration is not writable from inside the box" \
+    docker exec -u agent "$CFG_CONTAINER" sh -c 'echo x > /boxes/agent/manifest'
+
+  curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$CFG_SESSION" >/dev/null 2>&1
+fi
+[ -n "${SET_ID:-}" ] && [ "$SET_ID" != null ] && \
+  curl -sS -m 15 -X DELETE "$API_BASE/api/agent-sets/$SET_ID" >/dev/null 2>&1
+api PATCH /api/agent-sets/global '{"agentsMd":""}' >/dev/null
+curl -sS -m 15 -X DELETE "$API_BASE/api/agent-sets/global/items?kind=command&name=housecmd" \
+  >/dev/null 2>&1
+
 # --------------------------------------------------------------- C. TLS trust --
 
 head1 "C. TLS trust, both sides of the boundary"

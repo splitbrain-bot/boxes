@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'vitest';
 import Docker from 'dockerode';
 import { PassThrough } from 'node:stream';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildApp, type Orchestrator } from './app.ts';
@@ -435,4 +435,130 @@ test('a browser can unsubscribe itself', async () => {
   });
   assert.equal(res.statusCode, 204);
   assert.equal(subscriptions().length, 0);
+});
+
+// --- agent configuration over its real routes ---------------------------------
+
+test('a set is created, filled and read back over the API', async () => {
+  const created = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/agent-sets',
+    payload: { name: 'Go projects' },
+  });
+  assert.equal(created.statusCode, 201);
+  const set = created.json() as { id: string; global: boolean };
+  assert.equal(set.global, false);
+
+  const put = await orchestrator.app.inject({
+    method: 'PUT',
+    url: `/api/agent-sets/${set.id}/items`,
+    payload: { kind: 'command', name: 'bench', content: 'Run the benchmarks.' },
+  });
+  assert.equal(put.statusCode, 200);
+  // Every mutation answers with the whole set, so the editor needs one call.
+  assert.deepEqual(
+    (put.json() as { items: Array<{ name: string }> }).items.map((i) => i.name),
+    ['bench'],
+  );
+
+  const listed = await orchestrator.app.inject({ url: '/api/agent-sets' });
+  assert.deepEqual(
+    (listed.json() as Array<{ id: string }>).map((s) => s.id),
+    ['global', set.id],
+  );
+});
+
+test('the preview shows the merge, overrides named', async () => {
+  await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/agent-sets/global',
+    payload: { agentsMd: 'House rules.' },
+  });
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/items',
+    payload: { kind: 'skill', name: 'review', content: 'global' },
+  });
+  const set = (
+    await orchestrator.app.inject({
+      method: 'POST',
+      url: '/api/agent-sets',
+      payload: { name: 'Go' },
+    })
+  ).json() as { id: string };
+  await orchestrator.app.inject({
+    method: 'PATCH',
+    url: `/api/agent-sets/${set.id}`,
+    payload: { agentsMd: 'Go rules.' },
+  });
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: `/api/agent-sets/${set.id}/items`,
+    payload: { kind: 'skill', name: 'review', content: 'go' },
+  });
+
+  const preview = (
+    await orchestrator.app.inject({ url: `/api/agent-sets/${set.id}/preview` })
+  ).json() as {
+    agentsMd: string;
+    items: Array<{ name: string; content: string }>;
+    overrides: Array<{ name: string }>;
+  };
+  assert.equal(preview.agentsMd, 'House rules.\n\nGo rules.');
+  assert.equal(preview.items.length, 1);
+  assert.equal(preview.items[0]!.content, 'go');
+  assert.deepEqual(preview.overrides, [{ kind: 'skill', name: 'review' }]);
+});
+
+test('the global set is refused deletion, and an unknown set is a 404', async () => {
+  const global = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: '/api/agent-sets/global',
+  });
+  assert.equal(global.statusCode, 400);
+
+  const unknown = await orchestrator.app.inject({ url: '/api/agent-sets/nope' });
+  assert.equal(unknown.statusCode, 404);
+});
+
+test('creating a session against an unknown set is refused before anything is built', async () => {
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: { name: 'a box', agentSet: 'nope' },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /Unknown agent set/);
+  // Nothing was inserted: the check runs before the row does.
+  const rows = db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number };
+  assert.equal(rows.n, 0);
+});
+
+test('starting a container for a command writes the current configuration first', async () => {
+  // Opening a thread and running a command both start a stopped box without
+  // going through /start, and the entrypoint installs whatever is on disk at
+  // that moment — so the box must not be started against a stale set.
+  insertSession('abc123');
+  fakeDocker('hi\n');
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/items',
+    payload: { kind: 'command', name: 'ship', content: 'Open a PR.' },
+  });
+
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/exec',
+    payload: { command: 'echo hi' },
+  });
+
+  // config() caches process-wide, so the data directory in force is the
+  // orchestrator's own rather than this test's fresh one.
+  assert.equal(
+    readFileSync(
+      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', 'commands', 'ship.md'),
+      'utf8',
+    ),
+    'Open a PR.\n',
+  );
 });

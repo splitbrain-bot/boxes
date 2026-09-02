@@ -22,6 +22,69 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
+# --- agent configuration ----------------------------------------------------
+# The orchestrator materializes this box's merged AGENTS.md, skills and slash
+# commands into a read-only bind at /boxes/agent, laid out exactly as they have
+# to appear under ~/.claude. Only the copy happens here, because ~/.claude is
+# on the home volume and the orchestrator has no path to it.
+#
+# The manifest is what makes the install reversible: it names every path put
+# there, a copy of it is left behind in ~/.claude/.boxes-managed, and the next
+# start removes exactly those before installing again. So a skill deleted in
+# the dashboard disappears from the box, while anything the agent itself put in
+# ~/.claude is never touched.
+AGENT_SRC=/boxes/agent
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-/home/agent/.claude}"
+MANAGED="$CLAUDE_DIR/.boxes-managed"
+
+# A manifest line has to be one relative path under CLAUDE_DIR and nothing
+# else. The file is written by the orchestrator, but it decides what gets
+# deleted, so it is checked rather than trusted.
+safe_rel() {
+  case "$1" in
+    ''|/*|*..*|*'
+'*) return 1 ;;
+  esac
+  return 0
+}
+
+install_agent_config() {
+  mkdir -p "$CLAUDE_DIR" || { log "WARNING: could not create $CLAUDE_DIR"; return; }
+
+  if [ -f "$MANAGED" ]; then
+    while IFS= read -r rel; do
+      safe_rel "$rel" || continue
+      rm -rf -- "$CLAUDE_DIR/$rel"
+    done < "$MANAGED"
+    rm -f "$MANAGED"
+  fi
+
+  if [ ! -f "$AGENT_SRC/manifest" ]; then
+    log "no agent configuration is mounted"
+    return
+  fi
+
+  installed=0
+  while IFS= read -r rel; do
+    safe_rel "$rel" || continue
+    [ -e "$AGENT_SRC/$rel" ] || continue
+    mkdir -p "$CLAUDE_DIR/$(dirname -- "$rel")"
+    # cp -R onto an existing directory would nest inside it rather than
+    # replace it, so the destination goes first. A managed name wins over
+    # anything already sitting under it.
+    rm -rf -- "$CLAUDE_DIR/$rel"
+    if cp -R -- "$AGENT_SRC/$rel" "$CLAUDE_DIR/$rel"; then
+      printf '%s\n' "$rel" >> "$MANAGED"
+      installed=$((installed + 1))
+    else
+      log "WARNING: could not install $rel"
+    fi
+  done < "$AGENT_SRC/manifest"
+  log "installed $installed agent configuration entries into $CLAUDE_DIR"
+}
+
+install_agent_config
+
 # --- git identity -----------------------------------------------------------
 if [ -n "${GIT_NAME:-}" ]; then
   git config --global user.name "$GIT_NAME"

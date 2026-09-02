@@ -33,6 +33,17 @@ function sessionUser(): string {
 /** The session's writable workspace, and the working directory of everything in it. */
 export const WORKSPACE_DIR = '/workspace';
 
+/**
+ * Where the session's merged agent configuration is mounted, read-only.
+ *
+ * The entrypoint installs it into `~/.claude` from here. It is not mounted at
+ * `~/.claude` directly because that directory is on the home volume, is
+ * written by the agent, and holds the transcripts — a read-only mount over it
+ * would break the box, and a writable one would let the agent edit what the
+ * dashboard says is configured.
+ */
+export const AGENT_CONFIG_DIR = '/boxes/agent';
+
 let client: Docker | null = null;
 
 /** The shared Docker client, connected to the host socket on first use. */
@@ -84,6 +95,13 @@ export interface CreateContainerSpec {
    * workspaces.ts for how it is resolved.
    */
   workspaceSource: string;
+  /**
+   * Host-side path of the session's materialized agent configuration, bound
+   * read-only at AGENT_CONFIG_DIR. Always present: a session with nothing
+   * configured gets an empty manifest, which is how the entrypoint learns to
+   * remove what a previous start installed.
+   */
+  agentConfigSource: string;
   homeVolume: string;
   profile: SessionProfile;
   egress: SessionEgress;
@@ -413,6 +431,9 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
         // container reads it.
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeVolume}:/home/agent`,
+        // Read-only: what the dashboard says a box is configured with is not
+        // something the agent inside it gets to rewrite.
+        `${spec.agentConfigSource}:${AGENT_CONFIG_DIR}:ro`,
       ],
       ReadonlyRootfs: true,
       Tmpfs: { '/tmp': 'rw,size=512m,mode=1777' },
@@ -501,6 +522,24 @@ export async function containerState(containerId: string | null): Promise<Docker
   } catch (err) {
     if ((err as { statusCode?: number }).statusCode === 404) return 'missing';
     return 'unknown';
+  }
+}
+
+/**
+ * Whether a container has a mount at `destination`.
+ *
+ * A container's mounts are fixed when it is created, so this is how a session
+ * from before a mount existed is recognised and recreated with it. A container
+ * that cannot be inspected answers true: a missing one has nothing to fix, and
+ * recreating on a transient inspect failure would be the more destructive
+ * mistake.
+ */
+export async function hasMount(containerId: string, destination: string): Promise<boolean> {
+  try {
+    const info = await docker().getContainer(containerId).inspect();
+    return (info.Mounts ?? []).some((m) => m.Destination === destination);
+  } catch {
+    return true;
   }
 }
 

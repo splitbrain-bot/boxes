@@ -234,3 +234,35 @@ test('a deployment on the previous release upgrades cleanly', () => {
     upgraded.close();
   }
 });
+
+test('the agent tables arrive with a global set, and existing sessions select none', () => {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 8)) db.exec(sql);
+  db.pragma('user_version = 8');
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES ('live', 'from before agent sets', 'DEFAULT', 'img', '[]', 'c1',
+       'sn-live', '10.200.0.0/24', '', 'home-live', 'stopped', NULL, 1000, 2000)`,
+  ).run();
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    // Seeded by the migration rather than created on demand: a deployment has
+    // exactly one always-applied set from the moment it has any.
+    const sets = upgraded.prepare('SELECT id, name FROM agent_sets').all();
+    assert.deepEqual(sets, [{ id: 'global', name: 'Global' }]);
+
+    // A session that predates the feature gets the global set and nothing
+    // else, which is what a null column means.
+    assert.ok(columns(upgraded, 'sessions').includes('agent_set_id'));
+    const row = upgraded
+      .prepare("SELECT agent_set_id FROM sessions WHERE id = 'live'")
+      .get() as { agent_set_id: string | null };
+    assert.equal(row.agent_set_id, null);
+  } finally {
+    upgraded.close();
+  }
+});

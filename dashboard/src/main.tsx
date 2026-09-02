@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { refreshPush } from './stores/push.ts';
 import { startPolling } from './stores/sessions.ts';
+import { AgentSetEditor } from './views/AgentSetEditor.tsx';
+import { AgentSets } from './views/AgentSets.tsx';
 import { Playground } from './views/Playground.tsx';
 import { SessionCreate } from './views/SessionCreate.tsx';
 import { Shell } from './views/Shell.tsx';
@@ -63,6 +65,10 @@ function App() {
         <Route element={<Shell />}>
           <Route path="/" element={<SessionList />} />
           <Route path="/new" element={<SessionCreate />} />
+          {/* What the agent is configured with, which belongs to the
+              deployment rather than to any one box. */}
+          <Route path="/agents" element={<AgentSets />} />
+          <Route path="/agents/:setId" element={<AgentSetEditor />} />
           <Route path="/sessions/:id/info" element={<SessionInfo />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

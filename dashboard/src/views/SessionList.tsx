@@ -1,4 +1,4 @@
-import { Plus } from 'lucide-react';
+import { Plus, SlidersHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
 import { PushToggle } from '@/components/PushToggle';
 import { SessionCard } from '@/components/SessionCard';
@@ -19,6 +19,13 @@ export function SessionList() {
               subscription belongs to the browser rather than to a session, so
               it lives with the list rather than inside one. */}
           <PushToggle />
+          {/* The AGENTS.md, skills and commands every box is built with.
+              Deployment-wide, so it hangs off the list rather than a box. */}
+          <Button asChild size="sm" variant="ghost" aria-label="Agent configuration">
+            <Link to="/agents">
+              <SlidersHorizontal />
+            </Link>
+          </Button>
           <Button asChild size="sm">
             <Link to="/new">
               <Plus />

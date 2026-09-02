@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import type {
   AcpLogEntry,
   AcpLogPage,
+  AgentItemBody,
+  CreateAgentSetBody,
   CreateSessionBody,
   CreateThreadBody,
   ExecLogPage,
@@ -16,7 +18,9 @@ import type {
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseBody,
+  UpdateAgentSetBody,
 } from '../../shared/types.ts';
+import { AgentConfigError, AgentStore } from './agents.ts';
 import type { config } from './config.ts';
 import {
   countPushSubscriptions,
@@ -59,6 +63,8 @@ export interface Orchestrator {
   notifier: Notifier;
   /** Reads and writes review data over the sessions' workspace directories. */
   review: ReviewService;
+  /** The AGENTS.md, skills and commands sessions are configured with. */
+  agents: AgentStore;
   /** Session ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -80,7 +86,8 @@ setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
 
 const egress = new EgressManager(cfg);
 const notifier = new Notifier(db, cfg);
-const manager = new SessionManager(db, cfg, egress, notifier);
+const agents = new AgentStore(db, cfg.DATA_DIR);
+const manager = new SessionManager(db, cfg, egress, notifier, agents);
 // The review surface reaches the files through the manager, which is the one
 // thing that knows whether a session is directory-backed yet.
 const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
@@ -92,7 +99,11 @@ const app = Fastify({ logger: false });
 // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
 app.setErrorHandler((err, _req, reply) => {
-  if (err instanceof HttpError || err instanceof ReviewUnavailable) {
+  if (
+    err instanceof HttpError ||
+    err instanceof ReviewUnavailable ||
+    err instanceof AgentConfigError
+  ) {
     return reply.code(err.statusCode).send({ error: err.message });
   }
   log.error('unhandled request error', { error: (err as Error).message });
@@ -322,6 +333,68 @@ app.delete('/api/sessions/:id/review', async (req, reply) => {
   return reply.code(204).send();
 });
 
+// --- Agent configuration ----------------------------------------------------
+
+/**
+ * The AGENTS.md, skills and slash commands a session is given.
+ *
+ * `global` is applied to every session and always exists; any other set is
+ * chosen when a session is created and merged over it. Every mutation answers
+ * with the whole set rather than the piece that changed, which is the same
+ * bargain the review endpoints make: one round trip per screen.
+ *
+ * What is written here reaches a box when that box next starts. Nothing on
+ * these routes touches a running container.
+ */
+
+app.get('/api/agent-sets', async () => agents.listSets());
+
+app.post('/api/agent-sets', async (req, reply) => {
+  const body = req.body as CreateAgentSetBody | undefined;
+  return reply.code(201).send(agents.createSet(body?.name as string));
+});
+
+app.get('/api/agent-sets/:setId', async (req) => {
+  const { setId } = req.params as { setId: string };
+  return agents.getSet(setId);
+});
+
+app.patch('/api/agent-sets/:setId', async (req) => {
+  const { setId } = req.params as { setId: string };
+  return agents.updateSet(setId, (req.body ?? {}) as UpdateAgentSetBody);
+});
+
+app.delete('/api/agent-sets/:setId', async (req, reply) => {
+  const { setId } = req.params as { setId: string };
+  agents.deleteSet(setId);
+  return reply.code(204).send();
+});
+
+/** Creates a skill or command, or replaces the one already under that name. */
+app.put('/api/agent-sets/:setId/items', async (req) => {
+  const { setId } = req.params as { setId: string };
+  return agents.putItem(setId, req.body as AgentItemBody | undefined);
+});
+
+app.delete('/api/agent-sets/:setId/items', async (req) => {
+  const { setId } = req.params as { setId: string };
+  const { kind, name } = req.query as { kind?: string; name?: string };
+  return agents.deleteItem(setId, kind, name);
+});
+
+/**
+ * What a session selecting this set would actually get, global set included.
+ *
+ * A merge of two sets is the one thing about this feature that is not obvious
+ * from either half, so the editor shows the result rather than asking anyone
+ * to hold it in their head.
+ */
+app.get('/api/agent-sets/:setId/preview', async (req) => {
+  const { setId } = req.params as { setId: string };
+  agents.getSet(setId);
+  return agents.bundle(setId);
+});
+
 // --- Web Push --------------------------------------------------------------
 
 /**
@@ -462,6 +535,7 @@ app.setNotFoundHandler((req, reply) => {
     egress,
     notifier,
     review,
+    agents,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

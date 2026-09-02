@@ -26,8 +26,12 @@ const IMAGE = 'ghcr.io/example/session:latest';
 interface Fake {
   /** Image reference to the id it currently resolves to. */
   images: Map<string, string>;
-  /** Container id to the image id it was created from, and whether it runs. */
-  containers: Map<string, { image: string; running: boolean }>;
+  /**
+   * Container id to the image id it was created from, whether it runs, and
+   * the destinations it has mounts at — which the start path asks about, to
+   * recognise a container from before a mount existed.
+   */
+  containers: Map<string, { image: string; running: boolean; mounts: string[] }>;
   created: Array<Record<string, unknown>>;
   removed: string[];
   pulled: string[];
@@ -53,7 +57,11 @@ function install(fake: Fake): void {
       inspect: async () => {
         const c = fake.containers.get(id);
         if (!c) throw notFound('container');
-        return { Image: c.image, State: { Running: c.running } };
+        return {
+          Image: c.image,
+          State: { Running: c.running },
+          Mounts: c.mounts.map((Destination) => ({ Destination })),
+        };
       },
       start: async () => {
         const c = fake.containers.get(id);
@@ -71,9 +79,13 @@ function install(fake: Fake): void {
     createContainer: async (opts: Record<string, unknown>) => {
       fake.created.push(opts);
       const id = `container-${++fake.next}`;
+      const binds = (opts['HostConfig'] as { Binds?: string[] } | undefined)?.Binds ?? [];
       fake.containers.set(id, {
         image: fake.images.get(opts['Image'] as string) ?? 'unresolved',
         running: false,
+        // A container's mounts come from what it was created with, so the
+        // daemon reports back whatever containerSpec asked for.
+        mounts: binds.map((bind) => bind.split(':')[1] ?? ''),
       });
       return { id };
     },
@@ -106,7 +118,14 @@ let fake: Fake;
 /** A stopped, directory-backed session with a container on `imageId`. */
 function insertSession(id: string, containerId: string, imageId: string): void {
   const now = Date.now();
-  fake.containers.set(containerId, { image: imageId, running: false });
+  fake.containers.set(containerId, {
+    image: imageId,
+    running: false,
+    // Every mount a container created today has. What this suite is about is
+    // the image moving under a session, not a container from before a mount
+    // existed — sessions.ts has its own path for that.
+    mounts: [dk.WORKSPACE_DIR, '/home/agent', dk.AGENT_CONFIG_DIR],
+  });
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, status,
@@ -169,6 +188,10 @@ describe('starting a session whose image has moved', () => {
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
       'home-a2:/home/agent',
+      // The agent configuration comes across too, read-only. It is derived
+      // from the database rather than durable in itself, but the mount has to
+      // be there or the box starts with nothing configured.
+      `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
   });
 

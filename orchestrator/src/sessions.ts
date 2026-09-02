@@ -1,12 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import type {
-  CreateSessionBody,
-  CreateThreadBody,
-  DockerState,
-  SessionDetail,
-  SessionSummary,
-  ThreadSummary,
+import {
+  GLOBAL_AGENT_SET,
+  type CreateSessionBody,
+  type CreateThreadBody,
+  type DockerState,
+  type SessionDetail,
+  type SessionSummary,
+  type ThreadSummary,
 } from '../../shared/types.ts';
+import { AgentStore, ensureAgentsRoot, hostAgentConfigPath } from './agents.ts';
 import type { Config, SessionProfile } from './config.ts';
 import type { EgressManager } from './egress.ts';
 import {
@@ -58,6 +60,12 @@ export class SessionManager {
     private readonly egress: EgressManager,
     /** Where "a thread wants you" goes; see notify.ts. */
     private readonly notifier: Notifier,
+    /**
+     * The AGENTS.md, skills and commands a session is given. Owned by the app
+     * so the REST routes and the lifecycle share one, since editing a set and
+     * starting a session are two halves of the same feature.
+     */
+    private readonly agents: AgentStore,
   ) {
     this.pending = new PendingStore(db);
     this.hostDataDir = cfg.HOST_DATA_DIR || cfg.DATA_DIR;
@@ -77,6 +85,7 @@ export class SessionManager {
    */
   async resolveHostDataDir(): Promise<void> {
     ws.ensureWorkspacesRoot(this.cfg.DATA_DIR);
+    ensureAgentsRoot(this.cfg.DATA_DIR);
     if (this.cfg.HOST_DATA_DIR) {
       log.info('using the configured host path for the data directory', {
         hostDataDir: this.hostDataDir,
@@ -298,6 +307,7 @@ export class SessionManager {
       networkName: row.network_name,
       subnet: row.subnet,
       workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
+      agentConfigSource: hostAgentConfigPath(this.hostDataDir, row.id),
       homeVolume: row.home_volume,
       profile,
       egress: {
@@ -327,8 +337,17 @@ export class SessionManager {
   upstream(id: string): UpstreamSession {
     let up = this.upstreams.get(id);
     if (!up) {
-      up = new UpstreamSession(id, this.db, this.cfg, this.pending, this.notifier, (status) =>
-        this.setStatus(id, status),
+      up = new UpstreamSession(
+        id,
+        this.db,
+        this.cfg,
+        this.pending,
+        this.notifier,
+        (status) => this.setStatus(id, status),
+        () => {
+          const row = this.getRow(id);
+          if (row && row.status !== 'deleted') this.agents.materialize(id, row.agent_set_id);
+        },
       );
       this.upstreams.set(id, up);
     }
@@ -350,9 +369,19 @@ export class SessionManager {
     const profile = this.cfg.profiles[profileName];
     if (!profile) throw new HttpError(400, `Unknown profile: ${profileName}`);
 
-    // Before anything is allocated. A deployment whose first pull failed
-    // would otherwise get the daemon's "no such image" halfway through
-    // creating one, and a teardown to go with it.
+    // The global set is applied whatever this says, so naming it is the same
+    // as naming nothing and is stored as nothing.
+    const requested = body.agentSet?.trim() ?? '';
+    const agentSetId = requested === '' || requested === GLOBAL_AGENT_SET ? null : requested;
+    if (agentSetId && !this.agents.has(agentSetId)) {
+      throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
+    }
+
+    // Before anything is allocated, and after the checks above, which cost
+    // nothing: a request naming a set that is not there should not pull an
+    // image on its way to a 400. A deployment whose first pull failed would
+    // otherwise get the daemon's "no such image" halfway through creating a
+    // session, and a teardown to go with it.
     try {
       await this.ensureSessionImage();
     } catch (err) {
@@ -386,6 +415,7 @@ export class SessionManager {
       review_base_rev: null,
       review_base_commit: null,
       status: 'creating',
+      agent_set_id: agentSetId,
       current_thread_id: null,
       created_at: now,
       last_active_at: now,
@@ -395,10 +425,10 @@ export class SessionManager {
       .prepare(
         `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
            network_name, subnet, ws_volume, home_volume, workspace_dir, status,
-           current_thread_id, created_at, last_active_at)
+           agent_set_id, current_thread_id, created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @status,
-           @current_thread_id, @created_at, @last_active_at)`,
+           @agent_set_id, @current_thread_id, @created_at, @last_active_at)`,
       )
       .run(row);
 
@@ -407,6 +437,8 @@ export class SessionManager {
       await dk.createNetwork(row.network_name, subnet, id);
       await dk.ensureProxyAttached(row.network_name, this.cfg);
       ws.createWorkspace(this.cfg.DATA_DIR, id);
+      // Before the container, because it is one of its mounts.
+      this.agents.materialize(id, agentSetId);
       await dk.createVolume(row.home_volume, id);
       const containerId = await dk.createContainer(
         this.containerSpec(row, profile),
@@ -433,8 +465,20 @@ export class SessionManager {
   async start(id: string): Promise<SessionDetail> {
     let row = this.mustGet(id);
     if (!row.container_id) throw new HttpError(409, 'Session has no container');
+    // Rewritten on every start, so an edited set reaches the box here — the
+    // entrypoint installs what this leaves behind, and nothing else does.
+    // Before either step below, both of which may create a container that
+    // binds the directory: the daemon would otherwise create it itself, empty
+    // and owned by root.
+    this.agents.materialize(row.id, row.agent_set_id);
     row = await this.migrateWorkspace(row);
+    // Before the mount check below, not after: a roll recreates the container
+    // from containerSpec, which already binds the agent configuration, so a
+    // session that moves image comes back with the mount and the check that
+    // follows finds nothing left to do. The other order would recreate the
+    // same container twice.
     row = await this.rollOntoCurrentImage(row);
+    row = await this.ensureAgentConfigMount(row);
     await dk.startContainer(row.container_id!);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.setStatus(id, 'running');
@@ -500,6 +544,40 @@ export class SessionManager {
     return this.mustGet(row.id);
   }
 
+  /**
+   * Gives a session created before agent configuration existed the mount that
+   * carries it, and returns the row as it now stands.
+   *
+   * A container's mounts are fixed when it is created, so the container has to
+   * be replaced — the same trade the workspace migration makes, and cheap for
+   * the same reason: a session container has a read-only rootfs and everything
+   * durable is in its mounts. Nothing is lost if this fails halfway, because
+   * the directory is already written and the next start tries again.
+   *
+   * A running session is left alone. Restarting it under the user would be a
+   * worse surprise than configuration arriving one stop/start cycle late.
+   */
+  private async ensureAgentConfigMount(row: SessionRow): Promise<SessionRow> {
+    if (!row.container_id) return row;
+    if (await dk.hasMount(row.container_id, dk.AGENT_CONFIG_DIR)) return row;
+    const slog = log.session(row.id);
+    if ((await dk.containerState(row.container_id)) === 'running') {
+      slog.info('agent configuration deferred: the container is still running');
+      return row;
+    }
+    slog.info('recreating the container with the agent configuration mount');
+    await dk.stopContainer(row.container_id);
+    await dk.removeContainer(row.container_id);
+    const containerId = await dk.createContainer(
+      this.containerSpec(row, this.profileFor(row)),
+      this.cfg,
+    );
+    this.db
+      .prepare('UPDATE sessions SET container_id = ? WHERE id = ?')
+      .run(containerId, row.id);
+    return this.mustGet(row.id);
+  }
+
   /** Stops the container and drops the upstream connection. */
   async stop(id: string): Promise<SessionDetail> {
     const row = this.mustGet(id);
@@ -555,6 +633,11 @@ export class SessionManager {
         slog.warn('workspace removal failed', { error: (err as Error).message });
       }
     }
+    try {
+      this.agents.removeMaterialized(row.id);
+    } catch (err) {
+      slog.warn('agent configuration removal failed', { error: (err as Error).message });
+    }
     // Only a session that never migrated still has one.
     if (row.ws_volume) await dk.removeVolume(row.ws_volume);
     await dk.removeVolume(row.home_volume);
@@ -577,6 +660,9 @@ export class SessionManager {
   async execTarget(id: string): Promise<{ containerId: string; workingDir: string }> {
     const row = this.mustGet(id);
     if (!row.container_id) throw new HttpError(409, 'Session has no container');
+    // A stopped container starts here too, and the entrypoint installs
+    // whatever is on disk when it does.
+    this.agents.materialize(row.id, row.agent_set_id);
     await dk.startContainer(row.container_id);
     return { containerId: row.container_id, workingDir: dk.WORKSPACE_DIR };
   }
@@ -628,6 +714,8 @@ export class SessionManager {
       // False until the adapter has been reached and has advertised it. The
       // capability is unstable, so an absent one is taken at face value.
       canFork: this.upstreams.get(row.id)?.canFork ?? false,
+      agentSetId: row.agent_set_id,
+      agentSetName: this.agents.nameOf(row.agent_set_id),
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,
     };
