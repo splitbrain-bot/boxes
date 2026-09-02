@@ -174,13 +174,13 @@ export function SessionThread() {
             {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
-                {/* It opens on an empty transcript, which is the adapter's
-                    doing: it keeps the context it was forked with and has no
-                    replay to hand over. Saying so here is cheaper than the
-                    reader wondering what was lost. */}
+                {/* It opens on this conversation: the gateway replays what
+                    was said here into it until it has said something of its
+                    own. What it carries and what it shows are the same thing,
+                    so there is nothing to warn about. */}
                 <span>
-                  {threadName(forked)} branched from this conversation. It knows what was said
-                  here, but starts with an empty transcript.
+                  {threadName(forked)} branched from this conversation. It opens on everything
+                  said here so far and goes its own way from there.
                 </span>
                 {/* A real click on a real link, so the browser opens the tab
                     rather than a script asking it to. */}

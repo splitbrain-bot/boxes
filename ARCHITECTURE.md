@@ -406,7 +406,10 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   own thread.** `session/load` is by definition a re-send of the whole thread,
   so broadcasting it rendered every other open tab's conversation twice — but
   a replay of one thread must not hold back another thread's live updates,
-  which is the bug two open tabs hit first.
+  which is the bug two open tabs hit first. A replay one thread *borrowed*
+  from another is re-tagged as the borrower's on the way out, because the
+  browser reading it is pinned to the borrower — see *Several threads per
+  session*.
 
 ### Several threads per session
 
@@ -458,6 +461,33 @@ Forking is offered only when the adapter advertised
 `sessionCapabilities.fork` in its `initialize` answer, which the orchestrator
 already caches verbatim. The capability is marked unstable in the ACP schema,
 so an adapter that drops it costs the dashboard a button rather than a build.
+
+**A fork borrows the transcript it branched from until it has one of its
+own.** The adapter branches the conversation in full — the fork knows
+everything the source said — but it writes the fork no transcript until the
+fork is first prompted, so `session/load` on a fresh one replays nothing and
+it would open on a blank screen claiming to know a conversation the reader
+cannot see. So `threads.inherits_from` records the source, and a load of a
+thread that has it replays the *source's* history, re-tagged as this thread's,
+after the fork's own load has come back empty. A fork of a fork follows the
+chain: the middle thread has no transcript either, so what both of them came
+from is what gets replayed.
+
+That first prompt is where the borrowing stops, and the column is cleared
+there rather than later: the adapter starts a transcript for the fork at that
+moment, and it opens with everything the source had said — so from then on
+the fork replays itself, and replaying the source as well would say all of it
+twice. The same column is what re-forks a thread the adapter has forgotten: a
+fork that had not been prompted before a respawn is branched again rather than
+started empty, because carrying that context is the only reason it exists.
+
+The borrowed replay is one browser's, exactly as its own would be, and it
+holds back the source's live updates for its length the same way. A replay of
+a thread cannot be told apart from what that thread is saying right now, and
+this is the one place where two threads are the same conversation — so a
+source mid-turn can lose a moment of its stream to a fork being opened. It
+comes back on that browser's next load, and a source that cannot be replayed
+at all costs the fork its history and nothing else.
 
 A running turn and a waiting permission request belong to the thread, not the
 session. `threads.turn_active` records the first, and the session's answer is

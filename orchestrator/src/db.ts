@@ -87,6 +87,14 @@ export interface ThreadRow {
    * thing that goes stale.
    */
   turn_active: number;
+  /**
+   * The thread this one was forked from, while it still has nothing of its
+   * own to show. A fork carries the source's context from the moment it is
+   * minted, but the adapter writes it a transcript only once it is prompted,
+   * so until then this is where its replay comes from — and it is cleared by
+   * that first prompt, after which the adapter has the whole conversation.
+   */
+  inherits_from: string | null;
   created_at: number;
   last_active_at: number;
 }
@@ -325,6 +333,12 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE sessions ADD COLUMN agent_set_id TEXT
     REFERENCES agent_sets(id) ON DELETE SET NULL;
   `,
+  // A fork carries its source's context, but the adapter writes it no
+  // transcript until it is first prompted — so until then the thread it
+  // branched from stands in for one. See upstream.ts, replayInherited.
+  `
+  ALTER TABLE threads ADD COLUMN inherits_from TEXT;
+  `,
 ];
 
 /** An open database handle. */
@@ -513,6 +527,7 @@ export function insertThread(
   db: Db,
   sessionId: string,
   acpSessionId: string | null,
+  inheritsFrom: string | null = null,
 ): ThreadRow {
   const now = Date.now();
   const id = `t${randomBytes(6).toString('hex')}`;
@@ -526,15 +541,16 @@ export function insertThread(
     title: null,
     ordinal: next.n,
     turn_active: 0,
+    inherits_from: inheritsFrom,
     created_at: now,
     last_active_at: now,
   };
   db.transaction(() => {
     db.prepare(
       `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
-         turn_active, created_at, last_active_at)
+         turn_active, inherits_from, created_at, last_active_at)
        VALUES (@id, @session_id, @acp_session_id, @title, @ordinal,
-         @turn_active, @created_at, @last_active_at)`,
+         @turn_active, @inherits_from, @created_at, @last_active_at)`,
     ).run(row);
     db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(id, sessionId);
   })();
@@ -547,6 +563,18 @@ export function setThreadAcpId(db: Db, threadId: string, acpSessionId: string | 
     acpSessionId,
     threadId,
   );
+}
+
+/**
+ * Drops a thread's borrowed history: it has a transcript of its own now.
+ *
+ * Called when a fork is first prompted, because that is the moment the
+ * adapter starts a transcript for it — one that already carries everything
+ * the source had said. Replaying the source as well would say all of it
+ * twice.
+ */
+export function clearThreadInheritance(db: Db, threadId: string): void {
+  db.prepare('UPDATE threads SET inherits_from = NULL WHERE id = ?').run(threadId);
 }
 
 /** Records the title the agent generated for a thread, or clears it. */

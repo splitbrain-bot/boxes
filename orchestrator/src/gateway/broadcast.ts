@@ -2,6 +2,15 @@ import { log } from '../log.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
 /**
+ * A browser one thread's replay is going to, and the thread id to put on what
+ * it is sent. `as` is set only when the replay is borrowed — see beginReplay.
+ */
+interface ReplayTarget {
+  handle: DownstreamHandle;
+  as?: string;
+}
+
+/**
  * Who each adapter update goes to.
  *
  * Broadcasting everything to everyone is almost right, and wrong in three
@@ -23,7 +32,7 @@ export class Broadcast {
    * is by definition a re-send of history, so broadcasting it would duplicate
    * that thread into every other tab watching it.
    */
-  private readonly replayTargets = new Map<string, Set<DownstreamHandle>>();
+  private readonly replayTargets = new Map<string, Set<ReplayTarget>>();
   /**
    * How many prompts the gateway is forwarding and has echoed itself, per
    * thread. While a thread's count is above zero the gateway, not the
@@ -73,7 +82,9 @@ export class Broadcast {
   remove(handle: DownstreamHandle): void {
     this.downstreams.delete(handle);
     for (const [thread, targets] of this.replayTargets) {
-      targets.delete(handle);
+      for (const target of targets) {
+        if (target.handle === handle) targets.delete(target);
+      }
       if (targets.size === 0) this.replayTargets.delete(thread);
     }
   }
@@ -103,9 +114,18 @@ export class Broadcast {
     ) {
       return;
     }
+    // A replay goes to the browsers reading it and to nobody else, each
+    // under the thread id it asked about — which is the source's own for an
+    // ordinary replay, and the fork's for a borrowed one.
+    if (replaying) {
+      for (const target of replaying) {
+        this.deliver([target.handle], target.as ? retag(params, target.as) : params);
+      }
+      return;
+    }
     // With nobody on this thread the update is dropped rather than broadcast,
     // which is what stops a background thread's stream reaching the wrong tab.
-    this.deliver(replaying ?? this.byRecency(thread), params);
+    this.deliver(this.byRecency(thread), params);
   }
 
   /**
@@ -144,21 +164,28 @@ export class Broadcast {
    * Starts routing one thread's updates to one browser only, for the length
    * of its replay. Another thread's updates are untouched, which is what lets
    * a second tab keep streaming while this one rebuilds.
+   *
+   * `as` re-tags what is replayed with another thread's id: a fork with no
+   * transcript of its own is shown the source's, and the browser reading it
+   * is pinned to the fork, so an update naming the source would be dropped as
+   * some other conversation's.
    */
-  beginReplay(handle: DownstreamHandle, acpThreadId: string): void {
+  beginReplay(handle: DownstreamHandle, acpThreadId: string, as?: string): void {
     let targets = this.replayTargets.get(acpThreadId);
     if (!targets) {
       targets = new Set();
       this.replayTargets.set(acpThreadId, targets);
     }
-    targets.add(handle);
+    targets.add({ handle, as });
   }
 
   /** Ends that, returning the thread to its watchers. */
   endReplay(handle: DownstreamHandle, acpThreadId: string): void {
     const targets = this.replayTargets.get(acpThreadId);
     if (!targets) return;
-    targets.delete(handle);
+    for (const target of targets) {
+      if (target.handle === handle) targets.delete(target);
+    }
     if (targets.size === 0) this.replayTargets.delete(acpThreadId);
   }
 
@@ -174,6 +201,11 @@ export class Broadcast {
       }
     }
   }
+}
+
+/** The same update, said to be about another thread. */
+function retag(params: unknown, acpThreadId: string): unknown {
+  return { ...(params as Record<string, unknown>), sessionId: acpThreadId };
 }
 
 /** The ACP thread a message is about, or undefined when it names none. */

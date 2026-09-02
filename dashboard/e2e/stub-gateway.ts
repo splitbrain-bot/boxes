@@ -140,7 +140,7 @@ export function attachStubGateway(
     }
   };
 
-  /** Mints a thread, seeded with a source thread's history when forking. */
+  /** Mints a thread, carrying a source thread's history when forking. */
   const mint = (from: string | null): string => {
     const id = `acp-thread-${nextThread++}`;
     threads.set(id, from ? [...historyOf(from)] : []);
@@ -204,7 +204,11 @@ export function attachStubGateway(
 
       case 'session/fork':
         // The fork answer carries modes and configOptions, the same as a
-        // fresh thread's, and its history starts as the source's.
+        // fresh thread's, and its history starts as the source's. This stub
+        // stands in for the gateway and the adapter together: the real
+        // adapter writes a fork no transcript until it is prompted, and the
+        // orchestrator replays the source's in its place, so what a browser
+        // sees when it loads a fresh fork is what is modelled here.
         return reply({
           sessionId: mint(String(params(msg)['sessionId'] ?? current)),
           modes: script.modes,

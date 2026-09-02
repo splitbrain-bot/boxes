@@ -248,6 +248,34 @@ test('two replays at once each get the history', () => {
   assert.equal(idle.sent.length, 1);
 });
 
+test('a borrowed replay reaches the fork under its own thread id', () => {
+  const b = new Broadcast('s1');
+  const exploring = fakeDownstream(1, T2);
+  const working = fakeDownstream(2, T1);
+  b.add(exploring);
+  b.add(working);
+
+  // A fork with no transcript of its own, being shown the source's. The
+  // browser is pinned to the fork, so what it is sent has to name the fork --
+  // an update naming the source is some other conversation's as far as it is
+  // concerned.
+  b.beginReplay(exploring, T1, T2);
+  b.update(update('user_message_chunk', 'old question', T1));
+  b.update(update('agent_message_chunk', 'old answer', T1));
+
+  assert.deepEqual(exploring.sent, [
+    update('user_message_chunk', 'old question', T2),
+    update('agent_message_chunk', 'old answer', T2),
+  ]);
+  // The tab on the source already has this history on screen.
+  assert.equal(working.sent.length, 0);
+
+  b.endReplay(exploring, T1);
+  b.update(update('agent_message_chunk', 'live', T1));
+  assert.deepEqual(working.sent, [update('agent_message_chunk', 'live', T1)]);
+  assert.equal(exploring.sent.length, 2);
+});
+
 test('a browser that leaves mid-replay does not strand the others', () => {
   const b = new Broadcast('s1');
   const [leaving, watching] = [fakeDownstream(1), fakeDownstream(2)];

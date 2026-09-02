@@ -236,7 +236,8 @@ history. Opening a stopped session starts it again.
 one workspace, listed under its card, each with its own link. **Fork** branches
 the one you are in, and the button offers to open it in a new tab — so you can
 ask the fork about what the original is doing without stopping it or losing
-your place. A fork starts in `plan` mode, because it shares the original's
+your place. It opens on everything that was said up to the branch, and goes
+its own way from there. A fork starts in `plan` mode, because it shares the original's
 checkout and two agents editing the same files at once is a mess neither can
 see; flip it to `auto` in the header when that is what you want.
 
