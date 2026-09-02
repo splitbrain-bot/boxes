@@ -501,97 +501,91 @@ than with this image as shipped.
 
 ### Headless browser
 
-Playwright and its Chromium build are in the image, so a session can screenshot
-a page, render a PDF, scrape something a `curl` cannot reach, or drive the dev
-server it just started. Chromium only — Firefox and WebKit would roughly double
-the layer, and a coding agent wants a browser rather than a compatibility
-matrix.
+`@playwright/cli` and a Chromium build are in the image, so a session can drive
+a real browser: inspect a page, click and type in it, screenshot it, scrape it,
+or check the dev server it just started.
 
-**Driven as a CLI and a skill, not as an MCP server.** Both work, and this is
-the cheaper half of the trade. An MCP server would be a second long-running
-process per session plus config for the orchestrator to manage, and the
-orchestrator manages nothing about MCP today; a skill is a file, and the agent
-already has a shell. Scripts also do what a fixed tool surface cannot — walk
-fifty pages, extract a table, drive a form to completion. What MCP would do
-better is step-by-step exploration, where its accessibility snapshots beat
-re-running a script; `launchPersistent()` closes most of that gap by keeping
-cookies and storage between runs, and nothing here rules an MCP server out
-later.
+**A CLI and a skill rather than an MCP server**, which is what Microsoft
+themselves recommend for coding agents, and the two share an implementation —
+so this gives up nothing on interaction. `playwright-cli snapshot` renders the
+page as an accessibility tree with a `[ref=eN]` handle on every element, and
+`click`, `type`, `select`, `hover` and the rest take those refs, so the agent
+never guesses a CSS selector:
 
-The skill is `headless-browser`, and the entrypoint **symlinks** it out of the
-image into `~/.claude/skills/` at every start rather than copying it. Claude
-Code follows a symlink at a skill directory, so the image stays the single
-source of truth and a corrected skill reaches sessions whose home volume
-already exists. A skill the session wrote itself under the same name is left
-alone.
+```yaml
+- heading "Sign in" [level=1] [ref=e2]
+- textbox "Email" [ref=e4]
+- button "Continue" [ref=e5]
+```
 
-Three things about a session container break a plain `chromium.launch()`, which
-is why the skill points at a launch helper
-(`/usr/local/share/boxes/browser.mjs`) instead:
+```sh
+playwright-cli type e4 user@example.com
+playwright-cli click e5
+```
 
-- **No route out but the proxy.** Chromium has to be given `--proxy-server`; it
-  does not reliably take the proxy from the environment. The helper passes it,
-  and passes `NO_PROXY` as the bypass so a local dev server still works.
-- **Its own trust store.** Chromium reads none of the CA variables the rest of
-  the image is pointed at, so the entrypoint imports the deployment CA into
-  `~/.pki/nssdb` with `certutil`. Without that, the hosts the proxy intercepts
-  fail TLS in the browser and nowhere else.
-- **A 64 MB `/dev/shm`**, which Chromium exhausts on a substantial page and
-  reports as a closed target. The helper passes `--disable-dev-shm-usage`,
-  which moves that traffic to `/tmp` — already a 512 MB tmpfs. Raising the
-  container's `ShmSize` instead would fix it for the `playwright screenshot`
-  CLI too, at the cost of a second tmpfs; it is not set today.
+The browser lives in a daemon between invocations, so those are three separate
+commands acting on one page, and each snapshot is written to a **file** with
+only the path printed — which is the point of the CLI over MCP: the tree does
+not land in the model's context unless the agent chooses to read it. Named
+sessions (`-s=name`), tabs, network inspection, console, cookies, storage,
+tracing, video and `run-code` for arbitrary Playwright snippets are all there;
+`playwright-cli --help` lists them.
 
-Chromium's *own* sandbox is unavailable here, and that is expected: it needs a
-user namespace, and Docker's seccomp profile denies one to a container without
-`CAP_SYS_ADMIN` — which this container deliberately does not have. Playwright
-passes `--no-sandbox` by default, and the container is the boundary instead:
-non-root, no capabilities, read-only rootfs, no egress but the proxy.
+**Its skill comes from the package**, and the entrypoint runs
+`playwright-cli install --skills --global` on every start. That writes
+`~/.claude/skills/playwright-cli/` — a SKILL.md plus nine reference files
+maintained by the Playwright team — rather than into the workspace, which is a
+git checkout and none of the image's business. Re-running each start means the
+copy in the home volume follows the image instead of being frozen at whatever
+that volume was initialised with.
 
-`PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright`, on the image rather than in
-the home volume, so it is read-only at runtime. A project pinning a different
-Playwright version wants its own browser build and cannot write there; point
-the variable at the home volume and download once:
+**Three settings the CLI cannot work out for itself**, shipped as
+`/usr/local/share/boxes/playwright-cli.config.json` and copied by the entrypoint
+to `~/.playwright/cli.config.json`, the CLI's documented global config, with the
+egress proxy added — that part is only known at runtime. A project's own
+`.playwright/cli.config.json` still overrides everything.
+
+- **`browserName: chromium`.** The CLI defaults to the `chrome` channel and
+  looks for real Google Chrome at `/opt/google/chrome/chrome`. Without this the
+  browser does not open at all.
+- **`chromiumSandbox: false`.** Chromium's own sandbox needs a user namespace,
+  and Docker's seccomp profile denies one to a container without
+  `CAP_SYS_ADMIN` — which this container deliberately does not have. Left on,
+  the browser dies at startup with `Chromium sandboxing failed`. Note this is
+  *not* the Playwright library's default, where it is already false. The
+  container is the sandbox instead: non-root, no capabilities, read-only
+  rootfs, no route out but the proxy.
+- **`--disable-dev-shm-usage`.** `/dev/shm` is Docker's default 64 MB, which
+  Chromium exhausts on a substantial page and reports as a closed target. This
+  moves that traffic to `/tmp`, already a 512 MB tmpfs.
+
+The proxy entry carries `NO_PROXY` as its bypass list, so a dev server started
+in the session is reachable while everything external still goes through the
+egress proxy.
+
+**TLS.** Chromium keeps its own trust store and reads none of the CA variables
+the rest of the image is pointed at, so the entrypoint imports the deployment
+CA into `~/.pki/nssdb` with `certutil`. Without it the hosts the proxy
+intercepts fail TLS in the browser and nowhere else.
+
+Two smaller things. `PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright`, on the
+image and so read-only at runtime; a project pinning its own Playwright version
+should point it at the home volume and download once:
 
 ```sh
 export PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright
 npx playwright install chromium
 ```
 
-`node /usr/local/lib/node_modules/@boxes/browser/selftest.mjs` starts the
-browser, renders, and screenshots — the same check the image build runs, kept
-around for when something looks wrong.
+And the CLI writes snapshots and screenshots to `.playwright-cli/` in the
+working directory, which in a session is the workspace — convenient, since the
+review surface then shows them, but worth a `.gitignore` entry in a repo the
+agent works on regularly. Set `outputDir` in the config to move it.
 
-**Why Ubuntu, and why not the official node image.** These are two independent
-choices, and basing on `node:22-<debian>` made them one. The base is picked for
-its language toolchains, where the spread is wide: Debian oldstable, which the
-node image was pinning this to, ships PHP 8.2, Go 1.19 and Rust 1.63 — a Go
-that refuses any `go.mod` asking for a newer one, and a Rust that cannot build
-an edition 2024 crate. Debian stable is 8.4 / 1.24 / 1.85; Ubuntu 26.04 is
-8.5 / 1.26 / 1.93. Node is picked separately, for the two npm globals the agent
-itself runs, and comes from NodeSource because a distribution's Node freezes
-with the release — 26.04's own is 22.x paired with npm 9. Change the major with
-`--build-arg NODE_MAJOR=24`.
-
-A toolchain from a distribution still ages, whichever one it is. When a project
-needs newer than the image has, the agent can install it into its own home with
-no privileges at all:
-
-```sh
-# Go, into the home volume
-curl -fsSL https://go.dev/dl/go1.27.0.linux-amd64.tar.gz | tar -C ~/.local -xz
-export PATH=~/.local/go/bin:$PATH
-
-# Rust, which is where rustup installs by default anyway
-curl -fsSL https://sh.rustup.rs | sh -s -- -y
-```
-
-Both land in `/home/agent`, so they survive restarts and image updates like
-anything else there. Go needs this least: 1.26 honours `GOTOOLCHAIN`, so a
-`go.mod` asking for a newer Go makes it fetch that toolchain by itself. Make a
-newer toolchain the deployment's default instead by putting the same thing in a
-derived image — see below — which is the better answer if every session is
-going to want it.
+Chromium only; Firefox and WebKit are not installed, and there is no display,
+so `--headed` cannot work. `playwright-cli install-browser chromium --only-shell`
+in a derived image drops the full browser and keeps just the headless shell if
+image size matters more than the option of a headed run later.
 
 ### The agent installs it itself
 

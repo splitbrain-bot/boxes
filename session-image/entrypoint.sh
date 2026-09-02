@@ -116,24 +116,43 @@ if [ -n "${BOXES_PROXY_CA:-}" ] && command -v certutil >/dev/null 2>&1; then
   fi
 fi
 
-# --- the skills the image ships ---------------------------------------------
-# Symlinked rather than copied. Claude Code follows a symlink at a skill
-# directory, so the image stays the single source of truth and a new image's
-# skills reach a session whose home volume already exists -- a copy would be
-# frozen at whatever that volume was initialised with. A directory the session
-# put there itself is left alone; only our own links are replaced.
-skills_src=/usr/local/share/boxes/skills
-skills_dst="${CLAUDE_CONFIG_DIR:-/home/agent/.claude}/skills"
-if [ -d "$skills_src" ] && mkdir -p "$skills_dst"; then
-  for src in "$skills_src"/*/; do
-    [ -d "$src" ] || continue
-    dst="$skills_dst/$(basename "$src")"
-    if [ -e "$dst" ] && [ ! -L "$dst" ]; then
-      log "leaving this session's own $(basename "$src") skill in place"
-      continue
-    fi
-    ln -sfn "${src%/}" "$dst" || log "WARNING: could not link the $(basename "$src") skill"
-  done
+# --- the browser CLI ---------------------------------------------------------
+# Two things the CLI cannot work out for itself.
+#
+# Its global config, at ~/.playwright/cli.config.json, carries which browser to
+# use and the launch options a session container needs; the image ships that
+# much, and the only piece missing at build time is the egress proxy, which is
+# added here. Written on every start rather than once, so a corrected base
+# config reaches a session whose home volume already exists. A project's own
+# .playwright/cli.config.json still overrides all of it.
+cli_base=/usr/local/share/boxes/playwright-cli.config.json
+cli_config=/home/agent/.playwright/cli.config.json
+if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
+  proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+  if [ -n "$proxy" ]; then
+    jq --arg server "$proxy" --arg bypass "${NO_PROXY:-}" \
+      '.browser.launchOptions.proxy = (if $bypass == "" then { server: $server }
+                                       else { server: $server, bypass: $bypass } end)' \
+      "$cli_base" > "$cli_config.tmp" \
+      && mv "$cli_config.tmp" "$cli_config" \
+      && log "wrote the browser CLI config, pointed at the egress proxy"
+  else
+    cp "$cli_base" "$cli_config" \
+      && log "wrote the browser CLI config; no egress proxy is configured"
+  fi
+fi
+
+# And its skill, which the CLI installs itself. --global puts it in
+# ~/.claude/skills rather than in the workspace, which is a git checkout that
+# is none of our business. Re-run every start so the copy in the home volume
+# follows the image rather than being frozen at whatever that volume was
+# initialised with.
+if command -v playwright-cli >/dev/null 2>&1; then
+  if playwright-cli install --skills --global >/dev/null 2>&1; then
+    log "installed the playwright-cli skill"
+  else
+    log "WARNING: could not install the playwright-cli skill"
+  fi
 fi
 
 # --- git identity -----------------------------------------------------------

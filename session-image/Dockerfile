@@ -152,56 +152,53 @@ RUN npm install -g \
       @agentclientprotocol/claude-agent-acp@0.70.0 \
  && npm cache clean --force
 
-# Playwright, and the one browser build a session gets. Chromium only: Firefox
-# and WebKit would roughly double this layer, and a coding agent wants a
-# browser rather than a compatibility matrix.
+# The browser an agent drives, and the tool it drives it with.
 #
-# Ubuntu's own `chromium` is not an option -- it is a virtual package standing
-# in for a snap, and snapd does not run in here -- so the browser is
-# Playwright's own build, which has the virtue of being version-matched to the
-# Playwright that drives it.
+# @playwright/cli is Microsoft's own CLI for coding agents: a snapshot command
+# that renders the page as an accessibility tree with a [ref=eN] handle on
+# every element, and click/type/select/hover commands that take those refs. It
+# holds the browser in a daemon between invocations, so a snapshot in one
+# command and a click in the next act on the same page. That is the same
+# interaction model as Playwright MCP -- the two share the implementation --
+# without an MCP server to configure or a second process for anything here to
+# manage, and it writes each snapshot to a file rather than into the model's
+# context. It ships its own agent skill, which the entrypoint installs.
+#
+# Pinned, like the ACP adapter, and for a better reason: this is 0.1.x, and it
+# depends on a prerelease Playwright.
+#
+# Chromium only. Firefox and WebKit would roughly double the layer, and a
+# coding agent wants a browser rather than a compatibility matrix. Ubuntu's own
+# chromium is not an option in any case -- it is a virtual package standing in
+# for a snap, and snapd does not run in here.
 #
 # --with-deps rather than a hand-written library list, because Playwright
-# maintains the mapping per distribution and Ubuntu's 64-bit time_t transition
-# renamed half of it (libasound2t64, libcups2t64, libglib2.0-0t64 and so on).
-# It also brings the font packages, without which every screenshot of a page
-# in a non-Latin script comes back as boxes.
+# maintains that mapping per distribution and Ubuntu's 64-bit time_t
+# transition renamed half of it (libasound2t64, libcups2t64, libglib2.0-0t64).
+# It also brings the font packages, without which a screenshot of a page in a
+# non-Latin script comes back as boxes.
 #
-# PLAYWRIGHT_BROWSERS_PATH is what keeps the browser on the image rather than
-# in the home volume, for the reason the npm globals are on the image: a named
-# volume is initialised once and never refreshed. The cost is that the
-# directory is read-only at runtime, so a project pinning a different
-# Playwright version has to point the variable at its own home and download
-# there -- which the skill below spells out.
+# PLAYWRIGHT_BROWSERS_PATH keeps the browser on the image rather than in the
+# home volume, for the reason the npm globals are on the image: a named volume
+# is initialised once and never refreshed. The cost is that it is read-only at
+# runtime, so a project pinning its own Playwright has to point the variable at
+# its own home and download there -- which the shipped skill spells out.
 #
 # libnss3-tools is not Playwright's: it is certutil, which the entrypoint uses
 # to put the deployment CA where Chromium will actually look for it.
-ARG PLAYWRIGHT_VERSION=1.62.1
+ARG PLAYWRIGHT_CLI_VERSION=0.1.19
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN npm install -g playwright@${PLAYWRIGHT_VERSION} \
+RUN npm install -g @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
  && npm cache clean --force \
- && playwright install --with-deps chromium \
+ && playwright-cli install-browser chromium --with-deps \
  && apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# The launch helper, and the skill that tells the agent to use it.
-#
-# The helper goes inside the global node_modules tree so that its own
-# `import 'playwright'` resolves, and gets a short symlink for scripts to
-# import by absolute path -- which is what a script in /workspace has to do,
-# since ESM ignores NODE_PATH. Node resolves the symlink before resolving the
-# import, so the short path behaves exactly like the long one.
-#
-# The skill stays on the image and is symlinked into the agent's config by the
-# entrypoint. Copying it into /home/agent here would freeze it at whatever the
-# home volume was initialised with, which is the one thing a skill must not do
-# -- it is documentation, and documentation that cannot be corrected is worse
-# than none.
-COPY browser/ /usr/local/lib/node_modules/@boxes/browser/
-RUN install -d -m 0755 /usr/local/share/boxes \
- && ln -s /usr/local/lib/node_modules/@boxes/browser/index.mjs \
-      /usr/local/share/boxes/browser.mjs
-COPY skills/ /usr/local/share/boxes/skills/
+# The environment's half of the CLI's configuration: which browser, and the two
+# launch options a session container needs. The entrypoint copies this to the
+# CLI's global config with the egress proxy added, since only runtime knows
+# that. Read the file -- it explains why each key is there.
+COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
 # The agent's own account, created rather than renamed: an Ubuntu base ships
 # no developer user to reuse, and 1020 keeps clear of the `ubuntu` account it
@@ -328,19 +325,37 @@ RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
 RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
-             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig playwright certutil; do \
+             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig playwright-cli certutil; do \
       command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
     done
 
-# The browser starts, renders and screenshots, as the agent.
+# The browser opens, loads a page and snapshots it with refs, as the agent.
 #
-# Every way this breaks is a runtime failure that the build would otherwise
-# not see: a missing shared library from the dependency list, a browsers
-# directory the agent cannot read, a helper whose `import 'playwright'` does
-# not resolve from where it was installed. The check renders markup it sets
-# itself rather than fetching a URL, so it proves the browser without
-# depending on a build host's egress.
-RUN node /usr/local/lib/node_modules/@boxes/browser/selftest.mjs
+# Everything this catches is a runtime failure the build would otherwise ship:
+# a missing shared library, a browsers directory the agent cannot read, a
+# config that leaves the CLI looking for Google Chrome at /opt/google/chrome,
+# and above all a Chromium sandbox left on -- which fails at browser startup
+# and would make every browser command in every session useless.
+#
+# Served over loopback by python rather than fetched, because the build host
+# has no business needing egress for this, and `file:` URLs are blocked by the
+# CLI by design. --config points at the image's copy: the global config does
+# not exist until the entrypoint writes one.
+RUN set -eu; \
+    cd /tmp; \
+    printf '<!doctype html><title>t</title><button>Continue</button>\n' > index.html; \
+    python3 -m http.server 18901 --bind 127.0.0.1 >/dev/null 2>&1 & \
+    server=$!; \
+    trap 'kill $server 2>/dev/null || true' EXIT; \
+    cfg=/usr/local/share/boxes/playwright-cli.config.json; \
+    for _ in $(seq 1 50); do \
+      curl -fsS -o /dev/null http://127.0.0.1:18901/ && break; sleep 0.2; \
+    done; \
+    playwright-cli --config "$cfg" open http://127.0.0.1:18901/; \
+    playwright-cli --config "$cfg" snapshot >/dev/null; \
+    grep -qE 'button "Continue" \[ref=e[0-9]+\]' .playwright-cli/*.yml; \
+    playwright-cli --config "$cfg" close; \
+    rm -rf /tmp/index.html /tmp/.playwright-cli
 
 # The toolchains build something, as the agent, with their caches where a
 # session will really put them.

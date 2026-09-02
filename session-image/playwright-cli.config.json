@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Base configuration for @playwright/cli in a session container. The",
+    "entrypoint copies this to ~/.playwright/cli.config.json -- the CLI's",
+    "documented global config -- adding the egress proxy, which is only known",
+    "at runtime. A project's own .playwright/cli.config.json still overrides",
+    "all of it.",
+    "",
+    "browserName: the CLI defaults to the 'chrome' channel and looks for real",
+    "Google Chrome at /opt/google/chrome/chrome, which is not what this image",
+    "installs. Without this the browser refuses to open at all.",
+    "",
+    "chromiumSandbox: Chromium's own sandbox needs a user namespace, and",
+    "Docker's seccomp profile denies one to a container without CAP_SYS_ADMIN,",
+    "which this container deliberately does not have. Left on, the browser",
+    "dies at startup with 'Chromium sandboxing failed'. The container is the",
+    "sandbox instead: non-root, no capabilities, read-only rootfs, no route out",
+    "but the proxy. Note this differs from the Playwright library, where",
+    "chromiumSandbox already defaults to false.",
+    "",
+    "--disable-dev-shm-usage: /dev/shm is Docker's default 64 MB, which",
+    "Chromium exhausts on any substantial page and reports as a closed target.",
+    "This moves that traffic to /tmp, already a 512 MB tmpfs here."
+  ],
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "chromiumSandbox": false,
+      "args": ["--disable-dev-shm-usage"]
+    }
+  }
+}
