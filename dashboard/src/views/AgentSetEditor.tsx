@@ -9,8 +9,8 @@ import type {
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
-import { Notice } from '@/components/Notice';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
@@ -92,9 +92,7 @@ export function AgentSetEditor() {
       <div className="flex flex-col gap-4">
         <BackLink to="/agents" label="Agent configuration" />
         {error ? (
-          <Notice className="rounded-md border px-3 py-2">
-            {error}
-          </Notice>
+          <Notice className="rounded-md border px-3 py-2">{error}</Notice>
         ) : (
           <div className="text-sm text-muted-foreground">Loading…</div>
         )}
@@ -120,9 +118,7 @@ export function AgentSetEditor() {
       </p>
 
       {error ? (
-        <Notice className="rounded-md border px-3 py-2">
-          {error}
-        </Notice>
+        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
       {/* Renaming the global set is allowed — it is only a label — but it

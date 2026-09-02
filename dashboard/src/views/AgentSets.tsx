@@ -4,8 +4,8 @@ import { Link } from 'react-router';
 import type { AgentSetSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
-import { Notice } from '@/components/Notice';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -124,9 +124,7 @@ export function AgentSets() {
       ) : null}
 
       {error ? (
-        <Notice className="rounded-md border px-3 py-2">
-          {error}
-        </Notice>
+        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
       {sets === null ? (

@@ -3,15 +3,19 @@ import { useLocation, useNavigate, useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
-import { Notice } from '@/components/Notice';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { CopyField } from '@/components/CopyField';
+import { Notice } from '@/components/Notice';
 import { sessionBadges } from '@/components/SessionCard';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { pollWhileVisible } from '@/lib/poll';
 import { wsUrlFor } from '@/lib/ws-url';
 import { refresh } from '../stores/sessions.ts';
+
+/** How often the detail view re-reads the session, while its tab is visible. */
+const POLL_MS = 5000;
 
 /** One field of the details grid. */
 function Meta({ label, value }: { label: string; value: string }) {
@@ -63,10 +67,7 @@ export function SessionInfo() {
 
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void load();
-    }, 5000);
-    return () => window.clearInterval(timer);
+    return pollWhileVisible(() => void load(), POLL_MS);
   }, [load]);
 
   const act = async (fn: () => Promise<unknown>): Promise<void> => {
@@ -106,9 +107,7 @@ export function SessionInfo() {
       <div className="flex flex-col gap-4">
         <BackLink to={back.to} label={back.label} />
         {error ? (
-          <Notice className="rounded-md border px-3 py-2">
-            {error}
-          </Notice>
+          <Notice className="rounded-md border px-3 py-2">{error}</Notice>
         ) : (
           <div className="text-sm text-muted-foreground">Loading…</div>
         )}
@@ -132,9 +131,7 @@ export function SessionInfo() {
       </div>
 
       {error ? (
-        <Notice className="rounded-md border px-3 py-2">
-          {error}
-        </Notice>
+        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
       {running && !session.proxyAttached ? (

@@ -6,8 +6,8 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router';
 import type { SessionDetail, ThreadSummary } from '../../../shared/types.ts';
-import { Notice } from '@/components/Notice';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
+import { Notice } from '@/components/Notice';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';

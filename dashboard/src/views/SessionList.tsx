@@ -39,9 +39,7 @@ export function SessionList() {
       {claudeTokenConfigured ? null : <TokenWarning className="rounded-md border px-3 py-2" />}
 
       {error ? (
-        <Notice className="rounded-md border px-3 py-2">
-          {error}
-        </Notice>
+        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
       {loading && sessions.length === 0 ? (

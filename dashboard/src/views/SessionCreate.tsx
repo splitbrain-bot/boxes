@@ -106,9 +106,7 @@ export function SessionCreate() {
       ) : null}
 
       {error ? (
-        <Notice className="rounded-md border px-3 py-2">
-          {error}
-        </Notice>
+        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
       <div className="flex justify-end gap-2">
