@@ -82,11 +82,9 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 /** An ACP Stream over a WebSocket: one JSON-RPC message per text frame. */
 function wsStream(ws: WebSocket, sessionId: string): Stream {
   const slog = log.session(sessionId);
-  let controller: ReadableStreamDefaultController<unknown> | null = null;
 
   const readable = new ReadableStream<unknown>({
     start(c) {
-      controller = c;
       ws.on('message', (data: Buffer, isBinary: boolean) => {
         if (isBinary) {
           slog.warn('rejecting binary WS frame');
@@ -126,9 +124,6 @@ function wsStream(ws: WebSocket, sessionId: string): Stream {
       };
       ws.on('close', finish);
       ws.on('error', finish);
-    },
-    cancel() {
-      controller = null;
     },
   });
 

@@ -9,6 +9,8 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noImplicitOverride": true,
     "exactOptionalPropertyTypes": false,
     "verbatimModuleSyntax": false,

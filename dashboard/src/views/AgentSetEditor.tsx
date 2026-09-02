@@ -1,6 +1,6 @@
-import { ArrowLeft, FileText, Pencil, Plus, Trash2 } from 'lucide-react';
+import { FileText, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
 import type {
   AgentBundlePreview,
   AgentItem,
@@ -8,6 +8,8 @@ import type {
   AgentSetDetail,
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { BackLink } from '@/components/BackLink';
+import { Notice } from '@/components/Notice';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -88,13 +90,11 @@ export function AgentSetEditor() {
   if (!set) {
     return (
       <div className="flex flex-col gap-4">
-        <Link to="/agents" className="text-sm text-muted-foreground hover:text-foreground">
-          ← Agent configuration
-        </Link>
+        <BackLink to="/agents" label="Agent configuration" />
         {error ? (
-          <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+          <Notice className="rounded-md border px-3 py-2">
             {error}
-          </div>
+          </Notice>
         ) : (
           <div className="text-sm text-muted-foreground">Loading…</div>
         )}
@@ -108,13 +108,7 @@ export function AgentSetEditor() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Link
-        to="/agents"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="size-4" />
-        Agent configuration
-      </Link>
+      <BackLink to="/agents" label="Agent configuration" />
 
       <h1 className="text-xl font-semibold">{set.name}</h1>
 
@@ -126,9 +120,9 @@ export function AgentSetEditor() {
       </p>
 
       {error ? (
-        <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+        <Notice className="rounded-md border px-3 py-2">
           {error}
-        </div>
+        </Notice>
       ) : null}
 
       {/* Renaming the global set is allowed — it is only a label — but it

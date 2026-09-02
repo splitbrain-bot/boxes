@@ -6,6 +6,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router';
 import type { SessionDetail, ThreadSummary } from '../../../shared/types.ts';
+import { Notice } from '@/components/Notice';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
@@ -201,14 +202,12 @@ export function SessionThread() {
               </div>
             ) : null}
             {forkError ? (
-              <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
+              <Notice className="border-b px-4 py-2">
                 Could not fork this thread: {forkError}
-              </div>
+              </Notice>
             ) : null}
             {state.error ? (
-              <div className="border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
-                {state.error}
-              </div>
+              <Notice className="border-b px-4 py-2">{state.error}</Notice>
             ) : null}
             <div className="min-h-0 flex-1">
               {/* A session that could not be read has no token, so nothing can

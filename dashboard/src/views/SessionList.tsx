@@ -1,5 +1,6 @@
 import { Plus, SlidersHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
+import { Notice } from '@/components/Notice';
 import { PushToggle } from '@/components/PushToggle';
 import { SessionCard } from '@/components/SessionCard';
 import { TokenWarning } from '@/components/TokenWarning';
@@ -38,9 +39,9 @@ export function SessionList() {
       {claudeTokenConfigured ? null : <TokenWarning className="rounded-md border px-3 py-2" />}
 
       {error ? (
-        <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+        <Notice className="rounded-md border px-3 py-2">
           {error}
-        </div>
+        </Notice>
       ) : null}
 
       {loading && sessions.length === 0 ? (

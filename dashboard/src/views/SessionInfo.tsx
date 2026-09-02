@@ -1,8 +1,9 @@
-import { ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router';
+import { useLocation, useNavigate, useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { BackLink } from '@/components/BackLink';
+import { Notice } from '@/components/Notice';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { CopyField } from '@/components/CopyField';
 import { sessionBadges } from '@/components/SessionCard';
@@ -103,13 +104,11 @@ export function SessionInfo() {
   if (!session) {
     return (
       <div className="flex flex-col gap-4">
-        <Link to={back.to} className="text-sm text-muted-foreground hover:text-foreground">
-          ← {back.label}
-        </Link>
+        <BackLink to={back.to} label={back.label} />
         {error ? (
-          <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+          <Notice className="rounded-md border px-3 py-2">
             {error}
-          </div>
+          </Notice>
         ) : (
           <div className="text-sm text-muted-foreground">Loading…</div>
         )}
@@ -121,13 +120,7 @@ export function SessionInfo() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Link
-        to={back.to}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="size-4" />
-        {back.label}
-      </Link>
+      <BackLink to={back.to} label={back.label} />
 
       <div className="flex flex-col gap-2">
         <h1 className="text-xl font-semibold">{session.name}</h1>
@@ -139,16 +132,16 @@ export function SessionInfo() {
       </div>
 
       {error ? (
-        <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+        <Notice className="rounded-md border px-3 py-2">
           {error}
-        </div>
+        </Notice>
       ) : null}
 
       {running && !session.proxyAttached ? (
-        <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm">
+        <Notice tone="warn" className="rounded-md border px-3 py-2">
           The egress proxy is not attached to this session&apos;s network — the agent has no
           internet access until the reconcile loop reattaches it.
-        </div>
+        </Notice>
       ) : null}
 
       <Card>

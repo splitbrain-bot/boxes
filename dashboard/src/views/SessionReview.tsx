@@ -2,6 +2,7 @@ import { ArrowLeft, FilePlus2, FolderTree, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk } from '../../../shared/types.ts';
+import { Notice } from '@/components/Notice';
 import { BasePicker } from '@/components/review/BasePicker';
 import { CodePane } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
@@ -304,14 +305,7 @@ export function SessionReview() {
         </Button>
       </header>
 
-      {error ? (
-        <div
-          role="alert"
-          className="shrink-0 border-b border-danger/40 bg-danger/10 px-3 py-2 text-sm"
-        >
-          {error}
-        </div>
-      ) : null}
+      {error ? <Notice className="shrink-0 border-b px-3 py-2">{error}</Notice> : null}
 
       <div className="flex min-h-0 flex-1">
         {/* One tree in the document, two arrangements.
@@ -352,9 +346,9 @@ export function SessionReview() {
               ) : (
                 <>
                   {file.truncated ? (
-                    <p className="shrink-0 border-b border-warn/40 bg-warn/10 px-3 py-1.5 text-xs">
+                    <Notice tone="warn" className="shrink-0 border-b px-3 py-1.5 text-xs">
                       This file is larger than the display limit. Only the first part is shown.
-                    </p>
+                    </Notice>
                   ) : null}
                   <CodePane
                     content={file.content}

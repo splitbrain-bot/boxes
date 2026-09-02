@@ -1,8 +1,10 @@
-import { ArrowLeft, ChevronRight, Globe, Layers, Plus } from 'lucide-react';
+import { ChevronRight, Globe, Layers, Plus } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 import type { AgentSetSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { BackLink } from '@/components/BackLink';
+import { Notice } from '@/components/Notice';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -71,13 +73,7 @@ export function AgentSets() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Link
-        to="/"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="size-4" />
-        Sessions
-      </Link>
+      <BackLink to="/" label="Sessions" />
 
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Agent configuration</h1>
@@ -128,9 +124,9 @@ export function AgentSets() {
       ) : null}
 
       {error ? (
-        <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+        <Notice className="rounded-md border px-3 py-2">
           {error}
-        </div>
+        </Notice>
       ) : null}
 
       {sets === null ? (

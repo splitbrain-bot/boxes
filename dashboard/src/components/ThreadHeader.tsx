@@ -1,4 +1,4 @@
-import { FileSearch, GitBranch, Info } from 'lucide-react';
+import { ArrowLeft, FileSearch, GitBranch, Info } from 'lucide-react';
 import { Link } from 'react-router';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
@@ -60,7 +60,7 @@ export function ThreadHeader({
     <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
       <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
         <Link to="/" aria-label="Back to sessions">
-          ←
+          <ArrowLeft className="size-4" />
         </Link>
       </Button>
 
