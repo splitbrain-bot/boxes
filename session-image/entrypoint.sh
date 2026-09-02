@@ -93,6 +93,49 @@ install_agent_config() {
 
 install_agent_config
 
+# --- chromium's trust store -------------------------------------------------
+# Chromium reads none of the CA variables the rest of the image is pointed at;
+# it keeps its own NSS database under ~/.pki/nssdb. Without the deployment CA
+# in there, the hosts the proxy intercepts -- and only those -- fail TLS inside
+# the browser while working in every other tool, which is a confusing shape to
+# debug from a page that will not load.
+#
+# Removed before it is added, so a restart replaces the entry rather than
+# failing on one that is already there.
+if [ -n "${BOXES_PROXY_CA:-}" ] && command -v certutil >/dev/null 2>&1; then
+  nssdb=/home/agent/.pki/nssdb
+  if mkdir -p "$nssdb"; then
+    [ -f "$nssdb/cert9.db" ] || certutil -N -d "sql:$nssdb" --empty-password >/dev/null 2>&1
+    certutil -D -n boxes-egress-proxy -d "sql:$nssdb" >/dev/null 2>&1
+    if certutil -A -n boxes-egress-proxy -t C,, -i /home/agent/.boxes/proxy-ca.crt \
+         -d "sql:$nssdb" 2>/dev/null; then
+      log "trusted the egress proxy CA in the browser's certificate store"
+    else
+      log "WARNING: could not add the egress proxy CA to $nssdb; intercepted hosts will fail TLS in the browser"
+    fi
+  fi
+fi
+
+# --- the skills the image ships ---------------------------------------------
+# Symlinked rather than copied. Claude Code follows a symlink at a skill
+# directory, so the image stays the single source of truth and a new image's
+# skills reach a session whose home volume already exists -- a copy would be
+# frozen at whatever that volume was initialised with. A directory the session
+# put there itself is left alone; only our own links are replaced.
+skills_src=/usr/local/share/boxes/skills
+skills_dst="${CLAUDE_CONFIG_DIR:-/home/agent/.claude}/skills"
+if [ -d "$skills_src" ] && mkdir -p "$skills_dst"; then
+  for src in "$skills_src"/*/; do
+    [ -d "$src" ] || continue
+    dst="$skills_dst/$(basename "$src")"
+    if [ -e "$dst" ] && [ ! -L "$dst" ]; then
+      log "leaving this session's own $(basename "$src") skill in place"
+      continue
+    fi
+    ln -sfn "${src%/}" "$dst" || log "WARNING: could not link the $(basename "$src") skill"
+  done
+fi
+
 # --- git identity -----------------------------------------------------------
 if [ -n "${GIT_NAME:-}" ]; then
   git config --global user.name "$GIT_NAME"

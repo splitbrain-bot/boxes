@@ -152,6 +152,57 @@ RUN npm install -g \
       @agentclientprotocol/claude-agent-acp@0.70.0 \
  && npm cache clean --force
 
+# Playwright, and the one browser build a session gets. Chromium only: Firefox
+# and WebKit would roughly double this layer, and a coding agent wants a
+# browser rather than a compatibility matrix.
+#
+# Ubuntu's own `chromium` is not an option -- it is a virtual package standing
+# in for a snap, and snapd does not run in here -- so the browser is
+# Playwright's own build, which has the virtue of being version-matched to the
+# Playwright that drives it.
+#
+# --with-deps rather than a hand-written library list, because Playwright
+# maintains the mapping per distribution and Ubuntu's 64-bit time_t transition
+# renamed half of it (libasound2t64, libcups2t64, libglib2.0-0t64 and so on).
+# It also brings the font packages, without which every screenshot of a page
+# in a non-Latin script comes back as boxes.
+#
+# PLAYWRIGHT_BROWSERS_PATH is what keeps the browser on the image rather than
+# in the home volume, for the reason the npm globals are on the image: a named
+# volume is initialised once and never refreshed. The cost is that the
+# directory is read-only at runtime, so a project pinning a different
+# Playwright version has to point the variable at its own home and download
+# there -- which the skill below spells out.
+#
+# libnss3-tools is not Playwright's: it is certutil, which the entrypoint uses
+# to put the deployment CA where Chromium will actually look for it.
+ARG PLAYWRIGHT_VERSION=1.62.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN npm install -g playwright@${PLAYWRIGHT_VERSION} \
+ && npm cache clean --force \
+ && playwright install --with-deps chromium \
+ && apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
+ && rm -rf /var/lib/apt/lists/*
+
+# The launch helper, and the skill that tells the agent to use it.
+#
+# The helper goes inside the global node_modules tree so that its own
+# `import 'playwright'` resolves, and gets a short symlink for scripts to
+# import by absolute path -- which is what a script in /workspace has to do,
+# since ESM ignores NODE_PATH. Node resolves the symlink before resolving the
+# import, so the short path behaves exactly like the long one.
+#
+# The skill stays on the image and is symlinked into the agent's config by the
+# entrypoint. Copying it into /home/agent here would freeze it at whatever the
+# home volume was initialised with, which is the one thing a skill must not do
+# -- it is documentation, and documentation that cannot be corrected is worse
+# than none.
+COPY browser/ /usr/local/lib/node_modules/@boxes/browser/
+RUN install -d -m 0755 /usr/local/share/boxes \
+ && ln -s /usr/local/lib/node_modules/@boxes/browser/index.mjs \
+      /usr/local/share/boxes/browser.mjs
+COPY skills/ /usr/local/share/boxes/skills/
+
 # The agent's own account, created rather than renamed: an Ubuntu base ships
 # no developer user to reuse, and 1020 keeps clear of the `ubuntu` account it
 # does carry at 1000 -- which on a real host is usually a person.
@@ -277,9 +328,19 @@ RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
 RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
-             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig; do \
+             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig playwright certutil; do \
       command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
     done
+
+# The browser starts, renders and screenshots, as the agent.
+#
+# Every way this breaks is a runtime failure that the build would otherwise
+# not see: a missing shared library from the dependency list, a browsers
+# directory the agent cannot read, a helper whose `import 'playwright'` does
+# not resolve from where it was installed. The check renders markup it sets
+# itself rather than fetching a URL, so it proves the browser without
+# depending on a build host's egress.
+RUN node /usr/local/lib/node_modules/@boxes/browser/selftest.mjs
 
 # The toolchains build something, as the agent, with their caches where a
 # session will really put them.

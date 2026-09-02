@@ -499,6 +499,69 @@ before a first pull on a slow link, and the reason a deployment that wants a
 leaner image is better off stripping what it does not need in a derived one
 than with this image as shipped.
 
+### Headless browser
+
+Playwright and its Chromium build are in the image, so a session can screenshot
+a page, render a PDF, scrape something a `curl` cannot reach, or drive the dev
+server it just started. Chromium only — Firefox and WebKit would roughly double
+the layer, and a coding agent wants a browser rather than a compatibility
+matrix.
+
+**Driven as a CLI and a skill, not as an MCP server.** Both work, and this is
+the cheaper half of the trade. An MCP server would be a second long-running
+process per session plus config for the orchestrator to manage, and the
+orchestrator manages nothing about MCP today; a skill is a file, and the agent
+already has a shell. Scripts also do what a fixed tool surface cannot — walk
+fifty pages, extract a table, drive a form to completion. What MCP would do
+better is step-by-step exploration, where its accessibility snapshots beat
+re-running a script; `launchPersistent()` closes most of that gap by keeping
+cookies and storage between runs, and nothing here rules an MCP server out
+later.
+
+The skill is `headless-browser`, and the entrypoint **symlinks** it out of the
+image into `~/.claude/skills/` at every start rather than copying it. Claude
+Code follows a symlink at a skill directory, so the image stays the single
+source of truth and a corrected skill reaches sessions whose home volume
+already exists. A skill the session wrote itself under the same name is left
+alone.
+
+Three things about a session container break a plain `chromium.launch()`, which
+is why the skill points at a launch helper
+(`/usr/local/share/boxes/browser.mjs`) instead:
+
+- **No route out but the proxy.** Chromium has to be given `--proxy-server`; it
+  does not reliably take the proxy from the environment. The helper passes it,
+  and passes `NO_PROXY` as the bypass so a local dev server still works.
+- **Its own trust store.** Chromium reads none of the CA variables the rest of
+  the image is pointed at, so the entrypoint imports the deployment CA into
+  `~/.pki/nssdb` with `certutil`. Without that, the hosts the proxy intercepts
+  fail TLS in the browser and nowhere else.
+- **A 64 MB `/dev/shm`**, which Chromium exhausts on a substantial page and
+  reports as a closed target. The helper passes `--disable-dev-shm-usage`,
+  which moves that traffic to `/tmp` — already a 512 MB tmpfs. Raising the
+  container's `ShmSize` instead would fix it for the `playwright screenshot`
+  CLI too, at the cost of a second tmpfs; it is not set today.
+
+Chromium's *own* sandbox is unavailable here, and that is expected: it needs a
+user namespace, and Docker's seccomp profile denies one to a container without
+`CAP_SYS_ADMIN` — which this container deliberately does not have. Playwright
+passes `--no-sandbox` by default, and the container is the boundary instead:
+non-root, no capabilities, read-only rootfs, no egress but the proxy.
+
+`PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright`, on the image rather than in
+the home volume, so it is read-only at runtime. A project pinning a different
+Playwright version wants its own browser build and cannot write there; point
+the variable at the home volume and download once:
+
+```sh
+export PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright
+npx playwright install chromium
+```
+
+`node /usr/local/lib/node_modules/@boxes/browser/selftest.mjs` starts the
+browser, renders, and screenshots — the same check the image build runs, kept
+around for when something looks wrong.
+
 **Why Ubuntu, and why not the official node image.** These are two independent
 choices, and basing on `node:22-<debian>` made them one. The base is picked for
 its language toolchains, where the spread is wide: Debian oldstable, which the
