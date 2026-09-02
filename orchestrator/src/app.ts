@@ -20,7 +20,7 @@ import type {
   ReviewBaseBody,
   UpdateAgentSetBody,
 } from '../../shared/types.ts';
-import { AgentConfigError, AgentStore } from './agents.ts';
+import { AgentStore } from './agents.ts';
 import type { config } from './config.ts';
 import {
   countPushSubscriptions,
@@ -30,10 +30,11 @@ import {
 } from './db.ts';
 import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
+import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
-import { ReviewService, ReviewUnavailable } from './review/service.ts';
-import { HttpError, SessionManager } from './sessions.ts';
+import { ReviewService } from './review/service.ts';
+import { SessionManager } from './sessions.ts';
 import { setSessionOwner } from './workspaces.ts';
 
 /**
@@ -99,11 +100,7 @@ const app = Fastify({ logger: false });
 // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
 app.setErrorHandler((err, _req, reply) => {
-  if (
-    err instanceof HttpError ||
-    err instanceof ReviewUnavailable ||
-    err instanceof AgentConfigError
-  ) {
+  if (err instanceof HttpError) {
     return reply.code(err.statusCode).send({ error: err.message });
   }
   log.error('unhandled request error', { error: (err as Error).message });

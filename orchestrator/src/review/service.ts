@@ -8,6 +8,7 @@ import type {
   ReviewTreeResponse,
 } from '../../../shared/types.ts';
 import type { Db, SessionRow } from '../db.ts';
+import { HttpError } from '../http-error.ts';
 import { log } from '../log.ts';
 import { fileDiff } from './difflines.ts';
 import {
@@ -54,16 +55,6 @@ import { REVIEW_FILE, reviewTree, treePaths, withDeleted } from './tree.ts';
  * is done and the box has idled out.
  */
 
-/** Why a review request could not be served. */
-export class ReviewUnavailable extends Error {
-  constructor(
-    readonly statusCode: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 /** What a session's review is rooted at, and whether git works there. */
 interface Root {
   /** Absolute path of the review root. */
@@ -109,7 +100,7 @@ export class ReviewService {
     const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as
       | SessionRow
       | undefined;
-    if (!row || row.status === 'deleted') throw new ReviewUnavailable(404, 'Session not found');
+    if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
     return row;
   }
 
@@ -125,7 +116,7 @@ export class ReviewService {
     const row = this.row(id);
     const path = this.workspaceOf(row.id);
     if (!path || !isDirectory(path)) {
-      throw new ReviewUnavailable(
+      throw new HttpError(
         409,
         'This session stores its workspace in a volume the orchestrator cannot read. ' +
           'Start the session once to migrate it, then review it.',
@@ -358,18 +349,18 @@ export class ReviewService {
     comment: string,
   ): Promise<ReviewAnnotation[]> {
     if (!Number.isInteger(line) || line < 1) {
-      throw new ReviewUnavailable(400, 'line must be a positive integer');
+      throw new HttpError(400, 'line must be a positive integer');
     }
     const text = comment.trim();
-    if (text === '') throw new ReviewUnavailable(400, 'comment is required');
-    if (text.length > 20_000) throw new ReviewUnavailable(400, 'comment is too long');
+    if (text === '') throw new HttpError(400, 'comment is required');
+    if (text.length > 20_000) throw new HttpError(400, 'comment is too long');
 
     const root = await this.root(id);
     // The path has to name a file of the tree, not merely resolve inside it:
     // an annotation on something the tree never listed could never be shown.
     const path = await this.resolveListed(root, id, relPath);
     if (path === null) {
-      throw new ReviewUnavailable(409, 'This file was deleted, so there is no line to comment on.');
+      throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
     }
     const source = fileLines(readTextFile(path).content);
 
@@ -381,7 +372,7 @@ export class ReviewService {
   /** Removes the comment on one line, and returns what is left for the file. */
   async deleteAnnotation(id: string, relPath: string, line: number): Promise<ReviewAnnotation[]> {
     if (!Number.isInteger(line) || line < 1) {
-      throw new ReviewUnavailable(400, 'line must be a positive integer');
+      throw new HttpError(400, 'line must be a positive integer');
     }
     const root = await this.root(id);
     return this.mutate(id, root, relPath, (review) => {
@@ -416,11 +407,11 @@ export class ReviewService {
       return { rev: '', commit: '' };
     }
     const wanted = rev.trim();
-    if (wanted.length > 200) throw new ReviewUnavailable(400, 'rev is too long');
-    if (!root.hasGit) throw new ReviewUnavailable(409, 'This workspace is not a git repository');
+    if (wanted.length > 200) throw new HttpError(400, 'rev is too long');
+    if (!root.hasGit) throw new HttpError(409, 'This workspace is not a git repository');
 
     const resolved = await resolveBase(root.path, wanted);
-    if ('error' in resolved) throw new ReviewUnavailable(400, resolved.error);
+    if ('error' in resolved) throw new HttpError(400, resolved.error);
 
     this.db
       .prepare('UPDATE sessions SET review_base_rev = ?, review_base_commit = ? WHERE id = ?')
@@ -463,7 +454,7 @@ export class ReviewService {
         writeFileAtomic(path, serialized);
         return toAnnotations(annotationsFor(review, relPath));
       }
-      throw new ReviewUnavailable(
+      throw new HttpError(
         409,
         'REVIEW.md is being written by something else; try again',
       );
@@ -570,15 +561,15 @@ export class ReviewService {
    */
   private async resolveListed(root: Root, id: string, relPath: string): Promise<string | null> {
     if (!(await this.listed(id, root)).has(relPath)) {
-      throw new ReviewUnavailable(404, 'File not found');
+      throw new HttpError(404, 'File not found');
     }
     const resolved = resolveInRoot(root.path, relPath);
     if (resolved.ok) {
-      if (isDirectory(resolved.path)) throw new ReviewUnavailable(404, 'File not found');
+      if (isDirectory(resolved.path)) throw new HttpError(404, 'File not found');
       return resolved.path;
     }
     if (resolved.reason === 'missing') return null;
-    throw new ReviewUnavailable(404, 'File not found');
+    throw new HttpError(404, 'File not found');
   }
 
   /**
@@ -603,14 +594,6 @@ export class ReviewService {
   forget(id: string): void {
     this.treePaths.delete(id);
     this.locks.delete(id);
-  }
-
-  /**
-   * The review root of a session, relative to the workspace, for the "hand to
-   * agent" prompt. Empty when the workspace itself is the root.
-   */
-  async rootRelative(id: string): Promise<string> {
-    return (await this.root(id)).relative;
   }
 }
 

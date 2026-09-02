@@ -5,6 +5,28 @@ import { log } from './log.ts';
 import type { SessionManager } from './sessions.ts';
 
 /**
+ * The interval every background loop here runs on. Each one re-asserts
+ * something rather than reacting to an event, so a minute is both often enough
+ * to matter and cheap enough to ignore.
+ */
+const TICK_MS = 60_000;
+
+/**
+ * Runs `tick` every `everyMs` until the returned handle stops it, logging
+ * whatever it throws rather than letting it reach an unhandled rejection.
+ *
+ * The timer is unreferenced, so a loop that is still scheduled never holds the
+ * process open at shutdown.
+ */
+function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop: () => void } {
+  const timer = setInterval(() => {
+    void tick().catch((err: Error) => log.error(`${what} failed`, { error: err.message }));
+  }, everyMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
+}
+
+/**
  * Starts the idle reaper and returns a handle that stops it. Every minute it
  * stops each session that has no running turn, no waiting permission request,
  * no attached browser and no activity for IDLE_STOP_MINUTES. It never deletes.
@@ -46,12 +68,7 @@ export function startReaper(
     manager.maintenance();
   };
 
-  const timer = setInterval(() => {
-    void tick().catch((err: Error) => log.error('reaper tick failed', { error: err.message }));
-  }, 60_000);
-  timer.unref?.();
-
-  return { stop: () => clearInterval(timer) };
+  return loop('reaper tick', TICK_MS, tick);
 }
 
 /**
@@ -73,20 +90,19 @@ export function startImageRefresher(
     return { stop: () => {} };
   }
 
-  const timer = setInterval(
-    () => {
-      void manager.refreshSessionImage().catch((err: Error) => {
-        log.warn('could not refresh the session image', {
-          image: cfg.SESSION_IMAGE,
-          error: err.message,
-        });
+  // A registry that is down, or a tag built locally and pullable from nowhere,
+  // is not the orchestrator's problem: the image already here still works, so
+  // this is the one loop whose failure is a warning rather than an error.
+  return loop('session image refresh', cfg.SESSION_IMAGE_PULL_MINUTES * 60_000, async () => {
+    try {
+      await manager.refreshSessionImage();
+    } catch (err) {
+      log.warn('could not refresh the session image', {
+        image: cfg.SESSION_IMAGE,
+        error: (err as Error).message,
       });
-    },
-    cfg.SESSION_IMAGE_PULL_MINUTES * 60_000,
-  );
-  timer.unref?.();
-
-  return { stop: () => clearInterval(timer) };
+    }
+  });
 }
 
 /**
@@ -117,11 +133,5 @@ export function startProxyReconciler(
       });
     }
   };
-  const timer = setInterval(() => {
-    void tick().catch((err: Error) =>
-      log.error('proxy reconcile failed', { error: err.message }),
-    );
-  }, 60_000);
-  timer.unref?.();
-  return { stop: () => clearInterval(timer) };
+  return loop('proxy reconcile', TICK_MS, tick);
 }

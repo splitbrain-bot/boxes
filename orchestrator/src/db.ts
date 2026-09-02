@@ -371,6 +371,25 @@ export function nextSubnetIndex(db: Db): number {
   return row?.value ?? 0;
 }
 
+/**
+ * Drops all but the newest `keep` rows of one session from a log table.
+ *
+ * Both logs are per-session rings, and the trim is the same statement over a
+ * different table: keep nothing older than the row `keep` places back from the
+ * newest, and keep everything when the session has fewer than that. The table
+ * name is interpolated because SQLite cannot bind an identifier; it is never
+ * caller-supplied.
+ */
+function pruneRing(db: Db, table: 'acp_log' | 'exec_log', sessionId: string, keep: number): void {
+  db.prepare(
+    `DELETE FROM ${table}
+     WHERE session_id = ?
+       AND id <= COALESCE(
+         (SELECT id FROM ${table} WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
+         -1)`,
+  ).run(sessionId, sessionId, keep);
+}
+
 /** Debug log rows kept per session. */
 const LOG_RING = 5000;
 
@@ -388,13 +407,7 @@ export function appendAcpLog(
 
 /** Drops all but the newest LOG_RING debug log entries of one session. */
 export function pruneAcpLog(db: Db, sessionId: string): void {
-  db.prepare(
-    `DELETE FROM acp_log
-     WHERE session_id = ?
-       AND id <= COALESCE(
-         (SELECT id FROM acp_log WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
-         -1)`,
-  ).run(sessionId, sessionId, LOG_RING);
+  pruneRing(db, 'acp_log', sessionId, LOG_RING);
 }
 
 /** Local command runs kept per session. */
@@ -422,13 +435,7 @@ export function appendExecLog(
       record.started_at,
       record.finished_at,
     );
-  db.prepare(
-    `DELETE FROM exec_log
-     WHERE session_id = ?
-       AND id <= COALESCE(
-         (SELECT id FROM exec_log WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
-         -1)`,
-  ).run(sessionId, sessionId, EXEC_RING);
+  pruneRing(db, 'exec_log', sessionId, EXEC_RING);
   return Number(info.lastInsertRowid);
 }
 
@@ -437,6 +444,20 @@ export function listExecLog(db: Db, sessionId: string): ExecRow[] {
   return db
     .prepare('SELECT * FROM exec_log WHERE session_id = ? ORDER BY id ASC')
     .all(sessionId) as ExecRow[];
+}
+
+/**
+ * Marks a session active now, which is what holds the idle reaper off.
+ *
+ * A deleted session is left alone: an upstream still settling when the session
+ * was removed reports afterwards, and that must not stir a row that is on its
+ * way out.
+ */
+export function touchSession(db: Db, sessionId: string): void {
+  db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ? AND status != 'deleted'").run(
+    Date.now(),
+    sessionId,
+  );
 }
 
 // --- threads ----------------------------------------------------------------
@@ -556,13 +577,12 @@ export function setThreadTurnActive(
   acpSessionId: string,
   active: boolean,
 ): void {
-  const now = Date.now();
   db.transaction(() => {
     db.prepare(
       `UPDATE threads SET turn_active = ?, last_active_at = ?
         WHERE session_id = ? AND acp_session_id = ?`,
-    ).run(active ? 1 : 0, now, sessionId, acpSessionId);
-    db.prepare('UPDATE sessions SET last_active_at = ? WHERE id = ?').run(now, sessionId);
+    ).run(active ? 1 : 0, Date.now(), sessionId, acpSessionId);
+    touchSession(db, sessionId);
   })();
 }
 

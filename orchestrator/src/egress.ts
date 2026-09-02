@@ -270,8 +270,7 @@ export class EgressManager {
   /** Pushes the composed policy and records what came back. */
   async sync(): Promise<void> {
     if (!this.material || !this.composed) await this.prepare();
-    const material = this.material!;
-    const composed = this.composed!;
+    const { material, composed } = this.prepared();
 
     try {
       const status = await pushPolicy(this.cfg, material, composed);

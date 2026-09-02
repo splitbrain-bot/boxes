@@ -8,7 +8,7 @@ import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downs
 import { log } from './log.ts';
 import { startImageRefresher, startProxyReconciler, startReaper } from './reaper.ts';
 
-// --- boot ------------------------------------------------------------------
+// --- the app and its database ----------------------------------------------
 
 const cfg = config();
 const db = openDb(cfg.DATA_DIR);

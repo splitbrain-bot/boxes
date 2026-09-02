@@ -3,7 +3,6 @@ import {
   GLOBAL_AGENT_SET,
   type CreateSessionBody,
   type CreateThreadBody,
-  type DockerState,
   type SessionDetail,
   type SessionSummary,
   type ThreadSummary,
@@ -19,11 +18,13 @@ import {
   nextSubnetIndex,
   sessionTurnActive,
   sessionsWithActiveTurns,
+  touchSession,
   type Db,
   type SessionRow,
   type ThreadRow,
 } from './db.ts';
 import * as dk from './docker.ts';
+import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
 import * as ws from './workspaces.ts';
@@ -236,10 +237,7 @@ export class SessionManager {
     // either way there is nothing to decide, and start() surfaces the second.
     if (!wanted || !current || wanted === current) return row;
 
-    if ((await dk.containerState(row.container_id)) === 'running') {
-      slog.info('session image change deferred: the container is still running');
-      return row;
-    }
+    if (await this.deferredWhileRunning(row, 'session image change')) return row;
 
     slog.info('recreating the container on the current session image', {
       from: current,
@@ -249,13 +247,10 @@ export class SessionManager {
     // anything the gateway still holds for this session is already dead.
     this.upstreams.get(row.id)?.stop();
 
-    await dk.removeContainer(row.container_id);
-    const containerId = await dk.createContainer(
-      this.containerSpec({ ...row, image: this.cfg.SESSION_IMAGE }, this.profileFor(row)),
-      this.cfg,
-    );
-    await dk.startContainer(containerId);
-
+    const containerId = await this.recreateContainer({
+      ...row,
+      image: this.cfg.SESSION_IMAGE,
+    });
     this.db
       .prepare('UPDATE sessions SET container_id = ?, image = ? WHERE id = ?')
       .run(containerId, this.cfg.SESSION_IMAGE, row.id);
@@ -263,6 +258,49 @@ export class SessionManager {
       image: this.cfg.SESSION_IMAGE,
     });
     return this.mustGet(row.id);
+  }
+
+  // --- recreating a container -----------------------------------------------
+  //
+  // A container's image and its mounts are fixed when it is created, so every
+  // change to either replaces the container. That is cheap — the rootfs is
+  // read-only and everything durable lives in the mounts — but it is only
+  // safe while nothing is running in it, hence the guard the three callers
+  // share.
+
+  /**
+   * Whether a change that has to replace the container must wait, because the
+   * container is still running. Says so in the log when it does.
+   *
+   * Killing a live container would take the adapter exec, and any turn in it,
+   * with it. The change comes through at the session's next stop/start cycle,
+   * which the idle reaper produces on its own within IDLE_STOP_MINUTES.
+   */
+  private async deferredWhileRunning(row: SessionRow, what: string): Promise<boolean> {
+    if ((await dk.containerState(row.container_id)) !== 'running') return false;
+    log.session(row.id).info(`${what} deferred: the container is still running`);
+    return true;
+  }
+
+  /**
+   * Replaces a session's container with a fresh one built from `row`, and
+   * returns the new container's id. The caller records it.
+   *
+   * The old container is stopped before it is removed even where it is known
+   * to be down already: both calls tolerate a container that is gone, and one
+   * order for all three callers is worth more than the saved request.
+   */
+  private async recreateContainer(row: SessionRow): Promise<string> {
+    if (row.container_id) {
+      await dk.stopContainer(row.container_id);
+      await dk.removeContainer(row.container_id);
+    }
+    const containerId = await dk.createContainer(
+      this.containerSpec(row, this.profileFor(row)),
+      this.cfg,
+    );
+    await dk.startContainer(containerId);
+    return containerId;
   }
 
   // --- helpers --------------------------------------------------------------
@@ -506,10 +544,7 @@ export class SessionManager {
   private async migrateWorkspace(row: SessionRow): Promise<SessionRow> {
     if (row.workspace_dir) return row;
     const slog = log.session(row.id);
-    if ((await dk.containerState(row.container_id)) === 'running') {
-      slog.info('workspace migration deferred: the container is still running');
-      return row;
-    }
+    if (await this.deferredWhileRunning(row, 'workspace migration')) return row;
 
     slog.info('migrating the workspace volume to a directory', { volume: row.ws_volume });
     const directory = ws.createWorkspace(this.cfg.DATA_DIR, row.id);
@@ -522,16 +557,7 @@ export class SessionManager {
     // own ownership with it, which a Docker-initialised volume gets right.
     ws.chownToAgent(directory);
 
-    if (row.container_id) {
-      await dk.stopContainer(row.container_id);
-      await dk.removeContainer(row.container_id);
-    }
-    const containerId = await dk.createContainer(
-      this.containerSpec(row, this.profileFor(row)),
-      this.cfg,
-    );
-    await dk.startContainer(containerId);
-
+    const containerId = await this.recreateContainer(row);
     this.db
       .prepare(
         `UPDATE sessions SET container_id = ?, workspace_dir = ?, ws_volume = ''
@@ -548,11 +574,8 @@ export class SessionManager {
    * Gives a session created before agent configuration existed the mount that
    * carries it, and returns the row as it now stands.
    *
-   * A container's mounts are fixed when it is created, so the container has to
-   * be replaced — the same trade the workspace migration makes, and cheap for
-   * the same reason: a session container has a read-only rootfs and everything
-   * durable is in its mounts. Nothing is lost if this fails halfway, because
-   * the directory is already written and the next start tries again.
+   * Nothing is lost if this fails halfway, because the directory is already
+   * written and the next start tries again.
    *
    * A running session is left alone. Restarting it under the user would be a
    * worse surprise than configuration arriving one stop/start cycle late.
@@ -560,18 +583,9 @@ export class SessionManager {
   private async ensureAgentConfigMount(row: SessionRow): Promise<SessionRow> {
     if (!row.container_id) return row;
     if (await dk.hasMount(row.container_id, dk.AGENT_CONFIG_DIR)) return row;
-    const slog = log.session(row.id);
-    if ((await dk.containerState(row.container_id)) === 'running') {
-      slog.info('agent configuration deferred: the container is still running');
-      return row;
-    }
-    slog.info('recreating the container with the agent configuration mount');
-    await dk.stopContainer(row.container_id);
-    await dk.removeContainer(row.container_id);
-    const containerId = await dk.createContainer(
-      this.containerSpec(row, this.profileFor(row)),
-      this.cfg,
-    );
+    if (await this.deferredWhileRunning(row, 'agent configuration')) return row;
+    log.session(row.id).info('recreating the container with the agent configuration mount');
+    const containerId = await this.recreateContainer(row);
     this.db
       .prepare('UPDATE sessions SET container_id = ? WHERE id = ?')
       .run(containerId, row.id);
@@ -669,9 +683,7 @@ export class SessionManager {
 
   /** Marks a session active, so running a command holds off the reaper. */
   touch(id: string): void {
-    this.db
-      .prepare("UPDATE sessions SET last_active_at = ? WHERE id = ? AND status != 'deleted'")
-      .run(Date.now(), id);
+    touchSession(this.db, id);
   }
 
   /** Summaries of every live session. */
@@ -692,7 +704,7 @@ export class SessionManager {
     pendingCount: number,
     turnActive: boolean,
   ): Promise<SessionSummary> {
-    const dockerState = (await dk.containerState(row.container_id)) as DockerState;
+    const dockerState = await dk.containerState(row.container_id);
     const pendingByThread = this.pending.countsByThread(row.id);
     return {
       id: row.id,
@@ -880,12 +892,3 @@ function toThreadSummary(
   };
 }
 
-/** An error carrying the HTTP status the API should answer with. */
-export class HttpError extends Error {
-  constructor(
-    readonly statusCode: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}

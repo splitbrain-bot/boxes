@@ -11,6 +11,7 @@ import {
   type AgentSetSummary,
 } from '../../shared/types.ts';
 import type { AgentItemRow, AgentSetRow, Db } from './db.ts';
+import { HttpError } from './http-error.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
@@ -53,16 +54,6 @@ export const MAX_CONTENT = 100_000;
 
 /** Most items of one kind a single set may hold. */
 const MAX_ITEMS_PER_KIND = 100;
-
-/** An error carrying the HTTP status the API should answer with. */
-export class AgentConfigError extends Error {
-  constructor(
-    readonly statusCode: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 /** The parent of every materialized set. */
 export function agentsRoot(dataDir: string): string {
@@ -126,7 +117,7 @@ export class AgentStore {
     const row = this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(id) as
       | AgentSetRow
       | undefined;
-    if (!row) throw new AgentConfigError(404, 'Agent set not found');
+    if (!row) throw new HttpError(404, 'Agent set not found');
     return row;
   }
 
@@ -228,7 +219,7 @@ export class AgentStore {
   deleteSet(id: string): void {
     this.mustGet(id);
     if (id === GLOBAL_AGENT_SET) {
-      throw new AgentConfigError(400, 'The global set is applied to every session and cannot be deleted');
+      throw new HttpError(400, 'The global set is applied to every session and cannot be deleted');
     }
     this.db.prepare('DELETE FROM agent_sets WHERE id = ?').run(id);
   }
@@ -249,7 +240,7 @@ export class AgentStore {
         .prepare('SELECT COUNT(*) AS n FROM agent_items WHERE set_id = ? AND kind = ?')
         .get(id, kind) as { n: number };
       if (count.n >= MAX_ITEMS_PER_KIND) {
-        throw new AgentConfigError(
+        throw new HttpError(
           400,
           `A set holds at most ${MAX_ITEMS_PER_KIND} ${kind}s`,
         );
@@ -276,7 +267,7 @@ export class AgentStore {
     const info = this.db
       .prepare('DELETE FROM agent_items WHERE set_id = ? AND kind = ? AND name = ?')
       .run(id, validKind(kind), validItemName(name));
-    if (info.changes === 0) throw new AgentConfigError(404, 'No such skill or command');
+    if (info.changes === 0) throw new HttpError(404, 'No such skill or command');
     this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(Date.now(), id);
     return this.getSet(id);
   }
@@ -404,9 +395,9 @@ export class AgentStore {
 /** Checks a set's display name. */
 function validSetName(value: unknown): string {
   const name = typeof value === 'string' ? value.trim() : '';
-  if (name === '') throw new AgentConfigError(400, 'name is required');
+  if (name === '') throw new HttpError(400, 'name is required');
   if (name.length > MAX_SET_NAME) {
-    throw new AgentConfigError(400, `name must be ${MAX_SET_NAME} characters or fewer`);
+    throw new HttpError(400, `name must be ${MAX_SET_NAME} characters or fewer`);
   }
   return name;
 }
@@ -415,7 +406,7 @@ function validSetName(value: unknown): string {
 function validItemName(value: unknown): string {
   const name = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!NAME_PATTERN.test(name)) {
-    throw new AgentConfigError(
+    throw new HttpError(
       400,
       'name must be lowercase letters, digits and dashes, start with a letter or digit, ' +
         'and be 64 characters or fewer',
@@ -427,16 +418,16 @@ function validItemName(value: unknown): string {
 /** Checks which kind of item is meant. */
 function validKind(value: unknown): AgentItemKind {
   if (value !== 'skill' && value !== 'command') {
-    throw new AgentConfigError(400, "kind must be 'skill' or 'command'");
+    throw new HttpError(400, "kind must be 'skill' or 'command'");
   }
   return value;
 }
 
 /** Checks a file's content, which may legitimately be empty. */
 function validContent(value: unknown, field: string): string {
-  if (typeof value !== 'string') throw new AgentConfigError(400, `${field} must be a string`);
+  if (typeof value !== 'string') throw new HttpError(400, `${field} must be a string`);
   if (value.length > MAX_CONTENT) {
-    throw new AgentConfigError(400, `${field} must be ${MAX_CONTENT} characters or fewer`);
+    throw new HttpError(400, `${field} must be ${MAX_CONTENT} characters or fewer`);
   }
   // A lone CR or a CRLF pair reaches a file the agent reads; normalise here so
   // what is stored is what the editor showed.

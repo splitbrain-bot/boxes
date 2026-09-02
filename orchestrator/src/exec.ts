@@ -29,7 +29,7 @@ export interface ExecOutcome {
 /** What runCommand needs to know about the session it is running in. */
 export interface ExecTarget {
   containerId: string;
-  /** Prefer the clone, and fall back to the workspace root. */
+  /** Where the command runs; the workspace root, as the adapter does. */
   workingDir: string;
 }
 

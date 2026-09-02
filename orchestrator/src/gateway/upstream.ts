@@ -14,6 +14,7 @@ import {
   setThreadTitle,
   setThreadTurnActive,
   threadByAcpId,
+  touchSession,
   touchThread,
   type Db,
   type SessionRow,
@@ -264,9 +265,7 @@ export class UpstreamSession {
 
   /** Marks the session as active now, which holds off the reaper. */
   private touch(): void {
-    this.db
-      .prepare('UPDATE sessions SET last_active_at = ? WHERE id = ?')
-      .run(Date.now(), this.sessionId);
+    touchSession(this.db, this.sessionId);
   }
 
   /**
@@ -411,7 +410,7 @@ export class UpstreamSession {
     for (const acpThreadId of this.downstreams.watchedThreads) {
       if (loaded.has(acpThreadId)) continue;
       loaded.add(acpThreadId);
-      const row = this.threadByAcpId(acpThreadId);
+      const row = threadByAcpId(this.db, this.sessionId, acpThreadId);
       if (!row?.acp_session_id) continue;
       try {
         if (await this.loadSession(conn, row)) continue;
@@ -428,13 +427,6 @@ export class UpstreamSession {
       // reconnects, and its handshake pins whatever the thread is now.
       this.dropWatchers(acpThreadId);
     }
-  }
-
-  /** One of this session's threads, by the adapter's own id for it. */
-  private threadByAcpId(acpSessionId: string): ThreadRow | undefined {
-    return this.db
-      .prepare('SELECT * FROM threads WHERE session_id = ? AND acp_session_id = ?')
-      .get(this.sessionId, acpSessionId) as ThreadRow | undefined;
   }
 
   /**
@@ -712,9 +704,7 @@ export class UpstreamSession {
   private recordThreadInfo(params: unknown): void {
     const acpSessionId = (params as { sessionId?: string })?.sessionId;
     if (!acpSessionId) return;
-    const row = this.db
-      .prepare('SELECT id FROM threads WHERE session_id = ? AND acp_session_id = ?')
-      .get(this.sessionId, acpSessionId) as { id: string } | undefined;
+    const row = threadByAcpId(this.db, this.sessionId, acpSessionId);
     if (!row) return;
     touchThread(this.db, row.id);
 
