@@ -29,6 +29,10 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
 
+# One call to the API, carrying whatever authenticates it. Same helper
+# live-test.sh uses, so the two scripts read the same.
+api() { curl -sS "${CURL_AUTH[@]}" "$@"; }
+
 # Asserts a command run inside the session container FAILS.
 must_fail() {
   local desc="$1"; shift
@@ -96,21 +100,21 @@ must_output() {
 cleanup() {
   if [ -n "${SESSION_ID:-}" ]; then
     grey "cleaning up session $SESSION_ID"
-    curl -sS "${CURL_AUTH[@]}" -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null || true
+    api -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null || true
   fi
   if [ -n "${SIBLING_ID:-}" ]; then
-    curl -sS "${CURL_AUTH[@]}" -X DELETE "$API_BASE/api/sessions/$SIBLING_ID" >/dev/null || true
+    api -X DELETE "$API_BASE/api/sessions/$SIBLING_ID" >/dev/null || true
   fi
 }
 trap cleanup EXIT
 
 echo "== creating throwaway sessions =="
-SESSION_ID=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API_BASE/api/sessions" \
+SESSION_ID=$(api -X POST "$API_BASE/api/sessions" \
   -H 'Content-Type: application/json' \
   -d '{"name":"smoke-test"}' | jq -r '.id')
 [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] || { red "could not create session"; exit 1; }
 
-SIBLING_ID=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API_BASE/api/sessions" \
+SIBLING_ID=$(api -X POST "$API_BASE/api/sessions" \
   -H 'Content-Type: application/json' \
   -d '{"name":"smoke-test-sibling"}' | jq -r '.id')
 
@@ -334,19 +338,19 @@ fi
 
 echo
 echo "== egress policy is live in the proxy =="
-if curl -sS "${CURL_AUTH[@]}" "$API_BASE/healthz" | jq -e '.egress.inSync == true' >/dev/null; then
+if api "$API_BASE/healthz" | jq -e '.egress.inSync == true' >/dev/null; then
   green "ok   proxy is running the policy the orchestrator composed"; pass=$((pass+1))
-elif curl -sS "${CURL_AUTH[@]}" "$API_BASE/healthz" | jq -e '.egress == null' >/dev/null; then
+elif api "$API_BASE/healthz" | jq -e '.egress == null' >/dev/null; then
   grey "note (no policy pushed yet):   /healthz reports no egress state"
   noted=$((noted+1))
 else
   red   "FAIL: the proxy is not running the composed policy"; fail=$((fail+1))
-  curl -sS "${CURL_AUTH[@]}" "$API_BASE/healthz" | jq -c '.egress' | sed 's/^/     /'
+  api "$API_BASE/healthz" | jq -c '.egress' | sed 's/^/     /'
 fi
 
 echo
 echo "== proxy attachment =="
-if curl -sS "${CURL_AUTH[@]}" "$API_BASE/api/sessions/$SESSION_ID" | jq -e '.proxyAttached' >/dev/null; then
+if api "$API_BASE/api/sessions/$SESSION_ID" | jq -e '.proxyAttached' >/dev/null; then
   green "ok   proxy attached to session network"; pass=$((pass+1))
 else
   red   "FAIL: egress proxy is not attached to the session network"; fail=$((fail+1))
