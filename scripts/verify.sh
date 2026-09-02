@@ -383,7 +383,7 @@ CFG_SESSION=$(curl -sS -m 60 -X POST "$API_BASE/api/sessions" \
   -d "{\"name\":\"verify-agents\",\"agentSet\":\"$SET_ID\"}" | jq -r '.id')
 if [ -z "$CFG_SESSION" ] || [ "$CFG_SESSION" = null ]; then
   bad "B12" "could not create a session against an agent set"
-  for id in B13 B14 B15 B16; do skipped "$id" "no session to inspect"; done
+  for id in B13 B14 B15 B16 B17 B18; do skipped "$id" "no session to inspect"; done
 else
   CFG_CONTAINER="session-$CFG_SESSION"
   installed=0
@@ -406,7 +406,37 @@ else
   mustnot "B16" "the mounted configuration is not writable from inside the box" \
     docker exec -u agent "$CFG_CONTAINER" sh -c 'echo x > /boxes/agent/manifest'
 
+  # The image is the bottom layer of the same merge. No set here claims the
+  # name, so the image's own browser skill is what the box should have.
+  matches "B17" "a skill the image ships is installed when no set claims its name" \
+    'name: playwright-cli' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/skills/playwright-cli/SKILL.md
+
   curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$CFG_SESSION" >/dev/null 2>&1
+
+  # And a set that does claim the name wins, because the editor showed that
+  # version as the effective one. An override the operator cannot see is the
+  # thing the merged view exists to prevent.
+  api PUT "/api/agent-sets/$SET_ID/items" \
+    '{"kind":"skill","name":"playwright-cli","content":"---\nname: playwright-cli\ndescription: y\n---\nthe set overrides the image\n"}' \
+    >/dev/null
+  OVR_SESSION=$(curl -sS -m 60 -X POST "$API_BASE/api/sessions" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"verify-agents-override\",\"agentSet\":\"$SET_ID\"}" | jq -r '.id')
+  if [ -z "$OVR_SESSION" ] || [ "$OVR_SESSION" = null ]; then
+    skipped "B18" "could not create the overriding session"
+  else
+    OVR_CONTAINER="session-$OVR_SESSION"
+    for _ in $(seq 1 40); do
+      docker exec "$OVR_CONTAINER" test -f /home/agent/.claude/.boxes-managed >/dev/null 2>&1 \
+        && break
+      sleep 1
+    done
+    matches "B18" "a set's skill of the same name beats the image's" \
+      'the set overrides the image' \
+      docker exec -u agent "$OVR_CONTAINER" cat /home/agent/.claude/skills/playwright-cli/SKILL.md
+    curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$OVR_SESSION" >/dev/null 2>&1
+  fi
 fi
 [ -n "${SET_ID:-}" ] && [ "$SET_ID" != null ] && \
   curl -sS -m 15 -X DELETE "$API_BASE/api/agent-sets/$SET_ID" >/dev/null 2>&1

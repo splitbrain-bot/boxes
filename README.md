@@ -291,6 +291,16 @@ and the two are merged —
 
 — and the set's editor shows the result, so an override is never silent.
 
+**The session image is a third layer, underneath both.** A skill the image
+ships — `playwright-cli`, for the browser, is the only one today — is installed
+into a box only when no set in its merged configuration claims that name. So
+the same rule runs all the way down: the more specific configuration wins, with
+the image least specific of all. Define a `playwright-cli` skill in a set and
+the box gets yours; delete it again and the image's comes back at the next
+start. The one thing the editor cannot show is that bottom layer, because it
+lives in the image rather than the database — so if a skill you did not write
+turns up in a box, this is where it came from.
+
 Inside the box, the merged set is installed into the agent's own configuration:
 the `AGENTS.md` as its user-level memory, so it applies wherever in the box the
 agent is working; a skill as `skills/<name>/SKILL.md`, which needs YAML front
@@ -538,6 +548,11 @@ maintained by the Playwright team — rather than into the workspace, which is a
 git checkout and none of the image's business. Re-running each start means the
 copy in the home volume follows the image instead of being frozen at whatever
 that volume was initialised with.
+
+It runs *after* the box's own agent configuration is installed, and defers to
+it: a `playwright-cli` skill in one of the deployment's sets is the one the box
+gets, and the image's copy is left out. See
+[Configure the agent](#use) — the image is the bottom layer of that merge.
 
 **Three settings the CLI cannot work out for itself**, shipped as
 `/usr/local/share/boxes/playwright-cli.config.json` and copied by the entrypoint

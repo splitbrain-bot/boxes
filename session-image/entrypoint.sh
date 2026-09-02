@@ -147,9 +147,21 @@ fi
 # is none of our business. Re-run every start so the copy in the home volume
 # follows the image rather than being frozen at whatever that volume was
 # initialised with.
-if command -v playwright-cli >/dev/null 2>&1; then
+#
+# Runs after install_agent_config, and defers to it: a skill of this name in
+# the box's merged set is the one the box gets. The dashboard showed that
+# version as the effective one, so installing the image's copy over the top
+# would be exactly the silent override the editor's merged view exists to
+# prevent. This is the same direction the merge itself runs -- the more
+# specific configuration wins -- with the image as the least specific layer of
+# all. The image's copy fills the name in only while nothing has claimed it,
+# and install_agent_config replaces it the moment something does.
+if [ -f "$AGENT_SRC/manifest" ] \
+   && grep -qxF 'skills/playwright-cli' "$AGENT_SRC/manifest"; then
+  log "the playwright-cli skill is configured for this box; leaving the image's copy out"
+elif command -v playwright-cli >/dev/null 2>&1; then
   if playwright-cli install --skills --global >/dev/null 2>&1; then
-    log "installed the playwright-cli skill"
+    log "installed the image's playwright-cli skill"
   else
     log "WARNING: could not install the playwright-cli skill"
   fi
