@@ -62,9 +62,9 @@ with no authentication of its own. See
 
 `SESSION_UID` and `SESSION_GID` are the uid and gid every session process runs
 as, and therefore the owner of every file in a workspace. They default to
-**1020** rather than 1000: 1000 is what `node:22-bookworm` ships and what a
-host usually gives its first login user, and a service sharing a uid with a
-person is what a per-service uid exists to avoid.
+**1020** rather than 1000: 1000 is the `ubuntu` account the base image
+carries and what a host usually gives its first login user, and a service
+sharing a uid with a person is what a per-service uid exists to avoid.
 
 One thing has to agree with them: the session image builds its `agent` user on
 the same numbers, through `AGENT_UID` and `AGENT_GID` build args whose defaults
@@ -291,6 +291,16 @@ and the two are merged —
 
 — and the set's editor shows the result, so an override is never silent.
 
+**The session image is a third layer, underneath both.** A skill the image
+ships — `playwright-cli`, for the browser, is the only one today — is installed
+into a box only when no set in its merged configuration claims that name. So
+the same rule runs all the way down: the more specific configuration wins, with
+the image least specific of all. Define a `playwright-cli` skill in a set and
+the box gets yours; delete it again and the image's comes back at the next
+start. The one thing the editor cannot show is that bottom layer, because it
+lives in the image rather than the database — so if a skill you did not write
+turns up in a box, this is where it came from.
+
 Inside the box, the merged set is installed into the agent's own configuration:
 the `AGENTS.md` as its user-level memory, so it applies wherever in the box the
 agent is working; a skill as `skills/<name>/SKILL.md`, which needs YAML front
@@ -437,6 +447,238 @@ fix is to point that tool at the same file:
 Rotating the CA is deleting `egress-secrets.json` from the data volume and
 restarting; sessions created before that keep the old certificate and must be
 recreated.
+
+## When an agent needs a tool the image lacks
+
+`apt-get install` cannot work inside a session, and not by accident: the root
+filesystem is mounted read-only, the agent is not root, and every capability is
+dropped, so all three of the things that install needs are missing. Handing any
+of them back would hand them to every session, for the sake of the one that
+wanted a package.
+
+There are two ways in, and which one you want depends on whether the tool is
+this session's business or the deployment's. Before either, check whether the
+toolchain is already in the image.
+
+### Language toolchains
+
+The image carries Node, Python, Go, Rust and PHP, so a session can work in any
+of them without installing anything:
+
+| | Version | From | Also |
+|---|---|---|---|
+| Node | 22 | NodeSource | npm; `NPM_CONFIG_PREFIX` is `~/.local` |
+| Python | 3.14 | Ubuntu 26.04 | `python3-venv`, `pipx` |
+| Go | 1.26 | Ubuntu 26.04 | `GOPATH` is `~/go`, cache `~/.cache/go-build` |
+| Rust | 1.93 | Ubuntu 26.04 | `cargo`, `rustfmt`, `cargo-clippy`, `rust-src` |
+| PHP | 8.5 | Ubuntu 26.04 | Composer 2.9, and the mbstring, xml, curl, zip, intl, sqlite3, gd and bcmath extensions |
+
+`build-essential`, `cmake`, `pkg-config` and `libssl-dev` are there too, so a
+crate or an extension with a native dependency builds. `uv` is installed as
+well, which is worth knowing under a read-only `/usr`: `uv tool install` and
+`uv python install` both write to the home volume, so a session can fetch a
+Python it does not have without any privilege at all.
+
+### Everything else in the image
+
+The tools an agent reaches for that are not a language — reading the PDF a
+ticket linked to, unpacking whatever a download turned out to be, converting a
+document, poking at a database file. A read-only `/usr` means a tool that is
+not here is one the agent has to build or do without mid-task, so the list
+leans generous:
+
+| | |
+|---|---|
+| PDF | `pdftotext`, `pdftoppm`, `pdfinfo` and the rest of poppler; `qpdf`; `mutool`; `gs`; `ocrmypdf` with `tesseract` (English) |
+| Documents | `pandoc` |
+| Images, diagrams | `magick` (ImageMagick 7), `dot` and the rest of graphviz |
+| Archives | `unzip`, `zip`, `xz`, `zstd`, `7z`, `bzip2` |
+| Files, text | `file`, `tree`, `patch`, `fd`, `rg`, `jq`, `yq`, `shellcheck`, `less` |
+| Data | `sqlite3` |
+| Network, VCS | `curl`, `wget`, `git`, `git-lfs`, `gh`, `dig`, `nc` |
+
+Two notes that will otherwise cost someone an hour. `fd` is a symlink the
+image adds, because Debian and Ubuntu install fd-find as `fdfind` to avoid a
+name collision. And ImageMagick's shipped policy refuses PDF and PostScript
+input — that is its Ghostscript hardening, left alone here — so rasterise a
+PDF with `pdftoppm` or `mutool draw`, not `magick`.
+
+Between the toolchains and these, the image is a few gigabytes; most of the
+toolchain half is Rust and most of the tool half is pandoc. Worth knowing
+before a first pull on a slow link, and the reason a deployment that wants a
+leaner image is better off stripping what it does not need in a derived one
+than with this image as shipped.
+
+### Headless browser
+
+`@playwright/cli` and a Chromium build are in the image, so a session can drive
+a real browser: inspect a page, click and type in it, screenshot it, scrape it,
+or check the dev server it just started.
+
+**A CLI and a skill rather than an MCP server**, which is what Microsoft
+themselves recommend for coding agents, and the two share an implementation —
+so this gives up nothing on interaction. `playwright-cli snapshot` renders the
+page as an accessibility tree with a `[ref=eN]` handle on every element, and
+`click`, `type`, `select`, `hover` and the rest take those refs, so the agent
+never guesses a CSS selector:
+
+```yaml
+- heading "Sign in" [level=1] [ref=e2]
+- textbox "Email" [ref=e4]
+- button "Continue" [ref=e5]
+```
+
+```sh
+playwright-cli type e4 user@example.com
+playwright-cli click e5
+```
+
+The browser lives in a daemon between invocations, so those are three separate
+commands acting on one page, and each snapshot is written to a **file** with
+only the path printed — which is the point of the CLI over MCP: the tree does
+not land in the model's context unless the agent chooses to read it. Named
+sessions (`-s=name`), tabs, network inspection, console, cookies, storage,
+tracing, video and `run-code` for arbitrary Playwright snippets are all there;
+`playwright-cli --help` lists them.
+
+**Its skill comes from the package**, and the entrypoint runs
+`playwright-cli install --skills --global` on every start. That writes
+`~/.claude/skills/playwright-cli/` — a SKILL.md plus nine reference files
+maintained by the Playwright team — rather than into the workspace, which is a
+git checkout and none of the image's business. Re-running each start means the
+copy in the home volume follows the image instead of being frozen at whatever
+that volume was initialised with.
+
+It runs *after* the box's own agent configuration is installed, and defers to
+it: a `playwright-cli` skill in one of the deployment's sets is the one the box
+gets, and the image's copy is left out. See
+[Configure the agent](#use) — the image is the bottom layer of that merge.
+
+**Three settings the CLI cannot work out for itself**, shipped as
+`/usr/local/share/boxes/playwright-cli.config.json` and copied by the entrypoint
+to `~/.playwright/cli.config.json`, the CLI's documented global config, with the
+egress proxy added — that part is only known at runtime. A project's own
+`.playwright/cli.config.json` still overrides everything.
+
+- **`browserName: chromium`.** The CLI defaults to the `chrome` channel and
+  looks for real Google Chrome at `/opt/google/chrome/chrome`. Without this the
+  browser does not open at all.
+- **`chromiumSandbox: false`.** Chromium's own sandbox needs a user namespace,
+  and Docker's seccomp profile denies one to a container without
+  `CAP_SYS_ADMIN` — which this container deliberately does not have. Left on,
+  the browser dies at startup with `Chromium sandboxing failed`. Note this is
+  *not* the Playwright library's default, where it is already false. The
+  container is the sandbox instead: non-root, no capabilities, read-only
+  rootfs, no route out but the proxy.
+- **`--disable-dev-shm-usage`.** `/dev/shm` is Docker's default 64 MB, which
+  Chromium exhausts on a substantial page and reports as a closed target. This
+  moves that traffic to `/tmp`, already a 512 MB tmpfs.
+
+The proxy entry carries `NO_PROXY` as its bypass list, so a dev server started
+in the session is reachable while everything external still goes through the
+egress proxy.
+
+**TLS.** Chromium keeps its own trust store and reads none of the CA variables
+the rest of the image is pointed at, so the entrypoint imports the deployment
+CA into `~/.pki/nssdb` with `certutil`. Without it the hosts the proxy
+intercepts fail TLS in the browser and nowhere else.
+
+Two smaller things. `PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright`, on the
+image and so read-only at runtime; a project pinning its own Playwright version
+should point it at the home volume and download once:
+
+```sh
+export PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright
+npx playwright install chromium
+```
+
+And the CLI writes snapshots and screenshots to `.playwright-cli/` in the
+working directory, which in a session is the workspace — convenient, since the
+review surface then shows them, but worth a `.gitignore` entry in a repo the
+agent works on regularly. Set `outputDir` in the config to move it.
+
+Chromium only; Firefox and WebKit are not installed, and there is no display,
+so `--headed` cannot work. `playwright-cli install-browser chromium --only-shell`
+in a derived image drops the full browser and keeps just the headless shell if
+image size matters more than the option of a headed run later.
+
+### The agent installs it itself
+
+`/home/agent` is a persistent volume, so anything the agent puts there survives
+restarts and image updates. The image points the user-level package managers at
+`/home/agent/.local` and puts `/home/agent/.local/bin` on `PATH`, so an agent
+can equip itself with no privilege at all:
+
+```sh
+npm install -g <pkg>            # prefix is ~/.local, not /usr/local
+pipx install <pkg>              # PEP 668 clean; binaries land in ~/.local/bin
+python3 -m venv ~/.local/venvs/<name>
+```
+
+`build-essential`, `python3` and `git` are already in the image, so packages
+that compile on install do compile. `~/.local/bin` is ahead of the system path
+for both a plain `docker exec` and a login shell.
+
+A `.deb` whose *contents* are all you need takes no root either —
+unpacking a `.deb` into the home volume is an ordinary file write:
+
+```sh
+apt-get download ripgrep                    # apt honours the proxy variables
+dpkg -x ripgrep_*.deb ~/.local              # binaries, libs, no maintainer scripts
+```
+
+The limits are worth knowing before you rely on it: `apt-get download` fetches
+the one package and not its dependencies (`apt-get install --print-uris -qq
+<pkg>` lists those URLs), maintainer scripts never run, and a package that
+expects to live under `/usr` may need `LD_LIBRARY_PATH=~/.local/usr/lib`. For a
+CLI binary it is usually enough; for anything with a postinst it is not.
+
+### The deployment bakes it in
+
+For a package the sessions on this deployment should simply have — a language
+runtime, a headless browser and its libraries, a database client — build an
+image on top of the published one and point `SESSION_IMAGE` at it. Root at
+build time, no root at runtime, and none of the container hardening changes:
+
+```dockerfile
+FROM ghcr.io/splitbrain/boxes/session:latest
+
+# Root here, and only here.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
+# Back to the agent, on the uid the deployment runs sessions as.
+USER 1020
+```
+
+Two rules a derived image has to keep:
+
+- **End on the agent user, not root.** The orchestrator runs the container as
+  `SESSION_UID` regardless, so a stray `USER root` does not get root — but it
+  does make the image's own uid wrong for the next rule.
+- **Do not change the uid.** A session's home is a named volume Docker
+  initialises from the image, owned by the uid the *image* was built on, and
+  nothing outside the container can chown it afterwards. Build with the same
+  `AGENT_UID`/`AGENT_GID` as `SESSION_UID`/`SESSION_GID`. The orchestrator
+  reads the image's user back at boot and warns when they have drifted.
+
+Set `SESSION_IMAGE_PULL_MINUTES=0` for an image built on the host, since there
+is no registry to pull it from.
+
+### What is deliberately not offered
+
+Neither Docker-in-Docker nor a mounted Docker socket. A session with the host's
+socket would have root-equivalent control of the host *and* of this deployment:
+it could read every other session's workspace and `egress-secrets.json` — the
+CA key and the placeholder map — which is precisely what token translation
+exists to prevent. `--privileged` for a nested daemon is host root by another
+route, and would apply to every session rather than the one that asked. A
+session that genuinely needs to run containers wants either an opt-in
+`sysbox-runc` runtime on the host, or a facility where the orchestrator creates
+the container on the session's behalf from the same hardened template. Neither
+exists today.
 
 ## Security model
 

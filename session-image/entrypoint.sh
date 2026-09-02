@@ -22,6 +22,14 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
+# --- the agent's own tool directory -----------------------------------------
+# npm's prefix has to exist before `npm install -g` will use it, and a home
+# volume created before this directory was part of the image does not have it:
+# Docker initialises a named volume from the image once and never again.
+if ! mkdir -p /home/agent/.local/bin; then
+  log "WARNING: could not create /home/agent/.local/bin; installing tools will fail"
+fi
+
 # --- agent configuration ----------------------------------------------------
 # The orchestrator materializes this box's merged AGENTS.md, skills and slash
 # commands into a read-only bind at /boxes/agent, laid out exactly as they have
@@ -84,6 +92,80 @@ install_agent_config() {
 }
 
 install_agent_config
+
+# --- chromium's trust store -------------------------------------------------
+# Chromium reads none of the CA variables the rest of the image is pointed at;
+# it keeps its own NSS database under ~/.pki/nssdb. Without the deployment CA
+# in there, the hosts the proxy intercepts -- and only those -- fail TLS inside
+# the browser while working in every other tool, which is a confusing shape to
+# debug from a page that will not load.
+#
+# Removed before it is added, so a restart replaces the entry rather than
+# failing on one that is already there.
+if [ -n "${BOXES_PROXY_CA:-}" ] && command -v certutil >/dev/null 2>&1; then
+  nssdb=/home/agent/.pki/nssdb
+  if mkdir -p "$nssdb"; then
+    [ -f "$nssdb/cert9.db" ] || certutil -N -d "sql:$nssdb" --empty-password >/dev/null 2>&1
+    certutil -D -n boxes-egress-proxy -d "sql:$nssdb" >/dev/null 2>&1
+    if certutil -A -n boxes-egress-proxy -t C,, -i /home/agent/.boxes/proxy-ca.crt \
+         -d "sql:$nssdb" 2>/dev/null; then
+      log "trusted the egress proxy CA in the browser's certificate store"
+    else
+      log "WARNING: could not add the egress proxy CA to $nssdb; intercepted hosts will fail TLS in the browser"
+    fi
+  fi
+fi
+
+# --- the browser CLI ---------------------------------------------------------
+# Two things the CLI cannot work out for itself.
+#
+# Its global config, at ~/.playwright/cli.config.json, carries which browser to
+# use and the launch options a session container needs; the image ships that
+# much, and the only piece missing at build time is the egress proxy, which is
+# added here. Written on every start rather than once, so a corrected base
+# config reaches a session whose home volume already exists. A project's own
+# .playwright/cli.config.json still overrides all of it.
+cli_base=/usr/local/share/boxes/playwright-cli.config.json
+cli_config=/home/agent/.playwright/cli.config.json
+if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
+  proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+  if [ -n "$proxy" ]; then
+    jq --arg server "$proxy" --arg bypass "${NO_PROXY:-}" \
+      '.browser.launchOptions.proxy = (if $bypass == "" then { server: $server }
+                                       else { server: $server, bypass: $bypass } end)' \
+      "$cli_base" > "$cli_config.tmp" \
+      && mv "$cli_config.tmp" "$cli_config" \
+      && log "wrote the browser CLI config, pointed at the egress proxy"
+  else
+    cp "$cli_base" "$cli_config" \
+      && log "wrote the browser CLI config; no egress proxy is configured"
+  fi
+fi
+
+# And its skill, which the CLI installs itself. --global puts it in
+# ~/.claude/skills rather than in the workspace, which is a git checkout that
+# is none of our business. Re-run every start so the copy in the home volume
+# follows the image rather than being frozen at whatever that volume was
+# initialised with.
+#
+# Runs after install_agent_config, and defers to it: a skill of this name in
+# the box's merged set is the one the box gets. The dashboard showed that
+# version as the effective one, so installing the image's copy over the top
+# would be exactly the silent override the editor's merged view exists to
+# prevent. This is the same direction the merge itself runs -- the more
+# specific configuration wins -- with the image as the least specific layer of
+# all. The image's copy fills the name in only while nothing has claimed it,
+# and install_agent_config replaces it the moment something does.
+if [ -f "$AGENT_SRC/manifest" ] \
+   && grep -qxF 'skills/playwright-cli' "$AGENT_SRC/manifest"; then
+  log "the playwright-cli skill is configured for this box; leaving the image's copy out"
+elif command -v playwright-cli >/dev/null 2>&1; then
+  if playwright-cli install --skills --global >/dev/null 2>&1; then
+    log "installed the image's playwright-cli skill"
+  else
+    log "WARNING: could not install the playwright-cli skill"
+  fi
+fi
 
 # --- git identity -----------------------------------------------------------
 if [ -n "${GIT_NAME:-}" ]; then
