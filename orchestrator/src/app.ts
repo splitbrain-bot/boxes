@@ -81,447 +81,447 @@ export function buildApp(
   cfg: ReturnType<typeof config>,
   db: ReturnType<typeof openDb>,
 ): Orchestrator {
-// Before anything creates a workspace directory or a container: everything
-// that writes files for the agent, or runs a process as it, reads this.
-setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
+  // Before anything creates a workspace directory or a container: everything
+  // that writes files for the agent, or runs a process as it, reads this.
+  setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
 
-const egress = new EgressManager(cfg);
-const notifier = new Notifier(db, cfg);
-const agents = new AgentStore(db, cfg.DATA_DIR);
-const manager = new SessionManager(db, cfg, egress, notifier, agents);
-// The review surface reaches the files through the manager, which is the one
-// thing that knows whether a session is directory-backed yet.
-const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
+  const egress = new EgressManager(cfg);
+  const notifier = new Notifier(db, cfg);
+  const agents = new AgentStore(db, cfg.DATA_DIR);
+  const manager = new SessionManager(db, cfg, egress, notifier, agents);
+  // The review surface reaches the files through the manager, which is the one
+  // thing that knows whether a session is directory-backed yet.
+  const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
 
-let proxyWarnings: string[] = [];
+  let proxyWarnings: string[] = [];
 
-const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false });
 
-// --- REST: unauthenticated here, the deployment puts auth in front ----------
+  // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
-app.setErrorHandler((err, _req, reply) => {
-  if (err instanceof HttpError) {
-    return reply.code(err.statusCode).send({ error: err.message });
-  }
-  log.error('unhandled request error', { error: (err as Error).message });
-  return reply.code(500).send({ error: 'Internal error' });
-});
+  app.setErrorHandler((err, _req, reply) => {
+    if (err instanceof HttpError) {
+      return reply.code(err.statusCode).send({ error: err.message });
+    }
+    log.error('unhandled request error', { error: (err as Error).message });
+    return reply.code(500).send({ error: 'Internal error' });
+  });
 
-app.get('/healthz', async (): Promise<HealthResponse> => {
-  const row = db
-    .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
-    .get() as { n: number };
-  return {
-    ok: true,
-    version: VERSION,
-    sessions: row.n,
-    proxyWarnings,
-    egress: egress.status(),
-    claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
-    pushSubscriptions: countPushSubscriptions(db),
+  app.get('/healthz', async (): Promise<HealthResponse> => {
+    const row = db
+      .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
+      .get() as { n: number };
+    return {
+      ok: true,
+      version: VERSION,
+      sessions: row.n,
+      proxyWarnings,
+      egress: egress.status(),
+      claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
+      pushSubscriptions: countPushSubscriptions(db),
+    };
+  });
+
+  app.get('/api/sessions', async () => manager.list());
+
+  app.post('/api/sessions', async (req, reply) => {
+    const created = await manager.create(req.body as CreateSessionBody);
+    return reply.code(201).send(created);
+  });
+
+  app.get('/api/sessions/:id', async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.detail(id);
+  });
+
+  app.post('/api/sessions/:id/start', async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.start(id);
+  });
+
+  app.post('/api/sessions/:id/stop', async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.stop(id);
+  });
+
+  app.delete('/api/sessions/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    await manager.remove(id);
+    // The review service caches per session; a deleted one has nothing to cache.
+    review.forget(id);
+    return reply.code(204).send();
+  });
+
+  /**
+   * The conversations a session owns. A session shares its container, its
+   * volumes and its egress policy across all of them, so an extra one costs
+   * nothing but its own transcript.
+   */
+  app.get('/api/sessions/:id/threads', async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.threads(id);
+  });
+
+  /**
+   * Adds a conversation and makes it current: empty, or carrying the context of
+   * the thread named by `from`.
+   */
+  app.post('/api/sessions/:id/threads', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const created = await manager.createThread(id, req.body as CreateThreadBody | undefined);
+    return reply.code(201).send(created);
+  });
+
+  /**
+   * Makes one of a session's threads current. Browsers watching the session are
+   * dropped and reconnect onto it; the ACP contract they speak is unchanged.
+   */
+  app.post('/api/sessions/:id/threads/:threadId/select', async (req) => {
+    const { id, threadId } = req.params as { id: string; threadId: string };
+    return manager.selectThread(id, threadId);
+  });
+
+  app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
+    const { id } = req.params as { id: string };
+    const { after, limit } = req.query as { after?: string; limit?: string };
+    const afterId = Number(after ?? 0) || 0;
+    const max = Math.min(Math.max(Number(limit ?? 200) || 200, 1), 1000);
+    const entries = db
+      .prepare(
+        `SELECT id, direction, ts, payload FROM acp_log
+         WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+      )
+      .all(id, afterId, max) as AcpLogEntry[];
+    return { entries, cursor: entries.at(-1)?.id ?? afterId };
+  });
+
+  /**
+   * Runs a local command in the session container and streams its combined
+   * output back as it arrives.
+   *
+   * The response is chunked text rather than JSON so the browser can render
+   * the output growing; the last line is a trailer carrying the exit code and
+   * whether either limit was hit. Both limits live in exec.ts: 120 seconds of
+   * wall clock and 256 KiB of output, after which the exec is killed.
+   *
+   * The command runs inside the session's own isolation, as the non-root agent
+   * user, and never reaches a command line on the host.
+   */
+  app.post('/api/sessions/:id/exec', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const command = (req.body as ExecRequest | undefined)?.command?.trim();
+    if (!command) throw new HttpError(400, 'command is required');
+    if (command.length > 8000) throw new HttpError(400, 'command is too long');
+
+    const target = await manager.execTarget(id);
+    manager.touch(id);
+    const startedAt = Date.now();
+
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+      // Nothing may buffer this: the point is that output appears as it is
+      // produced.
+      'X-Accel-Buffering': 'no',
+    });
+
+    const outcome = await execs.runCommand(target, command, (chunk) => {
+      reply.raw.write(chunk);
+    });
+    reply.raw.end(execs.trailer(outcome));
+
+    execs.record(db, id, command, outcome.output, outcome, startedAt);
+    manager.touch(id);
+    return reply;
+  });
+
+  /**
+   * Every command already run in this session.
+   *
+   * The browser appends these after the adapter's replay: ACP replay carries no
+   * timestamps, so where they belong in the transcript is not recoverable.
+   */
+  app.get('/api/sessions/:id/exec', async (req): Promise<ExecLogPage> => {
+    const { id } = req.params as { id: string };
+    const row = manager.getRow(id);
+    if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
+    return { records: execs.history(db, id) };
+  });
+
+  // --- Code review over a session's workspace ---------------------------------
+
+  /**
+   * The review surface. None of these routes starts or touches a session
+   * container: the workspace is a directory this process can read, which is what
+   * makes reviewing a stopped session — the natural moment, once the agent is
+   * done — cost nothing.
+   *
+   * The responses are batched on purpose. Boxes is driven from a phone, and a
+   * phone on a slow link should get one round trip per screen rather than one
+   * per piece of it: the tree endpoint carries the whole left panel, the file
+   * endpoint the whole file view.
+   *
+   * They also do not touch a session's activity timestamp. Reviewing is not the
+   * agent working, so polling a review must not hold off the reaper.
+   */
+
+  /**
+   * Where the review view polls, which is the only thing it asks for while idle.
+   * `path` names the file the pane has open, so an edit to it is part of the
+   * fingerprint.
+   */
+  app.get('/api/sessions/:id/review/status', async (req) => {
+    const { id } = req.params as { id: string };
+    const { path } = req.query as { path?: string };
+    return review.status(id, path);
+  });
+
+  app.get('/api/sessions/:id/review/tree', async (req) => {
+    const { id } = req.params as { id: string };
+    return review.tree(id);
+  });
+
+  app.get('/api/sessions/:id/review/file', async (req) => {
+    const { id } = req.params as { id: string };
+    const { path } = req.query as { path?: string };
+    if (!path) throw new HttpError(400, 'path is required');
+    return review.file(id, path);
+  });
+
+  /**
+   * Creates or replaces the comment on one line. The same route for both,
+   * because REVIEW.md holds at most one comment per line and the reviewer
+   * editing one is not a different operation from writing it.
+   */
+  app.put('/api/sessions/:id/review/annotations', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as ReviewAnnotationBody | undefined;
+    if (!body?.path) throw new HttpError(400, 'path is required');
+    const annotations = await review.setAnnotation(
+      id,
+      body.path,
+      Number(body.line),
+      String(body.comment ?? ''),
+    );
+    return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
+  });
+
+  app.delete('/api/sessions/:id/review/annotations', async (req) => {
+    const { id } = req.params as { id: string };
+    const { path, line } = req.query as { path?: string; line?: string };
+    if (!path) throw new HttpError(400, 'path is required');
+    const annotations = await review.deleteAnnotation(id, path, Number(line));
+    return { path, annotations } satisfies ReviewAnnotationsResponse;
+  });
+
+  /** Sets the revision the review is compared against, or clears it back to HEAD. */
+  app.put('/api/sessions/:id/review/base', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as ReviewBaseBody | undefined;
+    const rev = body?.rev ?? null;
+    if (rev !== null && typeof rev !== 'string') throw new HttpError(400, 'rev must be a string');
+    return review.setBase(id, rev);
+  });
+
+  /** Deletes REVIEW.md — the "New review" button. The file is the review. */
+  app.delete('/api/sessions/:id/review', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    await review.deleteReview(id);
+    return reply.code(204).send();
+  });
+
+  // --- Agent configuration ----------------------------------------------------
+
+  /**
+   * The AGENTS.md, skills and slash commands a session is given.
+   *
+   * `global` is applied to every session and always exists; any other set is
+   * chosen when a session is created and merged over it. Every mutation answers
+   * with the whole set rather than the piece that changed, which is the same
+   * bargain the review endpoints make: one round trip per screen.
+   *
+   * What is written here reaches a box when that box next starts. Nothing on
+   * these routes touches a running container.
+   */
+
+  app.get('/api/agent-sets', async () => agents.listSets());
+
+  app.post('/api/agent-sets', async (req, reply) => {
+    const body = req.body as CreateAgentSetBody | undefined;
+    return reply.code(201).send(agents.createSet(body?.name as string));
+  });
+
+  app.get('/api/agent-sets/:setId', async (req) => {
+    const { setId } = req.params as { setId: string };
+    return agents.getSet(setId);
+  });
+
+  app.patch('/api/agent-sets/:setId', async (req) => {
+    const { setId } = req.params as { setId: string };
+    return agents.updateSet(setId, (req.body ?? {}) as UpdateAgentSetBody);
+  });
+
+  app.delete('/api/agent-sets/:setId', async (req, reply) => {
+    const { setId } = req.params as { setId: string };
+    agents.deleteSet(setId);
+    return reply.code(204).send();
+  });
+
+  /** Creates a skill or command, or replaces the one already under that name. */
+  app.put('/api/agent-sets/:setId/items', async (req) => {
+    const { setId } = req.params as { setId: string };
+    return agents.putItem(setId, req.body as AgentItemBody | undefined);
+  });
+
+  app.delete('/api/agent-sets/:setId/items', async (req) => {
+    const { setId } = req.params as { setId: string };
+    const { kind, name } = req.query as { kind?: string; name?: string };
+    return agents.deleteItem(setId, kind, name);
+  });
+
+  /**
+   * What a session selecting this set would actually get, global set included.
+   *
+   * A merge of two sets is the one thing about this feature that is not obvious
+   * from either half, so the editor shows the result rather than asking anyone
+   * to hold it in their head.
+   */
+  app.get('/api/agent-sets/:setId/preview', async (req) => {
+    const { setId } = req.params as { setId: string };
+    agents.getSet(setId);
+    return agents.bundle(setId);
+  });
+
+  // --- Web Push --------------------------------------------------------------
+
+  /**
+   * The deployment's VAPID public key, which a browser needs before it can
+   * subscribe at all.
+   *
+   * Not a secret: it is the identity a push service checks the signature
+   * against, and it is meant to be handed to every browser.
+   */
+  app.get('/api/push/key', async (): Promise<PushKeyResponse> => ({
+    publicKey: notifier.publicKey,
+  }));
+
+  /**
+   * Registers a browser for push, or refreshes what is stored for it.
+   *
+   * There is no user to attach this to — Boxes has no accounts — so a
+   * subscription is simply one more browser this deployment notifies, and
+   * whatever authenticates the rest of `/api` is what decides who may add one.
+   */
+  app.post('/api/push/subscribe', async (req, reply) => {
+    const body = req.body as PushSubscribeBody | undefined;
+    const endpoint = validEndpoint(body?.endpoint);
+    const p256dh = validKey(body?.keys?.p256dh, 65, 'p256dh');
+    const auth = validKey(body?.keys?.auth, 16, 'auth');
+    const label = typeof body?.label === 'string' ? body.label.slice(0, 100) : null;
+
+    upsertPushSubscription(db, endpoint, p256dh, auth, label);
+    log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
+    return reply.code(204).send();
+  });
+
+  /** Forgets a browser's subscription, on its own way out. */
+  app.delete('/api/push/subscribe', async (req, reply) => {
+    const body = req.body as { endpoint?: unknown } | undefined;
+    if (typeof body?.endpoint !== 'string') throw new HttpError(400, 'endpoint is required');
+    deletePushSubscription(db, body.endpoint);
+    return reply.code(204).send();
+  });
+
+  // --- Static bundles with a single-page fallback -----------------------------
+
+  /** Content types served from the bundles, by file extension. */
+  const CONTENT_TYPES: Record<string, string> = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.json': 'application/json',
+    '.map': 'application/json',
+    '.ico': 'image/x-icon',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.txt': 'text/plain; charset=utf-8',
+    '.webmanifest': 'application/manifest+json',
   };
-});
 
-app.get('/api/sessions', async () => manager.list());
+  /**
+   * Checks a push endpoint before the orchestrator will ever POST to it.
+   *
+   * https only, and never an address literal: a push service is always a named
+   * host, and accepting a literal would turn this route into a way to aim the
+   * orchestrator at the LAN it can see. A hostname that resolves into private
+   * space is not caught here — the API is root-equivalent either way, and
+   * whatever authenticates it is the real boundary.
+   */
+  function validEndpoint(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 2000) {
+      throw new HttpError(400, 'endpoint is required');
+    }
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new HttpError(400, 'endpoint must be a URL');
+    }
+    if (url.protocol !== 'https:') throw new HttpError(400, 'endpoint must be https');
+    if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname === 'localhost') {
+      throw new HttpError(400, 'endpoint must name a host, not an address');
+    }
+    return value;
+  }
 
-app.post('/api/sessions', async (req, reply) => {
-  const created = await manager.create(req.body as CreateSessionBody);
-  return reply.code(201).send(created);
-});
+  /** Checks one base64url key from a subscription decodes to the expected size. */
+  function validKey(value: unknown, bytes: number, name: string): string {
+    if (typeof value !== 'string' || Buffer.from(value, 'base64url').length !== bytes) {
+      throw new HttpError(400, `${name} must be ${bytes} base64url-encoded bytes`);
+    }
+    return value;
+  }
 
-app.get('/api/sessions/:id', async (req) => {
-  const { id } = req.params as { id: string };
-  return manager.detail(id);
-});
+  /**
+   * Serves the dashboard bundle: a real file when the path names one, else its
+   * index.html so client-side routes survive a reload.
+   *
+   * The path is resolved under the bundle directory and has to stay there, with
+   * the separator in the prefix check so a sibling directory whose name merely
+   * starts the same way is not inside it.
+   */
+  function sendBundle(reply: FastifyReply, path: string): FastifyReply {
+    const candidate = resolve(DASHBOARD_DIR, `.${normalize(path)}`);
+    if (
+      candidate.startsWith(`${DASHBOARD_DIR}/`) &&
+      path !== '/' &&
+      existsSync(candidate) &&
+      statSync(candidate).isFile()
+    ) {
+      const ext = candidate.slice(candidate.lastIndexOf('.'));
+      return reply
+        .type(CONTENT_TYPES[ext] ?? 'application/octet-stream')
+        .send(readFileSync(candidate));
+    }
+    const index = join(DASHBOARD_DIR, 'index.html');
+    if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
+    return reply.type('text/html; charset=utf-8').send(readFileSync(index));
+  }
 
-app.post('/api/sessions/:id/start', async (req) => {
-  const { id } = req.params as { id: string };
-  return manager.start(id);
-});
-
-app.post('/api/sessions/:id/stop', async (req) => {
-  const { id } = req.params as { id: string };
-  return manager.stop(id);
-});
-
-app.delete('/api/sessions/:id', async (req, reply) => {
-  const { id } = req.params as { id: string };
-  await manager.remove(id);
-  // The review service caches per session; a deleted one has nothing to cache.
-  review.forget(id);
-  return reply.code(204).send();
-});
-
-/**
- * The conversations a session owns. A session shares its container, its
- * volumes and its egress policy across all of them, so an extra one costs
- * nothing but its own transcript.
- */
-app.get('/api/sessions/:id/threads', async (req) => {
-  const { id } = req.params as { id: string };
-  return manager.threads(id);
-});
-
-/**
- * Adds a conversation and makes it current: empty, or carrying the context of
- * the thread named by `from`.
- */
-app.post('/api/sessions/:id/threads', async (req, reply) => {
-  const { id } = req.params as { id: string };
-  const created = await manager.createThread(id, req.body as CreateThreadBody | undefined);
-  return reply.code(201).send(created);
-});
-
-/**
- * Makes one of a session's threads current. Browsers watching the session are
- * dropped and reconnect onto it; the ACP contract they speak is unchanged.
- */
-app.post('/api/sessions/:id/threads/:threadId/select', async (req) => {
-  const { id, threadId } = req.params as { id: string; threadId: string };
-  return manager.selectThread(id, threadId);
-});
-
-app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
-  const { id } = req.params as { id: string };
-  const { after, limit } = req.query as { after?: string; limit?: string };
-  const afterId = Number(after ?? 0) || 0;
-  const max = Math.min(Math.max(Number(limit ?? 200) || 200, 1), 1000);
-  const entries = db
-    .prepare(
-      `SELECT id, direction, ts, payload FROM acp_log
-       WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-    )
-    .all(id, afterId, max) as AcpLogEntry[];
-  return { entries, cursor: entries.at(-1)?.id ?? afterId };
-});
-
-/**
- * Runs a local command in the session container and streams its combined
- * output back as it arrives.
- *
- * The response is chunked text rather than JSON so the browser can render
- * the output growing; the last line is a trailer carrying the exit code and
- * whether either limit was hit. Both limits live in exec.ts: 120 seconds of
- * wall clock and 256 KiB of output, after which the exec is killed.
- *
- * The command runs inside the session's own isolation, as the non-root agent
- * user, and never reaches a command line on the host.
- */
-app.post('/api/sessions/:id/exec', async (req, reply) => {
-  const { id } = req.params as { id: string };
-  const command = (req.body as ExecRequest | undefined)?.command?.trim();
-  if (!command) throw new HttpError(400, 'command is required');
-  if (command.length > 8000) throw new HttpError(400, 'command is too long');
-
-  const target = await manager.execTarget(id);
-  manager.touch(id);
-  const startedAt = Date.now();
-
-  reply.raw.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-store',
-    // Nothing may buffer this: the point is that output appears as it is
-    // produced.
-    'X-Accel-Buffering': 'no',
+  app.setNotFoundHandler((req, reply) => {
+    if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
+    const url = req.url.split('?')[0] ?? '/';
+    if (url.startsWith('/api') || url.startsWith('/ws')) {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+    return sendBundle(reply, url);
   });
-
-  const outcome = await execs.runCommand(target, command, (chunk) => {
-    reply.raw.write(chunk);
-  });
-  reply.raw.end(execs.trailer(outcome));
-
-  execs.record(db, id, command, outcome.output, outcome, startedAt);
-  manager.touch(id);
-  return reply;
-});
-
-/**
- * Every command already run in this session.
- *
- * The browser appends these after the adapter's replay: ACP replay carries no
- * timestamps, so where they belong in the transcript is not recoverable.
- */
-app.get('/api/sessions/:id/exec', async (req): Promise<ExecLogPage> => {
-  const { id } = req.params as { id: string };
-  const row = manager.getRow(id);
-  if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
-  return { records: execs.history(db, id) };
-});
-
-// --- Code review over a session's workspace ---------------------------------
-
-/**
- * The review surface. None of these routes starts or touches a session
- * container: the workspace is a directory this process can read, which is what
- * makes reviewing a stopped session — the natural moment, once the agent is
- * done — cost nothing.
- *
- * The responses are batched on purpose. Boxes is driven from a phone, and a
- * phone on a slow link should get one round trip per screen rather than one
- * per piece of it: the tree endpoint carries the whole left panel, the file
- * endpoint the whole file view.
- *
- * They also do not touch a session's activity timestamp. Reviewing is not the
- * agent working, so polling a review must not hold off the reaper.
- */
-
-/**
- * Where the review view polls, which is the only thing it asks for while idle.
- * `path` names the file the pane has open, so an edit to it is part of the
- * fingerprint.
- */
-app.get('/api/sessions/:id/review/status', async (req) => {
-  const { id } = req.params as { id: string };
-  const { path } = req.query as { path?: string };
-  return review.status(id, path);
-});
-
-app.get('/api/sessions/:id/review/tree', async (req) => {
-  const { id } = req.params as { id: string };
-  return review.tree(id);
-});
-
-app.get('/api/sessions/:id/review/file', async (req) => {
-  const { id } = req.params as { id: string };
-  const { path } = req.query as { path?: string };
-  if (!path) throw new HttpError(400, 'path is required');
-  return review.file(id, path);
-});
-
-/**
- * Creates or replaces the comment on one line. The same route for both,
- * because REVIEW.md holds at most one comment per line and the reviewer
- * editing one is not a different operation from writing it.
- */
-app.put('/api/sessions/:id/review/annotations', async (req) => {
-  const { id } = req.params as { id: string };
-  const body = req.body as ReviewAnnotationBody | undefined;
-  if (!body?.path) throw new HttpError(400, 'path is required');
-  const annotations = await review.setAnnotation(
-    id,
-    body.path,
-    Number(body.line),
-    String(body.comment ?? ''),
-  );
-  return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
-});
-
-app.delete('/api/sessions/:id/review/annotations', async (req) => {
-  const { id } = req.params as { id: string };
-  const { path, line } = req.query as { path?: string; line?: string };
-  if (!path) throw new HttpError(400, 'path is required');
-  const annotations = await review.deleteAnnotation(id, path, Number(line));
-  return { path, annotations } satisfies ReviewAnnotationsResponse;
-});
-
-/** Sets the revision the review is compared against, or clears it back to HEAD. */
-app.put('/api/sessions/:id/review/base', async (req) => {
-  const { id } = req.params as { id: string };
-  const body = req.body as ReviewBaseBody | undefined;
-  const rev = body?.rev ?? null;
-  if (rev !== null && typeof rev !== 'string') throw new HttpError(400, 'rev must be a string');
-  return review.setBase(id, rev);
-});
-
-/** Deletes REVIEW.md — the "New review" button. The file is the review. */
-app.delete('/api/sessions/:id/review', async (req, reply) => {
-  const { id } = req.params as { id: string };
-  await review.deleteReview(id);
-  return reply.code(204).send();
-});
-
-// --- Agent configuration ----------------------------------------------------
-
-/**
- * The AGENTS.md, skills and slash commands a session is given.
- *
- * `global` is applied to every session and always exists; any other set is
- * chosen when a session is created and merged over it. Every mutation answers
- * with the whole set rather than the piece that changed, which is the same
- * bargain the review endpoints make: one round trip per screen.
- *
- * What is written here reaches a box when that box next starts. Nothing on
- * these routes touches a running container.
- */
-
-app.get('/api/agent-sets', async () => agents.listSets());
-
-app.post('/api/agent-sets', async (req, reply) => {
-  const body = req.body as CreateAgentSetBody | undefined;
-  return reply.code(201).send(agents.createSet(body?.name as string));
-});
-
-app.get('/api/agent-sets/:setId', async (req) => {
-  const { setId } = req.params as { setId: string };
-  return agents.getSet(setId);
-});
-
-app.patch('/api/agent-sets/:setId', async (req) => {
-  const { setId } = req.params as { setId: string };
-  return agents.updateSet(setId, (req.body ?? {}) as UpdateAgentSetBody);
-});
-
-app.delete('/api/agent-sets/:setId', async (req, reply) => {
-  const { setId } = req.params as { setId: string };
-  agents.deleteSet(setId);
-  return reply.code(204).send();
-});
-
-/** Creates a skill or command, or replaces the one already under that name. */
-app.put('/api/agent-sets/:setId/items', async (req) => {
-  const { setId } = req.params as { setId: string };
-  return agents.putItem(setId, req.body as AgentItemBody | undefined);
-});
-
-app.delete('/api/agent-sets/:setId/items', async (req) => {
-  const { setId } = req.params as { setId: string };
-  const { kind, name } = req.query as { kind?: string; name?: string };
-  return agents.deleteItem(setId, kind, name);
-});
-
-/**
- * What a session selecting this set would actually get, global set included.
- *
- * A merge of two sets is the one thing about this feature that is not obvious
- * from either half, so the editor shows the result rather than asking anyone
- * to hold it in their head.
- */
-app.get('/api/agent-sets/:setId/preview', async (req) => {
-  const { setId } = req.params as { setId: string };
-  agents.getSet(setId);
-  return agents.bundle(setId);
-});
-
-// --- Web Push --------------------------------------------------------------
-
-/**
- * The deployment's VAPID public key, which a browser needs before it can
- * subscribe at all.
- *
- * Not a secret: it is the identity a push service checks the signature
- * against, and it is meant to be handed to every browser.
- */
-app.get('/api/push/key', async (): Promise<PushKeyResponse> => ({
-  publicKey: notifier.publicKey,
-}));
-
-/**
- * Registers a browser for push, or refreshes what is stored for it.
- *
- * There is no user to attach this to — Boxes has no accounts — so a
- * subscription is simply one more browser this deployment notifies, and
- * whatever authenticates the rest of `/api` is what decides who may add one.
- */
-app.post('/api/push/subscribe', async (req, reply) => {
-  const body = req.body as PushSubscribeBody | undefined;
-  const endpoint = validEndpoint(body?.endpoint);
-  const p256dh = validKey(body?.keys?.p256dh, 65, 'p256dh');
-  const auth = validKey(body?.keys?.auth, 16, 'auth');
-  const label = typeof body?.label === 'string' ? body.label.slice(0, 100) : null;
-
-  upsertPushSubscription(db, endpoint, p256dh, auth, label);
-  log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
-  return reply.code(204).send();
-});
-
-/** Forgets a browser's subscription, on its own way out. */
-app.delete('/api/push/subscribe', async (req, reply) => {
-  const body = req.body as { endpoint?: unknown } | undefined;
-  if (typeof body?.endpoint !== 'string') throw new HttpError(400, 'endpoint is required');
-  deletePushSubscription(db, body.endpoint);
-  return reply.code(204).send();
-});
-
-// --- Static bundles with a single-page fallback -----------------------------
-
-/** Content types served from the bundles, by file extension. */
-const CONTENT_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.json': 'application/json',
-  '.map': 'application/json',
-  '.ico': 'image/x-icon',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.txt': 'text/plain; charset=utf-8',
-  '.webmanifest': 'application/manifest+json',
-};
-
-/**
- * Checks a push endpoint before the orchestrator will ever POST to it.
- *
- * https only, and never an address literal: a push service is always a named
- * host, and accepting a literal would turn this route into a way to aim the
- * orchestrator at the LAN it can see. A hostname that resolves into private
- * space is not caught here — the API is root-equivalent either way, and
- * whatever authenticates it is the real boundary.
- */
-function validEndpoint(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 2000) {
-    throw new HttpError(400, 'endpoint is required');
-  }
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new HttpError(400, 'endpoint must be a URL');
-  }
-  if (url.protocol !== 'https:') throw new HttpError(400, 'endpoint must be https');
-  if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname === 'localhost') {
-    throw new HttpError(400, 'endpoint must name a host, not an address');
-  }
-  return value;
-}
-
-/** Checks one base64url key from a subscription decodes to the expected size. */
-function validKey(value: unknown, bytes: number, name: string): string {
-  if (typeof value !== 'string' || Buffer.from(value, 'base64url').length !== bytes) {
-    throw new HttpError(400, `${name} must be ${bytes} base64url-encoded bytes`);
-  }
-  return value;
-}
-
-/**
- * Serves the dashboard bundle: a real file when the path names one, else its
- * index.html so client-side routes survive a reload.
- *
- * The path is resolved under the bundle directory and has to stay there, with
- * the separator in the prefix check so a sibling directory whose name merely
- * starts the same way is not inside it.
- */
-function sendBundle(reply: FastifyReply, path: string): FastifyReply {
-  const candidate = resolve(DASHBOARD_DIR, `.${normalize(path)}`);
-  if (
-    candidate.startsWith(`${DASHBOARD_DIR}/`) &&
-    path !== '/' &&
-    existsSync(candidate) &&
-    statSync(candidate).isFile()
-  ) {
-    const ext = candidate.slice(candidate.lastIndexOf('.'));
-    return reply
-      .type(CONTENT_TYPES[ext] ?? 'application/octet-stream')
-      .send(readFileSync(candidate));
-  }
-  const index = join(DASHBOARD_DIR, 'index.html');
-  if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
-  return reply.type('text/html; charset=utf-8').send(readFileSync(index));
-}
-
-app.setNotFoundHandler((req, reply) => {
-  if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
-  const url = req.url.split('?')[0] ?? '/';
-  if (url.startsWith('/api') || url.startsWith('/ws')) {
-    return reply.code(404).send({ error: 'Not found' });
-  }
-  return sendBundle(reply, url);
-});
 
   return {
     app,
