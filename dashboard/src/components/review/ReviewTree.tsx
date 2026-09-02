@@ -5,6 +5,7 @@ import type {
   ReviewTreeEntry,
   ReviewTreeResponse,
 } from '../../../../shared/types.ts';
+import { Notice } from '@/components/Notice';
 import { cn } from '@/lib/utils';
 
 /**
@@ -85,9 +86,9 @@ export function ReviewTree({
   return (
     <div className="flex flex-col py-1">
       {tree.truncated ? (
-        <p className="mx-2 mb-1 rounded-md border border-warn/40 bg-warn/10 px-2 py-1 text-xs">
+        <Notice tone="warn" className="mx-2 mb-1 rounded-md border px-2 py-1 text-xs">
           This tree is very large and was cut short. Files past the cap are not listed.
-        </p>
+        </Notice>
       ) : null}
       <Level
         entries={tree.entries}

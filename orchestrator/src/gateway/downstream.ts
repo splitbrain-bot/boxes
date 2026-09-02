@@ -42,16 +42,17 @@ const FORWARDED_NOTIFICATIONS = ['session/cancel'] as const;
 let nextHandleId = 1;
 
 /**
- * Validates a WebSocket upgrade and returns the subprotocol to select.
+ * Validates a WebSocket upgrade, saying why when it refuses.
  *
  * A browser cannot set an Authorization header on a WebSocket, so a client
  * offers the token as a bearer.<token> subprotocol entry alongside acp.v1.
- * The gateway checks it here, on the upgrade itself.
+ * The gateway checks it here, on the upgrade itself. Which subprotocol is
+ * negotiated is the server's own `handleProtocols`; see index.ts.
  */
 export function checkUpgrade(
   protocolHeader: string | undefined,
   cfg: Config,
-): { ok: true; select: string } | { ok: false; reason: string } {
+): { ok: true } | { ok: false; reason: string } {
   const offered = (protocolHeader ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -65,7 +66,7 @@ export function checkUpgrade(
   if (!timingSafeEqualStr(presented, expected)) {
     return { ok: false, reason: 'invalid bearer token' };
   }
-  return { ok: true, select: ACP_SUBPROTOCOL };
+  return { ok: true };
 }
 
 /** Constant-time compare that does not leak length via early return. */
@@ -81,11 +82,9 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 /** An ACP Stream over a WebSocket: one JSON-RPC message per text frame. */
 function wsStream(ws: WebSocket, sessionId: string): Stream {
   const slog = log.session(sessionId);
-  let controller: ReadableStreamDefaultController<unknown> | null = null;
 
   const readable = new ReadableStream<unknown>({
     start(c) {
-      controller = c;
       ws.on('message', (data: Buffer, isBinary: boolean) => {
         if (isBinary) {
           slog.warn('rejecting binary WS frame');
@@ -125,9 +124,6 @@ function wsStream(ws: WebSocket, sessionId: string): Stream {
       };
       ws.on('close', finish);
       ws.on('error', finish);
-    },
-    cancel() {
-      controller = null;
     },
   });
 

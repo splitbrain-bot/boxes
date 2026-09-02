@@ -165,10 +165,11 @@ export function decideCredentials(
     const present = headerValue(headers, name);
     if (present === null) continue;
 
-    const owner = credentials.find((c) => c.headers.includes(name));
+    // Every credential that may travel in this header, in policy order. The
+    // first whose placeholder the value actually carries is the one it is.
+    const candidates = credentials.filter((c) => c.headers.includes(name));
     let swapped: string | null = null;
-    for (const credential of credentials) {
-      if (!credential.headers.includes(name)) continue;
+    for (const credential of candidates) {
       swapped = swapCredentialValue(present, credential.placeholder, credential.secret);
       if (swapped !== null) {
         used.push(credential.id);
@@ -178,7 +179,7 @@ export function decideCredentials(
     if (swapped === null) {
       return {
         action: 'deny',
-        reason: `foreign credential in ${name} for ${owner?.id ?? host}`,
+        reason: `foreign credential in ${name} for ${candidates[0]?.id ?? host}`,
       };
     }
     replacements[name] = swapped;

@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router';
 import type { AgentSetSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/sessions.ts';
+import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -105,9 +106,7 @@ export function SessionCreate() {
       ) : null}
 
       {error ? (
-        <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
-          {error}
-        </div>
+        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
       <div className="flex justify-end gap-2">

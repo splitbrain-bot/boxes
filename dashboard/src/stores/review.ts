@@ -7,6 +7,7 @@ import type {
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { tokenizeLines, type Token } from '../lib/highlight.ts';
+import { pollWhileVisible } from '../lib/poll.ts';
 
 /**
  * The review view's whole state: the tree, the open file, and the poll that
@@ -305,29 +306,5 @@ export async function poll(): Promise<void> {
  * immediately anyway.
  */
 export function startPolling(): () => void {
-  let timer: number | null = null;
-
-  const schedule = (): void => {
-    if (timer === null) timer = window.setInterval(() => void poll(), POLL_MS);
-  };
-  const pause = (): void => {
-    if (timer !== null) window.clearInterval(timer);
-    timer = null;
-  };
-  const onVisibility = (): void => {
-    if (document.hidden) {
-      pause();
-    } else {
-      void poll();
-      schedule();
-    }
-  };
-
-  if (!document.hidden) schedule();
-  document.addEventListener('visibilitychange', onVisibility);
-
-  return () => {
-    pause();
-    document.removeEventListener('visibilitychange', onVisibility);
-  };
+  return pollWhileVisible(() => void poll(), POLL_MS);
 }

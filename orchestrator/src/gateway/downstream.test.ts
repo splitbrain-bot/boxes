@@ -8,12 +8,12 @@ const cfg = { WS_AUTH_TOKEN: TOKEN } as Config;
 
 test('accepts an upgrade offering acp.v1 and the right bearer token', () => {
   const result = checkUpgrade(`acp.v1, bearer.${TOKEN}`, cfg);
-  assert.deepEqual(result, { ok: true, select: 'acp.v1' });
+  assert.deepEqual(result, { ok: true });
 });
 
 test('tolerates whitespace and ordering in the subprotocol list', () => {
   const result = checkUpgrade(`bearer.${TOKEN} ,acp.v1`, cfg);
-  assert.deepEqual(result, { ok: true, select: 'acp.v1' });
+  assert.deepEqual(result, { ok: true });
 });
 
 test('rejects a missing acp.v1 subprotocol', () => {

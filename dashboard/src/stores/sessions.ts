@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import type { SessionSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { pollWhileVisible } from '../lib/poll.ts';
 
 /**
  * The session list every view reads, together with the deployment facts a
@@ -89,31 +90,8 @@ export async function refresh(): Promise<void> {
 /** Time between polls, in milliseconds. */
 const POLL_MS = 5000;
 
-let timer: number | null = null;
-
-/** Starts the poll timer, unless it already runs. */
-function schedule(): void {
-  if (timer !== null) return;
-  timer = window.setInterval(() => void refresh(), POLL_MS);
-}
-
-/** Stops the poll timer. */
-function pause(): void {
-  if (timer === null) return;
-  window.clearInterval(timer);
-  timer = null;
-}
-
-/** Polls for as long as the tab is visible, resuming on the way back. */
-export function startPolling(): void {
+/** Polls for as long as the tab is visible, and returns the teardown. */
+export function startPolling(): () => void {
   void refresh();
-  schedule();
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      pause();
-    } else {
-      void refresh();
-      schedule();
-    }
-  });
+  return pollWhileVisible(() => void refresh(), POLL_MS);
 }

@@ -2,6 +2,7 @@ import Docker from 'dockerode';
 import { existsSync, readFileSync } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
+import type { DockerState } from '../../shared/types.ts';
 import type { Config, SessionProfile } from './config.ts';
 import { log } from './log.ts';
 import { sessionOwner } from './workspaces.ts';
@@ -57,11 +58,16 @@ export function setDockerForTests(d: Docker | null): void {
   client = d;
 }
 
-/** Docker object names derived from a session id. */
+/**
+ * Docker object names derived from a session id.
+ *
+ * There is no workspace volume here any more: a workspace is a directory on
+ * the orchestrator's data volume, and the `ws-<id>` volume of a session from
+ * before that change is read off its row rather than derived.
+ */
 export const names = {
   container: (id: string) => `session-${id}`,
   network: (id: string) => `sn-${id}`,
-  wsVolume: (id: string) => `ws-${id}`,
   homeVolume: (id: string) => `home-${id}`,
 };
 
@@ -275,6 +281,24 @@ export async function pullImage(image: string): Promise<void> {
 }
 
 /**
+ * Reads something off an inspect, answering null for an object the daemon does
+ * not have.
+ *
+ * "It is not here" is a legitimate answer to every question below, and the
+ * daemon spells it as a 404. Any other failure is the daemon being unwell and
+ * is rethrown, because reporting that as absence would have a caller quietly
+ * act on a container or an image it never actually looked at.
+ */
+async function inspecting<T>(read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+}
+
+/**
  * The uid an image's own `USER` names, or null when it names something this
  * cannot read as a number.
  *
@@ -282,14 +306,11 @@ export async function pullImage(image: string): Promise<void> {
  * no uid to compare then, and saying nothing beats guessing.
  */
 export async function imageUserUid(image: string): Promise<number | null> {
-  try {
+  return inspecting(async () => {
     const info = await docker().getImage(image).inspect();
     const user = (info.Config?.User ?? '').split(':')[0] ?? '';
     return /^\d+$/.test(user) ? Number(user) : null;
-  } catch (err) {
-    if ((err as { statusCode?: number }).statusCode === 404) return null;
-    throw err;
-  }
+  });
 }
 
 /**
@@ -299,24 +320,14 @@ export async function imageUserUid(image: string): Promise<number | null> {
  * moving tag has moved.
  */
 export async function imageId(image: string): Promise<string | null> {
-  try {
-    const info = await docker().getImage(image).inspect();
-    return info.Id ?? null;
-  } catch (err) {
-    if ((err as { statusCode?: number }).statusCode === 404) return null;
-    throw err;
-  }
+  return inspecting(async () => (await docker().getImage(image).inspect()).Id ?? null);
 }
 
 /** The id of the image a container was created from, or null when it is gone. */
 export async function containerImageId(containerId: string): Promise<string | null> {
-  try {
-    const info = await docker().getContainer(containerId).inspect();
-    return info.Image ?? null;
-  } catch (err) {
-    if ((err as { statusCode?: number }).statusCode === 404) return null;
-    throw err;
-  }
+  return inspecting(
+    async () => (await docker().getContainer(containerId).inspect()).Image ?? null,
+  );
 }
 
 /** Whether this process is running inside a container. */
@@ -509,11 +520,8 @@ export async function removeVolume(name: string): Promise<void> {
   }
 }
 
-/** What Docker reports about a container. */
-export type DockerContainerState = 'running' | 'exited' | 'missing' | 'unknown';
-
 /** Resolves a container's live state, mapping every lookup failure onto a state. */
-export async function containerState(containerId: string | null): Promise<DockerContainerState> {
+export async function containerState(containerId: string | null): Promise<DockerState> {
   if (!containerId) return 'missing';
   try {
     const info = await docker().getContainer(containerId).inspect();
@@ -577,6 +585,56 @@ export interface AdapterExec {
   kill(): void;
 }
 
+/**
+ * Wires up the end of an exec: one promise for its exit code, and a kill.
+ *
+ * A hijacked stream reports its end as both `end` and `close`, so the settle
+ * runs at most once — otherwise every exec would inspect itself twice for an
+ * answer the promise has already taken. `onEnd` closes whatever the caller
+ * demuxed into, before the exit code is read.
+ */
+function execCompletion(
+  stream: Duplex,
+  exec: { inspect: () => Promise<{ ExitCode?: number | null }> },
+  onEnd: () => void,
+  onError?: (err: Error) => void,
+): { exited: Promise<number | null>; kill: () => void } {
+  let settle: (code: number | null) => void = () => {};
+  const exited = new Promise<number | null>((resolve) => {
+    settle = resolve;
+  });
+
+  let finished = false;
+  const finish = async (): Promise<void> => {
+    if (finished) return;
+    finished = true;
+    onEnd();
+    try {
+      settle((await exec.inspect()).ExitCode ?? null);
+    } catch {
+      settle(null);
+    }
+  };
+
+  stream.on('end', () => void finish());
+  stream.on('close', () => void finish());
+  stream.on('error', (err: Error) => {
+    onError?.(err);
+    void finish();
+  });
+
+  return {
+    exited,
+    kill: () => {
+      try {
+        stream.destroy();
+      } catch {
+        // already gone
+      }
+    },
+  };
+}
+
 /** Starts the adapter inside a running container and demuxes its streams. */
 export async function spawnAdapterExec(
   containerId: string,
@@ -598,42 +656,17 @@ export async function spawnAdapterExec(
   const stderr = new PassThrough();
   docker().modem.demuxStream(stream, stdout, stderr);
 
-  let settle: (code: number | null) => void = () => {};
-  const exited = new Promise<number | null>((resolve) => {
-    settle = resolve;
-  });
-
-  const finish = async (): Promise<void> => {
-    stdout.end();
-    stderr.end();
-    try {
-      const info = await exec.inspect();
-      settle(info.ExitCode ?? null);
-    } catch {
-      settle(null);
-    }
-  };
-
-  stream.on('end', () => void finish());
-  stream.on('close', () => void finish());
-  stream.on('error', (err) => {
-    log.warn('adapter exec stream error', { error: err.message });
-    void finish();
-  });
-
-  return {
-    stdout,
-    stderr,
-    stdin: stream,
-    exited,
-    kill: () => {
-      try {
-        stream.destroy();
-      } catch {
-        // already gone
-      }
+  const { exited, kill } = execCompletion(
+    stream,
+    exec,
+    () => {
+      stdout.end();
+      stderr.end();
     },
-  };
+    (err) => log.warn('adapter exec stream error', { error: err.message }),
+  );
+
+  return { stdout, stderr, stdin: stream, exited, kill };
 }
 
 /** A one-off exec whose combined output is streamed back. */
@@ -674,37 +707,6 @@ export async function runCommandExec(
   const output = new PassThrough();
   docker().modem.demuxStream(stream, output, output);
 
-  let settle: (code: number | null) => void = () => {};
-  const exited = new Promise<number | null>((resolve) => {
-    settle = resolve;
-  });
-
-  let finished = false;
-  const finish = async (): Promise<void> => {
-    if (finished) return;
-    finished = true;
-    output.end();
-    try {
-      const info = await exec.inspect();
-      settle(info.ExitCode ?? null);
-    } catch {
-      settle(null);
-    }
-  };
-
-  stream.on('end', () => void finish());
-  stream.on('close', () => void finish());
-  stream.on('error', () => void finish());
-
-  return {
-    output,
-    exited,
-    kill: () => {
-      try {
-        stream.destroy();
-      } catch {
-        // already gone
-      }
-    },
-  };
+  const { exited, kill } = execCompletion(stream, exec, () => output.end());
+  return { output, exited, kill };
 }

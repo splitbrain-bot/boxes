@@ -3,8 +3,9 @@ import { afterEach, beforeEach, test } from 'vitest';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AgentConfigError, AgentStore, agentConfigPath } from './agents.ts';
+import { AgentStore, agentConfigPath } from './agents.ts';
 import { openDb, type Db } from './db.ts';
+import { HttpError } from './http-error.ts';
 
 /**
  * Agent sets: what merges, what overrides, and what the container is handed.
@@ -61,7 +62,7 @@ test('the global set exists from the first boot and cannot be deleted', () => {
 
   assert.throws(
     () => store.deleteSet('global'),
-    (err: unknown) => err instanceof AgentConfigError && err.statusCode === 400,
+    (err: unknown) => err instanceof HttpError && err.statusCode === 400,
   );
 });
 
@@ -176,7 +177,7 @@ test('an item name that is not a safe path component is refused', () => {
   for (const name of ['../escape', 'a/b', '-lead', 'sk ill', '.hidden', '', 'a'.repeat(65)]) {
     assert.throws(
       () => store.putItem('global', { kind: 'skill', name, content: 'x' }),
-      (err: unknown) => err instanceof AgentConfigError && err.statusCode === 400,
+      (err: unknown) => err instanceof HttpError && err.statusCode === 400,
       `expected ${JSON.stringify(name)} to be refused`,
     );
   }
@@ -197,7 +198,7 @@ test('an unknown kind is refused rather than written somewhere', () => {
         name: 'x',
         content: 'x',
       }),
-    (err: unknown) => err instanceof AgentConfigError && err.statusCode === 400,
+    (err: unknown) => err instanceof HttpError && err.statusCode === 400,
   );
 });
 
@@ -223,7 +224,7 @@ test('an unknown set is a 404 on every route into it', () => {
   ]) {
     assert.throws(
       call,
-      (err: unknown) => err instanceof AgentConfigError && err.statusCode === 404,
+      (err: unknown) => err instanceof HttpError && err.statusCode === 404,
     );
   }
 });
