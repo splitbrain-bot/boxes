@@ -75,6 +75,18 @@ connection is pinned to one thread, so two of them can be watched at once; see
 The orchestrator and the proxy are compose services. Session containers are
 created at runtime through the Docker API, so they appear in no compose file.
 
+That makes the session image the orchestrator's to keep, not compose's: it
+pulls `SESSION_IMAGE` when it is missing and again every
+`SESSION_IMAGE_PULL_MINUTES`, and a session moves onto what arrived the next
+time it is *started* — never while it runs, where recreating the container
+would kill the adapter exec mid-turn. Recreating is otherwise cheap and is how
+a session container changes anything about itself: the rootfs is read-only and
+everything durable is in the two mounts, so the workspace and the thread
+history come across untouched. For the same reason nothing outside the
+orchestrator may recreate one — the container id in the database and the
+runtime proxy attachment would both be lost — so the template carries
+`com.centurylinklabs.watchtower.enable=false`.
+
 `compose.yaml` publishes one port, on loopback, and names no reverse proxy:
 what sits in front is a deployment decision, not part of the system. The one
 constraint it places on that decision is that `/ws` must not be behind HTTP
@@ -535,26 +547,41 @@ to install rather than that it cannot.
 
 Creating a session, in `SessionManager.create`:
 
-1. Validate the name.
-2. Generate a session id server-side. User input never reaches a Docker object
+1. Validate the name, and the agent set if one was named.
+2. Make sure the session image is on the host, pulling it if it is not. Before
+   anything is allocated, so a deployment whose first pull failed gets one
+   clear answer rather than a half-created session and a teardown.
+3. Generate a session id server-side. User input never reaches a Docker object
    name.
-3. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
+4. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
    `creating`.
-4. Create the network `sn-<id>`, attach the egress proxy, create the workspace
-   directory `${DATA_DIR}/workspaces/<id>` and the volume `home-<id>`, create
-   the container `session-<id>`, and start it.
+5. Create the network `sn-<id>`, attach the egress proxy, create the workspace
+   directory `${DATA_DIR}/workspaces/<id>`, write the merged agent
+   configuration to `${DATA_DIR}/agents/<id>`, create the volume `home-<id>`,
+   create the container `session-<id>`, and start it.
 
 Any failed step tears the whole session down and marks it `error`.
 
 The container's `HostConfig` is a fixed template that user input never reaches.
-It runs as the non-root `agent` user with `ReadonlyRootfs`, `CapDrop: ALL`,
+It runs as `SESSION_UID:SESSION_GID` — numbers rather than the image's `agent`,
+so one setting decides who a session is. The default is 1020, deliberately off
+the 1000 `node:22-bookworm` ships and a host's first login user usually holds.
+The session image builds its `agent` user on the same numbers, because a
+session's home is a named volume Docker ownership-initialises from the image
+and nothing outside the container can chown it afterwards; `ensureSessionImage`
+reads the image's own user back and warns when the two have drifted. Pointing
+the orchestrator's own user at `SESSION_UID` is what lets it drop root, since
+the workspace chown then has nothing to do.
+
+It runs non-root with `ReadonlyRootfs`, `CapDrop: ALL`,
 `no-new-privileges`, a tmpfs `/tmp`, memory, CPU and pids limits, and
 `Init: true`. That last one matters: the kernel discards default-disposition
 signals for PID 1, so without docker-init the entrypoint's `sleep` would never
 see SIGTERM and every stop would wait out the grace period. The only
 caller-supplied values are the session id and the profile secrets.
 
-The entrypoint sets the git and gh identity and then holds the container open.
+The entrypoint installs the agent configuration into `~/.claude`, sets the git
+and gh identity, and then holds the container open.
 The adapter is spawned separately by the gateway, so browser churn never
 restarts the container. Both run in `/workspace`, which is the session's own
 workspace directory and starts empty.
@@ -568,8 +595,8 @@ workspace directory and starts empty.
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
-network, the workspace directory and the home volume, and clears the session's
-pending requests and log rows. Nothing refers to either once the session is
+network, the workspace directory, the materialized agent configuration and the
+home volume, and clears the session's pending requests and log rows. Nothing refers to either once the session is
 gone, so they go with it rather than being left orphaned.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
@@ -672,8 +699,12 @@ directory's contents are replaced in place and its inode kept, because a
 running container has it bind-mounted and swapping the directory would leave
 that container mounted on an unlinked one. And a session created before this
 existed has no such mount — mounts are fixed when a container is created — so
-`start` recreates its container once, the same trade `migrateWorkspace` makes
-and cheap for the same reason.
+`start` recreates its container once, the same trade `migrateWorkspace` and
+`rollOntoCurrentImage` make and cheap for the same reason. That check runs
+*after* the image roll, because a roll recreates the container from
+`containerSpec`, which already binds the configuration: a session that moves
+image comes back with the mount and the check finds nothing left to do. The
+other order would recreate the same container twice.
 
 Deleting a set is not blocked. Sessions that named it keep running and keep
 what is installed in them; the foreign key clears the column and they fall back

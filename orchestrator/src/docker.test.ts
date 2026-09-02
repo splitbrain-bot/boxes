@@ -164,10 +164,29 @@ describe('the container template', () => {
     ]);
   }, 30_000);
 
+  it('runs as the configured uid and gid, not the image\'s user name', async () => {
+    const opts = await capture();
+    // Numbers, so SESSION_UID alone decides who a session is. The default
+    // is off 1000 deliberately: on a real host that is usually a person.
+    assert.equal(opts['User'], '1020:1020');
+  }, 30_000);
+
+  it('tells an outside updater to leave session containers alone', async () => {
+    const opts = await capture();
+    const labels = opts['Labels'] as Record<string, string>;
+    // The session id is how Boxes finds its own containers again.
+    assert.equal(labels['boxes.session'], 'abcd1234');
+    // And this is how something else is told not to. A container recreated
+    // from under the orchestrator loses the id in the database and the
+    // runtime proxy attachment that is the session's only way out; the
+    // orchestrator rolls sessions onto a new image itself, at start.
+    assert.equal(labels['com.centurylinklabs.watchtower.enable'], 'false');
+  }, 30_000);
+
   it('keeps the isolation the workspace change does not touch', async () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
-    assert.equal(opts['User'], 'agent');
+    assert.equal(opts['User'], '1020:1020');
     assert.equal(host['ReadonlyRootfs'], true);
     assert.deepEqual(host['CapDrop'], ['ALL']);
     assert.equal(host['Privileged'], false);

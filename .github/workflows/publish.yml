@@ -1,0 +1,163 @@
+# Build the three Boxes images, and publish them to GHCR on every push to main.
+#
+# A pull request runs the same thing minus the push: the suites, and a build
+# of all three images that goes nowhere. A Dockerfile that no longer builds is
+# then a red check rather than a main that cannot publish, and the layer cache
+# makes the repeat cheap for a branch that did not touch the image.
+#
+# One image per process in ARCHITECTURE.md's table:
+#
+#   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
+#   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a session network
+#   ghcr.io/<owner>/boxes/session        what a session container runs
+#
+# The session image is a compose service nowhere -- the orchestrator creates
+# session containers at runtime from SESSION_IMAGE -- which is exactly why it
+# is published here: a deployment cannot build it out of a checkout it does
+# not have.
+#
+# Everything gets `latest` and an immutable `sha-<short>`. A deployment that
+# follows `latest` picks the images up on its own; one that must not move
+# under itself pins the sha tag.
+#
+# The Dockerfiles type-check before they bundle, so an image cannot be built
+# from code that fails `tsc`. That is not the same as the tests passing, and
+# `latest` is a tag something else deploys unattended, so the test job gates
+# the build rather than running beside it.
+
+name: Build and publish images
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Two commits in a row: the second one's images are the ones worth having.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    name: test (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Three independent suites: one failing tells you more when the other
+      # two have still run.
+      fail-fast: false
+      matrix:
+        package: [orchestrator, proxy, dashboard]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+
+      # ci, not install: the same resolved versions the Dockerfiles build from,
+      # including the exactly-pinned assistant-ui packages.
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm ci
+
+      # The dashboard's `e2e` project builds the production bundle and drives
+      # it in a real Chromium, so the browser has to exist before `npm test`.
+      # The `unit` project needs none of this, and neither does anything else
+      # in the matrix.
+      - name: Install Chromium
+        if: matrix.package == 'dashboard'
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+
+      - name: Type-check
+        working-directory: ${{ matrix.package }}
+        run: npm run check
+
+      - name: Test
+        working-directory: ${{ matrix.package }}
+        run: npm test
+
+  images:
+    name: image (${{ matrix.image }})
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The orchestrator and the proxy build from the repository root:
+          # both Dockerfiles copy shared/ next to their own package, so the
+          # context has to be the checkout rather than the package directory.
+          - image: orchestrator
+            context: .
+            dockerfile: orchestrator/Dockerfile
+          - image: egress-proxy
+            context: .
+            dockerfile: proxy/Dockerfile
+          # The session image copies only entrypoint.sh, so its own directory
+          # is the whole context.
+          - image: session
+            context: session-image
+            dockerfile: session-image/Dockerfile
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Skipped on a pull request: nothing is pushed there, and a PR from a
+      # fork has no token that could log in anyway.
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ghcr.io/<owner>/<repo>/<image>, derived rather than written out, so a
+      # fork publishes to its own namespace with nothing to edit. GHCR names
+      # must be lowercase and github.repository already is.
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=boxes-${{ matrix.image }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          # Built on a pull request, pushed only once it is on main. The tags
+          # are computed either way, so a PR proves the whole step bar the
+          # upload.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # linux/amd64 is what the deployment host runs. Adding arm64 is one
+          # more entry here and roughly triples the session image's build,
+          # which installs an apt toolchain and the GitHub CLI.
+          platforms: linux/amd64
+          # A cache scope per image: one shared scope has the three builds
+          # evicting each other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          # A plain single-platform manifest rather than an OCI index with
+          # attestations attached, because a digest is what the deployment's
+          # watchtower compares to decide it has something new.
+          provenance: false
+          sbom: false

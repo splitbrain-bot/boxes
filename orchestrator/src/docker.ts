@@ -4,6 +4,7 @@ import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { Config, SessionProfile } from './config.ts';
 import { log } from './log.ts';
+import { sessionOwner } from './workspaces.ts';
 
 /**
  * Container, network and volume lifecycle, plus the long-lived adapter exec.
@@ -15,6 +16,19 @@ import { log } from './log.ts';
 
 /** Docker label carrying the session id on every object Boxes creates. */
 export const LABEL = 'boxes.session';
+
+/**
+ * The `uid:gid` every session process runs as, as Docker wants it written.
+ *
+ * Numbers rather than the image's `agent`, so SESSION_UID alone decides who a
+ * session is and the image needs no rebuild to be read differently. The two
+ * still have to agree about the *home volume*, which Docker initialises from
+ * the image — see ensureSessionImage().
+ */
+function sessionUser(): string {
+  const { uid, gid } = sessionOwner();
+  return `${uid}:${gid}`;
+}
 
 /** The session's writable workspace, and the working directory of everything in it. */
 export const WORKSPACE_DIR = '/workspace';
@@ -240,6 +254,71 @@ export function selfContainerId(): string | null {
   return null;
 }
 
+/**
+ * Pulls an image, resolving once the daemon has finished with it.
+ *
+ * The orchestrator creates session containers but used to never fetch what
+ * they run, which left the image something every deployment had to build out
+ * of a checkout. Pulling it here is what lets SESSION_IMAGE name a published
+ * tag and nothing else be done about it.
+ *
+ * No auth is passed: a deployment that needs a private registry configures
+ * the daemon's own credentials, which is where Docker looks anyway.
+ */
+export async function pullImage(image: string): Promise<void> {
+  const stream = await docker().pull(image);
+  await new Promise<void>((resolve, reject) => {
+    // The pull is a progress stream, and it is only complete when that stream
+    // is: awaiting the call alone returns as soon as the transfer starts.
+    docker().modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+/**
+ * The uid an image's own `USER` names, or null when it names something this
+ * cannot read as a number.
+ *
+ * An older image, or one built elsewhere, may carry a user *name* — there is
+ * no uid to compare then, and saying nothing beats guessing.
+ */
+export async function imageUserUid(image: string): Promise<number | null> {
+  try {
+    const info = await docker().getImage(image).inspect();
+    const user = (info.Config?.User ?? '').split(':')[0] ?? '';
+    return /^\d+$/.test(user) ? Number(user) : null;
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * The id of an image on this host, or null when it is not here.
+ *
+ * The id and not the tag, because the question this answers is whether a
+ * moving tag has moved.
+ */
+export async function imageId(image: string): Promise<string | null> {
+  try {
+    const info = await docker().getImage(image).inspect();
+    return info.Id ?? null;
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+}
+
+/** The id of the image a container was created from, or null when it is gone. */
+export async function containerImageId(containerId: string): Promise<string | null> {
+  try {
+    const info = await docker().getContainer(containerId).inspect();
+    return info.Image ?? null;
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+}
+
 /** Whether this process is running inside a container. */
 export function inContainer(): boolean {
   return existsSync('/.dockerenv') || selfContainerId() !== null;
@@ -322,10 +401,21 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
   const container = await docker().createContainer({
     name: names.container(spec.sessionId),
     Image: spec.image,
-    User: 'agent',
+    User: sessionUser(),
     WorkingDir: WORKSPACE_DIR,
     Env: sessionEnv(spec, cfg),
-    Labels: { [LABEL]: spec.sessionId },
+    Labels: {
+      [LABEL]: spec.sessionId,
+      // A session container is the orchestrator's, and only the
+      // orchestrator's: it is tracked by the id returned here, attached to
+      // its network after the fact, and recreated on a new image at start.
+      // An outside updater that stopped and recreated one would leave the id
+      // in the database pointing at nothing and drop the proxy attachment
+      // that is the session's only way out, so the opt-out every such tool
+      // reads is part of the template rather than something each deployment
+      // has to remember. Watchtower honours it; nothing else minds it.
+      'com.centurylinklabs.watchtower.enable': 'false',
+    },
     // The adapter is a separate exec; PID 1 only holds the container open.
     AttachStdin: false,
     AttachStdout: false,
@@ -499,7 +589,7 @@ export async function spawnAdapterExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
-    User: 'agent',
+    User: sessionUser(),
     WorkingDir: workingDir,
   });
 
@@ -574,7 +664,7 @@ export async function runCommandExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
-    User: 'agent',
+    User: sessionUser(),
     WorkingDir: workingDir,
   });
 

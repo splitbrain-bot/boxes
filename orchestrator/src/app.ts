@@ -34,6 +34,7 @@ import { log } from './log.ts';
 import { Notifier } from './notify.ts';
 import { ReviewService, ReviewUnavailable } from './review/service.ts';
 import { HttpError, SessionManager } from './sessions.ts';
+import { setSessionOwner } from './workspaces.ts';
 
 /**
  * The HTTP surface: the REST API, the exec endpoint and the static bundle.
@@ -79,6 +80,10 @@ export function buildApp(
   cfg: ReturnType<typeof config>,
   db: ReturnType<typeof openDb>,
 ): Orchestrator {
+// Before anything creates a workspace directory or a container: everything
+// that writes files for the agent, or runs a process as it, reads this.
+setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
+
 const egress = new EgressManager(cfg);
 const notifier = new Notifier(db, cfg);
 const agents = new AgentStore(db, cfg.DATA_DIR);

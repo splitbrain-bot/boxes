@@ -122,6 +122,149 @@ export class SessionManager {
     return ws.workspacePath(this.cfg.DATA_DIR, row.id);
   }
 
+  // --- the session image ----------------------------------------------------
+
+  /**
+   * Makes sure the session image is on this host, pulling it when it is not.
+   *
+   * Absent, there is nothing to create a session out of, so this is the one
+   * pull that is allowed to fail loudly. Present, it costs one inspect and
+   * says nothing.
+   */
+  async ensureSessionImage(): Promise<void> {
+    if (!(await dk.imageId(this.cfg.SESSION_IMAGE))) {
+      log.info('the session image is not on this host; pulling it', {
+        image: this.cfg.SESSION_IMAGE,
+      });
+      await dk.pullImage(this.cfg.SESSION_IMAGE);
+      log.info('pulled the session image', { image: this.cfg.SESSION_IMAGE });
+    }
+    await this.warnOnSessionUidDrift();
+  }
+
+  /**
+   * Says so when the session image was built on a different uid than
+   * SESSION_UID.
+   *
+   * A container can be run as any uid, so the workspace bind is fine either
+   * way. The home volume is not: Docker initialises a new one from the image's
+   * own `/home/agent`, so it arrives owned by the uid the *image* was built
+   * on, and nothing outside the container can chown it afterwards. Mismatched,
+   * the agent cannot write its own home and every turn fails on something
+   * obscure — so it is worth one loud line at boot rather than being
+   * discovered later.
+   *
+   * A warning and not a refusal: the image is the deployment's to fix, the
+   * rest of the orchestrator works, and reviewing an existing session does not
+   * need a container at all.
+   */
+  private async warnOnSessionUidDrift(): Promise<void> {
+    let imageUid: number | null;
+    try {
+      imageUid = await dk.imageUserUid(this.cfg.SESSION_IMAGE);
+    } catch (err) {
+      log.warn('could not read the session image user', { error: (err as Error).message });
+      return;
+    }
+    if (imageUid === null || imageUid === this.cfg.SESSION_UID) return;
+    log.warn(
+      'the session image was built on a different uid than SESSION_UID; ' +
+        "a session's home volume will not be writable by the agent",
+      {
+        image: this.cfg.SESSION_IMAGE,
+        imageUid,
+        sessionUid: this.cfg.SESSION_UID,
+      },
+    );
+  }
+
+  /**
+   * Pulls the session image again, so a tag that moves actually moves here.
+   *
+   * Best-effort on purpose: the image already on the host still works, and a
+   * registry that is down — or a tag that was built locally and can be pulled
+   * from nowhere — must not become the orchestrator's problem. Nothing
+   * running is touched; a session adopts what arrived the next time it is
+   * started.
+   */
+  async refreshSessionImage(): Promise<void> {
+    const before = await dk.imageId(this.cfg.SESSION_IMAGE);
+    await dk.pullImage(this.cfg.SESSION_IMAGE);
+    const after = await dk.imageId(this.cfg.SESSION_IMAGE);
+    if (after && after !== before) {
+      log.info('the session image moved; sessions adopt it as they are started', {
+        image: this.cfg.SESSION_IMAGE,
+      });
+    }
+  }
+
+  /**
+   * Moves a session onto the current session image, when what its container
+   * was created from is no longer what SESSION_IMAGE resolves to.
+   *
+   * Recreating is how a session container changes anything about itself —
+   * migrateWorkspace does the same for its mount — and it is cheap: the
+   * rootfs is read-only and everything durable lives in the two mounts, so
+   * the workspace and the adapter's thread history come across untouched.
+   *
+   * Start is the only moment this can happen. Under a running container it
+   * would kill the adapter exec mid-turn, so a running session is left alone
+   * and comes through here at its next stop/start cycle — which the idle
+   * reaper produces on its own within IDLE_STOP_MINUTES.
+   *
+   * The comparison is on image ids, not on the tag, because the case worth
+   * catching is `latest` having moved under a name that did not change.
+   */
+  private async rollOntoCurrentImage(row: SessionRow): Promise<SessionRow> {
+    if (!row.container_id) return row;
+    const slog = log.session(row.id);
+
+    let wanted: string | null;
+    let current: string | null;
+    try {
+      wanted = await dk.imageId(this.cfg.SESSION_IMAGE);
+      current = await dk.containerImageId(row.container_id);
+    } catch (err) {
+      // Whatever the daemon is unhappy about, it is not worth refusing to
+      // start a session that already has a container over.
+      slog.warn('could not compare the session image; starting as it is', {
+        error: (err as Error).message,
+      });
+      return row;
+    }
+    // Nothing on the host to move to, or a container Docker no longer has:
+    // either way there is nothing to decide, and start() surfaces the second.
+    if (!wanted || !current || wanted === current) return row;
+
+    if ((await dk.containerState(row.container_id)) === 'running') {
+      slog.info('session image change deferred: the container is still running');
+      return row;
+    }
+
+    slog.info('recreating the container on the current session image', {
+      from: current,
+      image: this.cfg.SESSION_IMAGE,
+    });
+    // The adapter ran as an exec inside the container about to be removed, so
+    // anything the gateway still holds for this session is already dead.
+    this.upstreams.get(row.id)?.stop();
+
+    await dk.removeContainer(row.container_id);
+    const containerId = await dk.createContainer(
+      this.containerSpec({ ...row, image: this.cfg.SESSION_IMAGE }, this.profileFor(row)),
+      this.cfg,
+    );
+    await dk.startContainer(containerId);
+
+    this.db
+      .prepare('UPDATE sessions SET container_id = ?, image = ? WHERE id = ?')
+      .run(containerId, this.cfg.SESSION_IMAGE, row.id);
+    slog.info('session moved onto the current session image', {
+      image: this.cfg.SESSION_IMAGE,
+    });
+    return this.mustGet(row.id);
+  }
+
   // --- helpers --------------------------------------------------------------
 
   /** The stored row for a session, including deleted ones. */
@@ -234,6 +377,20 @@ export class SessionManager {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
 
+    // Before anything is allocated, and after the checks above, which cost
+    // nothing: a request naming a set that is not there should not pull an
+    // image on its way to a 400. A deployment whose first pull failed would
+    // otherwise get the daemon's "no such image" halfway through creating a
+    // session, and a teardown to go with it.
+    try {
+      await this.ensureSessionImage();
+    } catch (err) {
+      throw new HttpError(
+        503,
+        `Session image ${this.cfg.SESSION_IMAGE} is not available: ${(err as Error).message}`,
+      );
+    }
+
     // Server-generated: user input never reaches a Docker object name.
     const id = randomBytes(4).toString('hex');
     const now = Date.now();
@@ -315,6 +472,12 @@ export class SessionManager {
     // and owned by root.
     this.agents.materialize(row.id, row.agent_set_id);
     row = await this.migrateWorkspace(row);
+    // Before the mount check below, not after: a roll recreates the container
+    // from containerSpec, which already binds the agent configuration, so a
+    // session that moves image comes back with the mount and the check that
+    // follows finds nothing left to do. The other order would recreate the
+    // same container twice.
+    row = await this.rollOntoCurrentImage(row);
     row = await this.ensureAgentConfigMount(row);
     await dk.startContainer(row.container_id!);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
