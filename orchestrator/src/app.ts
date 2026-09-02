@@ -489,18 +489,17 @@ function validKey(value: unknown, bytes: number, name: string): string {
 }
 
 /**
- * Serves one single-page bundle: a real file when the path names one, else the
- * bundle's index.html so client-side routes survive a reload.
+ * Serves the dashboard bundle: a real file when the path names one, else its
+ * index.html so client-side routes survive a reload.
+ *
+ * The path is resolved under the bundle directory and has to stay there, with
+ * the separator in the prefix check so a sibling directory whose name merely
+ * starts the same way is not inside it.
  */
-function sendBundle(
-  reply: FastifyReply,
-  dir: string,
-  path: string,
-  missing: string,
-): FastifyReply {
-  const candidate = resolve(dir, `.${normalize(path)}`);
+function sendBundle(reply: FastifyReply, path: string): FastifyReply {
+  const candidate = resolve(DASHBOARD_DIR, `.${normalize(path)}`);
   if (
-    candidate.startsWith(dir) &&
+    candidate.startsWith(`${DASHBOARD_DIR}/`) &&
     path !== '/' &&
     existsSync(candidate) &&
     statSync(candidate).isFile()
@@ -510,8 +509,8 @@ function sendBundle(
       .type(CONTENT_TYPES[ext] ?? 'application/octet-stream')
       .send(readFileSync(candidate));
   }
-  const index = join(dir, 'index.html');
-  if (!existsSync(index)) return reply.code(404).send({ error: missing });
+  const index = join(DASHBOARD_DIR, 'index.html');
+  if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
   return reply.type('text/html; charset=utf-8').send(readFileSync(index));
 }
 
@@ -521,7 +520,7 @@ app.setNotFoundHandler((req, reply) => {
   if (url.startsWith('/api') || url.startsWith('/ws')) {
     return reply.code(404).send({ error: 'Not found' });
   }
-  return sendBundle(reply, DASHBOARD_DIR, url, 'Dashboard not built');
+  return sendBundle(reply, url);
 });
 
   return {
