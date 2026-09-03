@@ -678,6 +678,34 @@ else. And iOS exposes it only to a page added to the Home Screen, which is why
 the dashboard ships a manifest and why the toggle tells an uninstalled iPhone
 to install rather than that it cannot.
 
+### Being installable
+
+Which makes the install a feature rather than a nicety, and it has one
+requirement that is nowhere in the manifest. A manifest is fetched with
+credentials omitted unless the link says otherwise, so behind the
+authenticating proxy every deployment past loopback is supposed to have, the
+single request that decides whether a browser offers the install is the single
+request that arrives without the session cookie. The proxy answers it with a
+redirect to a login page, the browser is left with no manifest, and nothing
+else on the page is affected — the failure is a missing offer, not an error.
+`index.html` asks with `crossorigin="use-credentials"`, and `e2e/pwa.test.ts`
+puts the stub orchestrator behind a cookie check and asks Chrome itself,
+over CDP, whether it would install what it found. That test needs a real
+profile: Chrome refuses to install from an incognito context, which every
+`newContext()` is, so `launchProfile` in `e2e/browser.ts` gives it one.
+
+iOS is told twice. Safari offers Add to Home Screen whether or not a manifest
+loaded, and an icon that opens a browser tab has a browser tab's Push API, so
+`apple-mobile-web-app-capable` states standalone in the markup where nothing
+can fail to fetch it, and `apple-mobile-web-app-title` names the app before
+the document title starts tracking what a thread is doing.
+
+The service worker is registered on load, by `installWorker`, and not by the
+push toggle. Registering it from `refreshPush` would have skipped exactly the
+browsers that need it: that function returns at the first blocker, and the
+blockers are an iPhone that has not installed yet and a user who has declined
+notifications once.
+
 ## Session lifecycle
 
 Creating a session, in `SessionManager.create`:
@@ -1204,7 +1232,7 @@ proxy/src/
   cidr.ts               Resolved-IP vetting, the security boundary
 
 dashboard/
-  index.html            Vite entry; sets the dark class before first paint
+  index.html            Vite entry; the dark class before first paint, and what makes the app installable
   public/               Served from the bundle root: the service worker, the manifest, the icons
   vite.config.ts        React, Tailwind, the dev proxy, both test projects
   components.json       Where the shadcn and assistant-ui CLIs install to

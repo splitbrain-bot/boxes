@@ -13,10 +13,34 @@
     />
     <meta name="color-scheme" content="dark light" />
     <!-- Installability, which is not decoration here: on iOS the Notification
-         and Push APIs exist only for a page added to the Home Screen. -->
-    <link rel="manifest" href="/manifest.webmanifest" />
+         and Push APIs exist only for a page added to the Home Screen.
+
+         crossorigin, on a same-origin manifest, is not about CORS: a manifest
+         is fetched with credentials omitted unless it says otherwise, so
+         behind the authenticating reverse proxy every deployment past
+         localhost is supposed to have (README, "Behind a reverse proxy"), the
+         request that decides whether Boxes can be installed is the one
+         request that arrives without the cookie. The proxy answers it with a
+         401 or a redirect to a login page, the browser has no manifest, and
+         the install offer never appears — while every other request on the
+         page succeeds, which is what makes it look like nothing is wrong.
+         use-credentials sends the cookie. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <link rel="icon" href="/icon-192.png" type="image/png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
+    <!-- What iOS reads instead of the manifest. Safari has honoured display
+         and short_name since 16.4, but Add to Home Screen is offered whether
+         or not the manifest loaded, and a home screen icon that opens a
+         Safari tab is an install that did not work: standalone is stated here
+         too, where nothing can fail to fetch it.
+
+         The title is stated for the same reason, and against a second
+         problem: the document title tracks what the thread is doing
+         (lib/tab-title.ts), so installing from an open conversation would
+         otherwise propose naming the app something like "⟳ refactor auth". -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Boxes" />
     <meta name="theme-color" content="#18181b" />
     <title>Boxes</title>
     <script>
