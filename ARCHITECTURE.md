@@ -220,6 +220,58 @@ so the working thread stays where it is and the new tab is opened by a real
 click. A `window.open` after the await is the thing to reach for, and it is
 what popup blockers exist to stop.
 
+That header gets out of the way while you read, and so does the review's —
+one hook and one wrapper serve both, because a thread and a code pane are the
+same shape of thing: a full-viewport route whose one scroller is the thing you
+came for. A downward run of thirty-odd pixels collapses the row, and two dozen
+back up returns it; the space goes straight to the content, which is `flex-1`
+below it. Going is a decision about the reading you are doing and coming back
+is a request that should not have to be repeated, so the two distances are not
+the same. Runs are measured from the last change of direction rather than the
+last event, which is what makes a pixel of finger jitter mean nothing and a
+slow drift down mean something. The notices under the header do not collapse:
+a missing token, a fork to open, an error to read are things to act on rather
+than things in the way.
+
+Three things are not reading, and the hook (`use-scroll-away.ts`) declines to
+read them as such. A view against the bottom of its scroller is following its
+own output — a thread streaming a reply, or writing what a `!bang` command
+returned — and stays there for the whole of it, so nothing decides down there.
+That question is asked of the scroller rather than of the app on purpose: the
+thread's `isRunning` clears while the last chunks are still landing, measured
+rather than guessed, so a header that trusted it moved on its own at the end
+of every turn. A single step longer than three hundred pixels is a jump — a
+review restoring where a file was left, a hunk being centred — and no hand
+produces one. And the collapse itself moves the scroller: growing it by the
+header's height makes Chrome nudge `scrollTop` to hold anchored content still,
+which arrives as an upward run, which is the signal to come back, which grows
+the scroller again. That one is a feedback loop, and it flapped until steps
+small enough to be the nudge stopped counting for as long as the transition
+runs. In every case the position is kept and the intent is dropped.
+
+The row is collapsed rather than slid over the content: on a phone the point
+is the fifty pixels, and chrome floating over the first message covers the
+message instead of yielding. Its height is measured with a `ResizeObserver`,
+because a two-line title beside two selects is not a number to hardcode and
+`auto` is not a value CSS will animate from — and it is `inert` while away, so
+nothing in it is tabbable, readable by a screen reader, or clickable through
+the clip. That last one has a cost worth knowing: below md the only way to the
+review's file tree is the button in its header, so switching files from deep
+in a file takes a flick up first.
+
+None of that is the browser's own hiding of its chrome, which is what the
+header used to be at the mercy of. A thread is one dynamic viewport tall with
+its own scroller inside, so the document has nothing to scroll — but `100dvh`
+is measured against chrome that slides in and out, and every mismatch (the URL
+bar expanding, the keyboard opening under a focused composer, rounding on iOS)
+left the document taller than the screen. The browser scrolled the difference
+away to keep the focused thing in view, and what went off the top was the
+header — stranded on a scroller no gesture reaches, because every touch lands
+in the thread's instead. So the full-viewport routes mark the document
+unscrollable for as long as they are mounted (`use-viewport-lock.ts`), and the
+viewport meta asks the keyboard to resize the content rather than slide over
+it. What moves the header now is the app, on purpose.
+
 The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
 CLI, in the shadcn distribution model: the sources are committed and are ours

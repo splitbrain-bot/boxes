@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
+import { Shelf } from '@/components/Shelf';
 import { BasePicker } from '@/components/review/BasePicker';
 import { CodePane } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
@@ -15,6 +16,8 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
+import { useScrollAway } from '@/hooks/use-scroll-away';
+import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { cn } from '@/lib/utils';
 import { useSessions } from '../stores/sessions.ts';
 import {
@@ -218,6 +221,14 @@ export function SessionReview() {
   const name = session?.name ?? id;
   const thread = origin ?? session?.currentThreadId;
 
+  // The code pane is the scroller here, the same way the thread is in a
+  // thread: the document must not acquire one of its own.
+  useViewportLock();
+
+  // And the same header behaviour as the thread's, called the same way:
+  // reading down a file puts the chrome away, a flick back up returns it.
+  const { away, container } = useScrollAway('[data-slot="review-code-pane"]');
+
   // No state symbol: a review is a thing you are doing, not a thing waiting
   // on you. What it needs to say is which box, and which file of it.
   useDocumentTitle(
@@ -225,92 +236,94 @@ export function SessionReview() {
   );
 
   return (
-    <div className="flex h-dvh flex-col">
-      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-        <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
-          <Link
-            to={thread ? `/sessions/${id}/threads/${thread}` : `/sessions/${id}`}
-            aria-label="Back to the thread"
-          >
-            <ArrowLeft className="size-4" />
-          </Link>
-        </Button>
-
-        <div className="flex min-w-16 flex-1 flex-col">
-          <span className="truncate text-sm font-medium">
-            {file ? shortPath(file.path) : 'Review'}
-          </span>
-          <span className="truncate text-xs text-muted-foreground">
-            {name}
-            {tree?.root ? ` · ${tree.root}` : ''}
-            {tree && !tree.hasGit ? ' · no git' : ''}
-            {/* Which base is active belongs in the status line, the way the
-                desktop tool's does: it changes what every colour in the tree
-                and every marker in the gutter means. */}
-            {tree?.base.commit
-              ? ` · vs ${tree.base.rev} (${tree.base.commit.slice(0, 8)})`
-              : tree?.hasGit
-                ? ' · vs working tree'
-                : ''}
-          </span>
-        </div>
-
-        {/* Only where there is a repository to compare in. */}
-        {tree?.hasGit ? (
-          <BasePicker base={tree.base} busy={saving} onSet={(rev) => void setBase(rev)} />
-        ) : null}
-
-        {/* The reason this feature belongs inside Boxes at all: the review is
-            a file of the project the agent is working on, so handing it over is
-            one line of prompt rather than an export. Staged in the composer,
-            not sent — the reviewer decides when to ask. */}
-        {tree && Object.keys(tree.counts).length > 0 ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="shrink-0"
-            onClick={() =>
-              void navigate(thread ? `/sessions/${id}/threads/${thread}` : `/sessions/${id}`, {
-                state: { prefill: handoffPrompt(tree.root) },
-              })
-            }
-            title="Open the thread with a prompt to address these comments"
-          >
-            <Send className="size-3.5" />
-            <span className="hidden sm:inline">Hand to agent</span>
+    <div ref={container} className="flex h-dvh flex-col">
+      <Shelf away={away}>
+        <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+          <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
+            <Link
+              to={thread ? `/sessions/${id}/threads/${thread}` : `/sessions/${id}`}
+              aria-label="Back to the thread"
+            >
+              <ArrowLeft className="size-4" />
+            </Link>
           </Button>
-        ) : null}
 
-        {tree?.hasReview ? (
+          <div className="flex min-w-16 flex-1 flex-col">
+            <span className="truncate text-sm font-medium">
+              {file ? shortPath(file.path) : 'Review'}
+            </span>
+            <span className="truncate text-xs text-muted-foreground">
+              {name}
+              {tree?.root ? ` · ${tree.root}` : ''}
+              {tree && !tree.hasGit ? ' · no git' : ''}
+              {/* Which base is active belongs in the status line, the way the
+                  desktop tool's does: it changes what every colour in the tree
+                  and every marker in the gutter means. */}
+              {tree?.base.commit
+                ? ` · vs ${tree.base.rev} (${tree.base.commit.slice(0, 8)})`
+                : tree?.hasGit
+                  ? ' · vs working tree'
+                  : ''}
+            </span>
+          </div>
+
+          {/* Only where there is a repository to compare in. */}
+          {tree?.hasGit ? (
+            <BasePicker base={tree.base} busy={saving} onSet={(rev) => void setBase(rev)} />
+          ) : null}
+
+          {/* The reason this feature belongs inside Boxes at all: the review is
+              a file of the project the agent is working on, so handing it over is
+              one line of prompt rather than an export. Staged in the composer,
+              not sent — the reviewer decides when to ask. */}
+          {tree && Object.keys(tree.counts).length > 0 ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() =>
+                void navigate(thread ? `/sessions/${id}/threads/${thread}` : `/sessions/${id}`, {
+                  state: { prefill: handoffPrompt(tree.root) },
+                })
+              }
+              title="Open the thread with a prompt to address these comments"
+            >
+              <Send className="size-3.5" />
+              <span className="hidden sm:inline">Hand to agent</span>
+            </Button>
+          ) : null}
+
+          {tree?.hasReview ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              disabled={saving}
+              onClick={() => setConfirmNew(true)}
+              aria-label="Start a new review"
+              title="Start a new review, discarding these comments"
+            >
+              <FilePlus2 />
+            </Button>
+          ) : null}
+
+          {/* The tree lives behind this button below md, and in the column
+              beside the pane above it. */}
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="shrink-0"
-            disabled={saving}
-            onClick={() => setConfirmNew(true)}
-            aria-label="Start a new review"
-            title="Start a new review, discarding these comments"
+            className="shrink-0 md:hidden"
+            onClick={() => setTreeOpen(true)}
+            aria-label="Browse files"
+            title="Browse files"
           >
-            <FilePlus2 />
+            <FolderTree />
           </Button>
-        ) : null}
-
-        {/* The tree lives behind this button below md, and in the column
-            beside the pane above it. */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="shrink-0 md:hidden"
-          onClick={() => setTreeOpen(true)}
-          aria-label="Browse files"
-          title="Browse files"
-        >
-          <FolderTree />
-        </Button>
-      </header>
+        </header>
+      </Shelf>
 
       {error ? <Notice className="shrink-0 border-b px-3 py-2">{error}</Notice> : null}
 

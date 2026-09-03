@@ -2,7 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- interactive-widget: the on-screen keyboard shrinks the viewport the
+         thread is measured against, rather than sliding over it. Otherwise the
+         browser makes room for a focused composer by scrolling the document —
+         and with the thread already exactly one viewport tall, what that
+         scrolls away is the header. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="color-scheme" content="dark light" />
     <!-- Installability, which is not decoration here: on iOS the Notification
          and Push APIs exist only for a page added to the Home Screen. -->

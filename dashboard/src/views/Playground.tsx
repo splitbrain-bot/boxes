@@ -5,6 +5,7 @@ import {
 } from '@assistant-ui/react';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { useViewportLock } from '@/hooks/use-viewport-lock';
 
 /**
  * The installed components over a canned store, with no ACP connection.
@@ -86,6 +87,8 @@ const MESSAGES: ThreadMessageLike[] = [
 
 /** A thread that renders the canned messages and accepts no input. */
 export function Playground() {
+  // A thread over canned messages is still a thread: same viewport, same lock.
+  useViewportLock();
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: MESSAGES,
     convertMessage: (m) => m,

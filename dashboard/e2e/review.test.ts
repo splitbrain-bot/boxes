@@ -552,6 +552,68 @@ test('each file remembers how far it was read, and a new one starts at the top',
   }
 });
 
+test('the review header steps aside while reading down a file, and ignores a jump', async () => {
+  // Long enough to scroll, which the small fixture files are not.
+  stub.state.reviews[SESSION] = stubReview({
+    files: {
+      'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
+    },
+    statuses: {},
+    diffs: {},
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    const shelf = page.locator('[data-slot="shelf"]');
+    const away = (): Promise<boolean> => shelf.evaluate((el) => el.hasAttribute('data-away'));
+    const top = (): Promise<number> => pane.evaluate((el) => el.scrollTop);
+    /** Whether the header is where a thumb reaches for it; see the thread's. */
+    const inReach = (): Promise<boolean> =>
+      page.evaluate(() => !!document.elementFromPoint(20, 10)?.closest('header'));
+    /** A notch at a time, the way a hand arrives rather than as one jump. */
+    const wheel = async (dy: number, notches: number): Promise<void> => {
+      for (let i = 0; i < notches; i += 1) {
+        await page.mouse.wheel(0, dy);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+    };
+
+    await page.getByRole('button', { name: /long\.ts/ }).click();
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    expect(await away()).toBe(false);
+
+    // The same header behaviour as the thread's, on the pane's scrolling.
+    await pane.hover();
+    await wheel(100, 8);
+    await expect.poll(away).toBe(true);
+    // And nothing in it is reachable while it is away — `inert`, and a parent
+    // collapsed to nothing. Below md the only way to the file tree is the
+    // button in this header, so switching files from here takes a flick up
+    // first, the same flick as in a thread.
+    expect(await inReach()).toBe(false);
+
+    await wheel(-100, 2);
+    await expect.poll(away).toBe(false);
+    expect(await inReach()).toBe(true);
+    expect(await top()).toBeGreaterThan(100);
+
+    // The pane's own scrolling is not reading. Restoring where a file was left
+    // and centring a hunk both arrive as one enormous step, and the chrome
+    // sits through them — otherwise opening a file would put away the header
+    // that has the only way back to the tree.
+    await pane.evaluate((el) => {
+      el.scrollTop = 4000;
+    });
+    await expect.poll(top).toBe(4000);
+    expect(await away()).toBe(false);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // --- the entry points -------------------------------------------------------
 
 test('the review is reachable from the session card and the thread header', async () => {
