@@ -394,6 +394,9 @@ test('the mode switcher lists the advertised modes and sets one', async () => {
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
+    // Behind the settings button, with the model and the rest: the header row
+    // is a name and four icons now.
+    await page.getByLabel('Agent settings').click();
     const modes = page.getByRole('combobox', { name: 'Agent mode' });
     await expect.poll(() => modes.isVisible()).toBe(true);
     // Nothing hardcoded: whatever the adapter advertises is what appears.
@@ -425,6 +428,7 @@ test('a current_mode_update from the adapter moves the switcher', async () => {
 
   const { page, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
+    await page.getByLabel('Agent settings').click();
     const modes = page.getByRole('combobox', { name: 'Agent mode' });
     await expect.poll(() => modes.isVisible()).toBe(true);
     stub.gateway.emit({ sessionUpdate: 'current_mode_update', currentModeId: 'auto' });
@@ -455,6 +459,7 @@ test('the model selector lists the advertised models and sets one', async () => 
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
+    await page.getByLabel('Agent settings').click();
     const models = page.getByRole('combobox', { name: 'Model' });
     await expect.poll(() => models.isVisible()).toBe(true);
     // Nothing hardcoded: whatever the adapter advertises is what appears.
@@ -571,6 +576,15 @@ test('a thread asked which way to go says that instead', async () => {
 // no control at all, so the effort level could not be set.
 test("the adapter's other settings are reachable, and setting one is sent", async () => {
   await start({
+    // This adapter says what mode it is in twice — as the protocol's modes,
+    // and again as a config option. Only one of them may reach the overlay.
+    modes: {
+      currentModeId: 'auto',
+      availableModes: [
+        { id: 'auto', name: 'Auto' },
+        { id: 'plan', name: 'Plan' },
+      ],
+    },
     configOptions: [
       {
         id: 'mode',
@@ -614,6 +628,8 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
   try {
     const settings = page.getByLabel('Agent settings');
     await expect.poll(() => settings.isVisible()).toBe(true);
+    // Closed, the header is a name and its icons: no select is in the row.
+    expect(await page.getByRole('combobox').count()).toBe(0);
     await settings.click();
 
     const effort = page.getByRole('combobox', { name: 'Effort' });
@@ -629,11 +645,12 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
       .poll(() => stub.gateway.script.configOptions.find((o) => o.id === 'effort')?.currentValue)
       .toBe('high');
 
-    // The mode is not doubled into the popover: the switcher beside the name
-    // is already that option, under the adapter's other name for it. Exactly
-    // "Mode", because a substring match also finds "Model".
+    // The mode is offered once, as the protocol's modes rather than as the
+    // config option that says the same thing. Exactly "Mode", because a
+    // substring match also finds "Model".
     expect(await page.getByRole('combobox', { name: 'Mode', exact: true }).count()).toBe(0);
-    // And the model is still where it was, beside the name rather than inside.
+    expect(await page.getByRole('combobox', { name: 'Agent mode' }).count()).toBe(1);
+    // And the model is in here now rather than in the header row.
     expect(await page.getByRole('combobox', { name: 'Model' }).count()).toBe(1);
     expect(errors).toEqual([]);
   } finally {

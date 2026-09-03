@@ -97,7 +97,10 @@ test('a prompt streams back and renders as it arrives', async () => {
 
 test('a turn with nothing to show yet shows the spinner, and stops once it has', async () => {
   await start({
-    prompts: [{ match: () => true, gapMs: 800, updates: reply('Eventually.') }],
+    // Long enough that the spinner can be read without racing the answer:
+    // a detached element has no computed style, and the assertions below
+    // would then be measuring the message that replaced it.
+    prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually.') }],
   });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
@@ -112,13 +115,15 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
     // rather than a page that has stopped repainting.
     const spinner = page.getByRole('img', { name: 'Assistant is working' });
     await expect.poll(() => spinner.isVisible()).toBe(true);
-    expect(await spinner.locator('rect').count()).toBe(9);
-    expect(
-      await spinner
-        .locator('rect')
-        .first()
-        .evaluate((el) => getComputedStyle(el).animationName),
-    ).toBe('spinner-block');
+    await expect.poll(() => spinner.locator('rect').count()).toBe(9);
+    await expect
+      .poll(() =>
+        spinner
+          .locator('rect')
+          .first()
+          .evaluate((el) => getComputedStyle(el).animationName),
+      )
+      .toBe('spinner-block');
 
     // And it is gone as soon as there is something to read instead.
     await expect

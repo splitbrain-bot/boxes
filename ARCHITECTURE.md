@@ -389,7 +389,7 @@ column is for. A fork is the exception and says so: it starts in `plan`,
 because it shares the thread it came from's checkout and the point of one is
 to ask about work the original is still doing, so it starts in a mode that
 reads rather than writes. That does not fix the shared workspace; it stops the
-common accident, and flipping the fork to `auto` is one tap in the header. An
+common accident, and flipping the fork to `auto` is the header's settings. An
 adapter offering no such mode is left in whichever mode it starts in, and a
 switch that fails is logged rather than failing the spawn.
 
@@ -421,7 +421,7 @@ disclosure in the thread never appears at all — the agent was thinking and
 saying so, and the words were not on the wire. The budgeted `enabled` form
 rather than `adaptive`: on a current model the two are the same thing, and
 `adaptive` is a flag an older one can reject, while which model a thread runs
-is chosen from the header long after this is fixed.
+is chosen from the header's settings long after this is fixed.
 
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
 that the session's status becomes `error`.
