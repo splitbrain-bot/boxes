@@ -232,6 +232,60 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
   }
 });
 
+// An unfinished tool call is not a question. A call with no result inherits
+// its message's requires-action status, which used to render as "Wants to
+// run" over Allow and Deny buttons — in auto mode, where nothing is being
+// asked, and over a tool whose result cannot come from a browser anyway.
+test('a tool call that never reported back is not offered as a decision', async () => {
+  await start({
+    prompts: [
+      {
+        match: () => true,
+        updates: [
+          {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'a1',
+            title: 'Run the proxy tests',
+            kind: 'execute',
+            status: 'in_progress',
+            rawInput: { command: 'npm test' },
+          },
+          // The turn ends without a result for it, which is what a cancelled
+          // or crashed call looks like from here.
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'that is all' },
+          },
+        ] as SessionUpdate[],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('run the tests');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.getByText('that is all').isVisible(), { timeout: 10_000 })
+      .toBe(true);
+
+    await page.locator('[data-slot="tool-group-trigger"]').first().click();
+    await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
+    // Opened by hand, and there is nothing to answer inside it.
+    await expect.poll(() => page.getByText('npm test', { exact: false }).first().isVisible()).toBe(
+      true,
+    );
+    expect(await page.locator('[data-slot="tool-fallback-approval"]').count()).toBe(0);
+    expect(await page.getByText('Wants to run:').count()).toBe(0);
+    expect(await page.getByText('Unfinished tool:').first().isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // Leaving a thread mid-turn and coming back. The orchestrator is the ACP
 // client of record, so the turn is still running; the view is a fresh store
 // with nothing in flight, and only the gateway can tell it otherwise.
