@@ -232,6 +232,11 @@ phone whenever you like; reattaching replays the thread from the session's own
 history — including a turn that is still running, which comes back mid-flight
 rather than looking finished. Opening a stopped session starts it again.
 
+The tab's title is the box and the conversation, behind a symbol for what that
+thread is doing: `⟳` running a turn, `⚠` waiting for a permission decision,
+`?` waiting for an answer, `○` idle. Several boxes in several tabs is the
+normal way to use this, and the symbol is the part a narrow tab still shows.
+
 **Watch it think.** A turn shows the agent's reasoning as a collapsed
 *Reasoning* line above what it does, streaming while it goes. Its mode and
 its model are in the header, and behind the sliders next to them is

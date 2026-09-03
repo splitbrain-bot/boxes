@@ -26,11 +26,24 @@ import {
  * everything here is unit-testable without a renderer.
  */
 
+/**
+ * What the thread is blocked on the user for.
+ *
+ * `permission` is the gate: may this tool call proceed. `question` is the
+ * agent asking which of several courses to take — leaving plan mode is the
+ * one Boxes meets most, since a fork starts there. The two are one ACP
+ * mechanism and two different things to a reader, which is why the tab says
+ * which it is rather than only that something is waiting.
+ */
+export type Awaiting = 'permission' | 'question';
+
 /** What the view renders. Every field is replaced, never mutated. */
 export interface ThreadSnapshot {
   messages: readonly Message[];
   /** True while a prompt is in flight upstream. */
   isRunning: boolean;
+  /** What the thread is waiting for an answer to, or null. */
+  awaiting: Awaiting | null;
   connection: ConnectionState;
   modes: SessionModeState | null;
   /** The options the adapter lets a client set, such as the model. */
@@ -89,6 +102,7 @@ export class ThreadStore {
     this.snapshot = {
       messages: [],
       isRunning: false,
+      awaiting: null,
       connection: 'connecting',
       modes: null,
       configOptions: [],
@@ -109,7 +123,12 @@ export class ThreadStore {
 
   /** Publishes a new snapshot and wakes every subscriber. */
   private emit(patch: Partial<ThreadSnapshot> = {}): void {
-    this.snapshot = { ...this.snapshot, ...patch, isRunning: this.running };
+    this.snapshot = {
+      ...this.snapshot,
+      ...patch,
+      isRunning: this.running,
+      awaiting: this.awaiting,
+    };
     for (const l of this.listeners) l();
   }
 
@@ -125,6 +144,19 @@ export class ThreadStore {
    */
   private get running(): boolean {
     return (this.promptsInFlight > 0 || this.turnUpstream) && this.approvals.size === 0;
+  }
+
+  /**
+   * What the oldest open request is asking for, or null when none is open.
+   *
+   * The oldest rather than the newest: it is the one that has been holding
+   * the turn up, and it is the one the reader is being taken to.
+   */
+  private get awaiting(): Awaiting | null {
+    for (const approval of this.approvals.keys()) {
+      return isQuestion(this.optionsFor(approval)) ? 'question' : 'permission';
+    }
+    return null;
   }
 
   /**
@@ -508,3 +540,29 @@ function trailerOf(outcome: {
   return [`[exit ${outcome.exitCode ?? 'killed'}]`, ...notes].join(' · ');
 }
 
+/**
+ * Whether an open request is a question rather than a permission gate.
+ *
+ * ACP carries both as a permission request, and the options are what tell
+ * them apart. A gate offers one way to say yes and one to say no, sometimes
+ * doubled by scope — allow once, allow always. A question offers several ways
+ * to say yes, because each is a different thing to do: leaving plan mode asks
+ * whether to continue in auto, to auto-accept edits, or to approve each one,
+ * and none of those is "the same yes, for longer".
+ *
+ * So: two or more answers of the same kind means the reader is being asked to
+ * choose between courses of action, not to permit one.
+ *
+ * (The adapter's own AskUserQuestion tool would be the other source of these.
+ * It is disabled while the client advertises no elicitation support, which
+ * this one does not — a form is a surface Boxes has not built.)
+ */
+function isQuestion(options: readonly PermissionOption[]): boolean {
+  const seen = new Set<string>();
+  for (const option of options) {
+    if (!option.kind?.startsWith('allow')) continue;
+    if (seen.has(option.kind)) return true;
+    seen.add(option.kind);
+  }
+  return false;
+}

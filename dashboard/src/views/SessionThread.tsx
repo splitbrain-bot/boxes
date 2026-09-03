@@ -12,6 +12,8 @@ import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../api.ts';
+import { useDocumentTitle } from '@/hooks/use-document-title';
+import { threadTitle, type TabState } from '@/lib/tab-title';
 import { useSessions } from '../stores/sessions.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
 import { bangCommand } from '../stores/thread/exec.ts';
@@ -77,6 +79,16 @@ export function SessionThread() {
   const threads = session?.threads ?? [];
   const thread = threads.find((t) => t.id === (threadId ?? session?.currentThreadId));
   const threadLabel = thread ? threadName(thread) : null;
+
+  /**
+   * What this tab is doing, for its title.
+   *
+   * A question outranks a running turn because it is the one that stopped:
+   * the two cannot both be true anyway — a thread waiting on an answer is not
+   * running, which is the whole point of the request.
+   */
+  const tabState: TabState = state.awaiting ?? (state.isRunning ? 'running' : 'idle');
+  useDocumentTitle(threadTitle(tabState, session?.name ?? id, threadLabel));
 
   /**
    * Branches this conversation and reveals the result as a link.

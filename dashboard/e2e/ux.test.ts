@@ -414,6 +414,104 @@ test('the model selector lists the advertised models and sets one', async () => 
   }
 });
 
+// The tab title. Several boxes in several tabs, all called "Boxes", said
+// nothing about which one had stopped for a question.
+test('the tab says which box and thread it is, and what that thread is doing', async () => {
+  await start({ prompts: [{ match: () => true, updates: reply('done'), hold: true }] });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    // The box's name and the conversation's, in the header's own order and
+    // with the header's own names for them.
+    await expect
+      .poll(() => page.title())
+      .toBe('\u25cb refactor auth \u00b7 Thread 1');
+
+    const input = page.getByLabel('Message input');
+    await input.fill('go');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('\u27f3 refactor auth \u00b7 Thread 1');
+
+    stub.gateway.release();
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('\u25cb refactor auth \u00b7 Thread 1');
+
+    // And leaving the thread puts the plain app title back.
+    await page.getByLabel('Back to sessions').click();
+    await expect.poll(() => page.title()).toBe('Boxes');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a thread waiting on a decision says so in its tab', async () => {
+  await start({
+    permissions: [
+      {
+        match: () => true,
+        toolCall: { toolCallId: 'p1', title: 'Write to src/main.ts', kind: 'edit' },
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+        ],
+        after: () => [],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('edit the file');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('\u26a0 refactor auth \u00b7 Thread 1');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a thread asked which way to go says that instead', async () => {
+  await start({
+    permissions: [
+      {
+        match: () => true,
+        toolCall: { toolCallId: 'p1', title: 'Leave plan mode', kind: 'switch_mode' },
+        // Three ways to say yes, each a different thing to do next: a
+        // question, not a gate.
+        options: [
+          { optionId: 'auto', name: 'Yes, and use auto mode', kind: 'allow_always' },
+          { optionId: 'acceptEdits', name: 'Yes, and auto-accept edits', kind: 'allow_always' },
+          { optionId: 'default', name: 'Yes, and approve each edit', kind: 'allow_once' },
+          { optionId: 'plan', name: 'No, keep planning', kind: 'reject_once' },
+        ],
+        after: () => [],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('ready to build it');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('? refactor auth \u00b7 Thread 1');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // Effort, and everything else the adapter offers beyond the model. These had
 // no control at all, so the effort level could not be set.
 test("the adapter's other settings are reachable, and setting one is sent", async () => {
