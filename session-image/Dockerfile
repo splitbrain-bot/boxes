@@ -147,7 +147,17 @@ RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
 
 # The adapter is pinned here and nowhere else. Do not switch to
 # @zed-industries/claude-code-acp, which is stale at 0.16.2.
-RUN npm install -g \
+#
+# --prefix names /usr/local rather than leaving npm to work it out, because
+# what npm works out is the grandparent of the node binary -- and no npmrc
+# here overrides that. Under the official node image node sat in
+# /usr/local/bin and the default was already /usr/local, so this never had to
+# be said; Node from NodeSource sits in /usr/bin, which silently moves every
+# global to /usr/bin instead. Naming the prefix keeps /usr/local the one place
+# the image's own globals live however Node arrives, out of the /usr/bin the
+# distribution's own packages own, and it is what the identity check below
+# asserts the adapter resolves to.
+RUN npm install -g --prefix /usr/local \
       @anthropic-ai/claude-code \
       @agentclientprotocol/claude-agent-acp@0.70.0 \
  && npm cache clean --force
@@ -187,6 +197,10 @@ RUN npm install -g \
 # libnss3-tools is not Playwright's: it is certutil, which the entrypoint uses
 # to put the deployment CA where Chromium will actually look for it.
 #
+# --prefix for the reason the adapter's install gives above, and here it also
+# has to land somewhere the next command can reach: /usr/local/bin is on PATH,
+# and playwright-cli is run by name on the line after it is installed.
+#
 # /usr/local/bin/chromium is the browser under a name something other than
 # this CLI can find. Playwright installs it as
 # chromium-<revision>/chrome-linux64/chrome, where the revision belongs to
@@ -195,11 +209,12 @@ RUN npm install -g \
 # and cannot download into /opt because the image is read-only at runtime. A
 # test suite that would rather use the browser that is here than fetch a
 # second one needs a path it can hardcode, and this is it. `--version` is the
-# assertion that the link points at something that runs, which is also the
-# only check in this build that the system libraries arrived.
+# assertion that the link points at something that runs, and the first thing
+# in this build to say so -- the browser check at the end says it again, and
+# far later.
 ARG PLAYWRIGHT_CLI_VERSION=0.1.19
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN npm install -g @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
+RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
  && npm cache clean --force \
  && playwright-cli install-browser chromium --with-deps \
  && ln -s "$(find "${PLAYWRIGHT_BROWSERS_PATH}" -maxdepth 3 -type f -name chrome \
@@ -353,23 +368,33 @@ RUN set -eu; \
 #
 # Served over loopback by python rather than fetched, because the build host
 # has no business needing egress for this, and `file:` URLs are blocked by the
-# CLI by design. --config points at the image's copy: the global config does
-# not exist until the entrypoint writes one.
+# CLI by design.
+#
+# The image's copy of the config is put at .playwright/cli.config.json in the
+# working directory -- the project location the CLI resolves first -- rather
+# than passed as --config, which is an option of `open` alone and not a global
+# one: `snapshot` rejects it outright, and `close` takes no options at all.
+# The global config would be the other place to put it, but that is
+# ~/.playwright, and anything left there is baked into every session's home
+# volume. Placed rather than passed, all three commands resolve the same
+# config, whether one launches the browser or attaches to the one already up.
 RUN set -eu; \
     cd /tmp; \
     printf '<!doctype html><title>t</title><button>Continue</button>\n' > index.html; \
     python3 -m http.server 18901 --bind 127.0.0.1 >/dev/null 2>&1 & \
     server=$!; \
     trap 'kill $server 2>/dev/null || true' EXIT; \
-    cfg=/usr/local/share/boxes/playwright-cli.config.json; \
+    mkdir -p /tmp/.playwright; \
+    cp /usr/local/share/boxes/playwright-cli.config.json \
+      /tmp/.playwright/cli.config.json; \
     for _ in $(seq 1 50); do \
       curl -fsS -o /dev/null http://127.0.0.1:18901/ && break; sleep 0.2; \
     done; \
-    playwright-cli --config "$cfg" open http://127.0.0.1:18901/; \
-    playwright-cli --config "$cfg" snapshot >/dev/null; \
+    playwright-cli open http://127.0.0.1:18901/; \
+    playwright-cli snapshot >/dev/null; \
     grep -qE 'button "Continue" \[ref=e[0-9]+\]' .playwright-cli/*.yml; \
-    playwright-cli --config "$cfg" close; \
-    rm -rf /tmp/index.html /tmp/.playwright-cli
+    playwright-cli close; \
+    rm -rf /tmp/index.html /tmp/.playwright /tmp/.playwright-cli
 
 # The toolchains build something, as the agent, with their caches where a
 # session will really put them.
