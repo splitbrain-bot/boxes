@@ -183,6 +183,63 @@ test('cancelling stops the run state', async () => {
   }
 });
 
+test('a thread that has not been read yet shows a placeholder, then all of it at once', async () => {
+  // Long enough to scroll, so where the reading starts is a real question.
+  const said = Array.from({ length: 12 }, (_, i) => `exchange number ${i}`);
+  await start({ holdLoad: true });
+  for (const text of said) {
+    stub.gateway.emit({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `asking about ${text}` },
+    } as SessionUpdate);
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `answering about ${text}` },
+    } as SessionUpdate);
+  }
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    // The load is held, which is the box still starting as far as this
+    // browser can tell: no history has arrived and none of it is on screen.
+    await expect.poll(() => page.locator('[data-slot="thread-loading"]').isVisible()).toBe(true);
+
+    // Nothing to type into and nothing that claims the thread is empty. The
+    // greeting was the worse of the two: it says there is nothing here to
+    // read, on arrival at a conversation, moments before being replaced.
+    expect(await page.getByLabel('Message input').count()).toBe(0);
+    expect(await page.getByText('How can I help you today?').count()).toBe(0);
+
+    stub.gateway.releaseLoad();
+
+    // The placeholder goes when the conversation arrives, and what arrives is
+    // the whole of it: the first exchange and the last are on screen in the
+    // same breath, not one render apart.
+    await expect
+      .poll(() => page.locator('[data-slot="thread-loading"]').count(), { timeout: 5000 })
+      .toBe(0);
+    expect(await page.getByText('asking about exchange number 0').count()).toBe(1);
+    expect(await page.getByText('answering about exchange number 11').count()).toBe(1);
+    // And now there is somewhere to type.
+    expect(await page.getByLabel('Message input').isVisible()).toBe(true);
+
+    // Opened at the end of the conversation, which is where a thread is read
+    // from — not at whichever message the last render happened to leave.
+    const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+    await expect
+      .poll(() =>
+        viewport.evaluate((el) =>
+          Math.round(el.scrollHeight - el.clientHeight - el.scrollTop),
+        ),
+      )
+      .toBeLessThanOrEqual(4);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the header steps aside while reading down, and returns on the way back up', async () => {
   // Long enough to scroll: the header can only give way to a conversation
   // that has somewhere to go.

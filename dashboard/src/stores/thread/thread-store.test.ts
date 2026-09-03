@@ -298,9 +298,20 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
 
   // What a fresh connection does: reset, then replay the same history.
   client.handlers.onResetThread();
-  assert.equal(store.getSnapshot().messages.length, 0);
-  for (const u of script) push(client, u);
+  // The conversation somebody is reading is not blanked to do that: the model
+  // is what went stale, and the socket dropping is not news about the thread.
   assert.equal(store.getSnapshot().messages.length, 2);
+
+  // Nor is the rebuild published on its way past, message by message.
+  const during = store.getSnapshot().messages;
+  for (const u of script) push(client, u);
+  assert.equal(store.getSnapshot().messages, during);
+
+  // The replay answered: what is on screen is what it said, once, and not
+  // both copies of it.
+  client.handlers.onReady(null, []);
+  assert.equal(store.getSnapshot().messages.length, 2);
+  assert.notEqual(store.getSnapshot().messages, during);
 });
 
 test('a permission request attaches to its tool call and its answer unblocks the turn', async () => {

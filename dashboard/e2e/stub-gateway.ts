@@ -52,6 +52,11 @@ export interface GatewayScript {
   permissions: PermissionScript[];
   /** Delivered to the next socket that attaches, then cleared. */
   queuedPermission: PermissionScript | null;
+  /**
+   * Hold every session/load until the test releases it, so the window a
+   * browser spends waiting for its history is a window assertions fit in.
+   */
+  holdLoad?: boolean;
 }
 
 /** A running stub gateway. */
@@ -75,6 +80,8 @@ export interface StubGateway {
   select: (threadId: string) => void;
   /** Releases a held prompt, ending the turn. */
   release: () => void;
+  /** Releases every held session/load, replay and all. */
+  releaseLoad: () => void;
   /** Sends one update to the sockets watching a thread, and records it. */
   emit: (update: SessionUpdate, threadId?: string) => void;
   close: () => void;
@@ -116,6 +123,8 @@ export function attachStubGateway(
   const prompts: string[] = [];
   /** Set while a prompt is held open, so the test can end the turn. */
   let releaseHeld: (() => void) | null = null;
+  /** Loads waiting for releaseLoad, when the script holds them. */
+  const heldLoads: Array<() => void> = [];
   /** Threads with a prompt running, which is what turn state reports. */
   const running = new Set<string>();
 
@@ -235,7 +244,7 @@ export function attachStubGateway(
 
       case 'session/load': {
         const threadId = String(params(msg)['sessionId'] ?? pinned);
-        reply({ modes: script.modes, configOptions: script.configOptions });
+        if (script.holdLoad) await new Promise<void>((go) => heldLoads.push(go));
         // Replay is that thread's stored history re-sent as notifications, to
         // this socket only.
         for (const update of historyOf(threadId)) {
@@ -257,7 +266,12 @@ export function attachStubGateway(
           script.queuedPermission = null;
           void askPermission(ws, queued, threadId);
         }
-        return undefined;
+        // Answered last, which is the order that matters: the real gateway
+        // forwards the adapter's replay as it arrives and returns the result
+        // only once the load has finished (orchestrator's downstream.ts). A
+        // client is entitled to read the answer as "that is all of it", and
+        // this one does — it is where the thread reaches the screen.
+        return reply({ modes: script.modes, configOptions: script.configOptions });
       }
 
       case 'session/set_mode': {
@@ -404,6 +418,9 @@ export function attachStubGateway(
       current = threadId;
     },
     release: () => releaseHeld?.(),
+    releaseLoad: () => {
+      for (const go of heldLoads.splice(0)) go();
+    },
     emit,
     close: () => {
       for (const ws of sockets.keys()) ws.close();

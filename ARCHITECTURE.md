@@ -311,6 +311,29 @@ history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
 
+A replay is folded in silence and published once. The notifications are the
+same ones live streaming uses, so the store used to hand the view every
+intermediate state of a conversation it was in the middle of re-reading: on
+arrival at a box with any history, the thread assembled itself message by
+message, the viewport chased the bottom of it, and the reading position ended
+up wherever the last render left it. Now the model is built up with nothing
+emitted, and the snapshot that ends the replay is the whole conversation —
+which the runtime's autoscroll opens at its end, because that is where a
+thread is read from. `session/load` answering is what says the replay is over:
+the gateway forwards the adapter's notifications as they arrive and returns
+the result only afterwards, so the answer means "that was all of it". A replay
+that never answers publishes nothing at all: the connection is reconnecting,
+the view says so, and half a conversation is not a better answer than the
+whole of the previous one.
+
+Until a replay has landed the thread shows a placeholder — a pulsing
+conversation shape, and nothing that can be acted on. What was there before is
+a composer over *How can I help you today?*, which is a claim that the thread
+is empty: true of a box that has never been prompted, and on arrival at one
+with a conversation in it both wrong and about to be replaced. A reconnect
+mid-session keeps showing what it was showing, since the socket dropping is
+not news about the conversation; only a first read shows the placeholder.
+
 `available_commands_update` carries the slash commands this agent accepts, and
 the composer completes them: a leading `/` opens the list, each further
 character narrows it, and picking one writes the command's name into the

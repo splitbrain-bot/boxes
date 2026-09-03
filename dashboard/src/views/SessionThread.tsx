@@ -21,6 +21,7 @@ import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
 import { threadName } from '@/lib/threads';
 import { Shelf } from '@/components/Shelf';
+import { ThreadLoading } from '@/components/ThreadLoading';
 import { ThreadHeader } from '@/components/ThreadHeader';
 import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
@@ -254,6 +255,11 @@ export function SessionThread() {
                     Back to sessions
                   </Link>
                 </div>
+              ) : state.loading ? (
+                // Nothing to type into and nothing to read yet: the box may
+                // still be starting, and the conversation arrives in one
+                // piece when it has been read. See ThreadLoading.
+                <ThreadLoading />
               ) : (
                 <Thread />
               )}
