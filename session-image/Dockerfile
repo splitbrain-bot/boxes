@@ -353,23 +353,33 @@ RUN set -eu; \
 #
 # Served over loopback by python rather than fetched, because the build host
 # has no business needing egress for this, and `file:` URLs are blocked by the
-# CLI by design. --config points at the image's copy: the global config does
-# not exist until the entrypoint writes one.
+# CLI by design.
+#
+# The image's copy of the config is put at .playwright/cli.config.json in the
+# working directory -- the project location the CLI resolves first -- rather
+# than passed as --config, which is an option of `open` alone and not a global
+# one: `snapshot` rejects it outright, and `close` takes no options at all.
+# The global config would be the other place to put it, but that is
+# ~/.playwright, and anything left there is baked into every session's home
+# volume. Placed rather than passed, all three commands resolve the same
+# config, whether one launches the browser or attaches to the one already up.
 RUN set -eu; \
     cd /tmp; \
     printf '<!doctype html><title>t</title><button>Continue</button>\n' > index.html; \
     python3 -m http.server 18901 --bind 127.0.0.1 >/dev/null 2>&1 & \
     server=$!; \
     trap 'kill $server 2>/dev/null || true' EXIT; \
-    cfg=/usr/local/share/boxes/playwright-cli.config.json; \
+    mkdir -p /tmp/.playwright; \
+    cp /usr/local/share/boxes/playwright-cli.config.json \
+      /tmp/.playwright/cli.config.json; \
     for _ in $(seq 1 50); do \
       curl -fsS -o /dev/null http://127.0.0.1:18901/ && break; sleep 0.2; \
     done; \
-    playwright-cli --config "$cfg" open http://127.0.0.1:18901/; \
-    playwright-cli --config "$cfg" snapshot >/dev/null; \
+    playwright-cli open http://127.0.0.1:18901/; \
+    playwright-cli snapshot >/dev/null; \
     grep -qE 'button "Continue" \[ref=e[0-9]+\]' .playwright-cli/*.yml; \
-    playwright-cli --config "$cfg" close; \
-    rm -rf /tmp/index.html /tmp/.playwright-cli
+    playwright-cli close; \
+    rm -rf /tmp/index.html /tmp/.playwright /tmp/.playwright-cli
 
 # The toolchains build something, as the agent, with their caches where a
 # session will really put them.
