@@ -147,7 +147,17 @@ RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
 
 # The adapter is pinned here and nowhere else. Do not switch to
 # @zed-industries/claude-code-acp, which is stale at 0.16.2.
-RUN npm install -g \
+#
+# --prefix names /usr/local rather than leaving npm to work it out, because
+# what npm works out is the grandparent of the node binary -- and no npmrc
+# here overrides that. Under the official node image node sat in
+# /usr/local/bin and the default was already /usr/local, so this never had to
+# be said; Node from NodeSource sits in /usr/bin, which silently moves every
+# global to /usr/bin instead. Naming the prefix keeps /usr/local the one place
+# the image's own globals live however Node arrives, out of the /usr/bin the
+# distribution's own packages own, and it is what the identity check below
+# asserts the adapter resolves to.
+RUN npm install -g --prefix /usr/local \
       @anthropic-ai/claude-code \
       @agentclientprotocol/claude-agent-acp@0.70.0 \
  && npm cache clean --force
@@ -186,9 +196,13 @@ RUN npm install -g \
 #
 # libnss3-tools is not Playwright's: it is certutil, which the entrypoint uses
 # to put the deployment CA where Chromium will actually look for it.
+#
+# --prefix for the reason the adapter's install gives above, and here it also
+# has to land somewhere the next command can reach: /usr/local/bin is on PATH,
+# and playwright-cli is run by name on the line after it is installed.
 ARG PLAYWRIGHT_CLI_VERSION=0.1.19
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN npm install -g @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
+RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
  && npm cache clean --force \
  && playwright-cli install-browser chromium --with-deps \
  && apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
