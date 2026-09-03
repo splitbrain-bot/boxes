@@ -147,12 +147,19 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  a: ({ className, ...props }) => (
+  // Boxes edit: a link in chat output opens in a new tab, and cannot reach
+  // back into this one. A thread is a long-lived thing that survives the
+  // browser going away, and following a link out of it in place is how you
+  // lose the composer you were half way through typing into.
+  a: ({ className, target, rel, ...props }) => (
     <a
       className={cn(
         "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
         className,
       )}
+      target={target ?? "_blank"}
+      // noreferrer implies noopener; both, because the model wrote the href.
+      rel={rel ?? "noreferrer"}
       {...props}
     />
   ),
