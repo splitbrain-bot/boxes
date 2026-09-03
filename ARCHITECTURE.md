@@ -514,9 +514,9 @@ proceeding without consent.
   mid-question, the request falls back to the queue rather than failing the
   turn.
 - With nobody on that thread, the request is stored in `pending_requests`
-  against the thread's ACP id and, when `NTFY_URL` is set, a notification is
-  posted. The next browser to attach *to that thread* gets its queued requests
-  delivered to it, and only those.
+  against the thread's ACP id and a notification is pushed. The next browser
+  to attach *to that thread* gets its queued requests delivered to it, and
+  only those.
 - After `PERMISSION_HOLD_MINUTES`, `PERMISSION_FALLBACK` decides. `hold` keeps
   waiting. `deny` answers with a reject option taken from the request's own
   options list, never an invented one, and cancels the request when none is
@@ -536,16 +536,16 @@ The announcement names the conversation, not only the box. With two threads
 live, "your session needs you" is not something you can act on from a lock
 screen.
 
-`Notifier` fans one event out to two channels and awaits neither of them from
-the gateway's side. A turn already waiting on a human must not also wait on a
-push service, so every failure inside is logged and swallowed.
+`Notifier` sends one event and the gateway's side awaits none of it. A turn
+already waiting on a human must not also wait on a push service, so every
+failure inside is logged and swallowed.
 
-- **`NTFY_URL`**, when set: one POST, no other requirement, and it reaches a
-  phone with no browser running at all.
 - **Web Push** (`push.ts`), to every browser that subscribed: RFC 8291
   `aes128gcm` payload encryption over RFC 8188, authenticated with an RFC 8292
   VAPID assertion. This is what survives the app being closed, which is the
-  reason the feature exists.
+  reason the feature exists — and it is the only channel, deliberately: a
+  second one that reached a third party would be Boxes telling somebody else
+  which of your boxes wants you and when.
 
 The crypto is implemented on `node:crypto` rather than taken as a dependency.
 It is about a hundred lines, and `push.test.ts` drives it against the RFC's
@@ -1016,9 +1016,9 @@ outside a container, under `npm run dev` and in its own tests. Inside the
 image every default is already the right answer, which is why compose passes
 an env file and otherwise stays out of it.
 
-An empty value counts as unset. `NTFY_URL=` in an env file arrives as an
-empty string, and failing the boot on a setting nobody set would be a poor
-way to read it.
+An empty value counts as unset. `SESSION_MEM_LIMIT=` in an env file arrives
+as an empty string, and failing the boot on a setting nobody set would be a
+poor way to read it.
 
 `WS_AUTH_TOKEN` is the exception, because a shipped default for a secret would
 be a published password. Left unset, `secret.ts` generates a token on first
@@ -1065,7 +1065,7 @@ orchestrator/src/
   exec.ts               Local commands: limits, streaming, the exec log
   config.ts             Environment parsing, and the translatable credential set
   secret.ts             WS auth token: configured, stored, or generated
-  notify.ts             "A thread wants you", fanned out to ntfy and Web Push
+  notify.ts             "A thread wants you", pushed to every subscribed browser
   push.ts               VAPID and RFC 8291 payload encryption, on node:crypto
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log

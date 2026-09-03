@@ -187,7 +187,6 @@ docker exec -it session-<id> claude /login
 | `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
 | `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
-| `NTFY_URL` | — | POSTed when a session wants you |
 | `PUSH_SUBJECT` | project URL | Contact in the VAPID assertion Web Push carries |
 | `DATA_DIR` | `/data` | Database, generated token and session workspaces, inside the volume |
 | `HOST_DATA_DIR` | resolved | Host-side path of `DATA_DIR`, which a workspace bind mount has to name. Resolved at boot by inspecting the orchestrator's own container; set it only where that cannot work |
@@ -326,16 +325,17 @@ Idle sessions — no turn on any thread, no waiting request, no attached browser
 
 ## Notifications
 
-A box that wants something tells you, on two channels, whenever **nobody is
-watching that thread**: a permission request has been queued, or a turn has
-finished. A turn finishing in front of you is not announced — that is the
-screen you are already looking at.
+A box that wants something tells you whenever **nobody is watching that
+thread**: a permission request has been queued, or a turn has finished. A
+turn finishing in front of you is not announced — that is the screen you are
+already looking at.
 
-**Web Push** reaches a browser with no tab open, which is the case the feature
-exists for: lock your phone mid-turn and the answer arrives on the lock screen.
-Tap *Notify me* on the session list to subscribe this browser. Nothing to
-configure — the deployment generates its own VAPID keypair into
-`/data/vapid-keys.json` on first use, and the tap is the whole setup.
+**Web Push** is the one channel, and it reaches a browser with no tab open,
+which is the case the feature exists for: lock your phone mid-turn and the
+answer arrives on the lock screen. Tap *Notify me* on the session list to
+subscribe this browser. Nothing to configure — the deployment generates its
+own VAPID keypair into `/data/vapid-keys.json` on first use, and the tap is
+the whole setup.
 
 Two things it needs, both outside Boxes:
 
@@ -348,11 +348,6 @@ Two things it needs, both outside Boxes:
 - **Add to Home Screen, on iOS.** Safari gives a page the Push API only once
   it has been installed. Share → Add to Home Screen, open it from there, then
   subscribe. Android and desktop browsers need no install.
-
-**`NTFY_URL`** is the other channel and needs neither: the same events are
-POSTed to whatever [ntfy](https://ntfy.sh) topic you point it at, from a
-deployment with no TLS and to a phone with no browser open. Setting both is
-reasonable — they fail in different ways.
 
 Unsubscribing is the same toggle. A subscription the push service reports as
 finished — permission revoked, browser uninstalled, Safari expiring it on its

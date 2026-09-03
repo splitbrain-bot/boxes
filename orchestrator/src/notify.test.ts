@@ -5,15 +5,15 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import { loadConfig, type Config } from './config.ts';
 import { openDb, upsertPushSubscription, type Db } from './db.ts';
-import { Notifier, type NotifyEvent } from './notify.ts';
+import { Notifier, wording, type NotifyEvent } from './notify.ts';
 
 /**
- * The fan-out, with both channels' transports faked at fetch.
+ * The fan-out, with the transport faked at fetch.
  *
  * What matters here is not the bytes — push.test.ts covers those against the
- * RFC's own vectors — but that one event reaches every channel, that a turn
- * is never held up by a push service, and that a subscription the service
- * says is finished is forgotten rather than retried forever.
+ * RFC's own vectors — but that one event reaches every subscribed browser,
+ * that a turn is never held up by a push service, and that a subscription
+ * the service says is finished is forgotten rather than retried forever.
  */
 
 let dir: string;
@@ -63,7 +63,7 @@ const event: NotifyEvent = {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-notify-'));
   db = openDb(dir);
-  cfg = loadConfig({ DATA_DIR: dir, NTFY_URL: 'https://ntfy.example/boxes' });
+  cfg = loadConfig({ DATA_DIR: dir });
   calls = [];
 });
 
@@ -73,7 +73,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('one event reaches ntfy and every subscribed browser', async () => {
+test('one event reaches every subscribed browser', async () => {
   subscribe('https://push.example.net/a');
   subscribe('https://push.example.org/b');
   fakeFetch(() => ({ status: 201 }));
@@ -81,41 +81,20 @@ test('one event reaches ntfy and every subscribed browser', async () => {
   await new Notifier(db, cfg).notify(event);
 
   const urls = calls.map((c) => c.url).sort();
-  assert.deepEqual(urls, [
-    'https://ntfy.example/boxes',
-    'https://push.example.net/a',
-    'https://push.example.org/b',
-  ]);
+  assert.deepEqual(urls, ['https://push.example.net/a', 'https://push.example.org/b']);
   const push = calls.find((c) => c.url.includes('push.example.net'))!;
   assert.equal(push.headers['Content-Encoding'], 'aes128gcm');
   assert.match(push.headers['Authorization']!, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
 });
 
-test('the thread is named in the message, not just the session', async () => {
-  fakeFetch(() => ({ status: 200 }));
-  let body = '';
-  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
-    body = String(init?.body ?? '');
-    calls.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
-    return new Response(null, { status: 200 });
-  }) as typeof globalThis.fetch;
-
-  await new Notifier(db, cfg).notify(event);
+test('the thread is named in the message, not just the session', () => {
   // From a lock screen, "your session needs you" is not enough to act on.
-  assert.match(body, /muffin · Rewrite the parser/);
+  assert.match(wording(event).body, /muffin · Rewrite the parser/);
 });
 
-test('an idle event and an approval read differently', async () => {
-  const titles: string[] = [];
-  globalThis.fetch = (async (_input: string | URL, init?: RequestInit) => {
-    titles.push((init?.headers as Record<string, string>)['Title'] ?? '');
-    return new Response(null, { status: 200 });
-  }) as typeof globalThis.fetch;
-
-  const notifier = new Notifier(db, cfg);
-  await notifier.notify(event);
-  await notifier.notify({ ...event, kind: 'idle' });
-  assert.deepEqual(titles, ['Boxes: approval needed', 'Boxes: turn finished']);
+test('an idle event and an approval read differently', () => {
+  assert.equal(wording(event).title, 'Boxes: approval needed');
+  assert.equal(wording({ ...event, kind: 'idle' }).title, 'Boxes: turn finished');
 });
 
 test('a subscription the push service has finished with is forgotten', async () => {
@@ -149,8 +128,8 @@ test('a push service that is merely down keeps its subscription', async () => {
   assert.equal(remaining.n, 1);
 });
 
-test('nothing is sent when no channel is configured', async () => {
+test('nothing is sent when no browser has subscribed', async () => {
   fakeFetch(() => ({ status: 200 }));
-  await new Notifier(db, loadConfig({ DATA_DIR: dir })).notify(event);
+  await new Notifier(db, cfg).notify(event);
   assert.deepEqual(calls, []);
 });

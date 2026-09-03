@@ -70,7 +70,6 @@ const schema = z.object({
 
   PERMISSION_FALLBACK: z.enum(['hold', 'deny']).default('hold'),
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
-  NTFY_URL: z.string().url().or(z.literal('')).default(''),
 
   /**
    * Who operates this deployment, for the VAPID assertion every Web Push
