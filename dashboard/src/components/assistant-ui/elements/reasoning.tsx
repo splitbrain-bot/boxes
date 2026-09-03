@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
-import { BrainIcon, ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -172,23 +172,25 @@ function ReasoningTrigger({
 }) {
   const durationText = duration ? ` (${duration}s)` : "";
 
+  /* Boxes edit: the same line the tool group draws for "1 tool call" —
+     text-xs, a size-3 chevron, and no leading icon. The brain was the loudest
+     thing in a thread whose subject is elsewhere, and it sat above reasoning
+     that already says what it is. Sizes are matched to
+     tool-group.aui.tsx rather than merely reduced, so the two disclosures a
+     message can carry read as one kind of row. */
   return (
     <CollapsibleTrigger
       data-slot="reasoning-trigger"
       className={cn(
-        "aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex max-w-[75%] origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
+        "aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit origin-left items-center gap-2 py-1.5 transition-[color,scale] active:scale-[0.98]",
         className,
       )}
       {...props}
     >
-      <BrainIcon
-        data-slot="reasoning-trigger-icon"
-        className="aui-reasoning-trigger-icon size-4 shrink-0"
-      />
       <span
         data-slot="reasoning-trigger-label"
         className={cn(
-          "aui-reasoning-trigger-label-wrapper inline-block leading-none tabular-nums",
+          "aui-reasoning-trigger-label-wrapper inline-block text-start text-xs leading-none tabular-nums",
           active && "shimmer motion-reduce:animate-none",
         )}
       >
@@ -197,7 +199,7 @@ function ReasoningTrigger({
       <ChevronDownIcon
         data-slot="reasoning-trigger-chevron"
         className={cn(
-          "aui-reasoning-trigger-chevron mt-0.5 size-4 shrink-0",
+          "aui-reasoning-trigger-chevron size-3 shrink-0",
           "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
           "-rotate-90",
           "group-data-open/trigger:rotate-0",
@@ -230,7 +232,11 @@ function ReasoningContent({
       )}
       {...props}
     >
-      <ReasoningFade side="top" />
+      {/* Boxes edit: the top fade only while streaming, as the bottom one
+          already was. It exists so text scrolling out of the preview leaves
+          softly; at rest, with no box around any of this, all it did was dim
+          the first line of the reasoning against the page. */}
+      {isPreview ? <ReasoningFade side="top" /> : null}
       {children}
       {isPreview ? <ReasoningFade /> : null}
     </CollapsibleContent>
@@ -295,7 +301,10 @@ function ReasoningText({
       ref={scrollRef}
       data-slot="reasoning-text"
       className={cn(
-        "aui-reasoning-text relative z-0 max-h-64 overflow-y-auto ps-6 pt-2 pb-2 leading-relaxed text-pretty",
+        /* Boxes edit: ps-6 indented this under the trigger's icon. With no
+           icon there is nothing to indent to, and the text reads as the
+           message's own. */
+        "aui-reasoning-text relative z-0 max-h-64 overflow-y-auto pt-1 pb-2 leading-relaxed text-pretty",
         "transform-gpu transition-[transform,opacity] ease-[cubic-bezier(0.32,0.72,0,1)]",
         "motion-reduce:animate-none",
         "group-data-open/collapsible-content:animate-in",

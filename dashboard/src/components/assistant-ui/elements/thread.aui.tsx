@@ -503,7 +503,12 @@ const AssistantMessage: FC = () => {
                 }
                 const running = part.status.type === "running";
                 return (
-                  <ReasoningRoot streaming={running}>
+                  /* Boxes edit: ghost, the way DefaultToolGroup above renders
+                     its own. Reasoning is the least of what a message says,
+                     and the outline variant gave it the one framed box on the
+                     page — more chrome than the tool calls that did the work.
+                     Ghost leaves the disclosure line and the text. */
+                  <ReasoningRoot variant="ghost" streaming={running}>
                     <ReasoningTrigger active={running} />
                     <ReasoningContent aria-busy={running}>
                       <ReasoningText>{children}</ReasoningText>
