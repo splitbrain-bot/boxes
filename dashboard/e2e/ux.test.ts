@@ -414,6 +414,75 @@ test('the model selector lists the advertised models and sets one', async () => 
   }
 });
 
+// Effort, and everything else the adapter offers beyond the model. These had
+// no control at all, so the effort level could not be set.
+test("the adapter's other settings are reachable, and setting one is sent", async () => {
+  await start({
+    configOptions: [
+      {
+        id: 'mode',
+        name: 'Mode',
+        category: 'mode',
+        type: 'select',
+        currentValue: 'auto',
+        options: [
+          { value: 'auto', name: 'Auto' },
+          { value: 'plan', name: 'Plan' },
+        ],
+      },
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'opus',
+        options: [
+          { value: 'opus', name: 'Opus' },
+          { value: 'sonnet', name: 'Sonnet' },
+        ],
+      },
+      {
+        id: 'effort',
+        name: 'Effort',
+        description: 'Available effort levels for this model',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'default',
+        options: [
+          { value: 'default', name: 'Default' },
+          { value: 'low', name: 'Low' },
+          { value: 'high', name: 'High' },
+        ],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    const settings = page.getByLabel('Agent settings');
+    await expect.poll(() => settings.isVisible()).toBe(true);
+    await settings.click();
+
+    const effort = page.getByRole('combobox', { name: 'Effort' });
+    await expect.poll(() => effort.isVisible()).toBe(true);
+    expect(await effort.locator('option').allInnerTexts()).toEqual(['Default', 'Low', 'High']);
+
+    await effort.selectOption('high');
+    await expect.poll(() => effort.inputValue()).toBe('high');
+    // The adapter heard about it, which is the half a select cannot show.
+    await expect
+      .poll(() => stub.gateway.script.configOptions.find((o) => o.id === 'effort')?.currentValue)
+      .toBe('high');
+
+    // The mode is not doubled into the popover: the switcher beside the name
+    // is already that option, under the adapter's other name for it.
+    expect(await page.getByRole('combobox', { name: 'Mode' }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // The missing-token warning.
 test('a deployment with no Claude token is warned about in the list and the thread', async () => {
   await start();
