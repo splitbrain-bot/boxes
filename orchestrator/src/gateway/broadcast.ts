@@ -1,3 +1,4 @@
+import { TURN_STATE_METHOD } from '../../../shared/types.ts';
 import { log } from '../log.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -140,7 +141,11 @@ export class Broadcast {
   beginPrompt(params: unknown): void {
     const thread = threadOf(params);
     if (!thread) return;
-    this.echoingPrompts.set(thread, (this.echoingPrompts.get(thread) ?? 0) + 1);
+    const before = this.echoingPrompts.get(thread) ?? 0;
+    this.echoingPrompts.set(thread, before + 1);
+    // The first prompt on a thread is what starts its turn; a second one
+    // arriving while that runs does not start a second turn.
+    if (before === 0) this.turnState(thread, true);
     const blocks = (params as { prompt?: unknown })?.prompt;
     if (!Array.isArray(blocks)) return;
     for (const content of blocks) {
@@ -156,8 +161,45 @@ export class Broadcast {
     const thread = threadOf(params);
     if (!thread) return;
     const left = (this.echoingPrompts.get(thread) ?? 0) - 1;
-    if (left > 0) this.echoingPrompts.set(thread, left);
-    else this.echoingPrompts.delete(thread);
+    if (left > 0) {
+      this.echoingPrompts.set(thread, left);
+      return;
+    }
+    this.echoingPrompts.delete(thread);
+    this.turnState(thread, false);
+  }
+
+  /** Whether the gateway is carrying a prompt on a thread right now. */
+  isPrompting(acpThreadId: string): boolean {
+    return (this.echoingPrompts.get(acpThreadId) ?? 0) > 0;
+  }
+
+  /**
+   * Tells the browsers watching a thread whether a turn is running on it.
+   *
+   * The one thing a browser cannot work out for itself: a turn it did not
+   * start, on a thread it has only just re-opened, is indistinguishable from
+   * a finished one until somebody says. See TURN_STATE_METHOD.
+   */
+  turnState(acpThreadId: string, active: boolean): void {
+    this.send(this.byRecency(acpThreadId), TURN_STATE_METHOD, {
+      sessionId: acpThreadId,
+      active,
+    });
+  }
+
+  /** The same, to one browser: what a fresh connection is told after its replay. */
+  turnStateTo(handle: DownstreamHandle, active: boolean): void {
+    if (!handle.acpThreadId) return;
+    this.send([handle], TURN_STATE_METHOD, {
+      sessionId: handle.acpThreadId,
+      active,
+    });
+  }
+
+  /** Says "no turn is running" on every thread anybody is watching. */
+  clearTurnStates(): void {
+    for (const thread of this.watchedThreads) this.turnState(thread, false);
   }
 
   /**
@@ -191,11 +233,17 @@ export class Broadcast {
 
   /** Sends one update to a set of browsers, surviving any one of them failing. */
   private deliver(targets: Iterable<DownstreamHandle>, params: unknown): void {
+    this.send(targets, 'session/update', params);
+  }
+
+  /** Sends one notification to a set of browsers, surviving any one failing. */
+  private send(targets: Iterable<DownstreamHandle>, method: string, params: unknown): void {
     for (const d of targets) {
       try {
-        d.notify('session/update', params);
+        d.notify(method, params);
       } catch (err) {
         log.session(this.sessionId).warn('broadcast failed', {
+          method,
           error: (err as Error).message,
         });
       }

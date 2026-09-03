@@ -232,6 +232,44 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
   }
 });
 
+// Leaving a thread mid-turn and coming back. The orchestrator is the ACP
+// client of record, so the turn is still running; the view is a fresh store
+// with nothing in flight, and only the gateway can tell it otherwise.
+test('a turn still running is still running after a detour away and back', async () => {
+  await start({
+    prompts: [{ match: () => true, updates: reply('working on it'), hold: true }],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('take your time');
+    await input.press('Enter');
+
+    const stop = page.getByLabel('Stop generating');
+    await expect.poll(() => stop.isVisible(), { timeout: 10_000 }).toBe(true);
+
+    // Out to the review and back, which is what tears the store down.
+    await page.getByLabel("Review this session's code").click();
+    await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
+    await page.getByLabel('Back to the thread').click();
+
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    // Still a stop button, not a send button, and still working.
+    await expect.poll(() => stop.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await page.getByLabel('Send message').count()).toBe(0);
+
+    stub.gateway.release();
+    await expect
+      .poll(() => page.getByLabel('Send message').isVisible(), { timeout: 10_000 })
+      .toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // 6 — mode switching.
 test('the mode switcher lists the advertised modes and sets one', async () => {
   await start({

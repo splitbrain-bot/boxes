@@ -1,5 +1,6 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
+import { TURN_STATE_METHOD } from '../../shared/types.ts';
 import type {
   SessionConfigOption,
   SessionModeState,
@@ -115,6 +116,8 @@ export function attachStubGateway(
   const prompts: string[] = [];
   /** Set while a prompt is held open, so the test can end the turn. */
   let releaseHeld: (() => void) | null = null;
+  /** Threads with a prompt running, which is what turn state reports. */
+  const running = new Set<string>();
 
   const historyOf = (threadId: string): SessionUpdate[] => {
     let found = threads.get(threadId);
@@ -128,6 +131,21 @@ export function attachStubGateway(
   /** The sockets watching one thread. Nobody else is told. */
   const watchers = (threadId: string): WebSocket[] =>
     [...sockets].filter(([, pinned]) => pinned === threadId).map(([ws]) => ws);
+
+  /**
+   * The gateway's one ACP extension: whether a turn is running on a thread.
+   * Mirrored here because a browser re-opening a thread mid-turn learns it
+   * from nothing else — see TURN_STATE_METHOD.
+   */
+  const turnState = (threadId: string, active: boolean, only?: WebSocket): void => {
+    for (const ws of only ? [only] : watchers(threadId)) {
+      send(ws, {
+        jsonrpc: '2.0',
+        method: TURN_STATE_METHOD,
+        params: { sessionId: threadId, active },
+      });
+    }
+  };
 
   const emit = (update: SessionUpdate, threadId: string = current): void => {
     historyOf(threadId).push(update);
@@ -227,6 +245,9 @@ export function attachStubGateway(
             params: { sessionId: threadId, update },
           });
         }
+        // Whether that thread is mid-turn, sent where the real gateway sends
+        // it: after the replay the client rebuilds from, never before.
+        turnState(threadId, running.has(threadId), ws);
         // After the replay, which is where the real gateway flushes them
         // (orchestrator/src/gateway/downstream.ts). Delivering one earlier
         // means delivering it into a transcript the client is about to throw
@@ -269,41 +290,58 @@ export function attachStubGateway(
         const blocks = (params(msg)['prompt'] ?? []) as Array<{ type: string; text?: string }>;
         const promptText = blocks.map((b) => b.text ?? '').join('');
         prompts.push(promptText);
-        if (script.echoPrompt !== false) {
-          emit(
-            {
-              sessionUpdate: 'user_message_chunk',
-              content: { type: 'text', text: promptText },
-            } as SessionUpdate,
-            onThread,
-          );
+        running.add(onThread);
+        turnState(onThread, true);
+        try {
+          return await runPrompt(ws, onThread, promptText, reply);
+        } finally {
+          running.delete(onThread);
+          turnState(onThread, false);
         }
-
-        const permission = script.permissions.find((p) => p.match(promptText));
-        if (permission) {
-          await askPermission(ws, permission, onThread);
-          return reply({ stopReason: 'end_turn' });
-        }
-
-        const found = script.prompts.find((p) => p.match(promptText));
-        if (found) {
-          for (const update of found.updates) {
-            if (found.gapMs) await sleep(found.gapMs);
-            emit(update, onThread);
-          }
-          if (found.hold) {
-            await new Promise<void>((resolve) => {
-              releaseHeld = resolve;
-            });
-            releaseHeld = null;
-          }
-        }
-        return reply({ stopReason: 'end_turn' });
       }
 
       default:
         return reply({});
     }
+  }
+
+  /** Streams one prompt's script, or its permission question. */
+  async function runPrompt(
+    ws: WebSocket,
+    onThread: string,
+    promptText: string,
+    reply: (result: unknown) => void,
+  ): Promise<void> {
+    if (script.echoPrompt !== false) {
+      emit(
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: promptText },
+        } as SessionUpdate,
+        onThread,
+      );
+    }
+
+    const permission = script.permissions.find((p) => p.match(promptText));
+    if (permission) {
+      await askPermission(ws, permission, onThread);
+      return reply({ stopReason: 'end_turn' });
+    }
+
+    const found = script.prompts.find((p) => p.match(promptText));
+    if (found) {
+      for (const update of found.updates) {
+        if (found.gapMs) await sleep(found.gapMs);
+        emit(update, onThread);
+      }
+      if (found.hold) {
+        await new Promise<void>((resolve) => {
+          releaseHeld = resolve;
+        });
+        releaseHeld = null;
+      }
+    }
+    return reply({ stopReason: 'end_turn' });
   }
 
   /** Puts a permission question to one socket and streams the aftermath. */

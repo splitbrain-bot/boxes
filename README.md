@@ -229,7 +229,8 @@ which of them this box gets.
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
 interface: type, and the turn runs in the container. Close the tab or lock your
 phone whenever you like; reattaching replays the thread from the session's own
-history. Opening a stopped session starts it again.
+history — including a turn that is still running, which comes back mid-flight
+rather than looking finished. Opening a stopped session starts it again.
 
 **Watch it think.** A turn shows the agent's reasoning as a collapsed
 *Reasoning* line above what it does, streaming while it goes. Its mode and

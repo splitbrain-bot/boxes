@@ -541,3 +541,30 @@ export interface AgentBundlePreview {
    */
   overrides: Array<{ kind: AgentItemKind; name: string }>;
 }
+
+// --- the gateway's one ACP extension ----------------------------------------
+
+/**
+ * Notification the gateway sends a browser to say whether a prompt turn is
+ * running on the thread it is watching.
+ *
+ * ACP has nothing for this. A client learns a turn is running because it sent
+ * the prompt itself and is awaiting the response — which is exactly what a
+ * browser that navigated away and came back did not do. The orchestrator is
+ * the client of record, so it is the only thing that knows, and this is how
+ * it says so: once to each browser after its replay, and again on every
+ * transition.
+ *
+ * The underscore is ACP's extension prefix, and a notification cannot be
+ * replied to — so a client that has never heard of this ignores it, which is
+ * what keeps the endpoint usable by ACP clients that are not this dashboard.
+ */
+export const TURN_STATE_METHOD = '_boxes/turn_state';
+
+/** Params of a `_boxes/turn_state` notification. */
+export interface TurnStateParams {
+  /** The adapter's own id for the thread, as every ACP message names it. */
+  sessionId: string;
+  /** True while a prompt is in flight on that thread. */
+  active: boolean;
+}

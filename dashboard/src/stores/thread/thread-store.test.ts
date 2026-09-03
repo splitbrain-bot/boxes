@@ -167,6 +167,40 @@ test('a prompt marks the thread running until it answers', async () => {
   assert.equal(store.getSnapshot().isRunning, false);
 });
 
+test("the gateway's turn state runs the thread a browser did not prompt", () => {
+  const { store, client } = makeStore();
+  assert.equal(store.getSnapshot().isRunning, false);
+
+  // What a browser is told after its replay when it re-opens a thread that
+  // is mid-turn: nothing is in flight from here, and the turn is real.
+  client.handlers.onTurnState(true);
+  assert.equal(store.getSnapshot().isRunning, true);
+
+  client.handlers.onTurnState(false);
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('a replay drops the turn state it was told before it', () => {
+  const { store, client } = makeStore();
+  client.handlers.onTurnState(true);
+  assert.equal(store.getSnapshot().isRunning, true);
+
+  // A reconnect: the gateway re-states the turn after the replay, so holding
+  // the old answer over one would claim a turn nobody has confirmed.
+  client.handlers.onResetThread();
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('cancel stops a turn this browser did not start', () => {
+  const { store, client } = makeStore();
+  client.handlers.onTurnState(true);
+  store.cancel();
+  assert.deepEqual(client.notifications, [
+    { method: 'session/cancel', params: { sessionId: 'acp-1' } },
+  ]);
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
 test('a failed prompt clears the running state and reports the reason', async () => {
   const { store } = makeStore((c) => {
     c.fail = 'upstream not connected';

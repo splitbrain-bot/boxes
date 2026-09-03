@@ -349,6 +349,7 @@ export class UpstreamSession {
    */
   private clearTurns(): void {
     clearSessionTurns(this.db, this.sessionId);
+    this.downstreams.clearTurnStates();
   }
 
   /**
@@ -909,6 +910,12 @@ export class UpstreamSession {
   flushPendingTo(handle: DownstreamHandle): void {
     const thread = handle.acpThreadId;
     if (!thread) return;
+    // Whether its thread is mid-turn, which is the other thing a replay does
+    // not carry: the transcript says what has been said, not that the agent
+    // is still saying it. Sent here rather than at attach for the same reason
+    // the queued questions are — a client rebuilds from the replay and drops
+    // whatever it held before it landed.
+    this.downstreams.turnStateTo(handle, this.downstreams.isPrompting(thread));
     for (const entry of this.pending.listForThread(this.sessionId, thread)) {
       const params = JSON.parse(entry.row.params) as unknown;
       handle
@@ -1063,7 +1070,10 @@ export class UpstreamSession {
     // session may still be mid-turn, and saying otherwise would be the stale
     // second source of truth this moved onto the thread to avoid.
     const thread = threadOf(params);
-    if (method === 'session/cancel' && thread) this.setTurnActive(thread, false);
+    if (method === 'session/cancel' && thread) {
+      this.setTurnActive(thread, false);
+      this.downstreams.turnState(thread, false);
+    }
     await conn.agent.notify(method, params);
   }
 

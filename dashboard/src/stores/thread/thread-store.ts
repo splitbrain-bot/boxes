@@ -70,6 +70,16 @@ export class ThreadStore {
   private readonly approvals = new Map<string, OpenApproval>();
   private client: AcpClient | null = null;
   private promptsInFlight = 0;
+  /**
+   * Whether the gateway says a turn is running on this thread, which is not
+   * the same question as whether this browser sent one.
+   *
+   * A store lives for as long as the view is on screen, so stepping into the
+   * review and back builds a fresh one with nothing in flight — while the
+   * turn it left behind is still going, because the orchestrator is the ACP
+   * client of record. This is what the gateway tells it after the replay.
+   */
+  private turnUpstream = false;
   private nextApprovalId = 1;
   private nextExecId = 1;
   /** Exec records already replayed, so a re-attach does not double them. */
@@ -114,7 +124,7 @@ export class ThreadStore {
    * spinner where the buttons belong and deadlock the turn.
    */
   private get running(): boolean {
-    return this.promptsInFlight > 0 && this.approvals.size === 0;
+    return (this.promptsInFlight > 0 || this.turnUpstream) && this.approvals.size === 0;
   }
 
   /**
@@ -150,6 +160,10 @@ export class ThreadStore {
         this.emit({ modes, configOptions, error: null });
       },
       onState: (connection) => this.emit({ connection }),
+      onTurnState: (active) => {
+        this.turnUpstream = active;
+        this.emit();
+      },
       onResetThread: () => this.reset(),
     });
     this.client.start();
@@ -175,6 +189,9 @@ export class ThreadStore {
     this.model.configOptions = configOptions;
     this.views = new Map();
     this.replayedExec.clear();
+    // Whatever was said about the turn belonged to the connection that is
+    // being replaced. The gateway says it again after this replay.
+    this.turnUpstream = false;
     this.failOpenApprovals();
     this.emit({ messages: [], plan: null, commands: [] });
   }
@@ -371,8 +388,10 @@ export class ThreadStore {
     if (!client || !sessionId) return;
     client.notify('session/cancel', { sessionId });
     // The prompt request resolves on its own afterwards; this only stops the
-    // view from claiming a turn is still going.
+    // view from claiming a turn is still going. Both counts, because the turn
+    // being cancelled may be one another browser started.
     this.promptsInFlight = 0;
+    this.turnUpstream = false;
     this.emit();
   }
 
