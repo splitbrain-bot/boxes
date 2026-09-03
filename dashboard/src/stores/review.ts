@@ -64,6 +64,27 @@ const EMPTY: ReviewState = {
 
 export const useReview = create<ReviewState>(() => EMPTY);
 
+/**
+ * How far down each file was read, by path.
+ *
+ * Outside the store's state because nothing renders from it: the pane writes
+ * it on scroll and reads it once when a file opens, and putting it in the
+ * state would re-render the whole view on every scroll frame. Cleared with
+ * the rest when the store points at another session, so "not opened in this
+ * review" and "opened at the top" stay different answers.
+ */
+const scrollOffsets = new Map<string, number>();
+
+/** Records how far down a file is scrolled. */
+export function rememberScroll(path: string, offset: number): void {
+  scrollOffsets.set(path, offset);
+}
+
+/** How far down a file was left, or 0 for one this review has not opened. */
+export function recallScroll(path: string): number {
+  return scrollOffsets.get(path) ?? 0;
+}
+
 /** Replaces part of the state. */
 function set(next: Partial<ReviewState>): void {
   useReview.setState(next);
@@ -82,6 +103,7 @@ function get(): ReviewState {
  */
 export function open(sessionId: string): void {
   if (get().sessionId === sessionId) return;
+  scrollOffsets.clear();
   set({ ...EMPTY, sessionId });
 }
 

@@ -351,6 +351,7 @@ export function SessionReview() {
                     </Notice>
                   ) : null}
                   <CodePane
+                    path={file.path}
                     content={file.content}
                     tokens={file.tokens}
                     diffLines={file.diff.lines}

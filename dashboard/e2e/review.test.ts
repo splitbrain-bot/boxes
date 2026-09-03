@@ -507,6 +507,51 @@ test('an empty workspace says so rather than showing nothing', async () => {
   }
 });
 
+// --- reading position -------------------------------------------------------
+
+test('each file remembers how far it was read, and a new one starts at the top', async () => {
+  // Long enough to scroll, which the small fixture files are not.
+  stub.state.reviews[SESSION] = stubReview({
+    files: {
+      'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
+      'short.ts': 'const one = 1;\n',
+    },
+    statuses: {},
+    diffs: {},
+  });
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review`,
+    'dark',
+    'desktop',
+  );
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    const offset = (): Promise<number> => pane.evaluate((el) => el.scrollTop);
+
+    await page.getByRole('button', { name: /long\.ts/ }).click();
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    await pane.evaluate((el) => {
+      el.scrollTop = 1200;
+    });
+    await expect.poll(offset).toBe(1200);
+
+    // One pane serves every file, so without help the next one opens
+    // wherever this one was left.
+    await page.getByRole('button', { name: /short\.ts/ }).click();
+    await expect.poll(() => page.getByText('const one = 1;').isVisible()).toBe(true);
+    await expect.poll(offset).toBe(0);
+
+    // And coming back picks up where the reading stopped.
+    await page.getByRole('button', { name: /long\.ts/ }).click();
+    await expect.poll(offset).toBe(1200);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // --- the entry points -------------------------------------------------------
 
 test('the review is reachable from the session card and the thread header', async () => {

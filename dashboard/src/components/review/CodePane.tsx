@@ -1,7 +1,8 @@
-import { Fragment } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef } from 'react';
 import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
 import type { Token } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
+import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
 /**
  * The file, one addressable row per line.
@@ -28,6 +29,12 @@ const CHANGE: Record<ReviewLineChange, { bar: string; row: string; label: string
 };
 
 export interface CodePaneProps {
+  /**
+   * The open file's path, which is what the remembered scroll position is
+   * keyed by — and which file this is, when one replaces another in the same
+   * pane.
+   */
+  path: string;
   content: string;
   /** One token list per line, or null to render the file plain. */
   tokens: Token[][] | null;
@@ -49,6 +56,7 @@ export interface CodePaneProps {
 }
 
 export function CodePane({
+  path,
   content,
   tokens,
   diffLines,
@@ -61,6 +69,36 @@ export function CodePane({
   onShowHunk,
   renderUnderLine,
 }: CodePaneProps) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** The path this pane has already positioned, so a poll does not re-do it. */
+  const positioned = useRef<string | null>(null);
+
+  /**
+   * Puts each file back where it was left, and every file this review has not
+   * opened at the top.
+   *
+   * One pane serves every file, so the scroll offset survives the swap unless
+   * something says otherwise — which is how a 40-line file used to open half
+   * way down because the last one was long. Before paint, so the reader never
+   * sees the wrong position; keyed on the path, so the poll refetching the
+   * open file does not throw away where they had got to.
+   */
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element || positioned.current === path) return;
+    positioned.current = path;
+    element.scrollTop = recallScroll(path);
+  }, [path, content]);
+
+  /** Records where the reader is, for the next time they open this file. */
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const onScroll = (): void => rememberScroll(path, element.scrollTop);
+    element.addEventListener('scroll', onScroll, { passive: true });
+    return () => element.removeEventListener('scroll', onScroll);
+  }, [path]);
+
   const lines = splitLines(content);
   // The gutter's width follows the file's size rather than being fixed, so a
   // 30-line file does not reserve room for five digits.
@@ -68,6 +106,8 @@ export function CodePane({
 
   return (
     <div
+      ref={scrollRef}
+      data-slot="review-code-pane"
       className={cn(
         'min-h-0 flex-1 overflow-auto font-mono text-[13px] leading-[1.55]',
         // The pane scrolls, not the page: the header and the toolbar stay put.
