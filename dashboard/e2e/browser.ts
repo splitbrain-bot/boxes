@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type LaunchOptions, type Page } from 'playwright';
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -9,30 +9,60 @@ import { resolve } from 'node:path';
 
 let browser: Browser | null = null;
 
-/**
- * A Chromium the environment already provides, preferred over Playwright's
- * own download so a browser build that does not match the pinned library
- * version is not a reason to fetch one.
- */
-const PROVIDED_CHROMIUM = process.env['CHROMIUM_PATH'] ?? '/opt/pw-browsers/chromium';
+/** A Chromium named outright, which is the last word on the subject. */
+const NAMED_CHROMIUM = process.env['CHROMIUM_PATH'];
 
 /**
- * Launches Chromium once and reuses it for the whole run.
+ * Where a Boxes session image keeps the browser it ships.
+ *
+ * Playwright's own copy cannot be used in a session: the image points
+ * PLAYWRIGHT_BROWSERS_PATH at itself, so the revision this suite's Playwright
+ * resolves is a path on a read-only filesystem that nothing can download
+ * into. The image links what it installed to this name for exactly this.
+ */
+const IMAGE_CHROMIUM = '/usr/local/bin/chromium';
+
+/**
+ * `/dev/shm` is Docker's default 64 MB in a session container, which Chromium
+ * exhausts on any substantial page and reports as a closed target. Harmless
+ * everywhere else, and the same reason the browser CLI's own config carries
+ * it — see session-image/playwright-cli.config.json.
+ */
+const LAUNCH_ARGS = ['--disable-dev-shm-usage'];
+
+/**
+ * Which Chromium to launch.
+ *
+ * CHROMIUM_PATH first, because somebody said so, and with no check that it
+ * exists: an explicit path that is wrong should say which path, not be
+ * quietly ignored. Then the build this suite's own Playwright pins, when it
+ * has been installed — the exactly matching one, which is what CI installs
+ * and what the README's two lines put in a session's home volume. Then the
+ * session image's, which is a couple of Chrome majors off and used because it
+ * is there and needs no download.
  *
  * `channel: 'chromium'` rather than the default, which is the
  * chromium-headless-shell build: that one has no permission UI and so reports
  * `Notification.permission` as a permanent `denied`, which the push toggle
  * reads as a browser that can never subscribe. The suite would then be
  * asserting one thing on a machine that provides its own Chromium and
- * another on CI, which is worse than either.
+ * another on CI, which is worse than either. Both `executablePath` branches
+ * name a full browser for the same reason.
  */
+function chromiumToLaunch(): LaunchOptions {
+  if (NAMED_CHROMIUM) return { executablePath: NAMED_CHROMIUM };
+  // Never throws; it answers where the browser would be, installed or not.
+  if (existsSync(chromium.executablePath())) return { channel: 'chromium' };
+  if (existsSync(IMAGE_CHROMIUM)) return { executablePath: IMAGE_CHROMIUM };
+  // Nothing to launch. The channel gets Playwright's own error, which names
+  // the install command, rather than an ENOENT on a path this file chose.
+  return { channel: 'chromium' };
+}
+
+/** Launches Chromium once and reuses it for the whole run. */
 export async function getBrowser(): Promise<Browser> {
   if (!browser) {
-    browser = await chromium.launch(
-      existsSync(PROVIDED_CHROMIUM)
-        ? { executablePath: PROVIDED_CHROMIUM }
-        : { channel: 'chromium' },
-    );
+    browser = await chromium.launch({ args: LAUNCH_ARGS, ...chromiumToLaunch() });
   }
   return browser;
 }

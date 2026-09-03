@@ -592,13 +592,30 @@ CA into `~/.pki/nssdb` with `certutil`. Without it the hosts the proxy
 intercepts fail TLS in the browser and nowhere else.
 
 Two smaller things. `PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright`, on the
-image and so read-only at runtime; a project pinning its own Playwright version
-should point it at the home volume and download once:
+image and so read-only at runtime. A project pinning its own Playwright has
+two ways out of that. Either download the build its version wants, once, into
+the home volume:
 
 ```sh
 export PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright
 npx playwright install chromium
 ```
+
+Or use the browser that is already here, at **`/usr/local/bin/chromium`** — a
+stable link to whatever revision the image installed, which is what a test
+suite can hardcode:
+
+```js
+chromium.launch({ executablePath: '/usr/local/bin/chromium' });
+```
+
+That needs no download and no egress, at the price of a Chromium a couple of
+Chrome majors from the one the library pins, which Playwright tolerates until
+it does not. Naming it with `executablePath` is what skips the revision check;
+`channel: 'chromium'` would go looking under `PLAYWRIGHT_BROWSERS_PATH` again.
+Either way, pass `--disable-dev-shm-usage`: `/dev/shm` here is Docker's
+default 64 MB, which Chromium exhausts on any substantial page and reports as
+a closed target. The browser CLI's own config already carries it.
 
 And the CLI writes snapshots and screenshots to `.playwright-cli/` in the
 working directory, which in a session is the workspace — convenient, since the

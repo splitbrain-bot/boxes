@@ -324,6 +324,61 @@ test('a turn still running is still running after a detour away and back', async
   }
 });
 
+// Wide output. A reading column is the right width for prose and the wrong
+// width for a table, and neither the table nor the code block could be
+// scrolled sideways to see the rest of one.
+test('a wide table leaves the reading column, and scrolls when even that is too narrow', async () => {
+  const header = `| ${Array.from({ length: 9 }, (_, i) => `column heading ${i}`).join(' | ')} |`;
+  const rule = `| ${Array.from({ length: 9 }, () => '---').join(' | ')} |`;
+  const row = `| ${Array.from({ length: 9 }, (_, i) => `a fairly long cell ${i}`).join(' | ')} |`;
+  await start({
+    prompts: [{ match: () => true, updates: reply(`here it is\n\n${header}\n${rule}\n${row}\n`) }],
+  });
+
+  const wide = await openPage(stub.url, `/sessions/${SESSION.id}`, 'dark', 'desktop');
+  try {
+    const input = wide.page.getByLabel('Message input');
+    await input.fill('show me the table');
+    await input.press('Enter');
+    const table = wide.page.locator('.aui-md-table-wrap');
+    await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
+
+    // Wider than the column the prose above it is set in, and no wider than
+    // the thread: the point is to use the window, not to overflow it.
+    const width = (locator: typeof table): Promise<number> =>
+      locator.evaluate((el) => el.clientWidth);
+    const column = wide.page.locator('[data-slot="aui_assistant-message-content"]').first();
+    expect(await width(table)).toBeGreaterThan(await width(column));
+
+    // And the thread itself did not gain a horizontal scrollbar, which is
+    // what a bleed measured against the window rather than the scroller does.
+    const viewport = wide.page.locator('[data-slot="aui_thread-viewport"]');
+    const overflow = await viewport.evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    await shoot(wide.page, 'wide-table-desktop');
+    expect(wide.errors).toEqual([]);
+  } finally {
+    await wide.close();
+  }
+
+  const phone = await openPage(stub.url, `/sessions/${SESSION.id}`, 'dark', 'phone');
+  try {
+    const input = phone.page.getByLabel('Message input');
+    await input.fill('show me the table');
+    await input.press('Enter');
+    const table = phone.page.locator('.aui-md-table-wrap');
+    await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
+
+    // Nowhere left to bleed to, so it scrolls instead of being cut off.
+    const scrollable = await table.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(scrollable).toBe(true);
+    await shoot(phone.page, 'wide-table-phone');
+    expect(phone.errors).toEqual([]);
+  } finally {
+    await phone.close();
+  }
+});
+
 // 6 — mode switching.
 test('the mode switcher lists the advertised modes and sets one', async () => {
   await start({
@@ -565,6 +620,8 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
     await expect.poll(() => effort.isVisible()).toBe(true);
     expect(await effort.locator('option').allInnerTexts()).toEqual(['Default', 'Low', 'High']);
 
+    await shoot(page, 'agent-settings', 'viewport');
+
     await effort.selectOption('high');
     await expect.poll(() => effort.inputValue()).toBe('high');
     // The adapter heard about it, which is the half a select cannot show.
@@ -573,8 +630,11 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
       .toBe('high');
 
     // The mode is not doubled into the popover: the switcher beside the name
-    // is already that option, under the adapter's other name for it.
-    expect(await page.getByRole('combobox', { name: 'Mode' }).count()).toBe(0);
+    // is already that option, under the adapter's other name for it. Exactly
+    // "Mode", because a substring match also finds "Model".
+    expect(await page.getByRole('combobox', { name: 'Mode', exact: true }).count()).toBe(0);
+    // And the model is still where it was, beside the name rather than inside.
+    expect(await page.getByRole('combobox', { name: 'Model' }).count()).toBe(1);
     expect(errors).toEqual([]);
   } finally {
     await close();
