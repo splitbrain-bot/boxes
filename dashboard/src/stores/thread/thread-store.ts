@@ -53,6 +53,15 @@ export interface ThreadSnapshot {
   commands: AvailableCommand[];
   /** The last send or connection error, or null. */
   error: string | null;
+  /**
+   * True until a replay has been read into this store.
+   *
+   * What the view shows meanwhile is a placeholder, not an empty thread: a
+   * composer over a greeting is a claim that there is nothing here to read,
+   * and on arrival at a box with a conversation in it that claim is wrong and
+   * about to be replaced.
+   */
+  loading: boolean;
 }
 
 /** A permission request that has been shown but not yet answered. */
@@ -97,6 +106,20 @@ export class ThreadStore {
   private nextExecId = 1;
   /** Exec records already replayed, so a re-attach does not double them. */
   private replayedExec = new Set<number>();
+  /**
+   * True from the moment a connection says it is about to replay until the
+   * replay has been read.
+   *
+   * A replay arrives as one notification per chunk of what was said — the
+   * whole conversation, in the order it happened, as fast as the socket
+   * delivers it. Publishing each one meant the view rebuilt itself dozens of
+   * times on arrival: every message appearing on its own line, the viewport
+   * chasing the bottom, the reading position landing wherever the last render
+   * left it. So the model is built up in here and published once, which is
+   * also what lets the view show one placeholder instead of a conversation
+   * assembling itself.
+   */
+  private replaying = false;
 
   constructor(private readonly deps: ThreadStoreDeps) {
     this.snapshot = {
@@ -109,6 +132,7 @@ export class ThreadStore {
       plan: null,
       commands: [],
       error: null,
+      loading: true,
     };
   }
 
@@ -160,23 +184,33 @@ export class ThreadStore {
   }
 
   /**
-   * Refreshes the snapshot's messages.
+   * The snapshot's copy of every message the model holds, with `touched`
+   * taken again.
    *
    * The model is mutated in place while a message streams, so the snapshot
    * holds a separate copy of each message and replaces only the one that
    * changed. Without that, a re-render would see the same object identity and
    * could show text that has already moved on.
    */
-  private refreshMessages(touched: Message | null): void {
+  private messageViews(touched: Message | null): readonly Message[] {
     if (touched) this.views.set(touched, { ...touched, parts: [...touched.parts] });
-    const messages = this.model.messages.map((m) => {
+    return this.model.messages.map((m) => {
       const view = this.views.get(m);
       if (view) return view;
       const fresh = { ...m, parts: [...m.parts] };
       this.views.set(m, fresh);
       return fresh;
     });
-    this.emit({ messages });
+  }
+
+  /** Publishes the messages, unless a replay is still being read. */
+  private refreshMessages(touched: Message | null): void {
+    if (this.replaying) {
+      // Nothing is published mid-replay, and nothing needs to be kept either:
+      // flushReplay takes every message again.
+      return;
+    }
+    this.emit({ messages: this.messageViews(touched) });
   }
 
   // --- lifecycle -----------------------------------------------------------
@@ -190,6 +224,9 @@ export class ThreadStore {
         this.model.modes = modes;
         this.model.configOptions = configOptions;
         this.emit({ modes, configOptions, error: null });
+        // Everything the replay said is in the model by now; this is where it
+        // reaches the view.
+        this.flushReplay();
       },
       onState: (connection) => this.emit({ connection }),
       onTurnState: (active) => {
@@ -213,6 +250,11 @@ export class ThreadStore {
    *
    * A reconnect repeats the handshake, and session/load re-sends the whole
    * history as notifications. Keeping what was there would double it.
+   *
+   * What the view is showing is left alone until the replay has been read:
+   * the model is what is stale, and blanking a conversation somebody is
+   * reading — because the socket dropped and came back — says the thread is
+   * empty when what is true is that it is being re-read.
    */
   private reset(): void {
     const { modes, configOptions } = this.model;
@@ -225,7 +267,34 @@ export class ThreadStore {
     // being replaced. The gateway says it again after this replay.
     this.turnUpstream = false;
     this.failOpenApprovals();
-    this.emit({ messages: [], plan: null, commands: [] });
+    this.replaying = true;
+    // A snapshot with no patch: what the thread is doing is re-derived — the
+    // turn claim is gone and so are the open questions — while the messages,
+    // the plan and the commands stay as they were until the replay lands.
+    this.emit();
+  }
+
+  /**
+   * Publishes what a replay built, in one snapshot.
+   *
+   * Called when the connection reports itself ready, which for a browser that
+   * asked for a replay is the moment session/load answered — after the last
+   * of the history has arrived. A replay that never finishes publishes
+   * nothing: the connection is reconnecting, the view keeps saying so, and a
+   * half-read conversation is not a better answer than the placeholder or
+   * than what was there before.
+   */
+  private flushReplay(): void {
+    if (!this.replaying) return;
+    this.replaying = false;
+    // One snapshot, so the view renders the conversation once rather than
+    // once per message in it.
+    this.emit({
+      messages: this.messageViews(null),
+      plan: this.model.plan,
+      commands: this.model.commands,
+      loading: false,
+    });
   }
 
   /**
@@ -249,6 +318,9 @@ export class ThreadStore {
 
   private onUpdate(params: SessionNotification): void {
     const touched = applyUpdate(this.model, params.update);
+    // A replay's own notifications say nothing on their way past; flushReplay
+    // publishes what they built.
+    if (this.replaying) return;
     if (
       this.snapshot.modes !== this.model.modes ||
       this.snapshot.configOptions !== this.model.configOptions ||

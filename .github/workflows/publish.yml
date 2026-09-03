@@ -20,6 +20,12 @@
 # follows `latest` picks the images up on its own; one that must not move
 # under itself pins the sha tag.
 #
+# A deployment that follows `latest` is also told, rather than left to notice:
+# the last job pings a watchtower HTTP API, if the repository is configured
+# with one, so a push and a deployment are the same event instead of one
+# polling interval apart. It is the pattern splitbrain/blogrng uses, down to
+# the secret's name.
+#
 # The Dockerfiles type-check before they bundle, so an image cannot be built
 # from code that fails `tsc`. That is not the same as the tests passing, and
 # `latest` is a tag something else deploys unattended, so the test job gates
@@ -161,3 +167,49 @@ jobs:
           # watchtower compares to decide it has something new.
           provenance: false
           sbom: false
+
+  # Tell the deployment its images have moved, rather than leaving it to
+  # notice on its next poll. Watchtower's interval is the difference between a
+  # push and a deployment, and it is minutes long for no reason once the push
+  # can say so itself.
+  watchtower:
+    name: watchtower
+    needs: images
+    # Nothing was pushed on a pull request, so there is nothing to pull. A
+    # partly failed matrix does not get here either: some of the three images
+    # would be new and some would not, and that is a state to fix rather than
+    # to deploy. Watchtower's own polling still picks those up.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # Both settings are the deployment's, and a fork has neither: without a
+      # URL this says so and succeeds, because a fork of this repository
+      # publishing to its own namespace has nothing to notify and no business
+      # failing over it. WATCHTOWER_URL is a repository variable — it is a
+      # host name, not a credential — and the token is the secret, named as it
+      # is in splitbrain/blogrng so an organisation secret covers both.
+      - name: Ask watchtower to pull what was just published
+        env:
+          WATCHTOWER_URL: ${{ vars.WATCHTOWER_URL }}
+          WATCHTOWER_TOKEN: ${{ secrets.WATCHTOWER_HTTP_API_TOKEN }}
+        # `set -eu` rather than the runner's implicit `bash -e`, so the
+        # failure below is the script's own decision and stays that way
+        # wherever it is run. The `:-` defaults are for the same reason: a
+        # repository with neither setting has both of these as empty strings,
+        # and a checkout that has never heard of them should behave the same.
+        run: |
+          set -eu
+          url=${WATCHTOWER_URL:-}
+          if [ -z "$url" ]; then
+            echo 'No WATCHTOWER_URL variable set; nothing to notify.'
+            exit 0
+          fi
+          # --fail so a refused or misrouted ping is a red check rather than a
+          # deployment that quietly stayed where it was. The endpoint answers
+          # only once it has pulled and recreated what it watches, which is
+          # why the timeout is minutes rather than seconds.
+          answer=$(curl --fail --silent --show-error --max-time 300 \
+            -X POST "$url" \
+            -H "Authorization: Bearer ${WATCHTOWER_TOKEN:-}")
+          # What it did, which is the only record of this deployment moving.
+          printf 'Watchtower answered: %s\n' "$answer"

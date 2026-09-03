@@ -14,6 +14,10 @@ import {
  * Each of these is a real deployment people hit: Boxes reached over plain
  * HTTP on a LAN address, an iPhone reading it in a Safari tab, a permission
  * turned down months ago and forgotten about.
+ *
+ * Shown as the tooltip of a spent toggle rather than as text next to it: the
+ * list header has room for a button and not for a sentence, and none of these
+ * is something to act on right now.
  */
 const BLOCKED: Record<PushBlocker, string> = {
   insecure: 'Notifications need HTTPS. Put Boxes behind a TLS reverse proxy.',
@@ -34,9 +38,10 @@ export function PushToggle() {
 
   if (!supported) {
     return blocker ? (
-      <p className="text-xs text-muted-foreground" role="note">
-        {BLOCKED[blocker]}
-      </p>
+      <Button variant="ghost" size="sm" disabled title={BLOCKED[blocker]}>
+        <BellOff />
+        Blocked
+      </Button>
     ) : null;
   }
 

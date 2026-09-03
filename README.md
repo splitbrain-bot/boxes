@@ -134,6 +134,20 @@ and the tools that copy it honour.
 A pull request runs the same suites and builds all three images without
 pushing any of them.
 
+A deployment fronted by watchtower can be told to pull rather than left to
+find out on its next poll. Set two things on the repository and the last job
+of every publishing run pings it:
+
+| Setting | Is |
+|---|---|
+| `WATCHTOWER_URL` (variable) | The update endpoint, such as `https://watchtower.example.net/v1/update` |
+| `WATCHTOWER_HTTP_API_TOKEN` (secret) | What watchtower was started with as `WATCHTOWER_HTTP_API_TOKEN` |
+
+Without the variable the job says there is nothing to notify and passes, so a
+fork publishing to its own namespace needs no changes. With it, a ping that is
+refused fails the run: the images are already published at that point, and a
+deployment that quietly stayed where it was is worth a red check.
+
 ## Configure
 
 There is no required configuration — every setting has a working default. To

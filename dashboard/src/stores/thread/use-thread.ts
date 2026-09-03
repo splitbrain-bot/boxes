@@ -61,6 +61,9 @@ const INITIAL: ThreadSnapshot = {
   plan: null,
   commands: [],
   error: null,
+  // No store yet is the same to a reader as a store with nothing read into
+  // it: something is on its way and this is not it.
+  loading: true,
 };
 
 const getInitial = (): ThreadSnapshot => INITIAL;

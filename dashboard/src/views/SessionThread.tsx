@@ -20,7 +20,11 @@ import { bangCommand } from '../stores/thread/exec.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
 import { threadName } from '@/lib/threads';
+import { Shelf } from '@/components/Shelf';
+import { ThreadLoading } from '@/components/ThreadLoading';
 import { ThreadHeader } from '@/components/ThreadHeader';
+import { useScrollAway } from '@/hooks/use-scroll-away';
+import { useViewportLock } from '@/hooks/use-viewport-lock';
 
 /** The text of a composer submission, which is all we send upstream. */
 function textOf(message: AppendMessage): string {
@@ -89,6 +93,16 @@ export function SessionThread() {
    */
   const tabState: TabState = state.awaiting ?? (state.isRunning ? 'running' : 'idle');
   useDocumentTitle(threadTitle(tabState, session?.name ?? id, threadLabel));
+
+  // The thread's viewport is the only scroller this route has; the document
+  // scrolling too is what used to take the header off the top of the screen.
+  useViewportLock();
+
+  // And now that the document cannot move it, reading down through the thread
+  // can: the header steps aside on a downward run and comes back on the first
+  // upward one. A turn's own output moves nothing, because the viewport stays
+  // against its bottom for the whole of one.
+  const { away, container } = useScrollAway('[data-slot="aui_thread-viewport"]');
 
   /**
    * Branches this conversation and reveals the result as a link.
@@ -164,25 +178,30 @@ export function SessionThread() {
     <TooltipProvider>
       <AssistantRuntimeProvider runtime={runtime}>
         <SlashCommandsProvider commands={state.commands}>
-          <div className="flex h-dvh flex-col">
-            <ThreadHeader
-              sessionId={id}
-              threadId={thread?.id ?? null}
-              name={session?.name ?? id}
-              threadLabel={threadLabel}
-              // Nothing is connecting while the session itself could not be
-              // read, and a dot that pulses forever says the opposite.
-              connection={loadError ? 'closed' : state.connection}
-              modes={state.modes}
-              configOptions={state.configOptions}
-              canFork={session?.canFork === true && thread !== undefined}
-              forking={forking}
-              onFork={onFork}
-              onSetMode={(modeId) => void store?.setMode(modeId)}
-              onSetConfigOption={(configId, value) =>
-                void store?.setConfigOption(configId, value)
-              }
-            />
+          <div ref={container} className="flex h-dvh flex-col">
+            {/* The header is the part that gives way. The notices below it are
+                not: a missing token, a fork to open, an error to read are all
+                things to act on, and none of them is in the way of anything. */}
+            <Shelf away={away}>
+              <ThreadHeader
+                sessionId={id}
+                threadId={thread?.id ?? null}
+                name={session?.name ?? id}
+                threadLabel={threadLabel}
+                // Nothing is connecting while the session itself could not be
+                // read, and a dot that pulses forever says the opposite.
+                connection={loadError ? 'closed' : state.connection}
+                modes={state.modes}
+                configOptions={state.configOptions}
+                canFork={session?.canFork === true && thread !== undefined}
+                forking={forking}
+                onFork={onFork}
+                onSetMode={(modeId) => void store?.setMode(modeId)}
+                onSetConfigOption={(configId, value) =>
+                  void store?.setConfigOption(configId, value)
+                }
+              />
+            </Shelf>
             {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
@@ -236,6 +255,11 @@ export function SessionThread() {
                     Back to sessions
                   </Link>
                 </div>
+              ) : state.loading ? (
+                // Nothing to type into and nothing to read yet: the box may
+                // still be starting, and the conversation arrives in one
+                // piece when it has been read. See ThreadLoading.
+                <ThreadLoading />
               ) : (
                 <Thread />
               )}

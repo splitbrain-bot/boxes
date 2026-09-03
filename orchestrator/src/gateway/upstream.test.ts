@@ -705,6 +705,124 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
   ]);
 });
 
+/**
+ * An adapter whose mode and model are per-process, the way a real one's are.
+ *
+ * Every spawn starts in `default` on `sonnet` and records what it is asked
+ * for, so a test can say what the orchestrator put a thread back into after
+ * the process that was holding the answer went away. `notify` speaks as the
+ * live one, which is how an adapter reports a change it made itself.
+ */
+function forgetfulAdapter(asked: string[]): {
+  spawn: () => FakeAdapter;
+  notify: (update: unknown) => void;
+} {
+  let live: FakeAdapter | null = null;
+  const state = () => ({
+    modes: {
+      currentModeId: 'default',
+      availableModes: [{ id: 'default' }, { id: 'auto' }, { id: 'plan' }],
+    },
+    configOptions: [
+      {
+        id: 'model',
+        category: 'model',
+        currentValue: 'sonnet',
+        options: [{ value: 'sonnet' }, { value: 'opus' }],
+      },
+    ],
+  });
+  return {
+    spawn: () => {
+      live = new FakeAdapter((msg) => {
+        if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+        if (msg.method === 'session/new') return { sessionId: 'acp-gone', ...state() };
+        if (msg.method === 'session/load') return state();
+        if (msg.method === 'session/set_mode') {
+          asked.push(`mode ${String(msg.params?.['modeId'])}`);
+          return {};
+        }
+        if (msg.method === 'session/set_config_option') {
+          asked.push(`model ${String(msg.params?.['value'])}`);
+          return {};
+        }
+        return {};
+      });
+      return live;
+    },
+    notify: (update) => live?.notify('session/update', { sessionId: 'acp-gone', update }),
+  };
+}
+
+test('a respawn puts a loaded thread back in the mode it was left in', async () => {
+  const asked: string[] = [];
+  const adapter = forgetfulAdapter(asked);
+  fakeDocker(adapter.spawn);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // t1 is stored with an adapter id, so the spawn loads it rather than
+  // minting it — and a load used to be where the mode was lost.
+  assert.deepEqual(asked, ['mode auto', 'model opus']);
+
+  // The user switches to plan, the way the header does: a request the adapter
+  // accepts, naming the thread it is about.
+  asked.length = 0;
+  await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'plan' });
+  assert.deepEqual(asked, ['mode plan']);
+  assert.equal(thread('t1')['mode_id'], 'plan');
+
+  // The idle reaper stops the session, and returning to it starts it again.
+  // The adapter is a fresh process in `default`; the thread is put back.
+  asked.length = 0;
+  up.stop();
+  await up.ensureStarted();
+  assert.deepEqual(asked, ['mode plan', 'model opus']);
+});
+
+test("a respawn honours the adapter's own mode change over the last one asked for", async () => {
+  const asked: string[] = [];
+  const adapter = forgetfulAdapter(asked);
+  fakeDocker(adapter.spawn);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'plan' });
+
+  // An adapter leaves plan mode by itself once a plan is accepted, and says
+  // so. Where the thread comes back is where it actually ended up.
+  adapter.notify({ sessionUpdate: 'current_mode_update', currentModeId: 'auto' });
+  await expect.poll(() => thread('t1')['mode_id']).toBe('auto');
+
+  asked.length = 0;
+  up.stop();
+  await up.ensureStarted();
+  // `auto`, not the `plan` that was the last thing anybody requested.
+  assert.deepEqual(asked, ['mode auto', 'model opus']);
+});
+
+test('a respawn puts a loaded thread back on the model it was left on', async () => {
+  const asked: string[] = [];
+  const adapter = forgetfulAdapter(asked);
+  fakeDocker(adapter.spawn);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // Which option is the model is its category, never the adapter's id for
+  // it, so this is a change reported the way a real one is.
+  adapter.notify({
+    sessionUpdate: 'config_option_update',
+    configOptions: [{ id: 'model', category: 'model', currentValue: 'sonnet' }],
+  });
+  await expect.poll(() => thread('t1')['model_id']).toBe('sonnet');
+
+  // Left on sonnet, so it comes back on sonnet: the deployment's default is
+  // for a thread nobody has chosen for, not an answer that overrides one.
+  asked.length = 0;
+  up.stop();
+  await up.ensureStarted();
+  assert.deepEqual(asked, ['mode auto']);
+});
+
 /** The threads each session/fork named as its source, in order. */
 let forkedFrom: unknown[] = [];
 /** The threads each session/load asked for, in order. */

@@ -95,6 +95,15 @@ export interface ThreadRow {
    * that first prompt, after which the adapter has the whole conversation.
    */
   inherits_from: string | null;
+  /**
+   * The mode this thread is meant to be in, or null for the deployment's
+   * default. Written when it changes rather than read from the adapter,
+   * because the adapter forgets: it holds a mode for as long as the process
+   * lives, and a respawn loads the conversation back without it.
+   */
+  mode_id: string | null;
+  /** The model it is meant to be on, on the same terms. */
+  model_id: string | null;
   created_at: number;
   last_active_at: number;
 }
@@ -339,6 +348,17 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE threads ADD COLUMN inherits_from TEXT;
   `,
+  // Which mode and model a thread is meant to be in. Both used to live only
+  // in the adapter process, so every respawn — an idle stop and a return, a
+  // deploy, an adapter that died — put the thread back in whatever the
+  // adapter starts in. See upstream.ts, applyMode.
+  //
+  // NULL is not "unknown": it means this deployment's default, which is what
+  // a thread nobody has changed is in. So the existing rows need no backfill.
+  `
+  ALTER TABLE threads ADD COLUMN mode_id TEXT;
+  ALTER TABLE threads ADD COLUMN model_id TEXT;
+  `,
 ];
 
 /** An open database handle. */
@@ -542,15 +562,19 @@ export function insertThread(
     ordinal: next.n,
     turn_active: 0,
     inherits_from: inheritsFrom,
+    mode_id: null,
+    model_id: null,
     created_at: now,
     last_active_at: now,
   };
   db.transaction(() => {
     db.prepare(
       `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
-         turn_active, inherits_from, created_at, last_active_at)
+         turn_active, inherits_from, mode_id, model_id, created_at,
+         last_active_at)
        VALUES (@id, @session_id, @acp_session_id, @title, @ordinal,
-         @turn_active, @inherits_from, @created_at, @last_active_at)`,
+         @turn_active, @inherits_from, @mode_id, @model_id, @created_at,
+         @last_active_at)`,
     ).run(row);
     db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(id, sessionId);
   })();
@@ -584,6 +608,23 @@ export function setThreadTitle(db: Db, threadId: string, title: string | null): 
     Date.now(),
     threadId,
   );
+}
+
+/**
+ * Records the mode a thread is meant to be in, or clears it back to the
+ * deployment's default.
+ *
+ * Written on every change rather than read back on demand, because the only
+ * other holder of it is the adapter process and the point of the column is
+ * outliving that.
+ */
+export function setThreadMode(db: Db, threadId: string, modeId: string | null): void {
+  db.prepare('UPDATE threads SET mode_id = ? WHERE id = ?').run(modeId, threadId);
+}
+
+/** Records the model a thread is meant to be on, on the same terms. */
+export function setThreadModel(db: Db, threadId: string, modelId: string | null): void {
+  db.prepare('UPDATE threads SET model_id = ? WHERE id = ?').run(modelId, threadId);
 }
 
 /** Marks a thread active now, alongside its session. */

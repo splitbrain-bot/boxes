@@ -220,6 +220,58 @@ so the working thread stays where it is and the new tab is opened by a real
 click. A `window.open` after the await is the thing to reach for, and it is
 what popup blockers exist to stop.
 
+That header gets out of the way while you read, and so does the review's —
+one hook and one wrapper serve both, because a thread and a code pane are the
+same shape of thing: a full-viewport route whose one scroller is the thing you
+came for. A downward run of thirty-odd pixels collapses the row, and two dozen
+back up returns it; the space goes straight to the content, which is `flex-1`
+below it. Going is a decision about the reading you are doing and coming back
+is a request that should not have to be repeated, so the two distances are not
+the same. Runs are measured from the last change of direction rather than the
+last event, which is what makes a pixel of finger jitter mean nothing and a
+slow drift down mean something. The notices under the header do not collapse:
+a missing token, a fork to open, an error to read are things to act on rather
+than things in the way.
+
+Three things are not reading, and the hook (`use-scroll-away.ts`) declines to
+read them as such. A view against the bottom of its scroller is following its
+own output — a thread streaming a reply, or writing what a `!bang` command
+returned — and stays there for the whole of it, so nothing decides down there.
+That question is asked of the scroller rather than of the app on purpose: the
+thread's `isRunning` clears while the last chunks are still landing, measured
+rather than guessed, so a header that trusted it moved on its own at the end
+of every turn. A single step longer than three hundred pixels is a jump — a
+review restoring where a file was left, a hunk being centred — and no hand
+produces one. And the collapse itself moves the scroller: growing it by the
+header's height makes Chrome nudge `scrollTop` to hold anchored content still,
+which arrives as an upward run, which is the signal to come back, which grows
+the scroller again. That one is a feedback loop, and it flapped until steps
+small enough to be the nudge stopped counting for as long as the transition
+runs. In every case the position is kept and the intent is dropped.
+
+The row is collapsed rather than slid over the content: on a phone the point
+is the fifty pixels, and chrome floating over the first message covers the
+message instead of yielding. Its height is measured with a `ResizeObserver`,
+because a two-line title beside two selects is not a number to hardcode and
+`auto` is not a value CSS will animate from — and it is `inert` while away, so
+nothing in it is tabbable, readable by a screen reader, or clickable through
+the clip. That last one has a cost worth knowing: below md the only way to the
+review's file tree is the button in its header, so switching files from deep
+in a file takes a flick up first.
+
+None of that is the browser's own hiding of its chrome, which is what the
+header used to be at the mercy of. A thread is one dynamic viewport tall with
+its own scroller inside, so the document has nothing to scroll — but `100dvh`
+is measured against chrome that slides in and out, and every mismatch (the URL
+bar expanding, the keyboard opening under a focused composer, rounding on iOS)
+left the document taller than the screen. The browser scrolled the difference
+away to keep the focused thing in view, and what went off the top was the
+header — stranded on a scroller no gesture reaches, because every touch lands
+in the thread's instead. So the full-viewport routes mark the document
+unscrollable for as long as they are mounted (`use-viewport-lock.ts`), and the
+viewport meta asks the keyboard to resize the content rather than slide over
+it. What moves the header now is the app, on purpose.
+
 The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
 CLI, in the shadcn distribution model: the sources are committed and are ours
@@ -258,6 +310,29 @@ code path: a reconnect repeats the handshake, `session/load` re-sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
+
+A replay is folded in silence and published once. The notifications are the
+same ones live streaming uses, so the store used to hand the view every
+intermediate state of a conversation it was in the middle of re-reading: on
+arrival at a box with any history, the thread assembled itself message by
+message, the viewport chased the bottom of it, and the reading position ended
+up wherever the last render left it. Now the model is built up with nothing
+emitted, and the snapshot that ends the replay is the whole conversation —
+which the runtime's autoscroll opens at its end, because that is where a
+thread is read from. `session/load` answering is what says the replay is over:
+the gateway forwards the adapter's notifications as they arrive and returns
+the result only afterwards, so the answer means "that was all of it". A replay
+that never answers publishes nothing at all: the connection is reconnecting,
+the view says so, and half a conversation is not a better answer than the
+whole of the previous one.
+
+Until a replay has landed the thread shows a placeholder — a pulsing
+conversation shape, and nothing that can be acted on. What was there before is
+a composer over *How can I help you today?*, which is a claim that the thread
+is empty: true of a box that has never been prompted, and on arrival at one
+with a conversation in it both wrong and about to be replaced. A reconnect
+mid-session keeps showing what it was showing, since the socket dropping is
+not news about the conversation; only a first read shows the placeholder.
 
 `available_commands_update` carries the slash commands this agent accepts, and
 the composer completes them: a leading `/` opens the list, each further
@@ -302,16 +377,34 @@ Starting it, in `ensureStarted`:
    id they hold is one the adapter would now reject; each reconnects and pins
    whatever that thread is next.
 
-A fresh thread is then switched into `auto` mode, when the adapter advertises
-a mode by that id — except a fork, which starts in `plan`. A fork shares the
-thread it came from's checkout, and the point of one is to ask about work the
-original is still doing, so it starts in a mode that reads rather than writes.
-That does not fix the shared workspace; it stops the common accident, and
-flipping the fork to `auto` is one tap in the header. Only the thread the
-adapter has just minted goes through this: from then on the mode is the
-user's, and a reconnect must not undo it. An adapter offering no such mode is
-left in whichever mode it starts in, and a switch that fails is logged rather
-than failing the spawn.
+Every thread is then put in the mode and on the model it is meant to have:
+what its row records, or this deployment's default — `auto` and `opus` — when
+it records nothing. A fresh thread records nothing, which is what an empty
+column is for. A fork is the exception and says so: it starts in `plan`,
+because it shares the thread it came from's checkout and the point of one is
+to ask about work the original is still doing, so it starts in a mode that
+reads rather than writes. That does not fix the shared workspace; it stops the
+common accident, and flipping the fork to `auto` is one tap in the header. An
+adapter offering no such mode is left in whichever mode it starts in, and a
+switch that fails is logged rather than failing the spawn.
+
+Both are on the thread's row (`threads.mode_id`, `threads.model_id`) because
+the adapter forgets them. A mode lives in that process and nothing else, so
+every respawn — an idle stop and a return, a deploy, an adapter that died —
+used to hand the conversation back in whatever mode the adapter starts in,
+which is how a thread left in `auto` came back on manual approvals half an
+hour later. `session/load` brings the conversation back and nothing else, and
+this is the other half of that: the row is read on every load, not only on
+the mint that used to be the one place a mode was ever set.
+
+The row is written wherever the answer changes. A `session/set_mode` the
+adapter accepts is recorded as it passes through the gateway, because that is
+the request the user actually made. `current_mode_update` and
+`config_option_update` are recorded as they arrive, because the adapter also
+changes both on its own — leaving `plan` when a plan is accepted, falling back
+to another model under load — and a thread should come back where it ended up
+rather than where it was last sent. Which config option is the model is read
+from its `category`, never from the adapter's id for it.
 
 Every one of those calls — `session/new`, `session/fork` and `session/load`
 alike — carries the same `_meta.claudeCode.options.thinking`, which is where

@@ -12,6 +12,8 @@ import {
   insertThread,
   pruneAcpLog,
   setThreadAcpId,
+  setThreadMode,
+  setThreadModel,
   setThreadTitle,
   setThreadTurnActive,
   threadByAcpId,
@@ -288,10 +290,15 @@ export class UpstreamSession {
     if (!conn) throw new Error('Upstream not connected');
     const row = getThread(this.db, threadId);
     const source = row ? this.inheritedSource(row) : null;
+    // What the row remembers beats where a thread of its kind starts: a fork
+    // the user has since flipped to auto is not put back in plan by an
+    // adapter restart.
+    const modeId = row?.mode_id ?? (source ? FORK_MODE_ID : DEFAULT_MODE_ID);
+    const modelId = row?.model_id ?? null;
     let branched: string | null = null;
     if (source?.acp_session_id) {
       try {
-        branched = await this.mintAcpThread(conn, source.acp_session_id, FORK_MODE_ID);
+        branched = await this.mintAcpThread(conn, source.acp_session_id, modeId, modelId);
       } catch (err) {
         this.slog.warn('could not branch a fork again; starting it empty', {
           threadId,
@@ -300,7 +307,8 @@ export class UpstreamSession {
         });
       }
     }
-    const acpSessionId = branched ?? (await this.mintAcpThread(conn, null));
+    const acpSessionId =
+      branched ?? (await this.mintAcpThread(conn, null, modeId, modelId));
     setThreadAcpId(this.db, threadId, acpSessionId);
     this.slog.info('thread had no adapter conversation; minted one', {
       threadId,
@@ -507,13 +515,26 @@ export class UpstreamSession {
       // The same `_meta` a fresh thread gets: a load is where the adapter
       // rebuilds the query for a conversation it no longer holds, which is
       // the other place these options are read.
-      await conn.agent.request('session/load', {
+      const res = (await conn.agent.request('session/load', {
         sessionId: acpSessionId,
         cwd: dk.WORKSPACE_DIR,
         mcpServers: [],
         _meta: THINKING_META,
-      });
+      })) as {
+        modes?: SessionModeState | null;
+        configOptions?: SessionConfigOption[] | null;
+      } | null;
       this.slog.info('acp session loaded', { threadId: thread.id, acpSessionId });
+      // A load brings the conversation back and nothing else: the mode and the
+      // model were the old process's, and this one starts in its own. Both are
+      // put back from the row, which is why the row has them.
+      await this.applyMode(
+        conn,
+        acpSessionId,
+        res?.modes ?? null,
+        thread.mode_id ?? DEFAULT_MODE_ID,
+      );
+      await this.applyModel(conn, acpSessionId, res?.configOptions ?? null, thread.model_id);
       return true;
     } catch (err) {
       if (!isResourceNotFound(err)) throw err;
@@ -530,18 +551,19 @@ export class UpstreamSession {
   }
 
   /**
-   * Mints an ACP thread and gives it this deployment's defaults.
+   * Mints an ACP thread and gives it the mode and model it is meant to have.
    *
-   * `from` forks that thread's context instead of starting empty, and
-   * `modeId` is the mode to put the result in — the one parameter that lets a
-   * fork start somewhere other than a fresh thread does. Both answers carry
-   * `modes` and `configOptions`, so the same two default steps apply either
-   * way.
+   * `from` forks that thread's context instead of starting empty. `modeId`
+   * and `modelId` are what to put the result in: a fork starts somewhere a
+   * fresh thread does not, and a thread being minted again for a row that
+   * already exists gets back what that row remembers. Both answers carry
+   * `modes` and `configOptions`, so the same two steps apply either way.
    */
   private async mintAcpThread(
     conn: ClientConnection,
     from: string | null,
     modeId: string = DEFAULT_MODE_ID,
+    modelId: string | null = null,
   ): Promise<string> {
     const method = from ? 'session/fork' : 'session/new';
     const res = (await conn.agent.request(method, {
@@ -556,8 +578,8 @@ export class UpstreamSession {
     };
     if (!res?.sessionId) throw new Error(`${method} returned no sessionId`);
     this.slog.info('acp session created', { method, acpSessionId: res.sessionId, from });
-    await this.applyDefaultMode(conn, res.sessionId, res.modes ?? null, modeId);
-    await this.applyDefaultModel(conn, res.sessionId, res.configOptions ?? null);
+    await this.applyMode(conn, res.sessionId, res.modes ?? null, modeId);
+    await this.applyModel(conn, res.sessionId, res.configOptions ?? null, modelId);
     return res.sessionId;
   }
 
@@ -641,6 +663,10 @@ export class UpstreamSession {
     // adapter writes it no transcript, and the row is where its replay has to
     // come from meanwhile. See replayInherited.
     const thread = insertThread(this.db, this.sessionId, acpSessionId, source.id);
+    // Recorded, unlike a fresh thread's mode: a fresh thread is in the
+    // deployment's default, which is what an empty column already means,
+    // where a fork is somewhere the default would not put it back.
+    setThreadMode(this.db, thread.id, FORK_MODE_ID);
     this.slog.info('thread forked', { from: source.id, threadId: thread.id });
     return thread;
   }
@@ -685,12 +711,18 @@ export class UpstreamSession {
   }
 
   /**
-   * Puts a fresh thread into the default mode.
+   * Puts a thread in the mode it is meant to be in: the one recorded for it,
+   * or this deployment's default when nothing is.
    *
-   * Only the thread the adapter has just minted goes through here: a mode is
-   * the user's choice from then on, and a reconnect must not undo it.
+   * Called on a thread the adapter has just minted and on one it has just
+   * loaded back, because both arrive in whatever mode the adapter starts in.
+   * A mode is the user's choice, and the thread's row is where that choice
+   * outlives the process that was holding it.
+   *
+   * An adapter that does not offer the mode is left alone rather than argued
+   * with, and so is one already in it.
    */
-  private async applyDefaultMode(
+  private async applyMode(
     conn: ClientConnection,
     acpSessionId: string,
     modes: SessionModeState | null,
@@ -703,28 +735,33 @@ export class UpstreamSession {
         sessionId: acpSessionId,
         modeId,
       });
-      this.slog.info('new thread set to its starting mode', { modeId });
+      this.slog.info('thread put in its mode', { acpSessionId, modeId });
     } catch (err) {
       // A thread in the adapter's own mode is still usable, so this never
       // fails the spawn.
-      this.slog.warn('could not set the default mode', { error: (err as Error).message });
+      this.slog.warn('could not set the mode', { error: (err as Error).message });
     }
   }
 
   /**
-   * Puts a fresh thread on the default model.
+   * Puts a thread on the model it is meant to be on, on the same terms as
+   * {@link applyMode}: the one recorded for it, or this deployment's default.
    *
-   * Only the thread the adapter has just minted goes through here: the model
-   * is the user's choice from then on, and a reconnect must not undo it.
+   * A recorded model the adapter no longer offers falls back to the default
+   * rather than being insisted on — model ids come and go, and a thread on
+   * the deployment's current default is a better answer than one whose model
+   * request the adapter rejects.
    */
-  private async applyDefaultModel(
+  private async applyModel(
     conn: ClientConnection,
     acpSessionId: string,
     configOptions: SessionConfigOption[] | null,
+    modelId: string | null,
   ): Promise<void> {
     const selector = configOptions?.find((option) => option.category === 'model');
     if (!selector?.options) return;
-    const value = pickModel(selector.options, DEFAULT_MODEL_ID);
+    const offered = modelId && selector.options.some((option) => option.value === modelId);
+    const value = offered ? modelId : pickModel(selector.options, DEFAULT_MODEL_ID);
     if (!value || value === selector.currentValue) return;
     try {
       await conn.agent.request('session/set_config_option', {
@@ -732,11 +769,11 @@ export class UpstreamSession {
         configId: selector.id,
         value,
       });
-      this.slog.info('new thread set to the default model', { modelId: value });
+      this.slog.info('thread put on its model', { acpSessionId, modelId: value });
     } catch (err) {
       // A thread on the adapter's own model is still usable, so this never
       // fails the spawn.
-      this.slog.warn('could not set the default model', { error: (err as Error).message });
+      this.slog.warn('could not set the model', { error: (err as Error).message });
     }
   }
 
@@ -765,8 +802,14 @@ export class UpstreamSession {
 
   /**
    * Keeps a thread's row in step with what the adapter says about it: the
-   * title the agent SDK generates at the end of a turn, and when it was last
-   * heard from.
+   * title the agent SDK generates at the end of a turn, the mode and model it
+   * reports itself in, and when it was last heard from.
+   *
+   * The mode and model are here as well as on the request that set them
+   * because the adapter changes them on its own too — leaving plan mode when
+   * a plan is accepted, falling back to another model under load — and a
+   * thread should come back in the mode it was actually in, not the last one
+   * somebody asked for.
    *
    * The row is found by the update's own ACP id rather than by which thread is
    * current, so an update that arrives while a switch is in flight lands on
@@ -779,14 +822,42 @@ export class UpstreamSession {
     if (!row) return;
     touchThread(this.db, row.id);
 
-    const update = (params as { update?: { sessionUpdate?: string; title?: unknown } })?.update;
-    if (update?.sessionUpdate !== 'session_info_update') return;
-    // Every field of a session_info_update is optional, so an update that
-    // carries no title says nothing about it. An explicit null is the adapter
-    // clearing it, which puts the thread back on its ordinal.
-    if (update.title === null) setThreadTitle(this.db, row.id, null);
-    else if (typeof update.title === 'string' && update.title.trim()) {
-      setThreadTitle(this.db, row.id, update.title.trim());
+    const update = (
+      params as {
+        update?: {
+          sessionUpdate?: string;
+          title?: unknown;
+          currentModeId?: unknown;
+          configOptions?: SessionConfigOption[];
+        };
+      }
+    )?.update;
+    switch (update?.sessionUpdate) {
+      case 'session_info_update':
+        // Every field of a session_info_update is optional, so an update that
+        // carries no title says nothing about it. An explicit null is the
+        // adapter clearing it, which puts the thread back on its ordinal.
+        if (update.title === null) setThreadTitle(this.db, row.id, null);
+        else if (typeof update.title === 'string' && update.title.trim()) {
+          setThreadTitle(this.db, row.id, update.title.trim());
+        }
+        return;
+      case 'current_mode_update':
+        if (typeof update.currentModeId === 'string') {
+          setThreadMode(this.db, row.id, update.currentModeId);
+        }
+        return;
+      case 'config_option_update': {
+        // Which of them is the model is the option's category, not its id:
+        // the id is the adapter's own and this deployment names none of them.
+        const model = update.configOptions?.find((option) => option.category === 'model');
+        if (typeof model?.currentValue === 'string') {
+          setThreadModel(this.db, row.id, model.currentValue);
+        }
+        return;
+      }
+      default:
+        return;
     }
   }
 
@@ -969,6 +1040,16 @@ export class UpstreamSession {
 
     try {
       const result = await conn.agent.request(method, params);
+      // A mode the adapter accepted is this thread's from now on, including
+      // across the restarts that lose the adapter's copy of it. Recorded here
+      // as well as from the adapter's own current_mode_update, because that
+      // notification is the adapter's courtesy and this is the answer to the
+      // request the user actually made.
+      if (method === 'session/set_mode' && thread !== undefined) {
+        const modeId = (params as { modeId?: unknown })?.modeId;
+        const row = threadByAcpId(this.db, this.sessionId, thread);
+        if (row && typeof modeId === 'string') setThreadMode(this.db, row.id, modeId);
+      }
       // A fork's own replay is empty until it has been prompted, so the
       // conversation it branched from is replayed in its place — after its
       // own, which is the part that answers the request.

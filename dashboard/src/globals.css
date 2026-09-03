@@ -136,6 +136,27 @@
 }
 
 /*
+ * The document while a full-viewport route is mounted; see use-viewport-lock.
+ *
+ * Those routes are `h-dvh` boxes with their own scroller inside, so the
+ * document has nothing to scroll by design. Saying so outright is what keeps a
+ * phone from disagreeing: a viewport measured against chrome that slides in and
+ * out is a few pixels off for as long as it is moving, and a document that can
+ * scroll those pixels will — taking the header with it and giving it back only
+ * on an overscroll from the very top of the thread.
+ *
+ * `overscroll-behavior` covers the same ground from the other side: without it
+ * a flick past the end of the thread becomes a pull-to-refresh, which is never
+ * what was meant by scrolling up through a conversation.
+ */
+.viewport-locked,
+.viewport-locked body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/*
  * Installed by `npx assistant-ui add`. The elements drive their open and
  * closed styling from data attributes rather than a class.
  */
