@@ -235,6 +235,42 @@ test('a deployment on the previous release upgrades cleanly', () => {
   }
 });
 
+test('threads from before the mode column upgrade to the deployment default', () => {
+  const db = new Database(join(dir, 'boxes.db'));
+  const before = MIGRATIONS.length - 1;
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES ('live', 'from before modes were kept', 'DEFAULT', 'img', '[]', 'c1',
+       'sn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+       created_at, last_active_at)
+     VALUES ('t1', 'live', 'acp-1', NULL, 1, 1000, 2000)`,
+  ).run();
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    assert.ok(columns(upgraded, 'threads').includes('mode_id'));
+    assert.ok(columns(upgraded, 'threads').includes('model_id'));
+
+    // No backfill, because null already says the right thing: this thread is
+    // in whatever the deployment starts one in. Nothing has to guess what a
+    // conversation from before the column was in.
+    const row = upgraded
+      .prepare("SELECT mode_id, model_id FROM threads WHERE id = 't1'")
+      .get() as { mode_id: string | null; model_id: string | null };
+    assert.deepEqual(row, { mode_id: null, model_id: null });
+  } finally {
+    upgraded.close();
+  }
+});
+
 test('the agent tables arrive with a global set, and existing sessions select none', () => {
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS.slice(0, 8)) db.exec(sql);

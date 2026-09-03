@@ -354,16 +354,34 @@ Starting it, in `ensureStarted`:
    id they hold is one the adapter would now reject; each reconnects and pins
    whatever that thread is next.
 
-A fresh thread is then switched into `auto` mode, when the adapter advertises
-a mode by that id — except a fork, which starts in `plan`. A fork shares the
-thread it came from's checkout, and the point of one is to ask about work the
-original is still doing, so it starts in a mode that reads rather than writes.
-That does not fix the shared workspace; it stops the common accident, and
-flipping the fork to `auto` is one tap in the header. Only the thread the
-adapter has just minted goes through this: from then on the mode is the
-user's, and a reconnect must not undo it. An adapter offering no such mode is
-left in whichever mode it starts in, and a switch that fails is logged rather
-than failing the spawn.
+Every thread is then put in the mode and on the model it is meant to have:
+what its row records, or this deployment's default — `auto` and `opus` — when
+it records nothing. A fresh thread records nothing, which is what an empty
+column is for. A fork is the exception and says so: it starts in `plan`,
+because it shares the thread it came from's checkout and the point of one is
+to ask about work the original is still doing, so it starts in a mode that
+reads rather than writes. That does not fix the shared workspace; it stops the
+common accident, and flipping the fork to `auto` is one tap in the header. An
+adapter offering no such mode is left in whichever mode it starts in, and a
+switch that fails is logged rather than failing the spawn.
+
+Both are on the thread's row (`threads.mode_id`, `threads.model_id`) because
+the adapter forgets them. A mode lives in that process and nothing else, so
+every respawn — an idle stop and a return, a deploy, an adapter that died —
+used to hand the conversation back in whatever mode the adapter starts in,
+which is how a thread left in `auto` came back on manual approvals half an
+hour later. `session/load` brings the conversation back and nothing else, and
+this is the other half of that: the row is read on every load, not only on
+the mint that used to be the one place a mode was ever set.
+
+The row is written wherever the answer changes. A `session/set_mode` the
+adapter accepts is recorded as it passes through the gateway, because that is
+the request the user actually made. `current_mode_update` and
+`config_option_update` are recorded as they arrive, because the adapter also
+changes both on its own — leaving `plan` when a plan is accepted, falling back
+to another model under load — and a thread should come back where it ended up
+rather than where it was last sent. Which config option is the model is read
+from its `category`, never from the adapter's id for it.
 
 Every one of those calls — `session/new`, `session/fork` and `session/load`
 alike — carries the same `_meta.claudeCode.options.thinking`, which is where
