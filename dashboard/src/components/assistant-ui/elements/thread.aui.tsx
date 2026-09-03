@@ -165,12 +165,19 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           its user message to the top; everything else that grows the thread
           follows the bottom. Without it a !bang command's output is written
           below the fold and never scrolled to, because only a running turn
-          sets the anchor. */}
+          sets the anchor.
+
+          Boxes edit: @container here as well as on the root, because this is
+          the element whose width a full-bleed table has to fit inside (see
+          .aui-md-bleed in globals.css). The root's own width counts the
+          vertical scrollbar this element keeps, and a bleed measured against
+          that overflows by exactly a scrollbar — putting a horizontal one
+          under the whole thread. Nothing else here queries a container. */}
       <ThreadPrimitive.Viewport
         autoScroll
         turnAnchor="top"
         data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        className="@container relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
         <div
           className={cn(
@@ -450,14 +457,23 @@ const AssistantMessage: FC = () => {
   } = useContext(ThreadComponentsContext);
 
   const ACTION_BAR_PT = "pt-1.5";
-  // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
+  // Reserve the action bar's height under the message, then cancel the
+  // reservation in flow so the next message sits where it would anyway.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      /* Boxes edit: no content-visibility utilities here, unlike the user
+         message below. It buys render skipping for off-screen messages and
+         pays for it with paint containment, which clips every child to this
+         box — and a table or a code block that bleeds out of the reading
+         column (.aui-md-bleed) is a child that has to escape it. So it is
+         applied in globals.css instead, to the messages that hold no such
+         block. The user message keeps the utilities: nothing in a prompt
+         bleeds. */
+      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
         data-slot="aui_assistant-message-content"

@@ -753,7 +753,12 @@ held with nobody watching — and needs
 Tailwind utilities and shadcn/assistant-ui components only: no inline `style=`,
 no CSS-in-JS, and design tokens defined once in `src/globals.css` — including
 the `@theme inline` bridge, without which Tailwind silently drops every token
-utility.
+utility. `.aui-md-bleed` is a hand-written rule rather than utilities because
+it needs container-query units and a negative margin computed from them: it
+lets a table or a code block in chat output escape the 44rem reading column
+out to the width of the thread and scroll horizontally beyond that. The rule
+under it withholds `content-visibility` from the messages that hold such a
+block, since paint containment would clip one back into the column.
 
 Components under `src/components/assistant-ui/` and `src/components/ui/` are
 installed by their official CLIs and committed. Our edits carry a comment

@@ -67,7 +67,7 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   };
 
   return (
-    <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
+    <div className="aui-code-header-root aui-md-bleed border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
         {language}
       </span>
@@ -189,14 +189,20 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
+  // Boxes edit: a table is the archetypal thing that does not fit a reading
+  // column. The wrapper is what bleeds and what scrolls (see .aui-md-bleed in
+  // globals.css); the table itself takes the width its content asks for and
+  // falls back to filling the wrapper when that is narrower.
   table: ({ className, ...props }) => (
-    <table
-      className={cn(
-        "aui-md-table my-3 w-full border-separate border-spacing-0 overflow-y-auto",
-        className,
-      )}
-      {...props}
-    />
+    <div className="aui-md-table-wrap aui-md-bleed my-3">
+      <table
+        className={cn(
+          "aui-md-table w-max min-w-full border-separate border-spacing-0",
+          className,
+        )}
+        {...props}
+      />
+    </div>
   ),
   th: ({ className, ...props }) => (
     <th
@@ -240,10 +246,14 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
+  // Boxes edit: bleeds with the same rule the tables use, so a wide line of
+  // code uses the window rather than wrapping the reading column's width.
+  // The header above it bleeds by the same amount, which is what keeps the
+  // two halves of one card lined up.
   pre: ({ className, ...props }) => (
     <pre
       className={cn(
-        "aui-md-pre border-border/50 bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl border border-t-0 p-3.5 text-[13px] leading-relaxed",
+        "aui-md-pre aui-md-bleed border-border/50 bg-muted/30 rounded-t-none rounded-b-xl border border-t-0 p-3.5 text-[13px] leading-relaxed",
         className,
       )}
       {...props}
