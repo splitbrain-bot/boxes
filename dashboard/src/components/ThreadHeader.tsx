@@ -1,8 +1,9 @@
-import { ArrowLeft, FileSearch, GitBranch, Info } from 'lucide-react';
+import { ArrowLeft, FileSearch, GitBranch, Info, SlidersHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 
 /** What the connection dot says, and the colour it says it in. */
@@ -12,6 +13,50 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
   reconnecting: { label: 'reconnecting', dot: 'bg-warn animate-pulse' },
   closed: { label: 'disconnected', dot: 'bg-idle' },
 };
+
+/**
+ * Whether an option is one this header can put a control on.
+ *
+ * A select with something to choose between. The adapter may advertise other
+ * kinds — it has a boolean form of some options for clients that ask for one,
+ * which this one does not — and an option with a single value is not a
+ * choice.
+ */
+function isSelectable(option: SessionConfigOption): boolean {
+  return (option.type ?? 'select') === 'select' && (option.options?.length ?? 0) > 1;
+}
+
+/** One config option as a native select. */
+function ConfigSelect({
+  option,
+  label,
+  className,
+  onSet,
+}: {
+  option: SessionConfigOption;
+  /** What to call it. The adapter's own name, unless the header has a better one. */
+  label?: string;
+  className?: string;
+  onSet: (value: string) => void;
+}) {
+  const name = label ?? option.name;
+  const current = option.options?.find((value) => value.value === option.currentValue);
+  return (
+    <select
+      aria-label={name}
+      value={option.currentValue ?? ''}
+      onChange={(event) => onSet(event.target.value)}
+      title={current?.description ?? current?.name ?? option.description ?? name}
+      className={cn('min-w-0 rounded-md border bg-muted px-2 py-1 text-xs', className)}
+    >
+      {option.options?.map((value) => (
+        <option key={value.value} value={value.value}>
+          {value.name}
+        </option>
+      ))}
+    </select>
+  );
+}
 
 /**
  * The thread's own chrome: where it goes back to, which of the session's
@@ -54,7 +99,18 @@ export function ThreadHeader({
   // By category rather than by id: what the option is for is part of the
   // protocol, the id the adapter gives it is not.
   const model = configOptions.find((option) => option.category === 'model');
-  const currentModel = model?.options?.find((value) => value.value === model.currentValue);
+  // Everything else the adapter lets a client set — the effort level, fast
+  // mode, the agent persona, whatever a later adapter adds. These used to go
+  // nowhere, so the effort level could not be set at all. They live behind a
+  // button rather than in the row: four selects do not fit a phone's header,
+  // and these are the ones you set once rather than flip mid-thread.
+  //
+  // The mode is excluded because the switcher beside the name already is it,
+  // under the adapter's other name for the same thing.
+  const rest = configOptions.filter(
+    (option) =>
+      option !== model && option.category !== 'mode' && isSelectable(option),
+  );
 
   return (
     <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
@@ -108,20 +164,47 @@ export function ThreadHeader({
         </select>
       ) : null}
 
-      {model && (model.options?.length ?? 0) > 1 ? (
-        <select
-          aria-label="Model"
-          value={model.currentValue ?? ''}
-          onChange={(event) => onSetConfigOption(model.id, event.target.value)}
-          title={currentModel?.description ?? currentModel?.name}
-          className="min-w-0 max-w-24 shrink rounded-md border bg-muted px-2 py-1 text-xs"
-        >
-          {model.options?.map((value) => (
-            <option key={value.value} value={value.value}>
-              {value.name}
-            </option>
-          ))}
-        </select>
+      {model && isSelectable(model) ? (
+        <ConfigSelect
+          option={model}
+          label="Model"
+          className="max-w-24 shrink"
+          onSet={(value) => onSetConfigOption(model.id, value)}
+        />
+      ) : null}
+
+      {rest.length > 0 ? (
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              aria-label="Agent settings"
+              title="Effort and the adapter's other settings"
+            >
+              <SlidersHorizontal />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-72">
+            <div className="flex flex-col gap-3">
+              {rest.map((option) => (
+                <label key={option.id} className="flex flex-col gap-1 text-xs">
+                  <span className="font-medium">{option.name}</span>
+                  {option.description ? (
+                    <span className="text-muted-foreground">{option.description}</span>
+                  ) : null}
+                  <ConfigSelect
+                    option={option}
+                    className="mt-0.5 py-1.5"
+                    onSet={(value) => onSetConfigOption(option.id, value)}
+                  />
+                </label>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
       ) : null}
 
       {/* Branching belongs here rather than only on the list, because this is

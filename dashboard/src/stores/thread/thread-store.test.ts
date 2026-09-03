@@ -167,6 +167,102 @@ test('a prompt marks the thread running until it answers', async () => {
   assert.equal(store.getSnapshot().isRunning, false);
 });
 
+test("the gateway's turn state runs the thread a browser did not prompt", () => {
+  const { store, client } = makeStore();
+  assert.equal(store.getSnapshot().isRunning, false);
+
+  // What a browser is told after its replay when it re-opens a thread that
+  // is mid-turn: nothing is in flight from here, and the turn is real.
+  client.handlers.onTurnState(true);
+  assert.equal(store.getSnapshot().isRunning, true);
+
+  client.handlers.onTurnState(false);
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('a replay drops the turn state it was told before it', () => {
+  const { store, client } = makeStore();
+  client.handlers.onTurnState(true);
+  assert.equal(store.getSnapshot().isRunning, true);
+
+  // A reconnect: the gateway re-states the turn after the replay, so holding
+  // the old answer over one would claim a turn nobody has confirmed.
+  client.handlers.onResetThread();
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('cancel stops a turn this browser did not start', () => {
+  const { store, client } = makeStore();
+  client.handlers.onTurnState(true);
+  store.cancel();
+  assert.deepEqual(client.notifications, [
+    { method: 'session/cancel', params: { sessionId: 'acp-1' } },
+  ]);
+  assert.equal(store.getSnapshot().isRunning, false);
+});
+
+test('an open permission request is reported as one', async () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 't1',
+    title: 'Write a file',
+    status: 'pending',
+  } as SessionUpdate);
+  void client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    options: [
+      { optionId: 'once', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'always', name: 'Always allow', kind: 'allow_always' },
+      { optionId: 'no', name: 'Deny', kind: 'reject_once' },
+    ],
+  } as RequestPermissionRequest);
+  // One way to say yes, doubled by scope, and one to say no: a gate.
+  assert.equal(store.getSnapshot().awaiting, 'permission');
+});
+
+test('several ways to say yes is a question, not a gate', async () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 't1',
+    title: 'Leave plan mode',
+    status: 'pending',
+  } as SessionUpdate);
+  void client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    // What leaving plan mode asks: three different things to do next.
+    options: [
+      { optionId: 'auto', name: 'Yes, and use auto mode', kind: 'allow_always' },
+      { optionId: 'acceptEdits', name: 'Yes, and auto-accept edits', kind: 'allow_always' },
+      { optionId: 'default', name: 'Yes, and approve each edit', kind: 'allow_once' },
+      { optionId: 'plan', name: 'No, keep planning', kind: 'reject_once' },
+    ],
+  } as RequestPermissionRequest);
+  assert.equal(store.getSnapshot().awaiting, 'question');
+});
+
+test('answering a request leaves nothing waiting', async () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 't1',
+    title: 'Write a file',
+    status: 'pending',
+  } as SessionUpdate);
+  void client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    options: [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }],
+  } as RequestPermissionRequest);
+  assert.equal(store.getSnapshot().awaiting, 'permission');
+
+  store.respondToApproval('approval-1', 'once');
+  assert.equal(store.getSnapshot().awaiting, null);
+});
+
 test('a failed prompt clears the running state and reports the reason', async () => {
   const { store } = makeStore((c) => {
     c.fail = 'upstream not connected';

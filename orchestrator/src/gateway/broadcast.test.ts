@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
+import { TURN_STATE_METHOD, type TurnStateParams } from '../../../shared/types.ts';
 import { Broadcast } from './broadcast.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -18,14 +19,23 @@ function fakeDownstream(
   id: number,
   acpThreadId: string | null = T1,
   lastActiveAt = 0,
-): DownstreamHandle & { sent: unknown[] } {
+): DownstreamHandle & { sent: unknown[]; turns: boolean[] } {
   const sent: unknown[] = [];
+  /** Every turn state this browser was told, in order. */
+  const turns: boolean[] = [];
   return {
     id,
     acpThreadId,
     lastActiveAt,
     sent,
-    notify: (_method, params) => sent.push(params),
+    turns,
+    notify: (method, params) => {
+      if (method === TURN_STATE_METHOD) {
+        turns.push((params as TurnStateParams).active);
+        return;
+      }
+      sent.push(params);
+    },
     request: () => Promise.resolve({}),
     close: () => {},
   };
@@ -248,6 +258,34 @@ test('two replays at once each get the history', () => {
   assert.equal(idle.sent.length, 1);
 });
 
+test('a borrowed replay reaches the fork under its own thread id', () => {
+  const b = new Broadcast('s1');
+  const exploring = fakeDownstream(1, T2);
+  const working = fakeDownstream(2, T1);
+  b.add(exploring);
+  b.add(working);
+
+  // A fork with no transcript of its own, being shown the source's. The
+  // browser is pinned to the fork, so what it is sent has to name the fork --
+  // an update naming the source is some other conversation's as far as it is
+  // concerned.
+  b.beginReplay(exploring, T1, T2);
+  b.update(update('user_message_chunk', 'old question', T1));
+  b.update(update('agent_message_chunk', 'old answer', T1));
+
+  assert.deepEqual(exploring.sent, [
+    update('user_message_chunk', 'old question', T2),
+    update('agent_message_chunk', 'old answer', T2),
+  ]);
+  // The tab on the source already has this history on screen.
+  assert.equal(working.sent.length, 0);
+
+  b.endReplay(exploring, T1);
+  b.update(update('agent_message_chunk', 'live', T1));
+  assert.deepEqual(working.sent, [update('agent_message_chunk', 'live', T1)]);
+  assert.equal(exploring.sent.length, 2);
+});
+
 test('a browser that leaves mid-replay does not strand the others', () => {
   const b = new Broadcast('s1');
   const [leaving, watching] = [fakeDownstream(1), fakeDownstream(2)];
@@ -342,4 +380,74 @@ test('nested prompts hold the window until the last one ends', () => {
   b.endPrompt({ sessionId: T1 });
   b.update(update('user_message_chunk', 'after'));
   assert.deepEqual(userChunks(a), ['one', 'two', 'after']);
+});
+
+test('a prompt tells the browsers on its thread that a turn is running', () => {
+  const b = new Broadcast('s1');
+  const [a, c, other] = [fakeDownstream(1), fakeDownstream(2), fakeDownstream(3, T2)];
+  b.add(a);
+  b.add(c);
+  b.add(other);
+
+  const prompt = { sessionId: T1, prompt: [{ type: 'text', text: 'go' }] };
+  b.beginPrompt(prompt);
+  assert.deepEqual(a.turns, [true]);
+  // Both browsers on the thread, including the one that did not send it.
+  assert.deepEqual(c.turns, [true]);
+  // And nobody on another conversation of the same box.
+  assert.deepEqual(other.turns, []);
+
+  b.endPrompt(prompt);
+  assert.deepEqual(a.turns, [true, false]);
+});
+
+test('two prompts on one thread are one turn', () => {
+  const b = new Broadcast('s1');
+  const a = fakeDownstream(1);
+  b.add(a);
+
+  const first = { sessionId: T1, prompt: [] };
+  const second = { sessionId: T1, prompt: [] };
+  b.beginPrompt(first);
+  b.beginPrompt(second);
+  assert.deepEqual(a.turns, [true]);
+  assert.equal(b.isPrompting(T1), true);
+
+  // The first to finish does not end the turn the second is still running.
+  b.endPrompt(first);
+  assert.deepEqual(a.turns, [true]);
+  assert.equal(b.isPrompting(T1), true);
+
+  b.endPrompt(second);
+  assert.deepEqual(a.turns, [true, false]);
+  assert.equal(b.isPrompting(T1), false);
+});
+
+test('a browser can be told its own thread state, and only its own', () => {
+  const b = new Broadcast('s1');
+  const [a, other] = [fakeDownstream(1), fakeDownstream(2, T2)];
+  b.add(a);
+  b.add(other);
+
+  b.turnStateTo(a, true);
+  assert.deepEqual(a.turns, [true]);
+  assert.deepEqual(other.turns, []);
+
+  // A connection whose thread has not been settled yet is told nothing;
+  // it has not asked for anything either.
+  const unpinned = fakeDownstream(3, null);
+  b.add(unpinned);
+  b.turnStateTo(unpinned, true);
+  assert.deepEqual(unpinned.turns, []);
+});
+
+test('clearing the turns says so on every watched thread', () => {
+  const b = new Broadcast('s1');
+  const [a, other] = [fakeDownstream(1), fakeDownstream(2, T2)];
+  b.add(a);
+  b.add(other);
+
+  b.clearTurnStates();
+  assert.deepEqual(a.turns, [false]);
+  assert.deepEqual(other.turns, [false]);
 });

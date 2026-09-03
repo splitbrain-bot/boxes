@@ -6,6 +6,7 @@ import type { Config } from '../config.ts';
 import {
   appendAcpLog,
   clearSessionTurns,
+  clearThreadInheritance,
   currentThread,
   getThread,
   insertThread,
@@ -108,10 +109,47 @@ const DEFAULT_MODE_ID = 'auto';
 const FORK_MODE_ID = 'plan';
 
 /**
+ * How far a borrowed replay follows the chain of forks back. A fork of a fork
+ * inherits through the middle thread, and the bound is what stops a row that
+ * somehow points at itself from spinning.
+ */
+const MAX_INHERIT_HOPS = 32;
+
+/**
  * The model a fresh thread is put on, when the adapter offers it. An adapter
  * that offers no such model leaves the thread on whichever one it starts on.
  */
 const DEFAULT_MODEL_ID = 'opus';
+
+/**
+ * What the adapter is asked for on the thinking side, on every conversation
+ * this orchestrator creates or brings back.
+ *
+ * `display` is the whole point. Current models default it to `omitted`, which
+ * streams thinking blocks carrying a signature and no text — so the adapter
+ * has nothing to put in an `agent_thought_chunk` and the dashboard's
+ * reasoning disclosure never appears. Asking for `summarized` is what makes
+ * the agent's reasoning something you can read, which on a phone, watching a
+ * long turn go by, is most of what there is to watch.
+ *
+ * `enabled` with a budget rather than `adaptive`, deliberately. The two are
+ * the same thing on a current model — the budget is read as on/off and the
+ * model decides how much to think — but `adaptive` is also a flag a model
+ * that predates it can reject, and which model a thread runs is the user's
+ * choice from the header while this is fixed at the thread's creation. The
+ * conservative spelling costs nothing and cannot be wrong.
+ *
+ * It travels in `_meta`, which is where ACP puts an agent's own extensions:
+ * the adapter reads `_meta.claudeCode.options` and lays it over the options
+ * it hands the Claude Agent SDK.
+ */
+const THINKING_META = {
+  claudeCode: {
+    options: {
+      thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
+    },
+  },
+} as const;
 
 /**
  * The value to select for a wanted model: the name itself when the adapter
@@ -235,15 +273,39 @@ export class UpstreamSession {
     return attempt;
   }
 
-  /** Mints a fresh adapter conversation and records it against a thread row. */
+  /**
+   * Mints a fresh adapter conversation and records it against a thread row.
+   *
+   * A fork that has not been prompted yet is branched again rather than
+   * started empty: it exists to carry the source's context, and an adapter
+   * restart is not the user changing their mind about that. When the source
+   * cannot be branched either — the same restart may have left it with a
+   * conversation of its own to lose — the thread is started empty, because a
+   * thread with nothing to pin is worse than one with nothing to say.
+   */
   private async mintInto(threadId: string): Promise<string> {
     const conn = this.conn;
     if (!conn) throw new Error('Upstream not connected');
-    const acpSessionId = await this.mintAcpThread(conn, null);
+    const row = getThread(this.db, threadId);
+    const source = row ? this.inheritedSource(row) : null;
+    let branched: string | null = null;
+    if (source?.acp_session_id) {
+      try {
+        branched = await this.mintAcpThread(conn, source.acp_session_id, FORK_MODE_ID);
+      } catch (err) {
+        this.slog.warn('could not branch a fork again; starting it empty', {
+          threadId,
+          from: source.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+    const acpSessionId = branched ?? (await this.mintAcpThread(conn, null));
     setThreadAcpId(this.db, threadId, acpSessionId);
     this.slog.info('thread had no adapter conversation; minted one', {
       threadId,
       acpSessionId,
+      forkedFrom: branched ? source?.id : null,
     });
     return acpSessionId;
   }
@@ -287,6 +349,7 @@ export class UpstreamSession {
    */
   private clearTurns(): void {
     clearSessionTurns(this.db, this.sessionId);
+    this.downstreams.clearTurnStates();
   }
 
   /**
@@ -441,10 +504,14 @@ export class UpstreamSession {
   private async loadSession(conn: ClientConnection, thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;
     try {
+      // The same `_meta` a fresh thread gets: a load is where the adapter
+      // rebuilds the query for a conversation it no longer holds, which is
+      // the other place these options are read.
       await conn.agent.request('session/load', {
         sessionId: acpSessionId,
         cwd: dk.WORKSPACE_DIR,
         mcpServers: [],
+        _meta: THINKING_META,
       });
       this.slog.info('acp session loaded', { threadId: thread.id, acpSessionId });
       return true;
@@ -481,6 +548,7 @@ export class UpstreamSession {
       ...(from ? { sessionId: from } : {}),
       cwd: dk.WORKSPACE_DIR,
       mcpServers: [],
+      _meta: THINKING_META,
     })) as {
       sessionId?: string;
       modes?: SessionModeState | null;
@@ -569,7 +637,10 @@ export class UpstreamSession {
     }
     if (!source.acp_session_id) throw new Error(NOTHING_TO_FORK);
     const acpSessionId = await this.mintAcpThread(conn, source.acp_session_id, FORK_MODE_ID);
-    const thread = insertThread(this.db, this.sessionId, acpSessionId);
+    // The source is recorded, not just used: until the fork is prompted the
+    // adapter writes it no transcript, and the row is where its replay has to
+    // come from meanwhile. See replayInherited.
+    const thread = insertThread(this.db, this.sessionId, acpSessionId, source.id);
     this.slog.info('thread forked', { from: source.id, threadId: thread.id });
     return thread;
   }
@@ -839,6 +910,12 @@ export class UpstreamSession {
   flushPendingTo(handle: DownstreamHandle): void {
     const thread = handle.acpThreadId;
     if (!thread) return;
+    // Whether its thread is mid-turn, which is the other thing a replay does
+    // not carry: the transcript says what has been said, not that the agent
+    // is still saying it. Sent here rather than at attach for the same reason
+    // the queued questions are — a client rebuilds from the replay and drops
+    // whatever it held before it landed.
+    this.downstreams.turnStateTo(handle, this.downstreams.isPrompting(thread));
     for (const entry of this.pending.listForThread(this.sessionId, thread)) {
       const params = JSON.parse(entry.row.params) as unknown;
       handle
@@ -879,13 +956,24 @@ export class UpstreamSession {
     const isLoad = method === 'session/load' && thread !== undefined && from !== undefined;
 
     if (isPrompt) {
+      // A fork's first prompt is where it stops borrowing: the adapter starts
+      // a transcript for it here, and that transcript opens with everything
+      // the source had said, so replaying the source as well would say all of
+      // it twice.
+      const row = threadByAcpId(this.db, this.sessionId, thread);
+      if (row?.inherits_from) clearThreadInheritance(this.db, row.id);
       this.setTurnActive(thread, true);
       this.downstreams.beginPrompt(params);
     }
     if (isLoad) this.downstreams.beginReplay(from, thread);
 
     try {
-      return await conn.agent.request(method, params);
+      const result = await conn.agent.request(method, params);
+      // A fork's own replay is empty until it has been prompted, so the
+      // conversation it branched from is replayed in its place — after its
+      // own, which is the part that answers the request.
+      if (isLoad) await this.replayInherited(thread, from);
+      return result;
     } finally {
       if (isPrompt) {
         this.setTurnActive(thread, false);
@@ -902,6 +990,76 @@ export class UpstreamSession {
     }
   }
 
+  /**
+   * Shows a fork the conversation it was branched from, when it has none of
+   * its own yet.
+   *
+   * A fork holds the source's context from the moment it is minted, but the
+   * adapter writes it a transcript only when it is first prompted — so
+   * loading it replays nothing, and it opens on a blank screen claiming to
+   * know what was said somewhere the reader cannot see. What is sent instead
+   * is the source's own replay, re-tagged as this thread's: the same history
+   * the fork is carrying, said back to the browser reading it.
+   *
+   * It goes to the one browser that asked, exactly as that browser's own
+   * replay does, and the source's live updates are held back for its length
+   * the same way — a replay of a thread cannot be told apart from what it is
+   * saying right now, and this is the one place where the two threads are the
+   * same thread.
+   *
+   * A source that cannot be replayed costs the browser the history and
+   * nothing else: it asked to load a thread, and the thread is loaded.
+   */
+  private async replayInherited(acpThreadId: string, to: DownstreamHandle): Promise<void> {
+    const fork = threadByAcpId(this.db, this.sessionId, acpThreadId);
+    if (!fork?.inherits_from) return;
+    const source = this.inheritedSource(fork);
+    const conn = this.conn;
+    if (!source?.acp_session_id || !conn) return;
+
+    this.downstreams.beginReplay(to, source.acp_session_id, acpThreadId);
+    try {
+      await conn.agent.request('session/load', {
+        sessionId: source.acp_session_id,
+        cwd: dk.WORKSPACE_DIR,
+        mcpServers: [],
+        _meta: THINKING_META,
+      });
+      this.slog.info('replayed a fork from the thread it came from', {
+        threadId: fork.id,
+        from: source.id,
+      });
+    } catch (err) {
+      this.slog.warn('could not replay the thread a fork came from', {
+        threadId: fork.id,
+        from: source.id,
+        error: (err as Error).message,
+      });
+    } finally {
+      this.downstreams.endReplay(to, source.acp_session_id);
+    }
+  }
+
+  /**
+   * The nearest thread whose transcript a fork can borrow, or null when there
+   * is none to ask.
+   *
+   * A fork of a fork inherits through the middle one: that thread has no
+   * transcript either, so following the chain is what makes the second branch
+   * show the conversation both of them came from.
+   */
+  private inheritedSource(thread: ThreadRow): ThreadRow | null {
+    let row: ThreadRow | undefined = thread;
+    for (let hop = 0; hop < MAX_INHERIT_HOPS; hop++) {
+      const next: string | null = row?.inherits_from ?? null;
+      if (!next) return null;
+      row = getThread(this.db, next);
+      if (!row || row.session_id !== this.sessionId) return null;
+      if (row.acp_session_id && !row.inherits_from) return row;
+    }
+    return null;
+  }
+
   /** Forwards a browser notification to the adapter. */
   async forwardNotification(method: string, params: unknown): Promise<void> {
     await this.ensureStarted();
@@ -912,7 +1070,10 @@ export class UpstreamSession {
     // session may still be mid-turn, and saying otherwise would be the stale
     // second source of truth this moved onto the thread to avoid.
     const thread = threadOf(params);
-    if (method === 'session/cancel' && thread) this.setTurnActive(thread, false);
+    if (method === 'session/cancel' && thread) {
+      this.setTurnActive(thread, false);
+      this.downstreams.turnState(thread, false);
+    }
     await conn.agent.notify(method, params);
   }
 

@@ -12,6 +12,8 @@ import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../api.ts';
+import { useDocumentTitle } from '@/hooks/use-document-title';
+import { threadTitle, type TabState } from '@/lib/tab-title';
 import { useSessions } from '../stores/sessions.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
 import { bangCommand } from '../stores/thread/exec.ts';
@@ -77,6 +79,16 @@ export function SessionThread() {
   const threads = session?.threads ?? [];
   const thread = threads.find((t) => t.id === (threadId ?? session?.currentThreadId));
   const threadLabel = thread ? threadName(thread) : null;
+
+  /**
+   * What this tab is doing, for its title.
+   *
+   * A question outranks a running turn because it is the one that stopped:
+   * the two cannot both be true anyway — a thread waiting on an answer is not
+   * running, which is the whole point of the request.
+   */
+  const tabState: TabState = state.awaiting ?? (state.isRunning ? 'running' : 'idle');
+  useDocumentTitle(threadTitle(tabState, session?.name ?? id, threadLabel));
 
   /**
    * Branches this conversation and reveals the result as a link.
@@ -174,13 +186,13 @@ export function SessionThread() {
             {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
-                {/* It opens on an empty transcript, which is the adapter's
-                    doing: it keeps the context it was forked with and has no
-                    replay to hand over. Saying so here is cheaper than the
-                    reader wondering what was lost. */}
+                {/* It opens on this conversation: the gateway replays what
+                    was said here into it until it has said something of its
+                    own. What it carries and what it shows are the same thing,
+                    so there is nothing to warn about. */}
                 <span>
-                  {threadName(forked)} branched from this conversation. It knows what was said
-                  here, but starts with an empty transcript.
+                  {threadName(forked)} branched from this conversation. It opens on everything
+                  said here so far and goes its own way from there.
                 </span>
                 {/* A real click on a real link, so the browser opens the tab
                     rather than a script asking it to. */}

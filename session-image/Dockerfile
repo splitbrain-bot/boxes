@@ -200,11 +200,26 @@ RUN npm install -g --prefix /usr/local \
 # --prefix for the reason the adapter's install gives above, and here it also
 # has to land somewhere the next command can reach: /usr/local/bin is on PATH,
 # and playwright-cli is run by name on the line after it is installed.
+#
+# /usr/local/bin/chromium is the browser under a name something other than
+# this CLI can find. Playwright installs it as
+# chromium-<revision>/chrome-linux64/chrome, where the revision belongs to
+# whichever playwright-core @playwright/cli depends on -- so a project with a
+# Playwright of its own resolves a different revision, finds nothing there,
+# and cannot download into /opt because the image is read-only at runtime. A
+# test suite that would rather use the browser that is here than fetch a
+# second one needs a path it can hardcode, and this is it. `--version` is the
+# assertion that the link points at something that runs, and the first thing
+# in this build to say so -- the browser check at the end says it again, and
+# far later.
 ARG PLAYWRIGHT_CLI_VERSION=0.1.19
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
  && npm cache clean --force \
  && playwright-cli install-browser chromium --with-deps \
+ && ln -s "$(find "${PLAYWRIGHT_BROWSERS_PATH}" -maxdepth 3 -type f -name chrome \
+      -path '*/chromium-*' -print -quit)" /usr/local/bin/chromium \
+ && chromium --version \
  && apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
  && rm -rf /var/lib/apt/lists/*
 

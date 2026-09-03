@@ -1,3 +1,4 @@
+import { TURN_STATE_METHOD, type TurnStateParams } from '../../../../shared/types.ts';
 import type {
   LoadSessionResponse,
   NewSessionResponse,
@@ -35,6 +36,12 @@ export interface AcpClientHandlers {
   onReady(modes: SessionModeState | null, configOptions: SessionConfigOption[]): void;
   /** The connection state changed. */
   onState(state: ConnectionState): void;
+  /**
+   * The gateway said whether a turn is running on this thread. It says so
+   * once after every replay and again on every transition, which is how a
+   * browser that did not send the prompt knows there is one.
+   */
+  onTurnState(active: boolean): void;
   /**
    * A fresh connection is about to replay the thread, so whatever the store
    * holds is stale and must be thrown away.
@@ -254,6 +261,11 @@ export class AcpClient {
 
     if (msg.method === 'session/update') {
       this.handlers.onUpdate(msg.params as SessionNotification);
+      return;
+    }
+
+    if (msg.method === TURN_STATE_METHOD) {
+      this.handlers.onTurnState((msg.params as TurnStateParams)?.active === true);
     }
   }
 

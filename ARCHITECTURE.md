@@ -313,6 +313,18 @@ user's, and a reconnect must not undo it. An adapter offering no such mode is
 left in whichever mode it starts in, and a switch that fails is logged rather
 than failing the spawn.
 
+Every one of those calls — `session/new`, `session/fork` and `session/load`
+alike — carries the same `_meta.claudeCode.options.thinking`, which is where
+the adapter reads options to lay over the ones it hands the Claude Agent SDK.
+It asks for `display: 'summarized'`. Current models default that to
+`omitted`, which streams thinking blocks carrying a signature and no text, so
+the adapter has nothing to put in an `agent_thought_chunk` and the reasoning
+disclosure in the thread never appears at all — the agent was thinking and
+saying so, and the words were not on the wire. The budgeted `enabled` form
+rather than `adaptive`: on a current model the two are the same thing, and
+`adaptive` is a flag an older one can reject, while which model a thread runs
+is chosen from the header long after this is fixed.
+
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
 that the session's status becomes `error`.
 
@@ -406,7 +418,10 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   own thread.** `session/load` is by definition a re-send of the whole thread,
   so broadcasting it rendered every other open tab's conversation twice — but
   a replay of one thread must not hold back another thread's live updates,
-  which is the bug two open tabs hit first.
+  which is the bug two open tabs hit first. A replay one thread *borrowed*
+  from another is re-tagged as the borrower's on the way out, because the
+  browser reading it is pinned to the borrower — see *Several threads per
+  session*.
 
 ### Several threads per session
 
@@ -459,6 +474,33 @@ Forking is offered only when the adapter advertised
 already caches verbatim. The capability is marked unstable in the ACP schema,
 so an adapter that drops it costs the dashboard a button rather than a build.
 
+**A fork borrows the transcript it branched from until it has one of its
+own.** The adapter branches the conversation in full — the fork knows
+everything the source said — but it writes the fork no transcript until the
+fork is first prompted, so `session/load` on a fresh one replays nothing and
+it would open on a blank screen claiming to know a conversation the reader
+cannot see. So `threads.inherits_from` records the source, and a load of a
+thread that has it replays the *source's* history, re-tagged as this thread's,
+after the fork's own load has come back empty. A fork of a fork follows the
+chain: the middle thread has no transcript either, so what both of them came
+from is what gets replayed.
+
+That first prompt is where the borrowing stops, and the column is cleared
+there rather than later: the adapter starts a transcript for the fork at that
+moment, and it opens with everything the source had said — so from then on
+the fork replays itself, and replaying the source as well would say all of it
+twice. The same column is what re-forks a thread the adapter has forgotten: a
+fork that had not been prompted before a respawn is branched again rather than
+started empty, because carrying that context is the only reason it exists.
+
+The borrowed replay is one browser's, exactly as its own would be, and it
+holds back the source's live updates for its length the same way. A replay of
+a thread cannot be told apart from what that thread is saying right now, and
+this is the one place where two threads are the same conversation — so a
+source mid-turn can lose a moment of its stream to a fork being opened. It
+comes back on that browser's next load, and a source that cannot be replayed
+at all costs the fork its history and nothing else.
+
 A running turn and a waiting permission request belong to the thread, not the
 session. `threads.turn_active` records the first, and the session's answer is
 derived as any of its threads — two sources of truth for whether a turn is
@@ -484,9 +526,9 @@ proceeding without consent.
   mid-question, the request falls back to the queue rather than failing the
   turn.
 - With nobody on that thread, the request is stored in `pending_requests`
-  against the thread's ACP id and, when `NTFY_URL` is set, a notification is
-  posted. The next browser to attach *to that thread* gets its queued requests
-  delivered to it, and only those.
+  against the thread's ACP id and a notification is pushed. The next browser
+  to attach *to that thread* gets its queued requests delivered to it, and
+  only those.
 - After `PERMISSION_HOLD_MINUTES`, `PERMISSION_FALLBACK` decides. `hold` keeps
   waiting. `deny` answers with a reject option taken from the request's own
   options list, never an invented one, and cancels the request when none is
@@ -506,16 +548,16 @@ The announcement names the conversation, not only the box. With two threads
 live, "your session needs you" is not something you can act on from a lock
 screen.
 
-`Notifier` fans one event out to two channels and awaits neither of them from
-the gateway's side. A turn already waiting on a human must not also wait on a
-push service, so every failure inside is logged and swallowed.
+`Notifier` sends one event and the gateway's side awaits none of it. A turn
+already waiting on a human must not also wait on a push service, so every
+failure inside is logged and swallowed.
 
-- **`NTFY_URL`**, when set: one POST, no other requirement, and it reaches a
-  phone with no browser running at all.
 - **Web Push** (`push.ts`), to every browser that subscribed: RFC 8291
   `aes128gcm` payload encryption over RFC 8188, authenticated with an RFC 8292
   VAPID assertion. This is what survives the app being closed, which is the
-  reason the feature exists.
+  reason the feature exists — and it is the only channel, deliberately: a
+  second one that reached a third party would be Boxes telling somebody else
+  which of your boxes wants you and when.
 
 The crypto is implemented on `node:crypto` rather than taken as a dependency.
 It is about a hundred lines, and `push.test.ts` drives it against the RFC's
@@ -986,9 +1028,9 @@ outside a container, under `npm run dev` and in its own tests. Inside the
 image every default is already the right answer, which is why compose passes
 an env file and otherwise stays out of it.
 
-An empty value counts as unset. `NTFY_URL=` in an env file arrives as an
-empty string, and failing the boot on a setting nobody set would be a poor
-way to read it.
+An empty value counts as unset. `SESSION_MEM_LIMIT=` in an env file arrives
+as an empty string, and failing the boot on a setting nobody set would be a
+poor way to read it.
 
 `WS_AUTH_TOKEN` is the exception, because a shipped default for a secret would
 be a published password. Left unset, `secret.ts` generates a token on first
@@ -1035,7 +1077,7 @@ orchestrator/src/
   exec.ts               Local commands: limits, streaming, the exec log
   config.ts             Environment parsing, and the translatable credential set
   secret.ts             WS auth token: configured, stored, or generated
-  notify.ts             "A thread wants you", fanned out to ntfy and Web Push
+  notify.ts             "A thread wants you", pushed to every subscribed browser
   push.ts               VAPID and RFC 8291 payload encryption, on node:crypto
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log

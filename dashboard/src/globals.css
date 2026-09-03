@@ -156,3 +156,57 @@
 .dark [data-line] code span {
   color: var(--shiki-dark);
 }
+
+/*
+ * Wide blocks in chat output — tables and code — escape the reading column.
+ *
+ * A 44rem column is right for prose and wrong for a table with eight columns
+ * in it. These grow to the width of the thread rather than the width of the
+ * paragraph above them, and scroll horizontally once even that is not enough.
+ *
+ * `100cqw` is the width of the thread's scrolling viewport, which is marked
+ * as a container for this (`@container` in thread.aui.tsx). Not `100vw`: that
+ * counts the vertical scrollbar the viewport itself keeps, and a block sized
+ * to it overflows by exactly a scrollbar — which puts a horizontal one under
+ * the whole thread. The 2rem inset is the reading column's own gutter, kept
+ * so a bleeding block still has a margin at the screen edge.
+ *
+ * The negative margin is what escapes: `100%` is the column, so it is zero
+ * while the column already fills the thread — a phone — and grows as the
+ * window does. Below it the block is exactly as wide as it always was.
+ */
+.aui-md-bleed {
+  --aui-md-bleed-width: calc(100cqw - 2rem);
+  width: var(--aui-md-bleed-width);
+  max-width: var(--aui-md-bleed-width);
+  margin-inline: calc((100% - var(--aui-md-bleed-width)) / 2);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/*
+ * Except inside the reasoning preview, which is a bounded box with its own
+ * scroller: a block that escaped it would be dragged off its left edge with
+ * no way to scroll back. There it is merely scrollable.
+ */
+.aui-reasoning-text .aui-md-bleed {
+  --aui-md-bleed-width: 100%;
+  margin-inline: 0;
+}
+
+/*
+ * And the render-skipping an assistant message would otherwise carry as
+ * utilities, applied here instead so it can be withheld from the messages
+ * that bleed.
+ *
+ * `content-visibility: auto` lets the browser skip laying out a message that
+ * is off screen, which is worth having in a thread hundreds of messages long.
+ * It comes with paint containment, though, which clips every descendant to
+ * the message's own box — so a message holding a full-bleed block cannot have
+ * it, and this is the narrowest way to say that. Everything else keeps it.
+ * See the matching note in thread.aui.tsx.
+ */
+[data-slot='aui_assistant-message-root']:not(:has(.aui-md-bleed)) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
+}

@@ -55,14 +55,12 @@ test('an empty value means unset, not an invalid value', () => {
       IDLE_STOP_MINUTES: '',
       PERMISSION_FALLBACK: '',
       PERMISSION_HOLD_MINUTES: '',
-      NTFY_URL: '',
       PROFILE_DEFAULT_GIT_NAME: '',
     });
     assert.equal(cfg.SESSION_MEM_LIMIT, '4g');
     assert.equal(cfg.SESSION_CPUS, 2);
     assert.equal(cfg.PERMISSION_FALLBACK, 'hold');
     assert.equal(cfg.IDLE_STOP_MINUTES, 30);
-    assert.equal(cfg.NTFY_URL, '');
     assert.equal(cfg.profiles['DEFAULT']?.gitName, 'boxes-bot');
   });
 });
@@ -74,12 +72,12 @@ test('a provided value wins over the default', () => {
       SESSION_MEM_LIMIT: '8g',
       SESSION_CPUS: '4',
       PERMISSION_FALLBACK: 'deny',
-      NTFY_URL: 'https://ntfy.sh/boxes',
+      PUSH_SUBJECT: 'mailto:ops@example.com',
     });
     assert.equal(cfg.SESSION_MEM_LIMIT, '8g');
     assert.equal(cfg.SESSION_CPUS, 4);
     assert.equal(cfg.PERMISSION_FALLBACK, 'deny');
-    assert.equal(cfg.NTFY_URL, 'https://ntfy.sh/boxes');
+    assert.equal(cfg.PUSH_SUBJECT, 'mailto:ops@example.com');
   });
 });
 
@@ -88,7 +86,10 @@ test('a genuinely invalid value still fails the boot', () => {
     assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_MEM_LIMIT: 'lots' }), /Invalid configuration/);
     assert.throws(() => loadConfig({ DATA_DIR: dir, PERMISSION_FALLBACK: 'maybe' }), /Invalid configuration/);
     assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_CPUS: '-1' }), /Invalid configuration/);
-    assert.throws(() => loadConfig({ DATA_DIR: dir, NTFY_URL: 'not-a-url' }), /Invalid configuration/);
+    assert.throws(
+      () => loadConfig({ DATA_DIR: dir, PUSH_SUBJECT: 'ops@example.com' }),
+      /Invalid configuration/,
+    );
   });
 });
 

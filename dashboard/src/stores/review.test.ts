@@ -13,6 +13,8 @@ import {
   newReview,
   open,
   poll,
+  recallScroll,
+  rememberScroll,
   saveComment,
   setBase,
   useReview,
@@ -155,6 +157,20 @@ test('opening a different session discards the previous one', async () => {
   open('other');
   assert.equal(useReview.getState().tree, null);
   assert.equal(useReview.getState().sessionId, 'other');
+});
+
+test('how far a file was read is remembered per file', () => {
+  rememberScroll('a.ts', 420);
+  assert.equal(recallScroll('a.ts'), 420);
+  // A file this review has not opened starts at the top, whatever the last
+  // one was scrolled to — one pane serves them all.
+  assert.equal(recallScroll('b.ts'), 0);
+});
+
+test('a new session starts every file at the top again', () => {
+  rememberScroll('a.ts', 420);
+  open('another-box');
+  assert.equal(recallScroll('a.ts'), 0);
 });
 
 test('an unchanged fingerprint refetches nothing', async () => {

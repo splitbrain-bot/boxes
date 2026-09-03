@@ -70,6 +70,11 @@ class FakeAdapter extends Duplex {
     done();
   }
 
+  /** Sends a notification, the way an adapter's replay does. */
+  notify(method: string, params: unknown): void {
+    this.push(frame(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`));
+  }
+
   private handle(line: string): void {
     const msg = JSON.parse(line) as Rpc;
     if (msg.id === undefined || !msg.method) return;
@@ -181,14 +186,17 @@ function thread(id: string): Record<string, unknown> {
 function fakeHandle(
   id: number,
   acpThreadId: string | null,
-): DownstreamHandle & { asked: unknown[]; closed: number } {
+): DownstreamHandle & { asked: unknown[]; told: unknown[]; closed: number } {
   return {
     id,
     acpThreadId,
     lastActiveAt: Date.now(),
     asked: [] as unknown[],
+    told: [] as unknown[],
     closed: 0,
-    notify: () => {},
+    notify(this: { told: unknown[] }, _method, params) {
+      this.told.push(params);
+    },
     request(this: { asked: unknown[] }, _method, params) {
       this.asked.push(params);
       return Promise.resolve({ outcome: { outcome: 'cancelled' } });
@@ -276,6 +284,40 @@ test('a session with no thread yet gets its first one recorded', async () => {
   assert.equal(rows[0]!['acp_session_id'], 'acp-first');
   assert.equal(rows[0]!['ordinal'], 1);
   assert.ok(!adapter.seen.includes('session/load'));
+});
+
+test('every conversation is created asking for readable thinking', async () => {
+  /** The `_meta` each session-creating call carried. */
+  const meta: Array<{ method: string; meta: unknown }> = [];
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/load' || msg.method === 'session/new') {
+      meta.push({
+        method: msg.method,
+        meta: (msg.params as { _meta?: unknown } | undefined)?._meta,
+      });
+    }
+    // The stored thread is gone, so both paths run: a load that fails and
+    // the fresh conversation that replaces it.
+    if (msg.method === 'session/load') return new Error('Session not found');
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  await manager.upstream('s1').ensureStarted();
+
+  // Without `display`, a current model streams thinking blocks with no text
+  // in them and the dashboard has no reasoning to show.
+  const wanted = {
+    claudeCode: {
+      options: {
+        thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
+      },
+    },
+  };
+  assert.ok(meta.length >= 2);
+  for (const call of meta) assert.deepEqual(call.meta, wanted, call.method);
 });
 
 test('forking is offered only when the adapter advertises the capability', async () => {
@@ -661,6 +703,158 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
     { session: 'acp-fresh', mode: 'auto' },
     { session: 'acp-branch', mode: 'plan' },
   ]);
+});
+
+/** The threads each session/fork named as its source, in order. */
+let forkedFrom: unknown[] = [];
+/** The threads each session/load asked for, in order. */
+let loaded: string[] = [];
+
+/**
+ * An adapter that forks, and replays a thread's history when it is loaded.
+ *
+ * It behaves the way the real one does about a fork: branching answers with a
+ * new id, but nothing is written for it until it is prompted, so loading it
+ * replays nothing. Only the source has a transcript.
+ */
+function forkingAdapter(history: Record<string, string>): FakeAdapter {
+  let branches = 0;
+  forkedFrom = [];
+  loaded = [];
+  const adapter: FakeAdapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') {
+      return {
+        protocolVersion: 1,
+        agentCapabilities: { sessionCapabilities: { fork: {} } },
+      };
+    }
+    if (msg.method === 'session/fork') {
+      branches += 1;
+      forkedFrom.push(msg.params?.['sessionId']);
+      return { sessionId: `acp-branch-${branches}` };
+    }
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    if (msg.method === 'session/load') {
+      const of = String(msg.params?.['sessionId']);
+      loaded.push(of);
+      const said = history[of];
+      if (said) {
+        adapter.notify('session/update', {
+          sessionId: of,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: said } },
+        });
+      }
+      return {};
+    }
+    return {};
+  });
+  return adapter;
+}
+
+test('a fork with no transcript of its own is shown the one it came from', async () => {
+  fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
+  const created = await manager.createThread('s1', { from: 't2' });
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-branch-1');
+  up.attach(reader);
+
+  // What the spawn loaded on its way up is not what this is about.
+  loaded.length = 0;
+  await up.forwardRequest(
+    'session/load',
+    { sessionId: 'acp-branch-1', cwd: '/workspace', mcpServers: [] },
+    reader,
+  );
+
+  // Its own load replays nothing, so the source's is sent in its place --
+  // re-tagged as this thread's, because that is the conversation the browser
+  // reading it is pinned to.
+  assert.deepEqual(reader.told, [
+    {
+      sessionId: 'acp-branch-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'what was said before the fork' },
+      },
+    },
+  ]);
+  assert.deepEqual(loaded, ['acp-branch-1', 'acp-kept']);
+  assert.equal(thread(created.id)['inherits_from'], 't2');
+});
+
+test('a fork stops borrowing the moment it is prompted', async () => {
+  fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
+  const created = await manager.createThread('s1', { from: 't2' });
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-branch-1');
+  up.attach(reader);
+
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-branch-1',
+    prompt: [{ type: 'text', text: 'and now something of my own' }],
+  });
+  reader.told.length = 0;
+  loaded.length = 0;
+  await up.forwardRequest(
+    'session/load',
+    { sessionId: 'acp-branch-1', cwd: '/workspace', mcpServers: [] },
+    reader,
+  );
+
+  // The adapter writes the fork a transcript at its first prompt, and that
+  // transcript opens with everything the source had said. Replaying the
+  // source as well would say all of it twice.
+  assert.equal(thread(created.id)['inherits_from'], null);
+  assert.deepEqual(loaded, ['acp-branch-1']);
+  assert.deepEqual(reader.told, []);
+});
+
+test('a fork the adapter has forgotten is branched again rather than started empty', async () => {
+  fakeDocker(forkingAdapter({}));
+  const created = await manager.createThread('s1', { from: 't2' });
+  const up = manager.upstream('s1');
+
+  // What an adapter restart leaves behind: the fork was never prompted, so it
+  // has no transcript and its id is gone.
+  db.prepare('UPDATE threads SET acp_session_id = NULL WHERE id = ?').run(created.id);
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+
+  // Branched again, not started empty: the thread exists to carry the
+  // source's context, and a restart is not the user changing their mind.
+  assert.equal(await up.pin(handle, created.id), 'acp-branch-2');
+  assert.deepEqual(forkedFrom, ['acp-kept', 'acp-kept']);
+  assert.equal(thread(created.id)['inherits_from'], 't2');
+});
+
+test('a fork whose source is gone too is started empty rather than left unpinnable', async () => {
+  let branches = 0;
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') {
+      return {
+        protocolVersion: 1,
+        agentCapabilities: { sessionCapabilities: { fork: {} } },
+      };
+    }
+    if (msg.method === 'session/fork') {
+      branches += 1;
+      // The first branch is the fork itself. By the second the adapter has
+      // restarted, and the source turns out to have had no transcript either.
+      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Session not found');
+    }
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    return {};
+  });
+  fakeDocker(adapter);
+  const created = await manager.createThread('s1', { from: 't2' });
+  const up = manager.upstream('s1');
+  db.prepare('UPDATE threads SET acp_session_id = NULL WHERE id = ?').run(created.id);
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+
+  // A thread with nothing to say is better than one the browser cannot pin
+  // to anything at all.
+  assert.equal(await up.pin(handle, created.id), 'acp-fresh');
 });
 
 // --- notifications ----------------------------------------------------------

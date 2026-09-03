@@ -13,6 +13,7 @@ import { ReviewTree } from '@/components/review/ReviewTree';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { cn } from '@/lib/utils';
 import { useSessions } from '../stores/sessions.ts';
@@ -217,6 +218,12 @@ export function SessionReview() {
   const name = session?.name ?? id;
   const thread = origin ?? session?.currentThreadId;
 
+  // No state symbol: a review is a thing you are doing, not a thing waiting
+  // on you. What it needs to say is which box, and which file of it.
+  useDocumentTitle(
+    [file ? shortPath(file.path) : null, 'Review', name].filter(Boolean).join(' · '),
+  );
+
   return (
     <div className="flex h-dvh flex-col">
       <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
@@ -351,6 +358,7 @@ export function SessionReview() {
                     </Notice>
                   ) : null}
                   <CodePane
+                    path={file.path}
                     content={file.content}
                     tokens={file.tokens}
                     diffLines={file.diff.lines}

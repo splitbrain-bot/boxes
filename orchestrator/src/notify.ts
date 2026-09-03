@@ -11,9 +11,9 @@ import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';
 /**
  * The one place that says "something needs you".
  *
- * Two channels, one call site. `NTFY_URL` posts to whatever the deployment
- * has configured; Web Push reaches every browser that subscribed, including
- * ones with no tab open, which is the case the whole feature exists for.
+ * One channel: Web Push, which reaches every browser that subscribed,
+ * including ones with no tab open — which is the case the whole feature
+ * exists for.
  *
  * Every send is fire-and-forget. A turn that is waiting on a human must not
  * also be waiting on a push service, so nothing here is ever awaited by the
@@ -47,8 +47,14 @@ interface PushPayload {
   url: string;
 }
 
-/** Title and body for one event. */
-function wording(event: NotifyEvent): { title: string; body: string } {
+/**
+ * Title and body for one event.
+ *
+ * Exported so it can be read as itself: the only channel left encrypts its
+ * payload end to end, so what a notification says cannot be checked on the
+ * wire the way a plaintext POST's could.
+ */
+export function wording(event: NotifyEvent): { title: string; body: string } {
   const where = event.threadName
     ? `${event.sessionName} · ${event.threadName}`
     : event.sessionName;
@@ -67,7 +73,7 @@ function target(event: NotifyEvent): string {
     : `/sessions/${event.sessionId}`;
 }
 
-/** Fans one event out to every configured channel. */
+/** Sends one event to every subscribed browser. */
 export class Notifier {
   private keys: VapidKeys | null = null;
 
@@ -93,29 +99,14 @@ export class Notifier {
   }
 
   /**
-   * Sends one event on every channel.
+   * Sends one event.
    *
-   * Returns a promise so a test can wait for the fan-out, but no caller in
-   * the gateway awaits it: a turn already waiting on a human must not also
-   * wait on a push service. Every failure inside is logged and swallowed.
+   * Returns a promise so a test can wait for it, but no caller in the gateway
+   * awaits it: a turn already waiting on a human must not also wait on a push
+   * service. Every failure inside is logged and swallowed.
    */
   async notify(event: NotifyEvent): Promise<void> {
-    await Promise.all([this.ntfy(event), this.push(event)]);
-  }
-
-  /** Posts to NTFY_URL, when one is set. */
-  private async ntfy(event: NotifyEvent): Promise<void> {
-    if (!this.cfg.NTFY_URL) return;
-    const { title, body } = wording(event);
-    try {
-      await fetch(this.cfg.NTFY_URL, {
-        method: 'POST',
-        headers: { Title: title },
-        body,
-      });
-    } catch (err) {
-      log.warn('ntfy notification failed', { error: (err as Error).message });
-    }
+    await this.push(event);
   }
 
   /**

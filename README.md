@@ -187,7 +187,6 @@ docker exec -it session-<id> claude /login
 | `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
 | `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
-| `NTFY_URL` | — | POSTed when a session wants you |
 | `PUSH_SUBJECT` | project URL | Contact in the VAPID assertion Web Push carries |
 | `DATA_DIR` | `/data` | Database, generated token and session workspaces, inside the volume |
 | `HOST_DATA_DIR` | resolved | Host-side path of `DATA_DIR`, which a workspace bind mount has to name. Resolved at boot by inspecting the orchestrator's own container; set it only where that cannot work |
@@ -230,13 +229,26 @@ which of them this box gets.
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
 interface: type, and the turn runs in the container. Close the tab or lock your
 phone whenever you like; reattaching replays the thread from the session's own
-history. Opening a stopped session starts it again.
+history — including a turn that is still running, which comes back mid-flight
+rather than looking finished. Opening a stopped session starts it again.
+
+The tab's title is the box and the conversation, behind a symbol for what that
+thread is doing: `⟳` running a turn, `⚠` waiting for a permission decision,
+`?` waiting for an answer, `○` idle. Several boxes in several tabs is the
+normal way to use this, and the symbol is the part a narrow tab still shows.
+
+**Watch it think.** A turn shows the agent's reasoning as a collapsed
+*Reasoning* line above what it does, streaming while it goes. Its mode and
+its model are in the header, and behind the sliders next to them is
+everything else the agent offers — its effort level among them. All of it is
+per conversation.
 
 **Work in two threads at once.** A session can hold several conversations on
 one workspace, listed under its card, each with its own link. **Fork** branches
 the one you are in, and the button offers to open it in a new tab — so you can
 ask the fork about what the original is doing without stopping it or losing
-your place. A fork starts in `plan` mode, because it shares the original's
+your place. It opens on everything that was said up to the branch, and goes
+its own way from there. A fork starts in `plan` mode, because it shares the original's
 checkout and two agents editing the same files at once is a mess neither can
 see; flip it to `auto` in the header when that is what you want.
 
@@ -325,16 +337,17 @@ Idle sessions — no turn on any thread, no waiting request, no attached browser
 
 ## Notifications
 
-A box that wants something tells you, on two channels, whenever **nobody is
-watching that thread**: a permission request has been queued, or a turn has
-finished. A turn finishing in front of you is not announced — that is the
-screen you are already looking at.
+A box that wants something tells you whenever **nobody is watching that
+thread**: a permission request has been queued, or a turn has finished. A
+turn finishing in front of you is not announced — that is the screen you are
+already looking at.
 
-**Web Push** reaches a browser with no tab open, which is the case the feature
-exists for: lock your phone mid-turn and the answer arrives on the lock screen.
-Tap *Notify me* on the session list to subscribe this browser. Nothing to
-configure — the deployment generates its own VAPID keypair into
-`/data/vapid-keys.json` on first use, and the tap is the whole setup.
+**Web Push** is the one channel, and it reaches a browser with no tab open,
+which is the case the feature exists for: lock your phone mid-turn and the
+answer arrives on the lock screen. Tap *Notify me* on the session list to
+subscribe this browser. Nothing to configure — the deployment generates its
+own VAPID keypair into `/data/vapid-keys.json` on first use, and the tap is
+the whole setup.
 
 Two things it needs, both outside Boxes:
 
@@ -347,11 +360,6 @@ Two things it needs, both outside Boxes:
 - **Add to Home Screen, on iOS.** Safari gives a page the Push API only once
   it has been installed. Share → Add to Home Screen, open it from there, then
   subscribe. Android and desktop browsers need no install.
-
-**`NTFY_URL`** is the other channel and needs neither: the same events are
-POSTed to whatever [ntfy](https://ntfy.sh) topic you point it at, from a
-deployment with no TLS and to a phone with no browser open. Setting both is
-reasonable — they fail in different ways.
 
 Unsubscribing is the same toggle. A subscription the push service reports as
 finished — permission revoked, browser uninstalled, Safari expiring it on its
@@ -584,13 +592,30 @@ CA into `~/.pki/nssdb` with `certutil`. Without it the hosts the proxy
 intercepts fail TLS in the browser and nowhere else.
 
 Two smaller things. `PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright`, on the
-image and so read-only at runtime; a project pinning its own Playwright version
-should point it at the home volume and download once:
+image and so read-only at runtime. A project pinning its own Playwright has
+two ways out of that. Either download the build its version wants, once, into
+the home volume:
 
 ```sh
 export PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright
 npx playwright install chromium
 ```
+
+Or use the browser that is already here, at **`/usr/local/bin/chromium`** — a
+stable link to whatever revision the image installed, which is what a test
+suite can hardcode:
+
+```js
+chromium.launch({ executablePath: '/usr/local/bin/chromium' });
+```
+
+That needs no download and no egress, at the price of a Chromium a couple of
+Chrome majors from the one the library pins, which Playwright tolerates until
+it does not. Naming it with `executablePath` is what skips the revision check;
+`channel: 'chromium'` would go looking under `PLAYWRIGHT_BROWSERS_PATH` again.
+Either way, pass `--disable-dev-shm-usage`: `/dev/shm` here is Docker's
+default 64 MB, which Chromium exhausts on any substantial page and reports as
+a closed target. The browser CLI's own config already carries it.
 
 And the CLI writes snapshots and screenshots to `.playwright-cli/` in the
 working directory, which in a session is the workspace — convenient, since the
@@ -750,7 +775,12 @@ held with nobody watching — and needs
 Tailwind utilities and shadcn/assistant-ui components only: no inline `style=`,
 no CSS-in-JS, and design tokens defined once in `src/globals.css` — including
 the `@theme inline` bridge, without which Tailwind silently drops every token
-utility.
+utility. `.aui-md-bleed` is a hand-written rule rather than utilities because
+it needs container-query units and a negative margin computed from them: it
+lets a table or a code block in chat output escape the 44rem reading column
+out to the width of the thread and scroll horizontally beyond that. The rule
+under it withholds `content-visibility` from the messages that hold such a
+block, since paint containment would clip one back into the column.
 
 Components under `src/components/assistant-ui/` and `src/components/ui/` are
 installed by their official CLIs and committed. Our edits carry a comment

@@ -232,6 +232,153 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
   }
 });
 
+// An unfinished tool call is not a question. A call with no result inherits
+// its message's requires-action status, which used to render as "Wants to
+// run" over Allow and Deny buttons — in auto mode, where nothing is being
+// asked, and over a tool whose result cannot come from a browser anyway.
+test('a tool call that never reported back is not offered as a decision', async () => {
+  await start({
+    prompts: [
+      {
+        match: () => true,
+        updates: [
+          {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'a1',
+            title: 'Run the proxy tests',
+            kind: 'execute',
+            status: 'in_progress',
+            rawInput: { command: 'npm test' },
+          },
+          // The turn ends without a result for it, which is what a cancelled
+          // or crashed call looks like from here.
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'that is all' },
+          },
+        ] as SessionUpdate[],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('run the tests');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.getByText('that is all').isVisible(), { timeout: 10_000 })
+      .toBe(true);
+
+    await page.locator('[data-slot="tool-group-trigger"]').first().click();
+    await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
+    // Opened by hand, and there is nothing to answer inside it.
+    await expect.poll(() => page.getByText('npm test', { exact: false }).first().isVisible()).toBe(
+      true,
+    );
+    expect(await page.locator('[data-slot="tool-fallback-approval"]').count()).toBe(0);
+    expect(await page.getByText('Wants to run:').count()).toBe(0);
+    expect(await page.getByText('Unfinished tool:').first().isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// Leaving a thread mid-turn and coming back. The orchestrator is the ACP
+// client of record, so the turn is still running; the view is a fresh store
+// with nothing in flight, and only the gateway can tell it otherwise.
+test('a turn still running is still running after a detour away and back', async () => {
+  await start({
+    prompts: [{ match: () => true, updates: reply('working on it'), hold: true }],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('take your time');
+    await input.press('Enter');
+
+    const stop = page.getByLabel('Stop generating');
+    await expect.poll(() => stop.isVisible(), { timeout: 10_000 }).toBe(true);
+
+    // Out to the review and back, which is what tears the store down.
+    await page.getByLabel("Review this session's code").click();
+    await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
+    await page.getByLabel('Back to the thread').click();
+
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    // Still a stop button, not a send button, and still working.
+    await expect.poll(() => stop.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await page.getByLabel('Send message').count()).toBe(0);
+
+    stub.gateway.release();
+    await expect
+      .poll(() => page.getByLabel('Send message').isVisible(), { timeout: 10_000 })
+      .toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// Wide output. A reading column is the right width for prose and the wrong
+// width for a table, and neither the table nor the code block could be
+// scrolled sideways to see the rest of one.
+test('a wide table leaves the reading column, and scrolls when even that is too narrow', async () => {
+  const header = `| ${Array.from({ length: 9 }, (_, i) => `column heading ${i}`).join(' | ')} |`;
+  const rule = `| ${Array.from({ length: 9 }, () => '---').join(' | ')} |`;
+  const row = `| ${Array.from({ length: 9 }, (_, i) => `a fairly long cell ${i}`).join(' | ')} |`;
+  await start({
+    prompts: [{ match: () => true, updates: reply(`here it is\n\n${header}\n${rule}\n${row}\n`) }],
+  });
+
+  const wide = await openPage(stub.url, `/sessions/${SESSION.id}`, 'dark', 'desktop');
+  try {
+    const input = wide.page.getByLabel('Message input');
+    await input.fill('show me the table');
+    await input.press('Enter');
+    const table = wide.page.locator('.aui-md-table-wrap');
+    await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
+
+    // Wider than the column the prose above it is set in, and no wider than
+    // the thread: the point is to use the window, not to overflow it.
+    const width = (locator: typeof table): Promise<number> =>
+      locator.evaluate((el) => el.clientWidth);
+    const column = wide.page.locator('[data-slot="aui_assistant-message-content"]').first();
+    expect(await width(table)).toBeGreaterThan(await width(column));
+
+    // And the thread itself did not gain a horizontal scrollbar, which is
+    // what a bleed measured against the window rather than the scroller does.
+    const viewport = wide.page.locator('[data-slot="aui_thread-viewport"]');
+    const overflow = await viewport.evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    await shoot(wide.page, 'wide-table-desktop');
+    expect(wide.errors).toEqual([]);
+  } finally {
+    await wide.close();
+  }
+
+  const phone = await openPage(stub.url, `/sessions/${SESSION.id}`, 'dark', 'phone');
+  try {
+    const input = phone.page.getByLabel('Message input');
+    await input.fill('show me the table');
+    await input.press('Enter');
+    const table = phone.page.locator('.aui-md-table-wrap');
+    await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
+
+    // Nowhere left to bleed to, so it scrolls instead of being cut off.
+    const scrollable = await table.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(scrollable).toBe(true);
+    await shoot(phone.page, 'wide-table-phone');
+    expect(phone.errors).toEqual([]);
+  } finally {
+    await phone.close();
+  }
+});
+
 // 6 — mode switching.
 test('the mode switcher lists the advertised modes and sets one', async () => {
   await start({
@@ -316,6 +463,178 @@ test('the model selector lists the advertised models and sets one', async () => 
 
     await models.selectOption('haiku');
     await expect.poll(() => models.inputValue()).toBe('haiku');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// The tab title. Several boxes in several tabs, all called "Boxes", said
+// nothing about which one had stopped for a question.
+test('the tab says which box and thread it is, and what that thread is doing', async () => {
+  await start({ prompts: [{ match: () => true, updates: reply('done'), hold: true }] });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    // The box's name and the conversation's, in the header's own order and
+    // with the header's own names for them.
+    await expect
+      .poll(() => page.title())
+      .toBe('\u25cb refactor auth \u00b7 Thread 1');
+
+    const input = page.getByLabel('Message input');
+    await input.fill('go');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('\u27f3 refactor auth \u00b7 Thread 1');
+
+    stub.gateway.release();
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('\u25cb refactor auth \u00b7 Thread 1');
+
+    // And leaving the thread puts the plain app title back.
+    await page.getByLabel('Back to sessions').click();
+    await expect.poll(() => page.title()).toBe('Boxes');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a thread waiting on a decision says so in its tab', async () => {
+  await start({
+    permissions: [
+      {
+        match: () => true,
+        toolCall: { toolCallId: 'p1', title: 'Write to src/main.ts', kind: 'edit' },
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+        ],
+        after: () => [],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('edit the file');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('\u26a0 refactor auth \u00b7 Thread 1');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a thread asked which way to go says that instead', async () => {
+  await start({
+    permissions: [
+      {
+        match: () => true,
+        toolCall: { toolCallId: 'p1', title: 'Leave plan mode', kind: 'switch_mode' },
+        // Three ways to say yes, each a different thing to do next: a
+        // question, not a gate.
+        options: [
+          { optionId: 'auto', name: 'Yes, and use auto mode', kind: 'allow_always' },
+          { optionId: 'acceptEdits', name: 'Yes, and auto-accept edits', kind: 'allow_always' },
+          { optionId: 'default', name: 'Yes, and approve each edit', kind: 'allow_once' },
+          { optionId: 'plan', name: 'No, keep planning', kind: 'reject_once' },
+        ],
+        after: () => [],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('ready to build it');
+    await input.press('Enter');
+    await expect
+      .poll(() => page.title(), { timeout: 10_000 })
+      .toBe('? refactor auth \u00b7 Thread 1');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// Effort, and everything else the adapter offers beyond the model. These had
+// no control at all, so the effort level could not be set.
+test("the adapter's other settings are reachable, and setting one is sent", async () => {
+  await start({
+    configOptions: [
+      {
+        id: 'mode',
+        name: 'Mode',
+        category: 'mode',
+        type: 'select',
+        currentValue: 'auto',
+        options: [
+          { value: 'auto', name: 'Auto' },
+          { value: 'plan', name: 'Plan' },
+        ],
+      },
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'opus',
+        options: [
+          { value: 'opus', name: 'Opus' },
+          { value: 'sonnet', name: 'Sonnet' },
+        ],
+      },
+      {
+        id: 'effort',
+        name: 'Effort',
+        description: 'Available effort levels for this model',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'default',
+        options: [
+          { value: 'default', name: 'Default' },
+          { value: 'low', name: 'Low' },
+          { value: 'high', name: 'High' },
+        ],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    const settings = page.getByLabel('Agent settings');
+    await expect.poll(() => settings.isVisible()).toBe(true);
+    await settings.click();
+
+    const effort = page.getByRole('combobox', { name: 'Effort' });
+    await expect.poll(() => effort.isVisible()).toBe(true);
+    expect(await effort.locator('option').allInnerTexts()).toEqual(['Default', 'Low', 'High']);
+
+    await shoot(page, 'agent-settings', 'viewport');
+
+    await effort.selectOption('high');
+    await expect.poll(() => effort.inputValue()).toBe('high');
+    // The adapter heard about it, which is the half a select cannot show.
+    await expect
+      .poll(() => stub.gateway.script.configOptions.find((o) => o.id === 'effort')?.currentValue)
+      .toBe('high');
+
+    // The mode is not doubled into the popover: the switcher beside the name
+    // is already that option, under the adapter's other name for it. Exactly
+    // "Mode", because a substring match also finds "Model".
+    expect(await page.getByRole('combobox', { name: 'Mode', exact: true }).count()).toBe(0);
+    // And the model is still where it was, beside the name rather than inside.
+    expect(await page.getByRole('combobox', { name: 'Model' }).count()).toBe(1);
     expect(errors).toEqual([]);
   } finally {
     await close();
