@@ -231,6 +231,12 @@ interface: type, and the turn runs in the container. Close the tab or lock your
 phone whenever you like; reattaching replays the thread from the session's own
 history. Opening a stopped session starts it again.
 
+**Watch it think.** A turn shows the agent's reasoning as a collapsed
+*Reasoning* line above what it does, streaming while it goes. Its mode and
+its model are in the header, and behind the sliders next to them is
+everything else the agent offers — its effort level among them. All of it is
+per conversation.
+
 **Work in two threads at once.** A session can hold several conversations on
 one workspace, listed under its card, each with its own link. **Fork** branches
 the one you are in, and the button offers to open it in a new tab — so you can

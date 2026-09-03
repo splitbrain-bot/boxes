@@ -286,6 +286,40 @@ test('a session with no thread yet gets its first one recorded', async () => {
   assert.ok(!adapter.seen.includes('session/load'));
 });
 
+test('every conversation is created asking for readable thinking', async () => {
+  /** The `_meta` each session-creating call carried. */
+  const meta: Array<{ method: string; meta: unknown }> = [];
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/load' || msg.method === 'session/new') {
+      meta.push({
+        method: msg.method,
+        meta: (msg.params as { _meta?: unknown } | undefined)?._meta,
+      });
+    }
+    // The stored thread is gone, so both paths run: a load that fails and
+    // the fresh conversation that replaces it.
+    if (msg.method === 'session/load') return new Error('Session not found');
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  await manager.upstream('s1').ensureStarted();
+
+  // Without `display`, a current model streams thinking blocks with no text
+  // in them and the dashboard has no reasoning to show.
+  const wanted = {
+    claudeCode: {
+      options: {
+        thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
+      },
+    },
+  };
+  assert.ok(meta.length >= 2);
+  for (const call of meta) assert.deepEqual(call.meta, wanted, call.method);
+});
+
 test('forking is offered only when the adapter advertises the capability', async () => {
   const withFork = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') {

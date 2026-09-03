@@ -313,6 +313,18 @@ user's, and a reconnect must not undo it. An adapter offering no such mode is
 left in whichever mode it starts in, and a switch that fails is logged rather
 than failing the spawn.
 
+Every one of those calls — `session/new`, `session/fork` and `session/load`
+alike — carries the same `_meta.claudeCode.options.thinking`, which is where
+the adapter reads options to lay over the ones it hands the Claude Agent SDK.
+It asks for `display: 'summarized'`. Current models default that to
+`omitted`, which streams thinking blocks carrying a signature and no text, so
+the adapter has nothing to put in an `agent_thought_chunk` and the reasoning
+disclosure in the thread never appears at all — the agent was thinking and
+saying so, and the words were not on the wire. The budgeted `enabled` form
+rather than `adaptive`: on a current model the two are the same thing, and
+`adaptive` is a flag an older one can reject, while which model a thread runs
+is chosen from the header long after this is fixed.
+
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
 that the session's status becomes `error`.
 

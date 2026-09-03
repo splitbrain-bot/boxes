@@ -122,6 +122,36 @@ const MAX_INHERIT_HOPS = 32;
 const DEFAULT_MODEL_ID = 'opus';
 
 /**
+ * What the adapter is asked for on the thinking side, on every conversation
+ * this orchestrator creates or brings back.
+ *
+ * `display` is the whole point. Current models default it to `omitted`, which
+ * streams thinking blocks carrying a signature and no text — so the adapter
+ * has nothing to put in an `agent_thought_chunk` and the dashboard's
+ * reasoning disclosure never appears. Asking for `summarized` is what makes
+ * the agent's reasoning something you can read, which on a phone, watching a
+ * long turn go by, is most of what there is to watch.
+ *
+ * `enabled` with a budget rather than `adaptive`, deliberately. The two are
+ * the same thing on a current model — the budget is read as on/off and the
+ * model decides how much to think — but `adaptive` is also a flag a model
+ * that predates it can reject, and which model a thread runs is the user's
+ * choice from the header while this is fixed at the thread's creation. The
+ * conservative spelling costs nothing and cannot be wrong.
+ *
+ * It travels in `_meta`, which is where ACP puts an agent's own extensions:
+ * the adapter reads `_meta.claudeCode.options` and lays it over the options
+ * it hands the Claude Agent SDK.
+ */
+const THINKING_META = {
+  claudeCode: {
+    options: {
+      thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
+    },
+  },
+} as const;
+
+/**
  * The value to select for a wanted model: the name itself when the adapter
  * offers it, else a bracketed variant of it such as `opus[1m]`, which is the
  * same model with a different context window. A name that merely starts the
@@ -473,10 +503,14 @@ export class UpstreamSession {
   private async loadSession(conn: ClientConnection, thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;
     try {
+      // The same `_meta` a fresh thread gets: a load is where the adapter
+      // rebuilds the query for a conversation it no longer holds, which is
+      // the other place these options are read.
       await conn.agent.request('session/load', {
         sessionId: acpSessionId,
         cwd: dk.WORKSPACE_DIR,
         mcpServers: [],
+        _meta: THINKING_META,
       });
       this.slog.info('acp session loaded', { threadId: thread.id, acpSessionId });
       return true;
@@ -513,6 +547,7 @@ export class UpstreamSession {
       ...(from ? { sessionId: from } : {}),
       cwd: dk.WORKSPACE_DIR,
       mcpServers: [],
+      _meta: THINKING_META,
     })) as {
       sessionId?: string;
       modes?: SessionModeState | null;
@@ -981,6 +1016,7 @@ export class UpstreamSession {
         sessionId: source.acp_session_id,
         cwd: dk.WORKSPACE_DIR,
         mcpServers: [],
+        _meta: THINKING_META,
       });
       this.slog.info('replayed a fork from the thread it came from', {
         threadId: fork.id,
