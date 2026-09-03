@@ -276,12 +276,17 @@ The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
 CLI, in the shadcn distribution model: the sources are committed and are ours
 to edit, and an upgrade is a CLI re-run reviewed as a diff rather than a
-version bump that changes the UI silently. Six edits are ours so far, each
-marked in the source: ArrowUp history on the composer, returning focus after
-a send, opening a tool group when a call inside it is waiting on the user,
-dropping the add-attachment button because nothing here takes an attachment,
-following the bottom of the viewport for output that is not a turn, and the
-slash-command list below.
+version bump that changes the UI silently. The edits that are ours are marked
+`Boxes edit` in the source, with the reason at the point of the change —
+`grep` is the list, because a count in prose here would rot. They are of three
+kinds: terminal habits the chat did not have (ArrowUp history on the composer,
+returning focus after a send, the slash-command list below), facts about this
+deployment the components could not know (a tool call in a session container
+cannot be answered from a browser, so only a real question opens a group and
+offers buttons; nothing here takes an attachment, so the button is gone), and
+the look — the reasoning disclosure drawn as quietly as the tool calls beside
+it, and one spinner (`components/Spinner.tsx`) wherever the registry shipped a
+rotating icon.
 
 Because those components are written in Tailwind utilities, Tailwind is a
 build dependency rather than a style choice, and it compiles from source on
@@ -1225,6 +1230,7 @@ dashboard/
         exec.ts         !bang commands against the exec endpoint
     views/              SessionList, SessionCreate, SessionThread, SessionInfo, AgentSets
     components/
+      Spinner.tsx       The one thing that says "working": blocks-wave, in every running state
       assistant-ui/     Installed registry sources, ours to edit
       ui/               Installed shadcn primitives
 

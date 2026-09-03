@@ -231,3 +231,41 @@
   content-visibility: auto;
   contain-intrinsic-size: auto 200px;
 }
+
+/*
+ * The spinner's blocks: nine of them, each shrinking about its own centre and
+ * growing back, a tenth of a second apart down the diagonal. See
+ * components/Spinner.tsx, which places the grid and sets each block's delay.
+ *
+ * `fill-box` is what makes the centre the block's own rather than the whole
+ * 24-unit canvas: without it every block would collapse toward the middle of
+ * the icon instead of into itself. The scale is upstream's geometry — 1.33
+ * over 7.33 — expressed as the one thing all nine of its keyframe pairs were
+ * doing.
+ *
+ * A plain class rather than a utility because the animation is the component,
+ * not a decoration a caller chooses; the reduced-motion rule is the same
+ * courtesy `motion-reduce:animate-none` buys everywhere else, and here a
+ * still grid of blocks is a perfectly good "working".
+ */
+@keyframes spinner-block {
+  0%,
+  50% {
+    transform: scale(1);
+  }
+  25% {
+    transform: scale(0.1814);
+  }
+}
+
+.spinner-block {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: spinner-block 1.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner-block {
+    animation: none;
+  }
+}

@@ -23,6 +23,7 @@ import {
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { SlashCommands } from "@/components/SlashCommands";
+import { Spinner } from "@/components/Spinner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -537,13 +538,17 @@ const AssistantMessage: FC = () => {
                   </div>
                 );
               case "indicator":
+                /* Boxes edit: the blocks, not a pulsing bullet. This is the
+                   thing you watch while a turn is thinking and nothing else
+                   has arrived yet — often the only thing on the screen — and
+                   a dot fading in and out is indistinguishable from a page
+                   that has stopped repainting. */
                 return (
                   <span
                     data-slot="aui_assistant-message-indicator"
-                    className="animate-pulse font-sans"
-                    aria-label="Assistant is working"
+                    className="inline-flex items-center py-1"
                   >
-                    {"●"}
+                    <Spinner label="Assistant is working" />
                   </span>
                 );
               default:

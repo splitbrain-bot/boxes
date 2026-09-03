@@ -5,7 +5,6 @@ import {
   AlertCircleIcon,
   CheckIcon,
   ChevronDownIcon,
-  LoaderIcon,
   XCircleIcon,
 } from "lucide-react";
 import {
@@ -24,6 +23,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/Spinner";
 
 const ANIMATION_DURATION = 200;
 
@@ -88,8 +88,10 @@ function ToolFallbackRoot({
 
 type ToolStatus = ToolCallMessagePartStatus["type"];
 
+// Boxes edit: one spinner for everything that is running, here and in the
+// group above these calls and in the message that has not begun answering.
 const statusIconMap: Record<ToolStatus, React.ElementType> = {
-  running: LoaderIcon,
+  running: Spinner,
   complete: CheckIcon,
   incomplete: XCircleIcon,
   "requires-action": AlertCircleIcon,
@@ -170,12 +172,14 @@ function ToolFallbackTrigger({
       )}
       {...props}
     >
+      {/* Boxes edit: no animate-spin for a running call. The icon it names
+          is the shared spinner now and carries its own animation; rotating
+          that on top of it is a second spinner over the first. */}
       <Icon
         data-slot="tool-fallback-trigger-icon"
         className={cn(
           "aui-tool-fallback-trigger-icon size-4 shrink-0",
           isCancelled && "text-muted-foreground",
-          isRunning && "animate-spin [animation-duration:0.6s]",
         )}
       />
       <span
