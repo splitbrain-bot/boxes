@@ -22,7 +22,12 @@ export const ANIMATION_DURATION = 200;
 
 const ReasoningPreviewContext = createContext(false);
 
-const reasoningVariants = cva("aui-reasoning-root mb-4 w-full", {
+/* Boxes edit: no mb-4 here. A disclosure row is not responsible for the
+   space under the block it belongs to — the chain-of-thought group is, and
+   it sets that space once in globals.css. With the margin on the row, a
+   turn that reasoned and called a tool paid it twice, and a run of them
+   paid it on every line. */
+const reasoningVariants = cva("aui-reasoning-root w-full", {
   variants: {
     variant: {
       outline: "rounded-lg border px-3 py-2",
