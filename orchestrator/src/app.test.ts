@@ -2,13 +2,22 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'vitest';
 import Docker from 'dockerode';
 import { PassThrough } from 'node:stream';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildApp, type Orchestrator } from './app.ts';
 import { config } from './config.ts';
 import { openDb, type Db } from './db.ts';
 import * as dk from './docker.ts';
+import * as ws from './workspaces.ts';
 
 /**
  * The exec endpoint over its real routes, real database and real session
@@ -81,10 +90,221 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // See insertWorkspaceSession: workspaces are written under the config's
+  // DATA_DIR, which outlives this test's own directory.
+  rmSync(ws.workspacesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   await orchestrator.app.close();
   db.close();
   dk.setDockerForTests(null);
   rmSync(dir, { recursive: true, force: true });
+});
+
+/**
+ * A directory-backed session: what an attachment needs, and what the exec
+ * routes above do not — those reach the container, this reaches the disk.
+ */
+function insertWorkspaceSession(id: string): string {
+  insertSession(id);
+  // config() is memoised for the process, so the app's DATA_DIR is whatever
+  // the first test in this file set — not necessarily this test's `dir`.
+  // Everything that reaches the disk has to go through the app's own copy.
+  const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
+  db.prepare('UPDATE sessions SET workspace_dir = ? WHERE id = ?').run(workspace, id);
+  return workspace;
+}
+
+test('an attachment is stored in the workspace and its path reported back', async () => {
+  const workspace = insertWorkspaceSession('abc123');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=shot.png',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('PNGDATA'),
+  });
+
+  assert.equal(res.statusCode, 200);
+  const stored = res.json() as { name: string; path: string; size: number };
+  assert.deepEqual(stored, { name: 'shot.png', path: '.boxes/attachments/shot.png', size: 7 });
+  assert.equal(readFileSync(join(workspace, stored.path), 'utf8'), 'PNGDATA');
+});
+
+test('an attachment name that is a path is reduced to a name', async () => {
+  const workspace = insertWorkspaceSession('abc123');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/sessions/abc123/attachments?name=${encodeURIComponent('../../escape.txt')}`,
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('x'),
+  });
+
+  assert.equal((res.json() as { path: string }).path, '.boxes/attachments/escape.txt');
+  assert.ok(existsSync(join(workspace, '.boxes/attachments/escape.txt')));
+});
+
+test('an attachment upload without a name or a body is refused', async () => {
+  insertWorkspaceSession('abc123');
+  const headers = { 'content-type': 'application/octet-stream' };
+
+  const nameless = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments',
+    headers,
+    payload: Buffer.from('x'),
+  });
+  assert.equal(nameless.statusCode, 400);
+
+  const empty = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=a.txt',
+    headers,
+    payload: Buffer.alloc(0),
+  });
+  assert.equal(empty.statusCode, 400);
+});
+
+test('an attachment to a session that has no workspace is a 404', async () => {
+  // Inserted, but never given a workspace directory: nothing to write into.
+  insertSession('abc123');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=a.txt',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('x'),
+  });
+  assert.equal(res.statusCode, 404);
+});
+
+test('an attachment over the size limit is refused, and says so', async () => {
+  insertWorkspaceSession('abc123');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=big.bin',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.alloc(config().MAX_ATTACHMENT_MB * 1024 * 1024 + 1),
+  });
+
+  // Fastify's own refusal, passed through with its status rather than
+  // flattened into a 500 — the size is the one thing the user can act on.
+  assert.equal(res.statusCode, 413);
+});
+
+test('a stored image is served back as itself, for the thread to show', async () => {
+  insertWorkspaceSession('abc123');
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=shot.png',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('PNGDATA'),
+  });
+
+  const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/attachments/shot.png' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['content-type'], 'image/png');
+  assert.match(res.headers['content-disposition'] as string, /^inline/);
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  assert.equal(res.body, 'PNGDATA');
+});
+
+test('an SVG is served as one, inert, so a diagram can be looked at', async () => {
+  insertWorkspaceSession('abc123');
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=diagram.svg',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('<svg onload="alert(1)"></svg>'),
+  });
+
+  const res = await orchestrator.app.inject({
+    url: '/api/sessions/abc123/attachments/diagram.svg',
+  });
+
+  assert.equal(res.headers['content-type'], 'image/svg+xml');
+  assert.match(res.headers['content-disposition'] as string, /^inline/);
+  // This is what makes the line above safe: an SVG opened as a document has
+  // no script, no origin and no network. Behind the <img> the thread uses it
+  // is inert regardless.
+  assert.equal(res.headers['content-security-policy'], "default-src 'none'; sandbox");
+});
+
+test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
+  insertWorkspaceSession('abc123');
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=report.pdf',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('%PDF-1.4'),
+  });
+
+  const res = await orchestrator.app.inject({
+    url: '/api/sessions/abc123/attachments/report.pdf',
+  });
+
+  assert.equal(res.headers['content-type'], 'application/pdf');
+  assert.match(res.headers['content-disposition'] as string, /^inline/);
+  // No `sandbox`: a sandboxed document is one a browser may decline to hand
+  // to its PDF viewer, which would make opening it a download again. The
+  // rest of the policy still applies.
+  assert.equal(res.headers['content-security-policy'], "default-src 'none'");
+});
+
+test('a format nothing renders is served as a download of unknown type', async () => {
+  insertWorkspaceSession('abc123');
+  // HTML above all: served as itself it would run as this origin, and unlike
+  // an SVG there is no way to show it that does not.
+  for (const name of ['page.html', 'notes.txt', 'archive.zip']) {
+    await orchestrator.app.inject({
+      method: 'POST',
+      url: `/api/sessions/abc123/attachments?name=${name}`,
+      headers: { 'content-type': 'application/octet-stream' },
+      payload: Buffer.from('x'),
+    });
+
+    const res = await orchestrator.app.inject({
+      url: `/api/sessions/abc123/attachments/${name}`,
+    });
+    assert.equal(res.headers['content-type'], 'application/octet-stream');
+    assert.match(res.headers['content-disposition'] as string, /^attachment/);
+    assert.equal(res.headers['content-security-policy'], "default-src 'none'; sandbox");
+  }
+});
+
+test('a link planted in the attachments directory serves nothing', async () => {
+  const workspace = insertWorkspaceSession('abc123');
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/attachments?name=real.png',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('x'),
+  });
+  // What an agent with a foothold in its own workspace would try: the
+  // orchestrator's own uid can read the database and the gateway token.
+  const secret = join(dir, 'secret.txt');
+  writeFileSync(secret, 'ws-auth-token');
+  symlinkSync(secret, join(workspace, '.boxes/attachments/escape.png'));
+
+  const res = await orchestrator.app.inject({
+    url: '/api/sessions/abc123/attachments/escape.png',
+  });
+  assert.equal(res.statusCode, 404);
+});
+
+test('an attachment name that is a path fetches nothing', async () => {
+  insertWorkspaceSession('abc123');
+  const res = await orchestrator.app.inject({
+    url: `/api/sessions/abc123/attachments/${encodeURIComponent('../../../etc/passwd')}`,
+  });
+  assert.equal(res.statusCode, 404);
+});
+
+test('an attachment that was never stored is a 404', async () => {
+  insertWorkspaceSession('abc123');
+  const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/attachments/nope.png' });
+  assert.equal(res.statusCode, 404);
 });
 
 test('a command runs in the container and streams its output with a trailer', async () => {

@@ -24,6 +24,9 @@ export const REVIEW_FILE = 'REVIEW.md';
  * source code anybody reviews.
  */
 const IGNORED_DIRS = new Set([
+  // Boxes' own scratch inside a workspace: the files the user attached to a
+  // prompt. They are input to the conversation, not source anybody reviews.
+  '.boxes',
   'vendor',
   'node_modules',
   'dist',

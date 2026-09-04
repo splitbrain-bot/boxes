@@ -16,8 +16,23 @@ const { app, manager, egress, setProxyWarnings } = buildApp(cfg, db);
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
+/**
+ * Largest ACP frame the gateway accepts from a browser, in bytes.
+ *
+ * Nothing the dashboard sends comes near it — a prompt carries text, and a
+ * file the user attached is uploaded over HTTP rather than put in the
+ * message. But the gateway is an ACP endpoint any client may speak to, and
+ * ACP prompts can carry an image inline as base64, so the ceiling is worth
+ * stating: ws defaults to 100 MiB, which is not a limit so much as the
+ * absence of one. A frame over it closes the connection (1009) rather than
+ * failing the request, so the number wants to be one nothing legitimate
+ * reaches.
+ */
+const MAX_WS_FRAME_BYTES = 16 * 1024 * 1024;
+
 const wss = new WebSocketServer({
   noServer: true,
+  maxPayload: MAX_WS_FRAME_BYTES,
   // The client offers ['acp.v1', 'bearer.<token>']. The bearer entry is
   // credentials, not a protocol, so acp.v1 is negotiated explicitly rather
   // than relying on the client to list it first.

@@ -1,5 +1,6 @@
 import type {
   AvailableCommand,
+  ContentBlock,
   PermissionOption,
   PlanEntry,
   RequestPermissionRequest,
@@ -380,19 +381,39 @@ export class ThreadStore {
 
   // --- actions -------------------------------------------------------------
 
-  /** Sends a prompt and tracks the turn while it runs. */
-  async send(text: string): Promise<void> {
+  /**
+   * Shows an error that happened on the way to a send.
+   *
+   * The composer's own failures — an upload that was refused, a file that
+   * could not be read — never reach the socket, so nothing here would
+   * otherwise know they happened, and the send button does not await the
+   * promise that would have carried them.
+   */
+  reportError(message: string): void {
+    this.emit({ error: message });
+  }
+
+  /**
+   * Sends a prompt and tracks the turn while it runs.
+   *
+   * Content blocks rather than a string, because a prompt is not always
+   * prose: an attachment puts an image and the note saying where it was
+   * saved into the same message. What the blocks are is the view's business
+   * — see views/SessionThread.tsx — and this only carries them.
+   */
+  async send(blocks: readonly ContentBlock[]): Promise<void> {
     const client = this.client;
     if (!client) throw new Error('not connected');
     const sessionId = client.sessionId;
     if (!sessionId) throw new Error('no ACP thread yet');
+    if (blocks.length === 0) return;
 
     this.promptsInFlight++;
     this.emit({ error: null });
     try {
       await client.request('session/prompt', {
         sessionId,
-        prompt: [{ type: 'text', text }],
+        prompt: blocks,
       });
     } catch (err) {
       this.emit({ error: (err as Error).message });

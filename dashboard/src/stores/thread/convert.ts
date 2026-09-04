@@ -1,6 +1,13 @@
 import type { ThreadMessageLike, ToolApprovalOption } from '@assistant-ui/react';
 import { imageSrc, type PermissionOption, type PermissionOptionKind } from './acp-types.ts';
-import { toolOutputText, type ApprovalState, type Message, type ToolPart } from './translate.ts';
+import { attachmentUrl, isThumbnailable } from '../../lib/attachments.ts';
+import {
+  toolOutputText,
+  type ApprovalState,
+  type AttachmentPart,
+  type Message,
+  type ToolPart,
+} from './translate.ts';
 
 /**
  * Our message model, in the shape the runtime reads.
@@ -111,6 +118,37 @@ function imagePart(src: string) {
 }
 
 /**
+ * An attached file as a part the thread can draw.
+ *
+ * An image becomes the picture itself, loaded from the endpoint that serves
+ * the session's workspace — which is what makes a screenshot readable in the
+ * thread that sent it without the bytes ever going through the transcript.
+ * Everything else becomes a chip naming the file, and carrying the same
+ * endpoint so it can be opened: a PDF in the browser's viewer, anything else
+ * as the download it is. `sourceType: 'id'` says the data is a reference
+ * rather than the bytes, which is what stops assistant-ui offering a
+ * download of something the browser never had — the chip's own link is in
+ * thread.aui.tsx.
+ *
+ * Without a session there is nothing to fetch from, so everything is a chip.
+ * That is the shape a test reads, and it loses only the picture.
+ */
+function attachmentPart(part: AttachmentPart, sessionId?: string) {
+  if (sessionId && isThumbnailable(part.mimeType)) {
+    return { type: 'image' as const, image: attachmentUrl(sessionId, part.path) };
+  }
+  return {
+    type: 'file' as const,
+    // The endpoint when there is a session to read it from, which is what
+    // the chip opens; otherwise the path, which at least says where it went.
+    data: sessionId ? attachmentUrl(sessionId, part.path) : part.path,
+    mimeType: part.mimeType,
+    filename: part.name,
+    sourceType: 'id' as const,
+  };
+}
+
+/**
  * The images a tool call produced, as parts of their own.
  *
  * A tool-call part cannot contain an image — assistant-ui's message parts are
@@ -146,8 +184,13 @@ function toolImages(part: ToolPart) {
  */
 type ConvertedPart = ThreadMessageLike['content'][number] & object;
 
-/** One of our messages, as the runtime reads it. */
-export function convertMessage(message: Message): ThreadMessageLike {
+/**
+ * One of our messages, as the runtime reads it.
+ *
+ * `sessionId` is what an attachment is fetched back from; a caller with none
+ * gets the same message with its attachments named rather than shown.
+ */
+export function convertMessage(message: Message, sessionId?: string): ThreadMessageLike {
   return {
     id: message.id,
     role: message.role,
@@ -155,6 +198,7 @@ export function convertMessage(message: Message): ThreadMessageLike {
       if (part.type === 'text') return [{ type: 'text' as const, text: part.text }];
       if (part.type === 'reasoning') return [{ type: 'reasoning' as const, text: part.text }];
       if (part.type === 'image') return [imagePart(part.src)];
+      if (part.type === 'attachment') return [attachmentPart(part, sessionId)];
       return [toolPart(part), ...toolImages(part)];
     }),
   };

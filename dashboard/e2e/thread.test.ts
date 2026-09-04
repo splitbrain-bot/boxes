@@ -101,6 +101,155 @@ test('a prompt streams back and renders as it arrives', async () => {
   }
 });
 
+test('an attached image is uploaded, named in the prompt, and shown from the workspace', async () => {
+  await start({ prompts: [{ match: () => true, updates: reply('The margin is wrong.') }] });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    // The picker is opened by a button that builds its own input, so the file
+    // arrives through the chooser rather than through a locator.
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByLabel('Add Attachment').click();
+    await (
+      await chooser
+    ).setFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from(PNG, 'base64') });
+
+    const input = page.getByLabel('Message input');
+    await input.fill('what is wrong here?');
+    await input.press('Enter');
+
+    // Uploaded into the session's workspace, before the prompt that names it.
+    await expect.poll(() => stub.attachmentUploads.length).toBe(1);
+    expect(stub.attachmentUploads[0]!.name).toBe('shot.png');
+    expect(stub.attachmentUploads[0]!.sessionId).toBe(SESSION.id);
+
+    // The note saying where it was saved, then what was typed. No bytes: the
+    // picture is in the workspace, and the prompt carries the path to it.
+    await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
+    const blocks = stub.gateway.promptBlocks[0]!;
+    expect(blocks.map((b) => b.type)).toEqual(['text', 'text']);
+    expect(blocks[0]!.text).toContain('.boxes/attachments/shot.png');
+    expect(blocks[0]!.text).toContain('image/png');
+    expect(blocks[1]!.text).toBe('what is wrong here?');
+
+    // What the thread shows is the picture — fetched back from the session's
+    // workspace — and not the note that went with it.
+    const picture = page.locator('[data-slot="aui_user-message-image"] img').first();
+    await expect.poll(() => picture.count()).toBe(1);
+    expect(await picture.getAttribute('src')).toBe(
+      `/api/sessions/${SESSION.id}/attachments/shot.png`,
+    );
+    // Loaded, rather than merely pointed at something.
+    await expect
+      .poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBeGreaterThan(0);
+    expect(await page.getByText('<attachments>').count()).toBe(0);
+    await shoot(page, 'thread-attached-image');
+
+    // And again from the transcript rather than from the echo: a reconnect
+    // replays what was said, and the note about the attachment is plain text
+    // that survives that trip, so the thread reads the same both ways.
+    await page.reload();
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    await expect.poll(() => page.locator('[data-slot="aui_user-message-image"]').count()).toBe(1);
+    expect(await page.getByText('<attachments>').count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('an attached SVG is shown as the drawing it is', async () => {
+  await start({ prompts: [{ match: () => true, updates: reply('A box and an arrow.') }] });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByLabel('Add Attachment').click();
+    await (
+      await chooser
+    ).setFiles({
+      name: 'diagram.svg',
+      mimeType: 'image/svg+xml',
+      // With a script in it, which is the case the served type is about: an
+      // <img> runs nothing, and the response's CSP covers opening it directly.
+      buffer: Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">' +
+          '<script>window.parent.alert(1)</script><rect width="80" height="40" fill="teal"/></svg>',
+      ),
+    });
+
+    const input = page.getByLabel('Message input');
+    await input.fill('what does this show?');
+    await input.press('Enter');
+
+    await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
+    expect(stub.gateway.promptBlocks[0]![0]!.text).toContain('image/svg+xml');
+
+    const picture = page.locator('[data-slot="aui_user-message-image"] img').first();
+    await expect.poll(() => picture.count()).toBe(1);
+    await expect
+      .poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBe(80);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('an attached file that is not an image travels as a path, and reads as a chip', async () => {
+  await start({ prompts: [{ match: () => true, updates: reply('It is a receipt.') }] });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByLabel('Add Attachment').click();
+    await (
+      await chooser
+    ).setFiles({
+      name: 'report.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from('%PDF-1.4 not really'),
+    });
+
+    const input = page.getByLabel('Message input');
+    await input.fill('what does this say?');
+    await input.press('Enter');
+
+    await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
+    const blocks = stub.gateway.promptBlocks[0]!;
+    // A PDF is read from the workspace by the agent's own tools, and shows
+    // here as a chip: the browser has nothing it could render.
+    expect(blocks.map((b) => b.type)).toEqual(['text', 'text']);
+    expect(blocks[0]!.text).toContain('.boxes/attachments/report.pdf');
+    expect(blocks[0]!.text).toContain('application/pdf');
+
+    // The chip stands in for the block of instructions that carried it, and
+    // opens the file: served as application/pdf, so a tab shows it rather
+    // than saving it.
+    await expect.poll(() => page.getByText('report.pdf').isVisible()).toBe(true);
+    const link = page.locator('[data-slot="aui_user-message-file"] a').first();
+    const href = await link.getAttribute('href');
+    expect(href).toBe(`/api/sessions/${SESSION.id}/attachments/report.pdf`);
+    expect(await link.getAttribute('target')).toBe('_blank');
+    expect(await link.getAttribute('rel')).toContain('noopener');
+
+    const served = await page.request.get(`${stub.url}${href}`);
+    expect(served.headers()['content-type']).toBe('application/pdf');
+    expect(await page.getByText('<attachments>').count()).toBe(0);
+    await shoot(page, 'thread-attached-file');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a turn with nothing to show yet shows the spinner, and stops once it has', async () => {
   await start({
     // Long enough that the spinner can be read without racing the answer:

@@ -199,6 +199,7 @@ docker exec -it session-<id> claude /login
 | `SESSION_CPUS` | `2` | Per-session CPU cap |
 | `SESSION_PIDS_LIMIT` | `512` | Per-session pids cap |
 | `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
+| `MAX_ATTACHMENT_MB` | `25` | Largest single file a prompt may carry into a workspace |
 | `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
 | `PUSH_SUBJECT` | project URL | Contact in the VAPID assertion Web Push carries |
@@ -265,6 +266,17 @@ your place. It opens on everything that was said up to the branch, and goes
 its own way from there. A fork starts in `plan` mode, because it shares the original's
 checkout and two agents editing the same files at once is a mess neither can
 see; flip it to `auto` under the header's sliders when that is what you want.
+
+**Attach a file.** The `+` under the composer takes anything — drop it on the
+thread or paste it, on a phone as much as on a desktop. Whatever it is, it is
+uploaded into that session's workspace under `.boxes/attachments/`, and the
+prompt tells the agent the path, the type and the size, so it opens a
+screenshot, a PDF or a CSV with the tools it already has. Nothing is carried
+in the message itself, so an attachment costs context only when the agent
+reaches for it. Images still show in the thread, served back from the
+workspace, and anything else reads as a chip you can tap — a PDF opens in a
+tab. The files stay there afterwards, and a `.gitignore` keeps them out of
+any repository you are working in.
 
 **Run a shell command with `!`.** A composer line starting with `!` runs as
 `bash -lc` in the session container and never reaches the model — no tokens

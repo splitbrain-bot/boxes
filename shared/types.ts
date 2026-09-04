@@ -194,6 +194,21 @@ export interface ApiError {
   error: string;
 }
 
+/**
+ * One file the user attached to a prompt, as the upload endpoint reports it
+ * back.
+ *
+ * The path is workspace-relative and slash-separated, which is what a client
+ * puts in the prompt and what the agent types into a tool call. The name may
+ * differ from the one that was uploaded: it is sanitised, and a collision is
+ * suffixed.
+ */
+export interface StoredAttachment {
+  name: string;
+  path: string;
+  size: number;
+}
+
 /** Body of a request to run a local command in the session container. */
 export interface ExecRequest {
   /** Run with `bash -lc`, inside the session's own isolation. */

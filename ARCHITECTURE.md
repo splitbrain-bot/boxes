@@ -132,6 +132,8 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `{"from":"<threadId>"}` forks that one instead of starting empty |
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
+| `POST /api/sessions/:id/attachments?name=` | Stores one file, raw bytes, in the session's workspace |
+| `GET /api/sessions/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
 | `POST /api/sessions/:id/exec` | Runs one command in the container, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run in this session |
 | `GET /api/sessions/:id/review/tree` | Tree, git status per path, comment counts, the resolved root and base — the whole left panel |
@@ -188,6 +190,90 @@ carrying a fence of its own cannot break out of the block.
 The browser appends stored runs *after* whatever the replay produced rather
 than interleaving them. ACP replay carries no timestamps, so where they belong
 in the transcript is not recoverable.
+
+### Attachments
+
+A file attached to a prompt is uploaded into the session's own workspace, at
+`.boxes/attachments/`, and the prompt then says so. That is the whole design,
+and what makes it type-agnostic: a PDF, a CSV or a heap dump becomes a path
+the agent opens with the tools it already has, where anything carried inside
+the message could only ever be the handful of things a model reads directly.
+A workspace is a plain directory the orchestrator owns, so the upload is a
+file write — no container is involved, and a stopped session takes
+attachments as a running one does.
+
+Nothing travels inside the message. What the prompt carries is one block of
+text naming every attachment, and then what the user typed — context, then
+the question about it:
+
+```
+<attachments>
+The user attached these files to this message. They are saved in the
+workspace at the paths below; read them if they are relevant.
+- .boxes/attachments/shot.png (image/png, 1.2 MB)
+- .boxes/attachments/report.pdf (application/pdf, 840.0 KB)
+</attachments>
+```
+
+An image the user attached is still shown in the thread: the chip is a
+picture, loaded from `GET /api/sessions/:id/attachments/:name`, which reads
+it back out of the workspace. So the bytes cross the wire once, on the way
+up, and the thread looks the same on the phone that sent the screenshot and
+on the desktop that comes to it an hour later.
+
+That endpoint reads out of a tree the agent controls, so it is contained the
+way the review's file endpoint is and by the same code — `resolveInRoot` in
+`review/fs.ts`, which refuses a path that leaves the directory or is reached
+through a link. That is the containment that matters here: a link planted in
+the attachments directory would otherwise serve whatever the orchestrator's
+own uid can read, `/data` included.
+
+What it serves is declared rather than sniffed. What a browser can show is
+served as itself — images, SVG included, and PDF — and everything else as an
+`application/octet-stream` download. HTML is the deliberate omission: served
+as itself it runs as this origin, and unlike an SVG there is no way to show
+it that does not.
+
+Every response carries `nosniff` and `default-src 'none'`, with `sandbox` on
+all but the PDF. That CSP is load-bearing rather than decorative: it is what
+lets an SVG — which can carry script, and which an agent can write — be
+served as an SVG. Opened as a document it has no script, no origin and no
+network; behind the `<img>` the thread draws it with, a browser runs nothing
+in it anyway. The PDF is the exception because it is rendered by the
+browser's own viewer rather than by the page, and a sandboxed document is one
+a browser may decline to hand over — which would turn opening it into a
+download, the one thing serving it inline was for.
+
+Non-image attachments read as a chip in the thread, and the chip is a link to
+that endpoint: a PDF opens in a tab, anything else downloads.
+
+**Text, and not ACP's `resource_link`.** The protocol has a block for naming
+a file, and the Claude adapter renders it as `[@name](file://…)` — a bare
+markdown link, with no mime type, no size, and nothing saying whether to open
+it. The deciding part is what comes back afterwards: an adapter stores that
+rendering, not the block, so a reconnected thread would not look like the one
+that was sent. Text round-trips through any adapter's transcript exactly as
+written, which is what lets the dashboard read this same envelope back —
+live from the gateway's echo, or on replay from the adapter — and draw the
+attachment in its place, as a picture where it can and as a chip naming the
+file otherwise. An envelope this build cannot parse is left alone as text, because showing
+the model's own instructions is a better failure than dropping a file the
+reader is looking for.
+
+Uploaded names are sanitised to letters, digits, dot, dash and underscore,
+with any leading dot dropped. That settles two things at once: as a path
+component a name cannot climb out of the directory, and as prompt text it
+cannot forge a line of the list it is quoted into — a newline in a filename
+would otherwise end its entry early and let the rest read as another. A
+`.gitignore` holding `*` goes into `.boxes/`, so attachments do not show up
+as untracked files in a repository the agent is working in, and the
+repository's own `.gitignore` — a file the user owns — is left alone.
+
+Two limits are set deliberately rather than inherited. `MAX_ATTACHMENT_MB`
+(25 by default) bounds one upload, which the orchestrator buffers before
+writing out. The gateway's WebSocket takes a 16 MiB frame, where `ws`
+defaults to 100 MiB — nothing the dashboard sends approaches either, but the
+gateway answers any ACP client, and an ACP prompt may carry an image inline.
 
 ## The frontend
 
@@ -283,7 +369,7 @@ kinds: terminal habits the chat did not have (ArrowUp history on the composer,
 returning focus after a send, the slash-command list below), facts about this
 deployment the components could not know (a tool call in a session container
 cannot be answered from a browser, so only a real question opens a group and
-offers buttons; nothing here takes an attachment, so the button is gone), and
+offers buttons), and
 the look — the reasoning disclosure drawn as quietly as the tool calls beside
 it, and one spinner (`components/Spinner.tsx`) wherever the registry shipped a
 rotating icon.
