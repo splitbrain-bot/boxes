@@ -116,6 +116,8 @@ type ConvertedPart = {
     approved?: boolean;
     resolution?: string;
   };
+  /** The src of an image part, which is a data URL or a remote https one. */
+  image?: string;
 };
 
 test('a snapshot changes identity when a streamed message grows', () => {
@@ -676,4 +678,55 @@ test('previously run commands are appended once, however often they are loaded',
   assert.deepEqual(partsOf(store.getSnapshot().messages[0]!), [
     { type: 'text', text: '!git status' },
   ]);
+});
+
+test("a tool call's image is converted as a part beside the card, not inside it", () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 't-shot',
+    title: 'Read .playwright-cli/page.png',
+    kind: 'read',
+    status: 'completed',
+    content: [
+      { type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } },
+    ],
+  } as SessionUpdate);
+
+  const message = store.getSnapshot().messages.at(-1)!;
+  const parts = partsOf(message);
+  assert.deepEqual(
+    parts.map((p) => p.type),
+    ['tool-call', 'image'],
+  );
+  // The card still says a finished call produced something, so it does not
+  // render as a tool that returned nothing.
+  assert.equal(parts[0]!.result, '[image]');
+  assert.equal(parts[1]!.image, 'data:image/png;base64,AAAA');
+});
+
+test("an update that replaces a call's content replaces its images with it", () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 't-shot2',
+    title: 'Screenshot',
+    content: [
+      { type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } },
+    ],
+  } as SessionUpdate);
+  push(client, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 't-shot2',
+    status: 'completed',
+    content: [
+      { type: 'content', content: { type: 'image', data: 'BBBB', mimeType: 'image/png' } },
+    ],
+  } as SessionUpdate);
+
+  const parts = partsOf(store.getSnapshot().messages.at(-1)!);
+  assert.deepEqual(
+    parts.map((p) => p.image).filter(Boolean),
+    ['data:image/png;base64,BBBB'],
+  );
 });

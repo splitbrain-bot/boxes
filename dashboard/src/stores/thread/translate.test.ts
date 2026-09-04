@@ -219,3 +219,74 @@ test('replaying the same script twice from a fresh model gives the same thread',
     }));
   assert.deepEqual(strip(fold(...script)), strip(fold(...script)));
 });
+
+/** An image chunk of the given kind, carrying a base64 payload. */
+function imageChunk(
+  sessionUpdate: 'user_message_chunk' | 'agent_message_chunk',
+  data: string,
+  mimeType = 'image/png',
+): SessionUpdate {
+  return { sessionUpdate, content: { type: 'image', data, mimeType } } as SessionUpdate;
+}
+
+test('an image chunk becomes its own part, between the prose either side', () => {
+  const model = fold(
+    chunk('agent_message_chunk', 'Here it is:'),
+    imageChunk('agent_message_chunk', 'AAAA'),
+    chunk('agent_message_chunk', 'and that is the page.'),
+  );
+  assert.equal(model.messages.length, 1);
+  assert.deepEqual(model.messages[0]!.parts, [
+    { type: 'text', text: 'Here it is:' },
+    { type: 'image', src: 'data:image/png;base64,AAAA' },
+    { type: 'text', text: 'and that is the page.' },
+  ]);
+});
+
+test('an image a user sent survives the replay of their prompt', () => {
+  const model = fold(imageChunk('user_message_chunk', 'BBBB', 'image/jpeg'));
+  assert.equal(model.messages[0]!.role, 'user');
+  assert.deepEqual(model.messages[0]!.parts, [
+    { type: 'image', src: 'data:image/jpeg;base64,BBBB' },
+  ]);
+});
+
+test('an image block with no payload the browser can load is said in words', () => {
+  const model = fold(
+    {
+      sessionUpdate: 'agent_message_chunk',
+      // What the adapter sends for a remote image: no payload, and a URL
+      // assistant-ui would refuse as a src.
+      content: { type: 'image', data: '', mimeType: '', uri: 'http://example.test/a.png' },
+    } as SessionUpdate,
+    {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'image', data: '', mimeType: '' },
+    } as SessionUpdate,
+  );
+  assert.deepEqual(model.messages[0]!.parts, [
+    { type: 'text', text: '[image: http://example.test/a.png][image]' },
+  ]);
+});
+
+test('an https image block is passed through as its own src', () => {
+  const model = fold({
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'image', uri: 'https://example.test/a.png' },
+  } as SessionUpdate);
+  assert.deepEqual(model.messages[0]!.parts, [
+    { type: 'image', src: 'https://example.test/a.png' },
+  ]);
+});
+
+test("a tool call's image result is named in its output rather than left empty", () => {
+  const model = fold({
+    sessionUpdate: 'tool_call',
+    toolCallId: 't10',
+    title: 'Read screenshot.png',
+    kind: 'read',
+    status: 'completed',
+    content: [{ type: 'content', content: { type: 'image', data: 'CCCC', mimeType: 'image/png' } }],
+  });
+  assert.equal(toolOutputText(findTool(model, 't10')!), '[image]');
+});

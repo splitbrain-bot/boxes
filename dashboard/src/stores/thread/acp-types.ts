@@ -188,3 +188,40 @@ export function blockText(block: ContentBlock | undefined): string {
   if (block.type === 'resource_link') return block.title ?? block.name ?? block.uri;
   return '';
 }
+
+/**
+ * An image block as a `src` the browser can load, or null when it carries
+ * none.
+ *
+ * Two forms reach us. A block with a payload becomes a data URL, which is
+ * what an image the agent produced always is — a screenshot it read back, a
+ * tool's image result — because ACP carries those inline as base64. A block
+ * with only a `uri` is a remote image, and is passed through as itself.
+ *
+ * Both halves of that are narrower than they look. The payload branch needs
+ * the mime type as well as the data: it goes into the URL, and the adapter
+ * sends a block with both empty when what it has is a remote URL, so the
+ * emptiness is the signal to fall through rather than build
+ * `data:;base64,`. And the uri branch admits only https and blob, because
+ * assistant-ui drops an image part whose src is anything else — plain http
+ * included — with a console warning. Saying so here is what lets the caller
+ * show the link instead.
+ */
+export function imageSrc(block: ContentBlock | undefined): string | null {
+  if (block?.type !== 'image') return null;
+  if (block.data && block.mimeType) return `data:${block.mimeType};base64,${block.data}`;
+  if (block.uri && /^(https:|blob:)/i.test(block.uri)) return block.uri;
+  return null;
+}
+
+/**
+ * What to say in place of an image that cannot be shown: the link, when
+ * there is one to follow, and otherwise that there was an image at all.
+ *
+ * The wording is the ACP adapter's own for the same case, which is the
+ * closest thing to a convention there is.
+ */
+export function imageFallbackText(block: ContentBlock | undefined): string {
+  if (block?.type !== 'image') return '';
+  return block.uri ? `[image: ${block.uri}]` : '[image]';
+}

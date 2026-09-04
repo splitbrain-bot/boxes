@@ -310,6 +310,18 @@ thread-store   the live thread          messages, modes, models, approvals, exec
 convert.ts     that model            →  what useExternalStoreRuntime reads
 ```
 
+An image is the one content block that is not prose, and it becomes a part of
+its own. Three things send one: a chunk of what the agent or the user said, and
+a tool call's result — which is how a screenshot arrives, the agent reading a
+PNG back with `Read` and the adapter carrying it inline as base64. ACP has no
+place for an image inside a tool call as far as a renderer is concerned, so
+`convert.ts` puts it just after the card that produced it, derived from the
+call's content on every conversion rather than stored — an update replaces a
+call's content wholesale, and its images have to go with it. A block the
+browser cannot load is said in words rather than dropped: assistant-ui admits
+a data URL or an https one as a src and refuses the rest, so a plain-http
+image becomes the link to it.
+
 `translate.ts` being pure is what makes replay and live streaming the same
 code path: a reconnect repeats the handshake, `session/load` re-sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
@@ -1099,7 +1111,7 @@ applies migrations tracked by `user_version`.
 | `sessions` | One row per session: names, Docker object names, status, which thread is the default, timestamps |
 | `threads` | One row per conversation: which session owns it, the adapter's id for it, the agent's title, its ordinal, whether a turn is running on it |
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
-| `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session |
+| `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session. An image or audio block's base64 payload is replaced by its size on the way in — a screenshot is a megabyte of it, the row is truncated at 64,000 characters anyway, and the bytes were never what the log is read for |
 | `exec_log` | Local commands and their output, ring-pruned to 200 rows per session |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
 | `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |

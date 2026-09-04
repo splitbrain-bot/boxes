@@ -63,6 +63,26 @@ interface SessionConfigOption {
   options?: Array<{ value: string }>;
 }
 
+/**
+ * A JSON.stringify replacer that keeps base64 media out of the debug log.
+ *
+ * An image or audio block carries its whole payload inline, and a screenshot
+ * is a megabyte of base64 — which the log truncates at 64,000 characters
+ * anyway, so what would be stored is a useless prefix of one, thousands of
+ * rows deep in a ring that then holds nothing else. The mime type and the
+ * size are what a tapped log is read for; the bytes never were.
+ *
+ * Keyed on the holder rather than the key name, which is why this is a
+ * `function` and not an arrow: `data` is also where a terminal's output
+ * lives, and that is exactly what somebody reading this log came for.
+ */
+function withoutMediaPayloads(this: unknown, key: string, value: unknown): unknown {
+  if (key !== 'data' || typeof value !== 'string') return value;
+  const type = (this as { type?: unknown })?.type;
+  if (type !== 'image' && type !== 'audio') return value;
+  return `[${value.length} base64 chars omitted]`;
+}
+
 /** A browser attached to this session, as seen from the upstream side. */
 export interface DownstreamHandle {
   readonly id: number;
@@ -1161,7 +1181,12 @@ export class UpstreamSession {
   /** Records one message in the debug log. A failed write never breaks the flow. */
   private tap(direction: 'up' | 'down', method: string, params: unknown): void {
     try {
-      appendAcpLog(this.db, this.sessionId, direction, JSON.stringify({ method, params }));
+      appendAcpLog(
+        this.db,
+        this.sessionId,
+        direction,
+        JSON.stringify({ method, params }, withoutMediaPayloads),
+      );
     } catch (err) {
       this.slog.debug('acp_log write failed', { error: (err as Error).message });
     }

@@ -636,6 +636,12 @@ working directory, which in a session is the workspace — convenient, since the
 review surface then shows them, but worth a `.gitignore` entry in a repo the
 agent works on regularly. Set `outputDir` in the config to move it.
 
+Ask the agent to read a screenshot back and it is shown in the thread, tap to
+zoom it full-screen: a `Read` of an image file returns the image itself, and
+the chat renders one wherever it arrives — in a tool's result, or in what the
+agent says. So "screenshot the dev server and show me" is a thing to ask for
+from a phone.
+
 Chromium only; Firefox and WebKit are not installed, and there is no display,
 so `--headed` cannot work. `playwright-cli install-browser chromium --only-shell`
 in a derived image drops the full browser and keeps just the headless shell if
