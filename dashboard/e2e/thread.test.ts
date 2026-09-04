@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import type { Page } from 'playwright';
-import { closeBrowser, openPage } from './browser.ts';
+import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
 import type { GatewayScript } from './stub-gateway.ts';
 
@@ -35,6 +35,12 @@ function reply(...texts: string[]): SessionUpdate[] {
     (text) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as SessionUpdate,
   );
 }
+
+/**
+ * A real PNG, small enough to sit in the source: two bands and a diagonal, so
+ * a screenshot of this test shows an image rather than a plausible rectangle.
+ */
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
 
 let stub: StubOrchestrator;
 
@@ -404,6 +410,54 @@ test('an update the dashboard does not know about does not break the thread', as
     await input.fill('anything');
     await input.press('Enter');
     await expect.poll(() => page.getByText('Still fine.').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('an image renders wherever it arrives — a tool result, or what the agent said', async () => {
+  await start();
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    // How a screenshot actually arrives: the agent reads the file back, and
+    // the adapter carries the image inline as the tool's result.
+    stub.gateway.emit({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'tc-shot',
+      title: 'Read .playwright-cli/page.png',
+      kind: 'read',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'image', mimeType: 'image/png', data: PNG } }],
+    } as SessionUpdate);
+    // And the other way one can arrive: in the message itself.
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Here is the page:' },
+    } as SessionUpdate);
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'image', mimeType: 'image/png', data: PNG },
+    } as SessionUpdate);
+
+    // Both of them, as loaded images rather than as parts that merely exist:
+    // a broken src renders an <img> too.
+    const images = page.locator(`img[src="data:image/png;base64,${PNG}"]`);
+    await expect.poll(() => images.count()).toBe(2);
+    await expect
+      .poll(() =>
+        images.evaluateAll((nodes) =>
+          nodes.every((n) => (n as HTMLImageElement).naturalWidth === 200),
+        ),
+      )
+      .toBe(true);
+
+    // The prose it was said with is still prose, on its own line.
+    expect(await page.getByText('Here is the page:').isVisible()).toBe(true);
+    await shoot(page, 'thread-images');
     expect(errors).toEqual([]);
   } finally {
     await close();

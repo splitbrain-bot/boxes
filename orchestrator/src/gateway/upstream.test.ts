@@ -1066,3 +1066,49 @@ test('a queued permission request is announced as one', async () => {
     threadName: 'Thread 2',
   });
 });
+
+test('a tapped image block is logged without its base64 payload', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  const data = 'A'.repeat(100_000);
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'tc-shot',
+      status: 'completed',
+      content: [
+        { type: 'content', content: { type: 'image', mimeType: 'image/png', data } },
+        // A terminal's output lives under `data` too, and is exactly what
+        // somebody reads this log for.
+        { type: 'terminal', terminalId: 'term-1' },
+      ],
+      _meta: { terminal_output: { terminal_id: 'term-1', data: 'ok 1\nok 2' } },
+    },
+  });
+
+  const tapped = (): string | undefined =>
+    (
+      db
+        .prepare("SELECT payload FROM acp_log WHERE payload LIKE '%tc-shot%' ORDER BY id DESC")
+        .get() as { payload?: string } | undefined
+    )?.payload;
+  await expect.poll(tapped).toBeDefined();
+  const logged = tapped()!;
+
+  // The bytes are gone, their size is not, and the row is nowhere near the
+  // 64,000-character truncation that would otherwise have eaten it.
+  assert.ok(!logged.includes(data.slice(0, 200)), 'the payload is not in the log');
+  assert.ok(logged.includes('[100000 base64 chars omitted]'), 'its size is');
+  assert.ok(logged.includes('image/png'), 'and so is its type');
+  assert.ok(logged.length < 2000, `the row stays small (${logged.length})`);
+  // The terminal output under the same key survived.
+  assert.ok(logged.includes('ok 1\\nok 2'), "a terminal's output is untouched");
+});

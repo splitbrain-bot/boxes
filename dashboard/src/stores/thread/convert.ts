@@ -1,5 +1,5 @@
 import type { ThreadMessageLike, ToolApprovalOption } from '@assistant-ui/react';
-import type { PermissionOption, PermissionOptionKind } from './acp-types.ts';
+import { imageSrc, type PermissionOption, type PermissionOptionKind } from './acp-types.ts';
 import { toolOutputText, type ApprovalState, type Message, type ToolPart } from './translate.ts';
 
 /**
@@ -105,15 +105,57 @@ function toolPart(part: ToolPart) {
   };
 }
 
+/** One part as an image part, in the shape the runtime reads. */
+function imagePart(src: string) {
+  return { type: 'image' as const, image: src };
+}
+
+/**
+ * The images a tool call produced, as parts of their own.
+ *
+ * A tool-call part cannot contain an image — assistant-ui's message parts are
+ * flat — so a screenshot arrives as a sibling just after the card that
+ * produced it. That is also where it reads best: the card says what was run,
+ * and the picture is the answer, in the transcript rather than folded away
+ * behind a disclosure nobody opens.
+ *
+ * Derived on every conversion rather than stored, so a tool_call_update that
+ * replaces the call's content — which is what the schema says an update does
+ * — replaces its images too, with nothing to keep in step.
+ *
+ * One consequence to expect rather than fix: the thread coalesces *adjacent*
+ * tool calls into one "n tool calls" group, and an image between two of them
+ * ends the first group. Two calls that each produced a screenshot therefore
+ * read as two groups with a picture under each, which is the grouping worth
+ * having — the alternative puts both images after the pair and leaves the
+ * reader matching them up.
+ */
+function toolImages(part: ToolPart) {
+  return part.content.flatMap((c) => {
+    if (c.type !== 'content') return [];
+    const src = imageSrc(c.content);
+    return src ? [imagePart(src)] : [];
+  });
+}
+
+/**
+ * One part of a message, in the shape the runtime reads.
+ *
+ * Named because one of our parts can convert to more than one of these, and
+ * an inferred element type from the first branch of that is not the union.
+ */
+type ConvertedPart = ThreadMessageLike['content'][number] & object;
+
 /** One of our messages, as the runtime reads it. */
 export function convertMessage(message: Message): ThreadMessageLike {
   return {
     id: message.id,
     role: message.role,
-    content: message.parts.map((part) => {
-      if (part.type === 'text') return { type: 'text' as const, text: part.text };
-      if (part.type === 'reasoning') return { type: 'reasoning' as const, text: part.text };
-      return toolPart(part);
+    content: message.parts.flatMap((part): ConvertedPart[] => {
+      if (part.type === 'text') return [{ type: 'text' as const, text: part.text }];
+      if (part.type === 'reasoning') return [{ type: 'reasoning' as const, text: part.text }];
+      if (part.type === 'image') return [imagePart(part.src)];
+      return [toolPart(part), ...toolImages(part)];
     }),
   };
 }

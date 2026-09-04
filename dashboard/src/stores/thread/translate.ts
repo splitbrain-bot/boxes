@@ -1,6 +1,9 @@
 import {
   blockText,
+  imageFallbackText,
+  imageSrc,
   type AvailableCommand,
+  type ContentBlock,
   type PermissionOption,
   type PlanEntry,
   type SessionConfigOption,
@@ -33,6 +36,19 @@ export interface ReasoningPart {
   text: string;
 }
 
+/**
+ * An image, as something the browser can load.
+ *
+ * The block's own shape does not survive into the model: what a renderer
+ * needs is one src, and which of the two ACP forms it came from is settled
+ * once, on arrival, by `imageSrc`. A block that yields no src never becomes
+ * one of these — it is said in words instead.
+ */
+export interface ImagePart {
+  type: 'image';
+  src: string;
+}
+
 /** A permission request attached to the tool call it is about. */
 export interface ApprovalState {
   /** Correlates the user's answer with the JSON-RPC request that is blocked. */
@@ -61,7 +77,7 @@ export interface ToolPart {
 }
 
 /** A part of a message. */
-export type Part = TextPart | ReasoningPart | ToolPart;
+export type Part = TextPart | ReasoningPart | ImagePart | ToolPart;
 
 /** One message in the thread. */
 export interface Message {
@@ -147,6 +163,31 @@ function appendText(message: Message, kind: 'text' | 'reasoning', text: string):
   message.parts.push({ type: kind, text });
 }
 
+/**
+ * Appends one content block to a message, as a part of the kind it is.
+ *
+ * An image becomes its own part rather than joining the prose, because it is
+ * not prose: two chunks of text on either side of one are two text parts with
+ * a picture between them, which is what was said. Everything else is read as
+ * text and appended, so a run of chunks still collapses into one part.
+ *
+ * The same path serves all three chunk kinds, thought included. An image in a
+ * thought is not something the adapter sends today, and if it starts, showing
+ * it costs nothing and dropping it would be a silence to debug.
+ */
+function appendBlock(message: Message, kind: 'text' | 'reasoning', content: ContentBlock): void {
+  if (content?.type === 'image') {
+    const src = imageSrc(content);
+    if (src) {
+      message.parts.push({ type: 'image', src });
+      return;
+    }
+    appendText(message, kind, imageFallbackText(content));
+    return;
+  }
+  appendText(message, kind, blockText(content));
+}
+
 /** Finds a tool part anywhere in the thread, newest first. */
 export function findTool(model: ThreadModel, toolCallId: string): ToolPart | undefined {
   for (let i = model.messages.length - 1; i >= 0; i--) {
@@ -171,19 +212,19 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
     case 'user_message_chunk': {
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'user_message_chunk' }>;
       const message = messageFor(model, 'user', u.messageId);
-      appendText(message, 'text', blockText(u.content));
+      appendBlock(message, 'text', u.content);
       return message;
     }
     case 'agent_message_chunk': {
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'agent_message_chunk' }>;
       const message = messageFor(model, 'assistant', u.messageId);
-      appendText(message, 'text', blockText(u.content));
+      appendBlock(message, 'text', u.content);
       return message;
     }
     case 'agent_thought_chunk': {
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'agent_thought_chunk' }>;
       const message = messageFor(model, 'assistant', u.messageId);
-      appendText(message, 'reasoning', blockText(u.content));
+      appendBlock(message, 'reasoning', u.content);
       return message;
     }
     case 'tool_call': {
@@ -286,11 +327,20 @@ function mergeTool(part: ToolPart, u: ToolCallUpdate): void {
   if (u.locations != null) part.locations = u.locations;
 }
 
-/** Renders a tool call's content as the plain text the fallback shows. */
+/**
+ * Renders a tool call's content as the plain text the fallback shows.
+ *
+ * An image is named rather than rendered here — the picture itself is shown
+ * beside the card, by the conversion in convert.ts. Naming it is not
+ * decoration: an empty result reads as a tool that produced nothing, which
+ * is what a Read of a PNG used to look like.
+ */
 export function toolOutputText(part: ToolPart): string {
   return part.content
     .map((c) => {
-      if (c.type === 'content') return blockText(c.content);
+      if (c.type === 'content') {
+        return c.content?.type === 'image' ? imageFallbackText(c.content) : blockText(c.content);
+      }
       if (c.type === 'diff') return diffText(c);
       return `[terminal ${c.terminalId}]`;
     })
