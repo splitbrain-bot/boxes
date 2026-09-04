@@ -2,11 +2,11 @@
 
 import { memo, useCallback, useRef } from "react";
 import {
-  useScrollLock,
   useAuiState,
   type ReasoningMessagePartComponent,
   type ReasoningGroupComponent,
 } from "@assistant-ui/react";
+import { useDisclosureLock } from "@/hooks/use-disclosure-lock";
 import { MarkdownText } from "@/components/assistant-ui/elements/markdown-text";
 import {
   ANIMATION_DURATION,
@@ -28,7 +28,9 @@ function ReasoningRoot({
   ...props
 }: ReasoningRootProps) {
   const collapsibleRef = useRef<HTMLDivElement | null>(null);
-  const lockScroll = useScrollLock(collapsibleRef, ANIMATION_DURATION);
+  // Boxes edit: the lock, minus the fight with a thread following its own
+  // output. See hooks/use-disclosure-lock.ts.
+  const lockScroll = useDisclosureLock(collapsibleRef, ANIMATION_DURATION);
 
   const handleAnimationStart = useCallback(() => {
     lockScroll();

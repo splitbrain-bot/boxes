@@ -27,6 +27,7 @@ import { SlashCommands } from "@/components/SlashCommands";
 import { Spinner } from "@/components/Spinner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useFollowOutput } from "@/hooks/use-follow-output";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -152,6 +153,11 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   autoFocus,
 }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  // Boxes edit: the rest of a long turn. autoScroll below stops at the turn
+  // anchor, which holds the prompt at the top and follows nothing; once the
+  // answer has outgrown the screen this keeps the newest of it in view for
+  // the rest of the turn. See hooks/use-follow-output.ts.
+  const viewport = useFollowOutput();
 
   return (
     <ThreadPrimitive.Root
@@ -176,6 +182,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           that overflows by exactly a scrollbar — putting a horizontal one
           under the whole thread. Nothing else here queries a container. */}
       <ThreadPrimitive.Viewport
+        ref={viewport}
         autoScroll
         turnAnchor="top"
         data-slot="aui_thread-viewport"

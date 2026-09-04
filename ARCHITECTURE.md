@@ -358,6 +358,44 @@ unscrollable for as long as they are mounted (`use-viewport-lock.ts`), and the
 viewport meta asks the keyboard to resize the content rather than slide over
 it. What moves the header now is the app, on purpose.
 
+Where a turn is read from is the runtime's business, up to a point. A turn
+anchors the prompt that started it to the top of the viewport and writes the
+answer underneath, paying for the space an unwritten answer does not fill yet
+with a reserve element it shrinks as the answer arrives. That lasts one
+screenful. Past it the anchor has nothing left to give — and it only ever
+held a position, never followed one — so a long turn, which is a run of tool
+calls and reasoning and rarely anything else, went on writing below the fold
+and left it all there until it ended. `use-follow-output.ts` takes over at
+that handover and keeps the viewport against the bottom for the rest of the
+turn. It watches the scroller and what it holds, because content arriving is
+not the only thing that grows a thread: a disclosure animates its height for a
+fifth of a second without touching the DOM again.
+
+A reader who takes the scroller away from the bottom is left where they put
+it, and arriving back at the bottom rejoins. Which of the two a scroll was is
+asked of the input rather than of the position, because the position cannot
+answer it: a reader going up a hundred pixels and the browser holding the page
+still while a block above them collapses by a hundred both subtract the same
+hundred from `scrollTop`, and the turn writing into the same frame moves the
+numbers again underneath both. Nothing the browser does to a scroller of its
+own accord arrives with a wheel or a finger attached. A key is not counted
+among those, however much it looks like input — the composer sits inside the
+viewport, so every letter typed into it, and the Return that starts the turn,
+arrives at the scroller too.
+
+Which is also why a disclosure does not hold the viewport still while any of
+that is going on (`use-disclosure-lock.ts`). The registry's `useScrollLock`
+pins `scrollTop` for the length of a collapse, so the line under the reader's
+eye stays where it was, and it pins by putting the position back on every
+scroll event of the next two hundred milliseconds — including the ones a
+thread following its own output makes. The runtime reads that reset as a
+reader flicking upward and stops following for good, and a working turn is
+disclosures opening and closing, so following survived about one of them. A
+thread that has moved with its output in the last second has nothing to hold
+still and is not held. One being read at the bottom of a finished turn does,
+and still is: opening a tool call there unfolds it below rather than taking
+the view to the end of what it printed, which is what the lock is for.
+
 The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
 CLI, in the shadcn distribution model: the sources are committed and are ours
@@ -1354,6 +1392,7 @@ dashboard/
         thread-store.ts The live thread: messages, modes, models, approvals, exec
         convert.ts      That model in the shape the runtime reads
         exec.ts         !bang commands against the exec endpoint
+    hooks/              What the views share: the header stepping aside, a thread following its own output
     views/              SessionList, SessionCreate, SessionThread, SessionInfo, AgentSets
     components/
       Spinner.tsx       The one thing that says "working": blocks-wave, in every running state
