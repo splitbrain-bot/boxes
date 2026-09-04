@@ -11,12 +11,12 @@ import {
 import { ChevronDownIcon } from "lucide-react";
 import { Spinner } from "@/components/Spinner";
 import { cva, type VariantProps } from "class-variance-authority";
-import { useScrollLock } from "@assistant-ui/react";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { useDisclosureLock } from "@/hooks/use-disclosure-lock";
 import { cn } from "@/lib/utils";
 
 const ANIMATION_DURATION = 200;
@@ -53,7 +53,9 @@ function ToolGroupRoot({
 }: ToolGroupRootProps) {
   const collapsibleRef = useRef<HTMLDivElement>(null);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
-  const lockScroll = useScrollLock(collapsibleRef, ANIMATION_DURATION);
+  // Boxes edit: the lock, minus the fight with a thread following its own
+  // output. See hooks/use-disclosure-lock.ts.
+  const lockScroll = useDisclosureLock(collapsibleRef, ANIMATION_DURATION);
 
   const isControlled = controlledOpen !== undefined;
   const isOpen = isControlled ? controlledOpen : uncontrolledOpen;

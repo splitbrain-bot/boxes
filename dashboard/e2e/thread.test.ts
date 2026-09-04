@@ -37,6 +37,55 @@ function reply(...texts: string[]): SessionUpdate[] {
 }
 
 /**
+ * A turn spent working: a thought and a tool call at a time, which is what
+ * most of a long one is made of. A paragraph of thinking rather than a line,
+ * so a handful of steps is a screenful and the turn reaches the end of the
+ * room its anchor keeps without having to run for a minute first.
+ */
+function working(steps: number): SessionUpdate[] {
+  return Array.from({ length: steps }, (_, i) => [
+    {
+      sessionUpdate: 'agent_thought_chunk',
+      content: {
+        type: 'text',
+        text: [
+          `Thinking about step ${i + 1}, and what it needs.`,
+          'The file has to be read before anything is said about it,',
+          'and what it says decides which one is read next.',
+        ].join(' '),
+      },
+    },
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId: `call-${i + 1}`,
+      title: `Step ${i + 1}: read file-${i + 1}.ts`,
+      kind: 'read',
+      status: 'completed',
+      rawInput: { path: `file-${i + 1}.ts` },
+    },
+  ]).flat() as SessionUpdate[];
+}
+
+/**
+ * How far past the bottom of the viewport the newest thing a turn has written
+ * sits. Negative is on screen.
+ *
+ * Not the scroller's own distance from its end: a turn holds empty space
+ * under its answer for as long as the answer is shorter than the screen — the
+ * room the anchor needs to keep the prompt at the top — and a screenful of
+ * that below the fold hides nothing. What can be read is the question.
+ */
+function overhang(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const viewport = document.querySelector('[data-slot="aui_thread-viewport"]')!;
+    const written = document.querySelectorAll('[data-slot="aui_assistant-message-content"]');
+    const last = written[written.length - 1];
+    if (!last) return 0;
+    return Math.round(last.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom);
+  });
+}
+
+/**
  * A real PNG, small enough to sit in the source: two bands and a diagonal, so
  * a screenshot of this test shows an image rather than a plausible rectangle.
  */
@@ -502,6 +551,177 @@ test('the header steps aside while reading down, and returns on the way back up'
     await wheel(page, -100, 2);
     await expect.poll(inReach).toBe(true);
     expect(await top()).toBeGreaterThan(100);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+/*
+ * A turn that works for a while — a run of reasoning and tool calls, then an
+ * answer — is where the reading position used to be lost.
+ *
+ * A turn anchors its prompt to the top of the viewport, and the empty space
+ * under an answer that has not been written yet is real space, shrunk as the
+ * answer grows. One screenful in there is none left to give, and everything
+ * the turn went on to write was written below the fold and left there until
+ * it ended. Tool calls and reasoning are what a long turn writes, so it was
+ * their rows that were never seen.
+ *
+ * The warm-up exchange is not decoration: only a turn with something before
+ * it anchors, so this was well behaved on the first turn of a conversation
+ * and wrong on every one after it.
+ */
+test('a working turn is followed past the fold, with its prompt still anchored', async () => {
+  await start({
+    prompts: [
+      { match: (text) => text.includes('warm up'), updates: reply('warmed up') },
+      {
+        match: () => true,
+        gapMs: 120,
+        updates: [...working(20), ...reply('and that is the answer')],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    const input = page.getByLabel('Message input');
+    await input.fill('warm up');
+    await input.press('Enter');
+    await expect.poll(() => page.getByText('warmed up').isVisible()).toBe(true);
+
+    await input.fill('do a lot of work');
+    await input.press('Enter');
+
+    // The prompt is taken to the top of the viewport, which is the anchor's
+    // job and still the anchor doing it.
+    const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+    const promptTop = async (): Promise<number> => {
+      const prompt = (await page.getByText('do a lot of work').boundingBox())!;
+      const box = (await viewport.boundingBox())!;
+      return Math.round(prompt.y - box.y);
+    };
+    await expect.poll(promptTop, { timeout: 5000 }).toBeLessThan(96);
+
+    // And from there to the end of the turn, everything it writes is on
+    // screen as it writes it. Sampled in the page rather than over the wire:
+    // what happens between two round trips is the whole question, and a turn
+    // that fell a screen behind and caught up at the end would answer it
+    // wrong.
+    await page.evaluate(() => {
+      const viewport = document.querySelector('[data-slot="aui_thread-viewport"]')!;
+      const w = window as unknown as { __overhang: number };
+      w.__overhang = -1;
+      setInterval(() => {
+        const written = document.querySelectorAll('[data-slot="aui_assistant-message-content"]');
+        const last = written[written.length - 1];
+        if (!last) return;
+        const past =
+          last.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom;
+        w.__overhang = Math.max(w.__overhang, past);
+      }, 25);
+    });
+
+    await expect
+      .poll(() => page.getByText('and that is the answer').isVisible(), { timeout: 20_000 })
+      .toBe(true);
+
+    // Nothing ever reached the bottom edge of the viewport, which is where the
+    // composer sits and where reading stops.
+    const worst = await page.evaluate(
+      () => (window as unknown as { __overhang: number }).__overhang,
+    );
+    expect(worst).toBeLessThan(0);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a reader who leaves the bottom during a turn is left there, and rejoins at it', async () => {
+  await start({
+    prompts: [
+      { match: (text) => text.includes('warm up'), updates: reply('warmed up') },
+      // Long enough to still be working when the reader has finished reading
+      // whatever they went back for, and slow enough that going back to the
+      // bottom by hand is something a hand can do.
+      {
+        match: () => true,
+        gapMs: 200,
+        updates: [...working(40), ...reply('and that is the answer')],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    const input = page.getByLabel('Message input');
+    await input.fill('warm up');
+    await input.press('Enter');
+    await expect.poll(() => page.getByText('warmed up').isVisible()).toBe(true);
+
+    await input.fill('do a lot of work');
+    await input.press('Enter');
+
+    const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+    const top = (): Promise<number> => viewport.evaluate((el) => Math.round(el.scrollTop));
+    /**
+     * Whether the thread is moving with its own output — asked of the
+     * scroller, which is the only place the answer is a fact rather than an
+     * intention.
+     */
+    const moving = async (): Promise<boolean> => {
+      const before = await top();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return (await top()) > before;
+    };
+
+    // The anchor has had its moment by now: the prompt is at the top of the
+    // viewport and the answer is growing into the room kept under it, so the
+    // position is not moving and `moving` is false.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    // And then the turn outgrows that room, which is where there is anything
+    // to follow — and to walk away from.
+    await expect.poll(moving, { timeout: 20_000 }).toBe(true);
+
+    // Back up to read something, while the turn goes on writing.
+    await viewport.hover();
+    await wheel(page, -100, 5);
+    const left = await top();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(await page.getByLabel('Stop generating').count()).toBe(1);
+    // Still where the reader left it: the turn wrote on underneath and none of
+    // it moved the page. A couple of dozen pixels is the browser holding
+    // anchored content still as a block above collapses, not the thread
+    // deciding where to be.
+    expect(Math.abs((await top()) - left)).toBeLessThanOrEqual(24);
+    expect(await overhang(page)).toBeGreaterThan(0);
+
+    // Back down, a flick at a time until the scroller is against its end,
+    // because the turn is still writing while the reader travels.
+    await expect
+      .poll(
+        async () => {
+          await wheel(page, 400, 2);
+          return viewport.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop <= 8);
+        },
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+
+    // And arriving there is rejoining the turn, rather than a position that
+    // has to be held by hand from now on: what it writes next is on screen
+    // too.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(await page.getByLabel('Stop generating').count()).toBe(1);
+    expect(await overhang(page)).toBeLessThan(0);
 
     expect(errors).toEqual([]);
   } finally {
