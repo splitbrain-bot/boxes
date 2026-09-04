@@ -3,7 +3,7 @@ import {
   useExternalStoreRuntime,
   type AppendMessage,
 } from '@assistant-ui/react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router';
 import type { SessionDetail, ThreadSummary } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
@@ -15,23 +15,56 @@ import { api } from '../api.ts';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { threadTitle, type TabState } from '@/lib/tab-title';
 import { useSessions } from '../stores/sessions.ts';
+import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
+import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
 import { bangCommand } from '../stores/thread/exec.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
 import { threadName } from '@/lib/threads';
+import { buildEnvelope, formatBytes, type AttachmentEntry } from '@/lib/attachments';
 import { Shelf } from '@/components/Shelf';
 import { ThreadLoading } from '@/components/ThreadLoading';
 import { ThreadHeader } from '@/components/ThreadHeader';
 import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 
-/** The text of a composer submission, which is all we send upstream. */
+/** The prose of a composer submission, without its attachments. */
 function textOf(message: AppendMessage): string {
   return message.content
     .map((part) => (part.type === 'text' ? part.text : ''))
     .join('')
     .trim();
+}
+
+/**
+ * One composer submission as the content blocks of an ACP prompt.
+ *
+ * The note saying what was attached comes first, then what the user typed:
+ * context, then the question about it. Nothing carries a file — attachments
+ * arrive already uploaded, and what the prompt holds is where they went. See
+ * stores/thread/attachments.ts.
+ */
+function blocksOf(message: AppendMessage): ContentBlock[] {
+  const entries: AttachmentEntry[] = [];
+
+  for (const attachment of message.attachments ?? []) {
+    for (const part of attachment.content ?? []) {
+      if (part.type !== 'file') continue;
+      entries.push({
+        path: part.data,
+        name: part.filename ?? attachment.name,
+        mimeType: part.mimeType,
+        size: formatBytes(attachment.file?.size ?? 0),
+      });
+    }
+  }
+
+  const text = textOf(message);
+  return [
+    ...(entries.length > 0 ? [{ type: 'text' as const, text: buildEnvelope(entries) }] : []),
+    ...(text ? [{ type: 'text' as const, text }] : []),
+  ];
 }
 
 /**
@@ -136,28 +169,49 @@ export function SessionThread() {
 
   const onNew = useCallback(
     async (message: AppendMessage) => {
+      if (!store) return;
       const text = textOf(message);
-      if (!text || !store) return;
+      const attachments = message.attachments ?? [];
       // A !bang line is intercepted here and never reaches the adapter, so
-      // it costs no tokens and cannot be read as an instruction.
-      const command = bangCommand(text);
+      // it costs no tokens and cannot be read as an instruction. It runs a
+      // command rather than saying anything, so an attachment on one has
+      // nothing to attach to and the line is sent as the prompt it looks
+      // like instead.
+      const command = attachments.length === 0 ? bangCommand(text) : null;
       if (command) {
         await store.runCommand(command);
         return;
       }
-      await store.send(text);
+      await store.send(blocksOf(message));
     },
     [store],
   );
 
+  /**
+   * The composer's attachment adapter, which uploads into this session's
+   * workspace. Rebuilt with the store so a failed upload has somewhere to
+   * report to; the composer holds the attachments themselves, so nothing is
+   * lost when it is.
+   */
+  const attachmentAdapter = useMemo(
+    () => createAttachmentAdapter(id, (message) => store?.reportError(message)),
+    [id, store],
+  );
+
+  // Bound to the session because an attachment is fetched back from it: the
+  // thread's own pictures are served from its workspace, not carried in the
+  // transcript.
+  const convert = useCallback((message: Message) => convertMessage(message, id), [id]);
+
   const runtime = useExternalStoreRuntime<Message>({
     messages: state.messages as Message[],
-    convertMessage,
+    convertMessage: convert,
     isRunning: state.isRunning,
     isSendDisabled: !store || state.connection !== 'ready',
     onNew,
     onCancel: async () => store?.cancel(),
     onRefetchThread: async () => store?.refetch(),
+    adapters: { attachments: attachmentAdapter },
     onRespondToToolApproval: ({ approvalId, approved, optionId }) => {
       // A decision with no option id is a plain refusal to choose; the store
       // turns that into ACP's cancelled outcome.

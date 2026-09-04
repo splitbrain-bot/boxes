@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import type { FastifyReply } from 'fastify';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { createReadStream, readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -18,9 +18,11 @@ import type {
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseBody,
+  StoredAttachment,
   UpdateAgentSetBody,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
+import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
 import type { config } from './config.ts';
 import {
   countPushSubscriptions,
@@ -33,6 +35,7 @@ import * as execs from './exec.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
+import { resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { SessionManager } from './sessions.ts';
 import { setSessionOwner } from './workspaces.ts';
@@ -97,11 +100,31 @@ export function buildApp(
 
   const app = Fastify({ logger: false });
 
+  /**
+   * Attachment uploads arrive as raw bytes, which Fastify has no parser for
+   * until it is given one. `parseAs: 'buffer'` is the whole of it: the route
+   * sets the size limit, and what the bytes are is the client's business.
+   */
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer' },
+    (_req, body, done) => done(null, body),
+  );
+
   // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof HttpError) {
       return reply.code(err.statusCode).send({ error: err.message });
+    }
+    // Fastify's own refusals — a body over the route's limit, a content type
+    // with no parser — already carry both the status and the sentence worth
+    // showing. Flattening them into "Internal error" would hide the one thing
+    // the user could act on, and a 4xx is by definition not this server's
+    // fault to conceal.
+    const status = (err as { statusCode?: number }).statusCode;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      return reply.code(status).send({ error: (err as Error).message });
     }
     log.error('unhandled request error', { error: (err as Error).message });
     return reply.code(500).send({ error: 'Internal error' });
@@ -233,6 +256,96 @@ export function buildApp(
     execs.record(db, id, command, outcome.output, outcome, startedAt);
     manager.touch(id);
     return reply;
+  });
+
+  /**
+   * Stores one file the user attached to a prompt, in the session's own
+   * workspace.
+   *
+   * Raw bytes rather than a multipart form: there is one file per request and
+   * its name is in the query, so the parts a form would carry are the parts
+   * this does not need — and octet-stream is a body Fastify can hand over as
+   * a Buffer without a dependency that parses envelopes.
+   *
+   * The upload happens before the prompt that mentions it, and is what makes
+   * the mention true. It needs no container: a workspace is a directory this
+   * process owns, so a session that is stopped — or has never been started —
+   * takes attachments the same way a running one does.
+   */
+  app.post(
+    '/api/sessions/:id/attachments',
+    { bodyLimit: cfg.MAX_ATTACHMENT_MB * 1024 * 1024 },
+    async (req): Promise<StoredAttachment> => {
+      const { id } = req.params as { id: string };
+      const { name } = req.query as { name?: string };
+      if (!name) throw new HttpError(400, 'name is required');
+
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.byteLength === 0) {
+        throw new HttpError(400, 'an attachment body is required');
+      }
+
+      const workspace = manager.workspacePathOf(id);
+      if (!workspace) throw new HttpError(404, 'Session not found');
+
+      const stored = storeAttachment(workspace, name, body);
+      // The same touch every other thing a user does to a session makes: an
+      // upload is somebody working here, and the reaper counts idleness.
+      manager.touch(id);
+      log.session(id).info('attachment stored', { path: stored.path, size: stored.size });
+      return stored;
+    },
+  );
+
+  /**
+   * Serves one stored attachment back, which is how the thread shows the
+   * picture the user attached.
+   *
+   * Contained the same way the review's file endpoint is, and for the same
+   * reason: this reads out of a tree the agent controls, so a link planted in
+   * the attachments directory would otherwise serve whatever the
+   * orchestrator's own uid can read. `resolveInRoot` holds that invariant —
+   * see review/fs.ts, which holds it alone.
+   *
+   * What a browser can show — images, SVG, PDF — is served as itself, and
+   * everything else as a download of unknown type. The headers are what make
+   * that safe for the one image format that can carry script: `sandbox` and
+   * `default-src 'none'` leave an SVG opened as a document with no script and
+   * no origin, and an SVG behind an `<img>` is inert anyway. A PDF is served
+   * unsandboxed for the viewer's sake; see attachments.ts.
+   */
+  app.get('/api/sessions/:id/attachments/:name', async (req, reply) => {
+    const { id, name } = req.params as { id: string; name: string };
+    // Stored names are a single path component by construction. Anything
+    // shaped otherwise is not one of ours and is not looked for.
+    if (name.includes('/') || name.includes('\\')) {
+      throw new HttpError(404, 'Attachment not found');
+    }
+
+    const workspace = manager.workspacePathOf(id);
+    if (!workspace) throw new HttpError(404, 'Session not found');
+
+    const resolved = resolveInRoot(join(workspace, ATTACHMENTS_DIR), name);
+    if (!resolved.ok) throw new HttpError(404, 'Attachment not found');
+    const stat = statSync(resolved.path);
+    if (!stat.isFile()) throw new HttpError(404, 'Attachment not found');
+
+    const served = servedTypeFor(name);
+    void reply.headers({
+      'Content-Type': served.contentType,
+      'Content-Length': String(stat.size),
+      'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename="${name}"`,
+      // The type is decided here and must not be second-guessed from the
+      // bytes, which is what would let a download be treated as a document.
+      'X-Content-Type-Options': 'nosniff',
+      // Load-bearing, not belt-and-braces: this is what lets an SVG be served
+      // as an SVG. Nothing in one of these may run or fetch anything.
+      'Content-Security-Policy': served.sandbox ? "default-src 'none'; sandbox" : "default-src 'none'",
+      // Short, rather than immutable: the name is stable but the file under
+      // it belongs to a workspace the agent can rewrite.
+      'Cache-Control': 'private, max-age=60',
+    });
+    return createReadStream(resolved.path);
   });
 
   /**

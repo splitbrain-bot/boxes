@@ -18,6 +18,7 @@ import type {
   ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
+  StoredAttachment,
   ThreadSummary,
 } from '../../shared/types.ts';
 
@@ -79,6 +80,22 @@ export const api = {
     request<ThreadSummary>(`/api/sessions/${id}/threads/${threadId}/select`, {
       method: 'POST',
     }),
+  /**
+   * Stores one file the user attached, and answers with where it landed.
+   *
+   * The bytes go up as themselves rather than as a form or as base64: this
+   * is the one call in the client that carries a file, and the endpoint
+   * wants nothing else from it but the name, which travels in the query.
+   */
+  uploadAttachment: (id: string, file: File) =>
+    request<StoredAttachment>(
+      `/api/sessions/${id}/attachments?name=${encodeURIComponent(file.name)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      },
+    ),
   getLog: (id: string, after = 0) =>
     request<AcpLogPage>(`/api/sessions/${id}/log?after=${after}&limit=200`),
   health: () => request<HealthResponse>('/healthz'),

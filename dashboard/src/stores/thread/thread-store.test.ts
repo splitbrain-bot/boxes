@@ -157,7 +157,7 @@ test('a prompt marks the thread running until it answers', async () => {
   });
   assert.equal(store.getSnapshot().isRunning, false);
 
-  const sent = store.send('hello');
+  const sent = store.send([{ type: 'text', text: 'hello' }]);
   assert.equal(store.getSnapshot().isRunning, true);
   assert.deepEqual(client.requests[0], {
     method: 'session/prompt',
@@ -269,7 +269,7 @@ test('a failed prompt clears the running state and reports the reason', async ()
   const { store } = makeStore((c) => {
     c.fail = 'upstream not connected';
   });
-  await assert.rejects(() => store.send('hello'));
+  await assert.rejects(() => store.send([{ type: 'text', text: 'hello' }]));
   assert.equal(store.getSnapshot().isRunning, false);
   assert.equal(store.getSnapshot().error, 'upstream not connected');
 });
@@ -278,7 +278,7 @@ test('cancel notifies the adapter and stops the running state', () => {
   const { store, client } = makeStore((c) => {
     c.hold = true;
   });
-  void store.send('long one');
+  void store.send([{ type: 'text', text: 'long one' }]);
   store.cancel();
   assert.deepEqual(client.notifications, [
     { method: 'session/cancel', params: { sessionId: 'acp-1' } },
@@ -553,7 +553,7 @@ test('a turn blocked on a permission request is not reported as running', async 
   const { store, client } = makeStore((c) => {
     c.hold = true;
   });
-  void store.send('edit the file');
+  void store.send([{ type: 'text', text: 'edit the file' }]);
   assert.equal(store.getSnapshot().isRunning, true);
 
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write main.ts' });

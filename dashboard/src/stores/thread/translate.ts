@@ -15,6 +15,7 @@ import {
   type ToolCallUpdate,
   type ToolKind,
 } from './acp-types.ts';
+import { parseEnvelope } from '../../lib/attachments.ts';
 
 /**
  * ACP session/update notifications, folded into an append-only message model.
@@ -49,6 +50,23 @@ export interface ImagePart {
   src: string;
 }
 
+/**
+ * A file the user attached, as a chip under their message.
+ *
+ * Built from the envelope the composer put in the prompt rather than from
+ * anything the adapter says, which is what makes it identical live and on
+ * replay: the envelope is text, and text is the one thing that survives a
+ * transcript unchanged. See lib/attachments.ts.
+ */
+export interface AttachmentPart {
+  type: 'attachment';
+  /** The file's name, which is what the chip shows. */
+  name: string;
+  /** Workspace-relative, and what the agent was given to open. */
+  path: string;
+  mimeType: string;
+}
+
 /** A permission request attached to the tool call it is about. */
 export interface ApprovalState {
   /** Correlates the user's answer with the JSON-RPC request that is blocked. */
@@ -77,7 +95,7 @@ export interface ToolPart {
 }
 
 /** A part of a message. */
-export type Part = TextPart | ReasoningPart | ImagePart | ToolPart;
+export type Part = TextPart | ReasoningPart | ImagePart | AttachmentPart | ToolPart;
 
 /** One message in the thread. */
 export interface Message {
@@ -185,7 +203,28 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
     appendText(message, kind, imageFallbackText(content));
     return;
   }
-  appendText(message, kind, blockText(content));
+
+  const text = blockText(content);
+
+  // A block the composer wrote to tell the agent what was attached. It is
+  // addressed to the model, so what is shown in its place is the thing the
+  // reader attached: the picture, or the file's name.
+  const envelope = kind === 'text' ? parseEnvelope(text) : null;
+  if (envelope) {
+    appendText(message, kind, envelope.before);
+    for (const entry of envelope.entries) {
+      message.parts.push({
+        type: 'attachment',
+        name: entry.name,
+        path: entry.path,
+        mimeType: entry.mimeType,
+      });
+    }
+    appendText(message, kind, envelope.after);
+    return;
+  }
+
+  appendText(message, kind, text);
 }
 
 /** Finds a tool part anywhere in the thread, newest first. */

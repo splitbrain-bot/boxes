@@ -15,6 +15,7 @@ import type {
   ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
+  StoredAttachment,
   ThreadSummary,
 } from '../../shared/types.ts';
 import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
@@ -211,6 +212,8 @@ export interface StubOrchestrator {
   state: StubState;
   /** The ACP gateway attached to the same server, on the same origin. */
   gateway: StubGateway;
+  /** Files uploaded to the attachments endpoint, in order. */
+  attachmentUploads: Array<{ sessionId: string; name: string; bytes: Buffer }>;
   /** Bodies posted to the exec endpoint, in order. */
   execCalls: Array<{ sessionId: string; command: string }>;
   /** Combined output the exec endpoint streams back, by command. */
@@ -238,6 +241,7 @@ export async function startStubOrchestrator(
     requireCookie: null,
   };
   const reviewCalls: StubOrchestrator['reviewCalls'] = [];
+  const attachmentUploads: StubOrchestrator['attachmentUploads'] = [];
   const execCalls: StubOrchestrator['execCalls'] = [];
   const execLog: ExecRecord[] = [];
   let execOutput: StubOrchestrator['execOutput'] = (command) => ({
@@ -324,6 +328,53 @@ export async function startStubOrchestrator(
       if (thread.acpSessionId) gateway.select(thread.acpSessionId);
       return json(res, 200, thread);
     }
+    const attach = /^\/api\/sessions\/([^/]+)\/attachments$/.exec(url);
+    if (attach && req.method === 'POST') {
+      // `url` above has had its query cut off; the name is in the raw one.
+      const name = new URL(req.url ?? '/', 'http://stub').searchParams.get('name') ?? '';
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const bytes = Buffer.concat(chunks);
+        attachmentUploads.push({ sessionId: attach[1]!, name, bytes });
+        // The real endpoint sanitises the name and reports where it landed;
+        // the paths a test reads are the ones the prompt will carry.
+        const stored: StoredAttachment = {
+          name,
+          path: `.boxes/attachments/${name}`,
+          size: bytes.byteLength,
+        };
+        json(res, 200, stored);
+      });
+      return undefined;
+    }
+
+    const attached = /^\/api\/sessions\/([^/]+)\/attachments\/([^/]+)$/.exec(url);
+    if (attached && req.method === 'GET') {
+      const name = decodeURIComponent(attached[2]!);
+      const found = attachmentUploads.find(
+        (a) => a.sessionId === attached[1] && a.name === name,
+      );
+      if (!found) return json(res, 404, { error: 'Not found' });
+      // The real endpoint serves images as themselves and everything else as
+      // a download; the thread only ever asks for the former, which is the
+      // part a test is checking. The CSP goes with it, because it is what
+      // makes serving an SVG as an SVG safe there.
+      const types: Record<string, string> = {
+        png: 'image/png',
+        svg: 'image/svg+xml',
+        pdf: 'application/pdf',
+      };
+      res.writeHead(200, {
+        'Content-Type': types[name.split('.').pop() ?? ''] ?? 'application/octet-stream',
+        'Content-Length': String(found.bytes.byteLength),
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+      });
+      res.end(found.bytes);
+      return undefined;
+    }
+
     const exec = /^\/api\/sessions\/([^/]+)\/exec$/.exec(url);
     if (exec && req.method === 'POST') {
       let body = '';
@@ -388,6 +439,7 @@ export async function startStubOrchestrator(
     url: `http://127.0.0.1:${port}`,
     state,
     gateway,
+    attachmentUploads,
     execCalls,
     execLog,
     reviewCalls,

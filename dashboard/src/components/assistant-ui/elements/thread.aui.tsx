@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ComposerAddAttachment,
   ComposerAttachments,
   UserMessageAttachments,
 } from "@/components/assistant-ui/elements/attachment.aui";
@@ -369,11 +370,11 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
 
 const ComposerAction: FC = () => {
   return (
-    // Boxes edit: justify-end rather than justify-between, because the
-    // add-attachment button that sat on the left is gone. Nothing here
-    // accepts an attachment yet, and a button that does nothing is worse
-    // than no button.
-    <div className="aui-composer-action-wrapper relative flex items-center justify-end">
+    <div className="aui-composer-action-wrapper relative flex items-center justify-between">
+      {/* Boxes edit: the add-attachment button is back, and does something.
+          A file picked here is uploaded into the session's workspace, which
+          is why it takes any type — see stores/thread/attachments.ts. */}
+      <ComposerAddAttachment />
       <div className="flex items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>
           <AuiIf condition={(s) => s.composer.dictation == null}>
@@ -617,11 +618,31 @@ const AssistantActionBar: FC = () => {
   );
 };
 
-const UserFilePart: FileMessagePartComponent = (part) => (
-  <div data-slot="aui_user-message-file" className="py-1">
-    <File {...part} />
-  </div>
-);
+// Boxes edit: an attached file is a link. Its data is the endpoint serving it
+// out of the session's workspace, so a PDF opens in the browser's own viewer
+// and anything else downloads — the registry's own chip offers neither,
+// because `sourceType: 'id'` means it has no bytes of its own to hand over.
+const UserFilePart: FileMessagePartComponent = (part) => {
+  const href = part.data.startsWith('/api/') ? part.data : null;
+  const chip = <File {...part} />;
+  return (
+    <div data-slot="aui_user-message-file" className="py-1">
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open ${part.filename ?? 'attachment'}`}
+          className="inline-block rounded-lg"
+        >
+          {chip}
+        </a>
+      ) : (
+        chip
+      )}
+    </div>
+  );
+};
 
 const UserImagePart: ImageMessagePartComponent = (part) => (
   <div data-slot="aui_user-message-image" className="py-1">

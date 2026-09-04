@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'vitest';
 import type { SessionUpdate } from './acp-types.ts';
+import { buildEnvelope } from '../../lib/attachments.ts';
 import {
   applyUpdate,
   emptyModel,
@@ -289,4 +290,81 @@ test("a tool call's image result is named in its output rather than left empty",
     content: [{ type: 'content', content: { type: 'image', data: 'CCCC', mimeType: 'image/png' } }],
   });
   assert.equal(toolOutputText(findTool(model, 't10')!), '[image]');
+});
+
+// --- attachments ------------------------------------------------------------
+//
+// The composer sends what the user attached as one block of text — see
+// lib/attachments.ts. These cover what the thread does with it, which has to
+// be the same whether the block arrives from the gateway's echo or from the
+// adapter's transcript on a reconnect: it is the same text either way.
+
+/** The envelope for one attachment, as a user chunk. */
+function attached(
+  overrides: Partial<Parameters<typeof buildEnvelope>[0][number]> = {},
+): SessionUpdate {
+  return chunk(
+    'user_message_chunk',
+    buildEnvelope([
+      {
+        path: '.boxes/attachments/report.pdf',
+        name: 'report.pdf',
+        mimeType: 'application/pdf',
+        size: '840.0 KB',
+        ...overrides,
+      },
+    ]),
+  );
+}
+
+test('an attached file becomes a chip rather than the instructions the model got', () => {
+  const model = fold(attached(), chunk('user_message_chunk', 'what does this say?'));
+
+  assert.deepEqual(model.messages[0]!.parts, [
+    {
+      type: 'attachment',
+      name: 'report.pdf',
+      path: '.boxes/attachments/report.pdf',
+      mimeType: 'application/pdf',
+    },
+    { type: 'text', text: 'what does this say?' },
+  ]);
+});
+
+test('an attached image is a chip too: what it becomes on screen is the converter', () => {
+  const model = fold(
+    attached({ path: '.boxes/attachments/shot.png', mimeType: 'image/png' }),
+    chunk('user_message_chunk', 'what is wrong here?'),
+  );
+
+  assert.deepEqual(model.messages[0]!.parts[0], {
+    type: 'attachment',
+    name: 'shot.png',
+    path: '.boxes/attachments/shot.png',
+    mimeType: 'image/png',
+  });
+});
+
+test('an envelope that cannot be read is shown rather than swallowed', () => {
+  const model = fold(
+    chunk('user_message_chunk', '<attachments>\n- a.png (image/png, 1 B, later field)\n</attachments>'),
+  );
+  assert.equal(model.messages[0]!.parts[0]!.type, 'text');
+});
+
+test('the envelope is only read in a user or agent message, never as a thought', () => {
+  // Nothing sends one in a thought; this is about the reasoning stream never
+  // acquiring parts that are not reasoning.
+  const model = fold({
+    sessionUpdate: 'agent_thought_chunk',
+    content: { type: 'text', text: buildEnvelope([
+      {
+        path: '.boxes/attachments/a.png',
+        name: 'a.png',
+        mimeType: 'image/png',
+        size: '1 B',
+      },
+    ]) },
+  } as SessionUpdate);
+  assert.equal(model.messages[0]!.parts[0]!.type, 'reasoning');
 });

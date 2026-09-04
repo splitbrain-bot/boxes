@@ -19,6 +19,14 @@ import type {
  * about.
  */
 
+/** One content block of a prompt, as far as the stub reads it. */
+export interface PromptBlock {
+  type: string;
+  text?: string;
+  mimeType?: string;
+  data?: string;
+}
+
 /** What the stub streams in answer to one prompt. */
 export interface PromptScript {
   /** Matched against the prompt text; the first match wins. */
@@ -68,6 +76,8 @@ export interface StubGateway {
   historyOf: (threadId: string) => SessionUpdate[];
   /** Prompt texts the stub received, across every thread. */
   prompts: string[];
+  /** The content blocks of each prompt, which is what text loses. */
+  promptBlocks: PromptBlock[][];
   /** How many sockets are attached right now, across every thread. */
   attached: () => number;
   /** The ACP id a socket naming no thread is pinned to. */
@@ -121,6 +131,7 @@ export function attachStubGateway(
   let current = THREAD_ID;
   let nextThread = 2;
   const prompts: string[] = [];
+  const promptBlocks: PromptBlock[][] = [];
   /** Set while a prompt is held open, so the test can end the turn. */
   let releaseHeld: (() => void) | null = null;
   /** Loads waiting for releaseLoad, when the script holds them. */
@@ -301,13 +312,14 @@ export function attachStubGateway(
         // The thread the prompt names, which is this socket's own: a turn
         // runs on a conversation, never on whichever is the default.
         const onThread = String(params(msg)['sessionId'] ?? pinned);
-        const blocks = (params(msg)['prompt'] ?? []) as Array<{ type: string; text?: string }>;
+        const blocks = (params(msg)['prompt'] ?? []) as PromptBlock[];
         const promptText = blocks.map((b) => b.text ?? '').join('');
         prompts.push(promptText);
+        promptBlocks.push(blocks);
         running.add(onThread);
         turnState(onThread, true);
         try {
-          return await runPrompt(ws, onThread, promptText, reply);
+          return await runPrompt(ws, onThread, blocks, promptText, reply);
         } finally {
           running.delete(onThread);
           turnState(onThread, false);
@@ -323,17 +335,18 @@ export function attachStubGateway(
   async function runPrompt(
     ws: WebSocket,
     onThread: string,
+    blocks: PromptBlock[],
     promptText: string,
     reply: (result: unknown) => void,
   ): Promise<void> {
     if (script.echoPrompt !== false) {
-      emit(
-        {
-          sessionUpdate: 'user_message_chunk',
-          content: { type: 'text', text: promptText },
-        } as SessionUpdate,
-        onThread,
-      );
+      // Block by block, as the real gateway echoes it: a prompt carrying an
+      // image and a note about what was attached is three blocks, and
+      // flattening them to their text is exactly the part a client renders
+      // differently.
+      for (const content of blocks) {
+        emit({ sessionUpdate: 'user_message_chunk', content } as SessionUpdate, onThread);
+      }
     }
 
     const permission = script.permissions.find((p) => p.match(promptText));
@@ -407,6 +420,7 @@ export function attachStubGateway(
     },
     historyOf,
     prompts,
+    promptBlocks,
     attached: () => sockets.size,
     current: () => current,
     newThread: () => mint(null),

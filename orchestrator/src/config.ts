@@ -63,6 +63,17 @@ const schema = z.object({
   IDLE_STOP_MINUTES: durationMinutes.default(30),
 
   /**
+   * Largest single attachment a prompt may carry into a workspace, in
+   * mebibytes.
+   *
+   * The cap is on the upload rather than on the workspace, because the
+   * workspace has no size worth policing here — the agent can fill it faster
+   * than any user with a file picker. What this bounds is one request the
+   * orchestrator buffers in memory before writing it out.
+   */
+  MAX_ATTACHMENT_MB: z.coerce.number().int().positive().default(25),
+
+  /**
    * Validated against the bearer.<token> WebSocket subprotocol. Unset means
    * the orchestrator generates one and keeps it in the data volume.
    */
