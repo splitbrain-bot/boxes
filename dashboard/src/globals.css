@@ -233,6 +233,85 @@
 }
 
 /*
+ * The rhythm of a turn's quiet rows.
+ *
+ * A thread is a column of messages 24px apart (`gap-y-6` on the message
+ * group), each reserving 30px under itself for an action bar that only
+ * appears on the last message or on hover. That is right for prose, where a
+ * paragraph needs air and a copy button has something to copy. It is wrong
+ * for the rows a working turn is mostly made of: "Reasoning" and "3 tool
+ * calls" are single 24px lines, and an adapter that names a message id per
+ * block sends every one of them as a message of its own. Each line of a long
+ * working stretch then came with 54px of nothing under it, more than twice
+ * its own height — and where several shared one message, with the 16px the
+ * reasoning row used to carry as well.
+ *
+ * A quiet message is one whose content is nothing but the chain-of-thought
+ * group and, while the turn runs, the working indicator: no prose, no image,
+ * no file, no error. `:has()` asks exactly that — "no child of the content
+ * that is not one of those two" — so a message becomes loud again the moment
+ * it says something, without anything having to label it. The indicator
+ * counts as quiet so a row does not change height the moment the spinner
+ * under it goes away.
+ */
+[data-slot='aui_assistant-message-root']:not(
+    :has(
+        > [data-slot='aui_assistant-message-content']
+          > :not(
+              [data-slot='aui_chain-of-thought'],
+              [data-slot='aui_assistant-message-indicator']
+            )
+      )
+  ) {
+  /* Nothing to reserve: the action bar's copy and export act on the
+     message's text, and a message with no text has neither to offer. The
+     footer goes, and with it the padding that held room for it below the
+     row — and the negative margin that cancelled that padding, which on its
+     own would pull the next row up over this one. */
+  padding-bottom: 0;
+  margin-bottom: 0;
+
+  & > [data-slot='aui_assistant-message-footer'] {
+    display: none;
+  }
+
+  /* An open row is a block rather than a line, so it keeps a little space
+     under its body — enough that the text belongs to the trigger above it
+     and not to the row below. */
+  &:has(
+      :is([data-slot='reasoning-content'], [data-slot='tool-group-content'])[data-state='open']
+    ) {
+    padding-bottom: calc(2 * var(--spacing));
+  }
+
+  /* And no 24px between one of them and whatever carries on the run, which
+     cancels the group's `gap-y-6` for that pair only. Carrying on the run
+     means opening with rows of its own — usually another quiet message, but
+     also the message that reasons, calls a tool and then finally speaks,
+     which an adapter naming no message ids sends as one. What is left
+     between two rows is the 6px each trigger carries above and below its own
+     text, so they read as one list rather than a column of stranded lines.
+     The gap returns in full on either side of the run, against the prose it
+     belongs to. */
+  & + [data-slot='aui_assistant-message-root']:has(
+      > [data-slot='aui_assistant-message-content']
+        > :first-child[data-slot='aui_chain-of-thought']
+    ) {
+    margin-top: calc(-6 * var(--spacing));
+  }
+}
+
+/*
+ * The space under a chain-of-thought block, set here rather than on the
+ * disclosure rows inside it — see the note in reasoning.tsx. It only applies
+ * where the block has prose after it in the same message; a block that is
+ * the whole message is spaced by the rule above instead.
+ */
+[data-slot='aui_chain-of-thought']:not(:last-child) {
+  margin-bottom: 1rem;
+}
+
+/*
  * The spinner's blocks: nine of them, each shrinking about its own centre and
  * growing back, a tenth of a second apart down the diagonal. See
  * components/Spinner.tsx, which places the grid and sets each block's delay.

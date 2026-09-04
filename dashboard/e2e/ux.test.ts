@@ -232,6 +232,132 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
   }
 });
 
+/*
+ * A working turn is mostly rows: "Reasoning", "1 tool call", "Reasoning"
+ * again. Each is a single line, and each used to arrive with the space a
+ * paragraph gets under it — the action bar's reserved height, and the gap
+ * between messages when the adapter sends them as separate ones. A dozen of
+ * them in a row was a screen of whitespace with a few words down the left
+ * edge, which is what this measures: a run of rows stays a list, and the
+ * prose after it still gets its air.
+ *
+ * Two turns, because both are real. The first has the adapter name a message
+ * id per block, which is what puts every row in a message of its own; the
+ * second names none, and everything lands in one message. The rows have to
+ * be as tight either way.
+ */
+test('a run of reasoning and tool rows stays a list, and prose after it still breathes', async () => {
+  // One thought and one tool call, as an adapter that names its messages
+  // sends them and as one that does not. The turn's own letter keeps the
+  // tool call ids apart: a re-announced id is an update to the call already
+  // in the thread, not a second one.
+  const row = (turn: string, n: number, split: boolean): SessionUpdate[] =>
+    [
+      {
+        sessionUpdate: 'agent_thought_chunk',
+        ...(split ? { messageId: `${turn}${n}` } : {}),
+        content: { type: 'text', text: `Thinking about step ${n}.` },
+      },
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: `${turn}-call-${n}`,
+        title: `Step ${n}`,
+        kind: 'read',
+        status: 'completed',
+        rawInput: { path: `file-${n}.ts` },
+      },
+    ] as SessionUpdate[];
+
+  const turn = (letter: string, split: boolean): SessionUpdate[] => [
+    ...row(letter, 1, split),
+    ...row(letter, 2, split),
+    ...row(letter, 3, split),
+    ...reply('and that is the answer'),
+  ];
+
+  await start({
+    prompts: [
+      { match: (text) => text.includes('split'), updates: turn('a', true) },
+      { match: () => true, updates: turn('b', false) },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    for (const [prompt, name] of [
+      ['split into messages', 'quiet-rows-split'],
+      ['all one message', 'quiet-rows-one-message'],
+    ]) {
+      const input = page.getByLabel('Message input');
+      await input.fill(prompt!);
+      await input.press('Enter');
+      await expect
+        .poll(() => page.getByText('and that is the answer').last().isVisible(), { timeout: 10_000 })
+        .toBe(true);
+      // At rest, which is not the same moment: reasoning is held open while
+      // it streams and collapses when the turn moves on. The wait is on the
+      // panels having no height rather than on their state, which flips at
+      // the start of the 200ms collapse — a row measured during it is as
+      // tall as the text still inside it.
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            [...document.querySelectorAll('[data-slot="reasoning-content"]')].every(
+              (el) => el.getBoundingClientRect().height === 0,
+            ),
+          ),
+        )
+        .toBe(true);
+
+      // Every gap between one row and the next in this turn, measured on the
+      // triggers themselves so it counts whatever the message, group and
+      // margins between them add up to. This turn only: the one before it is
+      // still on the page, and the user message between them is not a gap
+      // anything here is about.
+      const gaps = await page.evaluate(() => {
+        const turn = [...document.querySelectorAll('[data-role="user"]')]
+          .pop()!
+          .getBoundingClientRect().bottom;
+        const rows = [
+          ...document.querySelectorAll(
+            '[data-slot="reasoning-trigger"], [data-slot="tool-group-trigger"]',
+          ),
+        ]
+          .map((el) => el.getBoundingClientRect())
+          .filter((r) => r.top >= turn);
+        return rows.slice(1).map((r, i) => Math.round(r.top - rows[i]!.bottom));
+      });
+      expect(gaps.length).toBeGreaterThanOrEqual(5);
+      // A row is 24px tall. Anything over half that between two of them and
+      // the run has stopped reading as one thing.
+      for (const gap of gaps) expect(gap).toBeLessThanOrEqual(12);
+
+      // The prose the turn ends with is not dragged into the run with them.
+      const air = await page.evaluate(() => {
+        const rows = [
+          ...document.querySelectorAll(
+            '[data-slot="reasoning-trigger"], [data-slot="tool-group-trigger"]',
+          ),
+        ];
+        const last = rows[rows.length - 1]!.getBoundingClientRect();
+        const prose = [...document.querySelectorAll('.aui-md')]
+          .map((el) => el.getBoundingClientRect())
+          .filter((r) => r.top > last.bottom)
+          .sort((a, b) => a.top - b.top)[0]!;
+        return Math.round(prose.top - last.bottom);
+      });
+      expect(air).toBeGreaterThanOrEqual(12);
+      await shoot(page, name!);
+    }
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // An unfinished tool call is not a question. A call with no result inherits
 // its message's requires-action status, which used to render as "Wants to
 // run" over Allow and Deny buttons — in auto mode, where nothing is being
