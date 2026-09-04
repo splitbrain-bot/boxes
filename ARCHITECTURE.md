@@ -276,12 +276,17 @@ The chat itself is [assistant-ui](https://www.assistant-ui.com/). Its
 components are installed into `src/components/assistant-ui/` by the official
 CLI, in the shadcn distribution model: the sources are committed and are ours
 to edit, and an upgrade is a CLI re-run reviewed as a diff rather than a
-version bump that changes the UI silently. Six edits are ours so far, each
-marked in the source: ArrowUp history on the composer, returning focus after
-a send, opening a tool group when a call inside it is waiting on the user,
-dropping the add-attachment button because nothing here takes an attachment,
-following the bottom of the viewport for output that is not a turn, and the
-slash-command list below.
+version bump that changes the UI silently. The edits that are ours are marked
+`Boxes edit` in the source, with the reason at the point of the change —
+`grep` is the list, because a count in prose here would rot. They are of three
+kinds: terminal habits the chat did not have (ArrowUp history on the composer,
+returning focus after a send, the slash-command list below), facts about this
+deployment the components could not know (a tool call in a session container
+cannot be answered from a browser, so only a real question opens a group and
+offers buttons; nothing here takes an attachment, so the button is gone), and
+the look — the reasoning disclosure drawn as quietly as the tool calls beside
+it, and one spinner (`components/Spinner.tsx`) wherever the registry shipped a
+rotating icon.
 
 Because those components are written in Tailwind utilities, Tailwind is a
 build dependency rather than a style choice, and it compiles from source on
@@ -384,7 +389,7 @@ column is for. A fork is the exception and says so: it starts in `plan`,
 because it shares the thread it came from's checkout and the point of one is
 to ask about work the original is still doing, so it starts in a mode that
 reads rather than writes. That does not fix the shared workspace; it stops the
-common accident, and flipping the fork to `auto` is one tap in the header. An
+common accident, and flipping the fork to `auto` is the header's settings. An
 adapter offering no such mode is left in whichever mode it starts in, and a
 switch that fails is logged rather than failing the spawn.
 
@@ -416,7 +421,7 @@ disclosure in the thread never appears at all — the agent was thinking and
 saying so, and the words were not on the wire. The budgeted `enabled` form
 rather than `adaptive`: on a current model the two are the same thing, and
 `adaptive` is a flag an older one can reject, while which model a thread runs
-is chosen from the header long after this is fixed.
+is chosen from the header's settings long after this is fixed.
 
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
 that the session's status becomes `error`.
@@ -1253,6 +1258,7 @@ dashboard/
         exec.ts         !bang commands against the exec endpoint
     views/              SessionList, SessionCreate, SessionThread, SessionInfo, AgentSets
     components/
+      Spinner.tsx       The one thing that says "working": blocks-wave, in every running state
       assistant-ui/     Installed registry sources, ours to edit
       ui/               Installed shadcn primitives
 

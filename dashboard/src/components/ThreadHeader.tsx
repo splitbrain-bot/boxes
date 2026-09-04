@@ -59,9 +59,33 @@ function ConfigSelect({
 }
 
 /**
+ * One setting in the overlay: what it is called, what it does, and the
+ * control. A label rather than a heading and a control, so the whole block is
+ * the hit area — these are read and set with a thumb.
+ */
+function Setting({
+  name,
+  description,
+  children,
+}: {
+  name: string;
+  /** What the adapter says it does, when it says anything. */
+  description?: string | null | undefined;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="font-medium">{name}</span>
+      {description ? <span className="text-muted-foreground">{description}</span> : null}
+      {children}
+    </label>
+  );
+}
+
+/**
  * The thread's own chrome: where it goes back to, which of the session's
- * conversations it is, what it is connected to, which of the adapter's modes
- * it is in, which model it answers with, and how to branch it.
+ * conversations it is, what it is connected to, how to branch it — and one
+ * button holding everything the adapter lets a client set.
  */
 export function ThreadHeader({
   sessionId,
@@ -100,17 +124,24 @@ export function ThreadHeader({
   // protocol, the id the adapter gives it is not.
   const model = configOptions.find((option) => option.category === 'model');
   // Everything else the adapter lets a client set — the effort level, fast
-  // mode, the agent persona, whatever a later adapter adds. These used to go
-  // nowhere, so the effort level could not be set at all. They live behind a
-  // button rather than in the row: four selects do not fit a phone's header,
-  // and these are the ones you set once rather than flip mid-thread.
+  // mode, the agent persona, whatever a later adapter adds.
   //
-  // The mode is excluded because the switcher beside the name already is it,
-  // under the adapter's other name for the same thing.
+  // The mode is excluded because `modes` is already it, under the adapter's
+  // other name for the same thing: a client that reads both would offer the
+  // permission mode twice and have to keep the two in step.
   const rest = configOptions.filter(
     (option) =>
       option !== model && option.category !== 'mode' && isSelectable(option),
   );
+
+  // Everything the adapter offers now lives behind the one button, the mode
+  // and the model included. Four controls and a name do not fit a phone's
+  // header — the name was down to a couple of words with the selects beside
+  // it — and a setting is a thing you glance at rarely and change rarer
+  // still. The button is beside the name, so any of them is two taps away.
+  const hasModes = Boolean(modes && modes.availableModes.length > 1);
+  const hasModel = Boolean(model && isSelectable(model));
+  const settings = hasModes || hasModel || rest.length > 0;
 
   return (
     <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
@@ -120,12 +151,10 @@ export function ThreadHeader({
         </Link>
       </Button>
 
-      {/* A floor under the name: two selects next to it would otherwise take
-          the whole row on a phone and squeeze it away entirely. */}
+      {/* A floor under the name, which the icon buttons cannot push past. */}
       <div className="flex min-w-16 flex-1 flex-col">
         {/* The thread's name shares the session's line: the row below is the
-            connection state, and the two selects have already taken the rest
-            of the width at phone size. */}
+            connection state. */}
         <span className="flex items-baseline gap-1.5 text-sm">
           {/* The session's name goes first and keeps up to two thirds of the
               line: which box you are in matters more than which of its
@@ -142,38 +171,13 @@ export function ThreadHeader({
       </div>
 
       {/* Whatever the adapter advertises, with nothing hardcoded: an adapter
-          that offers no modes and no model gets neither switcher.
+          that offers no modes, no model and nothing else gets no button.
 
-          Selects rather than rows of buttons: six modes are wider than a
-          phone, and the native control opens the platform's own picker and
-          brings its keyboard and screen-reader behaviour with it. Each is
-          capped so a long label truncates instead of pushing the name out. */}
-      {modes && modes.availableModes.length > 1 ? (
-        <select
-          aria-label="Agent mode"
-          value={modes.currentModeId}
-          onChange={(event) => onSetMode(event.target.value)}
-          title={current?.description ?? current?.name}
-          className="min-w-0 max-w-24 shrink rounded-md border bg-muted px-2 py-1 text-xs"
-        >
-          {modes.availableModes.map((mode) => (
-            <option key={mode.id} value={mode.id}>
-              {mode.name}
-            </option>
-          ))}
-        </select>
-      ) : null}
-
-      {model && isSelectable(model) ? (
-        <ConfigSelect
-          option={model}
-          label="Model"
-          className="max-w-24 shrink"
-          onSet={(value) => onSetConfigOption(model.id, value)}
-        />
-      ) : null}
-
-      {rest.length > 0 ? (
+          Selects rather than rows of buttons: six modes are longer than a
+          phone is wide, and the native control opens the platform's own
+          picker and brings its keyboard and screen-reader behaviour with
+          it. */}
+      {settings ? (
         <Popover>
           <PopoverTrigger asChild>
             <Button
@@ -182,25 +186,51 @@ export function ThreadHeader({
               size="icon-sm"
               className="shrink-0"
               aria-label="Agent settings"
-              title="Effort and the adapter's other settings"
+              title="Mode, model, effort and the adapter's other settings"
             >
               <SlidersHorizontal />
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-72">
             <div className="flex flex-col gap-3">
+              {/* The mode first: of everything here it is the one that gets
+                  changed mid-thread, when a plan turns into work. */}
+              {modes && hasModes ? (
+                <Setting name="Agent mode" description={current?.description}>
+                  <select
+                    aria-label="Agent mode"
+                    value={modes.currentModeId}
+                    onChange={(event) => onSetMode(event.target.value)}
+                    className="mt-0.5 min-w-0 rounded-md border bg-muted px-2 py-1.5 text-xs"
+                  >
+                    {modes.availableModes.map((mode) => (
+                      <option key={mode.id} value={mode.id}>
+                        {mode.name}
+                      </option>
+                    ))}
+                  </select>
+                </Setting>
+              ) : null}
+
+              {model && hasModel ? (
+                <Setting name={model.name} description={model.description}>
+                  <ConfigSelect
+                    option={model}
+                    label="Model"
+                    className="mt-0.5 py-1.5"
+                    onSet={(value) => onSetConfigOption(model.id, value)}
+                  />
+                </Setting>
+              ) : null}
+
               {rest.map((option) => (
-                <label key={option.id} className="flex flex-col gap-1 text-xs">
-                  <span className="font-medium">{option.name}</span>
-                  {option.description ? (
-                    <span className="text-muted-foreground">{option.description}</span>
-                  ) : null}
+                <Setting key={option.id} name={option.name} description={option.description}>
                   <ConfigSelect
                     option={option}
                     className="mt-0.5 py-1.5"
                     onSet={(value) => onSetConfigOption(option.id, value)}
                   />
-                </label>
+                </Setting>
               ))}
             </div>
           </PopoverContent>

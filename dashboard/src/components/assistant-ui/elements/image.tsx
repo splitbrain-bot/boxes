@@ -15,7 +15,6 @@ import {
   DownloadIcon,
   ImageIcon,
   ImageOffIcon,
-  Loader2Icon,
   RefreshCwIcon,
   ShieldAlertIcon,
   XIcon,
@@ -25,6 +24,7 @@ import type {
   ImageMessagePartComponent,
 } from "@assistant-ui/react";
 import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/Spinner";
 
 const extensionForMimeType = (mimeType?: string): string => {
   switch (mimeType) {
@@ -374,7 +374,8 @@ function ImageGenerating({ className }: { className?: string }) {
         className,
       )}
     >
-      <Loader2Icon className="text-muted-foreground size-8 animate-spin" />
+      {/* Boxes edit: the shared spinner. */}
+      <Spinner className="text-muted-foreground size-8" />
       <span className="sr-only">Generating image…</span>
     </div>
   );
@@ -435,9 +436,10 @@ function RegenerateButton({
       aria-label="Regenerate image"
       className="hover:bg-muted inline-flex size-7 items-center justify-center rounded disabled:opacity-50"
     >
-      <RefreshCwIcon
-        className={cn("size-4", isRegenerating && "animate-spin")}
-      />
+      {/* Boxes edit: the shared spinner while it runs, rather than the
+          refresh arrow spun. Same reason as everywhere else — one thing means
+          "working" in this dashboard. */}
+      {isRegenerating ? <Spinner /> : <RefreshCwIcon className="size-4" />}
     </button>
   );
 }

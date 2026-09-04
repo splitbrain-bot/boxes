@@ -10,7 +10,6 @@ import {
   XIcon,
   PlusIcon,
   FileText,
-  Loader2Icon,
   AlertCircleIcon,
 } from "lucide-react";
 import {
@@ -40,6 +39,7 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { useAttachmentSrc } from "@/hooks/use-attachment-src";
 import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/Spinner";
 
 type AttachmentPreviewProps = {
   src: string;
@@ -189,7 +189,8 @@ const AttachmentUI: FC = () => {
                     aria-hidden="true"
                     className="aui-attachment-tile-uploading bg-background/60 animate-in fade-in-0 absolute inset-0 flex items-center justify-center backdrop-blur-[2px] motion-reduce:animate-none"
                   >
-                    <Loader2Icon className="text-muted-foreground size-4 animate-spin" />
+                    {/* Boxes edit: the shared spinner. */}
+                    <Spinner className="text-muted-foreground" />
                   </div>
                 )}
                 {isError && (

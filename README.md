@@ -252,10 +252,10 @@ thread is doing: `⟳` running a turn, `⚠` waiting for a permission decision,
 normal way to use this, and the symbol is the part a narrow tab still shows.
 
 **Watch it think.** A turn shows the agent's reasoning as a collapsed
-*Reasoning* line above what it does, streaming while it goes. Its mode and
-its model are in the header, and behind the sliders next to them is
-everything else the agent offers — its effort level among them. All of it is
-per conversation.
+*Reasoning* line above what it does, streaming while it goes. The sliders in
+the thread's header hold everything the agent offers — its mode, its model,
+its effort level, and whatever else the adapter advertises. All of it is per
+conversation.
 
 **Work in two threads at once.** A session can hold several conversations on
 one workspace, listed under its card, each with its own link. **Fork** branches
@@ -264,7 +264,7 @@ ask the fork about what the original is doing without stopping it or losing
 your place. It opens on everything that was said up to the branch, and goes
 its own way from there. A fork starts in `plan` mode, because it shares the original's
 checkout and two agents editing the same files at once is a mess neither can
-see; flip it to `auto` in the header when that is what you want.
+see; flip it to `auto` under the header's sliders when that is what you want.
 
 **Run a shell command with `!`.** A composer line starting with `!` runs as
 `bash -lc` in the session container and never reaches the model — no tokens
