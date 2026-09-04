@@ -37,6 +37,10 @@ const CONTENT_TYPES: Record<string, string> = {
   '.json': 'application/json',
   '.map': 'application/json',
   '.woff2': 'font/woff2',
+  // The install: the manifest and the icons it names, with the types the
+  // orchestrator gives them (app.ts, CONTENT_TYPES).
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json',
 };
 
 /** A thread the stub reports, matching the stub gateway's own first thread. */
@@ -186,6 +190,17 @@ export interface StubState {
   agentSets: AgentSetDetail[];
   /** What the health probe reports about the deployment's Claude token. */
   claudeTokenConfigured: boolean;
+  /**
+   * The cookie an authenticating reverse proxy in front of this deployment
+   * would be checking, or null for the loopback default that has none.
+   *
+   * Boxes has no auth of its own, so anything past a single-user machine is
+   * behind one (README, "Behind a reverse proxy"). Named here because that
+   * changes what the browser sees: a request the proxy does not recognize is
+   * bounced to a login page rather than answered, and not every request the
+   * page makes carries credentials.
+   */
+  requireCookie: string | null;
   /** Review data per session id. A session without one has no review at all. */
   reviews: Record<string, StubReview>;
 }
@@ -220,6 +235,7 @@ export async function startStubOrchestrator(
     claudeTokenConfigured: true,
     reviews: Object.fromEntries(initial.map((s) => [s.id, stubReview()])),
     agentSets: [stubAgentSet()],
+    requireCookie: null,
   };
   const reviewCalls: StubOrchestrator['reviewCalls'] = [];
   const execCalls: StubOrchestrator['execCalls'] = [];
@@ -233,6 +249,20 @@ export async function startStubOrchestrator(
 
   const server = createServer((req, res) => {
     const url = (req.url ?? '/').split('?')[0] ?? '/';
+
+    // The proxy, when the test asked for one: anything without the cookie is
+    // redirected to a login page that answers 200, which is what
+    // oauth2-proxy, Authelia and a Caddy forward_auth all do.
+    if (state.requireCookie && !(req.headers.cookie ?? '').includes(`${state.requireCookie}=`)) {
+      if (url === '/login') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<!doctype html><title>Sign in</title>');
+        return;
+      }
+      res.writeHead(302, { Location: '/login' });
+      res.end();
+      return;
+    }
 
     if (url === '/healthz' && req.method === 'GET') {
       const health: HealthResponse = {

@@ -1,7 +1,7 @@
 import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
-import { refreshPush } from './stores/push.ts';
+import { installWorker, refreshPush } from './stores/push.ts';
 import { startPolling } from './stores/sessions.ts';
 import { AgentSetEditor } from './views/AgentSetEditor.tsx';
 import { AgentSets } from './views/AgentSets.tsx';
@@ -85,10 +85,14 @@ if (root) {
     </StrictMode>,
   );
   startPolling();
-  // Registers the service worker and re-registers a browser that is already
-  // subscribed — a push service may have handed it a new subscription since
-  // the last load, and this is the only place the orchestrator hears about
-  // that. Never asks for permission: that needs a click, and the toggle in
-  // the session list is where it happens.
+  // The service worker first and unconditionally: it is what makes the app
+  // installable, and installing is what an iPhone has to do before push is
+  // even offered to it.
+  void installWorker();
+  // Then re-register a browser that is already subscribed — a push service
+  // may have handed it a new subscription since the last load, and this is
+  // the only place the orchestrator hears about that. Never asks for
+  // permission: that needs a click, and the toggle in the session list is
+  // where it happens.
   void refreshPush();
 }

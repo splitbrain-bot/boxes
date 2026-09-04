@@ -1,6 +1,7 @@
-import { chromium, type Browser, type LaunchOptions, type Page } from 'playwright';
-import { existsSync, mkdirSync } from 'node:fs';
+import { chromium, type Browser, type BrowserContext, type LaunchOptions, type Page } from 'playwright';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 /**
  * The one Chromium the e2e suite shares, and the helpers every test uses to
@@ -65,6 +66,39 @@ export async function getBrowser(): Promise<Browser> {
     browser = await chromium.launch({ args: LAUNCH_ARGS, ...chromiumToLaunch() });
   }
   return browser;
+}
+
+/**
+ * A Chromium with a profile directory of its own, thrown away afterwards.
+ *
+ * For the one question the shared browser cannot answer: whether Chrome would
+ * offer to install the app. Every context from `newContext()` is incognito,
+ * and Chrome refuses to install from one — it reports `in-incognito` as the
+ * reason and stops looking, so a real bug in the manifest would be invisible
+ * behind it. A persistent context is an ordinary profile.
+ *
+ * The context is returned rather than a page: what a browser carries before
+ * its first navigation — a session cookie, most of the point here — has to be
+ * put there first.
+ */
+export async function launchProfile(): Promise<{
+  context: BrowserContext;
+  close: () => Promise<void>;
+}> {
+  const profile = mkdtempSync(resolve(tmpdir(), 'boxes-profile-'));
+  const context = await chromium.launchPersistentContext(profile, {
+    args: LAUNCH_ARGS,
+    viewport: VIEWPORTS.phone,
+    colorScheme: 'dark',
+    ...chromiumToLaunch(),
+  });
+  return {
+    context,
+    close: async () => {
+      await context.close();
+      rmSync(profile, { recursive: true, force: true });
+    },
+  };
 }
 
 /** Closes the shared Chromium, if one was launched. */

@@ -120,6 +120,26 @@ async function worker(): Promise<ServiceWorkerRegistration> {
 }
 
 /**
+ * Registers the service worker, whatever push is doing.
+ *
+ * Not part of refreshPush, which returns before registering anything as soon
+ * as it finds a blocker — and the blockers are the cases that need the worker
+ * most. A browser whose user declined notifications would never register one,
+ * and neither would an iPhone reading this in a tab, which is the browser
+ * that has to install the app before it can subscribe at all. Installing is
+ * the worker's other job: browsers that still gate the install offer on a
+ * registered worker are asking at first load, long before anybody taps the
+ * toggle.
+ *
+ * Resolves either way. Nothing on the page depends on the outcome, and a
+ * browser without service workers is a browser this is simply not for.
+ */
+export async function installWorker(): Promise<void> {
+  if (!window.isSecureContext || !('serviceWorker' in navigator)) return;
+  await worker().catch(() => undefined);
+}
+
+/**
  * Brings the store up to date, and re-registers a browser that is already
  * subscribed.
  *
