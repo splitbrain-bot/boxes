@@ -366,8 +366,16 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     const input = phone.page.getByLabel('Message input');
     await input.fill('show me the table');
     await input.press('Enter');
-    const table = phone.page.locator('.aui-md-table-wrap');
-    await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
+    // Two of them, and the wait is for both: this page is a second look at
+    // the session the desktop half just used, so the thread replays that
+    // exchange and then answers this page's own prompt with another table.
+    // Waiting only for the first leaves the second free to arrive between the
+    // wait and the measurement, and a locator matching two elements is an
+    // error rather than a choice — which is how this read as flaky.
+    const tables = phone.page.locator('.aui-md-table-wrap');
+    await expect.poll(() => tables.count(), { timeout: 10_000 }).toBe(2);
+    const table = tables.last();
+    expect(await table.isVisible()).toBe(true);
 
     // Nowhere left to bleed to, so it scrolls instead of being cut off.
     const scrollable = await table.evaluate((el) => el.scrollWidth > el.clientWidth);
