@@ -45,7 +45,7 @@ async function askOnce(page: import('playwright').Page): Promise<void> {
   await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
   const input = page.getByLabel('Message input');
   await input.fill('question one');
-  await input.press('Enter');
+  await input.press('Control+Enter');
   await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
 }
 
@@ -170,7 +170,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
     await expect.poll(() => working.page.getByText('connected').isVisible()).toBe(true);
     const first = working.page.getByLabel('Message input');
     await first.fill('the long job');
-    await first.press('Enter');
+    await first.press('Control+Enter');
     await expect.poll(() => working.page.getByText('Working on it.').isVisible()).toBe(true);
 
     // Fork it and open the fork in its own tab, which is the motion the whole
@@ -191,7 +191,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
       await expect.poll(() => exploring.page.getByText('Working on it.').isVisible()).toBe(true);
       const second = exploring.page.getByLabel('Message input');
       await second.fill('what are you doing?');
-      await second.press('Enter');
+      await second.press('Control+Enter');
       await expect.poll(() => exploring.page.getByText('A quick answer.').isVisible()).toBe(true);
 
       // And none of that reached the thread that is still working: its
