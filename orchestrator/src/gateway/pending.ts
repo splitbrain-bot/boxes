@@ -42,7 +42,6 @@ export class PendingStore {
    */
   add(
     sessionId: string,
-    upstreamId: string,
     acpSessionId: string | null,
     method: string,
     params: unknown,
@@ -51,28 +50,23 @@ export class PendingStore {
     onTimeout: (entry: PendingEntry) => void,
   ): PendingEntry {
     const createdAt = Date.now();
+    // Serialized once: the row handed back has to be the row that was stored,
+    // and stringifying twice made that a coincidence rather than a fact.
+    const serialized = JSON.stringify(params ?? null);
     const info = this.db
       .prepare(
         `INSERT INTO pending_requests
-           (session_id, upstream_id, acp_session_id, method, params, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (session_id, acp_session_id, method, params, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(
-        sessionId,
-        upstreamId,
-        acpSessionId,
-        method,
-        JSON.stringify(params ?? null),
-        createdAt,
-      );
+      .run(sessionId, acpSessionId, method, serialized, createdAt);
     const id = Number(info.lastInsertRowid);
     const row: PendingRequestRow = {
       id,
       session_id: sessionId,
-      upstream_id: upstreamId,
       acp_session_id: acpSessionId,
       method,
-      params: JSON.stringify(params ?? null),
+      params: serialized,
       created_at: createdAt,
     };
     const timer = setTimeout(() => {

@@ -183,6 +183,18 @@ export async function createNetwork(networkName: string, subnet: string, session
 }
 
 /**
+ * Whether a network's own inspect says the egress proxy is on it.
+ *
+ * One predicate for both questions below, so "is it attached" cannot come to
+ * mean two slightly different things.
+ */
+function proxyOn(info: Docker.NetworkInspectInfo, cfg: Config): boolean {
+  return Object.values(info.Containers ?? {}).some(
+    (c) => c.Name === cfg.EGRESS_PROXY_CONTAINER,
+  );
+}
+
+/**
  * Attaches the egress proxy to a session network under its alias, and reports
  * whether it is attached. The check runs every time, because compose can
  * recreate the proxy container and drop its dynamic attachments.
@@ -195,10 +207,7 @@ export async function ensureProxyAttached(networkName: string, cfg: Config): Pro
   } catch {
     return false;
   }
-  const attached = Object.values(info.Containers ?? {}).some(
-    (c) => c.Name === cfg.EGRESS_PROXY_CONTAINER,
-  );
-  if (attached) return true;
+  if (proxyOn(info, cfg)) return true;
   try {
     await net.connect({
       Container: cfg.EGRESS_PROXY_CONTAINER,
@@ -218,10 +227,7 @@ export async function ensureProxyAttached(networkName: string, cfg: Config): Pro
 /** Whether the egress proxy is attached to a session network right now. */
 export async function isProxyAttached(networkName: string, cfg: Config): Promise<boolean> {
   try {
-    const info = await docker().getNetwork(networkName).inspect();
-    return Object.values(info.Containers ?? {}).some(
-      (c) => c.Name === cfg.EGRESS_PROXY_CONTAINER,
-    );
+    return proxyOn(await docker().getNetwork(networkName).inspect(), cfg);
   } catch {
     return false;
   }

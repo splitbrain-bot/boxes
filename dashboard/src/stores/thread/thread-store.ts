@@ -593,17 +593,31 @@ export class ThreadStore {
     return findTool(this.model, open.toolCallId)?.approval?.options ?? [];
   }
 
-  /** Re-runs the handshake, which rebuilds the thread from the adapter's replay. */
+  /**
+   * Asks the adapter to replay the thread, rebuilding the model from what it
+   * sends back.
+   *
+   * The publish is here rather than in `onReady`, which is the handshake's
+   * own: this load happens on a connection that is already up, so nothing
+   * would report itself ready afterwards — and `reset()` has stopped the model
+   * from reaching the view until something does. A failed load publishes what
+   * arrived before it gave up, which is the same bargain a reconnect makes,
+   * because leaving the view frozen on a stale thread is the worse answer.
+   */
   async refetch(): Promise<void> {
     const client = this.client;
     const sessionId = client?.sessionId;
     if (!client || !sessionId) return;
     this.reset();
-    await client.request('session/load', {
-      sessionId,
-      cwd: '/workspace',
-      mcpServers: [],
-    });
+    try {
+      await client.request('session/load', {
+        sessionId,
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+    } finally {
+      this.flushReplay();
+    }
   }
 }
 

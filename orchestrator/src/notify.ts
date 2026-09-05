@@ -104,9 +104,24 @@ export class Notifier {
    * Returns a promise so a test can wait for it, but no caller in the gateway
    * awaits it: a turn already waiting on a human must not also wait on a push
    * service. Every failure inside is logged and swallowed.
+   *
+   * Swallowed here rather than only in the delivery below, because the callers
+   * discard this promise. `sendPush` already answers with a result instead of
+   * throwing, but reading the subscriptions, generating the keypair on first
+   * use and pruning a dead row are all database and filesystem work that can
+   * fail — and a rejection nobody is holding is an unhandled rejection, which
+   * is the orchestrator exiting over a notification it could not send.
    */
   async notify(event: NotifyEvent): Promise<void> {
-    await this.push(event);
+    try {
+      await this.push(event);
+    } catch (err) {
+      log.warn('could not notify anybody about a session event', {
+        kind: event.kind,
+        session: event.sessionId,
+        error: (err as Error).message,
+      });
+    }
   }
 
   /**

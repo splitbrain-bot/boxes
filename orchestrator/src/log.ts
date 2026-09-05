@@ -48,23 +48,24 @@ function emit(level: Level, msg: string, fields?: Record<string, unknown>): void
   process.stderr.write(`${JSON.stringify(line)}\n`);
 }
 
+/** The four level methods, each stamping every line with the same fields. */
+function levels(tag?: Record<string, unknown>): Record<
+  Level,
+  (msg: string, fields?: Record<string, unknown>) => void
+> {
+  const at =
+    (level: Level) =>
+    (msg: string, fields?: Record<string, unknown>): void =>
+      emit(level, msg, tag ? { ...tag, ...fields } : fields);
+  return { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') };
+}
+
+/** A logger, tagged or not. */
+export type Logger = ReturnType<typeof levels>;
+
 /** Process-wide logger. */
 export const log = {
-  debug: (msg: string, fields?: Record<string, unknown>) => emit('debug', msg, fields),
-  info: (msg: string, fields?: Record<string, unknown>) => emit('info', msg, fields),
-  warn: (msg: string, fields?: Record<string, unknown>) => emit('warn', msg, fields),
-  error: (msg: string, fields?: Record<string, unknown>) => emit('error', msg, fields),
+  ...levels(),
   /** Child logger that stamps every line with a session id. */
-  session(id: string) {
-    const tag = { session: id };
-    return {
-      debug: (m: string, f?: Record<string, unknown>) => emit('debug', m, { ...tag, ...f }),
-      info: (m: string, f?: Record<string, unknown>) => emit('info', m, { ...tag, ...f }),
-      warn: (m: string, f?: Record<string, unknown>) => emit('warn', m, { ...tag, ...f }),
-      error: (m: string, f?: Record<string, unknown>) => emit('error', m, { ...tag, ...f }),
-    };
-  },
+  session: (id: string): Logger => levels({ session: id }),
 };
-
-/** A session-tagged logger. */
-export type Logger = ReturnType<typeof log.session>;

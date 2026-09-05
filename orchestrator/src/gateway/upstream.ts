@@ -957,7 +957,6 @@ export class UpstreamSession {
     return new Promise((resolve, reject) => {
       const entry = this.pending.add(
         this.sessionId,
-        '',
         threadOf(params) ?? null,
         'session/request_permission',
         params,

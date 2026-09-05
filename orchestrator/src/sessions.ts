@@ -608,9 +608,12 @@ export class SessionManager {
     this.upstreams.get(id)?.close();
     this.upstreams.delete(id);
     await this.teardownResources(id);
-    this.db.prepare('DELETE FROM pending_requests WHERE session_id = ?').run(id);
-    this.db.prepare('DELETE FROM acp_log WHERE session_id = ?').run(id);
-    this.db.prepare('DELETE FROM threads WHERE session_id = ?').run(id);
+    // Every table keyed by the session id, so a deleted session leaves nothing
+    // behind: the row itself stays as a tombstone — see setStatus — and these
+    // have no reader once it does.
+    for (const table of ['pending_requests', 'acp_log', 'exec_log', 'threads']) {
+      this.db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
+    }
     this.setStatus(id, 'deleted');
     log.session(id).info('session deleted', { name: row.name });
   }
@@ -798,8 +801,12 @@ export class SessionManager {
   }
 
   /**
-   * Makes one of a session's threads current. The browsers watching it are
-   * dropped and reconnect onto the new one.
+   * Makes one of a session's threads current: the thread a connection that
+   * names none gets.
+   *
+   * Nobody is dropped and nothing reconnects. A browser is pinned to its own
+   * thread for the life of its socket, so the session's default is only ever
+   * read at a handshake — see UpstreamSession.switchThread.
    */
   selectThread(id: string, threadId: string): ThreadSummary {
     this.mustGet(id);

@@ -46,8 +46,8 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/', scheme);
     try {
       await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
-      expect(await page.getByText('2 approvals waiting').isVisible()).toBe(true);
-      expect(await page.getByText('running turn').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('2 approvals waiting').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('running turn').isVisible()).toBe(true);
       await shoot(page, `list-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -70,7 +70,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/sessions/a1b2c3d4/info', scheme);
     try {
       await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
-      expect(await page.getByText('Connect an external ACP client').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('Connect an external ACP client').isVisible()).toBe(true);
       await shoot(page, `info-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -121,7 +121,7 @@ test('a link to a session that is gone says so instead of offering a composer', 
     // a void.
     await expect.poll(() => page.getByText('Back to sessions').isVisible()).toBe(true);
     expect(await page.getByRole('textbox', { name: 'Message input' }).isVisible()).toBe(false);
-    expect(await page.getByText('disconnected').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('disconnected').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
