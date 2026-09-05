@@ -66,22 +66,114 @@ function working(steps: number): SessionUpdate[] {
   ]).flat() as SessionUpdate[];
 }
 
+/** The handful of pixels `use-follow-output.ts` calls the bottom. */
+const AT_BOTTOM = 8;
+
+/** Where the thread is, measured all at once so the numbers agree. */
+interface Geometry {
+  /** Where the scroller sits. */
+  top: number;
+  /** How much of the thread is below the fold. */
+  behind: number;
+  /**
+   * How far past the bottom of the viewport the newest thing the turn has
+   * written sits. Negative is on screen.
+   *
+   * Not the scroller's own distance from its end: a turn holds empty space
+   * under its answer for as long as the answer is shorter than the screen —
+   * the room the anchor needs to keep the prompt at the top — and a
+   * screenful of that below the fold hides nothing. What can be read is the
+   * question.
+   */
+  overhang: number;
+}
+
 /**
- * How far past the bottom of the viewport the newest thing a turn has written
- * sits. Negative is on screen.
+ * The thread's geometry, out of a frame that has been painted.
  *
- * Not the scroller's own distance from its end: a turn holds empty space
- * under its answer for as long as the answer is shorter than the screen — the
- * room the anchor needs to keep the prompt at the top — and a screenful of
- * that below the fold hides nothing. What can be read is the question.
+ * Two frames deep because a thread rewrites its own layout as it streams: a
+ * reasoning block collapses as the tool call after it arrives, so the bottom
+ * of the conversation moves up as well as down, by hundreds of pixels. An
+ * `evaluate` landing between two of those mutations forces a layout of a
+ * state the screen never shows, and a test that stops on one of those has
+ * stopped somewhere no reader ever was.
  */
-function overhang(page: Page): Promise<number> {
-  return page.evaluate(() => {
+function geometry(page: Page): Promise<Geometry> {
+  return page.evaluate(
+    () =>
+      new Promise<Geometry>((resolve) => {
+        const viewport = document.querySelector('[data-slot="aui_thread-viewport"]')!;
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            const written = document.querySelectorAll(
+              '[data-slot="aui_assistant-message-content"]',
+            );
+            const last = written[written.length - 1];
+            const bottom = viewport.getBoundingClientRect().bottom;
+            return resolve({
+              top: Math.round(viewport.scrollTop),
+              behind: Math.round(
+                viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+              ),
+              overhang: last ? Math.round(last.getBoundingClientRect().bottom - bottom) : 0,
+            });
+          }),
+        );
+      }),
+  );
+}
+
+/**
+ * Waits for the thread to stop moving of its own accord.
+ *
+ * A disclosure animates for a fifth of a second after the update that closed
+ * it, and a working turn closes one every few hundred milliseconds; anything
+ * measured across one of those is measuring the animation. Still is the same
+ * shape — the scroller's height, its size and its position — for several
+ * frames and a moment together. Frames alone mean nothing on a machine that
+ * is dropping them, and a moment alone can pass between two frames of a
+ * slideshow.
+ *
+ * Best effort: it gives up rather than throwing, so what fails is the
+ * assertion afterwards, with the numbers that made it fail.
+ */
+function still(page: Page): Promise<void> {
+  return page.evaluate(async () => {
     const viewport = document.querySelector('[data-slot="aui_thread-viewport"]')!;
-    const written = document.querySelectorAll('[data-slot="aui_assistant-message-content"]');
-    const last = written[written.length - 1];
-    if (!last) return 0;
-    return Math.round(last.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom);
+    const frame = (): Promise<void> =>
+      new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const shape = (): string =>
+      `${viewport.scrollHeight}:${viewport.clientHeight}:${viewport.scrollTop}`;
+
+    const deadline = performance.now() + 5000;
+    let last = shape();
+    let since = performance.now();
+    let frames = 0;
+    while (performance.now() < deadline) {
+      await frame();
+      const now = shape();
+      if (now === last) frames += 1;
+      else {
+        last = now;
+        since = performance.now();
+        frames = 0;
+      }
+      if (frames >= 4 && performance.now() - since >= 150) return;
+    }
+  });
+}
+
+/**
+ * Whether the turn's anchor still has room to give.
+ *
+ * The same DOM detail `use-follow-output.ts` reads, and for the same reason:
+ * while the reserve under the answer has height, the position belongs to the
+ * anchor and there is nothing to follow. Its running out is the handover.
+ */
+function reserving(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const reserve = document.querySelector<HTMLElement>('[data-aui-top-anchor-reserve]');
+    return !!reserve && reserve.offsetHeight > 0;
   });
 }
 
@@ -135,9 +227,7 @@ test('a prompt streams back and renders as it arrives', async () => {
     expect(stub.gateway.prompts).toEqual(['summarise the proxy']);
 
     await expect
-      .poll(() => page.getByText('resolved address.', { exact: false }).isVisible(), {
-        timeout: 5000,
-      })
+      .poll(() => page.getByText('resolved address.', { exact: false }).isVisible())
       .toBe(true);
     // Markdown, not literal asterisks.
     expect(await page.locator('strong', { hasText: 'vets' }).count()).toBe(1);
@@ -388,9 +478,7 @@ test('a second tab sees updates live', async () => {
 
     // The gateway broadcasts every update to every attached browser.
     await expect.poll(() => a.page.getByText('Shared answer.').isVisible()).toBe(true);
-    await expect
-      .poll(() => b.page.getByText('Shared answer.').isVisible(), { timeout: 5000 })
-      .toBe(true);
+    await expect.poll(() => b.page.getByText('Shared answer.').isVisible()).toBe(true);
     expect(a.errors).toEqual([]);
     expect(b.errors).toEqual([]);
   } finally {
@@ -445,8 +533,14 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
-    // The load is held, which is the box still starting as far as this
-    // browser can tell: no history has arrived and none of it is on screen.
+    // The browser has asked for its history and the stub is sitting on the
+    // answer. Waited for rather than assumed: releasing frees the loads that
+    // are parked, so releasing before one arrives frees nothing and holds
+    // this browser for good.
+    await expect.poll(() => stub.gateway.loadsHeld()).toBe(1);
+
+    // Which is the box still starting as far as this browser can tell: no
+    // history has arrived and none of it is on screen.
     await expect.poll(() => page.locator('[data-slot="thread-loading"]').isVisible()).toBe(true);
 
     // Nothing to type into and nothing that claims the thread is empty. The
@@ -460,9 +554,7 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     // The placeholder goes when the conversation arrives, and what arrives is
     // the whole of it: the first exchange and the last are on screen in the
     // same breath, not one render apart.
-    await expect
-      .poll(() => page.locator('[data-slot="thread-loading"]').count(), { timeout: 5000 })
-      .toBe(0);
+    await expect.poll(() => page.locator('[data-slot="thread-loading"]').count()).toBe(0);
     expect(await page.getByText('asking about exchange number 0').count()).toBe(1);
     expect(await page.getByText('answering about exchange number 11').count()).toBe(1);
     // And now there is somewhere to type.
@@ -527,12 +619,8 @@ test('the header steps aside while reading down, and returns on the way back up'
 
     // Counted rather than seen: an assistant message below the fold is
     // render-skipped (globals.css), so it has no box to be visible in.
-    await expect
-      .poll(() => page.getByText('paragraph number 39').count(), { timeout: 10000 })
-      .toBe(1);
-    await expect
-      .poll(() => page.getByLabel('Stop generating').count(), { timeout: 5000 })
-      .toBe(0);
+    await expect.poll(() => page.getByText('paragraph number 39').count()).toBe(1);
+    await expect.poll(() => page.getByLabel('Stop generating').count()).toBe(0);
 
     // Reading from the top: the header is there to begin with.
     await viewport.hover();
@@ -605,7 +693,7 @@ test('a working turn is followed past the fold, with its prompt still anchored',
       const box = (await viewport.boundingBox())!;
       return Math.round(prompt.y - box.y);
     };
-    await expect.poll(promptTop, { timeout: 5000 }).toBeLessThan(96);
+    await expect.poll(promptTop).toBeLessThan(96);
 
     // And from there to the end of the turn, everything it writes is on
     // screen as it writes it. Sampled in the page rather than over the wire:
@@ -643,17 +731,60 @@ test('a working turn is followed past the fold, with its prompt still anchored',
   }
 });
 
+/**
+ * A paragraph of an answer, marked so a test can wait for the one it just
+ * sent instead of for a length of time. Long enough that a few of them are a
+ * screenful on a phone.
+ */
+function paragraph(mark: string): string {
+  return [
+    `\n\n${mark} — the file was read, and what it said decided which one`,
+    'was read next. That is most of what a turn spends its time doing, and',
+    'all this one has left to say about it.',
+  ].join(' ');
+}
+
+/** The paragraphs the script streams before the reader touches anything. */
+const SCRIPTED = Array.from({ length: 8 }, (_, i) => `Scripted paragraph ${i + 1}`);
+/** What the turn writes while the reader is up the thread, reading. */
+const AWAY = 'Written while the reader was away';
+/** And what it writes once they are back at the end of it. */
+const BACK = 'Written after the reader came back';
+
+/**
+ * Writes one more paragraph of the held-open turn, and waits for the thread
+ * to take it and settle.
+ *
+ * The turn is held rather than scripted on a timer so that growth happens
+ * when the test has something to prove and at no other time. A chunk landing
+ * in the same frame as a reader's gesture makes a geometry that is gone
+ * before it is painted, and nothing — not the hook, not this test — can be
+ * asked a straight question about one of those.
+ */
+async function writes(page: Page, mark: string): Promise<void> {
+  stub.gateway.emit({
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: paragraph(mark) },
+  } as SessionUpdate);
+  await expect.poll(() => page.getByText(mark, { exact: false }).isVisible()).toBe(true);
+  await still(page);
+}
+
 test('a reader who leaves the bottom during a turn is left there, and rejoins at it', async () => {
   await start({
     prompts: [
       { match: (text) => text.includes('warm up'), updates: reply('warmed up') },
-      // Long enough to still be working when the reader has finished reading
-      // whatever they went back for, and slow enough that going back to the
-      // bottom by hand is something a hand can do.
+      // Long enough to outgrow the room the anchor keeps under the answer,
+      // and then held open. Everything after the script is written by the
+      // test, one paragraph at a time, so each thing asserted here is
+      // asserted of a thread that is standing still: what a reader does
+      // while a turn writes is a race nobody can measure, because the
+      // geometry it makes is superseded before the screen shows it.
       {
         match: () => true,
-        gapMs: 200,
-        updates: [...working(40), ...reply('and that is the answer')],
+        gapMs: 60,
+        updates: [...working(20), ...reply(...SCRIPTED.map(paragraph))],
+        hold: true,
       },
     ],
   });
@@ -671,60 +802,65 @@ test('a reader who leaves the bottom during a turn is left there, and rejoins at
     await input.press('Control+Enter');
 
     const viewport = page.locator('[data-slot="aui_thread-viewport"]');
-    const top = (): Promise<number> => viewport.evaluate((el) => Math.round(el.scrollTop));
-    /**
-     * Whether the thread is moving with its own output — asked of the
-     * scroller, which is the only place the answer is a fact rather than an
-     * intention.
-     */
-    const moving = async (): Promise<boolean> => {
-      const before = await top();
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      return (await top()) > before;
-    };
 
-    // The anchor has had its moment by now: the prompt is at the top of the
-    // viewport and the answer is growing into the room kept under it, so the
-    // position is not moving and `moving` is false.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    // And then the turn outgrows that room, which is where there is anything
-    // to follow — and to walk away from.
-    await expect.poll(moving, { timeout: 20_000 }).toBe(true);
+    // The last of the script is on the page and the turn is held open, so
+    // the thread now moves only when this test moves it.
+    await expect
+      .poll(() => page.getByText(SCRIPTED[SCRIPTED.length - 1]!).isVisible(), { timeout: 30_000 })
+      .toBe(true);
+    await still(page);
 
-    // Back up to read something, while the turn goes on writing.
+    // The turn has outgrown the room its anchor keeps, which is the handover
+    // — up to there the position is the anchor's business and there is
+    // nothing to follow, or to walk away from.
+    expect(await reserving(page)).toBe(false);
+    // And the thread is against the bottom of its own output, which is where
+    // a turn that is following it leaves a reader who has touched nothing.
+    const arrived = await geometry(page);
+    expect(arrived.behind).toBeLessThanOrEqual(AT_BOTTOM);
+
+    // Back up to read something, while the turn goes on.
     await viewport.hover();
     await wheel(page, -100, 5);
-    const left = await top();
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    expect(await page.getByLabel('Stop generating').count()).toBe(1);
-    // Still where the reader left it: the turn wrote on underneath and none of
-    // it moved the page. A couple of dozen pixels is the browser holding
-    // anchored content still as a block above collapses, not the thread
-    // deciding where to be.
-    expect(Math.abs((await top()) - left)).toBeLessThanOrEqual(24);
-    expect(await overhang(page)).toBeGreaterThan(0);
+    await still(page);
+    const left = (await geometry(page)).top;
+    // A good way off the bottom, rather than the rounding a short thread
+    // would leave: there has to be somewhere to be dragged from.
+    expect(arrived.top - left).toBeGreaterThan(200);
 
-    // Back down, a flick at a time until the scroller is against its end,
-    // because the turn is still writing while the reader travels.
+    // The turn writes on underneath. Downwards only: a block collapsing
+    // above the reader moves `scrollTop` because the browser holds anchored
+    // content still, and that is the browser's doing, not the thread's.
+    await writes(page, AWAY);
+    expect(await page.getByLabel('Stop generating').count()).toBe(1);
+    const after = await geometry(page);
+    // Still where the reader left it: what arrived landed below the fold and
+    // none of it moved the page.
+    expect(Math.abs(after.top - left)).toBeLessThanOrEqual(24);
+    expect(after.overhang).toBeGreaterThan(0);
+
+    // Back down, a flick at a time until the scroller is against its end.
+    // Nothing is arriving while they travel, so the end they arrive at is
+    // the end that was on the screen.
     await expect
-      .poll(
-        async () => {
-          await wheel(page, 400, 2);
-          return viewport.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop <= 8);
-        },
-        { timeout: 20_000 },
-      )
-      .toBe(true);
+      .poll(async () => {
+        await wheel(page, 400, 2);
+        return (await geometry(page)).behind;
+      })
+      .toBeLessThanOrEqual(AT_BOTTOM);
 
     // And arriving there is rejoining the turn, rather than a position that
     // has to be held by hand from now on: what it writes next is on screen
     // too.
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await writes(page, BACK);
     expect(await page.getByLabel('Stop generating').count()).toBe(1);
-    expect(await overhang(page)).toBeLessThan(0);
+    expect((await geometry(page)).overhang).toBeLessThan(0);
 
     expect(errors).toEqual([]);
   } finally {
+    // The turn is only over when the test says so, and it has to say so:
+    // a held prompt outlives the page that asked for it.
+    stub.gateway.release();
     await close();
   }
 });
