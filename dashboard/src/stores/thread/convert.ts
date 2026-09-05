@@ -1,11 +1,13 @@
 import type { ThreadMessageLike, ToolApprovalOption } from '@assistant-ui/react';
 import { imageSrc, type PermissionOption, type PermissionOptionKind } from './acp-types.ts';
 import { attachmentUrl, isThumbnailable } from '../../lib/attachments.ts';
+import { TASK_NOTIFICATION_PART } from '../../lib/task-notifications.ts';
 import {
   toolOutputText,
   type ApprovalState,
   type AttachmentPart,
   type Message,
+  type TaskPart,
   type ToolPart,
 } from './translate.ts';
 
@@ -149,6 +151,21 @@ function attachmentPart(part: AttachmentPart, sessionId?: string) {
 }
 
 /**
+ * A background task's report, as a data part the thread has a renderer for.
+ *
+ * assistant-ui's message parts are a closed set of prose, pictures, files and
+ * tool calls, and this is none of those — so it travels as the one part kind
+ * that carries an application's own vocabulary: a name the renderer is keyed
+ * by, and the notification itself as its data. The part's `type` discriminant
+ * is dropped on the way, because `name` is what does that job here.
+ *
+ * See components/TaskNotification.tsx, which is what the name resolves to.
+ */
+function taskPart({ type: _type, ...notification }: TaskPart) {
+  return { type: 'data' as const, name: TASK_NOTIFICATION_PART, data: notification };
+}
+
+/**
  * The images a tool call produced, as parts of their own.
  *
  * A tool-call part cannot contain an image — assistant-ui's message parts are
@@ -199,6 +216,7 @@ export function convertMessage(message: Message, sessionId?: string): ThreadMess
       if (part.type === 'reasoning') return [{ type: 'reasoning' as const, text: part.text }];
       if (part.type === 'image') return [imagePart(part.src)];
       if (part.type === 'attachment') return [attachmentPart(part, sessionId)];
+      if (part.type === 'task') return [taskPart(part)];
       return [toolPart(part), ...toolImages(part)];
     }),
   };

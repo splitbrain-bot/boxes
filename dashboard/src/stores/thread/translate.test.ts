@@ -368,3 +368,58 @@ test('the envelope is only read in a user or agent message, never as a thought',
   } as SessionUpdate);
   assert.equal(model.messages[0]!.parts[0]!.type, 'reasoning');
 });
+
+// --- background tasks -------------------------------------------------------
+//
+// A task left running in the background reports in by waking the agent with a
+// block of XML in the user's own role — see lib/task-notifications.ts. These
+// cover the thread refusing to read that as somebody talking.
+
+/** A monitor's event, as the harness sends one. */
+const NOTIFICATION = [
+  '<task-notification>',
+  '<task-id>bnztwmmw5</task-id>',
+  '<summary>Monitor event: "crawl progress"</summary>',
+  '<event>2200/30321 ok=2193 bad=7</event>',
+  '</task-notification>',
+].join('\n');
+
+test('a background task reporting in becomes a row of its own, not prose', () => {
+  const model = fold(chunk('user_message_chunk', NOTIFICATION));
+
+  assert.deepEqual(model.messages[0]!.parts, [
+    {
+      type: 'task',
+      taskId: 'bnztwmmw5',
+      summary: 'Monitor event: "crawl progress"',
+      body: '2200/30321 ok=2193 bad=7',
+    },
+  ]);
+});
+
+test('what the user typed around one is still what they typed', () => {
+  // One message, because an adapter that names no message ids has only the
+  // role to go on and this is the shape that produces.
+  const model = fold(
+    chunk('user_message_chunk', 'keep going'),
+    chunk('user_message_chunk', NOTIFICATION),
+  );
+
+  assert.equal(model.messages.length, 1);
+  assert.deepEqual(
+    model.messages[0]!.parts.map((p) => p.type),
+    ['text', 'task'],
+  );
+});
+
+test('an agent quoting the format is quoting it', () => {
+  const model = fold(chunk('agent_message_chunk', `the harness sends\n${NOTIFICATION}`));
+  assert.equal(model.messages[0]!.parts[0]!.type, 'text');
+});
+
+test('a notification this build cannot read is shown rather than swallowed', () => {
+  const model = fold(
+    chunk('user_message_chunk', NOTIFICATION.replace(/<task-id>.*<\/task-id>\n/, '')),
+  );
+  assert.equal(model.messages[0]!.parts[0]!.type, 'text');
+});

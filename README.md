@@ -199,6 +199,7 @@ docker exec -it session-<id> claude /login
 | `SESSION_CPUS` | `2` | Per-session CPU cap |
 | `SESSION_PIDS_LIMIT` | `512` | Per-session pids cap |
 | `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
+| `BACKGROUND_TASK_MAX_MINUTES` | `240` | Longest a background task holds that stop off |
 | `MAX_ATTACHMENT_MB` | `25` | Largest single file a prompt may carry into a workspace |
 | `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
 | `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
@@ -257,6 +258,13 @@ normal way to use this, and the symbol is the part a narrow tab still shows.
 the thread's header hold everything the agent offers — its mode, its model,
 its effort level, and whatever else the adapter advertises. All of it is per
 conversation.
+
+**Watch work that reports back later.** A command left running in the
+background, a subagent, a monitor — none of them answers into the turn that
+started it. When one has something to say it wakes the agent, and the thread
+shows that as a row of its own rather than as a message from you: what
+happened, and what the task said. A monitor's event is there to read; a
+finished task's answer is folded under its summary and opens on a tap.
 
 **Work in two threads at once.** A session can hold several conversations on
 one workspace, listed under its card, each with its own link. **Fork** branches
@@ -359,7 +367,12 @@ bearer token for attaching your own ACP client. Deleting removes the storage
 too, so the agent's work and the thread history go with it.
 
 Idle sessions — no turn on any thread, no waiting request, no attached browser
-— are stopped after `IDLE_STOP_MINUTES`. They are never deleted.
+— are stopped after `IDLE_STOP_MINUTES`. They are never deleted. Work left
+running in the background counts as not idle: a command still going or a
+monitor still watching holds the stop off, for up to
+`BACKGROUND_TASK_MAX_MINUTES` from the call that started it. So backgrounding
+a long build and closing the tab is safe, and a box whose task ended without
+saying so is stopped late rather than never.
 
 ## Notifications
 

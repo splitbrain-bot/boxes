@@ -832,3 +832,82 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
     await close();
   }
 });
+
+test('a background task reporting in is a row of its own, not the user talking', async () => {
+  await start();
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    // What the harness sends when a task started in the background has
+    // something to say: a message in the user's own role, carrying XML
+    // addressed to the model. A monitor's event first, then a subagent's
+    // answer — the two shapes, and the two ways they read.
+    stub.gateway.emit({
+      sessionUpdate: 'user_message_chunk',
+      messageId: 'note-1',
+      content: {
+        type: 'text',
+        text: [
+          '<task-notification>',
+          '<task-id>bnztwmmw5</task-id>',
+          '<summary>Monitor event: "Atlas Obscura crawl progress"</summary>',
+          '<event>2200/30321 ok=2193 bad=7 0.9/s eta 528m</event>',
+          '</task-notification>',
+        ].join('\n'),
+      },
+    } as SessionUpdate);
+    stub.gateway.emit({
+      sessionUpdate: 'user_message_chunk',
+      messageId: 'note-2',
+      content: {
+        type: 'text',
+        text: [
+          '<task-notification>',
+          '<task-id>agent-a1b</task-id>',
+          '<status>completed</status>',
+          '<summary>Agent "Check the crawler logs" finished</summary>',
+          '<result>The 429s are all from one host, and the backoff is holding.</result>',
+          '<usage><subagent_tokens>48200</subagent_tokens><tool_uses>6</tool_uses>',
+          '<duration_ms>184000</duration_ms></usage>',
+          '</task-notification>',
+        ].join('\n'),
+      },
+    } as SessionUpdate);
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'The crawl is being rate limited; the backoff is holding.' },
+    } as SessionUpdate);
+
+    // Two rows, neither of them a message on the user's side of the thread.
+    const rows = page.locator('[data-role="task-notification"]');
+    await expect.poll(() => rows.count()).toBe(2);
+    expect(await page.locator('[data-role="user"]').count()).toBe(0);
+    expect(await page.getByText('<task-notification>').count()).toBe(0);
+    expect(await page.getByText('<task-id>').count()).toBe(0);
+
+    // A monitor exists to report its event, so the event is what is shown.
+    expect(await page.getByText('Monitor event:', { exact: false }).isVisible()).toBe(true);
+    expect(await page.getByText('2200/30321', { exact: false }).isVisible()).toBe(true);
+
+    // A finished task has been summarised by its own row, and what is under
+    // it is its whole answer — folded, and opened by a click.
+    const answer = page.getByText('The 429s are all from one host', { exact: false });
+    expect(await answer.isVisible()).toBe(false);
+    expect(await page.getByText('48.2k tokens · 6 tool calls · 3m 4s').isVisible()).toBe(true);
+    await page.getByText('Agent "Check the crawler logs" finished').click();
+    await expect.poll(() => answer.isVisible()).toBe(true);
+    await shoot(page, 'task-notification');
+
+    // And the same on a reconnect: the block is text, so it comes back
+    // through the transcript exactly as it arrived, and is read the same way.
+    await page.reload();
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    await expect.poll(() => rows.count()).toBe(2);
+    expect(await page.getByText('<task-notification>').count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});

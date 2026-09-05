@@ -16,6 +16,10 @@ import {
   type ToolKind,
 } from './acp-types.ts';
 import { parseEnvelope } from '../../lib/attachments.ts';
+import {
+  parseTaskNotifications,
+  type TaskNotification,
+} from '../../../../shared/task-notifications.ts';
 
 /**
  * ACP session/update notifications, folded into an append-only message model.
@@ -67,6 +71,18 @@ export interface AttachmentPart {
   mimeType: string;
 }
 
+/**
+ * A background task reporting in, as a row of its own.
+ *
+ * Built from the block of XML the harness wakes the agent with rather than
+ * from anything the adapter says — the same bargain the attachment chip
+ * makes, and for the same reason: the text is what survives a transcript, so
+ * live and replayed threads draw the same row. See lib/task-notifications.ts.
+ */
+export interface TaskPart extends TaskNotification {
+  type: 'task';
+}
+
 /** A permission request attached to the tool call it is about. */
 export interface ApprovalState {
   /** Correlates the user's answer with the JSON-RPC request that is blocked. */
@@ -95,7 +111,7 @@ export interface ToolPart {
 }
 
 /** A part of a message. */
-export type Part = TextPart | ReasoningPart | ImagePart | AttachmentPart | ToolPart;
+export type Part = TextPart | ReasoningPart | ImagePart | AttachmentPart | TaskPart | ToolPart;
 
 /** One message in the thread. */
 export interface Message {
@@ -205,6 +221,18 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
   }
 
   const text = blockText(content);
+
+  // Not the user speaking, however much it looks like it: the harness wakes
+  // the agent in the user's own role when a background task has something to
+  // report. Only in that role — an agent quoting the format is quoting it.
+  const segments = kind === 'text' && message.role === 'user' ? parseTaskNotifications(text) : null;
+  if (segments) {
+    for (const segment of segments) {
+      if (segment.type === 'text') appendText(message, kind, segment.text);
+      else message.parts.push({ type: 'task', ...segment.notification });
+    }
+    return;
+  }
 
   // A block the composer wrote to tell the agent what was attached. It is
   // addressed to the model, so what is shown in its place is the thing the

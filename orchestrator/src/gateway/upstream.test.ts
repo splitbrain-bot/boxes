@@ -1112,3 +1112,78 @@ test('a tapped image block is logged without its base64 payload', async () => {
   // The terminal output under the same key survived.
   assert.ok(logged.includes('ok 1\\nok 2'), "a terminal's output is untouched");
 });
+
+test('work the agent leaves running in the background holds the reaper off', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  assert.equal(up.backgroundActive, false);
+
+  // The turn backgrounds a command and ends. Nothing else about the session
+  // says so: no browser is attached and no turn is running.
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'toolu_1',
+      title: 'npm run build',
+      status: 'completed',
+      rawInput: { command: 'npm run build', run_in_background: true },
+      _meta: { claudeCode: { toolName: 'Bash' } },
+    },
+  });
+  await expect.poll(() => up.backgroundActive).toBe(true);
+
+  // An hour later the build reports in, and the box is idle again.
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: {
+      sessionUpdate: 'user_message_chunk',
+      content: {
+        type: 'text',
+        text: [
+          '<task-notification>',
+          '<task-id>bm74el4o7</task-id>',
+          '<tool-use-id>toolu_1</tool-use-id>',
+          '<status>completed</status>',
+          '<summary>Background command "npm run build" completed (exit code 0)</summary>',
+          '</task-notification>',
+        ].join('\n'),
+      },
+    },
+  });
+  await expect.poll(() => up.backgroundActive).toBe(false);
+});
+
+test('a replayed transcript is history, not work to wait for', async () => {
+  // The adapter re-sends the thread on load, which is how replay works
+  // everywhere else in the gateway. Among it is a command backgrounded in
+  // some earlier life of the container, and it is not running now.
+  const adapter: FakeAdapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/load') {
+      adapter.notify('session/update', {
+        sessionId: 'acp-gone',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'toolu_old',
+          title: 'npm run build',
+          status: 'completed',
+          rawInput: { command: 'npm run build', run_in_background: true },
+          _meta: { claudeCode: { toolName: 'Bash' } },
+        },
+      });
+    }
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  assert.equal(up.backgroundActive, false);
+});
