@@ -25,9 +25,11 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { SlashCommands } from "@/components/SlashCommands";
 import { Spinner } from "@/components/Spinner";
+import { TaskNotificationPart } from "@/components/TaskNotification";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useFollowOutput } from "@/hooks/use-follow-output";
+import { TASK_NOTIFICATION_PART } from "@/lib/task-notifications";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -266,14 +268,32 @@ const DefaultToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   );
 };
 
+// Boxes edit: the renderer for the one part kind that is ours rather than the
+// registry's. See components/TaskNotification.tsx.
+const DATA_PARTS = {
+  by_name: { [TASK_NOTIFICATION_PART]: TaskNotificationPart },
+};
+
+// Boxes edit: a message carrying nothing but background-task notifications is
+// not the user speaking, however it arrived — the harness wakes the agent in
+// the user's role when a task it started reports in. It is drawn as a quiet
+// row across the thread rather than as a bubble on the user's side of it.
+const isTaskNotification = (s: AssistantState) =>
+  s.message.content.length > 0 &&
+  s.message.content.every(
+    (part) => part.type === "data" && part.name === TASK_NOTIFICATION_PART,
+  );
+
 const ThreadMessage: FC = () => {
   const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
     useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
+  const isTask = useAuiState(isTaskNotification);
 
   if (isEditing) return <EditComposer />;
-  if (role === "user") return <UserMessage />;
+  if (role === "user")
+    return isTask ? <TaskNotificationMessage /> : <UserMessage />;
   return <AssistantMessageComponent />;
 };
 
@@ -669,7 +689,15 @@ const UserMessage: FC = () => {
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 wrap-break-word empty:hidden">
           <MessagePrimitive.Parts
-            components={{ File: UserFilePart, Image: UserImagePart }}
+            components={{
+              File: UserFilePart,
+              Image: UserImagePart,
+              // Boxes edit: reached only by a notification sharing its
+              // message with something the user did say, which is what an
+              // adapter that names no message ids produces. One arriving on
+              // its own gets the row above instead.
+              data: DATA_PARTS,
+            }}
           />
         </div>
       </div>
@@ -678,6 +706,25 @@ const UserMessage: FC = () => {
         data-slot="aui_user-branch-picker"
         className="col-span-full col-start-1 row-start-3 -me-1 justify-end"
       />
+    </MessagePrimitive.Root>
+  );
+};
+
+/**
+ * Boxes edit: a turn's worth of background work reporting in.
+ *
+ * Full width and quiet, at the rhythm of the tool rows rather than the
+ * conversation: no bubble, no branch picker, and nothing to copy or edit,
+ * because nobody wrote it.
+ */
+const TaskNotificationMessage: FC = () => {
+  return (
+    <MessagePrimitive.Root
+      data-slot="aui_task-notification-message-root"
+      data-role="task-notification"
+      className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150"
+    >
+      <MessagePrimitive.Parts components={{ data: DATA_PARTS }} />
     </MessagePrimitive.Root>
   );
 };

@@ -26,6 +26,7 @@ import {
 import * as dk from '../docker.ts';
 import { log, type Logger } from '../log.ts';
 import type { NotifyKind, Notifier } from '../notify.ts';
+import { BackgroundWork } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
 
@@ -200,12 +201,16 @@ export class UpstreamSession {
   private starting: Promise<void> | null = null;
   /** Who each adapter update goes to; see broadcast.ts. */
   private readonly downstreams: Broadcast;
+  /** What this session has left running in the background; see background.ts. */
+  private readonly background: BackgroundWork;
   private readonly slog: Logger;
   /** Threads with a mint in flight, so concurrent pins share one; see below. */
   private readonly minting = new Map<string, Promise<string>>();
   private closed = false;
   /** Guards against reconnect storms after a deliberate stop. */
   private stopping = false;
+  /** Loads in flight, which is what says an update is history; see below. */
+  private replaying = 0;
 
   constructor(
     readonly sessionId: string,
@@ -225,11 +230,20 @@ export class UpstreamSession {
   ) {
     this.slog = log.session(sessionId);
     this.downstreams = new Broadcast(sessionId);
+    this.background = new BackgroundWork(cfg.BACKGROUND_TASK_MAX_MINUTES * 60_000);
   }
 
   /** How many browsers are attached to this session. */
   get attachedCount(): number {
     return this.downstreams.size;
+  }
+
+  /**
+   * Whether this session has work running in the background, which holds the
+   * idle reaper off the way an attached browser or a running turn does.
+   */
+  get backgroundActive(): boolean {
+    return this.background.active;
   }
 
   /** Whether the adapter connection is up. */
@@ -351,6 +365,23 @@ export class UpstreamSession {
       .get(this.sessionId) as SessionRow | undefined;
     if (!row) throw new Error(`Session ${this.sessionId} not found`);
     return row;
+  }
+
+  /**
+   * Runs a `session/load` with its replay marked as history rather than news.
+   *
+   * Every load re-sends a conversation as ordinary notifications, which is
+   * what makes replay and live streaming the same code path everywhere else —
+   * and the one place that difference matters is background work, where a
+   * five-hour-old tool call is not evidence of anything running now.
+   */
+  private async whileReplaying<T>(load: () => Promise<T>): Promise<T> {
+    this.replaying += 1;
+    try {
+      return await load();
+    } finally {
+      this.replaying -= 1;
+    }
   }
 
   /** Marks the session as active now, which holds off the reaper. */
@@ -535,12 +566,14 @@ export class UpstreamSession {
       // The same `_meta` a fresh thread gets: a load is where the adapter
       // rebuilds the query for a conversation it no longer holds, which is
       // the other place these options are read.
-      const res = (await conn.agent.request('session/load', {
-        sessionId: acpSessionId,
-        cwd: dk.WORKSPACE_DIR,
-        mcpServers: [],
-        _meta: THINKING_META,
-      })) as {
+      const res = (await this.whileReplaying(() =>
+        conn.agent.request('session/load', {
+          sessionId: acpSessionId,
+          cwd: dk.WORKSPACE_DIR,
+          mcpServers: [],
+          _meta: THINKING_META,
+        }),
+      )) as {
         modes?: SessionModeState | null;
         configOptions?: SessionConfigOption[] | null;
       } | null;
@@ -815,6 +848,15 @@ export class UpstreamSession {
   /** Taps an adapter update and delivers it to the browsers it is meant for. */
   private onSessionUpdate(params: unknown): void {
     this.touch();
+    // Only what is happening now. A replay re-sends every tool call the thread
+    // ever made, and a background one among them started hours ago in a
+    // container that has since been stopped — re-arming those would keep a box
+    // awake for the sake of work that is long gone. The cost is that a call
+    // backgrounded during somebody else's replay goes untracked, which is a
+    // window of milliseconds and no worse than not tracking it at all.
+    if (this.replaying === 0) {
+      this.background.observe((params as { update?: unknown })?.update);
+    }
     this.recordThreadInfo(params);
     this.tap('up', 'session/update', params);
     this.downstreams.update(params);
@@ -1059,7 +1101,9 @@ export class UpstreamSession {
     if (isLoad) this.downstreams.beginReplay(from, thread);
 
     try {
-      const result = await conn.agent.request(method, params);
+      const result = isLoad
+        ? await this.whileReplaying(() => conn.agent.request(method, params))
+        : await conn.agent.request(method, params);
       // A mode the adapter accepted is this thread's from now on, including
       // across the restarts that lose the adapter's copy of it. Recorded here
       // as well as from the adapter's own current_mode_update, because that
@@ -1120,12 +1164,14 @@ export class UpstreamSession {
 
     this.downstreams.beginReplay(to, source.acp_session_id, acpThreadId);
     try {
-      await conn.agent.request('session/load', {
-        sessionId: source.acp_session_id,
-        cwd: dk.WORKSPACE_DIR,
-        mcpServers: [],
-        _meta: THINKING_META,
-      });
+      await this.whileReplaying(() =>
+        conn.agent.request('session/load', {
+          sessionId: source.acp_session_id,
+          cwd: dk.WORKSPACE_DIR,
+          mcpServers: [],
+          _meta: THINKING_META,
+        }),
+      );
       this.slog.info('replayed a fork from the thread it came from', {
         threadId: fork.id,
         from: source.id,
@@ -1201,6 +1247,9 @@ export class UpstreamSession {
     this.slog.warn('adapter exec exited', { code });
     this.teardownConnection();
     this.clearTurns();
+    // Whatever was running in the background was a child of that adapter, so
+    // it is either gone or beyond anything that could ever report it.
+    this.background.clear();
   }
 
   /** Closes the connection and kills the exec, tolerating either being gone. */
@@ -1224,6 +1273,7 @@ export class UpstreamSession {
     this.stopping = true;
     this.teardownConnection();
     this.clearTurns();
+    this.background.clear();
     this.pending.failSession(this.sessionId, 'Session stopped');
   }
 

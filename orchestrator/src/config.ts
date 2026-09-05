@@ -63,6 +63,19 @@ const schema = z.object({
   IDLE_STOP_MINUTES: durationMinutes.default(30),
 
   /**
+   * The longest a background task may hold the idle reaper off — a command
+   * left running, a monitor watching something — measured from the tool call
+   * that started it.
+   *
+   * A cap rather than a licence, because knowing a task has finished depends
+   * on the harness's own notification and a missed one would otherwise pin a
+   * box awake for good. A task that reports as it goes needs none of this: its
+   * reports mark the session active like any other traffic, so what this
+   * covers is the quiet stretch of a long one.
+   */
+  BACKGROUND_TASK_MAX_MINUTES: durationMinutes.default(240),
+
+  /**
    * Largest single attachment a prompt may carry into a workspace, in
    * mebibytes.
    *

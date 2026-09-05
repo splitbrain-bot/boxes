@@ -446,6 +446,29 @@ browser cannot load is said in words rather than dropped: assistant-ui admits
 a data URL or an https one as a src and refuses the rest, so a plain-http
 image becomes the link to it.
 
+A message in the user's role is not always the user speaking. Work started in
+the background — a command left running, a subagent, a monitor watching
+something — does not answer into the turn that started it: it reports later,
+and the way it reports is that the harness wakes the agent with a block of XML
+sent as though the user had typed it. Left alone that arrives in the thread as
+a bubble on the user's side with the tags still in it, which is what it used
+to do. `lib/task-notifications.ts` reads the block back out,
+`stores/thread/translate.ts` makes it a part of its own, and the thread draws
+a quiet row across the conversation instead: an icon for how the task ended,
+the summary, and what the task said. A monitor's event is shown, because
+reporting it is the whole point of a monitor; a finished task's result is
+folded under its summary, because a subagent's answer runs to pages and the
+summary already says what happened. It reaches the runtime as a `data` part —
+assistant-ui's one open part kind, keyed by name to the component that draws
+it — because prose, pictures, files and tool calls are the whole of the closed
+set and this is none of them.
+
+The block travels as text, which is the same bargain the attachment envelope
+makes and buys the same thing: it survives the adapter's transcript unchanged,
+so a reconnected thread draws the row it drew live. One this build cannot
+parse is left as the text it is, because showing the XML is a better failure
+than dropping what a task said.
+
 `translate.ts` being pure is what makes replay and live streaming the same
 code path: a reconnect repeats the handshake, `session/load` re-sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
@@ -767,6 +790,41 @@ proceeding without consent.
   waiting. `deny` answers with a reject option taken from the request's own
   options list, never an invented one, and cancels the request when none is
   offered. Nothing auto-approves.
+
+### Work left running in the background
+
+A turn that backgrounds something ends like any other. The agent says it will
+report back, the thread goes quiet, and with the browser closed every test the
+reaper makes says the session is idle — so half an hour later the container is
+stopped, and the build, the crawl or the monitor inside it goes with it. The
+failure is silent: the thread's last line is still the agent promising to
+report, and the report never comes.
+
+Two things already covered part of this and neither covered it all. A
+background *subagent* holds its turn open — the adapter defers the prompt's
+result until the subagents it spawned settle — so the session counts as running
+a turn for as long as one is alive. And a task that keeps talking keeps its box
+awake by talking, because every adapter update marks the session active. What
+was left was the quiet task: a command compiling for two hours, or a monitor
+watching a log that says nothing.
+
+`gateway/background.ts` reads the same updates the browsers get and holds the
+reaper off while it believes something is still running. A tool call starts an
+entry when its input asks for the background or its tool only ever runs there
+(`Monitor`, `Workflow`); the notification the harness sends when a task is over
+ends it, matched on the tool call id the block carries as `<tool-use-id>` —
+which is ACP's `toolCallId`, so the report and the call that started the work
+name the same thing. A report naming no call ends nothing, because guessing
+which entry a nameless one meant would stop a box for the sake of tidying a
+map.
+
+Held off, not disabled. Both ends of this are the harness's conventions rather
+than anything ACP promises, so an entry expires after
+`BACKGROUND_TASK_MAX_MINUTES` whatever happens: a missed ending costs a box
+that stops later than it should rather than one that never stops at all. The
+state is deliberately in memory — a background task is a child of the adapter,
+the adapter is a docker exec this process owns, and both die with it, so an
+orchestrator that has forgotten a task is one whose task is already gone.
 
 ### Notifications
 
@@ -1256,7 +1314,7 @@ restart; the resolver that answers the request is in memory only, so
 
 | Loop | Interval | Does |
 |---|---|---|
-| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all four counts: no running turn on any thread, no waiting permission request, no attached browser, and no activity for `IDLE_STOP_MINUTES`. It never deletes. The turn count is derived from the threads; the other three stay session-scoped, because they are about the box rather than the conversation |
+| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes. The turn count is derived from the threads; the rest stay session-scoped, because they are about the box rather than the conversation |
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running session's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
 | Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size |
 
@@ -1359,6 +1417,7 @@ orchestrator/src/
   reaper.ts             The idle reaper and the proxy reconciler
   log.ts                Structured stderr logging with secret redaction
   gateway/
+    background.ts       What a session left running in the background, so the reaper waits for it
     upstream.ts         One persistent ACP client per session, carrying every watched thread
     downstream.ts       One ACP agent connection per browser, pinned to one thread
     broadcast.ts        Which browsers each adapter update goes to, routed by thread
@@ -1399,7 +1458,9 @@ dashboard/
       assistant-ui/     Installed registry sources, ours to edit
       ui/               Installed shadcn primitives
 
-shared/types.ts         REST shapes and the control-channel contract
+shared/
+  types.ts              REST shapes and the control-channel contract
+  task-notifications.ts How a background task reports in, read by both sides
 session-image/          The per-session container image and its entrypoint
 scripts/                Security smoke test and credentialed live test
 ```

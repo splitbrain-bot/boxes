@@ -29,7 +29,8 @@ function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop:
 /**
  * Starts the idle reaper and returns a handle that stops it. Every minute it
  * stops each session that has no running turn, no waiting permission request,
- * no attached browser and no activity for IDLE_STOP_MINUTES. It never deletes.
+ * no attached browser, no background task still believed to be running, and no
+ * activity for IDLE_STOP_MINUTES. It never deletes.
  */
 export function startReaper(
   db: Db,
@@ -53,6 +54,11 @@ export function startReaper(
       if (running.has(row.id)) continue;
       if ((pendingCounts.get(row.id) ?? 0) > 0) continue;
       if (manager.upstream(row.id).attachedCount > 0) continue;
+      // A box with a command still running in it, or a monitor still watching
+      // something, is not idle however quiet it has gone. Capped inside, so a
+      // task whose ending was never reported delays this rather than
+      // cancelling it; see gateway/background.ts.
+      if (manager.upstream(row.id).backgroundActive) continue;
       if (now - row.last_active_at < idleMs) continue;
 
       try {
