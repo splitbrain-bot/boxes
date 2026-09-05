@@ -127,7 +127,7 @@ test('a prompt streams back and renders as it arrives', async () => {
 
     const input = page.getByLabel('Message input');
     await input.fill('summarise the proxy');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // The first chunk shows before the last has been sent, which is what
     // progressive rendering means.
@@ -167,7 +167,7 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
 
     const input = page.getByLabel('Message input');
     await input.fill('what is wrong here?');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // Uploaded into the session's workspace, before the prompt that names it.
     await expect.poll(() => stub.attachmentUploads.length).toBe(1);
@@ -234,7 +234,7 @@ test('an attached SVG is shown as the drawing it is', async () => {
 
     const input = page.getByLabel('Message input');
     await input.fill('what does this show?');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
     expect(stub.gateway.promptBlocks[0]![0]!.text).toContain('image/svg+xml');
@@ -269,7 +269,7 @@ test('an attached file that is not an image travels as a path, and reads as a ch
 
     const input = page.getByLabel('Message input');
     await input.fill('what does this say?');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
     const blocks = stub.gateway.promptBlocks[0]!;
@@ -312,7 +312,7 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('think about it');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // The gap before the first chunk is the whole point of this indicator: it
     // is often the only thing on the screen, and it has to be visibly moving
@@ -350,7 +350,7 @@ test('reloading mid-conversation replays the whole thread', async () => {
     await expect.poll(() => first.page.getByText('connected').isVisible()).toBe(true);
     const input = first.page.getByLabel('Message input');
     await input.fill('question one');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect.poll(() => first.page.getByText('First answer.').isVisible()).toBe(true);
   } finally {
     await first.close();
@@ -384,7 +384,7 @@ test('a second tab sees updates live', async () => {
 
     const input = a.page.getByLabel('Message input');
     await input.fill('ask once');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // The gateway broadcasts every update to every attached browser.
     await expect.poll(() => a.page.getByText('Shared answer.').isVisible()).toBe(true);
@@ -411,7 +411,7 @@ test('cancelling stops the run state', async () => {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('take your time');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // While the turn runs the composer offers a stop instead of a send.
     const cancel = page.getByLabel('Stop generating');
@@ -514,7 +514,7 @@ test('the header steps aside while reading down, and returns on the way back up'
 
     const input = page.getByLabel('Message input');
     await input.fill('tell me at length');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // The turn's own scrolling moves nothing: the viewport is against its
     // bottom for the whole of one, and none of that is a reader's decision
@@ -591,11 +591,11 @@ test('a working turn is followed past the fold, with its prompt still anchored',
 
     const input = page.getByLabel('Message input');
     await input.fill('warm up');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect.poll(() => page.getByText('warmed up').isVisible()).toBe(true);
 
     await input.fill('do a lot of work');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // The prompt is taken to the top of the viewport, which is the anchor's
     // job and still the anchor doing it.
@@ -664,11 +664,11 @@ test('a reader who leaves the bottom during a turn is left there, and rejoins at
 
     const input = page.getByLabel('Message input');
     await input.fill('warm up');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect.poll(() => page.getByText('warmed up').isVisible()).toBe(true);
 
     await input.fill('do a lot of work');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     const viewport = page.locator('[data-slot="aui_thread-viewport"]');
     const top = (): Promise<number> => viewport.evaluate((el) => Math.round(el.scrollTop));
@@ -777,7 +777,7 @@ test('an update the dashboard does not know about does not break the thread', as
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('anything');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect.poll(() => page.getByText('Still fine.').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {

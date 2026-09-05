@@ -32,6 +32,31 @@ afterAll(async () => {
   await closeBrowser();
 });
 
+// A prompt is prose, so the composer treats Enter as a line break and
+// reserves Ctrl/Cmd+Enter for the send.
+test('Enter opens a line in the composer, Ctrl+Enter sends it', async () => {
+  await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+
+    await input.fill('first line');
+    await input.press('Enter');
+    await input.pressSequentially('second line');
+    await expect.poll(() => input.inputValue()).toBe('first line\nsecond line');
+    // The line break stayed in the draft, and nothing was sent by it.
+    expect(stub.gateway.prompts).toEqual([]);
+
+    await input.press('Control+Enter');
+    await expect.poll(() => stub.gateway.prompts).toEqual(['first line\nsecond line']);
+    await expect.poll(() => input.inputValue()).toBe('');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // 2 — ArrowUp recalls previous messages.
 test('ArrowUp walks back through what was sent, ArrowDown returns', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
@@ -42,7 +67,7 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
 
     for (const text of ['first prompt', 'second prompt']) {
       await input.fill(text);
-      await input.press('Enter');
+      await input.press('Control+Enter');
       await expect.poll(() => input.inputValue()).toBe('');
       // The composer clearing is local and immediate; the message itself
       // reaches the thread only when the gateway echoes it back. Recall walks
@@ -83,7 +108,7 @@ test('the composer is focused on arrival and stays focused after a send', async 
 
     const input = page.getByLabel('Message input');
     await input.fill('anything');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect.poll(() => page.getByText('done').isVisible()).toBe(true);
     await expect.poll(focusedLabel).toBe('Message input');
     expect(errors).toEqual([]);
@@ -101,7 +126,7 @@ test('a send that fails still leaves the composer focused', async () => {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('goes nowhere');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect
       .poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? null))
       .toBe('Message input');
@@ -120,7 +145,7 @@ test('a !bang command runs in the container and never reaches the agent', async 
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('!echo hi');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // It went to the exec endpoint, not to the adapter.
     await expect.poll(() => stub.execCalls.length).toBe(1);
@@ -146,7 +171,7 @@ test('a failing !bang command shows its exit code under the output', async () =>
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('!nope');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     await expect.poll(() => page.getByText('command not found').isVisible()).toBe(true);
     expect(await page.getByText('[exit 127]').isVisible()).toBe(true);
@@ -219,7 +244,7 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('run the tests');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     await page.locator('[data-slot="tool-group-trigger"]').first().click();
     await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
@@ -292,7 +317,7 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
     ]) {
       const input = page.getByLabel('Message input');
       await input.fill(prompt!);
-      await input.press('Enter');
+      await input.press('Control+Enter');
       await expect
         .poll(() => page.getByText('and that is the answer').last().isVisible(), { timeout: 10_000 })
         .toBe(true);
@@ -392,7 +417,7 @@ test('a tool call that never reported back is not offered as a decision', async 
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('run the tests');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect
       .poll(() => page.getByText('that is all').isVisible(), { timeout: 10_000 })
       .toBe(true);
@@ -425,7 +450,7 @@ test('a turn still running is still running after a detour away and back', async
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('take your time');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     const stop = page.getByLabel('Stop generating');
     await expect.poll(() => stop.isVisible(), { timeout: 10_000 }).toBe(true);
@@ -465,7 +490,7 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
   try {
     const input = wide.page.getByLabel('Message input');
     await input.fill('show me the table');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     const table = wide.page.locator('.aui-md-table-wrap');
     await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
 
@@ -491,7 +516,7 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
   try {
     const input = phone.page.getByLabel('Message input');
     await input.fill('show me the table');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     // Two of them, and the wait is for both: this page is a second look at
     // the session the desktop half just used, so the thread replays that
     // exchange and then answers this page's own prompt with another table.
@@ -623,7 +648,7 @@ test('the tab says which box and thread it is, and what that thread is doing', a
 
     const input = page.getByLabel('Message input');
     await input.fill('go');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect
       .poll(() => page.title(), { timeout: 10_000 })
       .toBe('\u27f3 refactor auth \u00b7 Thread 1');
@@ -662,7 +687,7 @@ test('a thread waiting on a decision says so in its tab', async () => {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('edit the file');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect
       .poll(() => page.title(), { timeout: 10_000 })
       .toBe('\u26a0 refactor auth \u00b7 Thread 1');
@@ -696,7 +721,7 @@ test('a thread asked which way to go says that instead', async () => {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('ready to build it');
-    await input.press('Enter');
+    await input.press('Control+Enter');
     await expect
       .poll(() => page.title(), { timeout: 10_000 })
       .toBe('? refactor auth \u00b7 Thread 1');
@@ -852,7 +877,7 @@ test('a permission request renders its options and the choice answers the agent'
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
     await input.fill('edit the file');
-    await input.press('Enter');
+    await input.press('Control+Enter');
 
     // The question opens itself: a prompt nobody can see blocks the turn.
     const approval = page.locator('[data-slot="tool-fallback-approval"]');
@@ -927,7 +952,7 @@ test('typing a slash lists the adapter commands and completes the one picked', a
     const options = page.getByRole('option');
     await expect.poll(() => options.count()).toBe(3);
 
-    // Typing narrows the list, and Enter completes rather than sends.
+    // Typing narrows the list, and Enter completes rather than opening a line.
     await input.pressSequentially('rel');
     await expect.poll(() => options.count()).toBe(1);
     await input.press('Enter');

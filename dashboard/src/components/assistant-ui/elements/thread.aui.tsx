@@ -363,7 +363,12 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
               className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
               rows={1}
               autoFocus={autoFocus}
-              enterKeyHint="send"
+              // Boxes edit: a prompt here is prose and often several lines of
+              // it, so Enter opens a line and Ctrl/Cmd+Enter sends. Touch has
+              // no modifier to hold; the send button in ComposerAction is the
+              // way in from a phone, and it is there whenever a send is.
+              submitMode="ctrlEnter"
+              enterKeyHint="enter"
               aria-label="Message input"
               onKeyDown={history.onKeyDown}
             />
