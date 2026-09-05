@@ -126,6 +126,26 @@ test('output past the cap is dropped and the exec killed', async () => {
   assert.match(trailer(result), /\[exit null truncated\]/);
 });
 
+test('the cap is bytes, and a multi-byte character is never cut in half', async () => {
+  // Every one of these is three bytes of UTF-8, so a cap counted in bytes has
+  // room for two of them and no more — where a cap counted in string length
+  // would let seven through, at more than three times the budget.
+  const wide = '€'.repeat(8);
+  fakeDocker({ writes: [frame(1, wide), frame(1, wide)], gapMs: 5, never: true });
+
+  const seen: string[] = [];
+  const result = await runCommand(TARGET, 'wide', (c) => seen.push(c), { maxOutputBytes: 7 });
+
+  assert.equal(result.truncated, true);
+  assert.ok(
+    Buffer.byteLength(result.output, 'utf8') <= 7,
+    `the byte budget holds: ${Buffer.byteLength(result.output, 'utf8')} bytes`,
+  );
+  assert.equal(result.output, '€€', 'cut on a character boundary, not mid-sequence');
+  assert.equal(seen.join(''), result.output, 'the caller saw exactly what was captured');
+  assert.ok(!result.output.includes('\ufffd'), 'no replacement character at the cut');
+});
+
 test('the default limits are the ones the endpoint documents', () => {
   assert.equal(WALL_CLOCK_MS, 120_000);
   assert.equal(MAX_OUTPUT_BYTES, 256 * 1024);
@@ -160,19 +180,17 @@ test('records are stored and read back in the API shape', () => {
       db,
       's1',
       'git status',
-      'clean\n',
-      { exitCode: 0, truncated: false, timedOut: false },
+      { output: 'clean\n', exitCode: 0, truncated: false, timedOut: false },
       1000,
     );
     record(
       db,
       's1',
       'yes',
-      'y'.repeat(10),
-      { exitCode: null, truncated: true, timedOut: true },
+      { output: 'y'.repeat(10), exitCode: null, truncated: true, timedOut: true },
       2000,
     );
-    record(db, 's2', 'ls', '', { exitCode: 0, truncated: false, timedOut: false }, 3000);
+    record(db, 's2', 'ls', { output: '', exitCode: 0, truncated: false, timedOut: false }, 3000);
 
     const rows = history(db, 's1');
     assert.equal(rows.length, 2, 'only this session');

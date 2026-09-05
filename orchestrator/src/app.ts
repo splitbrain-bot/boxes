@@ -196,8 +196,9 @@ export function buildApp(
   });
 
   /**
-   * Makes one of a session's threads current. Browsers watching the session are
-   * dropped and reconnect onto it; the ACP contract they speak is unchanged.
+   * Makes one of a session's threads current: what a connection naming no
+   * thread gets. An ordinary write — every live connection is pinned to its
+   * own thread, so nobody is dropped and nothing reconnects.
    */
   app.post('/api/sessions/:id/threads/:threadId/select', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
@@ -253,7 +254,7 @@ export function buildApp(
     });
     reply.raw.end(execs.trailer(outcome));
 
-    execs.record(db, id, command, outcome.output, outcome, startedAt);
+    execs.record(db, id, command, outcome, startedAt);
     manager.touch(id);
     return reply;
   });
@@ -519,6 +520,40 @@ export function buildApp(
   }));
 
   /**
+   * Checks a push endpoint before the orchestrator will ever POST to it.
+   *
+   * https only, and never an address literal: a push service is always a named
+   * host, and accepting a literal would turn this route into a way to aim the
+   * orchestrator at the LAN it can see. A hostname that resolves into private
+   * space is not caught here — the API is root-equivalent either way, and
+   * whatever authenticates it is the real boundary.
+   */
+  function validEndpoint(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 2000) {
+      throw new HttpError(400, 'endpoint is required');
+    }
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new HttpError(400, 'endpoint must be a URL');
+    }
+    if (url.protocol !== 'https:') throw new HttpError(400, 'endpoint must be https');
+    if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname === 'localhost') {
+      throw new HttpError(400, 'endpoint must name a host, not an address');
+    }
+    return value;
+  }
+
+  /** Checks one base64url key from a subscription decodes to the expected size. */
+  function validKey(value: unknown, bytes: number, name: string): string {
+    if (typeof value !== 'string' || Buffer.from(value, 'base64url').length !== bytes) {
+      throw new HttpError(400, `${name} must be ${bytes} base64url-encoded bytes`);
+    }
+    return value;
+  }
+
+  /**
    * Registers a browser for push, or refreshes what is stored for it.
    *
    * There is no user to attach this to — Boxes has no accounts — so a
@@ -566,40 +601,6 @@ export function buildApp(
     '.txt': 'text/plain; charset=utf-8',
     '.webmanifest': 'application/manifest+json',
   };
-
-  /**
-   * Checks a push endpoint before the orchestrator will ever POST to it.
-   *
-   * https only, and never an address literal: a push service is always a named
-   * host, and accepting a literal would turn this route into a way to aim the
-   * orchestrator at the LAN it can see. A hostname that resolves into private
-   * space is not caught here — the API is root-equivalent either way, and
-   * whatever authenticates it is the real boundary.
-   */
-  function validEndpoint(value: unknown): string {
-    if (typeof value !== 'string' || value.length > 2000) {
-      throw new HttpError(400, 'endpoint is required');
-    }
-    let url: URL;
-    try {
-      url = new URL(value);
-    } catch {
-      throw new HttpError(400, 'endpoint must be a URL');
-    }
-    if (url.protocol !== 'https:') throw new HttpError(400, 'endpoint must be https');
-    if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname === 'localhost') {
-      throw new HttpError(400, 'endpoint must name a host, not an address');
-    }
-    return value;
-  }
-
-  /** Checks one base64url key from a subscription decodes to the expected size. */
-  function validKey(value: unknown, bytes: number, name: string): string {
-    if (typeof value !== 'string' || Buffer.from(value, 'base64url').length !== bytes) {
-      throw new HttpError(400, `${name} must be ${bytes} base64url-encoded bytes`);
-    }
-    return value;
-  }
 
   /**
    * Serves the dashboard bundle: a real file when the path names one, else its

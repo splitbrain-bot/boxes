@@ -316,6 +316,53 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   assert.notEqual(store.getSnapshot().messages, during);
 });
 
+test('a refetch publishes what the replay it asked for rebuilt', async () => {
+  const { store, client } = makeStore();
+  push(client, {
+    sessionUpdate: 'user_message_chunk',
+    content: { type: 'text', text: 'hi' },
+  } as SessionUpdate);
+  assert.equal(store.getSnapshot().messages.length, 1);
+
+  // A refetch is a session/load on a connection that is already up, so nothing
+  // reports itself ready afterwards the way a handshake does. The store has to
+  // end its own replay window, or the model never reaches the view again.
+  const done = store.refetch();
+  push(client, {
+    sessionUpdate: 'user_message_chunk',
+    content: { type: 'text', text: 'hi' },
+  } as SessionUpdate);
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'hello again' },
+  } as SessionUpdate);
+  await done;
+
+  assert.deepEqual(
+    store.getSnapshot().messages.map((m) => m.role),
+    ['user', 'assistant'],
+    'the replay is published once, and not doubled onto what was there',
+  );
+
+  // And the thread is live again: an update after the refetch still lands.
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: ' and again' },
+  } as SessionUpdate);
+  assert.match(JSON.stringify(store.getSnapshot().messages), /and again/);
+});
+
+test('a refetch whose load fails still gives the view back what arrived', async () => {
+  const { store, client } = makeStore();
+  client.fail = 'adapter is gone';
+  await store.refetch().catch(() => undefined);
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'still here' },
+  } as SessionUpdate);
+  assert.equal(store.getSnapshot().messages.length, 1, 'not frozen behind a replay that failed');
+});
+
 test('a permission request attaches to its tool call and its answer unblocks the turn', async () => {
   const { store, client } = makeStore();
   push(client, {

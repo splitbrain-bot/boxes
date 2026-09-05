@@ -40,6 +40,26 @@ export interface ExecLimits {
 }
 
 /**
+ * The longest prefix of `text` that fits in `maxBytes` bytes of UTF-8, cut on
+ * a character boundary.
+ *
+ * The cap is in bytes because that is what bounds the response and the stored
+ * row, while the chunk is a string — so slicing it by length would both
+ * overshoot the budget, by up to four times on non-ASCII output, and be able
+ * to cut a character in half and leave a replacement glyph at the end of it.
+ * A UTF-8 continuation byte is `10xxxxxx`, so walking back over those from the
+ * cut lands on the start of the character being dropped.
+ */
+export function truncateToBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end--;
+  return buffer.subarray(0, end).toString('utf8');
+}
+
+/**
  * Runs one command, streaming its combined output to `onChunk`.
  *
  * Both limits are enforced here rather than left to the container: output
@@ -71,14 +91,17 @@ export async function runCommand(
     exec.output.setEncoding('utf8');
     exec.output.on('data', (chunk: string) => {
       if (truncated) return;
-      const room = maxOutputBytes - bytes;
-      const piece = Buffer.byteLength(chunk, 'utf8') <= room ? chunk : chunk.slice(0, room);
-      bytes += Buffer.byteLength(piece, 'utf8');
+      const piece = truncateToBytes(chunk, maxOutputBytes - bytes);
       if (piece) {
+        bytes += Buffer.byteLength(piece, 'utf8');
         captured.push(piece);
         onChunk(piece);
       }
-      if (bytes >= maxOutputBytes) {
+      // Whether the cap left anything of this chunk out, rather than whether
+      // the byte total reached it: the cut lands on a character boundary, so
+      // the last byte or two of the budget can be unspendable and a total that
+      // has to arrive exactly on the cap would never trip.
+      if (piece.length < chunk.length) {
         truncated = true;
         exec.kill();
       }
@@ -102,19 +125,24 @@ export function trailer(outcome: ExecOutcome): string {
   return `\n[exit ${outcome.exitCode ?? 'null'}${notes ? ` ${notes}` : ''}]\n`;
 }
 
-/** Records one finished run, and never lets a failed write break the response. */
+/**
+ * Records one finished run, and never lets a failed write break the response.
+ *
+ * The outcome carries the output, which is the shape {@link runCommand}
+ * returns: passing the two separately let a caller store one run's text
+ * against another's exit code.
+ */
 export function record(
   db: Db,
   sessionId: string,
   command: string,
-  output: string,
-  outcome: ExecOutcome,
+  outcome: ExecOutcome & { output: string },
   startedAt: number,
 ): void {
   try {
     appendExecLog(db, sessionId, {
       command,
-      output: output.slice(0, MAX_OUTPUT_BYTES),
+      output: truncateToBytes(outcome.output, MAX_OUTPUT_BYTES),
       exit_code: outcome.exitCode,
       truncated: outcome.truncated ? 1 : 0,
       timed_out: outcome.timedOut ? 1 : 0,

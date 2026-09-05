@@ -109,7 +109,7 @@ test('switching back to the first thread returns its transcript', async () => {
 
     // The first thread was left where it was, and comes back whole.
     await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
-    expect(await page.getByText('question one').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('question one').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -146,8 +146,8 @@ test('a fork from inside the thread leaves it where it is and offers a new tab',
     // This thread stayed exactly where it was: same route, same transcript,
     // same connection. Nothing was switched out from under it.
     expect(page.url()).toContain(`/sessions/${ID}/threads/th1`);
-    expect(await page.getByText('First answer.').isVisible()).toBe(true);
-    expect(await page.getByText('connected').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();

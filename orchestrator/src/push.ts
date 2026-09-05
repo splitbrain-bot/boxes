@@ -50,6 +50,17 @@ const RECORD_SIZE = 4096;
 /** How long a push service should hold an undelivered message, in seconds. */
 const DEFAULT_TTL = 12 * 60 * 60;
 
+/**
+ * How long one delivery attempt may take, in milliseconds.
+ *
+ * `fetch` has no timeout of its own, and the caller pushes to every subscribed
+ * browser at once and awaits all of them — so one push service that accepts a
+ * connection and then says nothing would leave that fan-out pending for the
+ * life of the process. A push nobody is waiting on is better abandoned than
+ * held: the next event pushes again.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 /** Lifetime of a VAPID assertion. Well under the 24h RFC 8292 allows. */
 const VAPID_LIFETIME_SECONDS = 12 * 60 * 60;
 
@@ -280,6 +291,7 @@ export async function sendPush(
         Urgency: 'high',
       },
       body: new Uint8Array(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     return {
       ok: res.ok,

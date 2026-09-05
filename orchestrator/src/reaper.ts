@@ -53,12 +53,13 @@ export function startReaper(
     for (const row of rows) {
       if (running.has(row.id)) continue;
       if ((pendingCounts.get(row.id) ?? 0) > 0) continue;
-      if (manager.upstream(row.id).attachedCount > 0) continue;
+      const upstream = manager.upstream(row.id);
+      if (upstream.attachedCount > 0) continue;
       // A box with a command still running in it, or a monitor still watching
       // something, is not idle however quiet it has gone. Capped inside, so a
       // task whose ending was never reported delays this rather than
       // cancelling it; see gateway/background.ts.
-      if (manager.upstream(row.id).backgroundActive) continue;
+      if (upstream.backgroundActive) continue;
       if (now - row.last_active_at < idleMs) continue;
 
       try {

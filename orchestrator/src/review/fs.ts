@@ -9,7 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 import { chownToAgent } from '../workspaces.ts';
 
 /**
@@ -240,9 +240,4 @@ export function subdirectories(path: string): string[] {
   } catch {
     return [];
   }
-}
-
-/** Joins a review root and a relative path for display and logging only. */
-export function under(root: string, relPath: string): string {
-  return join(root, relPath);
 }

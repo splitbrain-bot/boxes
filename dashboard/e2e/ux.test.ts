@@ -154,7 +154,7 @@ test('a !bang command runs in the container and never reaches the agent', async 
 
     // The output is printed as code, with nothing to open first.
     await expect.poll(() => page.getByText('ran: echo hi').isVisible()).toBe(true);
-    expect(await page.getByText('[exit 0]').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('[exit 0]').isVisible()).toBe(true);
     await shoot(page, 'bang-command');
     expect(errors).toEqual([]);
   } finally {
@@ -174,7 +174,7 @@ test('a failing !bang command shows its exit code under the output', async () =>
     await input.press('Control+Enter');
 
     await expect.poll(() => page.getByText('command not found').isVisible()).toBe(true);
-    expect(await page.getByText('[exit 127]').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('[exit 127]').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -250,7 +250,7 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
     await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
     await expect.poll(() => page.getByText('ok 2 - subnet').isVisible()).toBe(true);
     // The args are shown too, which is the other half of "can't see output".
-    expect(await page.getByText('npm test', { exact: false }).first().isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('npm test', { exact: false }).first().isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -430,7 +430,7 @@ test('a tool call that never reported back is not offered as a decision', async 
     );
     expect(await page.locator('[data-slot="tool-fallback-approval"]').count()).toBe(0);
     expect(await page.getByText('Wants to run:').count()).toBe(0);
-    expect(await page.getByText('Unfinished tool:').first().isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Unfinished tool:').first().isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -526,7 +526,7 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     const tables = phone.page.locator('.aui-md-table-wrap');
     await expect.poll(() => tables.count(), { timeout: 10_000 }).toBe(2);
     const table = tables.last();
-    expect(await table.isVisible()).toBe(true);
+    await expect.poll(() => table.isVisible()).toBe(true);
 
     // Nowhere left to bleed to, so it scrolls instead of being cut off.
     const scrollable = await table.evaluate((el) => el.scrollWidth > el.clientWidth);
@@ -884,7 +884,7 @@ test('a permission request renders its options and the choice answers the agent'
     await expect.poll(() => approval.isVisible(), { timeout: 10_000 }).toBe(true);
     // And the call it is about has not run yet, whatever the collapsed header
     // of a finished one says.
-    expect(await page.getByText('Wants to run:').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Wants to run:').isVisible()).toBe(true);
     expect(await approval.getByRole('button').allInnerTexts()).toEqual([
       'Allow once',
       'Always allow',

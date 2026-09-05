@@ -51,6 +51,13 @@ export default defineConfig({
           globalSetup: ['e2e/build.setup.ts'],
           testTimeout: 60_000,
           hookTimeout: 60_000,
+          // Every `expect.poll` here is waiting on a real browser doing real
+          // work over a real socket, and vitest's own default for one is a
+          // second. That is not a bound on "this is broken", it is a bound on
+          // "this machine is busy" — which on a loaded CI box is the flake
+          // these tests were reported as. The per-test timeout is what
+          // actually stops a hung run.
+          expect: { poll: { timeout: 15_000, interval: 50 } },
           // Chromium is a single shared resource here; parallel pages would
           // fight over it for no gain at this suite size.
           fileParallelism: false,

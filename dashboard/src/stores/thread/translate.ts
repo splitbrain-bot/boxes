@@ -298,47 +298,14 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'tool_call' }>;
       // A re-announced call is an update, not a second card: an adapter may
       // resend one, and replay always does.
-      const existing = findTool(model, u.toolCallId);
-      if (existing) {
-        mergeTool(existing, u);
-        return messageOf(model, existing);
-      }
-      const message = messageFor(model, 'assistant', null);
-      message.parts.push({
-        type: 'tool',
-        toolCallId: u.toolCallId,
-        title: u.title,
-        ...(u.name ? { name: u.name } : {}),
-        ...(u.kind ? { kind: u.kind } : {}),
-        status: u.status ?? 'pending',
-        ...(u.rawInput === undefined ? {} : { rawInput: u.rawInput }),
-        content: u.content ?? [],
-        locations: u.locations ?? [],
-      });
-      return message;
+      return openTool(model, u, u.title);
     }
     case 'tool_call_update': {
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>;
-      const part = findTool(model, u.toolCallId);
-      // Out of order: an update can arrive before the call it belongs to,
-      // and dropping it would lose the tool's result.
-      if (!part) {
-        const message = messageFor(model, 'assistant', null);
-        message.parts.push({
-          type: 'tool',
-          toolCallId: u.toolCallId,
-          title: u.title ?? u.toolCallId,
-          ...(u.name ? { name: u.name } : {}),
-          ...(u.kind ? { kind: u.kind } : {}),
-          status: u.status ?? 'pending',
-          ...(u.rawInput === undefined ? {} : { rawInput: u.rawInput }),
-          content: u.content ?? [],
-          locations: u.locations ?? [],
-        });
-        return message;
-      }
-      mergeTool(part, u);
-      return messageOf(model, part);
+      // Out of order: an update can arrive before the call it belongs to, and
+      // dropping it would lose the tool's result. What it lacks is a title, so
+      // the id stands in until the announcement arrives with one.
+      return openTool(model, u, u.title ?? u.toolCallId);
     }
     case 'plan': {
       const u = update as Extract<SessionUpdate, { sessionUpdate: 'plan' }>;
@@ -369,6 +336,35 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
       model.unknown.push(update);
       return null;
   }
+}
+
+/**
+ * Folds a tool_call or a tool_call_update into the thread: merged into the
+ * call it is about, or started as a fresh card when there is none yet.
+ *
+ * One path for both, because the two updates differ in exactly one thing —
+ * what a card with no title yet is called — and an adapter is free to send
+ * either of them first.
+ */
+function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message | null {
+  const existing = findTool(model, u.toolCallId);
+  if (existing) {
+    mergeTool(existing, u);
+    return messageOf(model, existing);
+  }
+  const message = messageFor(model, 'assistant', null);
+  message.parts.push({
+    type: 'tool',
+    toolCallId: u.toolCallId,
+    title,
+    ...(u.name ? { name: u.name } : {}),
+    ...(u.kind ? { kind: u.kind } : {}),
+    status: u.status ?? 'pending',
+    ...(u.rawInput === undefined ? {} : { rawInput: u.rawInput }),
+    content: u.content ?? [],
+    locations: u.locations ?? [],
+  });
+  return message;
 }
 
 /** The message a part belongs to. */

@@ -69,14 +69,11 @@ function parseV6(addr: string): number[] | null {
   }
 
   const doubleColon = text.indexOf('::');
-  let head: number[];
-  let mid: number[];
   if (doubleColon === -1) {
     const groups = text === '' ? [] : text.split(':');
     if (groups.some((g) => g === '')) return null;
-    head = groups.map(hexGroup).filter((g): g is number => g !== null);
+    const head = groups.map(hexGroup).filter((g): g is number => g !== null);
     if (head.length !== groups.length) return null;
-    mid = [];
     const all = [...head, ...tail];
     return all.length === 8 ? all : null;
   }
@@ -88,8 +85,8 @@ function parseV6(addr: string): number[] | null {
   const rightGroups = right === '' ? [] : right.split(':');
   if (leftGroups.some((g) => g === '') || rightGroups.some((g) => g === '')) return null;
 
-  head = leftGroups.map(hexGroup).filter((g): g is number => g !== null);
-  mid = rightGroups.map(hexGroup).filter((g): g is number => g !== null);
+  const head = leftGroups.map(hexGroup).filter((g): g is number => g !== null);
+  const mid = rightGroups.map(hexGroup).filter((g): g is number => g !== null);
   if (head.length !== leftGroups.length || mid.length !== rightGroups.length) return null;
 
   const explicit = head.length + mid.length + tail.length;

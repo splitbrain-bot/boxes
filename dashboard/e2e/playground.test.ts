@@ -30,7 +30,7 @@ for (const scheme of ['light', 'dark'] as const) {
     try {
       // The composer, and the assistant's markdown.
       await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
-      expect(await page.getByText('security boundary').first().isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('security boundary').first().isVisible()).toBe(true);
 
       // Markdown: the bold run, the code fence and the table all became real
       // elements rather than literal backticks and pipes.
@@ -54,15 +54,15 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect
         .poll(() => page.locator('[data-slot="tool-fallback-result"]').isVisible())
         .toBe(true);
-      expect(await page.getByText('cidr.test.ts', { exact: false }).first().isVisible()).toBe(true);
-      expect(await page.getByText('ls -1 proxy/src', { exact: false }).first().isVisible()).toBe(
-        true,
-      );
+      await expect.poll(() => page.getByText('cidr.test.ts', { exact: false }).first().isVisible()).toBe(true);
+      await expect
+        .poll(() => page.getByText('ls -1 proxy/src', { exact: false }).first().isVisible())
+        .toBe(true);
       await shoot(page, `playground-tool-open-${scheme}`);
 
       // The user's prompt and the reasoning part sit at the top of the thread.
       await page.getByText('Summarise what').first().scrollIntoViewIfNeeded();
-      expect(await page.getByText('Summarise what').first().isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('Summarise what').first().isVisible()).toBe(true);
       const reasoning = page.locator('[data-slot="reasoning-trigger"], .aui-reasoning-trigger');
       await expect.poll(() => reasoning.count()).toBeGreaterThan(0);
       await reasoning.first().click();

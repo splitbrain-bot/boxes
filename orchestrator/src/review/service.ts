@@ -15,6 +15,7 @@ import {
   fileHash,
   fileLines,
   isDirectory,
+  MAX_REVIEW_BYTES,
   readTextFile,
   removeFile,
   resolveInRoot,
@@ -36,7 +37,7 @@ import {
   todayStamp,
   type Review,
 } from './store.ts';
-import { REVIEW_FILE, reviewTree, treePaths, withDeleted } from './tree.ts';
+import { REVIEW_FILE, reviewTree, treePaths, withDeleted, type TreeEntry } from './tree.ts';
 
 /**
  * The per-session review façade: root resolution, the REVIEW.md
@@ -236,6 +237,11 @@ export class ReviewService {
 
     const review = await this.driftAll(id, root);
     const entries = withDeleted(tree.entries, deletedPaths(statuses));
+    // The paths this response offers, remembered for the file open that almost
+    // always follows it. Without this the cache was only ever filled by the
+    // first file request, which then paid for the `git ls-files` and the status
+    // run a second time — the exact cost it exists to avoid.
+    this.rememberPaths(id, entries);
 
     return {
       root: root.relative,
@@ -465,7 +471,7 @@ export class ReviewService {
   private read(path: string): Review {
     const hash = fileHash(path);
     if (hash === '') return { data: new Map(), started: '' };
-    const read = readTextFile(path, 8 * 1024 * 1024);
+    const read = readTextFile(path, MAX_REVIEW_BYTES);
     if (read.binary) return { data: new Map(), started: '' };
     return parseReview(read.content);
   }
@@ -585,7 +591,18 @@ export class ReviewService {
       reviewTree(root.path, root.hasGit),
       root.hasGit ? fileStatuses(root.path, this.base(id)) : Promise.resolve(null),
     ]);
-    const paths = treePaths(withDeleted(tree.entries, deletedPaths(statuses)));
+    return this.rememberPaths(id, withDeleted(tree.entries, deletedPaths(statuses)));
+  }
+
+  /**
+   * Remembers the paths one set of tree entries offers, and hands them back.
+   *
+   * Both the tree endpoint and {@link listed} end up holding the same entries,
+   * so whichever of them ran most recently is the one the next file request is
+   * validated against.
+   */
+  private rememberPaths(id: string, entries: TreeEntry[]): Set<string> {
+    const paths = treePaths(entries);
     this.treePaths.set(id, { at: Date.now(), paths });
     return paths;
   }

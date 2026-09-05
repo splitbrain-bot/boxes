@@ -46,13 +46,13 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
   try {
     await expect.poll(() => page.getByRole('button', { name: 'src' }).isVisible()).toBe(true);
     // Status marks travel with the tree, in one response with it.
-    expect(await page.getByLabel('untracked').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('untracked').isVisible()).toBe(true);
 
     // Directories start closed unless they are a single-child chain from the
     // top, which this fixture's three top-level entries are not.
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /app\.ts/ }).isVisible()).toBe(true);
-    expect(await page.getByLabel('modified').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('modified').isVisible()).toBe(true);
 
     await page.getByRole('button', { name: /app\.ts/ }).click();
 
@@ -81,7 +81,7 @@ test('the tree is a column beside the pane on a desktop', async () => {
   try {
     await expect.poll(() => page.getByText('wire the router').isVisible()).toBe(true);
     // Both at once, which is the whole difference from the phone arrangement.
-    expect(await page.getByRole('button', { name: 'src' }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByRole('button', { name: 'src' }).isVisible()).toBe(true);
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /boot\.ts/ }).isVisible()).toBe(true);
     // The sheet trigger is the phone's way in and must not be here.
@@ -145,7 +145,7 @@ test('a gutter marker opens the hunk, deleted lines included', async () => {
     // The hunk is the only place the removed lines exist, so this is where
     // hover-on-a-tooltip had to go.
     await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
-    expect(await page.getByText('console.log("boot")').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('console.log("boot")').isVisible()).toBe(true);
     await shoot(page, 'review-hunk-phone', 'viewport');
     expect(errors).toEqual([]);
   } finally {
@@ -212,7 +212,7 @@ test('commenting a line on a phone writes it through the API', async () => {
     // On touch the composer is a bottom sheet, so the keyboard has somewhere
     // to be that is not on top of it.
     await expect.poll(() => page.getByText('Comment on line 2').isVisible()).toBe(true);
-    expect(await page.getByText('Saved into REVIEW.md in the workspace').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Saved into REVIEW.md in the workspace').isVisible()).toBe(true);
     await shoot(page, 'review-composer-phone', 'viewport');
 
     await page.getByRole('textbox', { name: 'Comment on line 2' }).fill('this TODO needs an owner');
@@ -430,7 +430,7 @@ test('a revision that is not one is reported, not swallowed', async () => {
     await page.getByRole('button', { name: 'Compare' }).click();
 
     await expect.poll(() => page.getByRole('alert').isVisible()).toBe(true);
-    expect(await page.getByText(/unknown revision: nope/).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText(/unknown revision: nope/).isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -457,7 +457,7 @@ test('a workspace with no git still browses and comments', async () => {
   try {
     await expect.poll(() => page.getByText('just some notes').isVisible()).toBe(true);
     // The git features are off and say so, rather than being absent silently.
-    expect(await page.getByText(/no git/).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText(/no git/).isVisible()).toBe(true);
     // No base to pick when there is no repository to pick one in.
     expect(await page.getByRole('button', { name: /HEAD/ }).isVisible()).toBe(false);
     // Commenting still works, which is the point of degrading rather than
@@ -487,7 +487,7 @@ test('a session whose workspace cannot be read says what to do', async () => {
     // A legacy session, before its next start migrates it. The message has to
     // name the fix, since nothing about the view suggests one.
     await expect.poll(() => page.getByRole('alert').isVisible()).toBe(true);
-    expect(await page.getByText(/Start the session once to migrate it/).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText(/Start the session once to migrate it/).isVisible()).toBe(true);
     await shoot(page, 'review-legacy-phone');
     expect(errors).toEqual([]);
   } finally {

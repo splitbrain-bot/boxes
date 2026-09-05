@@ -125,7 +125,6 @@ export interface ExecRow {
 export interface PendingRequestRow {
   id: number;
   session_id: string;
-  upstream_id: string;
   /**
    * The ACP thread that asked, so a browser is given only the requests for
    * the thread it is watching. Null on a row from before the column existed,
@@ -358,6 +357,14 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE threads ADD COLUMN mode_id TEXT;
   ALTER TABLE threads ADD COLUMN model_id TEXT;
+  `,
+  // pending_requests.upstream_id dates from a gateway that correlated a queued
+  // request with the JSON-RPC id it arrived under. Nothing has read it since
+  // the resolver moved into memory — it was written as the empty string and
+  // never looked at — and the table is cleared at every boot, so there is
+  // nothing to preserve.
+  `
+  ALTER TABLE pending_requests DROP COLUMN upstream_id;
   `,
 ];
 

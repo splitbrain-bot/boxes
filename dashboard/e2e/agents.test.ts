@@ -53,8 +53,8 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/agents', scheme);
     try {
       await expect.poll(() => page.getByText('Global').first().isVisible()).toBe(true);
-      expect(await page.getByText('applied to every box').isVisible()).toBe(true);
-      expect(await page.getByText('Go projects').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('applied to every box').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('Go projects').isVisible()).toBe(true);
       await shoot(page, `agent-sets-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -66,7 +66,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/agents/as1', scheme);
     try {
       await expect.poll(() => page.getByText('AGENTS.md').first().isVisible()).toBe(true);
-      expect(await page.getByText('Slash commands').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('Slash commands').isVisible()).toBe(true);
       await shoot(page, `agent-set-editor-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -93,9 +93,9 @@ test('the editor shows the merge, and which of its items replaces a global one',
       true,
     );
     // `review` is defined in both sets; the named one wins, and says so.
-    expect(await page.getByText('replaces the global one').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('replaces the global one').isVisible()).toBe(true);
     // The merged commands come from the global set, which this one adds none to.
-    expect(await page.getByText('/ship').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('/ship').isVisible()).toBe(true);
   } finally {
     await close();
   }
@@ -139,7 +139,7 @@ test('a SKILL.md with no front matter is called out before it is saved', async (
     await page.getByLabel('SKILL.md').fill('Just some prose.');
     // The failure is silent inside the box, so the editor is the only place
     // it can be caught.
-    expect(await page.getByText('is not loaded at all').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('is not loaded at all').isVisible()).toBe(true);
   } finally {
     await close();
   }

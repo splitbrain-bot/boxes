@@ -143,7 +143,7 @@ test('a prompt streams back and renders as it arrives', async () => {
     expect(await page.locator('strong', { hasText: 'vets' }).count()).toBe(1);
 
     // The prompt itself is in the thread too.
-    expect(await page.getByText('summarise the proxy').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('summarise the proxy').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -361,7 +361,7 @@ test('reloading mid-conversation replays the whole thread', async () => {
   const second = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
     await expect.poll(() => second.page.getByText('First answer.').isVisible()).toBe(true);
-    expect(await second.page.getByText('question one').isVisible()).toBe(true);
+    await expect.poll(() => second.page.getByText('question one').isVisible()).toBe(true);
     // Replayed once, not twice.
     expect(await second.page.getByText('First answer.').count()).toBe(1);
     expect(second.errors).toEqual([]);
@@ -419,7 +419,7 @@ test('cancelling stops the run state', async () => {
 
     await cancel.click();
     await expect.poll(() => cancel.isVisible()).toBe(false);
-    expect(await page.getByLabel('Send message').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Send message').isVisible()).toBe(true);
 
     stub.gateway.release();
     expect(errors).toEqual([]);
@@ -466,7 +466,7 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     expect(await page.getByText('asking about exchange number 0').count()).toBe(1);
     expect(await page.getByText('answering about exchange number 11').count()).toBe(1);
     // And now there is somewhere to type.
-    expect(await page.getByLabel('Message input').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
 
     // Opened at the end of the conversation, which is where a thread is read
     // from — not at whichever message the last render happened to leave.
@@ -751,8 +751,8 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     const thread = (await page.locator('.aui-thread-root').boundingBox())!;
     expect(header.height).toBeGreaterThan(0);
     expect(thread.y).toBeGreaterThanOrEqual(header.y + header.height);
-    expect(await page.getByLabel('Back to sessions').isVisible()).toBe(true);
-    expect(await page.getByLabel('Session details and controls').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Back to sessions').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Session details and controls').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -825,7 +825,7 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
       .toBe(true);
 
     // The prose it was said with is still prose, on its own line.
-    expect(await page.getByText('Here is the page:').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Here is the page:').isVisible()).toBe(true);
     await shoot(page, 'thread-images');
     expect(errors).toEqual([]);
   } finally {
@@ -888,14 +888,14 @@ test('a background task reporting in is a row of its own, not the user talking',
     expect(await page.getByText('<task-id>').count()).toBe(0);
 
     // A monitor exists to report its event, so the event is what is shown.
-    expect(await page.getByText('Monitor event:', { exact: false }).isVisible()).toBe(true);
-    expect(await page.getByText('2200/30321', { exact: false }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Monitor event:', { exact: false }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('2200/30321', { exact: false }).isVisible()).toBe(true);
 
     // A finished task has been summarised by its own row, and what is under
     // it is its whole answer — folded, and opened by a click.
     const answer = page.getByText('The 429s are all from one host', { exact: false });
     expect(await answer.isVisible()).toBe(false);
-    expect(await page.getByText('48.2k tokens · 6 tool calls · 3m 4s').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('48.2k tokens · 6 tool calls · 3m 4s').isVisible()).toBe(true);
     await page.getByText('Agent "Check the crawler logs" finished').click();
     await expect.poll(() => answer.isVisible()).toBe(true);
     await shoot(page, 'task-notification');

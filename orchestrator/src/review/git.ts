@@ -39,9 +39,9 @@ function homeForGit(): string {
 /**
  * The flags every git invocation carries, ahead of the subcommand.
  *
- * - `safe.directory` — the workspace is owned by uid 1000 and git refuses to
- *   operate on a repository owned by someone else. Scoped to the one root
- *   rather than `*`.
+ * - `safe.directory` — the workspace is owned by the session uid (see
+ *   SESSION_UID) and git refuses to operate on a repository owned by someone
+ *   else. Scoped to the one root rather than `*`.
  * - `core.fsmonitor=false` — the one config value that turns `status` into a
  *   command execution. Overridden here rather than trusted to be absent.
  * - `core.hooksPath` — pointed at the empty home, so no hook in the repository
