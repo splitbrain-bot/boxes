@@ -17,18 +17,22 @@ mid-task and find the finished thread when you come back.
   vetted IP, and can be given a host allowlist.
 - **No credentials in the sandbox.** Sessions hold placeholder tokens. The
   proxy swaps in the real ones on the wire, and refuses any other credential
-  to those hosts — so a leaked placeholder is worth nothing.
+  to those hosts — so a leaked placeholder is worth nothing. The real ones are
+  entered on the dashboard's settings page and never leave the orchestrator.
 - **One service, one port.** The orchestrator serves the UI, the REST API and
   the WebSocket gateway on `:3000`. No second origin, nothing to configure.
-- **Claude Code today**, other agents later — sessions speak the Agent Client
-  Protocol (ACP).
+- **Two agents, one checkout.** A conversation runs Claude Code or OpenAI
+  Codex, chosen when it is started, and one box can hold both on the same
+  workspace. Sessions speak the Agent Client Protocol (ACP).
 
 `ARCHITECTURE.md` describes how it is built.
 
 ## Requirements
 
 - Docker with Compose v2, on Linux or macOS
-- A Claude token from `claude setup-token` (subscription-based, inference only)
+- A credential for whichever agent you want to run: a Claude token from
+  `claude setup-token` (subscription-based, inference only), an OpenAI API key
+  for Codex, or both. They are entered in the dashboard rather than in a file
 - Node 22+ — only if you want to develop on Boxes itself
 
 ## Install
@@ -169,37 +173,85 @@ the repo, point at it instead:
 BOXES_ENV=~/.config/boxes.env docker compose up -d
 ```
 
-To run an agent turn you need one credential:
+**No credential belongs in that file.** The Claude token, the OpenAI key a
+Codex thread runs on, the GitHub token and the git identity are entered in the
+dashboard and kept in the database, because a credential has to be enterable
+without a restart and a subscription login has no static form at all. `.env`
+carries deployment settings only: ports, limits, the allowlist, where the data
+lives.
 
-```sh
-claude setup-token          # then export it, or put it in ./.env
-export PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-docker compose up -d
-```
+### The settings page
 
-The two credentials are the only settings compose takes from the shell, so
-they need never be written down. That is also why they are the only two a
-`BOXES_ENV` file cannot carry — use the shell or `./.env` for those, and the
-env file for everything else.
+The key in the session list's header opens **Settings**, at `/settings`: one
+card per credential, and the identity every box commits as.
 
-Without it, sessions still start and the UI still works — only inference
-fails. Alternatively skip the variable and log in inside a session, which
-keeps the credential in that session's home and out of every file:
+| | What it is | Without it |
+|---|---|---|
+| Claude | The token `claude setup-token` prints, `sk-ant-oat01-…` | A Claude Code thread fails at its first prompt |
+| OpenAI | An API key, `sk-…` | A Codex thread fails at its first prompt |
+| GitHub | A classic personal access token, `ghp_…` | git and gh reach GitHub unauthenticated, and a push is refused |
+| Git identity | The name and email a box commits as | Boxes commit as `boxes-bot <boxes-bot@users.noreply.github.com>` |
 
-```sh
-docker exec -it session-<id> claude /login
-```
+A secret is write-only. It goes in, and what comes back out is its last four
+characters, whether it is working, and what it last failed with — enough to
+tell two tokens apart and not enough to be worth reading off a screen.
 
-### Settings
+Entering one takes effect within the second: the egress policy is recomposed
+and pushed the moment it is stored. It reaches boxes that already exist,
+including ones created before any credential was set, because every box holds
+a placeholder for every credential whether or not that credential exists yet.
+Nothing is restarted and nothing is recreated.
+
+Until a credential is there the session list says so, one line per agent that
+cannot run a turn, naming this page. Boxes still start and the dashboard still
+works; only a turn fails, and the new-thread dialog offers that agent greyed
+out with the reason beside it rather than letting you get there.
+
+**Logging in rather than pasting.** An account is not a string anybody can
+type into a form, so the page also offers a login: it runs the harness's own
+CLI in a throwaway container, shows you the URL and the one-time code, takes
+the code back where the CLI asks for one pasted, and stores what it produced.
+The orchestrator is the only holder of that and the only thing that refreshes
+it, so nothing in a box can rotate a token out from under the deployment.
+
+A Claude login ends in a token like the pasted one, good for a year and not
+renewable — at expiry the page says so and asks for another. A ChatGPT login
+ends in something else: a document rather than a header value, for traffic that
+goes to a host the proxy deliberately does not intercept. Boxes stores it and
+keeps it refreshed, and cannot hand it to a box yet — so a Codex thread still
+wants a pasted API key, and the settings page says exactly that rather than
+leaving the agent greyed out for no visible reason.
+
+**There is no logging in inside a box.** The CLIs prefer a credential in their
+environment to their own stored login, and every box now has one in its
+environment from the moment it is created — so `claude /login` in a session
+container has nothing left to do. The settings page is the way in.
+
+**The data volume now holds live credentials.** They are stored as-is in
+SQLite, with no encryption layer: the orchestrator has to hand them to the
+proxy on every boot, and there is nobody to ask for a passphrase. So a backup
+of that volume is a backup of your logins, and the reverse proxy in front of
+the dashboard is a requirement rather than a suggestion — see
+[Behind a reverse proxy](#behind-a-reverse-proxy).
+
+### Upgrading a deployment from before this
+
+There is no compatibility, and no migration. A deployment that had its
+credentials in the environment comes up with none: nothing is imported from
+`.env` or from the shell, and the tokens have to be entered on the settings
+page once. A box built before the upgrade also stops reading the record an
+older entrypoint left at `~/.claude/.boxes-managed`, so whatever that start
+installed stays in the box's home until the same path is installed again. What
+does carry over is the work: every session, every thread and every transcript
+comes back as it was, each thread on Claude Code and on the model it was last
+left on.
+
+### Environment settings
 
 | Variable | Default | What |
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1` | Interface the port is published on |
 | `HOST_PORT` | `3000` | Published port |
-| `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN` | — | Claude token; without it no turn can run |
-| `PROFILE_DEFAULT_GH_TOKEN` | — | Classic GitHub PAT for the bot account |
-| `PROFILE_DEFAULT_GIT_NAME` | `boxes-bot` | Git author name in sessions |
-| `PROFILE_DEFAULT_GIT_EMAIL` | `boxes-bot@users.noreply.github.com` | Git author email |
 | `WS_AUTH_TOKEN` | generated | Gateway bearer token; generated on first boot into `/data/ws-auth-token` and reused |
 | `SESSION_IMAGE` | `boxes-session:latest` | Image sessions run |
 | `SESSION_UID` | `1020` | uid session processes run as, and the owner of every workspace file. The session image must be built on it |
@@ -224,7 +276,9 @@ docker exec -it session-<id> claude /login
 | `EGRESS_ALLOWED_HOSTS` | — | Hosts sessions may reach; empty means every public host |
 
 Everything is parsed and validated at boot, so a bad value fails startup
-rather than surfacing later. `orchestrator/src/config.ts` is the full list.
+rather than surfacing later. `orchestrator/src/config.ts` is the full list, and
+it is deployment settings only: no credential and no git identity is read from
+the environment at all.
 
 ## Run
 
@@ -243,18 +297,21 @@ API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
 
 The smoke test needs no credentials: it creates throwaway sessions, asserts the
 isolation properties from inside a container, and cleans up. Run it after any
-change to networking, the proxy, or the session image. Where the deployment
-*has* configured credentials or an allowlist, it additionally proves that no
-real credential is inside a session and that the allowlist bites.
+change to networking, the proxy, or the session image. Hand it a credential
+in its environment and it seeds the store over the API first, then proves that
+no real credential is inside a session; where an allowlist is set, it proves
+that the allowlist bites.
 
 ## Use
 
 Open <http://localhost:3000>.
 
-**Create a session.** Give it a name. The session gets its own container,
-network and storage, and its workspace starts empty — tell the agent what to
-fetch into it. If the deployment has any agent sets beyond the global one, pick
-which of them this box gets.
+**Create a session.** Give it a name, and say what its first conversation
+runs: the agent, and under it the mode, the model and whatever else that agent
+offers. The session gets its own container, network and storage, and its
+workspace starts empty — tell the agent what to fetch into it. If the
+deployment has any agent sets beyond the global one, pick which of them this
+box gets.
 
 **Talk to the agent.** Tap a session card to open its thread. That is the whole
 interface: type, and the turn runs in the container. Close the tab or lock your
@@ -266,6 +323,26 @@ The tab's title is the box and the conversation, behind a symbol for what that
 thread is doing: `⟳` running a turn, `⚠` waiting for a permission decision,
 `?` waiting for an answer, `○` idle. Several boxes in several tabs is the
 normal way to use this, and the symbol is the part a narrow tab still shows.
+
+**Pick the agent per conversation.** Which harness runs a thread is settled
+when the thread is started and belongs to the thread rather than to the box —
+so one box can hold a Claude Code thread and a Codex thread on the same
+checkout, working the same files. **New thread** opens a dialog asking the
+same question the create form does: the agent, then its mode, its model and
+its effort. It opens on whatever you chose last for that agent, kept on the
+deployment so it is the same on every device, and it offers only the agents
+whose credential works — the others are greyed out and say why. A deployment
+that has never run an agent has nothing to offer but the choice of agent
+itself; the thread then starts on that agent's defaults and the agent's own
+answer fills the sliders in on its first turn. A thread's row and its header
+both say which agent it is, because that is what its settings mean.
+
+Codex's two sandboxed modes say they may be unavailable in this deployment.
+They run every command under a sandbox that needs a kernel facility a hardened
+container is unlikely to grant, and the adapter cannot know what the container
+it was started in allows — so they are offered with the caveat rather than
+hidden. The container is the boundary either way, which is why a fresh Codex
+thread starts in full access.
 
 **Watch it think.** A turn shows the agent's reasoning as a collapsed
 *Reasoning* line above what it does, streaming while it goes. The sliders in
@@ -285,9 +362,12 @@ one workspace, listed under its card, each with its own link. **Fork** branches
 the one you are in, and the button offers to open it in a new tab — so you can
 ask the fork about what the original is doing without stopping it or losing
 your place. It opens on everything that was said up to the branch, and goes
-its own way from there. A fork starts in `plan` mode, because it shares the original's
-checkout and two agents editing the same files at once is a mess neither can
-see; flip it to `auto` under the header's sliders when that is what you want.
+its own way from there. A fork asks nothing and stays on the agent that wrote
+the transcript, since only that agent can load it. It starts in the mode that
+reads rather than writes — `plan` under Claude Code, `read-only` under Codex —
+because it shares the original's checkout and two agents editing the same
+files at once is a mess neither can see; flip it under the header's sliders
+when that is what you want.
 
 **Mark a thread done.** The check in a thread's header says you are finished
 with that conversation, and the list draws it struck through — so a box that
@@ -395,11 +475,27 @@ start. The one thing the editor cannot show is that bottom layer, because it
 lives in the image rather than the database — so if a skill you did not write
 turns up in a box, this is where it came from.
 
-Inside the box, the merged set is installed into the agent's own configuration:
-the `AGENTS.md` as its user-level memory, so it applies wherever in the box the
-agent is working; a skill as `skills/<name>/SKILL.md`, which needs YAML front
-matter naming and describing it or it is not loaded at all; a command as
-`commands/<name>.md`, invoked as `/<name>` in the composer.
+Inside the box, the merged set is installed into each agent's own
+configuration — both of them, always, because a box may hold threads of either
+and a set belongs to the box rather than to an agent:
+
+| | Claude Code | Codex |
+|---|---|---|
+| `AGENTS.md` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
+| Skill | `~/.claude/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
+| Slash command | `~/.claude/commands/<name>.md` | `~/.codex/prompts/<name>.md` |
+
+The `AGENTS.md` lands as that agent's user-level memory, so it applies wherever
+in the box the agent is working. A skill needs YAML front matter naming and
+describing it or it is not loaded at all. A command is invoked as `/<name>` in
+the composer. Neither agent reads the other's directories, and a few kilobytes
+written twice is cheaper than a box that would have to know in advance which
+agent it will be asked for.
+
+What was installed is recorded in `~/.boxes/managed`, and the next start
+removes exactly those paths before installing again — so a skill deleted in the
+dashboard disappears from the box, while anything the agent itself put in its
+home is never touched.
 
 **An edit reaches a box the next time that box starts.** Nothing is pushed into
 a running one. Stop and start it, or create a new one.
@@ -450,13 +546,30 @@ background subagent is not an agent that is still talking. A card in the
 session list carries the same fact about the box as a whole.
 
 What is listed is that conversation's own work and nothing another one left
-behind: which thread a command belongs to is read off the box, from the agent
-process it is running under. In the session list the same fact is the bullet
-beside each thread — dim blue for the one still running something, which is
-the conversation holding the box awake. **Stop** kills it — that command and anything it
-started, or everything the thread is running. It is a kill and not an
-interrupt, because a background command outlives the turn that started it by
-design and cancelling the conversation would leave it running.
+behind: the agent announces a task when it starts one and again when it ends,
+and the bar is what it announced. In the session list the same fact is the
+bullet beside each thread — dim blue for the one still running something, which
+is the conversation holding the box awake. **Stop** names the task back to the
+agent that started it — that one, or everything the thread is running. It is a
+stop and not an interrupt, because a background command outlives the turn that
+started it by design and cancelling the conversation would leave it running.
+
+An agent that has been restarted since knows nothing about what it left
+running. The announcements live in the adapter process, so a box that was
+stopped and started, or an orchestrator that was deployed mid-build, comes
+back with empty bars and a build still compiling. The box itself is still read
+underneath — which is what keeps that build from being reaped — and the
+session card offers **Stop everything running in this box** for work no thread
+can name any more.
+
+**A long background command under Codex may not be long.** Codex has no
+"run this in the background" flag: its shell tool yields after a timeout and
+leaves the process running as something the model can poll back, and its
+source carries a default background timeout of 300 seconds. Whether that ends
+the process at the five-minute mark has not been measured here, so expect a
+Codex background bar to be a five-minute affair and a two-hour build to need
+the agent to detach it itself. Claude Code has no such limit. Nothing in Boxes
+changes either way.
 
 ## Notifications
 
@@ -493,9 +606,12 @@ own schedule — is dropped on the next attempt without anybody doing anything.
 
 ## Behind a reverse proxy
 
-Boxes has no authentication and holds the Docker socket, so as shipped it binds
-to `127.0.0.1`. Anything beyond a single-user machine needs a reverse proxy in
-front — Caddy, nginx, Traefik, whatever you already run. Proxy to
+Boxes has no authentication, holds the Docker socket and now holds the
+deployment's credentials, so as shipped it binds to `127.0.0.1`. Anything
+beyond a single-user machine needs a reverse proxy in front — a requirement
+rather than a suggestion: the settings page enters live logins over `/api`, and
+anything that can reach that route can read back which accounts they are for
+and replace them — Caddy, nginx, Traefik, whatever you already run. Proxy to
 `127.0.0.1:3000`, or join the `boxes_default` network and use
 `orchestrator:3000` if the proxy is itself a container. Only widen `BIND_ADDR`
 once something else is doing the authenticating.
@@ -520,23 +636,47 @@ Two settings shape it, and both default to something safe.
 list of exact hostnames and one-label wildcards:
 
 ```
-EGRESS_ALLOWED_HOSTS=github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,registry.npmjs.org
+EGRESS_ALLOWED_HOSTS=github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,api.openai.com,registry.npmjs.org
 ```
 
 `*.example.com` matches `a.example.com`, but neither `example.com` nor
 `a.b.example.com`. An address literal matches only as a literal. Leave it unset
 and behaviour is what it has always been: any public host, private ranges still
-denied. The hosts of a credential you configured are always reachable, so a
-narrow list can never sever inference or GitHub.
+denied. The hosts of a credential you have stored are always reachable, so a
+narrow list can never sever inference or GitHub — and so are the hosts that
+credential's own tools need, which is how a Codex login and a token refresh
+keep working under a list that names neither.
 
-**Token translation.** It is always on, and it applies to whichever credentials
-you configured:
+**Token translation.** It is always on, and a host becomes a translated host
+the moment its credential is entered on the settings page:
 
-- Set `PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`, and `api.anthropic.com`
-  becomes a translated host.
-- Set `PROFILE_DEFAULT_GH_TOKEN`, and the GitHub hosts do.
-- Leave one unset and its host stays an ordinary tunnel, which is what keeps
-  the "log in inside a session with `claude setup-token`" flow working.
+| Credential | Translated | Reachable, never translated |
+|---|---|---|
+| Claude | `api.anthropic.com` | `console.anthropic.com`, `platform.claude.com`, `claude.ai` |
+| OpenAI | `api.openai.com` | `auth.openai.com`, `chatgpt.com` |
+| GitHub | `github.com`, `api.github.com`, `*.githubusercontent.com` | `codeload.github.com` |
+
+Leave a credential unstored and its host stays an ordinary tunnel. The
+placeholder a box holds for it is then worth nothing at all — the service is
+handed a bearer it has never issued and refuses it — which is the intended
+failure, and the thread dialog is what keeps you from getting there. A ChatGPT
+subscription is the same case for a different reason: what a login leaves is a
+document rather than a header value, so there is nothing for the proxy to swap
+and its hosts stay opaque.
+
+`chatgpt.com` is deliberately not intercepted. It carries the other kind of
+OpenAI credential, a subscription, and the two kinds reject each other's
+material — so leaving it alone is what lets a deployment's API key and a
+person's subscription live in the same box. Two further hosts Codex uses come
+with no credential and are a deployment's own choice under a narrow list:
+`files.openai.com`, which model attachments are fetched from, and
+`ab.chatgpt.com`, its telemetry. A list that omits them makes the proxy refuse
+both — expect them in its denial counters — and Codex carries on.
+
+Every box holds a placeholder for every credential this deployment can
+translate, whether or not that credential exists yet, and is given the
+deployment CA on the same terms. A container's environment is fixed when it is
+created, so a box built today has to work with a token entered tomorrow.
 
 For a translated host the session holds a placeholder of the same shape as the
 real token, and:
@@ -551,11 +691,13 @@ deployment, swaps the placeholder for the real credential, and refuses any
 implies "any Anthropic account is reachable". Everything else stays an opaque
 tunnel the proxy cannot read.
 
-The real credentials live in the orchestrator's environment and in the proxy's
-memory, and nowhere else. The proxy has no config file, no database and no CA
+The real credentials live in the orchestrator's database and in the proxy's
+memory, and nowhere else — never in a session container, and never in a file
+outside the data volume. The proxy has no config file, no database and no CA
 on disk: it boots empty and is handed its policy over an authenticated channel
 on the compose network, which no session can route to. Restart it and the
-orchestrator's reconciler pushes again within a minute.
+orchestrator's reconciler pushes again within a minute; enter a credential and
+the push happens at once rather than at the next tick.
 
 The CA certificate reaches each session as `BOXES_PROXY_CA`, written by the
 entrypoint to `~/.boxes/proxy-ca.crt`, with `NODE_EXTRA_CA_CERTS`,
@@ -680,7 +822,9 @@ tracing, video and `run-code` for arbitrary Playwright snippets are all there;
 `playwright-cli install --skills --global` on every start. That writes
 `~/.claude/skills/playwright-cli/` — a SKILL.md plus nine reference files
 maintained by the Playwright team — rather than into the workspace, which is a
-git checkout and none of the image's business. Re-running each start means the
+git checkout and none of the image's business. The entrypoint then copies it
+to `~/.agents/skills/playwright-cli/`, which is where Codex looks for skills
+and where the CLI does not put one. Re-running each start means the
 copy in the session's home follows the image instead of being frozen at whatever
 that volume was initialised with.
 
@@ -936,14 +1080,21 @@ Known residual risks, accepted deliberately:
 - `GET /api/sessions` returns `WS_AUTH_TOKEN`, behind that same auth.
 - A compromised proxy sees the credentials it injects. That is true of any
   injecting proxy; what this one adds is that it leaves nothing at rest.
-- A credential you do *not* configure is not translated. A session that logs
-  itself in with `claude setup-token` holds its own token, and prompt injection
-  can leak that one.
+- The deployment's credentials are on the data volume, stored as-is in SQLite
+  with no encryption layer — the orchestrator has to hand them to the proxy on
+  every boot, and there is nobody to ask for a passphrase. A backup of that
+  volume holds live logins, and anything that reaches `/api` can replace them.
+- A credential you have not stored is not translated, and the placeholder a box
+  holds for it is refused by the service rather than working unauthenticated.
+  A session can no longer log itself in either, so there is no path by which a
+  box comes to hold a credential of its own.
 - Sibling sessions share a deployment's placeholders, so they map to the same
   real credentials. Per-session placeholders arrive with per-session
   credentials.
-- Protocol behaviour depends on the `claude-agent-acp` build the session
-  image pins. Re-check capabilities and WebSocket framing on upgrade.
+- Protocol behaviour depends on the adapter builds the session image pins —
+  `claude-agent-acp` and `codex-acp`, and the agent each of them drives.
+  Re-check capabilities, the async-task extension and WebSocket framing on
+  upgrade.
 
 ## Development
 
@@ -966,8 +1117,10 @@ browser suite asserts that page.
 
 `scripts/live-test.sh` covers what only real inference can prove — a turn
 surviving the browser leaving, thread replay on reattach, a permission request
-held with nobody watching — and needs
-`PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN`.
+held with nobody watching. It needs a real Claude token, which it seeds into
+the credential store over the API before it creates anything; the variable to
+pass it in is named in the script's own header. Give it an OpenAI key as well
+and it runs a Codex thread beside the Claude one in the same box.
 
 ### Frontend conventions
 
@@ -1001,5 +1154,5 @@ npm run check && npm test
 | `session-image/` | The per-session container image |
 | `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
 | `scripts/smoke-test.sh` | Security smoke test, no credentials needed |
-| `scripts/live-test.sh` | The checks that need a real Claude token |
+| `scripts/live-test.sh` | The checks that need a real credential and real inference |
 | `ARCHITECTURE.md` | How the system is put together |

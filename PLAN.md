@@ -1259,3 +1259,34 @@ Findings against the sources:
   background timeout; verify step 11 asks what that does to a long build.
 - Codex's telemetry host and its attachments host are added to the endpoint
   table so an allowlisted deployment is not surprised by the denials.
+
+## Appendix D: found while building
+
+Three things the plan did not know, recorded where the next reader will look.
+
+- **The ACP SDK eats an update it does not know.** `@agentclientprotocol/sdk`
+  1.3.0's client installs a session-update router ahead of every handler an app
+  registers, and that router parses each `session/update` against the schema it
+  was generated from and throws on a `sessionUpdate` outside it. A handler that
+  throws takes the whole message with it, so a raw parser never sees the frame,
+  and every async-task notification was logged as invalid params and dropped.
+  The connection therefore lifts those lines off the adapter's stdout before
+  the SDK parses them and delivers them by the path the SDK would have used —
+  `siftExtensions` in `gateway/adapter.ts`. Section 8.1's "the gateway passes
+  them through raw as it does everything else" is not enough on its own.
+- **`processToken` alone misclassifies the agent as an adapter.**
+  `claude-agent-acp` is on the *agent's* command line too, because the CLI the
+  adapter spawns lives inside the adapter package's own `node_modules`. The
+  rule in section 8.2 would have read an agent as an adapter and everything
+  under it as an agent, which is work made invisible. `readBox` counts a
+  token-carrying process as an adapter only when no harness's
+  `residentProcesses` pattern matches it and nothing above it carries a token
+  either; either test alone is enough.
+- **None of section 3's box runs could be made.** No Docker daemon was
+  available in the sessions that built this, so verify steps 1 to 11 are all
+  still open. Step 4 blocks nothing that has been written but has to be settled
+  before a Codex thread's egress is relied on; steps 2, 3, 5 and 11 shape
+  values and copy that are in place on the sources alone; steps 8 and 9 shape
+  the login flows, which parse for shapes rather than for wording so that a
+  surprise is recoverable by hand. Every path that rests on one carries a
+  comment naming the step.
