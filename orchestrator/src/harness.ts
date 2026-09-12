@@ -1,0 +1,188 @@
+/**
+ * The harness registry. One record per agent harness the orchestrator can run
+ * in a box, and the single place any harness-specific value is written down.
+ *
+ * Everything in here is a value, never behaviour: the modules that spawn an
+ * adapter, mint a thread, materialize an agent set or read a box's process
+ * table ask the registry what this harness wants and then do the one thing
+ * they do. A harness that needs something none of the fields express wants a
+ * new field, not a branch at the call site — the point of the table is that
+ * adding a third harness is an entry rather than a search for every `if`.
+ */
+
+/**
+ * Which credential a harness needs before a thread on it can run.
+ *
+ * It lives here only until the credential store exists; `credentials.ts` owns
+ * this type once it lands, and the registry imports it from there.
+ */
+export type CredentialId = 'claude' | 'openai' | 'github';
+
+export type HarnessId = 'claude' | 'codex';
+
+export interface AgentLayout {
+  /** Home-relative path of the instructions file. */
+  agentsMd: string;
+  /** Home-relative directory a skill's `<name>/SKILL.md` goes under. */
+  skills: string;
+  /** Home-relative directory a command's `<name>.md` goes in. */
+  commands: string;
+}
+
+export interface Harness {
+  id: HarnessId;
+  /** What the dashboard calls it. */
+  label: string;
+  /** argv for the adapter, spawned as a docker exec in the box. */
+  cmd: readonly string[];
+  /**
+   * The token the adapter's own process is recognised by in the box's
+   * process table. `cmd[0]` for both, kept as its own field because the
+   * reading and the spawn are different questions.
+   */
+  processToken: string;
+  /**
+   * Processes that sit under the adapter and are the harness itself rather
+   * than work it is doing: the agent process and any long-lived helper.
+   * Matched against the command line.
+   */
+  residentProcesses: readonly RegExp[];
+  /** Mode a fresh thread is put in, when the adapter offers it. */
+  defaultModeId: string;
+  /** Mode a fork starts in instead. */
+  forkModeId: string;
+  /** Config option values a fresh thread starts with, by option id. */
+  defaultConfig: Readonly<Record<string, string>>;
+  /** `_meta` sent with session/new, session/load and session/fork, or undefined. */
+  sessionMeta: Readonly<Record<string, unknown>> | undefined;
+  /** Which credential must be present before a thread can run. */
+  credentialId: CredentialId;
+  /**
+   * Container environment this harness needs. `placeholder` is what the box
+   * holds in place of the credential: the real secret never enters a box, and
+   * the egress proxy swaps the placeholder for it on the way out.
+   */
+  env: (placeholder: string) => Record<string, string>;
+  /** Where an agent set is installed, home-relative. */
+  layout: AgentLayout;
+  /** Tools that background their work whatever their input says. */
+  alwaysBackground: ReadonlySet<string>;
+}
+
+export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
+  claude: {
+    id: 'claude',
+    label: 'Claude Code',
+    cmd: ['claude-agent-acp'],
+    processToken: 'claude-agent-acp',
+    // Read from the adapter's source, not yet confirmed against a real box's
+    // process table (PLAN.md section 3, verify step 2): the adapter spawns the
+    // Claude Code CLI as its agent and nothing else that outlives a turn. The
+    // pattern matches the `claude` argv0 and not a workspace path that merely
+    // contains the word.
+    residentProcesses: [/(^|\/)claude(\s|$)/],
+    defaultModeId: 'auto',
+    forkModeId: 'plan',
+    defaultConfig: { model: 'opus' },
+    /**
+     * What the adapter is asked for on the thinking side. `summarized` is what
+     * makes the agent's reasoning readable: the default `omitted` streams
+     * thinking blocks with a signature and no text, so the adapter has nothing
+     * to put in an `agent_thought_chunk`. `enabled` with a budget rather than
+     * `adaptive`, because a model that predates `adaptive` rejects it.
+     */
+    sessionMeta: {
+      claudeCode: {
+        options: {
+          thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
+        },
+      },
+    },
+    credentialId: 'claude',
+    env: (placeholder: string) => ({
+      CLAUDE_CODE_OAUTH_TOKEN: placeholder,
+      CLAUDE_CONFIG_DIR: '/home/agent/.claude',
+    }),
+    layout: {
+      agentsMd: '.claude/CLAUDE.md',
+      skills: '.claude/skills',
+      commands: '.claude/commands',
+    },
+    alwaysBackground: new Set(['Monitor', 'Workflow']),
+  },
+  codex: {
+    id: 'codex',
+    label: 'Codex',
+    cmd: ['codex-acp'],
+    processToken: 'codex-acp',
+    // Same caveat as Claude's: read from `codex-acp`'s source, still to be
+    // confirmed against a real box (PLAN.md section 3, verify step 2). The
+    // adapter spawns the Codex binary as `codex app-server` and talks JSON-RPC
+    // to it for the life of the exec; what else sits under that app-server —
+    // a sandbox helper, an MCP server — is exactly what step 2 is for, and
+    // anything long-lived it finds belongs in this list.
+    residentProcesses: [/codex app-server/],
+    /**
+     * `agent-full-access` rather than the adapter's own `agent` default: the
+     * other two modes run each command under bubblewrap, which needs
+     * unprivileged user namespaces the session container is unlikely to grant.
+     * The container is the boundary here, which is what Codex's own docs say
+     * to do when the sandbox cannot start. Verify step 3 settles it.
+     */
+    defaultModeId: 'agent-full-access',
+    forkModeId: 'read-only',
+    /** Empty: a fresh Codex thread stays on the adapter's own default model. */
+    defaultConfig: {},
+    sessionMeta: undefined,
+    credentialId: 'openai',
+    /**
+     * `CODEX_API_KEY` is read by the adapter, not by Codex itself: with
+     * `DEFAULT_AUTH_REQUEST` naming the `api-key` method, `codex-acp` logs
+     * itself in from the environment when a session call finds no account, and
+     * Codex persists the key to `$CODEX_HOME/auth.json` from there.
+     * `NO_BROWSER` hides the browser-based method, which would otherwise open
+     * a browser inside the box.
+     *
+     * `CODEX_CA_CERTIFICATE` is deliberately absent. Codex wants it to trust
+     * the egress proxy's CA, but that is a fact about the deployment rather
+     * than about the harness, so it is set in `sessionEnv` beside
+     * `SSL_CERT_FILE` and the other CA variables.
+     */
+    env: (placeholder: string) => ({
+      CODEX_API_KEY: placeholder,
+      CODEX_HOME: '/home/agent/.codex',
+      NO_BROWSER: '1',
+      INITIAL_AGENT_MODE: 'agent-full-access',
+      DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
+    }),
+    /**
+     * Codex reads its own instructions from `$CODEX_HOME/AGENTS.md` and its
+     * slash commands from `$CODEX_HOME/prompts`, while skills come from the
+     * harness-neutral `~/.agents/skills`.
+     */
+    layout: {
+      agentsMd: '.codex/AGENTS.md',
+      skills: '.agents/skills',
+      commands: '.codex/prompts',
+    },
+    /** Codex has no tool that backgrounds itself regardless of its input. */
+    alwaysBackground: new Set<string>(),
+  },
+};
+
+/** Every harness id, in the order the dashboard offers them. */
+export const HARNESS_IDS: readonly HarnessId[] = Object.keys(HARNESSES) as HarnessId[];
+
+/**
+ * The harness a stored id names.
+ *
+ * Throws rather than falling back, because every caller has taken the id from
+ * a database row or a request body and an id that names no harness means one
+ * of those is wrong: a thread would otherwise silently run on the wrong agent.
+ */
+export function harness(id: string): Harness {
+  // Own properties only: `constructor` and `toString` are on every object and
+  // name no harness.
+  if (!Object.hasOwn(HARNESSES, id)) throw new Error(`Unknown harness: ${id}`);
+  return HARNESSES[id as HarnessId];
+}
