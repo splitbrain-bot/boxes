@@ -17,7 +17,11 @@
 #
 #   PROFILE_DEFAULT_GH_TOKEN=ghp_...
 #   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-#   EGRESS_ALLOWED_HOSTS='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,registry.npmjs.org'
+#   PROFILE_DEFAULT_OPENAI_API_KEY=sk-...
+#   EGRESS_ALLOWED_HOSTS='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,api.openai.com,registry.npmjs.org'
+#
+# The OpenAI key is what Codex runs on, and the Codex half of this script is
+# skipped without it.
 set -uo pipefail
 
 API_BASE="${API_BASE:-http://localhost:3000}"
@@ -115,16 +119,20 @@ trap cleanup EXIT
 # the orchestrator's own environment, where they no longer are.
 REAL_GH="${PROFILE_DEFAULT_GH_TOKEN:-}"
 REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
+REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
 
 # Seeds one credential, and says so if the deployment refuses it. Before the
 # sessions, so the boxes below are created against the policy that results —
 # though a box created before one is entered holds the same placeholder.
+#
+# The method is how the secret was obtained, which the settings page would
+# have known: a pasted API key is `api_key` and a pasted token is `token`.
 seed_credential() {
-  local id="$1" secret="$2"
+  local id="$1" secret="$2" method="${3:-token}"
   [ -z "$secret" ] && return 0
   if api -f -X PUT "$API_BASE/api/credentials/$id" \
        -H 'Content-Type: application/json' \
-       -d "$(jq -n --arg s "$secret" '{method:"token",secret:$s}')" >/dev/null; then
+       -d "$(jq -n --arg m "$method" --arg s "$secret" '{method:$m,secret:$s}')" >/dev/null; then
     grey "seeded the $id credential"
   else
     red "could not seed the $id credential"; exit 1
@@ -132,11 +140,12 @@ seed_credential() {
 }
 
 echo "== seeding the deployment's credentials =="
-if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ]; then
+if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ] && [ -z "$REAL_OPENAI" ]; then
   grey "none passed: the translation checks below will be skipped"
 else
   seed_credential github "$REAL_GH"
   seed_credential claude "$REAL_CLAUDE"
+  seed_credential openai "$REAL_OPENAI" api_key
 fi
 
 echo
@@ -155,6 +164,39 @@ SIBLING_CONTAINER="session-$SIBLING_ID"
 SIBLING_IP=$(docker inspect -f \
   '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIBLING_CONTAINER" 2>/dev/null)
 grey "session=$SESSION_ID sibling=$SIBLING_ID sibling_ip=${SIBLING_IP:-unknown}"
+
+echo
+echo "== both harnesses in one box =="
+# One box, one checkout, two agents on the same work is what a per-thread
+# harness is for. The box is created with a Claude thread; this adds a Codex
+# one beside it, which is a row and an adapter of its own rather than a second
+# container.
+if [ -z "$REAL_OPENAI" ]; then
+  grey "skipped: no OpenAI key was passed, so a Codex thread could not run a turn"
+  noted=$((noted+1))
+else
+  ADDED_HARNESS=$(api -X POST "$API_BASE/api/sessions/$SESSION_ID/threads" \
+    -H 'Content-Type: application/json' \
+    -d '{"options":{"harness":"codex"}}' | jq -r '.harness')
+  if [ "$ADDED_HARNESS" = "codex" ]; then
+    green "ok   (a Codex thread was added):  the box now holds one of each"; pass=$((pass+1))
+  else
+    red   "FAIL (no Codex thread):        the box would not take one"; fail=$((fail+1))
+  fi
+  HARNESSES=$(api "$API_BASE/api/sessions/$SESSION_ID/threads" | jq -r '[.[].harness] | sort | unique | join(",")')
+  if [ "$HARNESSES" = "claude,codex" ]; then
+    green "ok   (two harnesses, one box):   $HARNESSES"; pass=$((pass+1))
+  else
+    red   "FAIL (harnesses in the box):   wanted claude,codex, got ${HARNESSES:-none}"; fail=$((fail+1))
+  fi
+  # And the deployment agrees a Codex thread can run at all, which is the key
+  # having reached the proxy rather than only the database.
+  if api "$API_BASE/healthz" | jq -e '.harnesses[] | select(.id=="codex") | .runnable' >/dev/null; then
+    green "ok   (Codex is runnable):        /healthz says the key works"; pass=$((pass+1))
+  else
+    red   "FAIL (Codex is not runnable):  /healthz says it has no usable credential"; fail=$((fail+1))
+  fi
+fi
 
 echo
 echo "== MUST FAIL: direct (proxy-bypassing) egress =="
@@ -315,11 +357,12 @@ fi
 
 echo
 echo "== token translation: the session holds placeholders, not credentials =="
-if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ]; then
+if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ] && [ -z "$REAL_OPENAI" ]; then
   grey "skipped: no credential was seeded, so this deployment translates none"
 else
   absent_from_session "GH_TOKEN is nowhere in the session" "$REAL_GH"
   absent_from_session "CLAUDE_CODE_OAUTH_TOKEN is nowhere in the session" "$REAL_CLAUDE"
+  absent_from_session "CODEX_API_KEY is nowhere in the session" "$REAL_OPENAI"
 
   if [ -n "$REAL_GH" ]; then
     # The placeholder must authenticate as the bot: proof the proxy swapped it.
@@ -332,6 +375,18 @@ else
   if [ -n "$REAL_CLAUDE" ]; then
     must_output "an invented Anthropic token is refused by the proxy" 'egress denied' \
       sh -c 'curl -sS -m 15 -H "Authorization: Bearer sk-ant-oat01-notTheDeploymentsToken" https://api.anthropic.com/v1/messages'
+  fi
+  if [ -n "$REAL_OPENAI" ]; then
+    # What a Codex turn is on the wire: the key the box holds is a placeholder,
+    # and OpenAI answering at all is the proof the proxy swapped it.
+    must_output "the OpenAI placeholder is swapped and OpenAI answers" '"object"' \
+      sh -c 'curl -sS -m 15 -H "Authorization: Bearer $CODEX_API_KEY" https://api.openai.com/v1/models'
+    must_output "an invented OpenAI key is refused by the proxy" 'egress denied' \
+      sh -c 'curl -sS -m 15 -H "Authorization: Bearer sk-notTheDeploymentsKey" https://api.openai.com/v1/models'
+    # Codex logs in and refreshes here and it is never intercepted, so the key
+    # can never be sent to it by mistake.
+    must_output "the login host presents its own certificate chain" 'issuer:' \
+      sh -c 'curl -sS -m 15 -v https://auth.openai.com/ 2>&1 | grep -i "issuer:" | grep -v "Boxes egress proxy CA"'
   fi
 
   # Interception is bounded: the deployment CA appears for a translated host
@@ -362,6 +417,16 @@ else
   # A narrow allowlist must never sever the credential hosts.
   must_pass "a credential host is implied by the allowlist" \
     curl -fsS -m 15 https://api.github.com
+  if [ -n "$REAL_OPENAI" ]; then
+    # No -f: an unauthenticated call to OpenAI is a 401, which is the host
+    # answering. What is under test is that the CONNECT is not refused here.
+    must_pass "the OpenAI key host is implied by the allowlist" \
+      curl -sS -m 15 -o /dev/null https://api.openai.com/v1/models
+    # alsoAllow: Codex logs in and refreshes here, so a narrow list may not
+    # sever it even though no credential is ever sent to it.
+    must_pass "Codex's login host comes with the OpenAI credential" \
+      curl -sS -m 15 -o /dev/null https://auth.openai.com/
+  fi
 fi
 
 echo

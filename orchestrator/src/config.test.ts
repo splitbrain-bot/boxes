@@ -161,12 +161,29 @@ test('the credential set describes where each credential travels', () => {
   // secrets that go with them come from the store.
   assert.deepEqual(
     CREDENTIAL_SET.map((c) => c.id),
-    ['claude', 'github'],
+    ['claude', 'openai', 'github'],
   );
   const github = CREDENTIAL_SET.find((c) => c.id === 'github');
   assert.ok(github?.hosts.includes('api.github.com'));
   assert.deepEqual(github?.headers, ['authorization']);
   assert.ok(CREDENTIAL_SET.every((c) => c.placeholderPrefix !== ''));
+});
+
+test('the OpenAI credential travels to the API-key endpoint alone', () => {
+  const openai = CREDENTIAL_SET.find((c) => c.id === 'openai');
+  // One intercepted host, because only `api.openai.com` takes an API key.
+  assert.deepEqual(openai?.hosts, ['api.openai.com']);
+  // Codex sends it as a bearer and nothing else.
+  assert.deepEqual(openai?.headers, ['authorization']);
+  // `chatgpt.com` is the subscription endpoint, which rejects an API key and
+  // whose credential Boxes does not hold yet; `auth.openai.com` is where Codex
+  // logs in and refreshes. Both have to stay reachable under a narrow
+  // allowlist, and neither may be intercepted.
+  assert.deepEqual(openai?.alsoAllow, ['auth.openai.com', 'chatgpt.com']);
+  assert.ok(!openai?.hosts.includes('chatgpt.com'));
+  // Codex checks the shape of the key before it sends it anywhere, so the
+  // placeholder has to look like one.
+  assert.equal(openai?.placeholderPrefix, 'sk-');
 });
 
 test('the session uid defaults off 1000 and is settable', () => {

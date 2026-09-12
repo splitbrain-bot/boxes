@@ -19,6 +19,8 @@
 # Optional:
 #   PROFILE_DEFAULT_GH_TOKEN=ghp_...  a real PAT; a fake one is used otherwise,
 #                                     which still exercises interception
+#   PROFILE_DEFAULT_OPENAI_API_KEY=sk-...  what a Codex thread runs on. Without
+#                                     one, every Codex check below is skipped
 #   SKIP_BUILD=1                      reuse the images already built
 #   SKIP_UNIT=1                       skip the two vitest suites
 #   SKIP_SUITES=1                     skip smoke-test.sh and live-test.sh
@@ -37,6 +39,7 @@ API_BASE="http://127.0.0.1:${HOST_PORT}"
 COMPOSE=(docker compose -f "$REPO/compose.yaml")
 REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
 REAL_GH="${PROFILE_DEFAULT_GH_TOKEN:-}"
+REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
 
 # A fake PAT still proves the GitHub half: it is intercepted and swapped, and
 # then rejected by GitHub rather than by the proxy, which is a different answer
@@ -47,7 +50,7 @@ if [ -z "$REAL_GH" ]; then
   GH_IS_FAKE=1
 fi
 
-ALLOWLIST='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,registry.npmjs.org'
+ALLOWLIST='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,api.openai.com,registry.npmjs.org'
 
 # ---------------------------------------------------------------- reporting --
 
@@ -63,7 +66,8 @@ head1() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 # replaced wherever they appear, whatever produced the text.
 redact() {
   sed -e "s|$REAL_GH|<GH_TOKEN>|g" \
-      ${REAL_CLAUDE:+-e "s|$REAL_CLAUDE|<CLAUDE_TOKEN>|g"}
+      ${REAL_CLAUDE:+-e "s|$REAL_CLAUDE|<CLAUDE_TOKEN>|g"} \
+      ${REAL_OPENAI:+-e "s|$REAL_OPENAI|<OPENAI_KEY>|g"}
 }
 
 # Drops the escapes a coloured suite writes, so its summary can be read.
@@ -127,6 +131,8 @@ grey "node $(node --version), docker compose $(docker compose version --short)"
 
 [ -z "$REAL_CLAUDE" ] && \
   grey "PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN is unset: the inference checks will be skipped"
+[ -z "$REAL_OPENAI" ] && \
+  grey "PROFILE_DEFAULT_OPENAI_API_KEY is unset: the Codex checks will be skipped"
 [ "$GH_IS_FAKE" = 1 ] && \
   grey "PROFILE_DEFAULT_GH_TOKEN is unset: using a fake PAT, which still exercises interception"
 
@@ -218,6 +224,7 @@ absent_from_log() {
   local id="$1" desc="$2" container="$3" hits=0
   docker logs "$container" 2>&1 | grep -qF -- "$REAL_GH" && hits=1
   [ -n "$REAL_CLAUDE" ] && docker logs "$container" 2>&1 | grep -qF -- "$REAL_CLAUDE" && hits=1
+  [ -n "$REAL_OPENAI" ] && docker logs "$container" 2>&1 | grep -qF -- "$REAL_OPENAI" && hits=1
   if [ "$hits" = 1 ]; then bad "$id" "$desc"; else ok "$id" "$desc"; fi
 }
 
@@ -279,12 +286,15 @@ else bad "health" "/healthz never answered"; dump_logs; exit 1; fi
 
 # The credentials, into the deployment's store. Once: they are on the data
 # volume, so they survive the restarts and the recreations below.
+#
+# The method is what the settings page would have recorded about how the
+# secret was obtained: a pasted OpenAI key is an `api_key`, the rest tokens.
 seed_credential() {
-  local id="$1" secret="$2"
+  local id="$1" secret="$2" method="${3:-token}"
   [ -z "$secret" ] && { skipped "seed-$id" "not configured"; return; }
   if curl -fsS -m 15 -X PUT "$API_BASE/api/credentials/$id" \
        -H 'Content-Type: application/json' \
-       -d "$(jq -n --arg s "$secret" '{method:"token",secret:$s}')" >/dev/null 2>&1; then
+       -d "$(jq -n --arg m "$method" --arg s "$secret" '{method:$m,secret:$s}')" >/dev/null 2>&1; then
     ok "seed-$id" "the $id credential is stored"
   else
     bad "seed-$id" "the deployment refused the $id credential"
@@ -292,6 +302,7 @@ seed_credential() {
 }
 seed_credential github "$REAL_GH"
 seed_credential claude "$REAL_CLAUDE"
+seed_credential openai "$REAL_OPENAI" api_key
 
 # ------------------------------------------------------------ A. the policy ---
 
@@ -306,7 +317,9 @@ matches "A2" "the allowlist is reported active" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.egress.allowlistActive'"
 
 WANT_CREDS="github"
-[ -n "$REAL_CLAUDE" ] && WANT_CREDS="claude github"
+[ -n "$REAL_CLAUDE" ] && WANT_CREDS="claude $WANT_CREDS"
+# Alphabetical, because the check sorts what /healthz reports.
+[ -n "$REAL_OPENAI" ] && WANT_CREDS="$WANT_CREDS openai"
 matches "A3" "the proxy holds exactly the stored credentials ($WANT_CREDS)" "^$WANT_CREDS\$" \
   bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.egress.credentialIds | sort | join(\" \")'"
 
@@ -370,14 +383,45 @@ else
 fi
 matches "B7" "the session holds a GitHub-shaped value" '^ghp_' \
   sx printenv GH_TOKEN
+# The Codex half of the same unconditional delivery: the key the adapter logs
+# itself in with, and the three variables that make it do so.
+matches "B7a" "the session holds an OpenAI-shaped value" '^sk-' \
+  sx printenv CODEX_API_KEY
+matches "B7b" "the adapter is told to log in with it" '^\{"methodId":"api-key"\}$' \
+  sx printenv DEFAULT_AUTH_REQUEST
+matches "B7c" "a fresh Codex thread starts in full access" '^agent-full-access$' \
+  sx printenv INITIAL_AGENT_MODE
+matches "B7d" "Codex's own state directory exists before it starts" '^ok$' \
+  sxs 'test -d "$CODEX_HOME" && echo ok'
+if [ -n "$REAL_OPENAI" ]; then
+  lacks "B7e" "that value is not the deployment's own key" "^$(printf '%s' "$REAL_OPENAI" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" \
+    sx printenv CODEX_API_KEY
+else
+  skipped "B7e" "no OpenAI key was passed to compare against"
+fi
 lacks "B8" "that value is not the deployment's own PAT" "^$(printf '%s' "$REAL_GH" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" \
   sx printenv GH_TOKEN
 
 absent "B9"  "the real Claude token is nowhere in the session" "$REAL_CLAUDE"
 absent "B10" "the real GitHub token is nowhere in the session" "$REAL_GH"
+absent "B10a" "the real OpenAI key is nowhere in the session" "$REAL_OPENAI"
 
 matches "B11" "the proxy is attached to the session network" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/api/sessions/$SESSION_ID' | jq -r '.proxyAttached'"
+
+# One box, one checkout, a thread of each agent in it. The thread is a row and
+# an adapter of its own rather than a second container, so this costs nothing
+# but the request.
+if [ -z "$REAL_OPENAI" ]; then
+  skipped "B11a" "no OpenAI key, so a Codex thread could not run"
+  skipped "B11b" "no OpenAI key, so a Codex thread could not run"
+else
+  matches "B11a" "the box takes a Codex thread beside its Claude one" '^codex$' \
+    bash -c "curl -fsS -m 30 -X POST '$API_BASE/api/sessions/$SESSION_ID/threads' \
+      -H 'Content-Type: application/json' -d '{\"options\":{\"harness\":\"codex\"}}' | jq -r '.harness'"
+  matches "B11b" "and /healthz says a Codex thread can run a turn" '^true$' \
+    bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.harnesses[] | select(.id==\"codex\") | .runnable'"
+fi
 
 # ------------------------------------------------- B2. agent configuration ---
 
@@ -550,6 +594,26 @@ else
     sxs 'gh api user'
 fi
 
+if [ -n "$REAL_OPENAI" ]; then
+  # What a Codex turn is on the wire. OpenAI answering at all is the proof the
+  # placeholder was swapped rather than forwarded or refused.
+  matches "D2a" "the OpenAI placeholder is swapped and OpenAI answers" '"object"' \
+    sxs 'curl -sS -m 25 -H "Authorization: Bearer $CODEX_API_KEY" https://api.openai.com/v1/models'
+  matches "D2b" "an invented OpenAI key is refused by the proxy" 'egress denied' \
+    sxs 'curl -sS -m 25 -H "Authorization: Bearer sk-notThisDeployments" https://api.openai.com/v1/models'
+  matches "D2c" "api.openai.com presents the deployment CA" 'Boxes egress proxy CA' \
+    sxs 'curl -sS -m 25 -o /dev/null -v https://api.openai.com/v1/models 2>&1 | grep -i "issuer:"'
+  # Codex logs in and refreshes here and may be talking to the subscription
+  # endpoint with a credential this deployment does not hold. Intercepting
+  # either would put a key where it does not belong.
+  lacks "D2d" "Codex's login host is not intercepted" 'Boxes egress proxy CA' \
+    sxs 'curl -sS -m 25 -o /dev/null -v https://auth.openai.com/ 2>&1 | grep -i "issuer:"'
+  lacks "D2e" "the subscription endpoint is not intercepted" 'Boxes egress proxy CA' \
+    sxs 'curl -sS -m 25 -o /dev/null -v https://chatgpt.com/ 2>&1 | grep -i "issuer:"'
+else
+  for id in D2a D2b D2c D2d D2e; do skipped "$id" "no OpenAI key configured"; done
+fi
+
 # git offers its credential only after a 401, and sends it as Basic. The proxy
 # must swap that framing rather than read it as a foreign credential, so what
 # matters is that the refusal never comes from the proxy.
@@ -587,6 +651,21 @@ if [ -n "$REAL_CLAUDE" ]; then
     sxs 'curl -sS -m 25 -o /dev/null -w "%{http_code}" https://console.anthropic.com/'
 else
   skipped "E5" "alsoAllow hosts come with the Claude credential"
+fi
+if [ -n "$REAL_OPENAI" ]; then
+  # The OpenAI credential's own alsoAllow: where Codex logs in and refreshes,
+  # and the endpoint a subscription would talk to. Neither takes this key, and
+  # a narrow allowlist may not sever either.
+  matches "E5a" "Codex's login host comes with the OpenAI credential" '^[2345][0-9][0-9]$' \
+    sxs 'curl -sS -m 25 -o /dev/null -w "%{http_code}" https://auth.openai.com/'
+  matches "E5b" "the subscription endpoint comes with it too" '^[2345][0-9][0-9]$' \
+    sxs 'curl -sS -m 25 -o /dev/null -w "%{http_code}" https://chatgpt.com/'
+  # A deployment's own choice rather than something the credential implies, so
+  # a narrow list refuses it and Codex carries on without its telemetry.
+  mustnot "E5c" "Codex's telemetry host is not implied by the credential" \
+    sxs 'curl -fsS -m 15 -o /dev/null https://ab.chatgpt.com/'
+else
+  for id in E5a E5b E5c; do skipped "$id" "alsoAllow hosts come with the OpenAI credential"; done
 fi
 mustnot "E6" "a credential host may not be reached in the clear" \
   sxs 'curl -fsS -m 25 -o /dev/null http://api.github.com/'

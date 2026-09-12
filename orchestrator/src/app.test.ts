@@ -1094,13 +1094,17 @@ test('the health probe says which harness can run, and on what', async () => {
     harnesses: Array<{ id: string; runnable: boolean; credential: unknown }>;
     credentials: unknown[];
   };
-  // Claude alone: a harness whose credential this deployment cannot even
-  // carry to a box is not offered. Codex joins the list with its credential.
+  // Both harnesses, because a box can be handed a placeholder for either
+  // credential. Neither runs yet: nothing is stored.
   assert.deepEqual(
     empty.harnesses.map((h) => [h.id, h.runnable]),
-    [['claude', false]],
+    [
+      ['claude', false],
+      ['codex', false],
+    ],
   );
   assert.equal(empty.harnesses[0]!.credential, null);
+  assert.equal(empty.harnesses[1]!.credential, null);
   assert.deepEqual(empty.credentials, []);
 
   await orchestrator.app.inject({
@@ -1115,12 +1119,51 @@ test('the health probe says which harness can run, and on what', async () => {
   };
   assert.equal(after.harnesses[0]!.runnable, true);
   assert.equal(after.harnesses[0]!.credential?.account, '1234');
+  // One credential is one harness: Codex is still waiting for its own.
+  assert.equal(after.harnesses[1]!.runnable, false);
   // Every stored credential is reported, GitHub included, because the
   // settings page reads them from here.
   assert.deepEqual(
     after.credentials.map((c) => c.id),
     ['claude'],
   );
+});
+
+test('an OpenAI key entered on the settings page is what makes Codex runnable', async () => {
+  const put = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/openai',
+    payload: { method: 'api_key', secret: 'sk-proj-abcdefgh5678' },
+  });
+  assert.equal(put.statusCode, 200);
+  // Write-only: the page is told which key this is and never the key.
+  assert.deepEqual(put.json(), {
+    id: 'openai',
+    method: 'api_key',
+    account: '5678',
+    status: 'ok',
+    lastError: null,
+    expiresAt: null,
+    refreshedAt: null,
+    updatedAt: (put.json() as { updatedAt: number }).updatedAt,
+  });
+
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ id: string; runnable: boolean }>;
+  };
+  assert.deepEqual(
+    health.harnesses.map((h) => [h.id, h.runnable]),
+    [
+      ['claude', false],
+      ['codex', true],
+    ],
+  );
+
+  const harnesses = (await orchestrator.app.inject({ url: '/api/harnesses' })).json() as Array<{
+    id: string;
+    runnable: boolean;
+  }>;
+  assert.equal(harnesses.find((h) => h.id === 'codex')?.runnable, true);
 });
 
 test('a credential that is failing is still offered, and says it is not runnable', async () => {
@@ -1152,15 +1195,22 @@ test('the harness list carries the registry, the catalogue and the health', asyn
     defaultConfig: Record<string, string>;
     catalog: unknown;
   }>;
-  // Claude alone, on the same rule the health probe uses: a harness whose
-  // credential this deployment cannot even carry to a box is not offered.
+  // Both, on the same rule the health probe uses: a harness this deployment
+  // can carry a credential to is offered whether or not one is stored.
   assert.deepEqual(
     fresh.map((h) => h.id),
-    ['claude'],
+    ['claude', 'codex'],
   );
   assert.equal(fresh[0]!.defaultModeId, 'auto');
   assert.equal(fresh[0]!.forkModeId, 'plan');
   assert.deepEqual(fresh[0]!.defaultConfig, { model: 'opus' });
+  // Codex's own defaults, which the dialog prefills from: the container is the
+  // boundary, so a fresh thread is in full access, and the model is left to
+  // the adapter.
+  assert.equal(fresh[1]!.defaultModeId, 'agent-full-access');
+  assert.equal(fresh[1]!.forkModeId, 'read-only');
+  assert.deepEqual(fresh[1]!.defaultConfig, {});
+  assert.equal(fresh[1]!.catalog, null);
   // Nothing has run an adapter here, so there is nothing cached and no box is
   // started to find out: the dialog shows the agent choice alone.
   assert.equal(fresh[0]!.catalog, null);

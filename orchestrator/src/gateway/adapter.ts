@@ -530,6 +530,12 @@ export class AdapterConnection {
    * only once a prompt has run, so an id minted by session/new and never
    * prompted does not survive the container stopping. Any other error is
    * rethrown, which keeps a transient fault from discarding a live thread.
+   *
+   * Both adapters stream a load's whole conversation back as `session/update`
+   * notifications, so one path serves either. What only a box can show is that
+   * a Codex rollout survives its container being stopped and started, which is
+   * what makes this return true rather than mint a fresh thread. PLAN.md
+   * section 3, verify step 6.
    */
   private async loadSession(thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;

@@ -131,6 +131,14 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      * to do when the sandbox cannot start. Verify step 3 settles it.
      */
     defaultModeId: 'agent-full-access',
+    /**
+     * The same intent as a Claude fork starting in `plan`: every write asks
+     * first. `read-only` is not a read-only sandbox — it is Codex's
+     * `on-request` approval with a human reviewer — which is why it is the
+     * fork's mode and not a safety boundary. If verify step 3 finds that the
+     * sandboxed modes cannot run in the container at all, a fork starts in
+     * `agent-full-access` instead and the dashboard says so.
+     */
     forkModeId: 'read-only',
     /** Empty: a fresh Codex thread stays on the adapter's own default model. */
     defaultConfig: {},
@@ -143,6 +151,13 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      * Codex persists the key to `$CODEX_HOME/auth.json` from there.
      * `NO_BROWSER` hides the browser-based method, which would otherwise open
      * a browser inside the box.
+     *
+     * What a box has yet to confirm is that the login accepts a placeholder
+     * without validating it against OpenAI first, and that the copy it leaves
+     * in `auth.json` — on the persistent home, so it survives a stop — is
+     * still the same placeholder on the next start. It is per deployment and
+     * never changes, so a stale copy is the right copy. PLAN.md section 3,
+     * verify step 5.
      *
      * `CODEX_CA_CERTIFICATE` is deliberately absent. Codex wants it to trust
      * the egress proxy's CA, but that is a fact about the deployment rather

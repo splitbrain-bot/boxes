@@ -186,7 +186,8 @@ export function buildApp(
    * Only the harnesses this deployment can carry a credential to: a box holds
    * one placeholder per entry of CREDENTIAL_SET, so a harness whose
    * credential is not in that set could not be given one whatever the store
-   * held. Codex joins the list when its credential does.
+   * held. Both harnesses qualify now that the OpenAI credential is in the set,
+   * and a third would the moment its own credential joined it.
    */
   function harnessHealth(): HarnessHealth[] {
     const deliverable = new Set(CREDENTIAL_SET.map((spec) => spec.id));

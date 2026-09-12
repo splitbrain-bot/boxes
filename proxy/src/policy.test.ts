@@ -20,6 +20,19 @@ const CLAUDE = {
   secret: 'sk-ant-oat01-realrealreal',
 };
 
+/**
+ * The OpenAI credential Codex sends. Its placeholder starts `sk-`, which is
+ * also the start of the Claude one, so it is here to prove that a swap is
+ * decided by the whole value at the host it belongs to rather than by a prefix.
+ */
+const OPENAI = {
+  id: 'openai',
+  hosts: ['api.openai.com'],
+  headers: ['authorization'],
+  placeholder: 'sk-PLACEHOLDER',
+  secret: 'sk-proj-realrealreal',
+};
+
 const GITHUB = {
   id: 'github',
   hosts: ['github.com', 'api.github.com', '*.githubusercontent.com'],
@@ -31,7 +44,7 @@ const GITHUB = {
 const policy = (over: Partial<EgressPolicy> = {}): EgressPolicy => ({
   allowedHosts: [],
   ca: { key: 'KEY', cert: 'CERT' },
-  credentials: [CLAUDE, GITHUB],
+  credentials: [CLAUDE, OPENAI, GITHUB],
   ...over,
 });
 
@@ -178,6 +191,43 @@ describe('decideCredentials', () => {
     expect(verdict.action).toBe('deny');
   });
 
+  it('swaps the key Codex sends at api.openai.com', () => {
+    // What a Codex turn on an API key is, on the wire: the adapter logs itself
+    // in with the placeholder, Codex stores it and sends it as a bearer, and
+    // this is where it becomes the deployment's own key.
+    expect(
+      decideCredentials(
+        'api.openai.com',
+        { authorization: `Bearer ${OPENAI.placeholder}` },
+        policy(),
+      ),
+    ).toEqual({
+      action: 'swap',
+      headers: { authorization: `Bearer ${OPENAI.secret}` },
+      credentialIds: ['openai'],
+    });
+    // A key that is not this deployment's stops here rather than reaching
+    // OpenAI, and the Claude placeholder is foreign at this host even though
+    // it starts the same way.
+    expect(
+      decideCredentials('api.openai.com', { authorization: 'Bearer sk-somebodyelses' }, policy())
+        .action,
+    ).toBe('deny');
+    expect(
+      decideCredentials(
+        'api.openai.com',
+        { authorization: `Bearer ${CLAUDE.placeholder}` },
+        policy(),
+      ).action,
+    ).toBe('deny');
+    // The subscription endpoint takes the other kind of credential entirely,
+    // so it is not intercepted and whatever Codex sends there is its own.
+    expect(isInjectionHost('chatgpt.com', policy())).toBe(false);
+    expect(
+      decideCredentials('chatgpt.com', { authorization: 'Bearer whatever' }, policy()),
+    ).toEqual({ action: 'pass' });
+  });
+
   it('checks every header a credential may travel in', () => {
     expect(
       decideCredentials('api.anthropic.com', { 'x-api-key': CLAUDE.placeholder }, policy()),
@@ -195,7 +245,7 @@ describe('decideCredentials', () => {
 describe('policyHash', () => {
   it('is stable across ordering and case, and changes with the secret', () => {
     const a = policy({ allowedHosts: ['B.com', 'a.com'] });
-    const b = policy({ allowedHosts: ['a.com', 'b.com'], credentials: [GITHUB, CLAUDE] });
+    const b = policy({ allowedHosts: ['a.com', 'b.com'], credentials: [GITHUB, OPENAI, CLAUDE] });
     expect(policyHash(a)).toBe(policyHash(b));
     expect(policyHash(policy({ credentials: [{ ...GITHUB, secret: 'other' }, CLAUDE] }))).not.toBe(
       policyHash(a),

@@ -31,6 +31,7 @@ import { readSettings } from './settings.ts';
 
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
 const GH_TOKEN = 'ghp_therealgithubtoken';
+const OPENAI_KEY = 'sk-therealopenaiapikey';
 
 let dirs: string[] = [];
 let dbs: Db[] = [];
@@ -118,9 +119,27 @@ describe('sessionEnv', () => {
     // logging in inside a box.
     expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toMatch(/^sk-ant-oat01-/);
     expect(env['GH_TOKEN']).toMatch(/^ghp_/);
+    expect(env['CODEX_API_KEY']).toMatch(/^sk-/);
     // And what each harness needs beside its credential, from the registry.
     expect(env['CLAUDE_CONFIG_DIR']).toBe('/home/agent/.claude');
     expect(env['CODEX_HOME']).toBe('/home/agent/.codex');
+  }, 30_000);
+
+  it('carries what Codex needs to log itself in from the environment', async () => {
+    // The Codex app-server reads no key from its environment; `codex-acp` is
+    // what reads CODEX_API_KEY, and it only does so when DEFAULT_AUTH_REQUEST
+    // tells it to log in with the api-key method on the first session call.
+    // The value has to reach the box as the JSON the adapter parses.
+    const env = await envFor({ openai: OPENAI_KEY });
+
+    expect(env['CODEX_API_KEY']).toMatch(/^sk-/);
+    expect(env['CODEX_API_KEY']).not.toBe(OPENAI_KEY);
+    expect(env['DEFAULT_AUTH_REQUEST']).toBe('{"methodId":"api-key"}');
+    expect(JSON.parse(env['DEFAULT_AUTH_REQUEST']!)).toEqual({ methodId: 'api-key' });
+    // A fresh Codex thread starts where the registry says, and the browser
+    // method is hidden because nothing in a box can open one.
+    expect(env['INITIAL_AGENT_MODE']).toBe('agent-full-access');
+    expect(env['NO_BROWSER']).toBe('1');
   }, 30_000);
 
   it('points every client at the CA, whether or not anything is intercepted', async () => {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Docker from 'dockerode';
 import { Duplex, Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -1638,6 +1638,43 @@ test('a stop reaches nothing but the work it was asked about', async () => {
   assert.deepEqual(killed, []);
 });
 
+test('a stop on a Codex thread is read against its own adapter, and takes nothing else', async () => {
+  // The per-thread stop resolves the adapter token from the thread's own
+  // harness row rather than from the box, which is what keeps a box holding
+  // both adapters from being read as one.
+  db.prepare(`UPDATE threads SET harness = 'codex' WHERE id = 't2'`).run();
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  insideProcesses = [
+    ['1', '0', '/sbin/docker-init'],
+    ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
+    ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
+    ['14', '13', shell('npm run build')],
+    // Codex's own tree: the adapter, the app-server it drives, and a shell the
+    // model backgrounded under it.
+    ['20', '1', 'node /usr/local/bin/codex-acp'],
+    ['21', '20', 'codex app-server'],
+    ['22', '21', 'bash -lc npm run watch'],
+  ];
+
+  // Nothing: `codex app-server` runs every conversation in the box and says
+  // which one nowhere, so the process reading cannot place this shell on a
+  // thread and a stop must not guess. The async-task stop that can name it
+  // arrives with milestone 4; until then a Codex thread has no stop button
+  // rather than a button that kills the wrong thing.
+  assert.equal(await up.stopBackgroundWork('acp-kept'), 0);
+  assert.deepEqual(killed, []);
+
+  // And the Claude thread in the same box is unaffected by any of that.
+  assert.equal(await up.stopBackgroundWork('acp-gone'), 1);
+  assert.deepEqual(killed, [['-TERM', '14']]);
+});
+
 test('a prompt held open for background work is not the agent still talking', async () => {
   // The shape this whole distinction exists for: the adapter defers the
   // prompt's result until what the turn started settles, so the request stays
@@ -1832,6 +1869,52 @@ function harnessAdapter(
     });
 }
 
+test('only the harness that asks for a _meta is sent one', async () => {
+  // Claude's adapter reads `_meta.claudeCode.options` and lays it over the
+  // options it hands the Agent SDK. Codex's reads no `_meta` at all, so
+  // sending it one would be noise on the wire — and the registry, not a
+  // branch here, is what decides.
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const meta: Array<{ harness: string; method: string; meta: unknown }> = [];
+  const record =
+    (harness: string) =>
+    (msg: Rpc): unknown => {
+      if (msg.method?.startsWith('session/') && msg.method !== 'session/prompt') {
+        meta.push({
+          harness,
+          method: msg.method,
+          meta: (msg.params as { _meta?: unknown } | undefined)?._meta,
+        });
+      }
+      return undefined;
+    };
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude', record('claude')),
+    'codex-acp': harnessAdapter(seen, 'codex', record('codex')),
+  });
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+  await up.pin(handle, 't3');
+
+  assert.ok(meta.some((call) => call.harness === 'claude'));
+  assert.ok(meta.some((call) => call.harness === 'codex'));
+  for (const call of meta) {
+    if (call.harness === 'claude') {
+      assert.deepEqual(call.meta, {
+        claudeCode: {
+          options: { thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' } },
+        },
+      });
+    } else {
+      assert.equal(call.meta, undefined, `${call.method} carried a _meta to Codex`);
+    }
+  }
+});
+
 test('each thread is served by its own harness, and only its own is started', async () => {
   seedThread('t3', 'codex', 'cx-1', 3);
   const seen: string[] = [];
@@ -1978,12 +2061,29 @@ test('an adapter with no credential is not retried, and is kept up', async () =>
   const handle = fakeHandle(1, null);
   up.attach(handle);
 
+  // What the log said while the refusal happened. A person reading it has to
+  // be able to act on it, and the only action is entering one named
+  // credential on the settings page.
+  const logged: string[] = [];
+  const stderr = vi
+    .spyOn(process.stderr, 'write')
+    .mockImplementation((chunk: string | Uint8Array) => {
+      logged.push(String(chunk));
+      return true;
+    });
+
   await assert.rejects(
     () => up.pin(handle, 't3'),
     // The browser's request fails with the adapter's own sentence, which is
     // the one worth showing: it names what is missing.
     (err: Error) => err.message.startsWith('Authentication required'),
   );
+  stderr.mockRestore();
+  const complaint = logged.find((line) => line.includes('no credential to run under'));
+  assert.ok(complaint, `nothing was logged about the missing credential: ${logged.join('')}`);
+  // By name: `codex` is the harness, `openai` is the row somebody has to fill
+  // in, and they are not the same word.
+  assert.match(complaint, /"credential":"openai"/);
 
   // Spawned once. Retrying cannot conjure a credential, and three attempts
   // apiece would only be three of the same refusal.

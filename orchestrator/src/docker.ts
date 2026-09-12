@@ -196,7 +196,15 @@ export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     env['GIT_SSL_CAINFO'] = CA_PATH;
     env['CURL_CA_BUNDLE'] = CA_PATH;
     // Codex reads this one first and falls back to SSL_CERT_FILE; setting
-    // both costs nothing and says what is meant. Harmless before Codex ships.
+    // both costs nothing and says what is meant.
+    //
+    // Whether the published Codex binary reads either of them is the one thing
+    // about Codex's egress that only a box can answer: its source builds with
+    // native-tls and rustls both, and only the OpenSSL path applies these. A
+    // Codex turn that fails TLS against api.openai.com with the CA delivered
+    // here is that, and the answer is upstream rather than anything Boxes can
+    // do — the CA is per deployment and cannot go into the image. PLAN.md
+    // section 3, verify step 4.
     env['CODEX_CA_CERTIFICATE'] = CA_PATH;
   }
 

@@ -234,6 +234,22 @@ export const CREDENTIAL_SET: readonly CredentialSpec[] = [
     placeholderPrefix: 'sk-ant-oat01-',
   },
   {
+    id: 'openai',
+    // The API-key endpoint alone. `chatgpt.com` carries the other kind of
+    // OpenAI credential — a subscription — and the two reject each other's
+    // material, so leaving it unintercepted is what lets a deployment key and
+    // a person's subscription coexist in one box.
+    hosts: ['api.openai.com'],
+    headers: ['authorization'],
+    // Where Codex logs in and refreshes, and the subscription endpoint it may
+    // be talking to instead. Reachable so a narrow allowlist cannot break
+    // either, never intercepted. `files.openai.com` and `ab.chatgpt.com` —
+    // attachments and Codex's own telemetry — are a deployment's own choice
+    // and are deliberately not implied here.
+    alsoAllow: ['auth.openai.com', 'chatgpt.com'],
+    placeholderPrefix: 'sk-',
+  },
+  {
     id: 'github',
     hosts: ['github.com', 'api.github.com', '*.githubusercontent.com'],
     // git sends the token as the password of an HTTP Basic pair and gh sends

@@ -23,6 +23,7 @@ import {
  */
 
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
+const OPENAI_KEY = 'sk-therealopenaiapikey';
 const GH_TOKEN = 'ghp_therealgithubtoken';
 
 let dirs: string[] = [];
@@ -186,6 +187,29 @@ describe('composePolicy', () => {
     // The credential's own hosts are implied by the proxy, not listed here.
     expect(allowedHosts).not.toContain('evil.com');
   }, 30_000);
+
+  it('intercepts the OpenAI key host, and only that one', async () => {
+    const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
+    const store = storeWith(cfg, { openai: OPENAI_KEY });
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const policy = composePolicy(cfg, material, rows(store));
+
+    const openai = policy.credentials.find((c) => c.id === 'openai');
+    expect(openai?.hosts).toEqual(['api.openai.com']);
+    expect(openai?.headers).toEqual(['authorization']);
+    expect(openai?.secret).toBe(OPENAI_KEY);
+    expect(openai?.placeholder).toBe(material.placeholders['openai']);
+
+    // Codex logs in and refreshes at one of these and may be talking to the
+    // other with a credential Boxes does not hold; both must stay reachable
+    // under a narrow allowlist, and neither is a host the key is sent to.
+    expect(policy.allowedHosts).toContain('auth.openai.com');
+    expect(policy.allowedHosts).toContain('chatgpt.com');
+    expect(openai?.hosts).not.toContain('chatgpt.com');
+    // A deployment's own choice rather than something the credential implies.
+    expect(policy.allowedHosts).not.toContain('files.openai.com');
+    expect(policy.allowedHosts).not.toContain('ab.chatgpt.com');
+  }, 30_000);
 });
 
 describe('the control channel, from the orchestrator side', () => {
@@ -262,17 +286,24 @@ describe('the control channel, from the orchestrator side', () => {
 describe('EgressManager', () => {
   it('hands a box a placeholder for every credential, and the CA', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
+    const store = storeWith(cfg, {
+      claude: CLAUDE_TOKEN,
+      openai: OPENAI_KEY,
+      github: GH_TOKEN,
+    });
     const manager = new EgressManager(cfg, store);
     await manager.prepare();
 
     const claude = manager.placeholderFor('claude');
     const github = manager.placeholderFor('github');
+    const openai = manager.placeholderFor('openai');
 
     expect(claude).not.toBe(CLAUDE_TOKEN);
     expect(claude.startsWith('sk-ant-oat01-')).toBe(true);
     expect(github).not.toBe(GH_TOKEN);
     expect(github.startsWith('ghp_')).toBe(true);
+    expect(openai).not.toBe(OPENAI_KEY);
+    expect(openai.startsWith('sk-')).toBe(true);
     expect(manager.caCertificate()).toContain('BEGIN CERTIFICATE');
   }, 30_000);
 
@@ -286,6 +317,9 @@ describe('EgressManager', () => {
     // later.
     expect(manager.placeholderFor('claude')).toMatch(/^sk-ant-oat01-/);
     expect(manager.placeholderFor('github')).toMatch(/^ghp_/);
+    // Codex checks the shape of its key, so the placeholder carries the prefix
+    // a real one has. It exists whether or not a key has ever been entered.
+    expect(manager.placeholderFor('openai')).toMatch(/^sk-/);
     expect(manager.caCertificate()).toContain('BEGIN CERTIFICATE');
   }, 30_000);
 
@@ -296,7 +330,7 @@ describe('EgressManager', () => {
 
     // An empty string rather than an invention: sessionEnv drops a variable
     // with no value, so the box is given nothing rather than nonsense.
-    expect(manager.placeholderFor('openai')).toBe('');
+    expect(manager.placeholderFor('gemini')).toBe('');
   }, 30_000);
 
   it('recomposes from the store on every sync, so a pasted token is live', async () => {
