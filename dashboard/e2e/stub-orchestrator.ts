@@ -6,8 +6,11 @@ import type {
   AgentItem,
   AgentSetDetail,
   CreateThreadBody,
+  CredentialId,
+  CredentialSummary,
   DeploymentImages,
   ExecRecord,
+  HarnessHealth,
   HealthResponse,
   ReviewAnnotation,
   ReviewAnnotationBody,
@@ -16,6 +19,7 @@ import type {
   ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
+  Settings,
   StoredAttachment,
   ThreadDoneBody,
   ThreadSummary,
@@ -204,6 +208,35 @@ export function stubAgentSet(over: Partial<AgentSetDetail> = {}): AgentSetDetail
   };
 }
 
+/** A credential the stub holds, shown the way the real API shows one. */
+export function stubCredential(over: Partial<CredentialSummary> = {}): CredentialSummary {
+  return {
+    id: 'claude',
+    method: 'token',
+    account: '1234',
+    status: 'ok',
+    lastError: null,
+    expiresAt: null,
+    refreshedAt: null,
+    updatedAt: Date.parse('2026-09-01T10:00:00Z'),
+    ...over,
+  };
+}
+
+/**
+ * A harness the health probe reports. Runnable by default and carrying the
+ * credential that makes it so, which is the state a working deployment is in.
+ */
+export function stubHarness(over: Partial<HarnessHealth> = {}): HarnessHealth {
+  return {
+    id: 'claude',
+    label: 'Claude Code',
+    credential: stubCredential(),
+    runnable: true,
+    ...over,
+  };
+}
+
 /**
  * The three images the stub says are running: two pulled from a registry and
  * one built on the host, which is the mix a deployment following `latest`
@@ -240,8 +273,20 @@ export interface StubState {
    * detail and the merge from one place.
    */
   agentSets: AgentSetDetail[];
-  /** What the health probe reports about the deployment's Claude token. */
-  claudeTokenConfigured: boolean;
+  /**
+   * What the health probe reports about each harness. The dashboard warns
+   * about every one that cannot run, so a test makes a harness unrunnable by
+   * taking its credential away here.
+   */
+  harnesses: HarnessHealth[];
+  /**
+   * The credentials the deployment holds, as the settings page sees them:
+   * an account and a status, never a secret. Written by PUT and read by GET,
+   * so a pasted token round-trips the way the real one does.
+   */
+  credentials: CredentialSummary[];
+  /** The deployment's plain settings, which the settings page round-trips. */
+  settings: Settings;
   /** Which build of each image the health probe says is running. */
   images: DeploymentImages;
   /**
@@ -300,7 +345,13 @@ export async function startStubOrchestrator(
   const dir = resolve(distDir);
   const state: StubState = {
     sessions: initial,
-    claudeTokenConfigured: true,
+    harnesses: [stubHarness()],
+    credentials: [stubCredential()],
+    settings: {
+      gitName: 'boxes-bot',
+      gitEmail: 'boxes-bot@users.noreply.github.com',
+      dialogs: {},
+    },
     images: stubImages(),
     reviews: Object.fromEntries(initial.map((s) => [s.id, stubReview()])),
     agentSets: [stubAgentSet()],
@@ -342,7 +393,8 @@ export async function startStubOrchestrator(
         sessions: state.sessions.length,
         proxyWarnings: [],
         egress: null,
-        claudeTokenConfigured: state.claudeTokenConfigured,
+        harnesses: state.harnesses,
+        credentials: state.credentials,
         pushSubscriptions: 0,
         images: state.images,
       };
@@ -517,6 +569,25 @@ export async function startStubOrchestrator(
     const agentSets = /^\/api\/agent-sets(?:\/([^/]+))?(?:\/(items|preview))?$/.exec(url);
     if (agentSets) {
       return answerAgentSets(req, res, state, agentSets[1], agentSets[2] ?? '');
+    }
+
+    const credentials = /^\/api\/credentials(?:\/([^/]+))?$/.exec(url);
+    if (credentials) {
+      return answerCredentials(req, res, state, credentials[1]);
+    }
+
+    if (url === '/api/settings') {
+      if (req.method === 'GET') return json(res, 200, state.settings);
+      if (req.method === 'PATCH') {
+        let body = '';
+        req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+        req.on('end', () => {
+          const patch = JSON.parse(body || '{}') as Partial<Settings>;
+          state.settings = { ...state.settings, ...patch };
+          json(res, 200, state.settings);
+        });
+        return undefined;
+      }
     }
 
     if (url.startsWith('/api') || url.startsWith('/ws')) {
@@ -930,4 +1001,63 @@ function answerAgentSets(
     });
   }
   return json(res, 404, { error: 'Not found' });
+}
+
+// --- the credential endpoints -------------------------------------------------
+
+/**
+ * Answers the three credential routes from the stub's own list.
+ *
+ * Real state rather than canned bodies, and the same one-way rule as the API:
+ * a PUT carries a secret, and nothing this returns ever does. The account is
+ * derived here the way the store derives it, so what the page shows after a
+ * paste is what it would show against the real thing.
+ */
+function answerCredentials(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  state: StubState,
+  id: string | undefined,
+): void {
+  if (id === undefined) {
+    if (req.method === 'GET') return json(res, 200, state.credentials);
+    return json(res, 404, { error: 'Not found' });
+  }
+
+  if (req.method === 'PUT') {
+    let body = '';
+    req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+    req.on('end', () => {
+      const { secret = '' } = JSON.parse(body || '{}') as { secret?: string };
+      if (secret.trim() === '') return json(res, 400, { error: 'secret is required' });
+      const stored = stubCredential({
+        id: id as CredentialId,
+        account: secret.length > 4 ? secret.slice(-4) : null,
+        updatedAt: Date.now(),
+      });
+      state.credentials = [
+        ...state.credentials.filter((c) => c.id !== stored.id),
+        stored,
+      ];
+      // The harness that runs on it can run again, which is what takes the
+      // warning off the session list.
+      state.harnesses = state.harnesses.map((h) =>
+        h.id === stored.id ? { ...h, credential: stored, runnable: true } : h,
+      );
+      return json(res, 200, stored);
+    });
+    return undefined;
+  }
+
+  if (req.method === 'DELETE') {
+    state.credentials = state.credentials.filter((c) => c.id !== id);
+    state.harnesses = state.harnesses.map((h) =>
+      h.id === id ? { ...h, credential: null, runnable: false } : h,
+    );
+    res.writeHead(204);
+    res.end();
+    return undefined;
+  }
+
+  return json(res, 405, { error: 'Method not allowed' });
 }

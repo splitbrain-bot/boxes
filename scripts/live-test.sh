@@ -5,11 +5,16 @@
 # apart from the credential-free scripts/smoke-test.sh and never run by
 # default.
 #
-# The orchestrator needs PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN from
-# `claude setup-token` before these can pass. It can live outside the repo:
+# The deployment needs a Claude token from `claude setup-token`. It is
+# normally entered on the settings page; pass it here and this script seeds it
+# through the API before it creates anything:
 #
-#   BOXES_ENV=~/.config/boxes.env docker compose up -d
-#   API_BASE=http://localhost:3000 ./scripts/live-test.sh
+#   docker compose up -d
+#   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... \
+#     API_BASE=http://localhost:3000 ./scripts/live-test.sh
+#
+# Without it, the deployment has to already hold one, and the two checks that
+# compare the box's placeholder against the real token are skipped.
 #
 # Needs: curl, jq, docker, and node 22 or newer (for the WebSocket client).
 set -uo pipefail
@@ -35,6 +40,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Read under the name the deployment used to take, for the convenience of
+# whoever already exports it, and seeded into the store rather than read back
+# out of the orchestrator's environment, where it no longer is.
+REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
+if [ -n "$REAL_CLAUDE" ]; then
+  if api -f -X PUT "$API_BASE/api/credentials/claude" \
+       -H 'Content-Type: application/json' \
+       -d "$(jq -n --arg s "$REAL_CLAUDE" '{method:"token",secret:$s}')" >/dev/null; then
+    grey "seeded the claude credential"
+  else
+    red "could not seed the claude credential"; exit 1
+  fi
+fi
+
 echo "== creating a session =="
 SESSION_ID=$(api -X POST "$API_BASE/api/sessions" \
   -H 'Content-Type: application/json' -d '{"name":"live-test"}' | jq -r '.id')
@@ -51,17 +70,16 @@ echo "== M1: the subscription token works inside the container =="
 if docker exec -u agent "$CONTAINER" claude -p 'reply ok' 2>&1 | tee /dev/stderr | grep -qi ok; then
   ok "claude -p 'reply ok' answered via the subscription"
 else
-  no "claude -p 'reply ok' produced no answer - check PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN"
+  no "claude -p 'reply ok' produced no answer - check the Claude credential in Settings"
 fi
 
 echo
 echo "== the turn above ran on a placeholder, not on the real token =="
 # The same turn, seen from the credential's side: the container holds something
-# that is not the configured token, and the proxy is what made it work.
-REAL_CLAUDE=$(docker exec boxes-orchestrator printenv PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
+# that is not the stored token, and the proxy is what made it work.
 IN_SESSION=$(docker exec "$CONTAINER" printenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
 if [ -z "$REAL_CLAUDE" ]; then
-  grey "skipped: no Claude token is configured, so nothing is translated"
+  grey "skipped: this run was passed no token, so there is nothing to compare against"
 elif [ -z "$IN_SESSION" ]; then
   no "the session has no CLAUDE_CODE_OAUTH_TOKEN at all"
 elif [ "$IN_SESSION" = "$REAL_CLAUDE" ]; then

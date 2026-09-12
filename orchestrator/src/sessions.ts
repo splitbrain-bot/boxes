@@ -8,7 +8,7 @@ import {
   type ThreadSummary,
 } from '../../shared/types.ts';
 import { AgentStore, ensureAgentsRoot, hostAgentConfigPath } from './agents.ts';
-import type { Config, SessionProfile } from './config.ts';
+import type { Config } from './config.ts';
 import type { EgressManager } from './egress.ts';
 import {
   clearSessionTurns,
@@ -29,6 +29,7 @@ import * as dk from './docker.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
+import { readSettings } from './settings.ts';
 import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, UpstreamSession } from './gateway/upstream.ts';
@@ -505,10 +506,7 @@ export class SessionManager {
       await dk.stopContainer(row.container_id);
       await dk.removeContainer(row.container_id);
     }
-    const containerId = await dk.createContainer(
-      this.containerSpec(row, this.profileFor(row)),
-      this.cfg,
-    );
+    const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
     await dk.startContainer(containerId);
     return containerId;
   }
@@ -542,13 +540,19 @@ export class SessionManager {
 
   /**
    * Everything createContainer needs about a session, built from its stored
-   * row and the deployment's current credentials.
+   * row and what the deployment currently holds.
    *
    * One place rather than two, because a session's container is created twice:
    * once at create, and once more when a volume-backed workspace migrates to a
    * directory and the container has to be recreated with the new mount.
+   *
+   * What goes in for the credentials is a placeholder apiece, and the same
+   * ones for every box: a box created before a credential was entered holds
+   * what a box created after it holds, and the proxy is where the difference
+   * is made. So nothing here has to be rebuilt when a credential arrives.
    */
-  private containerSpec(row: SessionRow, profile: SessionProfile): dk.CreateContainerSpec {
+  private containerSpec(row: SessionRow): dk.CreateContainerSpec {
+    const settings = readSettings(this.db);
     return {
       sessionId: row.id,
       image: row.image,
@@ -563,28 +567,12 @@ export class SessionManager {
       homeSource: row.home_dir
         ? ws.hostHomePath(this.hostDataDir, row.id)
         : row.home_volume,
-      profile,
-      egress: {
-        claudeOauthToken: this.egress.sessionValue('claude', profile.claudeOauthToken),
-        ghToken: this.egress.sessionValue('github', profile.ghToken),
-        caCertificate: this.egress.caCertificate(),
-      },
+      env: dk.credentialEnv((id) => this.egress.placeholderFor(id), {
+        gitName: settings.gitName,
+        gitEmail: settings.gitEmail,
+      }),
+      caCertificate: this.egress.caCertificate(),
     };
-  }
-
-  /**
-   * The profile a session was created with, or the default when the deployment
-   * has since dropped it. A session that outlived its profile must still start.
-   */
-  private profileFor(row: SessionRow): SessionProfile {
-    const profile = this.cfg.profiles[row.profile];
-    if (profile) return profile;
-    const fallback = this.cfg.profiles['DEFAULT'];
-    if (!fallback) throw new HttpError(500, `Unknown profile: ${row.profile}`);
-    log.session(row.id).warn('profile is gone; falling back to DEFAULT', {
-      profile: row.profile,
-    });
-    return fallback;
   }
 
   /** The persistent upstream for a session, created on first use. */
@@ -625,10 +613,6 @@ export class SessionManager {
     if (!name) throw new HttpError(400, 'name is required');
     if (name.length > 100) throw new HttpError(400, 'name must be 100 characters or fewer');
 
-    const profileName = body.profile?.trim() || 'DEFAULT';
-    const profile = this.cfg.profiles[profileName];
-    if (!profile) throw new HttpError(400, `Unknown profile: ${profileName}`);
-
     // The global set is applied whatever this says, so naming it is the same
     // as naming nothing and is stored as nothing.
     const requested = body.agentSet?.trim() ?? '';
@@ -656,7 +640,10 @@ export class SessionManager {
     const row: SessionRow = {
       id,
       name,
-      profile: profileName,
+      // Every session is DEFAULT. The column is what a deployment with named
+      // credential profiles would key on, and there is no such thing: one
+      // global set of credentials is what the settings page manages.
+      profile: 'DEFAULT',
       image: this.cfg.SESSION_IMAGE,
       agent_cmd: JSON.stringify(AGENT_CMD),
       container_id: null,
@@ -706,10 +693,7 @@ export class SessionManager {
         row.image,
         id,
       );
-      const containerId = await dk.createContainer(
-        this.containerSpec(row, profile),
-        this.cfg,
-      );
+      const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
       await dk.startContainer(containerId);
       this.db
         .prepare("UPDATE sessions SET container_id = ?, status = 'running' WHERE id = ?")

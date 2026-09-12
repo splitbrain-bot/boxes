@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { config } from '../config.ts';
 import { openDb, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
+import { CredentialStore } from '../credentials.ts';
 import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { AgentStore } from '../agents.ts';
@@ -233,7 +234,7 @@ beforeEach(() => {
   manager = new SessionManager(
     db,
     cfg,
-    new EgressManager(cfg),
+    new EgressManager(cfg, new CredentialStore(db, () => {})),
     new RecordingNotifier(db, cfg),
     new AgentStore(db, cfg.DATA_DIR),
   );

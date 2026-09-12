@@ -7,6 +7,9 @@ import type {
   AgentSetSummary,
   CreateSessionBody,
   CreateThreadBody,
+  CredentialId,
+  CredentialMethod,
+  CredentialSummary,
   HealthResponse,
   PushKeyResponse,
   PushSubscribeBody,
@@ -17,6 +20,7 @@ import type {
   ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
+  Settings,
   StoredAttachment,
   ThreadSummary,
 } from '../../shared/types.ts';
@@ -196,4 +200,25 @@ export const api = {
     ),
   agentSetPreview: (setId: string) =>
     request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),
+
+  // --- credentials and settings ---------------------------------------------
+  //
+  // Secrets go one way. A credential is written by pasting it and comes back
+  // as an account and a status, never as the value, so nothing here can show
+  // one and nothing here has to be careful not to.
+
+  listCredentials: () => request<CredentialSummary[]>('/api/credentials'),
+  putCredential: (id: CredentialId, method: CredentialMethod, secret: string) =>
+    request<CredentialSummary>(`/api/credentials/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ method, secret }),
+    }),
+  deleteCredential: (id: CredentialId) =>
+    request<void>(`/api/credentials/${id}`, { method: 'DELETE' }),
+  getSettings: () => request<Settings>('/api/settings'),
+  patchSettings: (body: Partial<Settings>) =>
+    request<Settings>('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
 };

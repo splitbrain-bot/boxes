@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { DockerState, ImageInfo } from '../../shared/types.ts';
-import type { Config, SessionProfile } from './config.ts';
+import type { Config } from './config.ts';
+import { HARNESSES } from './harness.ts';
 import { log } from './log.ts';
 import { sessionOwner } from './workspaces.ts';
 
@@ -52,9 +53,11 @@ export const WORKSPACE_DIR = '/workspace';
 /**
  * Where the session's merged agent configuration is mounted, read-only.
  *
- * The entrypoint installs it into `~/.claude` from here. It is not mounted at
- * `~/.claude` directly because that directory is on the home volume, is
- * written by the agent, and holds the transcripts — a read-only mount over it
+ * The entrypoint copies it out of here into `$HOME`, in each harness's own
+ * layout: `.claude/` for one, `.codex/` and `.agents/skills/` for the other,
+ * with the manifest at the root of this mount naming every path. It is not
+ * mounted over those directories directly because they are on the home, are
+ * written by the agent, and hold the transcripts — a read-only mount over one
  * would break the box, and a writable one would let the agent edit what the
  * dashboard says is configured.
  */
@@ -85,24 +88,6 @@ export const names = {
   network: (id: string) => `sn-${id}`,
 };
 
-/**
- * What a session is handed in place of the deployment's real credentials.
- *
- * Where translation is on these are placeholders and the proxy swaps them for
- * the real thing on the wire, so nothing inside the container is worth
- * stealing. Where it is off — a credential this deployment did not configure —
- * they are whatever the profile holds.
- */
-export interface SessionEgress {
-  claudeOauthToken: string;
-  ghToken: string;
-  /**
-   * PEM of the deployment CA the session must trust, or '' when nothing is
-   * intercepted and no extra trust is needed.
-   */
-  caCertificate: string;
-}
-
 /** Everything createContainer needs to know about one session. */
 export interface CreateContainerSpec {
   sessionId: string;
@@ -129,8 +114,50 @@ export interface CreateContainerSpec {
    * the same field to Docker, and which one this is is the caller's business.
    */
   homeSource: string;
-  profile: SessionProfile;
-  egress: SessionEgress;
+  /**
+   * What this box holds in place of the deployment's credentials, plus the
+   * git identity: built by the caller with credentialEnv(), because every
+   * value in it comes from the credential store and the settings table rather
+   * than from anything Docker knows.
+   */
+  env: Record<string, string>;
+  /**
+   * PEM of the deployment CA this box trusts.
+   *
+   * Always present: a box is given the CA when it is created and holds it for
+   * as long as it lives, so one created before the first credential existed
+   * would otherwise never be able to trust an intercepted host.
+   */
+  caCertificate: string;
+}
+
+/**
+ * The credential and identity half of a box's environment.
+ *
+ * Every harness in the registry contributes its own variables, whether or not
+ * a thread in this box will ever run on it: a container's environment is fixed
+ * when it is created, and a credential entered afterwards has to reach it. The
+ * value each of them carries is a placeholder, and the egress proxy is what
+ * swaps it for the real secret on the way out.
+ *
+ * GH_TOKEN belongs to no harness — it is what git and gh in a box push with —
+ * and is set on the same terms, so `gh auth setup-git` in the entrypoint
+ * always has something to set up. A push with no GitHub credential stored
+ * gets a 401 from GitHub, which in a headless box is the same outcome said
+ * sooner than a prompt nobody can answer.
+ */
+export function credentialEnv(
+  placeholderFor: (credentialId: string) => string,
+  identity: { gitName: string; gitEmail: string },
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const harness of Object.values(HARNESSES)) {
+    Object.assign(env, harness.env(placeholderFor(harness.credentialId)));
+  }
+  env['GH_TOKEN'] = placeholderFor('github');
+  env['GIT_NAME'] = identity.gitName;
+  env['GIT_EMAIL'] = identity.gitEmail;
+  return env;
 }
 
 /** Where the entrypoint writes the CA, and where the CA env vars point. */
@@ -139,20 +166,16 @@ const CA_PATH = '/home/agent/.boxes/proxy-ca.crt';
 /**
  * Environment of a session container.
  *
- * This is the only delivery path for a session's credentials, and with
- * translation on it carries no real one. The CA travels here too, as a PEM
- * rather than a mount, so the proxy's trust anchor needs no volume and no file
- * on the host.
+ * This is the only delivery path for what a box holds in place of the
+ * deployment's credentials, and it never carries a real one. The CA travels
+ * here too, as a PEM rather than a mount, so the proxy's trust anchor needs no
+ * volume and no file on the host.
  */
 export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
   const proxyUrl = `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
   const env: Record<string, string> = {
-    CLAUDE_CODE_OAUTH_TOKEN: spec.egress.claudeOauthToken,
-    GH_TOKEN: spec.egress.ghToken,
-    GIT_NAME: spec.profile.gitName,
-    GIT_EMAIL: spec.profile.gitEmail,
+    ...spec.env,
     TERM: 'dumb',
-    CLAUDE_CONFIG_DIR: '/home/agent/.claude',
     // Every proxy-aware client honours these; anything else has no route
     // out, which is the intended failure mode.
     HTTP_PROXY: proxyUrl,
@@ -163,15 +186,18 @@ export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     no_proxy: 'localhost,127.0.0.1',
   };
 
-  if (spec.egress.caCertificate !== '') {
-    // The entrypoint writes the PEM to CA_PATH; these are the four variables
-    // that point node, gh, git and curl at it. A tool honouring none of them
-    // fails TLS against the intercepted hosts and nothing else.
-    env['BOXES_PROXY_CA'] = spec.egress.caCertificate;
+  if (spec.caCertificate !== '') {
+    // The entrypoint writes the PEM to CA_PATH; these are the variables that
+    // point node, gh, git, curl and Codex at it. A tool honouring none of
+    // them fails TLS against the intercepted hosts and nothing else.
+    env['BOXES_PROXY_CA'] = spec.caCertificate;
     env['NODE_EXTRA_CA_CERTS'] = CA_PATH;
     env['SSL_CERT_FILE'] = CA_PATH;
     env['GIT_SSL_CAINFO'] = CA_PATH;
     env['CURL_CA_BUNDLE'] = CA_PATH;
+    // Codex reads this one first and falls back to SSL_CERT_FILE; setting
+    // both costs nothing and says what is meant. Harmless before Codex ships.
+    env['CODEX_CA_CERTIFICATE'] = CA_PATH;
   }
 
   return Object.entries(env)

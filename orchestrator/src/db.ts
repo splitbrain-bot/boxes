@@ -420,6 +420,39 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE threads ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
   `,
+  // Credentials move out of the environment and into the database, so that a
+  // token can be entered from the settings page and reach the proxy without a
+  // restart — and so that a login, which has no static form at all, has
+  // somewhere to live. The secret is stored as-is: the orchestrator has to
+  // hand it to the proxy on every boot, so there is nobody to ask for a
+  // passphrase.
+  //
+  // The settings table is the non-secret half of the same page: the git
+  // identity that used to come from the environment beside the credentials,
+  // and each dialog's last choice.
+  //
+  // Milestone 2 adds the thread and catalogue changes here: this entry is
+  // extended rather than a new one appended, because the two ship together
+  // and a deployment that has applied this one is not yet in anybody's hands.
+  `
+  CREATE TABLE credentials (
+    id           TEXT PRIMARY KEY,
+    method       TEXT NOT NULL,
+    secret       TEXT NOT NULL,
+    account      TEXT,
+    expires_at   INTEGER,
+    refreshed_at INTEGER,
+    status       TEXT NOT NULL DEFAULT 'ok',
+    last_error   TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+  );
+  CREATE TABLE settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** An open database handle. */

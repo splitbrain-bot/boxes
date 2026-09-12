@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CredentialId } from '../../shared/types.ts';
 import { resolveWsAuthToken } from './secret.ts';
 import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 
@@ -8,7 +9,9 @@ import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
  * at startup.
  *
  * Every setting has a working default, so the orchestrator starts with no
- * configuration at all.
+ * configuration at all. Nothing here is a secret: the deployment's
+ * credentials live in the database and are managed from the settings page,
+ * and this file knows only which hosts each of them travels to.
  */
 
 /** A positive whole number of minutes. */
@@ -165,23 +168,11 @@ const schema = z.object({
    * which leaves every public host reachable.
    */
   EGRESS_ALLOWED_HOSTS: z.string().default(''),
-
-  PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: z.string().default(''),
-  PROFILE_DEFAULT_GH_TOKEN: z.string().default(''),
-  PROFILE_DEFAULT_GIT_NAME: z.string().default('boxes-bot'),
-  PROFILE_DEFAULT_GIT_EMAIL: z.string().default('boxes-bot@users.noreply.github.com'),
 });
 
 export type Config = Readonly<z.infer<typeof schema>> & {
-  /** Credentials by profile name. */
-  readonly profiles: Readonly<Record<string, SessionProfile>>;
   /** The parsed allowlist. Empty means the allowlist is off. */
   readonly egressAllowedHosts: readonly string[];
-  /**
-   * The credentials this deployment translates: the entries of CREDENTIAL_SET
-   * whose secret this deployment configured.
-   */
-  readonly egressCredentials: readonly ConfiguredCredential[];
 };
 
 /**
@@ -192,8 +183,8 @@ export type Config = Readonly<z.infer<typeof schema>> & {
  * they are facts about the services rather than preferences.
  */
 export interface CredentialSpec {
-  /** Stable identifier, used in logs, status and the placeholder file. */
-  id: string;
+  /** Which stored credential this is: the key of the row that holds its secret. */
+  id: CredentialId;
   /** Hosts intercepted so the credential can be swapped in. */
   hosts: readonly string[];
   /** Headers the credential may travel in, lowercased. */
@@ -210,24 +201,23 @@ export interface CredentialSpec {
   placeholderPrefix: string;
 }
 
-/** A credential spec together with the secret this deployment configured. */
-export interface ConfiguredCredential extends CredentialSpec {
-  secret: string;
-}
-
 /**
- * Every credential the proxy knows how to translate. A deployment translates
- * the ones it configures a secret for; the rest stay ordinary passthrough
- * hosts, which is what preserves the "log in inside a session" flow.
+ * Every credential the proxy knows how to translate, and where each one
+ * travels. A deployment translates the ones the credential store holds a
+ * secret for; the rest stay ordinary passthrough hosts.
+ *
+ * This stays configuration-free even though the secrets have left the
+ * environment: which hosts a credential is sent to, and which header it
+ * arrives in, are facts about the services rather than preferences.
  */
 export const CREDENTIAL_SET: readonly CredentialSpec[] = [
   {
     id: 'claude',
     hosts: ['api.anthropic.com'],
     headers: ['authorization', 'x-api-key'],
-    // The token endpoints an OAuth credential may be refreshed at. They are
-    // reachable but not intercepted, so a session that runs `claude
-    // setup-token` still works and keeps its own token.
+    // The token endpoints an OAuth credential may be refreshed at. Reachable
+    // but never intercepted: a refresh is the orchestrator's own business and
+    // carries its own credential rather than a box's placeholder.
     alsoAllow: ['console.anthropic.com', 'platform.claude.com', 'claude.ai'],
     placeholderPrefix: 'sk-ant-oat01-',
   },
@@ -252,14 +242,6 @@ export function parseHostList(value: string): string[] {
         .filter((h) => h !== ''),
     ),
   ];
-}
-
-/** Credentials + identity handed to a session container at create time. */
-export interface SessionProfile {
-  claudeOauthToken: string;
-  ghToken: string;
-  gitName: string;
-  gitEmail: string;
 }
 
 /** The config parsed at first use, or null before then. */
@@ -302,27 +284,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
-  const secrets: Record<string, string> = {
-    claude: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,
-    github: base.PROFILE_DEFAULT_GH_TOKEN,
-  };
-
   return {
     ...base,
     WS_AUTH_TOKEN: resolveWsAuthToken(base.DATA_DIR, base.WS_AUTH_TOKEN),
     egressAllowedHosts: allowedHosts,
-    egressCredentials: CREDENTIAL_SET.flatMap((spec) => {
-      const secret = secrets[spec.id] ?? '';
-      return secret ? [{ ...spec, secret }] : [];
-    }),
-    profiles: {
-      DEFAULT: {
-        claudeOauthToken: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,
-        ghToken: base.PROFILE_DEFAULT_GH_TOKEN,
-        gitName: base.PROFILE_DEFAULT_GIT_NAME,
-        gitEmail: base.PROFILE_DEFAULT_GIT_EMAIL,
-      },
-    },
   };
 }
 

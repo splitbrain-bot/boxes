@@ -242,9 +242,11 @@ test('a deployment on the previous release upgrades cleanly', () => {
 
 test('threads from before the mode column upgrade to the deployment default', () => {
   const db = new Database(join(dir, 'boxes.db'));
-  const before = MIGRATIONS.length - 1;
-  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
-  db.pragma(`user_version = ${before}`);
+  // The version just before the migration that adds the two columns, named
+  // rather than derived from the length: a migration appended later must not
+  // silently move this case onto itself.
+  for (const sql of MIGRATIONS.slice(0, 10)) db.exec(sql);
+  db.pragma('user_version = 10');
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
@@ -362,6 +364,58 @@ test('threads from before the done column read as not done', () => {
       done: number;
     };
     assert.equal(row.done, 0);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('the credential and settings tables arrive empty on an existing deployment', () => {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
+  db.pragma('user_version = 16');
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES ('live', 'from before credentials moved', 'DEFAULT', 'img', '[]', 'c1',
+       'sn-live', '10.200.0.0/24', '', 'home-live', 'running', NULL, 1000, 2000)`,
+  ).run();
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    // Nothing is carried over from the environment, deliberately: a
+    // deployment that had credentials in its .env enters them again on the
+    // settings page, and the release notes say so.
+    const credentials = upgraded
+      .prepare('SELECT COUNT(*) AS n FROM credentials')
+      .get() as { n: number };
+    assert.equal(credentials.n, 0);
+    const settings = upgraded.prepare('SELECT COUNT(*) AS n FROM settings').get() as {
+      n: number;
+    };
+    assert.equal(settings.n, 0);
+
+    assert.deepEqual(columns(upgraded, 'settings'), ['key', 'value', 'updated_at']);
+    assert.deepEqual(columns(upgraded, 'credentials'), [
+      'id',
+      'method',
+      'secret',
+      'account',
+      'expires_at',
+      'refreshed_at',
+      'status',
+      'last_error',
+      'created_at',
+      'updated_at',
+    ]);
+
+    // And the session that predates them is untouched: its box gets a
+    // placeholder for every credential at its next start, whatever is stored.
+    const row = upgraded.prepare("SELECT name FROM sessions WHERE id = 'live'").get() as {
+      name: string;
+    };
+    assert.equal(row.name, 'from before credentials moved');
   } finally {
     upgraded.close();
   }

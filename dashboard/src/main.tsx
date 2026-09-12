@@ -7,6 +7,7 @@ import { AgentSetEditor } from './views/AgentSetEditor.tsx';
 import { AgentSets } from './views/AgentSets.tsx';
 import { Playground } from './views/Playground.tsx';
 import { SessionCreate } from './views/SessionCreate.tsx';
+import { Settings } from './views/Settings.tsx';
 import { Shell } from './views/Shell.tsx';
 import { SessionInfo } from './views/SessionInfo.tsx';
 import { SessionList } from './views/SessionList.tsx';
@@ -69,6 +70,9 @@ function App() {
               deployment rather than to any one box. */}
           <Route path="/agents" element={<AgentSets />} />
           <Route path="/agents/:setId" element={<AgentSetEditor />} />
+          {/* The credentials every box runs on, and the identity it commits
+              as: deployment-wide for the same reason. */}
+          <Route path="/settings" element={<Settings />} />
           <Route path="/sessions/:id/info" element={<SessionInfo />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

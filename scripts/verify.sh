@@ -11,6 +11,11 @@
 # The Claude token is what pays for the one real inference turn. Without it
 # the run still covers everything else and says which checks it skipped.
 #
+# Credentials are not configuration any more: they live in the deployment's
+# own store and are normally entered on the settings page. These two
+# variables are read for the convenience of whoever already exports them, and
+# this script PUTs them to /api/credentials once the stack is up.
+#
 # Optional:
 #   PROFILE_DEFAULT_GH_TOKEN=ghp_...  a real PAT; a fake one is used otherwise,
 #                                     which still exercises interception
@@ -135,8 +140,6 @@ LOG_DIR="$(mktemp -d -t boxes-verify-logs.XXXXXX)"
 chmod 600 "$ENV_FILE"
 write_env() {
   cat > "$ENV_FILE" <<ENV
-PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=$REAL_CLAUDE
-PROFILE_DEFAULT_GH_TOKEN=$REAL_GH
 EGRESS_ALLOWED_HOSTS=$1
 IDLE_STOP_MINUTES=60
 ENV
@@ -274,6 +277,22 @@ fi
 if wait_health; then ok "health" "/healthz answers on $API_BASE"
 else bad "health" "/healthz never answered"; dump_logs; exit 1; fi
 
+# The credentials, into the deployment's store. Once: they are on the data
+# volume, so they survive the restarts and the recreations below.
+seed_credential() {
+  local id="$1" secret="$2"
+  [ -z "$secret" ] && { skipped "seed-$id" "not configured"; return; }
+  if curl -fsS -m 15 -X PUT "$API_BASE/api/credentials/$id" \
+       -H 'Content-Type: application/json' \
+       -d "$(jq -n --arg s "$secret" '{method:"token",secret:$s}')" >/dev/null 2>&1; then
+    ok "seed-$id" "the $id credential is stored"
+  else
+    bad "seed-$id" "the deployment refused the $id credential"
+  fi
+}
+seed_credential github "$REAL_GH"
+seed_credential claude "$REAL_CLAUDE"
+
 # ------------------------------------------------------------ A. the policy ---
 
 head1 "A. the policy the proxy is running"
@@ -288,7 +307,7 @@ matches "A2" "the allowlist is reported active" '^true$' \
 
 WANT_CREDS="github"
 [ -n "$REAL_CLAUDE" ] && WANT_CREDS="claude github"
-matches "A3" "the proxy holds exactly the configured credentials ($WANT_CREDS)" "^$WANT_CREDS\$" \
+matches "A3" "the proxy holds exactly the stored credentials ($WANT_CREDS)" "^$WANT_CREDS\$" \
   bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.egress.credentialIds | sort | join(\" \")'"
 
 matches "A4" "the proxy logged the policy it applied" 'applied policy' \
@@ -331,19 +350,23 @@ matches "B2" "the CA file is the deployment CA" 'Boxes egress proxy CA' \
 matches "B3" "the CA file is exactly what BOXES_PROXY_CA carried" '^same$' \
   sxs 'if [ "$(cat /home/agent/.boxes/proxy-ca.crt)" = "$(printf "%s\n" "$BOXES_PROXY_CA")" ]; then echo same; else echo differs; fi'
 
-for var in NODE_EXTRA_CA_CERTS SSL_CERT_FILE GIT_SSL_CAINFO CURL_CA_BUNDLE; do
+# CODEX_CA_CERTIFICATE among them: Codex reads it before SSL_CERT_FILE, and
+# the CA is delivered to every box whether or not a Codex thread ever runs.
+for var in NODE_EXTRA_CA_CERTS SSL_CERT_FILE GIT_SSL_CAINFO CURL_CA_BUNDLE CODEX_CA_CERTIFICATE; do
   matches "B4-$var" "$var points at the CA file" '^/home/agent/\.boxes/proxy-ca\.crt$' \
     sx printenv "$var"
 done
 
+# Unconditional: a box holds a placeholder for every credential whether or not
+# one is stored, because its environment is fixed when it is created and a
+# token entered afterwards has to reach it.
+matches "B5" "the session holds a Claude-shaped value" '^sk-ant-oat01-' \
+  sx printenv CLAUDE_CODE_OAUTH_TOKEN
 if [ -n "$REAL_CLAUDE" ]; then
-  matches "B5" "the session holds a Claude-shaped value" '^sk-ant-oat01-' \
-    sx printenv CLAUDE_CODE_OAUTH_TOKEN
   lacks "B6" "that value is not the deployment's own token" "^$(printf '%s' "$REAL_CLAUDE" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" \
     sx printenv CLAUDE_CODE_OAUTH_TOKEN
 else
-  skipped "B5" "no Claude token configured"
-  skipped "B6" "no Claude token configured"
+  skipped "B6" "no Claude token was passed to compare against"
 fi
 matches "B7" "the session holds a GitHub-shaped value" '^ghp_' \
   sx printenv GH_TOKEN
@@ -388,11 +411,11 @@ else
   CFG_CONTAINER="session-$CFG_SESSION"
   installed=0
   for _ in $(seq 1 40); do
-    docker exec "$CFG_CONTAINER" test -f /home/agent/.claude/.boxes-managed >/dev/null 2>&1 \
+    docker exec "$CFG_CONTAINER" test -f /home/agent/.boxes/managed >/dev/null 2>&1 \
       && { installed=1; break; }
     sleep 1
   done
-  if [ "$installed" = 1 ]; then ok "B12" "the entrypoint installed the merged set into ~/.claude"
+  if [ "$installed" = 1 ]; then ok "B12" "the entrypoint installed the merged set under \$HOME"
   else bad "B12" "nothing was installed"; why "$(docker logs "$CFG_CONTAINER" 2>&1 | tail -20)"; fi
 
   matches "B13" "the AGENTS.md landed as the agent's own memory" 'Verify: the house rules' \
@@ -401,6 +424,14 @@ else
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/commands/housecmd.md
   matches "B15" "the named set's skill is there too" 'name: verifyskill' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/skills/verifyskill/SKILL.md
+  # Both layouts, always: a box may hold threads of either harness, and
+  # neither agent reads the other's directories.
+  matches "B15a" "the AGENTS.md landed where Codex reads it too" 'Verify: the house rules' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.codex/AGENTS.md
+  matches "B15b" "the command is a Codex prompt as well" 'the global command' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.codex/prompts/housecmd.md
+  matches "B15c" "the skill is in the harness-neutral skills directory" 'name: verifyskill' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.agents/skills/verifyskill/SKILL.md
   # Read-only: what the dashboard says a box is configured with is not the
   # agent's to rewrite.
   mustnot "B16" "the mounted configuration is not writable from inside the box" \
@@ -411,6 +442,8 @@ else
   matches "B17" "a skill the image ships is installed when no set claims its name" \
     'name: playwright-cli' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/skills/playwright-cli/SKILL.md
+  matches "B17a" "and Codex gets its copy of that skill too" 'name: playwright-cli' \
+    docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.agents/skills/playwright-cli/SKILL.md
 
   curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$CFG_SESSION" >/dev/null 2>&1
 
@@ -428,13 +461,15 @@ else
   else
     OVR_CONTAINER="session-$OVR_SESSION"
     for _ in $(seq 1 40); do
-      docker exec "$OVR_CONTAINER" test -f /home/agent/.claude/.boxes-managed >/dev/null 2>&1 \
+      docker exec "$OVR_CONTAINER" test -f /home/agent/.boxes/managed >/dev/null 2>&1 \
         && break
       sleep 1
     done
     matches "B18" "a set's skill of the same name beats the image's" \
       'the set overrides the image' \
       docker exec -u agent "$OVR_CONTAINER" cat /home/agent/.claude/skills/playwright-cli/SKILL.md
+    matches "B18a" "in both layouts" 'the set overrides the image' \
+      docker exec -u agent "$OVR_CONTAINER" cat /home/agent/.agents/skills/playwright-cli/SKILL.md
     curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$OVR_SESSION" >/dev/null 2>&1
   fi
 fi

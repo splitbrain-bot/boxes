@@ -10,15 +10,16 @@
  * adding a third harness is an entry rather than a search for every `if`.
  */
 
-/**
- * Which credential a harness needs before a thread on it can run.
- *
- * It lives here only until the credential store exists; `credentials.ts` owns
- * this type once it lands, and the registry imports it from there.
- */
-export type CredentialId = 'claude' | 'openai' | 'github';
+import type { HarnessId } from '../../shared/types.ts';
+import type { CredentialId } from './credentials.ts';
 
-export type HarnessId = 'claude' | 'codex';
+/**
+ * Re-exported, so a module that wants the registry wants one import.
+ *
+ * The id itself is declared in `shared/types.ts` because the dashboard reads
+ * it off the health probe; everything about what a harness *is* stays here.
+ */
+export type { HarnessId };
 
 export interface AgentLayout {
   /** Home-relative path of the instructions file. */

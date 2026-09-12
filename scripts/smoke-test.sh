@@ -11,8 +11,9 @@
 # non-zero exit status.
 #
 # The token-translation and allowlist sections below assert only what the
-# deployment configured. Run it with credentials and an allowlist to
-# exercise all of it:
+# deployment holds. Credentials live in the deployment's own store now, so
+# this script seeds them: pass either of these and it is PUT to
+# /api/credentials before anything is created, and translation is exercised.
 #
 #   PROFILE_DEFAULT_GH_TOKEN=ghp_...
 #   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
@@ -108,6 +109,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# What this run has to work with. Read from the caller's environment under the
+# names the deployment used to take, for the convenience of whoever already
+# exports them, and seeded into the store below rather than read back out of
+# the orchestrator's own environment, where they no longer are.
+REAL_GH="${PROFILE_DEFAULT_GH_TOKEN:-}"
+REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
+
+# Seeds one credential, and says so if the deployment refuses it. Before the
+# sessions, so the boxes below are created against the policy that results —
+# though a box created before one is entered holds the same placeholder.
+seed_credential() {
+  local id="$1" secret="$2"
+  [ -z "$secret" ] && return 0
+  if api -f -X PUT "$API_BASE/api/credentials/$id" \
+       -H 'Content-Type: application/json' \
+       -d "$(jq -n --arg s "$secret" '{method:"token",secret:$s}')" >/dev/null; then
+    grey "seeded the $id credential"
+  else
+    red "could not seed the $id credential"; exit 1
+  fi
+}
+
+echo "== seeding the deployment's credentials =="
+if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ]; then
+  grey "none passed: the translation checks below will be skipped"
+else
+  seed_credential github "$REAL_GH"
+  seed_credential claude "$REAL_CLAUDE"
+fi
+
+echo
 echo "== creating throwaway sessions =="
 SESSION_ID=$(api -X POST "$API_BASE/api/sessions" \
   -H 'Content-Type: application/json' \
@@ -283,12 +315,8 @@ fi
 
 echo
 echo "== token translation: the session holds placeholders, not credentials =="
-# What the deployment configured, read back from the orchestrator's own env.
-REAL_GH=$(docker exec boxes-orchestrator printenv PROFILE_DEFAULT_GH_TOKEN 2>/dev/null || true)
-REAL_CLAUDE=$(docker exec boxes-orchestrator printenv PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
-
 if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ]; then
-  grey "skipped: this deployment configures no credential, so it translates none"
+  grey "skipped: no credential was seeded, so this deployment translates none"
 else
   absent_from_session "GH_TOKEN is nowhere in the session" "$REAL_GH"
   absent_from_session "CLAUDE_CODE_OAUTH_TOKEN is nowhere in the session" "$REAL_CLAUDE"

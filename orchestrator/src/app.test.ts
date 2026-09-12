@@ -903,7 +903,7 @@ test('starting a container for a command writes the current configuration first'
   // orchestrator's own rather than this test's fresh one.
   assert.equal(
     readFileSync(
-      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', 'commands', 'ship.md'),
+      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', '.claude', 'commands', 'ship.md'),
       'utf8',
     ),
     'Open a PR.\n',
@@ -992,4 +992,149 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
     last_active_at: number;
   };
   assert.equal(after.last_active_at, before.last_active_at);
+});
+
+// --- credentials and settings over their real routes --------------------------
+
+test('a pasted credential is stored, shown by its last four, and never read back', async () => {
+  const put = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual(put.json(), {
+    id: 'claude',
+    method: 'token',
+    account: '1234',
+    status: 'ok',
+    lastError: null,
+    expiresAt: null,
+    refreshedAt: null,
+    updatedAt: (put.json() as { updatedAt: number }).updatedAt,
+  });
+
+  const list = await orchestrator.app.inject({ url: '/api/credentials' });
+  // Write-only: the secret exists in the database and in the proxy, and in no
+  // answer this API gives.
+  assert.ok(!list.payload.includes('sk-ant-oat01-abcdefgh1234'));
+  assert.deepEqual(
+    (list.json() as Array<{ id: string }>).map((c) => c.id),
+    ['claude'],
+  );
+
+  const removed = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: '/api/credentials/claude',
+  });
+  assert.equal(removed.statusCode, 204);
+  assert.deepEqual((await orchestrator.app.inject({ url: '/api/credentials' })).json(), []);
+});
+
+test('a credential nobody can use is refused rather than stored', async () => {
+  const unknown = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/gitlab',
+    payload: { method: 'token', secret: 'x' },
+  });
+  assert.equal(unknown.statusCode, 400);
+
+  const method = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'magic', secret: 'x' },
+  });
+  assert.equal(method.statusCode, 400);
+
+  const empty = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: '   ' },
+  });
+  assert.equal(empty.statusCode, 400);
+
+  assert.deepEqual((await orchestrator.app.inject({ url: '/api/credentials' })).json(), []);
+});
+
+test('the git identity round-trips, and defaults where nobody has set it', async () => {
+  const initial = await orchestrator.app.inject({ url: '/api/settings' });
+  assert.deepEqual(initial.json(), {
+    gitName: 'boxes-bot',
+    gitEmail: 'boxes-bot@users.noreply.github.com',
+    dialogs: {},
+  });
+
+  const patched = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/settings',
+    payload: { gitEmail: 'bot@example.com' },
+  });
+  assert.deepEqual(patched.json(), {
+    gitName: 'boxes-bot',
+    gitEmail: 'bot@example.com',
+    dialogs: {},
+  });
+  assert.equal(
+    ((await orchestrator.app.inject({ url: '/api/settings' })).json() as { gitEmail: string })
+      .gitEmail,
+    'bot@example.com',
+  );
+
+  const bad = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/settings',
+    payload: { gitName: 42 },
+  });
+  assert.equal(bad.statusCode, 400);
+});
+
+test('the health probe says which harness can run, and on what', async () => {
+  const before = await orchestrator.app.inject({ url: '/healthz' });
+  const empty = before.json() as {
+    harnesses: Array<{ id: string; runnable: boolean; credential: unknown }>;
+    credentials: unknown[];
+  };
+  // Claude alone: a harness whose credential this deployment cannot even
+  // carry to a box is not offered. Codex joins the list with its credential.
+  assert.deepEqual(
+    empty.harnesses.map((h) => [h.id, h.runnable]),
+    [['claude', false]],
+  );
+  assert.equal(empty.harnesses[0]!.credential, null);
+  assert.deepEqual(empty.credentials, []);
+
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
+  });
+
+  const after = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ id: string; runnable: boolean; credential: { account: string } | null }>;
+    credentials: Array<{ id: string }>;
+  };
+  assert.equal(after.harnesses[0]!.runnable, true);
+  assert.equal(after.harnesses[0]!.credential?.account, '1234');
+  // Every stored credential is reported, GitHub included, because the
+  // settings page reads them from here.
+  assert.deepEqual(
+    after.credentials.map((c) => c.id),
+    ['claude'],
+  );
+});
+
+test('a credential that is failing is still offered, and says it is not runnable', async () => {
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
+  });
+  orchestrator.credentials.markStatus('claude', 'expired', 'a year is up');
+
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ runnable: boolean; credential: { status: string; lastError: string } }>;
+  };
+  assert.equal(health.harnesses[0]!.runnable, false);
+  assert.equal(health.harnesses[0]!.credential.status, 'expired');
+  assert.equal(health.harnesses[0]!.credential.lastError, 'a year is up');
 });

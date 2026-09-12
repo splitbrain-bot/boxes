@@ -14,6 +14,97 @@ export type SessionStatus =
 export type DockerState = 'running' | 'exited' | 'missing' | 'unknown';
 
 /**
+ * Which agent harness a box can run.
+ *
+ * Declared here rather than only in the orchestrator's registry because the
+ * dashboard reads it off the health probe; `orchestrator/src/harness.ts`
+ * re-exports it, and is still the one place a harness is described.
+ */
+export type HarnessId = 'claude' | 'codex';
+
+/**
+ * A credential the deployment holds, by the service it authenticates to.
+ *
+ * Same reasoning as HarnessId: the settings page names these, so they are
+ * part of the API. `orchestrator/src/credentials.ts` owns the store and
+ * re-exports the three types below.
+ */
+export type CredentialId = 'claude' | 'openai' | 'github';
+
+/**
+ * How a credential was obtained, which decides what the secret is: a token
+ * pasted from `claude setup-token`, an API key, or the whole JSON document a
+ * CLI wrote when somebody logged in.
+ */
+export type CredentialMethod = 'token' | 'api_key' | 'oauth';
+
+/** Whether a stored credential is believed to work. */
+export type CredentialStatus = 'ok' | 'expired' | 'failing';
+
+/**
+ * One stored credential, as everything outside the orchestrator sees it.
+ *
+ * Never the secret. `account` is what a person recognises the credential by:
+ * the last four characters of a pasted secret, or the account name where a
+ * login reported one.
+ */
+export interface CredentialSummary {
+  id: CredentialId;
+  method: CredentialMethod;
+  account: string | null;
+  status: CredentialStatus;
+  lastError: string | null;
+  /** When the secret stops working, in epoch milliseconds, or null for a static one. */
+  expiresAt: number | null;
+  /** When it was last refreshed, in epoch milliseconds, or null if it never has been. */
+  refreshedAt: number | null;
+  updatedAt: number;
+}
+
+/** What one harness needs before a thread on it can run, and whether it has it. */
+export interface HarnessHealth {
+  id: HarnessId;
+  /** What the dashboard calls it. */
+  label: string;
+  /** Null when no credential is stored for this harness. */
+  credential: CredentialSummary | null;
+  /** True when a thread of this harness can run a turn right now. */
+  runnable: boolean;
+}
+
+/**
+ * What a thread dialog last chose for one harness, so the next box starts on
+ * the same settings from any device.
+ *
+ * Written by the dashboard and read back by it; the orchestrator only stores
+ * it. Nothing fills it before the dialogs exist.
+ */
+export interface ThreadDialogDefaults {
+  modeId?: string;
+  config?: Record<string, string>;
+}
+
+/**
+ * The deployment's plain settings: everything that is configuration rather
+ * than a secret, and so lives beside the credentials instead of in them.
+ *
+ * The git identity is what every box commits as. It used to come from the
+ * environment, and only did so because the credentials did.
+ */
+export interface Settings {
+  gitName: string;
+  gitEmail: string;
+  /** Keyed by harness id; see ThreadDialogDefaults. */
+  dialogs: Record<string, ThreadDialogDefaults>;
+}
+
+/** Body of a request to store a credential by pasting its secret. */
+export interface PutCredentialBody {
+  method: CredentialMethod;
+  secret: string;
+}
+
+/**
  * One thing a conversation has left running in its box.
  *
  * Read from the processes alive in the container: nothing reports when a
@@ -207,6 +298,11 @@ export interface ThreadDoneBody {
 /** Body of a create-session request. */
 export interface CreateSessionBody {
   name: string;
+  /**
+   * Ignored. Every box runs on the one set of credentials the settings page
+   * manages, so there is no profile to name; the field is kept so a client
+   * from before that still creates a box rather than a 400.
+   */
   profile?: string;
   /**
    * Id of the agent set whose AGENTS.md, skills and commands are merged over
@@ -273,10 +369,14 @@ export interface HealthResponse {
   /** Egress policy state, or null before the first push has been attempted. */
   egress: EgressHealth | null;
   /**
-   * True when the deployment holds a Claude token. False means no session can
-   * run a turn unless somebody logs in inside it.
+   * Every harness this deployment can run, and whether each of them has a
+   * credential that works. A harness that is not runnable is one whose
+   * threads fail at their first turn, which is why the dashboard says so
+   * before anybody prompts one.
    */
-  claudeTokenConfigured: boolean;
+  harnesses: HarnessHealth[];
+  /** Every stored credential, GitHub included. Never the secrets. */
+  credentials: CredentialSummary[];
   /** How many browsers are registered for Web Push. */
   pushSubscriptions: number;
   /** Which build of each of the deployment's own images is running. */

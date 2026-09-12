@@ -1,5 +1,9 @@
 import { useSyncExternalStore } from 'react';
-import type { DeploymentImages, SessionSummary } from '../../../shared/types.ts';
+import type {
+  DeploymentImages,
+  HarnessHealth,
+  SessionSummary,
+} from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { pollWhileVisible } from '../lib/poll.ts';
 
@@ -16,10 +20,14 @@ import { pollWhileVisible } from '../lib/poll.ts';
 export interface SessionsState {
   sessions: SessionSummary[];
   /**
-   * False once a probe has reported that the deployment holds no Claude
-   * token. True to begin with, so a slow first answer shows no warning.
+   * Every harness the deployment can run, and whether each has a credential
+   * that works.
+   *
+   * Empty until a probe has answered, so a slow first answer warns about
+   * nothing: a harness nobody has heard of yet is not a harness that cannot
+   * run.
    */
-  claudeTokenConfigured: boolean;
+  harnesses: HarnessHealth[];
   /**
    * Which build of each of the deployment's images is running, all three null
    * until a probe has said otherwise.
@@ -33,7 +41,7 @@ export interface SessionsState {
 
 let state: SessionsState = {
   sessions: [],
-  claudeTokenConfigured: true,
+  harnesses: [],
   images: { orchestrator: null, proxy: null, session: null },
   error: null,
   loading: true,
@@ -77,7 +85,7 @@ function reachable(error: Error): string {
  * Fetches the session list and the health probe once.
  *
  * The two are settled apart: a failed probe says nothing about the sessions,
- * and neither does a failed list say anything about the token, so one
+ * and neither does a failed list say anything about the credentials, so one
  * failure never discards the other's answer.
  */
 export async function refresh(): Promise<void> {
@@ -88,7 +96,7 @@ export async function refresh(): Promise<void> {
       : { error: reachable(list.reason as Error) }),
     ...(health.status === 'fulfilled'
       ? {
-          claudeTokenConfigured: health.value.claudeTokenConfigured,
+          harnesses: health.value.harnesses,
           images: health.value.images,
         }
       : {}),

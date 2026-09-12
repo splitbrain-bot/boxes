@@ -10,21 +10,31 @@ import type {
   CreateAgentSetBody,
   CreateSessionBody,
   CreateThreadBody,
+  CredentialSummary,
   ExecLogPage,
   ExecRequest,
+  HarnessHealth,
   HealthResponse,
   PushKeyResponse,
   PushSubscribeBody,
+  PutCredentialBody,
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseBody,
+  Settings,
   StoredAttachment,
   ThreadDoneBody,
   UpdateAgentSetBody,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
-import type { config } from './config.ts';
+import { CREDENTIAL_SET, type config } from './config.ts';
+import {
+  CredentialStore,
+  isCredentialId,
+  isCredentialMethod,
+  type CredentialId,
+} from './credentials.ts';
 import {
   countPushSubscriptions,
   deletePushSubscription,
@@ -33,6 +43,7 @@ import {
 } from './db.ts';
 import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
+import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
 import { log } from './log.ts';
@@ -40,6 +51,7 @@ import { Notifier } from './notify.ts';
 import { resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { SessionManager } from './sessions.ts';
+import { patchSettings, readSettings } from './settings.ts';
 import { setSessionOwner } from './workspaces.ts';
 
 /** The HTTP surface: the REST API, the exec endpoint and the static bundle. */
@@ -60,6 +72,8 @@ export interface Orchestrator {
   cfg: ReturnType<typeof config>;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
+  /** The deployment's credentials, as the settings page manages them. */
+  credentials: CredentialStore;
   /** Where "a thread wants you" goes. */
   notifier: Notifier;
   /** Reads and writes review data over the sessions' workspace directories. */
@@ -85,8 +99,27 @@ export function buildApp(
   // that writes files for the agent, or runs a process as it, reads this.
   setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
 
-  const egress = new EgressManager(cfg);
+  // The store and the manager each need the other: the policy is composed
+  // from the store's rows, and every write to the store re-pushes it. The
+  // hoisted function below is what lets them be built in this order.
+  const credentials = new CredentialStore(db, () => repushPolicy());
+  const egress = new EgressManager(cfg, credentials);
   const notifier = new Notifier(db, cfg);
+
+  /**
+   * Pushes the policy again because a credential changed.
+   *
+   * Best effort and never awaited: the write that caused it has already
+   * happened, the settings page should not fail because the proxy is
+   * restarting, and the reconciler re-pushes every minute regardless.
+   */
+  function repushPolicy(): void {
+    void egress.sync().catch((err: Error) => {
+      log.warn('could not push the egress policy after a credential changed; will retry', {
+        error: err.message,
+      });
+    });
+  }
   const agents = new AgentStore(db, cfg.DATA_DIR);
   const manager = new SessionManager(db, cfg, egress, notifier, agents);
   // The review surface reaches the files through the manager, which is the one
@@ -135,7 +168,8 @@ export function buildApp(
       sessions: row.n,
       proxyWarnings,
       egress: egress.status(),
-      claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
+      harnesses: harnessHealth(),
+      credentials: credentials.list().map((row) => credentials.summarize(row)),
       pushSubscriptions: countPushSubscriptions(db),
       // The one thing here that asks the daemon anything. Cached for a minute
       // and null on every failure, so the probe answers at the same speed and
@@ -143,6 +177,32 @@ export function buildApp(
       images: await deploymentImages(cfg),
     };
   });
+
+  /**
+   * What each harness needs, and whether it has it.
+   *
+   * Only the harnesses this deployment can carry a credential to: a box holds
+   * one placeholder per entry of CREDENTIAL_SET, so a harness whose
+   * credential is not in that set could not be given one whatever the store
+   * held. Codex joins the list when its credential does.
+   */
+  function harnessHealth(): HarnessHealth[] {
+    const deliverable = new Set(CREDENTIAL_SET.map((spec) => spec.id));
+    return Object.values(HARNESSES)
+      .filter((h) => deliverable.has(h.credentialId))
+      .map((h) => {
+        const row = credentials.get(h.credentialId);
+        return {
+          id: h.id,
+          label: h.label,
+          credential: row ? credentials.summarize(row) : null,
+          // A stored credential that is expired or failing is still stored:
+          // the dashboard offers the harness and says what is wrong with it,
+          // rather than having it disappear.
+          runnable: row?.status === 'ok',
+        };
+      });
+  }
 
   app.get('/api/sessions', async () => manager.list());
 
@@ -536,6 +596,76 @@ export function buildApp(
     return agents.bundle(setId);
   });
 
+  // --- Credentials and settings ------------------------------------------------
+
+  /**
+   * The deployment's credentials and the plain settings beside them.
+   *
+   * Secrets are write-only: they go in through PUT and come back out only as
+   * an account and a status. Every write starts a recompose and a push of the
+   * egress policy through the store's own change hook, so a pasted token
+   * reaches the proxy in the same second rather than at the reconciler's next
+   * minute.
+   */
+
+  app.get('/api/credentials', async (): Promise<CredentialSummary[]> =>
+    credentials.list().map((row) => credentials.summarize(row)),
+  );
+
+  app.put('/api/credentials/:id', async (req) => {
+    const id = credentialId(req.params as { id: string });
+    const body = (req.body ?? {}) as Partial<PutCredentialBody>;
+    const method = body.method ?? 'token';
+    if (!isCredentialMethod(method)) {
+      throw new HttpError(400, `Unknown credential method: ${method}`);
+    }
+    const secret = typeof body.secret === 'string' ? body.secret.trim() : '';
+    if (secret === '') throw new HttpError(400, 'secret is required');
+    return credentials.summarize(credentials.put(id, method, secret));
+  });
+
+  app.delete('/api/credentials/:id', async (req, reply) => {
+    credentials.remove(credentialId(req.params as { id: string }));
+    return reply.code(204).send();
+  });
+
+  /** The credential a route names, or a 400 rather than a row nobody can use. */
+  function credentialId(params: { id: string }): CredentialId {
+    if (!isCredentialId(params.id)) {
+      throw new HttpError(400, `Unknown credential: ${params.id}`);
+    }
+    return params.id;
+  }
+
+  app.get('/api/settings', async (): Promise<Settings> => readSettings(db));
+
+  /**
+   * Writes the settings a body names and answers with the whole of them.
+   *
+   * A patch rather than a put: the git identity and a dialog's last choice are
+   * written by different screens, and neither should carry the other's values
+   * to be able to save.
+   */
+  app.patch('/api/settings', async (req): Promise<Settings> => {
+    const body = (req.body ?? {}) as Partial<Settings>;
+    const patch: Partial<Settings> = {};
+    if (body.gitName !== undefined) {
+      if (typeof body.gitName !== 'string') throw new HttpError(400, 'gitName must be a string');
+      patch.gitName = body.gitName;
+    }
+    if (body.gitEmail !== undefined) {
+      if (typeof body.gitEmail !== 'string') throw new HttpError(400, 'gitEmail must be a string');
+      patch.gitEmail = body.gitEmail;
+    }
+    if (body.dialogs !== undefined) {
+      if (typeof body.dialogs !== 'object' || body.dialogs === null) {
+        throw new HttpError(400, 'dialogs must be an object');
+      }
+      patch.dialogs = body.dialogs;
+    }
+    return patchSettings(db, patch);
+  });
+
   // --- Web Push --------------------------------------------------------------
 
   /**
@@ -673,6 +803,7 @@ export function buildApp(
     manager,
     cfg,
     egress,
+    credentials,
     notifier,
     review,
     agents,

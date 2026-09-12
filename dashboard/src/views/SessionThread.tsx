@@ -17,7 +17,6 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
 import { threadTitle, type TabState } from '@/lib/tab-title';
-import { useSessions } from '../stores/sessions.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
@@ -101,7 +100,6 @@ export function SessionThread() {
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
-  const { claudeTokenConfigured } = useSessions();
 
   // The WS token comes from the session API, behind the deployment's auth.
   useEffect(() => {
@@ -338,7 +336,7 @@ export function SessionThread() {
                 }
               />
             </Shelf>
-            {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
+            <TokenWarning className="border-b px-4 py-2" />
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
                 {/* It opens on this conversation: the gateway replays what

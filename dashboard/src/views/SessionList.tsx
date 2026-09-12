@@ -1,4 +1,4 @@
-import { Plus, SlidersHorizontal } from 'lucide-react';
+import { KeyRound, Plus, SlidersHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
 import { ImageFooter } from '@/components/ImageFooter';
 import { Notice } from '@/components/Notice';
@@ -10,7 +10,7 @@ import { useSessions } from '../stores/sessions.ts';
 
 /** The dashboard's home: every session as a card, and the card is the thread. */
 export function SessionList() {
-  const { sessions, claudeTokenConfigured, images, error, loading } = useSessions();
+  const { sessions, images, error, loading } = useSessions();
 
   return (
     <div className="flex flex-col gap-3">
@@ -28,6 +28,15 @@ export function SessionList() {
               <SlidersHorizontal />
             </Link>
           </Button>
+          {/* The credentials every box runs on, and the identity it commits
+              as. Deployment-wide for the same reason, and beside the agent
+              configuration because the two are the whole of what is set up
+              once rather than per box. */}
+          <Button asChild size="sm" variant="ghost" aria-label="Settings">
+            <Link to="/settings">
+              <KeyRound />
+            </Link>
+          </Button>
           <Button asChild size="sm">
             <Link to="/new">
               <Plus />
@@ -37,7 +46,7 @@ export function SessionList() {
         </div>
       </div>
 
-      {claudeTokenConfigured ? null : <TokenWarning className="rounded-md border px-3 py-2" />}
+      <TokenWarning className="rounded-md border px-3 py-2" />
 
       {error ? (
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>

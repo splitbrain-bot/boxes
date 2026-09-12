@@ -2,7 +2,12 @@ import { afterAll, afterEach, expect, test } from 'vitest';
 import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
+import {
+  startStubOrchestrator,
+  stubHarness,
+  stubSession,
+  type StubOrchestrator,
+} from './stub-orchestrator.ts';
 import type { GatewayScript } from './stub-gateway.ts';
 
 /**
@@ -954,11 +959,11 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
   }
 });
 
-// The missing-token warning.
-test('a deployment with no Claude token is warned about in the list and the thread', async () => {
+// The per-harness warning: one line for each agent that cannot run a turn.
+test('a harness with no credential is warned about in the list and the thread', async () => {
   await start();
-  stub.state.claudeTokenConfigured = false;
-  const warning = /No Claude token is set/;
+  stub.state.harnesses = [stubHarness({ credential: null, runnable: false })];
+  const warning = /No credential is set for Claude Code/;
 
   const list = await openPage(stub.url, '/');
   try {
@@ -976,12 +981,43 @@ test('a deployment with no Claude token is warned about in the list and the thre
   }
 });
 
-test('a deployment that holds a Claude token is not warned about', async () => {
+test('a harness whose credential has expired is named, with the reason', async () => {
+  await start();
+  stub.state.harnesses = [
+    stubHarness({
+      runnable: false,
+      credential: {
+        id: 'claude',
+        method: 'token',
+        account: '1234',
+        status: 'expired',
+        lastError: null,
+        expiresAt: null,
+        refreshedAt: null,
+        updatedAt: Date.now(),
+      },
+    }),
+  ];
+
+  const { page, close } = await openPage(stub.url, '/');
+  try {
+    // Named rather than only missing: an expired credential is a different
+    // thing to do something about from one that was never entered.
+    await expect
+      .poll(() => page.getByText(/Claude Code's credential has expired/).isVisible())
+      .toBe(true);
+  } finally {
+    await close();
+  }
+});
+
+test('a deployment whose harnesses can all run is not warned about', async () => {
   await start();
   const { page, close } = await openPage(stub.url, '/');
   try {
     await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
-    expect(await page.getByText(/No Claude token is set/).count()).toBe(0);
+    expect(await page.getByText(/cannot run/).count()).toBe(0);
+    expect(await page.getByText(/No credential is set/).count()).toBe(0);
   } finally {
     await close();
   }
