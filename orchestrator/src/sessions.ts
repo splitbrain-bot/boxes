@@ -32,6 +32,7 @@ import { SessionUsage, SESSION_SIZE_TTL_MS } from './diskusage.ts';
 import * as dk from './docker.ts';
 import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
+import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
 import { readSettings } from './settings.ts';
@@ -282,6 +283,10 @@ export class SessionManager {
    * still mounted into one, is refused. Containers go first.
    */
   async sweepOrphans(): Promise<void> {
+    // First, and whatever the rest of this decides: a login container belongs
+    // to no session at all, so none of the reasoning below reaches it.
+    await this.sweepLoginContainers();
+
     const live = new Set(this.allRows().map((row) => row.id));
     const containers = await dk.listSessionContainers();
     const networks = await dk.listSessionNetworks();
@@ -338,6 +343,46 @@ export class SessionManager {
       await this.sweeping(sessionId, 'home', () =>
         Promise.resolve(ws.removeHome(this.cfg.DATA_DIR, sessionId)),
       );
+    }
+  }
+
+  /**
+   * Removes login containers that nothing is waiting on.
+   *
+   * A login runs the harness's own CLI in a container of its own and removes
+   * it when the flow ends, but a flow only ends while the orchestrator is
+   * alive to end it: a restart mid-login leaves a container holding a tmpfs
+   * home with half a credential in it, on the default bridge, forever.
+   *
+   * Age is the whole rule, because a login container has no other owner to
+   * ask about. The cutoff is longer than the ten minutes a flow is allowed to
+   * take, so a person still in a browser is never swept out from under. A
+   * container whose creation time cannot be read is treated as old, which is
+   * the safe direction: the thing it might interrupt lives for minutes.
+   */
+  private async sweepLoginContainers(): Promise<void> {
+    const cutoff = Date.now() - LOGIN_CONTAINER_MAX_AGE_MS;
+    let containers: Awaited<ReturnType<typeof dk.listLoginContainers>>;
+    try {
+      containers = await dk.listLoginContainers();
+    } catch (err) {
+      log.warn('could not list login containers', { error: (err as Error).message });
+      return;
+    }
+    for (const container of containers) {
+      if (container.createdAt > cutoff) continue;
+      try {
+        await dk.removeContainer(container.id);
+        log.info('swept an abandoned login container', {
+          credential: container.credentialId,
+          container: container.id,
+        });
+      } catch (err) {
+        log.warn('could not sweep an abandoned login container', {
+          container: container.id,
+          error: (err as Error).message,
+        });
+      }
     }
   }
 

@@ -17,6 +17,7 @@ import { buildApp, type Orchestrator } from './app.ts';
 import { config } from './config.ts';
 import { openDb, upsertHarnessCatalog, type Db } from './db.ts';
 import * as dk from './docker.ts';
+import type { LoginExecSpec } from './login.ts';
 import * as ws from './workspaces.ts';
 
 /**
@@ -1117,6 +1118,191 @@ test('a credential nobody can use is refused rather than stored', async () => {
   assert.equal(empty.statusCode, 400);
 
   assert.deepEqual((await orchestrator.app.inject({ url: '/api/credentials' })).json(), []);
+});
+
+/**
+ * A login, over its real routes and a scripted CLI.
+ *
+ * The container and the exec are injected — a daemon is the one thing these
+ * tests cannot have — so what is exercised here is the shape the settings page
+ * consumes: one call to start, a poll that answers with a state, a code posted
+ * back, and a cancel that takes the container with it.
+ */
+function fakeLogins(): {
+  execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> ;
+  removed: string[];
+} {
+  const execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> = [];
+  const removed: string[] = [];
+  orchestrator.logins.setRuntimeForTests({
+    start: async () => 'login-container',
+    exec: async (_id, spec) => {
+      const output = new PassThrough();
+      const record = { spec, output, input: '' };
+      execs.push(record);
+      const stdin = spec.tty ? new PassThrough() : null;
+      stdin?.on('data', (chunk: Buffer) => {
+        record.input += chunk.toString('utf8');
+      });
+      return {
+        output,
+        stdin,
+        exited: new Promise<number | null>(() => {}),
+        kill: () => output.destroy(),
+      };
+    },
+    remove: async (id) => {
+      removed.push(id);
+    },
+  });
+  return { execs, removed };
+}
+
+/** Waits for something a flow does on its own, or gives up loudly. */
+async function untilTrue(
+  what: string,
+  ready: () => boolean | Promise<boolean>,
+): Promise<void> {
+  for (let i = 0; i < 500; i += 1) {
+    if (await ready()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+test('a login is started, polled, and cancelled over its own routes', async () => {
+  const fake = fakeLogins();
+
+  const started = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/openai/login',
+  });
+  assert.equal(started.statusCode, 200);
+  const { loginId } = started.json() as { loginId: string };
+  assert.ok(loginId);
+
+  const first = await orchestrator.app.inject({
+    url: `/api/credentials/openai/login/${loginId}`,
+  });
+  assert.deepEqual(first.json(), { state: 'starting' });
+
+  await untilTrue('the CLI to be running', () => fake.execs.length === 1);
+  fake.execs[0]!.output.write(
+    'Open https://auth.openai.com/codex/device and enter WXYZ-1234\n',
+  );
+
+  let state = { state: 'starting' } as Record<string, unknown>;
+  await untilTrue('the poll to move', async () => {
+    const res = await orchestrator.app.inject({
+      url: `/api/credentials/openai/login/${loginId}`,
+    });
+    state = res.json() as Record<string, unknown>;
+    return state['state'] === 'awaiting_browser';
+  });
+  assert.deepEqual(state, {
+    state: 'awaiting_browser',
+    url: 'https://auth.openai.com/codex/device',
+    code: 'WXYZ-1234',
+  });
+
+  const cancelled = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: `/api/credentials/openai/login/${loginId}`,
+  });
+  assert.equal(cancelled.statusCode, 204);
+  await untilTrue('the container to go', () => fake.removed.length === 1);
+
+  // The id stops resolving with it, which is what a page polling an abandoned
+  // login sees.
+  const gone = await orchestrator.app.inject({
+    url: `/api/credentials/openai/login/${loginId}`,
+  });
+  assert.equal(gone.statusCode, 404);
+});
+
+test("a code is posted back into Claude's flow, and refused where none is wanted", async () => {
+  const fake = fakeLogins();
+  const started = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/claude/login',
+  });
+  const { loginId } = started.json() as { loginId: string };
+
+  await untilTrue('the CLI to be running', () => fake.execs.length === 1);
+  const cli = fake.execs[0]!;
+  // Nothing is waiting for a code yet, and saying so beats writing into a
+  // stream nobody is reading.
+  const early = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/credentials/claude/login/${loginId}/code`,
+    payload: { code: 'x' },
+  });
+  assert.equal(early.statusCode, 409);
+
+  cli.output.write('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
+  await untilTrue('the prompt', async () => {
+    const res = await orchestrator.app.inject({
+      url: `/api/credentials/claude/login/${loginId}`,
+    });
+    return (res.json() as { state: string }).state === 'awaiting_code';
+  });
+
+  const posted = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/credentials/claude/login/${loginId}/code`,
+    payload: { code: 'from-the-page' },
+  });
+  assert.equal(posted.statusCode, 204);
+  await untilTrue('the code to reach the CLI', () => cli.input !== '');
+  assert.equal(cli.input, 'from-the-page\n');
+
+  const missing = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/credentials/claude/login/${loginId}/code`,
+    payload: {},
+  });
+  assert.equal(missing.statusCode, 400);
+});
+
+test('GitHub has no login flow, and neither has anything else unknown', async () => {
+  const fake = fakeLogins();
+  const github = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/github/login',
+  });
+  assert.equal(github.statusCode, 400);
+  assert.match((github.json() as { error: string }).error, /no login flow/);
+
+  const unknown = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/gitlab/login',
+  });
+  assert.equal(unknown.statusCode, 400);
+  assert.deepEqual(fake.removed, []);
+});
+
+test('an account credential is reported, and says why it cannot run a box yet', async () => {
+  const document = JSON.stringify({
+    tokens: { access_token: 'a.b.c', refresh_token: 'r' },
+    last_refresh: '2026-09-12T10:00:00Z',
+  });
+  orchestrator.credentials.put('openai', 'oauth', document, { account: 'someone@example.com' });
+
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{
+      id: string;
+      runnable: boolean;
+      credential: { account: string; status: string; lastError: string | null } | null;
+    }>;
+  };
+  const codex = health.harnesses.find((h) => h.id === 'codex');
+  assert.equal(codex?.credential?.account, 'someone@example.com');
+  assert.equal(codex?.credential?.status, 'ok');
+  // Stored, refreshed, and still not something a box can be handed: the proxy
+  // swaps a header and this authenticates traffic nobody intercepts. PLAN.md
+  // section 3, verify step 10.
+  assert.equal(codex?.runnable, false);
+  assert.match(codex?.credential?.lastError ?? '', /cannot hand a subscription login to a box/);
 });
 
 test('the git identity round-trips, and defaults where nobody has set it', async () => {

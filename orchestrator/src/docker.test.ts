@@ -11,6 +11,7 @@ import { openDb, type Db } from './db.ts';
 import { EgressManager } from './egress.ts';
 import {
   containerProcesses,
+  createLoginContainer,
   containerProcessesFromInside,
   createContainer,
   credentialEnv,
@@ -292,6 +293,59 @@ describe('the container template', () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
     assert.equal(host['ShmSize'], 512 * 1024 * 1024);
+  }, 30_000);
+});
+
+describe('the login container', () => {
+  /** What createLoginContainer would ask the daemon for. */
+  async function capture(): Promise<Record<string, unknown>> {
+    let opts: Record<string, unknown> = {};
+    setDockerForTests({
+      createContainer: async (o: Record<string, unknown>) => {
+        opts = o;
+        return { id: 'login1' };
+      },
+    } as unknown as Docker);
+    try {
+      await createLoginContainer({ image: 'boxes-session:latest', credentialId: 'openai' });
+    } finally {
+      setDockerForTests(null);
+    }
+    return opts;
+  }
+
+  it('is nobody\'s box: no bind, no credential, and a home it can write', async () => {
+    const opts = await capture();
+    const host = opts['HostConfig'] as Record<string, unknown>;
+
+    // Nothing of a session is here. No workspace, no agent configuration, no
+    // placeholder for the proxy to swap — the CLI inside is authenticating a
+    // person to their own service, and there is no deployment secret in the
+    // container for an egress policy to protect.
+    assert.equal(host['Binds'], undefined);
+    assert.deepEqual(opts['Env'], []);
+    // The rootfs is read-only, and both CLIs write their state under $HOME.
+    const tmpfs = host['Tmpfs'] as Record<string, string>;
+    assert.match(tmpfs['/home/agent'] ?? '', /rw/);
+    assert.equal(host['ReadonlyRootfs'], true);
+    assert.deepEqual(host['CapDrop'], ['ALL']);
+    assert.equal(host['Privileged'], false);
+    assert.equal(opts['User'], '1020:1020');
+  }, 30_000);
+
+  it('sits on the default bridge, which is the point of it', async () => {
+    const opts = await capture();
+    // The one container Boxes creates with a route out of its own: the login
+    // hosts are the service's, not the deployment's, and it lives for minutes.
+    assert.equal((opts['HostConfig'] as Record<string, unknown>)['NetworkMode'], 'bridge');
+  }, 30_000);
+
+  it('carries the credential it is for, so a crash mid-flow can be swept', async () => {
+    const opts = await capture();
+    const labels = opts['Labels'] as Record<string, string>;
+    assert.equal(labels['boxes.login'], 'openai');
+    // It is not a session, so nothing that reads the session label finds it.
+    assert.equal(labels['boxes.session'], undefined);
   }, 30_000);
 });
 

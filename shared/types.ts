@@ -175,6 +175,36 @@ export interface PutCredentialBody {
 }
 
 /**
+ * Where a login has got to, as the settings page polls it.
+ *
+ * A credential that is an account rather than a string is obtained by running
+ * the harness's own CLI in a throwaway container, and the two CLIs want
+ * different things from the person at the browser. Codex prints a URL and a
+ * one-time code and then polls on its own, so the page shows both and waits;
+ * Claude prints a URL and then blocks on a prompt, so the page shows the URL,
+ * takes the code the page it opened gave back, and posts it in. Both end the
+ * same way, and a login that ended badly says why in a sentence worth showing.
+ */
+export type LoginState =
+  | { state: 'starting' }
+  /** The CLI is waiting for a browser. `code` is Codex's one-time code, where there is one. */
+  | { state: 'awaiting_browser'; url: string; code: string | null }
+  /** The CLI is blocked on a code the page has to paste back. */
+  | { state: 'awaiting_code'; url: string }
+  | { state: 'done' }
+  | { state: 'failed'; error: string };
+
+/** What starting a login answers with: the id every later call names. */
+export interface StartLoginResponse {
+  loginId: string;
+}
+
+/** Body of the paste-back: the code the login page gave the person. */
+export interface LoginCodeBody {
+  code: string;
+}
+
+/**
  * One thing a conversation has left running in its box.
  *
  * What the harness's adapter announced as an async task: both adapters send a

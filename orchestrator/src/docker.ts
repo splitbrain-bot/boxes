@@ -35,6 +35,17 @@ export const IMAGE_LABEL = 'boxes.image';
 export const SESSION_IMAGE_KIND = 'session';
 
 /**
+ * Docker label carrying the credential a throwaway login container belongs to.
+ *
+ * A login runs the harness's own CLI in a container of its own, for the
+ * minutes a person takes to authorise it in a browser. It is nobody's session,
+ * so it carries no session label and `sweepOrphans` would never see it; this
+ * is what it is found by instead, both to sweep one a crash mid-flow left
+ * behind and to tell it apart from a box at a glance.
+ */
+export const LOGIN_LABEL = 'boxes.login';
+
+/**
  * The `uid:gid` every session process runs as, as Docker wants it written.
  *
  * Numbers rather than the image's `agent`, so SESSION_UID alone decides who a
@@ -662,6 +673,166 @@ export async function removeContainer(containerId: string): Promise<void> {
   } catch (err) {
     if ((err as { statusCode?: number }).statusCode !== 404) throw err;
   }
+}
+
+/**
+ * Creates the throwaway container one login runs in.
+ *
+ * Nothing about it is a box. It gets no workspace, no agent configuration, no
+ * placeholder and no proxy: the CLI inside talks to its own service's login
+ * endpoints, which are that service's business rather than this deployment's,
+ * and there is no deployment secret in here for an egress policy to protect.
+ * So it sits on Docker's default bridge, which is the one place in Boxes where
+ * a container reaches the internet directly, and it lives for minutes.
+ *
+ * The home is a tmpfs because the rootfs is read-only and both CLIs write
+ * their state under `$HOME` — Codex writes the `auth.json` the whole flow
+ * exists to read. A tmpfs also means a login that is abandoned leaves the
+ * credential material nowhere: the container goes and the home goes with it.
+ */
+export async function createLoginContainer(spec: {
+  image: string;
+  credentialId: string;
+  env?: Record<string, string>;
+}): Promise<string> {
+  const container = await docker().createContainer({
+    Image: spec.image,
+    User: sessionUser(),
+    WorkingDir: '/home/agent',
+    Env: Object.entries(spec.env ?? {}).map(([k, v]) => `${k}=${v}`),
+    Labels: {
+      [LOGIN_LABEL]: spec.credentialId,
+      'com.centurylinklabs.watchtower.enable': 'false',
+    },
+    AttachStdin: false,
+    AttachStdout: false,
+    AttachStderr: false,
+    Tty: false,
+    HostConfig: {
+      // The default bridge: the one container Boxes creates with a route out
+      // of its own. See the comment above for why that is acceptable here.
+      NetworkMode: 'bridge',
+      ReadonlyRootfs: true,
+      // `exec` because the image puts tools on the home's own PATH, and a
+      // login CLI is one of the things that runs from there; `mode=1777`
+      // because a tmpfs is created empty and root-owned otherwise, and
+      // everything in here runs as the session user.
+      Tmpfs: {
+        '/home/agent': 'rw,exec,size=256m,mode=1777',
+        '/tmp': 'rw,size=64m,mode=1777',
+      },
+      CapDrop: ['ALL'],
+      SecurityOpt: ['no-new-privileges:true'],
+      // No memory or CPU ceiling: a login is one short-lived CLI, and a limit
+      // low enough to be worth setting is one a Node CLI can trip over. The
+      // pids limit stays, since nothing here forks.
+      PidsLimit: 256,
+      RestartPolicy: { Name: 'no' },
+      Init: true,
+      Privileged: false,
+      PublishAllPorts: false,
+    },
+  });
+  return container.id;
+}
+
+/**
+ * One exec driving a login CLI: everything it printed, and a way to answer it.
+ *
+ * stdout and stderr arrive merged, in the order they were written. Which of
+ * the two a CLI puts its URL on is not an API — Codex prints the device code
+ * to stdout and its success line to stderr, Claude prints a whole terminal UI
+ * — so the flows parse what they are looking for out of the whole of it, and
+ * report the tail of the whole of it when something goes wrong.
+ */
+export interface LoginExec {
+  /** stdout and stderr, demuxed and merged in arrival order. */
+  output: Readable;
+  /** Writable only on a TTY exec; null otherwise. */
+  stdin: Duplex | null;
+  exited: Promise<number | null>;
+  kill(): void;
+}
+
+/**
+ * Runs one command in a login container.
+ *
+ * `tty` is what makes `claude setup-token` possible at all: it is an
+ * interactive Ink UI that refuses to run without a terminal, and the code it
+ * asks for has to be written back to the same stream. Under a TTY Docker does
+ * not frame the output, so there is nothing to demux and the one stream is
+ * both halves already — which is also why the stream carries the CLI's
+ * redraws and escape sequences, and why every flow strips those before
+ * reading anything. PLAN.md section 3, verify step 8.
+ */
+export async function spawnLoginExec(
+  containerId: string,
+  cmd: readonly string[],
+  opts: { env?: Record<string, string>; tty?: boolean } = {},
+): Promise<LoginExec> {
+  const tty = opts.tty === true;
+  const exec = await docker().getContainer(containerId).exec({
+    Cmd: [...cmd],
+    AttachStdin: tty,
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: tty,
+    Env: Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
+    User: sessionUser(),
+    WorkingDir: '/home/agent',
+  });
+
+  const stream = (await exec.start({ hijack: true, stdin: tty })) as Duplex;
+  const output = new PassThrough();
+  if (tty) {
+    // A terminal wraps at its own width, and a login URL is longer than the
+    // 80 columns Docker gives an exec by default — a wrapped one arrives split
+    // across lines and is read as two things. Asking for a wide terminal is
+    // best effort: a daemon that refuses leaves the default, which is the
+    // state this was in before.
+    try {
+      await exec.resize({ h: 50, w: 400 });
+    } catch (err) {
+      log.debug('could not widen the login terminal', { error: (err as Error).message });
+    }
+    // Raw bytes both ways, so there is no frame header to strip.
+    stream.pipe(output, { end: false });
+  } else {
+    docker().modem.demuxStream(stream, output, output);
+  }
+
+  const { exited, kill } = execCompletion(
+    stream,
+    exec,
+    () => output.end(),
+    (err) => log.warn('login exec stream error', { error: err.message }),
+  );
+
+  return { output, stdin: tty ? stream : null, exited, kill };
+}
+
+/**
+ * Every login container Docker still has, with the moment it was created.
+ *
+ * What the orphan sweep reads. A login that finished removed its own
+ * container; one that is still listed here either belongs to a flow in
+ * progress or is what a crash mid-flow left behind, and the age is the only
+ * thing that tells those apart.
+ */
+export async function listLoginContainers(): Promise<
+  Array<{ id: string; credentialId: string; createdAt: number }>
+> {
+  const containers = await docker().listContainers({
+    all: true,
+    filters: { label: [LOGIN_LABEL] },
+  });
+  return containers.flatMap((c) => {
+    const credentialId = c.Labels?.[LOGIN_LABEL];
+    if (!credentialId) return [];
+    // Docker reports creation in epoch seconds; everything here is in
+    // milliseconds.
+    return [{ id: c.Id, credentialId, createdAt: (c.Created ?? 0) * 1000 }];
+  });
 }
 
 /** Removes a session network, detaching the egress proxy first. */

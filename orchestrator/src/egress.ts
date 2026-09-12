@@ -9,7 +9,7 @@ import type {
   EgressStatus,
 } from '../../shared/types.ts';
 import { CREDENTIAL_SET, type Config } from './config.ts';
-import type { CredentialRow, CredentialStore } from './credentials.ts';
+import { deliverableSecret, type CredentialRow, type CredentialStore } from './credentials.ts';
 import { log } from './log.ts';
 
 /**
@@ -135,7 +135,13 @@ export function composePolicy(
   material: EgressMaterial,
   stored: readonly CredentialRow[],
 ): EgressPolicy {
-  const secrets = new Map(stored.map((row) => [row.id, row.secret]));
+  // What a box can be given rather than what is stored: a subscription
+  // obtained by logging in is a document rather than a header value, and the
+  // traffic it authenticates does not pass through the swap at all. See
+  // deliverableSecret() for the whole of why, and PLAN.md section 3, verify
+  // step 10, for what is still undecided about it. A credential with nothing
+  // deliverable leaves its hosts unintercepted, exactly as an absent one does.
+  const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
   const configured = CREDENTIAL_SET.filter((spec) => (secrets.get(spec.id) ?? '') !== '');
 
   const credentials: EgressCredential[] = configured.map((spec) => {

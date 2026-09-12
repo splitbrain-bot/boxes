@@ -16,6 +16,8 @@ import type {
   HarnessHealth,
   HarnessInfo,
   HealthResponse,
+  LoginCodeBody,
+  LoginState,
   PushKeyResponse,
   PushSubscribeBody,
   PutCredentialBody,
@@ -34,6 +36,7 @@ import {
   CredentialStore,
   isCredentialId,
   isCredentialMethod,
+  undeliverableReason,
   type CredentialId,
 } from './credentials.ts';
 import {
@@ -48,6 +51,7 @@ import * as execs from './exec.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
+import { dockerLoginRuntime, LoginManager } from './login.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
 import { resolveInRoot } from './review/fs.ts';
@@ -76,6 +80,8 @@ export interface Orchestrator {
   egress: EgressManager;
   /** The deployment's credentials, as the settings page manages them. */
   credentials: CredentialStore;
+  /** The logins in flight, one per credential at most. */
+  logins: LoginManager;
   /** Where "a thread wants you" goes. */
   notifier: Notifier;
   /** Reads and writes review data over the sessions' workspace directories. */
@@ -122,6 +128,10 @@ export function buildApp(
       });
     });
   }
+  // A login runs the harness's own CLI in a throwaway container built from
+  // the session image, so the one thing it needs from the deployment is which
+  // image that is.
+  const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.SESSION_IMAGE));
   const agents = new AgentStore(db, cfg.DATA_DIR);
   const manager = new SessionManager(db, cfg, egress, notifier, agents);
   // The review surface reaches the files through the manager, which is the one
@@ -195,14 +205,23 @@ export function buildApp(
       .filter((h) => deliverable.has(h.credentialId))
       .map((h) => {
         const row = credentials.get(h.credentialId);
+        // A credential can be perfectly good and still not reach a box: a
+        // subscription obtained by logging in is a document rather than a
+        // header value, and Boxes has no way to hand one to a container yet.
+        // See credentials.ts's deliverableSecret(), and PLAN.md section 3,
+        // verify step 10. The reason travels in the field the dashboard
+        // already shows beside a harness it cannot offer.
+        const blocked = row ? undeliverableReason(row) : null;
+        const summary = row ? credentials.summarize(row) : null;
         return {
           id: h.id,
           label: h.label,
-          credential: row ? credentials.summarize(row) : null,
+          credential:
+            summary && blocked ? { ...summary, lastError: summary.lastError ?? blocked } : summary,
           // A stored credential that is expired or failing is still stored:
           // the dashboard offers the harness and says what is wrong with it,
           // rather than having it disappear.
-          runnable: row?.status === 'ok',
+          runnable: row?.status === 'ok' && blocked === null,
         };
       });
   }
@@ -671,6 +690,47 @@ export function buildApp(
     return reply.code(204).send();
   });
 
+  /**
+   * Logging in, for a credential that cannot be pasted.
+   *
+   * A ChatGPT or Claude subscription has no static form: the only thing that
+   * can obtain one is the harness's own CLI, which Boxes runs in a throwaway
+   * container and drives from here. Four calls, because the flow is a state
+   * machine a page polls rather than a request that blocks for the minutes a
+   * person takes in a browser: start it, ask where it is, answer the one
+   * question Claude's CLI asks, and give up.
+   *
+   * `github` has no flow — a personal access token is a string somebody
+   * pastes — and says so rather than starting a container that would print
+   * nothing.
+   */
+
+  app.post('/api/credentials/:id/login', async (req) => {
+    const id = credentialId(req.params as { id: string });
+    return { loginId: logins.start(id) };
+  });
+
+  app.get('/api/credentials/:id/login/:loginId', async (req): Promise<LoginState> => {
+    const { loginId } = req.params as { loginId: string };
+    return logins.state(credentialId(req.params as { id: string }), loginId);
+  });
+
+  app.post('/api/credentials/:id/login/:loginId/code', async (req, reply) => {
+    const { loginId } = req.params as { loginId: string };
+    const body = (req.body ?? {}) as Partial<LoginCodeBody>;
+    const code = typeof body.code === 'string' ? body.code : '';
+    logins.submitCode(credentialId(req.params as { id: string }), loginId, code);
+    // Nothing to answer with: where the login goes next is what the poll
+    // above says, and it may not have moved yet.
+    return reply.code(204).send();
+  });
+
+  app.delete('/api/credentials/:id/login/:loginId', async (req, reply) => {
+    const { loginId } = req.params as { loginId: string };
+    logins.cancel(credentialId(req.params as { id: string }), loginId);
+    return reply.code(204).send();
+  });
+
   /** The credential a route names, or a 400 rather than a row nobody can use. */
   function credentialId(params: { id: string }): CredentialId {
     if (!isCredentialId(params.id)) {
@@ -846,6 +906,7 @@ export function buildApp(
     cfg,
     egress,
     credentials,
+    logins,
     notifier,
     review,
     agents,

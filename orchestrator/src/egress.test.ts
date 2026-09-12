@@ -188,6 +188,25 @@ describe('composePolicy', () => {
     expect(allowedHosts).not.toContain('evil.com');
   }, 30_000);
 
+  it('has nothing to swap for a subscription obtained by logging in', async () => {
+    const cfg = configFrom();
+    const store = storeWith(cfg);
+    // What `codex login --device-auth` leaves behind: a document, not a
+    // header value, and it authenticates traffic to chatgpt.com, which is
+    // deliberately not intercepted. Storing it therefore changes nothing
+    // about the wire — the row is kept and refreshed, and the harness health
+    // is where a person is told it cannot reach a box yet. PLAN.md section 3,
+    // verify step 10.
+    store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const policy = composePolicy(cfg, material, rows(store));
+
+    expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
+    // The placeholder still exists, because a box holds one whether or not
+    // its credential does.
+    expect(material.placeholders['openai']).toMatch(/^sk-/);
+  }, 30_000);
+
   it('intercepts the OpenAI key host, and only that one', async () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
     const store = storeWith(cfg, { openai: OPENAI_KEY });

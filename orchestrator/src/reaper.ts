@@ -1,4 +1,5 @@
 import type { Config } from './config.ts';
+import { refreshCredentials, type CredentialStore } from './credentials.ts';
 import { sessionsWithActiveTurns, type Db, type SessionRow } from './db.ts';
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
@@ -145,4 +146,22 @@ export function startProxyReconciler(
     }
   };
   return loop('proxy reconcile', TICK_MS, tick);
+}
+
+/**
+ * Starts the loop that keeps the stored credentials true, and returns a handle
+ * that stops it.
+ *
+ * A credential is the one thing Boxes holds that goes stale on its own: a
+ * Codex subscription's access token lasts hours, its login goes stale after
+ * eight days, and a Claude `setup-token` token runs out after a year with no
+ * way to renew it. Every minute, because the window that matters is the hour
+ * before an access token expires and a minute is cheap: the tick reads the
+ * rows, refreshes what it can, and marks what it cannot.
+ *
+ * A refresh writes through the store, so the new material reaches the proxy on
+ * the store's own change hook rather than waiting for the reconciler.
+ */
+export function startCredentialRefresh(credentials: CredentialStore): { stop: () => void } {
+  return loop('credential refresh', TICK_MS, () => refreshCredentials(credentials));
 }

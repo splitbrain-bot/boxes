@@ -6,13 +6,18 @@ import { config } from './config.ts';
 import { openDb } from './db.ts';
 import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { log } from './log.ts';
-import { startImageRefresher, startProxyReconciler, startReaper } from './reaper.ts';
+import {
+  startCredentialRefresh,
+  startImageRefresher,
+  startProxyReconciler,
+  startReaper,
+} from './reaper.ts';
 
 // --- the app and its database ----------------------------------------------
 
 const cfg = config();
 const db = openDb(cfg.DATA_DIR);
-const { app, manager, egress, setProxyWarnings } = buildApp(cfg, db);
+const { app, manager, credentials, egress, logins, setProxyWarnings } = buildApp(cfg, db);
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
@@ -124,6 +129,7 @@ async function main(): Promise<void> {
   startReaper(db, cfg, manager);
   startImageRefresher(cfg, manager);
   startProxyReconciler(manager, egress, setProxyWarnings);
+  startCredentialRefresh(credentials);
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });
   log.info('orchestrator listening', { port: cfg.PORT });
@@ -133,6 +139,9 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     log.info('shutting down', { signal });
     manager.closeAll();
+    // A login in flight holds a container of its own, which nothing else
+    // would remove until the sweep noticed it fifteen minutes later.
+    logins.closeAll();
     void app.close().then(() => {
       db.close();
       process.exit(0);
