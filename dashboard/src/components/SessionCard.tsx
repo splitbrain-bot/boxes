@@ -3,12 +3,14 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { SessionSummary, ThreadSummary } from '../../../shared/types.ts';
 import { DOT, StatusBadge, type BadgeKind } from './StatusBadge';
+import { NewThreadDialog } from '@/components/NewThreadDialog';
 import { Card } from '@/components/ui/card';
 import { api } from '../api.ts';
 import { STILL_RUNNING } from '@/lib/activity';
+import { harnessLabel } from '@/lib/harness';
 import { shortAge, shortSize } from '@/lib/rough';
 import { threadName } from '@/lib/threads';
-import { refresh } from '../stores/sessions.ts';
+import { refresh, useSessions } from '../stores/sessions.ts';
 import { cn } from '@/lib/utils';
 
 /**
@@ -64,10 +66,28 @@ export function SessionCard({ session }: { session: SessionSummary }) {
   /** Held while a thread call is in flight, so a double tap cannot fork twice. */
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Whether the new-thread dialog is up. */
+  const [starting, setStarting] = useState(false);
+  // What each thread's agent is called. Off the health probe the list is
+  // polling anyway rather than a call of its own: a row needs the label and
+  // nothing else about the harness, and the dialog is what needs the rest.
+  const { harnesses } = useSessions();
 
-  /** Runs one thread call, then opens the thread it made. */
-  async function open(work: () => Promise<ThreadSummary>): Promise<void> {
-    if (busy) return;
+  /**
+   * Runs one thread call and opens the thread it made. Answers whether it
+   * got there, so a caller with a dialog up knows whether to take it down.
+   *
+   * `replace` spends the current history entry on the thread instead of
+   * pushing over it. It is what the dialog wants: opening one pushes an entry
+   * at this same URL for the back button to pop (see ui/dialog), and the
+   * thread it starts belongs in that entry rather than on top of it —
+   * otherwise back from the new thread lands on the list twice.
+   */
+  async function open(
+    work: () => Promise<ThreadSummary>,
+    replace = false,
+  ): Promise<boolean> {
+    if (busy) return false;
     setBusy(true);
     setError(null);
     try {
@@ -75,9 +95,11 @@ export function SessionCard({ session }: { session: SessionSummary }) {
       // The card's own thread list comes from the poll, so a change made here
       // is visible on the way back rather than a reload later.
       void refresh();
-      await navigate(`/sessions/${session.id}/threads/${created.id}`);
+      await navigate(`/sessions/${session.id}/threads/${created.id}`, { replace });
+      return true;
     } catch (err) {
       setError((err as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -161,6 +183,16 @@ export function SessionCard({ session }: { session: SessionSummary }) {
               <span className={cn('min-w-0 flex-1 truncate', thread.done && 'line-through')}>
                 {threadName(thread)}
               </span>
+              {/* Which agent is on the other end of this conversation, which
+                  is what its mode and its model mean — and, in a box holding
+                  a thread of each, the difference between two rows that
+                  otherwise look alike. Quiet: it is a fact about the thread
+                  rather than a state of it. */}
+              {harnessLabel(harnesses, thread.harness) ? (
+                <span className="shrink-0 text-xs opacity-70">
+                  {harnessLabel(harnesses, thread.harness)}
+                </span>
+              ) : null}
               {/* How long since this conversation last did anything, which is
                   what picks the one you were in out of a box with six. Rough,
                   and rounded down: the question is this morning or last week,
@@ -180,7 +212,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
           <button
             type="button"
             disabled={busy}
-            onClick={() => void open(() => api.createThread(session.id))}
+            onClick={() => setStarting(true)}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
           >
             <Plus className="size-3.5" />
@@ -217,6 +249,28 @@ export function SessionCard({ session }: { session: SessionSummary }) {
           <div className="px-2 pt-1 text-xs text-danger" role="alert">
             {error}
           </div>
+        ) : null}
+
+        {/* Asked before it is started, because the agent a thread runs is
+            fixed for the life of its transcript. Forking asks nothing: it
+            stays on its source's harness with its source's settings. */}
+        {starting ? (
+          <NewThreadDialog
+            busy={busy}
+            onCancel={() => setStarting(false)}
+            // Left up while the thread is being made, and taken down only if
+            // it could not be: closing it first would pop its history entry
+            // from under the navigation that is still in flight, and the pop
+            // would land after the push and undo it.
+            onCreate={(options) => {
+              void open(
+                () => api.createThread(session.id, options ? { options } : {}),
+                true,
+              ).then((opened) => {
+                if (!opened) setStarting(false);
+              });
+            }}
+          />
         ) : null}
       </div>
     </Card>

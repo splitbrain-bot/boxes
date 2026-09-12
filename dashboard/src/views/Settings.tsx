@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type {
   CredentialId,
   CredentialSummary,
+  HarnessHealth,
+  HarnessId,
   Settings as SettingsShape,
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
@@ -31,6 +33,13 @@ import { useSessions } from '../stores/sessions.ts';
 interface CredentialKind {
   id: CredentialId;
   label: string;
+  /**
+   * The harnesses that run on it, which is the one fact about a credential
+   * that belongs to the registry rather than to this page. What each of them
+   * is *called* is not written down here: the labels come from the harness
+   * list, so this page and the dialogs name an agent the same way.
+   */
+  harnesses: HarnessId[];
   /** What stops working without it. */
   blurb: string;
   /** What the secret looks like, so a wrong paste is obvious before saving. */
@@ -48,12 +57,15 @@ const KINDS: CredentialKind[] = [
   {
     id: 'claude',
     label: 'Claude',
+    harnesses: ['claude'],
     blurb: 'What a Claude Code thread runs on. Without it, a turn fails at the first prompt.',
     hint: 'sk-ant-oat01-…, from claude setup-token',
   },
   {
     id: 'github',
     label: 'GitHub',
+    // Not a harness: every box uses it, whichever agent is in the box.
+    harnesses: [],
     blurb:
       'What a box clones and pushes with. Without it, git and gh reach GitHub ' +
       'unauthenticated and a push is refused.',
@@ -125,12 +137,11 @@ export function Settings() {
             key={kind.id}
             kind={kind}
             stored={credentials.find((c) => c.id === kind.id) ?? null}
-            // The harness that runs on this credential, where one does, so
-            // the card can say what is not working rather than only that
-            // something is unset.
-            harnessLabel={
-              harnesses.find((h) => h.credential?.id === kind.id && !h.runnable)?.label ?? null
-            }
+            // The harnesses that run on this credential, as the deployment
+            // names them, so the card can say what is not working rather than
+            // only that something is unset. Read off the health probe rather
+            // than written down here: the labels are the registry's.
+            stalled={harnesses.filter((h) => kind.harnesses.includes(h.id) && !h.runnable)}
             busy={busy}
             onSave={(method, secret) => act(() => api.putCredential(kind.id, method, secret))}
             onRemove={() => setConfirmRemove(kind)}
@@ -172,14 +183,15 @@ export function Settings() {
 function CredentialCard({
   kind,
   stored,
-  harnessLabel,
+  stalled,
   busy,
   onSave,
   onRemove,
 }: {
   kind: CredentialKind;
   stored: CredentialSummary | null;
-  harnessLabel: string | null;
+  /** The harnesses that cannot run on it right now, empty when all can. */
+  stalled: HarnessHealth[];
   busy: boolean;
   onSave: (method: 'token', secret: string) => Promise<boolean>;
   onRemove: () => void;
@@ -218,7 +230,7 @@ function CredentialCard({
 
       <p className="text-xs text-muted-foreground">{kind.blurb}</p>
 
-      <p className="text-xs text-muted-foreground">{describe(stored, harnessLabel)}</p>
+      <p className="text-xs text-muted-foreground">{describe(stored, stalled)}</p>
 
       {stored?.lastError ? (
         <Notice tone="warn" className="rounded-md border px-3 py-2 text-xs">
@@ -250,8 +262,12 @@ function CredentialCard({
 }
 
 /** The one line under a credential's name: what is stored, and how it is doing. */
-function describe(stored: CredentialSummary | null, harnessLabel: string | null): string {
-  if (!stored) return 'Not set.';
+function describe(stored: CredentialSummary | null, stalled: HarnessHealth[]): string {
+  if (!stored) {
+    return stalled.length === 0
+      ? 'Not set.'
+      : `Not set, so ${stalled.map((h) => h.label).join(' and ')} cannot run.`;
+  }
   const parts = [stored.account ? `Ends ${stored.account}` : 'Stored'];
   if (stored.status === 'expired') parts.push('expired');
   if (stored.status === 'failing') parts.push('failing');
@@ -261,7 +277,9 @@ function describe(stored: CredentialSummary | null, harnessLabel: string | null)
       : `entered ${shortAge(Date.now() - stored.updatedAt)} ago`,
   );
   if (stored.expiresAt) parts.push(`expires in ${shortAge(stored.expiresAt - Date.now())}`);
-  if (harnessLabel) parts.push(`${harnessLabel} cannot run on it`);
+  if (stalled.length > 0) {
+    parts.push(`${stalled.map((h) => h.label).join(' and ')} cannot run on it`);
+  }
   return `${parts.join(' · ')}.`;
 }
 

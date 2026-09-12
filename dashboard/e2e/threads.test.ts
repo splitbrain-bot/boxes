@@ -50,6 +50,19 @@ afterAll(async () => {
   await closeBrowser();
 });
 
+/**
+ * Starts a fresh thread from the list, through the dialog that now asks what
+ * it should run.
+ *
+ * The dialog's own answers are asserted in dialogs.test.ts; what these tests
+ * are about is the transcript on the other side of it, so they take the
+ * defaults it opens on.
+ */
+async function startThread(page: import('playwright').Page): Promise<void> {
+  await page.getByRole('button', { name: 'New thread' }).click();
+  await page.getByRole('button', { name: 'Start thread' }).click();
+}
+
 /** Opens the session, asks one question, and waits for the answer. */
 async function askOnce(page: import('playwright').Page): Promise<void> {
   await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
@@ -65,7 +78,7 @@ test('a new thread starts empty on the same session', async () => {
     await askOnce(page);
 
     await page.getByLabel('Back to sessions').click();
-    await page.getByRole('button', { name: 'New thread' }).click();
+    await startThread(page);
     // Opening a thread is a navigation to that thread's own route.
     await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
@@ -107,7 +120,7 @@ test('switching back to the first thread returns its transcript', async () => {
     await askOnce(page);
 
     await page.getByLabel('Back to sessions').click();
-    await page.getByRole('button', { name: 'New thread' }).click();
+    await startThread(page);
     await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('Thread 2').isVisible()).toBe(true);
     expect(await page.getByText('First answer.').count()).toBe(0);

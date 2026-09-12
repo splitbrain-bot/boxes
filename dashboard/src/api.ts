@@ -10,6 +10,7 @@ import type {
   CredentialId,
   CredentialMethod,
   CredentialSummary,
+  HarnessInfo,
   HealthResponse,
   PushKeyResponse,
   PushSubscribeBody,
@@ -200,6 +201,23 @@ export const api = {
     ),
   agentSetPreview: (setId: string) =>
     request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),
+
+  // --- harnesses ------------------------------------------------------------
+  //
+  // What agents this deployment can run. One call, because a dialog needs the
+  // registry's defaults, the catalogue and the credential's state together
+  // and has nothing to do with any of them apart.
+
+  /**
+   * Every harness this deployment can run: the registry's defaults, whatever
+   * each adapter last advertised, and whether each has a credential that
+   * works.
+   *
+   * What the dialogs are built from. The health probe carries the same
+   * harnesses without their catalogues, which is all a warning needs; this is
+   * the call for the view that has to offer the choice.
+   */
+  harnesses: () => request<HarnessInfo[]>('/api/harnesses'),
 
   // --- credentials and settings ---------------------------------------------
   //

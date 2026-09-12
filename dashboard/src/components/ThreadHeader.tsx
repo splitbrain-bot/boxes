@@ -7,9 +7,18 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { Link } from 'react-router';
+import type { HarnessId } from '../../../shared/types.ts';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
 import type { Up } from '@/hooks/use-up';
+import {
+  ConfigSelect,
+  ModeSelect,
+  Setting,
+  currentModeDescription,
+  isSelectable,
+  optionName,
+} from '@/components/AgentSettings';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -23,74 +32,6 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
 };
 
 /**
- * Whether an option is one this header can put a control on.
- *
- * A select with something to choose between. The adapter may advertise other
- * kinds — it has a boolean form of some options for clients that ask for one,
- * which this one does not — and an option with a single value is not a
- * choice.
- */
-function isSelectable(option: SessionConfigOption): boolean {
-  return (option.type ?? 'select') === 'select' && (option.options?.length ?? 0) > 1;
-}
-
-/** One config option as a native select. */
-function ConfigSelect({
-  option,
-  label,
-  className,
-  onSet,
-}: {
-  option: SessionConfigOption;
-  /** What to call it. The adapter's own name, unless the header has a better one. */
-  label?: string;
-  className?: string;
-  onSet: (value: string) => void;
-}) {
-  const name = label ?? option.name;
-  const current = option.options?.find((value) => value.value === option.currentValue);
-  return (
-    <select
-      aria-label={name}
-      value={option.currentValue ?? ''}
-      onChange={(event) => onSet(event.target.value)}
-      title={current?.description ?? current?.name ?? option.description ?? name}
-      className={cn('min-w-0 rounded-md border bg-muted px-2 py-1 text-xs', className)}
-    >
-      {option.options?.map((value) => (
-        <option key={value.value} value={value.value}>
-          {value.name}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-/**
- * One setting in the overlay: what it is called, what it does, and the
- * control. A label rather than a heading and a control, so the whole block is
- * the hit area — these are read and set with a thumb.
- */
-function Setting({
-  name,
-  description,
-  children,
-}: {
-  name: string;
-  /** What the adapter says it does, when it says anything. */
-  description?: string | null | undefined;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex flex-col gap-1 text-xs">
-      <span className="font-medium">{name}</span>
-      {description ? <span className="text-muted-foreground">{description}</span> : null}
-      {children}
-    </label>
-  );
-}
-
-/**
  * The thread's own chrome: where it goes back to, which of the session's
  * conversations it is, what it is connected to, whether the reader is done
  * with it, how to branch it — and one button holding everything the adapter
@@ -102,6 +43,8 @@ export function ThreadHeader({
   up,
   name,
   threadLabel,
+  harness,
+  harnessLabel,
   connection,
   modes,
   configOptions,
@@ -121,6 +64,15 @@ export function ThreadHeader({
   name: string;
   /** Which conversation of the session this is, or null while it is unknown. */
   threadLabel: string | null;
+  /**
+   * Which agent is on the other end, or null while the thread is unknown.
+   *
+   * The id decides what a mode means — Codex's sandboxed modes carry a caveat
+   * no adapter can know about the container it was started in — and the label
+   * is what the reader is shown.
+   */
+  harness: HarnessId | null;
+  harnessLabel: string | null;
   connection: ConnectionState;
   modes: SessionModeState | null;
   configOptions: readonly SessionConfigOption[];
@@ -137,7 +89,6 @@ export function ThreadHeader({
   onSetConfigOption: (configId: string, value: string) => void;
 }) {
   const state = CONNECTION[connection];
-  const current = modes?.availableModes.find((mode) => mode.id === modes.currentModeId);
   // By category rather than by id: what the option is for is part of the
   // protocol, the id the adapter gives it is not.
   const model = configOptions.find((option) => option.category === 'model');
@@ -186,6 +137,11 @@ export function ThreadHeader({
         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className={cn('size-1.5 rounded-full', state.dot)} />
           {state.label}
+          {/* Which agent this conversation runs, because it is what the
+              settings behind the button below mean: the same mode id is a
+              different permission under each harness, and a box may hold a
+              thread of each. */}
+          {harnessLabel ? <span className="truncate">· {harnessLabel}</span> : null}
         </span>
       </div>
 
@@ -215,24 +171,18 @@ export function ThreadHeader({
               {/* The mode first: of everything here it is the one that gets
                   changed mid-thread, when a plan turns into work. */}
               {modes && hasModes ? (
-                <Setting name="Agent mode" description={current?.description}>
-                  <select
-                    aria-label="Agent mode"
-                    value={modes.currentModeId}
-                    onChange={(event) => onSetMode(event.target.value)}
-                    className="mt-0.5 min-w-0 rounded-md border bg-muted px-2 py-1.5 text-xs"
-                  >
-                    {modes.availableModes.map((mode) => (
-                      <option key={mode.id} value={mode.id}>
-                        {mode.name}
-                      </option>
-                    ))}
-                  </select>
+                <Setting name="Agent mode" description={currentModeDescription(modes, harness)}>
+                  <ModeSelect
+                    modes={modes}
+                    harness={harness}
+                    className="mt-0.5 py-1.5"
+                    onSet={onSetMode}
+                  />
                 </Setting>
               ) : null}
 
               {model && hasModel ? (
-                <Setting name={model.name} description={model.description}>
+                <Setting name={optionName(model)} description={model.description}>
                   <ConfigSelect
                     option={model}
                     label="Model"
@@ -243,7 +193,7 @@ export function ThreadHeader({
               ) : null}
 
               {rest.map((option) => (
-                <Setting key={option.id} name={option.name} description={option.description}>
+                <Setting key={option.id} name={optionName(option)} description={option.description}>
                   <ConfigSelect
                     option={option}
                     className="mt-0.5 py-1.5"

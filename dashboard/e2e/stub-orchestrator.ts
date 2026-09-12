@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import type {
   AgentItem,
   AgentSetDetail,
+  CreateSessionBody,
   CreateThreadBody,
   CredentialId,
   CredentialSummary,
@@ -249,6 +250,11 @@ export function stubHarness(over: Partial<HarnessHealth> = {}): HarnessHealth {
  * One harness as the dialogs see it: the registry's answer, what an adapter
  * last advertised, and whether it can run. The catalogue is what a deployment
  * that has run Claude once has cached.
+ *
+ * The modes and options are shaped like the adapter's own answers — a name
+ * saying what each mode does, a model list, an effort level — because that is
+ * what the dialogs render, and a catalogue of bare ids would prove nothing
+ * about a picker whose whole job is to say what a mode means.
  */
 export function stubHarnessInfo(over: Partial<HarnessInfo> = {}): HarnessInfo {
   return {
@@ -260,8 +266,8 @@ export function stubHarnessInfo(over: Partial<HarnessInfo> = {}): HarnessInfo {
       modes: {
         currentModeId: 'auto',
         availableModes: [
-          { id: 'auto', name: 'Auto' },
-          { id: 'plan', name: 'Plan' },
+          { id: 'auto', name: 'Auto', description: 'Decides for itself when to ask.' },
+          { id: 'plan', name: 'Plan', description: 'Reads and plans; changes nothing.' },
         ],
       },
       configOptions: [
@@ -270,7 +276,92 @@ export function stubHarnessInfo(over: Partial<HarnessInfo> = {}): HarnessInfo {
           name: 'Model',
           category: 'model',
           currentValue: 'opus',
-          options: [{ value: 'opus' }, { value: 'sonnet' }],
+          options: [
+            { value: 'opus', name: 'Opus' },
+            { value: 'sonnet', name: 'Sonnet' },
+          ],
+        },
+        {
+          id: 'effort',
+          name: 'Thinking',
+          category: 'thought_level',
+          currentValue: 'medium',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'high', name: 'High' },
+          ],
+        },
+      ],
+      seenAt: Date.parse('2026-09-01T10:00:00Z'),
+    },
+    ...over,
+  };
+}
+
+/**
+ * The second harness, for the tests that are about there being two.
+ *
+ * Its modes are the ones Appendix A of the plan records, names and all: two of
+ * them run every command under a sandbox a hardened container is likely to
+ * refuse, which is why the picker has something to say about them that no
+ * adapter can say about itself.
+ */
+export function stubCodexHarness(over: Partial<HarnessHealth> = {}): HarnessHealth {
+  return {
+    id: 'codex',
+    label: 'Codex',
+    credential: stubCredential({ id: 'openai', method: 'api_key', account: 'abcd' }),
+    runnable: true,
+    ...over,
+  };
+}
+
+/** The same harness as the dialogs see it, catalogue and all. */
+export function stubCodexHarnessInfo(over: Partial<HarnessInfo> = {}): HarnessInfo {
+  return {
+    ...stubCodexHarness(),
+    defaultModeId: 'agent-full-access',
+    forkModeId: 'read-only',
+    defaultConfig: {},
+    catalog: {
+      modes: {
+        currentModeId: 'agent-full-access',
+        availableModes: [
+          {
+            id: 'read-only',
+            name: 'Ask for approval',
+            description: 'Every command waits for a human.',
+          },
+          { id: 'agent', name: 'Approve for me', description: 'Codex approves its own work.' },
+          {
+            id: 'agent-full-access',
+            name: 'Full access',
+            description: 'No sandbox: the container is the boundary.',
+          },
+        ],
+      },
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          currentValue: 'gpt-5.6-codex',
+          options: [
+            { value: 'gpt-5.6-codex', name: 'GPT-5.6 Codex' },
+            { value: 'gpt-5.6', name: 'GPT-5.6' },
+          ],
+        },
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          category: 'thought_level',
+          currentValue: 'medium',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'high', name: 'High' },
+          ],
         },
       ],
       seenAt: Date.parse('2026-09-01T10:00:00Z'),
@@ -380,6 +471,16 @@ export interface StubOrchestrator {
   execLog: ExecRecord[];
   /** Every review mutation the browser made, in order. */
   reviewCalls: Array<{ method: string; sessionId: string; body: unknown }>;
+  /**
+   * Every create-a-box request, as the browser sent it.
+   *
+   * Held whole because the body is the assertion: the dialog's answer — which
+   * agent, which mode, which model — travels in it, and a box created with
+   * the wrong one is a box somebody has to delete.
+   */
+  sessionCalls: CreateSessionBody[];
+  /** Every add-a-thread request, with the session it was made against. */
+  threadCalls: Array<{ sessionId: string; body: CreateThreadBody }>;
   server: Server;
   close(): Promise<void>;
 }
@@ -407,6 +508,8 @@ export async function startStubOrchestrator(
     requireCookie: null,
   };
   const reviewCalls: StubOrchestrator['reviewCalls'] = [];
+  const sessionCalls: StubOrchestrator['sessionCalls'] = [];
+  const threadCalls: StubOrchestrator['threadCalls'] = [];
   const attachmentUploads: StubOrchestrator['attachmentUploads'] = [];
   const execCalls: StubOrchestrator['execCalls'] = [];
   const backgroundStops: StubOrchestrator['backgroundStops'] = [];
@@ -464,6 +567,37 @@ export async function startStubOrchestrator(
     if (url === '/api/sessions' && req.method === 'GET') {
       return json(res, 200, state.sessions.map(summary));
     }
+    // Creating a box creates its first conversation in the same request, on
+    // whatever the form's agent block chose, so the stub does both here.
+    if (url === '/api/sessions' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+      req.on('end', () => {
+        const parsed = JSON.parse(body || '{}') as CreateSessionBody;
+        sessionCalls.push(parsed);
+        const id = `new${state.sessions.length}`;
+        const created = stubSession({
+          id,
+          name: parsed.name,
+          agentSetId: parsed.agentSet ?? null,
+          networkName: `sn-${id}`,
+          workspaceDir: `/data/workspaces/${id}`,
+          homeDir: `/data/homes/${id}`,
+          threads: [
+            stubThread({
+              acpSessionId: gateway.newThread(),
+              harness: parsed.thread?.harness ?? 'claude',
+              modeId: parsed.thread?.modeId ?? null,
+              config: parsed.thread?.config ?? {},
+            }),
+          ],
+        });
+        state.sessions = [...state.sessions, created];
+        state.reviews[id] = stubReview();
+        json(res, 201, created);
+      });
+      return undefined;
+    }
     const detail = /^\/api\/sessions\/([^/]+)$/.exec(url);
     if (detail && req.method === 'GET') {
       const found = state.sessions.find((s) => s.id === detail[1]);
@@ -490,6 +624,7 @@ export async function startStubOrchestrator(
         req.on('data', (c: Buffer) => (body += c.toString('utf8')));
         req.on('end', () => {
           const parsed = JSON.parse(body || '{}') as CreateThreadBody;
+          threadCalls.push({ sessionId: found.id, body: parsed });
           const from = parsed.from;
           // The orchestrator mints upstream and records what came back, so
           // the stub does the same rather than inventing an id of its own.
@@ -654,7 +789,14 @@ export async function startStubOrchestrator(
         req.on('data', (c: Buffer) => (body += c.toString('utf8')));
         req.on('end', () => {
           const patch = JSON.parse(body || '{}') as Partial<Settings>;
-          state.settings = { ...state.settings, ...patch };
+          // The dialogs are merged one harness at a time, the way
+          // orchestrator/src/settings.ts merges them: two browsers
+          // configuring two agents must not overwrite each other.
+          state.settings = {
+            ...state.settings,
+            ...patch,
+            dialogs: { ...state.settings.dialogs, ...patch.dialogs },
+          };
           json(res, 200, state.settings);
         });
         return undefined;
@@ -702,6 +844,8 @@ export async function startStubOrchestrator(
     backgroundStops,
     execLog,
     reviewCalls,
+    sessionCalls,
+    threadCalls,
     get execOutput() {
       return execOutput;
     },
