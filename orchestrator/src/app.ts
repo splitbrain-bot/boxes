@@ -305,22 +305,38 @@ export function buildApp(
   });
 
   /**
-   * Kills one thing that conversation left running, or everything it has.
+   * Stops one task that conversation left running, or every task it has.
    *
-   * A kill and not a cancel: a background command is a child of the agent's
-   * own process that outlives the turn which started it, and interrupting the
-   * conversation does not reach it. The `processId` is the one the thread
-   * state carried; without one, everything that thread is running stops.
+   * A stop and not a cancel: a background command outlives the turn which
+   * started it, and interrupting the conversation does not reach it. The
+   * adapter running the task is asked to stop it by name. The `processId` is
+   * the id the thread state carried, which is the adapter's own id for the
+   * task; without one, everything that thread is running stops.
    *
-   * The answer says how many processes were signalled, and zero is an
-   * ordinary one — the work can end between a browser being told about it and
-   * somebody pressing stop.
+   * The answer says how many tasks the adapter stopped, and zero is an
+   * ordinary one — a task that had already finished answers that it had, and
+   * the thread's state is re-sent either way so the bar catches up.
    */
   app.post('/api/sessions/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
     const body = req.body as { processId?: unknown } | undefined;
     const processId = typeof body?.processId === 'string' ? body.processId : undefined;
     return manager.stopBackgroundWork(id, threadId, processId);
+  });
+
+  /**
+   * Kills everything running in a box, whoever left it there.
+   *
+   * The per-thread stop reaches what an adapter is still holding; this reaches
+   * what no adapter can name any more. Neither adapter re-announces the tasks
+   * of a process that has died, so after a restart the bars are empty and the
+   * box is still compiling something — and a signal is all that is left.
+   *
+   * The answer says how many processes were signalled.
+   */
+  app.post('/api/sessions/:id/background/stop', async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.stopBoxWork(id);
   });
 
   app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {

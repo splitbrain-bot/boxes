@@ -1159,21 +1159,35 @@ export class SessionManager {
   }
 
   /**
-   * Stops one thing that conversation left running, or all of it.
+   * Stops one task that conversation left running, or every task it has.
    *
-   * A thread the adapter has no conversation for cannot have left anything in
-   * the box: work is a process under an agent process, and it has none.
+   * A thread the adapter has no conversation for cannot have announced a task:
+   * a task is named by the adapter's own id for the conversation it is on, and
+   * this thread has none.
    */
   async stopBackgroundWork(
     id: string,
     threadId: string,
-    processId?: string,
+    taskId?: string,
   ): Promise<{ stopped: number }> {
     this.mustGet(id);
     const row = getThread(this.db, threadId);
     if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
     if (!row.acp_session_id) return { stopped: 0 };
-    return { stopped: await this.upstream(id).stopBackgroundWork(row.acp_session_id, processId) };
+    return { stopped: await this.upstream(id).stopBackgroundWork(row.acp_session_id, taskId) };
+  }
+
+  /**
+   * Kills everything running in a box, whether or not a conversation claims it.
+   *
+   * The answer to a box that is busy with work no thread has a task for, which
+   * is what every adapter restart leaves behind: the tasks went with the
+   * process that announced them, and a signal is the only thing that reaches
+   * the build they left running.
+   */
+  async stopBoxWork(id: string): Promise<{ stopped: number }> {
+    this.mustGet(id);
+    return { stopped: await this.upstream(id).stopBoxWork() };
   }
 
   // --- boot reconciliation --------------------------------------------------

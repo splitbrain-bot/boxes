@@ -13,7 +13,6 @@ import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { AgentStore } from '../agents.ts';
 import { SessionManager } from '../sessions.ts';
-import { processId } from './background.ts';
 import type { DownstreamHandle } from './upstream.ts';
 import type { TurnStateParams } from '../../../shared/types.ts';
 
@@ -1394,9 +1393,9 @@ test('work the agent leaves running in the background holds the reaper off', asy
   assert.equal(up.backgroundActive, false);
 
   // The turn backgrounds a command and ends. Nothing else about the session
-  // says so: no browser is attached and no turn is running, and the harness
-  // tells the orchestrator nothing either. What says so is the shell, which
-  // is still there.
+  // says so: no browser is attached and no turn is running, and the task the
+  // adapter announced went with the process that announced it. What says so is
+  // the shell, which is still there.
   processes = [
     ...processes,
     ['200', '100', "/bin/bash -c source ~/.claude/shell-snapshots/s.sh && eval 'npm run build'"],
@@ -1405,8 +1404,8 @@ test('work the agent leaves running in the background holds the reaper off', asy
   assert.equal(up.backgroundActive, true);
 
   // An hour later the build is over. Nothing reported it — this is the case
-  // the old tally could not see, because it waited to be told — and the box
-  // is idle again on the next reading.
+  // events cannot see, because they wait to be told — and the box is idle
+  // again on the next reading.
   processes = processes.filter((p) => p[0] !== '200');
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
@@ -1420,11 +1419,26 @@ function shell(command: string, token = 'cfec'): string {
   );
 }
 
-test('a thread is told what it is running, and not what another thread is', async () => {
-  // The bug this is here for: one boolean about the whole box, sent to every
-  // conversation in it. A command left running by one thread said "something
-  // is still running" on a thread opened a minute later, with a stop button
-  // beside it that could not have reached the work.
+/** An `async_task_spawned`, as either adapter sends one. */
+function taskSpawned(acpThreadId: string, id: string, name: string): unknown {
+  return {
+    sessionId: acpThreadId,
+    update: {
+      sessionUpdate: 'async_task_spawned',
+      asyncTaskId: id,
+      name,
+      taskType: 'shell',
+      canStop: true,
+      showInTranscript: true,
+    },
+  };
+}
+
+test('a task the adapter announces belongs to the thread it names', async () => {
+  // The bug this shape exists for: one boolean about the whole box, sent to
+  // every conversation in it. A command left running by one thread said
+  // "something is still running" on a thread opened a minute later, with a
+  // stop button beside it that could not have reached the work.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1433,25 +1447,98 @@ test('a thread is told what it is running, and not what another thread is', asyn
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
-  // A second conversation, with the other thread's id on it.
-  processes = [
-    ...processes,
-    ['300', '19', 'claude --output-format stream-json --session-id=acp-kept'],
-    ['200', '100', shell('npm run build')],
-  ];
-  await up.refreshBackgroundForTests();
+  const watcher = fakeHandle(1, 'acp-gone');
+  up.attach(watcher);
 
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(1);
+  assert.deepEqual(up.threadState('acp-gone').background, [
+    {
+      id: 'task-1',
+      command: 'npm run build',
+      kind: 'shell',
+      stoppable: true,
+      startedAt: up.threadState('acp-gone').background[0]!.startedAt,
+    },
+  ]);
+  // The other conversation of the same box is told nothing.
+  assert.deepEqual(up.threadState('acp-kept').background, []);
+  // And the browser watching was told without asking, because a bar above a
+  // composer is a standing fact rather than something in the transcript.
+  const told = watcher.told.filter(
+    (params) => Array.isArray((params as TurnStateParams).background),
+  ) as TurnStateParams[];
   assert.deepEqual(
-    up.threadState('acp-gone').background.map((p) => p.command),
+    told.at(-1)?.background.map((task) => task.command),
     ['npm run build'],
   );
-  assert.deepEqual(up.threadState('acp-kept').background, []);
+});
+
+test('a task that ends takes its own bar away', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const watcher = fakeHandle(1, 'acp-gone');
+  up.attach(watcher);
+
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(1);
+
+  // `running` says the same thing again, and says nothing.
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'running' },
+  });
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' },
+  });
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(0);
+  const told = watcher.told.filter(
+    (params) => Array.isArray((params as TurnStateParams).background),
+  ) as TurnStateParams[];
+  assert.deepEqual(told.at(-1)?.background, []);
+});
+
+test('an adapter that dies drops its tasks and re-sends the threads it had', async () => {
+  // Neither adapter re-announces the tasks of a process that has died, so a
+  // bar left standing would name something nothing can stop. What the dead
+  // process left running is the reading's to find and the box-wide stop's to
+  // kill.
+  let live!: FakeAdapter;
+  fakeDocker(() => {
+    live = new FakeAdapter((msg) => {
+      if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+      return {};
+    });
+    return live;
+  });
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const watcher = fakeHandle(1, 'acp-gone');
+  up.attach(watcher);
+  live.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(1);
+
+  live.destroy();
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(0);
+  const told = watcher.told.filter(
+    (params) => Array.isArray((params as TurnStateParams).background),
+  ) as TurnStateParams[];
+  assert.deepEqual(told.at(-1)?.background, []);
 });
 
 test('the session list says which thread is holding the box awake', async () => {
-  // The list shows every conversation of a box at once, and until now the
-  // only thing it could say was that the box had something running. Which one
-  // to open was left to the reader.
+  // The list shows every conversation of a box at once, and the two answers
+  // it carries are different questions: the box is busy, and this thread is
+  // the one running something.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1460,11 +1547,9 @@ test('the session list says which thread is holding the box awake', async () => 
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
-  processes = [
-    ...processes,
-    ['300', '19', 'claude --output-format stream-json --session-id=acp-kept'],
-    ['200', '100', shell('npm run build')],
-  ];
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(1);
+  processes = [...processes, ['200', '100', shell('npm run build')]];
   await up.refreshBackgroundForTests();
 
   const [session] = await manager.list();
@@ -1478,10 +1563,10 @@ test('the session list says which thread is holding the box awake', async () => 
   );
 });
 
-test('a thread learns its work has finished without anything reporting it', async () => {
-  // Nothing tells Boxes a build is over, so a reading is the only news there
-  // is. Without this the bar above a composer appeared and stayed for as long
-  // as the thread was open — including after the work had been stopped.
+test('a box busy with work no thread claims is still busy', async () => {
+  // What every adapter restart leaves behind, and the state the session-level
+  // stop exists for: the card says the box is running something and no thread
+  // of it can say what. Reading it as idle would suspend the build.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1490,22 +1575,15 @@ test('a thread learns its work has finished without anything reporting it', asyn
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
-  const watcher = fakeHandle(1, 'acp-gone');
-  up.attach(watcher);
-
   processes = [...processes, ['200', '100', shell('npm run build')]];
   await up.refreshBackgroundForTests();
-  const started = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
-  ) as TurnStateParams[];
-  assert.deepEqual(started.at(-1)?.background.map((p) => p.command), ['npm run build']);
 
-  processes = processes.filter((p) => p[0] !== '200');
-  await up.refreshBackgroundForTests();
-  const ended = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
-  ) as TurnStateParams[];
-  assert.deepEqual(ended.at(-1)?.background, []);
+  const [session] = await manager.list();
+  assert.equal(session?.backgroundBusy, true);
+  assert.deepEqual(
+    session?.threads.map((t) => t.backgroundBusy),
+    [false, false],
+  );
 });
 
 test('a box nobody has opened is idle, so the reaper can have it', async () => {
@@ -1551,10 +1629,6 @@ test('a box that is not up has nothing running in it, and says so', async () => 
   assert.equal(up.backgroundActive, false);
   const [session] = await manager.list();
   assert.equal(session?.backgroundBusy, false);
-  assert.deepEqual(
-    session?.threads.map((t) => t.backgroundBusy),
-    [false, false],
-  );
 });
 
 test('stopping a session stops it claiming work, without waiting for a reading', async () => {
@@ -1577,72 +1651,126 @@ test('stopping a session stops it claiming work, without waiting for a reading',
   assert.equal(up.backgroundActive, false);
 });
 
-test('stopping work kills its tree, by the pids the box knows it by', async () => {
+test('stopping one task names it to the adapter that is running it', async () => {
+  /** Every stop the adapter was sent, in order. */
+  const stops: unknown[] = [];
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === '_session/async_task/stop') {
+      stops.push(msg.params);
+      return { stopped: true };
+    }
     return {};
   });
   fakeDocker(adapter);
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
-  const build = shell('npm run build');
-  processes = [...processes, ['200', '100', build]];
-  await up.refreshBackgroundForTests();
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-2', 'npm run watch'));
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(2);
 
-  // The same box, read from inside: the same commands under numbers of its
-  // own. `docker top` reports the host's pids, and a kill in here would
-  // otherwise be aimed at whatever the host happens to run at 200.
-  insideProcesses = [
-    ['1', '0', '/sbin/docker-init'],
-    ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
-    ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
-    ['14', '13', build],
-    ['15', '14', 'node .../vite build'],
-  ];
-
-  const stopped = await up.stopBackgroundWork('acp-gone', processId(build));
-  assert.equal(stopped, 2);
-  // Leaves first: a parent killed first hands its children to init, still
-  // running and no longer in any reading.
-  assert.deepEqual(killed, [['-TERM', '15', '14']]);
-});
-
-test('a stop reaches nothing but the work it was asked about', async () => {
-  const adapter = new FakeAdapter((msg) => {
-    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
-    return {};
-  });
-  fakeDocker(adapter);
-
-  const up = manager.upstream('s1');
-  await up.ensureStarted();
-  insideProcesses = [
-    ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
-    ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
-    ['14', '13', shell('npm run build')],
-    ['20', '12', 'claude --output-format stream-json --session-id=acp-kept'],
-    ['21', '20', shell('npm run watch', 'aa')],
-  ];
-
-  // Everything one thread is running, and nothing of the other's.
-  assert.equal(await up.stopBackgroundWork('acp-kept'), 1);
-  assert.deepEqual(killed, [['-TERM', '21']]);
-
-  // And a thread whose work has already ended kills nothing at all.
-  killed = [];
-  assert.equal(await up.stopBackgroundWork('acp-kept', processId(shell('npm run watch', 'aa'))), 1);
-  killed = [];
-  insideProcesses = insideProcesses.filter((p) => p[0] !== '21');
-  assert.equal(await up.stopBackgroundWork('acp-kept'), 0);
+  // A kill and not a cancel, and the adapter's own: the task is named by the
+  // id it announced, on the connection holding that conversation.
+  assert.equal(await up.stopBackgroundWork('acp-gone', 'task-2'), 1);
+  assert.deepEqual(stops, [{ sessionId: 'acp-gone', asyncTaskId: 'task-2' }]);
+  // And nothing is signalled in the box: the adapter stops what it started.
   assert.deepEqual(killed, []);
+  assert.deepEqual(
+    up.threadState('acp-gone').background.map((task) => task.id),
+    ['task-1'],
+  );
 });
 
-test('a stop on a Codex thread is read against its own adapter, and takes nothing else', async () => {
-  // The per-thread stop resolves the adapter token from the thread's own
-  // harness row rather than from the box, which is what keeps a box holding
-  // both adapters from being read as one.
-  db.prepare(`UPDATE threads SET harness = 'codex' WHERE id = 't2'`).run();
+test('a stop with no task named stops everything that thread is running', async () => {
+  const stops: string[] = [];
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === '_session/async_task/stop') {
+      stops.push(String(msg.params?.['asyncTaskId']));
+      return { stopped: true };
+    }
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+  adapter.notify('session/update', taskSpawned('acp-kept', 'task-2', 'npm run watch'));
+  await expect.poll(() => up.threadState('acp-kept').background.length).toBe(1);
+
+  assert.equal(await up.stopBackgroundWork('acp-gone'), 1);
+  // Only that conversation's, never another's.
+  assert.deepEqual(stops, ['task-1']);
+  assert.deepEqual(up.threadState('acp-gone').background, []);
+  assert.equal(up.threadState('acp-kept').background.length, 1);
+});
+
+test('a task that was already over is taken off the bar anyway', async () => {
+  // `stopped: false` is the adapter saying the task finished between the
+  // reading the browser is showing and the button being pressed. No state
+  // update is coming for it, so the bar catches up here or never.
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === '_session/async_task/stop') return { stopped: false };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const watcher = fakeHandle(1, 'acp-gone');
+  up.attach(watcher);
+  adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
+  await expect.poll(() => up.threadState('acp-gone').background.length).toBe(1);
+
+  assert.equal(await up.stopBackgroundWork('acp-gone', 'task-1'), 0);
+  assert.deepEqual(up.threadState('acp-gone').background, []);
+  const told = watcher.told.filter(
+    (params) => Array.isArray((params as TurnStateParams).background),
+  ) as TurnStateParams[];
+  assert.deepEqual(told.at(-1)?.background, []);
+});
+
+test("a stop goes to the thread's own adapter, and reaches no other", async () => {
+  // Two adapters over one checkout, each running tasks of its own. A stop
+  // routed to the wrong one would name a session that adapter has never heard
+  // of, and leave the work running.
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const seen: string[] = [];
+  const stops = (msg: Rpc): unknown =>
+    msg.method === '_session/async_task/stop' ? { stopped: true } : undefined;
+  /** The Codex adapter as it was spawned, so the test can talk as it. */
+  let codex!: FakeAdapter;
+  const spawnCodex = harnessAdapter(seen, 'codex', stops);
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude', stops),
+    'codex-acp': () => (codex = spawnCodex()),
+  });
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+  await up.pin(handle, 't3');
+
+  // A Codex task arrives on the Codex connection; the Claude thread's bar is
+  // untouched by it.
+  codex.notify('session/update', taskSpawned('cx-1', 'cx-task', 'npm run watch'));
+  await expect.poll(() => up.threadState('cx-1').background.length).toBe(1);
+  assert.deepEqual(up.threadState('acp-gone').background, []);
+
+  seen.length = 0;
+  assert.equal(await up.stopBackgroundWork('cx-1', 'cx-task'), 1);
+  assert.deepEqual(seen, ['codex _session/async_task/stop cx-1']);
+  assert.deepEqual(up.threadState('cx-1').background, []);
+});
+
+test('the session-level stop kills everything the box is running, leaves first', async () => {
+  // The floor's own stop, for work no task claims. After a respawn the bars
+  // are empty and the box is still compiling; a signal is the only thing left
+  // that can reach it.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1650,29 +1778,49 @@ test('a stop on a Codex thread is read against its own adapter, and takes nothin
   fakeDocker(adapter);
 
   const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // The box read from inside: the same commands under numbers of its own.
+  // `docker top` reports the host's pids, and a kill in here would otherwise
+  // be aimed at whatever the host happens to run at 200.
   insideProcesses = [
-    ['1', '0', '/sbin/docker-init'],
+    ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
+    ['7', '1', 'sleep infinity'],
     ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
     ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
     ['14', '13', shell('npm run build')],
-    // Codex's own tree: the adapter, the app-server it drives, and a shell the
-    // model backgrounded under it.
+    ['15', '14', 'node .../vite build'],
+    // The other harness's tree, in the same box: its adapter, the app-server
+    // it drives, and a shell it backgrounded.
     ['20', '1', 'node /usr/local/bin/codex-acp'],
     ['21', '20', 'codex app-server'],
     ['22', '21', 'bash -lc npm run watch'],
+    // And the reading's own `ps`, which must never be one of the answers.
+    ['30', '1', 'ps -eo pid,ppid,args'],
   ];
 
-  // Nothing: `codex app-server` runs every conversation in the box and says
-  // which one nowhere, so the process reading cannot place this shell on a
-  // thread and a stop must not guess. The async-task stop that can name it
-  // arrives with milestone 4; until then a Codex thread has no stop button
-  // rather than a button that kills the wrong thing.
-  assert.equal(await up.stopBackgroundWork('acp-kept'), 0);
-  assert.deepEqual(killed, []);
+  assert.equal(await up.stopBoxWork(), 3);
+  // Leaves before what spawned them: a parent killed first hands its children
+  // to init, still running and no longer in any reading. Neither adapter,
+  // neither agent and nothing of the entrypoint's is in it.
+  assert.deepEqual(killed, [['-TERM', '15', '14', '22']]);
+});
 
-  // And the Claude thread in the same box is unaffected by any of that.
-  assert.equal(await up.stopBackgroundWork('acp-gone'), 1);
-  assert.deepEqual(killed, [['-TERM', '14']]);
+test('a session-level stop over an empty box signals nothing', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  insideProcesses = [
+    ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
+    ['7', '1', 'sleep infinity'],
+  ];
+  assert.equal(await up.stopBoxWork(), 0);
+  assert.deepEqual(killed, []);
 });
 
 test('a prompt held open for background work is not the agent still talking', async () => {

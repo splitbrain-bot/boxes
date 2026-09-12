@@ -114,11 +114,13 @@ const schema = z.object({
    * How long a thread has to say nothing before the agent counts as having
    * stopped, in seconds.
    *
-   * The fallback. The adapter Boxes ships with marks the end of a processing
-   * cycle with a `usage_update` carrying a cost, which is read instead. This
-   * covers the adapters that say nothing: no stop reason arrives for a prompt
-   * held open, and a turn the harness started on its own has no request to
-   * end. A tool call the agent is waiting on suspends the question.
+   * The fallback, and for one of the two harnesses the whole answer.
+   * `claude-agent-acp` marks the end of a processing cycle with a
+   * `usage_update` carrying a cost, which is read instead; `codex-acp` sends
+   * no `usage_update` with a cost at all, so every Codex thread falls to this
+   * timer. That is what it is for: no stop reason arrives for a prompt held
+   * open, and a turn the harness started on its own has no request to end. A
+   * tool call the agent is waiting on suspends the question.
    */
   AGENT_QUIET_SECONDS: z.coerce.number().int().positive().default(3),
 

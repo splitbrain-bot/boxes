@@ -280,7 +280,19 @@ export class AcpClient {
         background: Array.isArray(params?.background)
           ? params.background
           : params?.background === true
-            ? [{ id: 'unnamed', command: 'Something is still running', startedAt: null }]
+            ? [
+                {
+                  id: 'unnamed',
+                  command: 'Something is still running',
+                  // An older orchestrator says only that the box is busy, so
+                  // the shape is filled in with what a shell that cannot be
+                  // named is: stoppable through the thread's own stop, and
+                  // running since some time this build cannot know.
+                  kind: 'shell',
+                  stoppable: true,
+                  startedAt: Date.now(),
+                },
+              ]
             : [],
       });
     }

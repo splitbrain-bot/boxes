@@ -24,10 +24,11 @@ import { log, type Logger } from '../log.ts';
 import type { NotifyKind, Notifier } from '../notify.ts';
 import { Activity } from './activity.ts';
 import { AdapterConnection, inheritedSource, type AdapterHost } from './adapter.ts';
-import { BackgroundProbe, workToStop } from './background.ts';
+import { BackgroundProbe, workPids } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
 import type {
+  BackgroundProcess,
   SessionConfigOption,
   ThreadOptions,
   TurnStateParams,
@@ -91,6 +92,16 @@ export interface DownstreamHandle {
   /** Closes this browser's socket, which makes it reconnect from scratch. */
   close(): void;
 }
+
+/**
+ * Every harness, for the reading of a box.
+ *
+ * The reading is about the whole container rather than about one adapter: a
+ * box may be running either harness's adapter, or both, and a rule that knew
+ * only one of them would read the other's box as empty and let the reaper
+ * suspend a build nobody could see.
+ */
+const ALL_HARNESSES = HARNESS_IDS.map((id) => harness(id));
 
 /**
  * How long work gets to stop politely before it is killed.
@@ -185,11 +196,10 @@ export class UpstreamSession implements AdapterHost {
     this.downstreams = new Broadcast(sessionId, (thread) => this.threadState(thread));
     this.background = new BackgroundProbe({
       list: () => this.containerProcesses(),
-      // One token, still: the reading is per adapter process and a box may now
-      // hold two. Milestone 4 replaces it with one answer about the whole box
-      // that knows every harness's token; until then a box is read as the
-      // Claude box every existing one is.
-      adapter: harness(DEFAULT_HARNESS).processToken,
+      // Every harness, because the answer is about the box and not about one
+      // adapter in it: what holds a box awake is anything running that Boxes
+      // did not put there, whichever agent started it.
+      harnesses: ALL_HARNESSES,
       ttlMs: cfg.BACKGROUND_POLL_SECONDS * 1_000,
       // A probe that cannot read its box holds whatever it last believed, and
       // what it last believed holds the reaper off. Silence here is a session
@@ -200,19 +210,16 @@ export class UpstreamSession implements AdapterHost {
               error: error.message,
             })
           : this.slog.info('reading what is running in the box again'),
-      // Nothing reports a build finishing, so a reading is the only news
-      // there is: a bar above a composer appears and goes away because this
-      // said so.
-      onChange: (threads) => {
-        for (const thread of threads) this.downstreams.threadState(thread);
-      },
-      // And a box that says it is busy while every one of its threads says it
-      // is not looks exactly like a bug from the outside. It is a real state,
-      // and this is the only place its reason can be found.
-      onUnexplained: (why) =>
-        why
-          ? this.slog.warn('the box is busy with work no conversation claims', { why })
-          : this.slog.info('what is running in the box is accounted for again'),
+      // The bars come off the adapters' own task updates, so a reading has
+      // nothing to push to a browser. What it has is the one thing no event
+      // can say — that a box which has lost its adapter is still working — and
+      // the log is where that has to go, with the commands, because a card
+      // saying "still running" with every thread of it quiet is otherwise
+      // indistinguishable from a fault.
+      onChange: (reading) =>
+        reading.busy
+          ? this.slog.info('the box has work running in it', { work: reading.work })
+          : this.slog.info('nothing is running in the box any more'),
     });
     this.activity = new Activity({
       quietMs: cfg.AGENT_QUIET_SECONDS * 1000,
@@ -423,9 +430,17 @@ export class UpstreamSession implements AdapterHost {
   /**
    * Whether this session has work running in the background, which holds the
    * idle reaper off the way an attached browser or a running turn does.
+   *
+   * The box first, because that is the answer that holds when no adapter is
+   * running and not every thread is loaded — after a respawn the bars are
+   * empty and the build is still compiling. A task an adapter has told us
+   * about counts too: not every task is a process of its own, and a monitor
+   * the agent is holding open inside the CLI would otherwise be reaped with
+   * the box it is watching.
    */
   get backgroundActive(): boolean {
-    return this.background.active;
+    if (this.background.active) return true;
+    return [...this.connections.values()].some((conn) => conn.hasTasks);
   }
 
   /** Test seam: takes a reading now rather than when one goes stale. */
@@ -466,66 +481,76 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * Stops what a conversation left running in its box: one process tree, or
-   * everything that thread has running.
+   * Stops what a conversation left running in its box: one task, or every task
+   * it has.
    *
-   * A kill rather than a cancel. `session/cancel` is what the composer's stop
-   * button sends and it is right for a turn — the adapter interrupts the
-   * query and tears down the subagents it was holding open for. It does
-   * nothing to a shell, which is the whole point of a background command: it
-   * is a child of the CLI process that outlives the turn that started it, so
-   * no interrupt reaches it.
+   * The adapter's own stop, not a signal. `session/cancel` is the composer's
+   * button and it is right for a turn — the adapter interrupts the query and
+   * tears down the subagents it was holding open for — but a backgrounded
+   * command is a child of the agent process that outlives its turn by design,
+   * so no interrupt reaches it. `_session/async_task/stop` names the task
+   * itself, on the connection whose adapter is running it.
+   *
+   * An adapter that is no longer up has nothing to stop this way: the tasks it
+   * announced went with the process, and what it left running in the box is
+   * the session-level stop's to kill.
+   *
+   * @returns How many tasks the adapter said it stopped. Zero is a normal
+   *   answer: a task that was already over answers `stopped: false`, and the
+   *   thread's state is re-sent either way so the bar catches up.
+   */
+  async stopBackgroundWork(acpThreadId: string, taskId?: string): Promise<number> {
+    const conn = this.connectionHolding(acpThreadId);
+    if (!conn) return 0;
+    const stopped = await conn.stopTasks(acpThreadId, taskId);
+    this.downstreams.threadState(acpThreadId);
+    return stopped;
+  }
+
+  /**
+   * Kills everything running in the box that Boxes did not put there.
+   *
+   * The floor's own stop, for work no task claims. After a respawn the bars
+   * are empty and the box is still busy — neither adapter re-announces what
+   * the process before it left running — and a signal is the only thing that
+   * can reach an orphaned build. It is not addressed to a conversation because
+   * it cannot be: the reading knows what is running and not whose it is.
    *
    * The pids are read from inside the container at this moment and used
    * immediately, because they are the box's own numbering and because a
-   * process that ended in between should not be found. TERM first, and
-   * whatever is still there after a moment is sent KILL — the
-   * escalation is not waited for, so the answer here is about what was
-   * signalled rather than what has already died.
+   * process that ended in between should not be found. TERM first, leaves
+   * before the branches they hang off — a parent killed first hands its
+   * children to init, still running and out of every reading — and whatever is
+   * still there a moment later is sent KILL. The escalation is not waited for,
+   * so the answer is about what was signalled rather than what has died.
    *
-   * @returns How many processes were signalled. Zero is a normal answer: the
-   *   work ended between the reading a browser is showing and this call.
+   * @returns How many processes were signalled. Zero is an ordinary answer:
+   *   the work ended between the reading a card is showing and this call.
    */
-  async stopBackgroundWork(acpThreadId: string, id?: string): Promise<number> {
+  async stopBoxWork(): Promise<number> {
     const containerId = this.row().container_id;
     if (!containerId) return 0;
     if ((await dk.containerState(containerId)) !== 'running') return 0;
 
-    const doomed = workToStop(
+    const doomed = workPids(
       await dk.containerProcessesFromInside(containerId),
-      this.adapterToken(acpThreadId),
-      acpThreadId,
-      id,
+      ALL_HARNESSES,
     );
     if (doomed.length === 0) {
-      // Nothing to kill is still news: what the browser is showing is a
-      // reading that has been overtaken, and a fresh one puts it right.
+      // Nothing to kill is still news: what the card is showing is a reading
+      // that has been overtaken, and a fresh one puts it right.
       void this.background.refresh();
       return 0;
     }
 
-    this.slog.info('stopping background work', { acpThreadId, id: id ?? null, pids: doomed });
+    this.slog.info('stopping everything running in the box', { pids: doomed });
     await dk.killInContainer(containerId, 'TERM', doomed);
     // No reading here: a process signalled a millisecond ago is very likely
-    // still in the table, and a reading that says so would put the bar back
-    // for a poll's length. The escalation takes one when it settles, which
-    // is the first moment the answer can be true either way.
-    this.escalate(containerId, acpThreadId, id);
+    // still in the table, and a reading that says so would put the badge back
+    // for a poll's length. The escalation takes one when it settles, which is
+    // the first moment the answer can be true either way.
+    this.escalate(containerId);
     return doomed.length;
-  }
-
-  /**
-   * The adapter token a reading of one thread's work is taken against: the
-   * process token of the harness that thread runs.
-   *
-   * Per thread rather than per box, because two adapters may be in the table
-   * and work under one of them is not work under the other. The whole reading
-   * becomes box-wide at milestone 4; this is the half that can already be
-   * asked about one conversation.
-   */
-  private adapterToken(acpThreadId?: string): string {
-    const row = acpThreadId ? this.rowOfAcp(acpThreadId) : undefined;
-    return harness(row?.harness ?? this.defaultHarness()).processToken;
   }
 
   /**
@@ -533,24 +558,22 @@ export class UpstreamSession implements AdapterHost {
    *
    * Detached from the request, which has been answered: a stop is judged by
    * the next reading, not by this. What it re-reads is the same question
-   * rather than the same pids: a pid that has gone is no longer this thread's
-   * work, and one that has not is what was asked to stop.
+   * rather than the same pids — a pid that has gone is no longer work, and one
+   * that has not is what was asked to stop.
    */
-  private escalate(containerId: string, acpThreadId: string, id?: string): void {
+  private escalate(containerId: string): void {
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const left = workToStop(
+          const left = workPids(
             await dk.containerProcessesFromInside(containerId),
-            this.adapterToken(acpThreadId),
-            acpThreadId,
-            id,
+            ALL_HARNESSES,
           );
           if (left.length === 0) return;
-          this.slog.info('background work ignored TERM; killing', { acpThreadId, pids: left });
+          this.slog.info('work in the box ignored TERM; killing', { pids: left });
           await dk.killInContainer(containerId, 'KILL', left);
         } catch (err) {
-          this.slog.warn('could not finish stopping background work', {
+          this.slog.warn('could not finish stopping what the box was running', {
             error: (err as Error).message,
           });
         } finally {
@@ -581,9 +604,31 @@ export class UpstreamSession implements AdapterHost {
     return this.activity.speakingThreads;
   }
 
-  /** The threads of this session with work still running in them. */
+  /**
+   * The threads of this session with work still running in them, across every
+   * adapter the box is holding.
+   *
+   * From the adapters rather than from the box: what a person sees named is
+   * what an adapter announced, and a list that shows every thread of a box at
+   * once has to say which of them is holding it up.
+   */
   get workingThreads(): string[] {
-    return this.background.workingThreads;
+    return [...this.connections.values()].flatMap((conn) => conn.taskThreads);
+  }
+
+  /**
+   * What one conversation has running, whichever adapter announced it.
+   *
+   * A task id belongs to one connection by construction — the adapter that
+   * minted the conversation is the adapter running its tasks — so the first
+   * connection with anything for this thread is the one that has it.
+   */
+  private tasksFor(acpThreadId: string): BackgroundProcess[] {
+    for (const conn of this.connections.values()) {
+      const tasks = conn.tasksFor(acpThreadId);
+      if (tasks.length > 0) return tasks;
+    }
+    return [];
   }
 
   /**
@@ -599,7 +644,7 @@ export class UpstreamSession implements AdapterHost {
       sessionId: acpThreadId,
       active: this.downstreams.isPrompting(acpThreadId),
       speaking: this.activity.speaking(acpThreadId),
-      background: this.background.work(acpThreadId),
+      background: this.tasksFor(acpThreadId),
     };
   }
 
@@ -851,13 +896,19 @@ export class UpstreamSession implements AdapterHost {
     // talking. The cost is that a turn starting during somebody else's replay
     // goes unobserved, which is a window of milliseconds.
     const thread = threadOf(params);
-    if (!replaying && thread) {
-      const update = (params as { update?: unknown })?.update;
-      this.activity.observe(thread, update, harnessId);
-    }
+    const update = (params as { update?: unknown })?.update;
+    if (!replaying && thread) this.activity.observe(thread, update, harnessId);
     this.recordThreadInfo(harnessId, params);
     this.tap('up', 'session/update', params);
     this.downstreams.update(params);
+    // After the update rather than before it, so a browser reading its
+    // transcript and the bar above its composer agree about what has just
+    // happened. A task update is passed through as well as read here: the
+    // gateway forwards everything an adapter says, and what a client makes of
+    // this extension is its own business.
+    if (thread !== undefined && this.connection(harnessId).noteTask(thread, update)) {
+      this.downstreams.threadState(thread);
+    }
   }
 
   /**
@@ -1023,7 +1074,7 @@ export class UpstreamSession implements AdapterHost {
       // What is still going on in that conversation, which separates a thread
       // to come back to later from one that is about to say something on its
       // own. Another thread's work is not news about this one.
-      background: acpThreadId ? this.background.work(acpThreadId).length > 0 : false,
+      background: acpThreadId ? this.tasksFor(acpThreadId).length > 0 : false,
     });
   }
 

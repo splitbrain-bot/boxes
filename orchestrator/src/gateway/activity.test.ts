@@ -117,6 +117,38 @@ test('a call that runs in the background is not the agent working', () => {
   assert.equal(a.speaking('t1'), false);
 });
 
+test("the adapter's own marker is what says a Codex call was backgrounded", () => {
+  // Codex has no `run_in_background` flag and puts no tool name on a call, so
+  // the marker both adapters add to the call's own update is the only thing
+  // that can say one. Without reading it, a Codex thread would sit "speaking"
+  // for as long as a backgrounded command ran.
+  const { a, pass } = activity();
+  a.observe(
+    't1',
+    update('tool_call', {
+      toolCallId: 'call_1',
+      status: 'in_progress',
+      kind: 'execute',
+      content: [{ type: 'terminal', terminalId: 'term_1' }],
+      _meta: { jetbrains: { air: { asyncTasks: { backgrounded: true } } } },
+    }),
+    'codex',
+  );
+  assert.equal(a.speaking('t1'), true);
+  pass(QUIET);
+  assert.equal(a.speaking('t1'), false);
+
+  // And a Codex call that is *not* backgrounded is one the agent is waiting
+  // on, whatever its silence says.
+  a.observe(
+    't1',
+    update('tool_call', { toolCallId: 'call_2', status: 'in_progress', kind: 'execute' }),
+    'codex',
+  );
+  for (let i = 0; i < 10; i++) pass(QUIET);
+  assert.equal(a.speaking('t1'), true);
+});
+
 test('a turn is settled once, a while after it has actually stopped', () => {
   const { a, pass, settled } = activity();
   a.observe('t1', update('agent_message_chunk'), 'claude');

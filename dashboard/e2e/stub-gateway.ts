@@ -398,7 +398,13 @@ export function attachStubGateway(
           // What the adapter does with a turn that spawned one: the prompt
           // stays open and the agent stops talking.
           background.set(onThread, [
-            { id: 'bg-1', command: 'npm run build', startedAt: Date.now() - 154_000 },
+            {
+              id: 'bg-1',
+              command: 'npm run build',
+              kind: 'shell',
+              stoppable: true,
+              startedAt: Date.now() - 154_000,
+            },
           ]);
           speaking.delete(onThread);
           turnState(onThread);

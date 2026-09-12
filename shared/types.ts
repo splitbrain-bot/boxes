@@ -97,6 +97,13 @@ export interface SessionModeState {
 export interface SessionConfigOption {
   id: string;
   name?: string;
+  /** What the adapter says the option does, where it says anything. */
+  description?: string | null;
+  /**
+   * `select` carries an options list; another kind carries none. Absent means
+   * a select, which is what both adapters send for everything they offer.
+   */
+  type?: string;
   category?: string | null;
   currentValue?: string;
   options?: Array<{ value: string; name?: string; description?: string | null }>;
@@ -170,21 +177,23 @@ export interface PutCredentialBody {
 /**
  * One thing a conversation has left running in its box.
  *
- * Read from the processes alive in the container: nothing reports when a
- * command finishes.
+ * What the harness's adapter announced as an async task: both adapters send a
+ * spawn when a task starts and a state update when it ends, and a task that
+ * nobody hears the end of is dropped when its adapter process goes. Nothing is
+ * read off the process table here — a task's id is the adapter's own, and it is
+ * what a stop names.
  */
 export interface BackgroundProcess {
-  /**
-   * Stable for as long as the process lives, and what a stop names.
-   *
-   * Derived from the command line rather than the pid: the host and the box
-   * number processes separately, so the pid here is not one the box accepts.
-   */
+  /** The adapter's asyncTaskId, which is what a stop names. */
   id: string;
-  /** The command the agent ran, as far as the host reports it. */
+  /** `name` from the spawn: the command for a shell, a description otherwise. */
   command: string;
-  /** When it started, in epoch milliseconds, or null where `ps` does not say. */
-  startedAt: number | null;
+  /** `shell`, `workflow`, `monitor` or `task` from Claude; `shell` from Codex. */
+  kind: string;
+  /** `canStop` from the spawn. Both adapters send true today. */
+  stoppable: boolean;
+  /** When the spawn arrived, in epoch milliseconds. */
+  startedAt: number;
 }
 
 /** One conversation of a session, as the API reports it. */

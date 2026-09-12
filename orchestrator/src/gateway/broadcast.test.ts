@@ -464,7 +464,17 @@ test('the state a browser is told is the one the gateway supplies', () => {
     active: false,
     speaking: thread === T1,
     background:
-      thread === T1 ? [{ id: 'aabbccdd', command: 'npm run build', startedAt: null }] : [],
+      thread === T1
+        ? [
+            {
+              id: 'task-1',
+              command: 'npm run build',
+              kind: 'shell',
+              stoppable: true,
+              startedAt: 1_700_000_000_000,
+            },
+          ]
+        : [],
   }));
   const a = fakeDownstream(1);
   b.add(a);

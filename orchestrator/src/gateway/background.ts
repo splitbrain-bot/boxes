@@ -1,8 +1,10 @@
 import type { ContainerProcess } from '../docker.ts';
+import type { Harness } from '../harness.ts';
 import type { BackgroundProcess } from '../../../shared/types.ts';
 
 /**
- * What is running in a session's box, and which conversation left it there.
+ * What a session has left running: what the adapters say, and what the box
+ * says underneath them.
  *
  * A turn that leaves something running in the background ends like any other:
  * the agent says it will report back, the thread goes quiet, and — with the
@@ -10,319 +12,359 @@ import type { BackgroundProcess } from '../../../shared/types.ts';
  * an hour later the container is stopped, and with it the build, the crawl or
  * the monitor watching them.
  *
- * So the box is asked what is running in it rather than told. This is a level
- * rather than a count of transitions, so it cannot drift and needs nothing to
- * be reported: a task killed with no notification, an adapter restarted, a
- * frame lost all answer correctly on the next reading, because the question
- * is about the present.
+ * Two answers, and they are not the same question.
  *
- * The reading is per conversation, which the box itself says: every agent
- * process carries on its command line the conversation it is running, and
- * `readTree` reads it. The stop button beside the work has to reach that work
- * rather than the reader's own conversation.
+ * **What a person sees comes from the adapters.** Both harnesses implement the
+ * same async-task extension: a task is announced with an id, a name and a kind,
+ * and it is announced again when it ends. {@link TaskBoard} is the translation,
+ * and what it holds is what a thread's bar shows and what its stop button
+ * names. That is the only way a task can be named at all — the id a stop sends
+ * is the adapter's, and no reading of the process table has it.
+ *
+ * **Whether the box is busy comes from the box.** The reaper's question has to
+ * be answerable when no adapter is running and when not every thread is
+ * loaded, and no event can answer it: a respawned adapter knows nothing about
+ * the shells the one before it left running, so after any restart the bars are
+ * empty and the build is still compiling. {@link readBox} is a level rather
+ * than a count of transitions — it cannot drift, it needs nothing reported, and
+ * a task killed with no notification answers correctly on the next reading.
+ *
+ * **The events decorate the reading. They never replace it.** A missed event
+ * costs a name on a bar. A missed reading costs a build.
  */
 
+// --- what the adapters say -------------------------------------------------
+
 /**
- * The conversation an agent process is running, read off its command line.
+ * One `session/update` about a task, as either adapter sends it.
  *
- * The SDK spawns the CLI with the session it is to be, so the id is on the
- * process: `--session-id=<uuid>` for a conversation the adapter minted or
- * forked, `--resume=<uuid>` for one it loaded after a restart. Both are the
- * adapter's own id for the thread — `createSession` passes the ACP session id
- * as one or the other — which is the id every ACP message names and the id
- * the threads table stores. So no bookkeeping is needed to tie a process to a
- * conversation: it is written on the process.
- *
- * `--session-id` wins where both appear, which is a fork: `--resume` names
- * the conversation it was forked from, and its work is not that one's.
- * `--resume-session-at` is a message id rather than a session id, and does
- * not match — the `=` is part of what is looked for.
+ * Typed loosely on purpose: the ACP SDK carries no types for this extension,
+ * the gateway passes its frames through raw, and every field here belongs to
+ * an adapter rather than to a specification. What is relied on is the three
+ * update names and `asyncTaskId`; everything else is read where it is there.
  */
-export function threadOfAgent(command: string): string | null {
-  return (
-    /(?:^|\s)--session-id=(\S+)/.exec(command)?.[1] ??
-    /(?:^|\s)--resume=(\S+)/.exec(command)?.[1] ??
-    null
+export interface AsyncTaskUpdate {
+  sessionUpdate?: unknown;
+  asyncTaskId?: unknown;
+  /** The command for a shell task, a description for any other kind. */
+  name?: unknown;
+  /** `shell`, `workflow`, `monitor` or `task` under Claude; always `shell` under Codex. */
+  taskType?: unknown;
+  description?: unknown;
+  canStop?: unknown;
+  /** On a state update: `running`, `paused`, `completed`, `failed` or `stopped`. */
+  state?: unknown;
+}
+
+/** States that mean the task is over, whichever way it went. */
+const OVER = new Set(['completed', 'failed', 'stopped']);
+
+/** What a task with no name to show is called, so a bar never draws a blank. */
+const UNNAMED_TASK = 'a background task';
+
+/**
+ * The tasks one adapter process has announced, by the conversation they are on.
+ *
+ * Held in memory beside the connection that announced them, and gone with it.
+ * Neither adapter re-announces the tasks of a process that has died — Claude's
+ * replay mentions them nowhere, and Codex's reconciles against a fresh
+ * app-server that owns none of the old terminals — so a respawn starts with an
+ * empty board, and what the old process left running is the floor's to find.
+ */
+export class TaskBoard {
+  /** Thread id → task id → what that task is, in the order they arrived. */
+  private readonly byThread = new Map<string, Map<string, BackgroundProcess>>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /**
+   * Reads one update for what it says about a task, and answers whether the
+   * thread's bar has changed.
+   *
+   * A spawn adds an entry, a terminal state removes it, and a progress update
+   * may rename one. `running` and `paused` keep what is there: a task that
+   * reports itself still running is not news. Anything else — a state for a
+   * task this process never announced, an update with no id on it — is passed
+   * over, because the answer to a bar showing a stale task is the next state
+   * update rather than a guess made here.
+   */
+  note(acpThreadId: string, update: unknown): boolean {
+    if (!update || typeof update !== 'object') return false;
+    const u = update as AsyncTaskUpdate;
+    const taskId = typeof u.asyncTaskId === 'string' ? u.asyncTaskId : null;
+    if (!taskId) return false;
+
+    switch (u.sessionUpdate) {
+      case 'async_task_spawned': {
+        const tasks = this.tasksOf(acpThreadId);
+        tasks.set(taskId, {
+          id: taskId,
+          command: describe(u) ?? UNNAMED_TASK,
+          // Codex sends `shell` and nothing else; Claude's four kinds are its
+          // own. Kept as the adapter's word rather than mapped onto an
+          // enumeration Boxes would have to keep in step with two harnesses.
+          kind: typeof u.taskType === 'string' ? u.taskType : 'task',
+          // Both adapters send true today. A task that says it cannot be
+          // stopped is shown without a button rather than with one that
+          // answers `stopped: false` every time.
+          stoppable: u.canStop === true,
+          startedAt: this.now(),
+        });
+        return true;
+      }
+      case 'async_task_state_update': {
+        if (typeof u.state !== 'string' || !OVER.has(u.state)) return false;
+        return this.drop(acpThreadId, taskId);
+      }
+      case 'async_task_progress': {
+        // Claude only, and nothing is required of it: a progress update that
+        // carries no description says nothing this holds.
+        const named = describe(u);
+        const task = this.byThread.get(acpThreadId)?.get(taskId);
+        if (!task || !named || task.command === named) return false;
+        task.command = named;
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  /** What one conversation has running, for the bar above its composer. */
+  for(acpThreadId: string): BackgroundProcess[] {
+    return [...(this.byThread.get(acpThreadId)?.values() ?? [])];
+  }
+
+  /** The conversations with something running, for a list that shows them all. */
+  get threads(): string[] {
+    return [...this.byThread].filter(([, tasks]) => tasks.size > 0).map(([thread]) => thread);
+  }
+
+  /** Whether any conversation of this adapter has a task running. */
+  get any(): boolean {
+    return this.threads.length > 0;
+  }
+
+  /**
+   * Forgets one task, and says whether it was there.
+   *
+   * The stop uses this as well as the terminal update: an adapter answering
+   * `stopped: false` is saying the task was already over, and a bar still
+   * showing it has to catch up without waiting for a state update that is
+   * never coming.
+   */
+  drop(acpThreadId: string, taskId: string): boolean {
+    const tasks = this.byThread.get(acpThreadId);
+    if (!tasks?.delete(taskId)) return false;
+    if (tasks.size === 0) this.byThread.delete(acpThreadId);
+    return true;
+  }
+
+  /**
+   * Forgets everything, for a process that has gone, and answers with the
+   * conversations that had something so their browsers can be told.
+   */
+  clear(): string[] {
+    const had = this.threads;
+    this.byThread.clear();
+    return had;
+  }
+
+  private tasksOf(acpThreadId: string): Map<string, BackgroundProcess> {
+    let tasks = this.byThread.get(acpThreadId);
+    if (!tasks) {
+      tasks = new Map();
+      this.byThread.set(acpThreadId, tasks);
+    }
+    return tasks;
+  }
+}
+
+/**
+ * What to call a task, from whichever of the two fields carries it.
+ *
+ * `name` is the command for a shell task under both adapters — Codex strips
+ * its own `bash -lc` wrapper before sending it — and a description for
+ * anything else. `description` is the fallback, and the only thing a progress
+ * update carries.
+ */
+function describe(update: AsyncTaskUpdate): string | null {
+  for (const value of [update.name, update.description]) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+// --- what the box says -----------------------------------------------------
+
+/**
+ * One reading of a box: whether anything is running in it that Boxes did not
+ * put there, and what.
+ *
+ * One answer about the whole box rather than one per conversation. The process
+ * table cannot say whose work is whose any more — `codex app-server` runs every
+ * Codex conversation of a box in one process and names none of them on its
+ * command line — and it no longer has to: the adapters name the work they know
+ * about, and this answers the only question left, which is the reaper's.
+ */
+export interface BoxReading {
+  /** Whether anything is running that Boxes did not put there to hold the box open. */
+  busy: boolean;
+  /** The command lines of what is, for the log and for the session-level stop. */
+  work: readonly string[];
+}
+
+/** Nothing running anywhere: a box that is not there, or not up. */
+const NOTHING: BoxReading = { busy: false, work: [] };
+
+/**
+ * The `ps` that took the reading, which is in every reading taken from inside.
+ *
+ * A stop reads the box through its own `ps`, and that process is in the table
+ * it prints. Counting it would make every box busy the moment it was asked,
+ * and killing it would be Boxes shooting its own reading.
+ */
+const READING_ITSELF = /^(?:\S*\/)?ps(?:\s|$)/;
+
+/** The line the entrypoint holds the container open with, once it has exec'd. */
+const ENTRYPOINT_HOLD = 'sleep infinity';
+
+/**
+ * Whether one process is the box itself rather than work being done in it.
+ *
+ * Resident is a short list, and everything not on it is work:
+ *
+ * - PID 1, and the `sleep infinity` the entrypoint holds the box open with —
+ *   that is `exec`ed, so it is PID 1 itself where there is no init, and init's
+ *   own child where there is;
+ * - every adapter, found by its harness's `processToken`;
+ * - every adapter's direct children, which are the agent processes: `claude`
+ *   under `claude-agent-acp`, `codex app-server` under `codex-acp`;
+ * - anything matching a harness's `residentProcesses`, which is where a
+ *   long-lived helper of either agent goes — an MCP server would be the one
+ *   thing this rule would otherwise misread, and Boxes configures none;
+ * - the `ps` that took the reading.
+ *
+ * Everything else is work: a shell under an agent, a build orphaned to PID 1
+ * by an adapter that died, a `!command` exec somebody is still waiting on.
+ * Under Codex's sandboxed modes a command is three wrappers deep
+ * (`codex-linux-sandbox` → `bwrap` → `codex-linux-sandbox
+ * --apply-seccomp-then-exec` → `bash -lc …`), and every one of them is that
+ * command's own and correctly reads as work.
+ *
+ * The rule has to know both harnesses' tokens. Left with one, it silently
+ * mis-reads the other harness's box as empty, and an invisible build gets
+ * suspended half an hour later.
+ */
+function isResident(
+  process: ContainerProcess,
+  adapters: ReadonlySet<number>,
+  harnesses: readonly Harness[],
+): boolean {
+  if (process.pid === 1) return true;
+  if (process.ppid === 1 && process.command.trim() === ENTRYPOINT_HOLD) return true;
+  if (adapters.has(process.pid)) return true;
+  if (adapters.has(process.ppid)) return true;
+  if (READING_ITSELF.test(process.command.trim())) return true;
+  return harnesses.some((h) =>
+    h.residentProcesses.some((pattern) => pattern.test(process.command)),
   );
 }
 
-/** One reading of a box: what is running in it, by conversation. */
-export interface BackgroundReading {
-  /**
-   * Work under each conversation's agent process, by the adapter's own id for
-   * that thread. Only conversations with something running appear.
-   */
-  byThread: ReadonlyMap<string, BackgroundProcess[]>;
-  /**
-   * Commands running under an agent process that names no conversation.
-   *
-   * They count for the box and belong to no thread: they hold the reaper off
-   * the way any other work does, and there is no conversation to show them
-   * beside. Kept as their command lines rather than a count, because a box
-   * that says "still running" with no thread saying it is a thing somebody
-   * will have to explain, and this is the only evidence of what it was.
-   */
-  unnamed: readonly string[];
-}
-
 /**
- * Nothing running anywhere.
+ * Every adapter process in a box, by the token its harness is spawned as.
  *
- * A box that is not there, or not up, is this rather than a box that could
- * not be read: those are opposite answers — one is knowledge and the other is
- * silence — and conflating them said "still running" about every stopped
- * session for as long as the orchestrator remembered it.
+ * The token alone is not enough, because it is on the agent's command line
+ * too: `claude-agent-acp` is a package name, and the CLI it spawns lives
+ * inside that package's own `node_modules`, three directories into a path. An
+ * agent read as an adapter would make the shells under it read as agents,
+ * which is work made invisible — exactly the mistake that costs a build.
+ *
+ * Two things tell them apart, and either is enough. A harness names its own
+ * agent in `residentProcesses`, and a process matching that is the agent
+ * whatever else is on its line; and the adapter is what Boxes `exec`s into the
+ * box, so nothing carrying a token sits above it.
  */
-const NOTHING: BackgroundReading = { byThread: new Map(), unnamed: [] };
-
-/** Whether a reading has anything in it at all, which is what the reaper asks. */
-export function anyWorkRunning(reading: BackgroundReading): boolean {
-  return reading.unnamed.length > 0 || reading.byThread.size > 0;
-}
-
-/**
- * Why a reading is busy with nothing to show for it, or null when it is not.
- *
- * The one state that reads as a fault from the outside: a card saying "still
- * running" with every one of its threads quiet. It is a legitimate answer —
- * work Boxes can see and cannot place — but nobody can act on it without
- * knowing which of the two ways it happened, so it is said once, in the log.
- */
-export function unexplained(reading: BackgroundReading): string | null {
-  if (reading.unnamed.length === 0) return null;
-  return `work under an agent that names no conversation: ${reading.unnamed.join(', ')}`;
-}
-
-/**
- * A stable id for one running process, from the command line it is running.
- *
- * The pid cannot be it. `docker top` runs `ps` on the host, so the pids it
- * reports are the host's and mean nothing inside the container — where the
- * kill has to happen. The command line is the same string in both places and
- * identifies the call on its own: the harness gives every tool call its own
- * `/tmp/claude-<hex>-cwd` to write its working directory to, so two runs of
- * the same command are two different strings here.
- *
- * FNV-1a, because this needs to be short, stable across readings, and the
- * same on both sides of a stop request. It is not a security boundary: the
- * stop resolves it against the box's own processes and can only match
- * something the box is running.
- */
-export function processId(command: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < command.length; i += 1) {
-    hash ^= command.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
-}
-
-/**
- * What the agent asked for, out of the shell the harness wrapped it in.
- *
- * A tool call's process is not the command the agent wrote. It is a shell
- * restoring a snapshot, undoing an alias, then `eval`-ing the command and
- * writing its working directory somewhere for the next call to pick up:
- *
- *     /bin/bash -c source /home/agent/.claude/shell-snapshots/snapshot-….sh
- *       2>/dev/null || true && shopt -u extglob … && eval 'npm run build'
- *       < /dev/null && pwd -P >| /tmp/claude-9138-cwd
- *
- * The words the agent chose are in there, between the quotes.
- *
- * Anything that is not that shape is its own name: a process the harness did
- * not wrap, or a wrapper of some later shape, reads better as itself than as
- * a failed parse.
- */
-export function commandOf(process: string): string {
-  const eval_ = /(?:^|\s)eval '((?:[^']|'\\'')*)'/.exec(process);
-  if (!eval_) return process.trim();
-  // `bash -c` is given the command single-quoted, so a quote inside it
-  // arrives as the four characters that close, escape and reopen.
-  return (eval_[1] ?? '').replaceAll(`'\\''`, `'`).trim();
-}
-
-/**
- * The adapter processes in a box, and every agent under them with the
- * conversation each is running — null where a process is an agent but does
- * not say which conversation it is.
- *
- * The shape being read is the one the session image runs: the adapter Boxes
- * spawned, one agent process under it per conversation, and under those the
- * shells the agent's tool calls run in. So the adapter's own children are
- * agents, by depth.
- *
- * The id on a command line is the other half. A process carrying one is an
- * agent wherever it sits under the adapter, so a launcher or a re-exec
- * between the two does not make the real agent look like work; and an agent
- * is never work itself, so the same wrapper does not make it look busy. The
- * depth rule is kept underneath as the safe answer for an agent that names no
- * conversation: its work is real, and only who to show it to is unknown.
- *
- * With no adapter in the box at all, an id is the whole of the rule. Boxes
- * spawns the adapter as an exec and does not keep one there between
- * connections, so a container that is up and has never been opened — or that
- * has outlived the orchestrator process that opened it — runs the entrypoint
- * and nothing else. Such a box reads as empty, and the id is what keeps that
- * safe: an agent that outlived its adapter is still an agent, and its work is
- * still found.
- */
-function readTree(
+function adapterPids(
   processes: readonly ContainerProcess[],
-  adapter: string,
-): { adapters: ReadonlySet<number>; agents: ReadonlyMap<number, string | null> } {
+  harnesses: readonly Harness[],
+): Set<number> {
   const byPid = new Map(processes.map((p) => [p.pid, p]));
-  /** Whether any of `pids` is above a process, however far up. */
-  const under = (start: ContainerProcess, pids: ReadonlySet<number>): boolean => {
-    const seen = new Set<number>();
-    let at: ContainerProcess | undefined = start;
+  const carries = (p: ContainerProcess): boolean =>
+    harnesses.some((h) => p.command.includes(h.processToken));
+  const named = (p: ContainerProcess): boolean =>
+    harnesses.some((h) => h.residentProcesses.some((pattern) => pattern.test(p.command)));
+  /** Whether anything above a process carries an adapter's token. */
+  const under = (start: ContainerProcess): boolean => {
+    const seen = new Set<number>([start.pid]);
+    let at = byPid.get(start.ppid);
     while (at && !seen.has(at.pid)) {
+      if (carries(at)) return true;
       seen.add(at.pid);
-      if (pids.has(at.ppid)) return true;
       at = byPid.get(at.ppid);
     }
     return false;
   };
-
-  // The agents first, because they are what tells the adapter apart from
-  // them. `claude-agent-acp` names the adapter's package, and the CLI it
-  // spawns lives inside that package's own node_modules, so the token Boxes
-  // launched the adapter with is on the agent's command line too, three
-  // directories into a path. A conversation id is not: that is on every agent
-  // and on nothing else.
-  const named = new Set(
-    processes.filter((p) => threadOfAgent(p.command) !== null).map((p) => p.pid),
+  return new Set(
+    processes.filter((p) => carries(p) && !named(p) && !under(p)).map((p) => p.pid),
   );
-  const adapters = new Set(
-    processes
-      .filter((p) => p.command.includes(adapter) && !named.has(p.pid) && !under(p, named))
-      .map((p) => p.pid),
-  );
-
-  const agents = new Map<number, string | null>();
-  for (const p of processes) {
-    if (adapters.has(p.pid)) continue;
-    const thread = threadOfAgent(p.command);
-    if (thread !== null) {
-      // Under the adapter, or — with no adapter in the box at all — the only
-      // trace left of one, which is what makes an empty answer safe below.
-      if (adapters.size === 0 || under(p, adapters)) agents.set(p.pid, thread);
-      continue;
-    }
-    if (adapters.has(p.ppid)) agents.set(p.pid, null);
-  }
-  return { adapters, agents };
 }
 
 /**
- * One reading: what is running in the box, and whose it is.
+ * What is running in a box that Boxes did not put there.
  *
- * Work is what sits under an agent process. Each of an agent's own children
- * is one entry — a tool call is one shell, whatever that shell then spawns —
- * and what is under it is that entry's own tree, which the stop takes with
- * it.
- *
- * Foreground and background calls are the same shell with the same ancestry,
- * and nothing here tells them apart. It does not need to: a foreground
- * command cannot outlive the turn waiting on it, so a shell that is still
- * here when the thread is quiet is background work, and one that is here
- * mid-turn is the turn — which the thread already says for itself.
- *
- * @param adapter A token from the adapter's own command line, which is the
- *   one Boxes launched and so the one thing here it names itself.
- * @param now Epoch milliseconds, for turning an age into a start time.
+ * A box with nothing of Boxes' own in it — no adapter, no agent — is empty
+ * rather than a shape this cannot understand. Boxes spawns an adapter as an
+ * exec and keeps none there between connections, so a container that is up and
+ * has never been opened runs the entrypoint and nothing else; counting that as
+ * busy would put "still running" on its card and keep the reaper off it
+ * forever.
  */
-export function readBackgroundWork(
+export function readBox(
   processes: readonly ContainerProcess[],
-  adapter: string,
-  now: number = Date.now(),
-): BackgroundReading {
-  const { agents } = readTree(processes, adapter);
-  const byThread = new Map<string, BackgroundProcess[]>();
-  const unnamed: string[] = [];
-  for (const p of processes) {
-    if (p.pid === p.ppid) continue;
-    if (agents.has(p.pid)) continue;
-    if (!agents.has(p.ppid)) continue;
-    const thread = agents.get(p.ppid) ?? null;
-    if (thread === null) {
-      unnamed.push(commandOf(p.command));
-      continue;
-    }
-    const entry: BackgroundProcess = {
-      id: processId(p.command),
-      command: commandOf(p.command),
-      startedAt: p.elapsedSeconds === null ? null : now - p.elapsedSeconds * 1000,
-    };
-    byThread.set(thread, [...(byThread.get(thread) ?? []), entry]);
-  }
-  return { byThread, unnamed };
+  harnesses: readonly Harness[],
+): BoxReading {
+  const adapters = adapterPids(processes, harnesses);
+  const work = processes
+    .filter((p) => !isResident(p, adapters, harnesses))
+    .map((p) => p.command.trim());
+  return { busy: work.length > 0, work };
 }
 
 /**
- * The pids to kill to stop a thread's work, deepest first.
+ * The pids to kill to empty a box, deepest first.
  *
- * One entry is a whole tree: the shell a tool call runs in, and whatever that
- * shell started. Killing the shell alone would leave `npm run build` running
- * with init for a parent, out of the reading — a box that looks empty with a
- * build still in it, which is worse than not having stopped it. Children
- * first, for the same reason: a parent killed first hands its children to
- * init before they are signalled.
+ * The same rule as {@link readBox}, answered in the numbering a `kill` inside
+ * the box takes — so the processes must be that box's own reading, taken a
+ * moment ago and used immediately.
  *
- * `id` picks one entry; without one, everything that conversation has left
- * running. Nothing else can be named: an agent process is never a target, and
- * neither is work belonging to another thread.
- *
- * The processes must be the container's own reading, because these numbers
- * are about to be handed to a `kill` inside it.
+ * Children before parents, because a parent killed first hands its children to
+ * init before they are signalled: a box that looks empty with a build still
+ * running in it is worse than one that was never asked to stop.
  */
-export function workToStop(
+export function workPids(
   processes: readonly ContainerProcess[],
-  adapter: string,
-  acpThreadId: string,
-  id?: string,
+  harnesses: readonly Harness[],
 ): number[] {
-  const { agents } = readTree(processes, adapter);
-  const children = new Map<number, ContainerProcess[]>();
-  for (const p of processes) {
-    if (p.pid === p.ppid) continue;
-    children.set(p.ppid, [...(children.get(p.ppid) ?? []), p]);
-  }
-
-  const roots = processes.filter(
-    (p) =>
-      !agents.has(p.pid) &&
-      agents.get(p.ppid) === acpThreadId &&
-      (id === undefined || processId(p.command) === id),
-  );
-
-  const doomed: number[] = [];
-  const seen = new Set<number>();
-  const walk = (p: ContainerProcess): void => {
-    if (seen.has(p.pid) || agents.has(p.pid)) return;
-    seen.add(p.pid);
-    for (const child of children.get(p.pid) ?? []) walk(child);
-    // After its own children, so the list runs from the leaves up.
-    doomed.push(p.pid);
+  const adapters = adapterPids(processes, harnesses);
+  const byPid = new Map(processes.map((p) => [p.pid, p]));
+  /** How far under PID 1 a process sits; anything that loops counts as shallow. */
+  const depth = (start: ContainerProcess): number => {
+    const seen = new Set<number>();
+    let at: ContainerProcess | undefined = start;
+    let steps = 0;
+    while (at && !seen.has(at.pid)) {
+      seen.add(at.pid);
+      at = byPid.get(at.ppid);
+      steps += 1;
+    }
+    return steps;
   };
-  for (const root of roots) walk(root);
-  return doomed;
-}
-
-/** The ids in one reading of one thread, which is what a change is measured in. */
-function shapeOf(entries: readonly BackgroundProcess[] | undefined): string {
-  return (entries ?? [])
-    .map((e) => e.id)
-    .sort()
-    .join(',');
-}
-
-/** Every thread whose work differs between two readings. */
-function changedThreads(before: BackgroundReading, after: BackgroundReading): string[] {
-  const threads = new Set([...before.byThread.keys(), ...after.byThread.keys()]);
-  return [...threads].filter(
-    (t) => shapeOf(before.byThread.get(t)) !== shapeOf(after.byThread.get(t)),
-  );
+  return processes
+    .filter((p) => !isResident(p, adapters, harnesses))
+    .map((p) => ({ pid: p.pid, depth: depth(p) }))
+    .sort((a, b) => b.depth - a.depth)
+    .map((p) => p.pid);
 }
 
 /**
@@ -333,12 +375,6 @@ function changedThreads(before: BackgroundReading, after: BackgroundReading): st
  * it to be current. So it is polled behind them: a reading is served from the
  * last one until it goes stale, and refreshing is something the holder does,
  * not something a reader waits on.
- *
- * A level has to be pushed as well as read. Nothing reports a build finishing
- * and nothing ever will, so a browser that is shown "still running" learns it
- * has stopped only when this notices: `onChange` is how the bar above a
- * composer goes away, and without it the bar was permanent for as long as the
- * thread stayed open.
  */
 export interface ProbeOptions {
   /**
@@ -350,8 +386,8 @@ export interface ProbeOptions {
    * Injected so this is testable without a Docker daemon under it.
    */
   list: () => Promise<ContainerProcess[] | null>;
-  /** A token from the adapter's command line. */
-  adapter: string;
+  /** Every harness, because a box may be running either adapter, or both. */
+  harnesses: readonly Harness[];
   /** How long one reading stands for. */
   ttlMs: number;
   /** Present so a test can move time without waiting for it. */
@@ -366,44 +402,40 @@ export interface ProbeOptions {
    */
   onTrouble?: (error: Error | null) => void;
   /**
-   * Told which conversations' work has changed, whenever a reading differs
-   * from the one before it. Only those, so a poll over a box where nothing is
+   * Told whenever the box changes between busy and idle, with the reading that
+   * says so. Only the transitions, so a poll over a box where nothing is
    * happening says nothing at all.
+   *
+   * What it is for is the log. Work the reading finds may be work no thread
+   * has a task for — everything an adapter left behind when it died is — and
+   * that state looks exactly like a fault from the outside: a card saying
+   * "still running" with every one of its threads quiet. The commands are the
+   * only evidence of what it was.
    */
-  onChange?: (threads: readonly string[]) => void;
-  /**
-   * Told why a reading is busy with nothing to show for it, and null when
-   * that clears. See `unexplained`: it is the state that looks like a fault
-   * from the outside, and the log is the only place the reason can go.
-   */
-  onUnexplained?: (why: string | null) => void;
+  onChange?: (reading: BoxReading) => void;
 }
 
 export class BackgroundProbe {
-  private reading: BackgroundReading = NOTHING;
+  private reading: BoxReading = NOTHING;
   private readAt = -Infinity;
   private inFlight: Promise<void> | null = null;
   /** Whether the last reading failed, so the trouble is reported once. */
   private failing = false;
-  /** The last reason reported, so the same one is not reported twice. */
-  private reported: string | null = null;
 
   private readonly list: ProbeOptions['list'];
-  private readonly adapter: string;
+  private readonly harnesses: readonly Harness[];
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly onTrouble: (error: Error | null) => void;
-  private readonly onChange: (threads: readonly string[]) => void;
-  private readonly onUnexplained: (why: string | null) => void;
+  private readonly onChange: (reading: BoxReading) => void;
 
   constructor(options: ProbeOptions) {
     this.list = options.list;
-    this.adapter = options.adapter;
+    this.harnesses = options.harnesses;
     this.ttlMs = options.ttlMs;
     this.now = options.now ?? Date.now;
     this.onTrouble = options.onTrouble ?? (() => {});
     this.onChange = options.onChange ?? (() => {});
-    this.onUnexplained = options.onUnexplained ?? (() => {});
   }
 
   /**
@@ -416,26 +448,7 @@ export class BackgroundProbe {
    */
   get active(): boolean {
     this.freshen();
-    return anyWorkRunning(this.reading);
-  }
-
-  /**
-   * What one conversation has running, for the thread state a browser is
-   * sent. Empty for a thread that has left nothing behind, which is the
-   * answer for every thread in a box whose work belongs to another one.
-   */
-  work(acpThreadId: string): BackgroundProcess[] {
-    this.freshen();
-    return this.reading.byThread.get(acpThreadId) ?? [];
-  }
-
-  /**
-   * The conversations with something running, for a list that shows every
-   * thread of a box at once and has to say which of them is holding it up.
-   */
-  get workingThreads(): string[] {
-    this.freshen();
-    return [...this.reading.byThread.keys()];
+    return this.reading.busy;
   }
 
   /**
@@ -449,12 +462,7 @@ export class BackgroundProbe {
     const before = this.reading;
     this.reading = NOTHING;
     this.readAt = -Infinity;
-    const changed = changedThreads(before, this.reading);
-    if (changed.length > 0) this.onChange(changed);
-    if (this.reported !== null) {
-      this.reported = null;
-      this.onUnexplained(null);
-    }
+    if (before.busy) this.onChange(this.reading);
   }
 
   /** Starts a reading if the last one has gone stale. */
@@ -470,20 +478,13 @@ export class BackgroundProbe {
         const before = this.reading;
         // No box to ask is not the same as a box that would not answer: it is
         // empty, and known to be.
-        this.reading =
-          processes === null ? NOTHING : readBackgroundWork(processes, this.adapter, this.now());
+        this.reading = processes === null ? NOTHING : readBox(processes, this.harnesses);
         this.readAt = this.now();
         if (this.failing) {
           this.failing = false;
           this.onTrouble(null);
         }
-        const changed = changedThreads(before, this.reading);
-        if (changed.length > 0) this.onChange(changed);
-        const why = unexplained(this.reading);
-        if (why !== this.reported) {
-          this.reported = why;
-          this.onUnexplained(why);
-        }
+        if (before.busy !== this.reading.busy) this.onChange(this.reading);
       })
       .catch((error: Error) => {
         // A box that cannot be asked is not a box known to be empty. Hold the
@@ -502,25 +503,46 @@ export class BackgroundProbe {
   }
 }
 
+// --- the call that started it ----------------------------------------------
+
+/**
+ * One tool call, as much of it as the two questions about it need.
+ *
+ * Shared with `activity.ts`, which asks the same predicate for the opposite
+ * reason: a call that runs in the background is exactly the call whose silence
+ * says nothing about whether the agent is still working.
+ */
+export interface ToolCallUpdate {
+  name?: string;
+  rawInput?: unknown;
+  _meta?: {
+    claudeCode?: { toolName?: string };
+    jetbrains?: { air?: { asyncTasks?: { backgrounded?: unknown } } };
+  };
+}
+
 /**
  * Whether a tool call leaves something running after the turn that made it.
  *
- * Asked in activity.ts, which is a different question about the same calls: a
- * call that runs in the background is exactly the call whose silence says
- * nothing about whether the agent is still working.
+ * Three answers, in the order of how much they know.
  *
- * @param alwaysBackground The harness's own tool names that background their
- *   work whatever their input says — `Monitor` and `Workflow` under Claude,
- *   none under Codex, and the registry is where that is written down.
+ * The marker both adapters put on the call's own update —
+ * `_meta.jetbrains.air.asyncTasks.backgrounded` — is the adapter saying it
+ * outright, about the call it has just backgrounded, and it is the only one of
+ * the three that speaks for Codex: Codex has no `run_in_background` flag and
+ * puts no tool name on a call at all.
+ *
+ * `rawInput.run_in_background` is Claude's Bash tool being asked for one, which
+ * arrives with the call rather than after it. The names are the tools that
+ * background their work whatever their input says, and the registry is where
+ * each harness's are written down — `Monitor` and `Workflow` under Claude, none
+ * under Codex, where `Monitor` would be a tool name like any other.
  */
 export function startsBackgroundWork(
-  update: {
-    name?: string;
-    rawInput?: unknown;
-    _meta?: { claudeCode?: { toolName?: string } };
-  },
+  update: ToolCallUpdate,
   alwaysBackground: ReadonlySet<string>,
 ): boolean {
+  if (update._meta?.jetbrains?.air?.asyncTasks?.backgrounded === true) return true;
   const input = update.rawInput;
   if (
     input &&

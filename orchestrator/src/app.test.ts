@@ -33,6 +33,15 @@ function frame(text: string): Buffer {
   return Buffer.concat([header, payload]);
 }
 
+/**
+ * What the box's own `ps` prints, for the stop that reads it from inside.
+ * Reset for every test, like everything else the fake Docker answers with.
+ */
+let insideBox = '';
+
+/** Every `kill` the routes ran inside a box, as its arguments. */
+let killedInBox: string[][] = [];
+
 /** Installs a fake Docker client that answers everything the routes touch. */
 function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
   const execs: string[][] = [];
@@ -45,18 +54,27 @@ function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
       inspect: async () => ({ State: { Running: true } }),
       exec: async (opts: { Cmd: string[] }) => {
         execs.push(opts.Cmd);
+        if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
+        // The box-wide stop's two calls: a reading taken inside the container,
+        // and the signal it aims at what the reading found.
+        const answers = opts.Cmd[0] === 'ps' ? insideBox : opts.Cmd[0] === 'bash' ? output : null;
         return {
           start: async () => {
             const stream = new PassThrough();
             queueMicrotask(() => {
               // The repo probe is a plain `test -d`, which produces nothing.
-              if (opts.Cmd[0] !== 'bash') return stream.end();
-              stream.write(frame(output));
+              if (answers === null) return stream.end();
+              stream.write(frame(answers));
               stream.end();
             });
             return stream;
           },
-          inspect: async () => ({ ExitCode: opts.Cmd[0] === 'bash' ? exitCode : 1 }),
+          inspect: async () => ({
+            // A `ps` or a `kill` the stop ran succeeded; anything else this fake
+            // does not answer for failed.
+            ExitCode:
+              opts.Cmd[0] === 'bash' ? exitCode : answers === null && opts.Cmd[0] !== 'kill' ? 1 : 0,
+          }),
         };
       },
     }),
@@ -98,6 +116,8 @@ function insertThread(sessionId: string, threadId: string, ordinal: number): voi
 }
 
 beforeEach(() => {
+  insideBox = '';
+  killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
   // Before config(), which generates and writes the WS token on first read.
   process.env['DATA_DIR'] = dir;
@@ -920,8 +940,9 @@ test('stopping background work names a thread, and 404s for one that is not ther
   });
   assert.equal(missing.statusCode, 404);
 
-  // A thread with no conversation upstream cannot have left anything in the
-  // box, and says so without reaching Docker at all.
+  // A thread with no conversation upstream cannot have announced a task: a
+  // task is named by the adapter's own id for the conversation it is on, and
+  // this thread has none. Said without reaching Docker at all.
   const now = Date.now();
   db.prepare(
     `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
@@ -929,13 +950,55 @@ test('stopping background work names a thread, and 404s for one that is not ther
      VALUES ('t1', 'abc123', NULL, NULL, 1, ?, ?)`,
   ).run(now, now);
 
+  // `processId` is the adapter's async task id now, not a hash of a command
+  // line. The body keeps its shape, so a browser from before this is wrong
+  // about what the id means rather than about how to send it.
   const unminted = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/sessions/abc123/threads/t1/background/stop',
-    payload: { processId: 'aabbccdd' },
+    payload: { processId: 'task-1' },
   });
   assert.equal(unminted.statusCode, 200);
   assert.deepEqual(unminted.json(), { stopped: 0 });
+});
+
+test('stopping everything in a box signals the work and nothing of Boxes own', async () => {
+  // The floor's own stop, for work no conversation can name: after an adapter
+  // restart the bars are empty and the box is still compiling something.
+  insertSession('abc123');
+  fakeDocker('');
+  insideBox = [
+    '  PID  PPID COMMAND',
+    '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
+    '    7     1 sleep infinity',
+    '   12     1 node /usr/local/bin/claude-agent-acp',
+    '   13    12 claude --output-format stream-json --session-id=acp-1',
+    "   14    13 /bin/bash -c eval 'npm run build'",
+    '   20     1 node /usr/local/bin/codex-acp',
+    '   21    20 codex app-server',
+    '   22    21 bash -lc npm run watch',
+    '   30     1 ps -eo pid,ppid,args',
+  ].join('\n');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/background/stop',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { stopped: 2 });
+  // The two shells, and neither adapter, neither agent, nothing of the
+  // entrypoint's and not the `ps` that took the reading.
+  assert.deepEqual(killedInBox, [['-TERM', '14', '22']]);
+});
+
+test('stopping everything in a box that is not there is a 404', async () => {
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/nope/background/stop',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 404);
 });
 
 test('marking a thread done is remembered, reversible, and 404s for a thread that is not there', async () => {

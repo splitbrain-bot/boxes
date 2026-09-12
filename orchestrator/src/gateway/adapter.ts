@@ -1,7 +1,7 @@
 import { client as acpClient, type ClientConnection } from '@agentclientprotocol/sdk';
 import type { Stream } from '@agentclientprotocol/sdk';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import {
   getThread,
   insertThread,
@@ -16,7 +16,12 @@ import {
 import * as dk from '../docker.ts';
 import type { Harness, HarnessId } from '../harness.ts';
 import type { Logger } from '../log.ts';
-import type { SessionConfigOption, SessionModeState } from '../../../shared/types.ts';
+import type {
+  BackgroundProcess,
+  SessionConfigOption,
+  SessionModeState,
+} from '../../../shared/types.ts';
+import { TaskBoard } from './background.ts';
 
 /**
  * One adapter process of one session: the exec, the ACP handshake, and the
@@ -30,13 +35,20 @@ import type { SessionConfigOption, SessionModeState } from '../../../shared/type
  * session, in `upstream.ts`, which owns these connections and routes to them.
  *
  * The split is what makes two adapters in one box possible at all. Each holds
- * its own `live` set, its own replay counter and its own cached `initialize`,
- * so a load on one harness does not mask live activity on the other and an
- * adapter that dies takes only its own threads down with it.
+ * its own `live` set, its own replay counter, its own cached `initialize` and
+ * its own board of running tasks, so a load on one harness does not mask live
+ * activity on the other and an adapter that dies takes only its own threads —
+ * and only its own tasks — down with it.
  */
 
 /** Pass-through parser, leaving params and their _meta untouched. */
 const raw = <T = unknown>(params: unknown): T => params as T;
+
+/**
+ * Update kinds this SDK's schema does not know, and which have to be taken off
+ * the stream before it sees them. See {@link AdapterConnection.siftExtensions}.
+ */
+const EXTENSION_UPDATE = /^async_task_/;
 
 /** How often a failed adapter spawn is retried before the session errors. */
 const MAX_SPAWN_ATTEMPTS = 3;
@@ -199,6 +211,16 @@ export class AdapterConnection {
    * the one echoing the mode decides whether it is recorded at all.
    */
   private readonly categories = new Map<string, string | null>();
+  /**
+   * What this adapter process has told Boxes it is running in the background.
+   *
+   * On the connection rather than on the session, because a task is a fact
+   * about one process: the id a stop names is this adapter's, the request goes
+   * back down this connection, and a process that dies takes every task it
+   * announced with it. Nothing re-announces them on the respawn, which is the
+   * case the box reading in `background.ts` exists for.
+   */
+  private readonly tasks = new TaskBoard();
   /** Whether the missing credential has already been said once. */
   private unauthenticated = false;
 
@@ -243,6 +265,74 @@ export class AdapterConnection {
   /** Every conversation this process is holding. */
   get liveThreads(): string[] {
     return [...this.live];
+  }
+
+  // --- background work -------------------------------------------------------
+
+  /**
+   * Reads one update for what it says about a task this adapter is running,
+   * and answers whether the thread's bar has changed.
+   *
+   * Replays are not excluded. Neither adapter re-announces the tasks of a
+   * process that has died, so a replay carries none of these in practice — and
+   * if one ever did, a task the adapter is telling us about again is a task it
+   * is still running, which is exactly what a bar should show.
+   */
+  noteTask(acpThreadId: string, update: unknown): boolean {
+    return this.tasks.note(acpThreadId, update);
+  }
+
+  /** What one conversation of this adapter has running. */
+  tasksFor(acpThreadId: string): BackgroundProcess[] {
+    return this.tasks.for(acpThreadId);
+  }
+
+  /** The conversations of this adapter with something running in them. */
+  get taskThreads(): string[] {
+    return this.tasks.threads;
+  }
+
+  /** Whether this adapter has any task running at all. */
+  get hasTasks(): boolean {
+    return this.tasks.any;
+  }
+
+  /**
+   * Stops one task of a conversation, or every task it has, and answers how
+   * many the adapter said it stopped.
+   *
+   * A kill rather than a cancel, and the adapter's own kill: `session/cancel`
+   * is the composer's button and it is right for a turn, but a backgrounded
+   * command outlives the turn that started it by design and no interrupt
+   * reaches it. `_session/async_task/stop` names the task itself.
+   *
+   * `stopped: false` means the task was already over — the answer to a bar
+   * showing something that has finished, not a failure — so the entry goes
+   * either way and the caller re-sends the thread's state. A request that
+   * *failed* is different: nothing is known about the task, and dropping it
+   * would take a running build off the bar.
+   */
+  async stopTasks(acpThreadId: string, taskId?: string): Promise<number> {
+    const wanted = taskId ? [taskId] : this.tasks.for(acpThreadId).map((task) => task.id);
+    let stopped = 0;
+    for (const id of wanted) {
+      try {
+        const answer = (await this.request('_session/async_task/stop', {
+          sessionId: acpThreadId,
+          asyncTaskId: id,
+        })) as { stopped?: unknown } | null;
+        if (answer?.stopped === true) stopped += 1;
+        else this.slog.info('the task was already over', { acpThreadId, asyncTaskId: id });
+        this.tasks.drop(acpThreadId, id);
+      } catch (err) {
+        this.slog.warn('could not stop a task', {
+          acpThreadId,
+          asyncTaskId: id,
+          error: (err as Error).message,
+        });
+      }
+    }
+    return stopped;
   }
 
   /**
@@ -818,9 +908,89 @@ export class AdapterConnection {
     }
   }
 
+  /**
+   * Lifts the async-task extension's notifications off the stream before the
+   * SDK parses it, and delivers them by the path the SDK would have used.
+   *
+   * The SDK's client installs a session-update router ahead of every handler an
+   * app registers, and that router parses each `session/update` against the
+   * schema it was generated from — a strict union of the update kinds that
+   * existed when it was generated. An update outside it throws there, and a
+   * handler that throws takes the whole message with it: nothing else sees the
+   * frame, however raw a parser the app asked for. The async-task extension is
+   * by construction outside any generated schema, so every frame this milestone
+   * rests on would be logged as invalid params and dropped.
+   *
+   * So the bytes are read one step earlier. Everything downstream is unchanged
+   * — the update is tapped, its thread is touched, the browsers watching are
+   * sent it, and the task board reads it — and only the route differs. What it
+   * costs is strict ordering against the frames still going through the SDK's
+   * own parsing: a bar may appear a beat before the tool call it belongs to,
+   * which is a level rather than a sequence and reads the same either way.
+   */
+  private siftExtensions(stdout: Readable): Readable {
+    const passed = new PassThrough();
+    let buffer = '';
+    stdout.setEncoding('utf8');
+    stdout.on('data', (chunk: string) => {
+      buffer += chunk;
+      let full = true;
+      let cut = buffer.indexOf('\n');
+      while (cut !== -1) {
+        const line = buffer.slice(0, cut + 1);
+        buffer = buffer.slice(cut + 1);
+        if (!this.consumeExtension(line)) full = passed.write(line) && full;
+        cut = buffer.indexOf('\n');
+      }
+      // A reader that has fallen behind — a replay of a long conversation
+      // arriving faster than it is parsed — stops the adapter rather than
+      // being buffered without limit here.
+      if (!full) {
+        stdout.pause();
+        passed.once('drain', () => stdout.resume());
+      }
+    });
+    // A half-written line at the end is the adapter dying mid-frame. It goes on
+    // as it is, because the SDK's own parser is where a broken frame belongs.
+    stdout.on('end', () => {
+      if (buffer) passed.write(buffer);
+      passed.end();
+    });
+    stdout.on('error', (err: Error) => passed.destroy(err));
+    return passed;
+  }
+
+  /**
+   * Delivers one line if it is an extension notification, and answers whether
+   * it was one.
+   *
+   * Anything else — a response, a request, an update the SDK knows, a line
+   * that is not JSON at all — is left for the stream it came off.
+   */
+  private consumeExtension(line: string): boolean {
+    if (!line.includes('async_task_')) return false;
+    let message: {
+      id?: unknown;
+      method?: unknown;
+      params?: { update?: { sessionUpdate?: unknown } };
+    };
+    try {
+      message = JSON.parse(line) as typeof message;
+    } catch {
+      return false;
+    }
+    if (message.id !== undefined || message.method !== 'session/update') return false;
+    const kind = message.params?.update?.sessionUpdate;
+    if (typeof kind !== 'string' || !EXTENSION_UPDATE.test(kind)) return false;
+    this.host.onUpdate(this.harness.id, message.params, this.replaying > 0);
+    return true;
+  }
+
   /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
   private makeStream(exec: dk.AdapterExec): Stream {
-    const readable = Readable.toWeb(exec.stdout) as ReadableStream<Uint8Array>;
+    const readable = Readable.toWeb(
+      this.siftExtensions(exec.stdout),
+    ) as ReadableStream<Uint8Array>;
     const writable = new WritableStream<Uint8Array>({
       write: (chunk) =>
         new Promise<void>((resolve, reject) => {
@@ -844,9 +1014,12 @@ export class AdapterConnection {
   private handleExecExit(code: number | null): void {
     if (this.stopping) return;
     this.slog.warn('adapter exec exited', { code });
-    const lost = [...this.live];
+    // Every conversation this process held, and every one it had told us about
+    // a task on — the two are the same set in practice, and the union is what
+    // makes the bars go away even if they ever come apart.
+    const lost = new Set([...this.live, ...this.tasks.threads]);
     this.teardownConnection();
-    this.host.onThreadsLost(lost);
+    this.host.onThreadsLost([...lost]);
   }
 
   /** Closes the connection and kills the exec, tolerating either being gone. */
@@ -861,6 +1034,10 @@ export class AdapterConnection {
     // A fresh adapter holds none of them, so the next pin brings its thread
     // back up rather than trusting an id this process never heard.
     this.live.clear();
+    // And it knows nothing about what the old one had running: neither adapter
+    // re-announces a dead process's tasks. What that process left running in
+    // the box is the reading's to find and the session-level stop's to kill.
+    this.tasks.clear();
     try {
       this.exec?.kill();
     } catch {
