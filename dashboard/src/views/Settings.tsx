@@ -2,6 +2,7 @@ import { KeyRound, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type {
   CredentialId,
+  CredentialMethod,
   CredentialSummary,
   HarnessHealth,
   HarnessId,
@@ -10,6 +11,7 @@ import type {
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { CredentialLogin } from '@/components/CredentialLogin';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -44,6 +46,17 @@ interface CredentialKind {
   blurb: string;
   /** What the secret looks like, so a wrong paste is obvious before saving. */
   hint: string;
+  /** What a pasted secret is stored as; a login decides its own. */
+  method: CredentialMethod;
+  /**
+   * Whether an account can be logged in to instead of a secret pasted.
+   *
+   * True for the two agents, whose subscriptions have no static form to
+   * paste: the orchestrator runs the harness's own CLI to get one. GitHub's
+   * credential is a token and nothing else, so its card offers the form
+   * alone.
+   */
+  canLogin: boolean;
 }
 
 /**
@@ -60,6 +73,17 @@ const KINDS: CredentialKind[] = [
     harnesses: ['claude'],
     blurb: 'What a Claude Code thread runs on. Without it, a turn fails at the first prompt.',
     hint: 'sk-ant-oat01-…, from claude setup-token',
+    method: 'token',
+    canLogin: true,
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    harnesses: ['codex'],
+    blurb: 'What a Codex thread runs on. Without it, a turn fails at the first prompt.',
+    hint: 'sk-…, an OpenAI API key',
+    method: 'api_key',
+    canLogin: true,
   },
   {
     id: 'github',
@@ -70,6 +94,8 @@ const KINDS: CredentialKind[] = [
       'What a box clones and pushes with. Without it, git and gh reach GitHub ' +
       'unauthenticated and a push is refused.',
     hint: 'ghp_…, a classic personal access token',
+    method: 'token',
+    canLogin: false,
   },
 ];
 
@@ -83,6 +109,15 @@ export function Settings() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<CredentialKind | null>(null);
+  /**
+   * The login being followed, or null.
+   *
+   * One at a time on the page, which is stricter than the API's one at a time
+   * per credential and is the same thing for a person: two device codes on
+   * one screen is two things to get wrong. Starting another cancels this one
+   * rather than leaving a container running for a flow nobody can see.
+   */
+  const [login, setLogin] = useState<{ id: CredentialId; loginId: string } | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -96,6 +131,33 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
+    void load();
+  }, [load]);
+
+  /** Starts a login for one credential, taking down whatever was open. */
+  const beginLogin = async (id: CredentialId): Promise<void> => {
+    const open = login;
+    setLogin(null);
+    setBusy(true);
+    setError(null);
+    try {
+      // Cancelled rather than abandoned: it holds a container of its own.
+      if (open) await api.cancelLogin(open.id, open.loginId).catch(() => {});
+      const { loginId } = await api.startLogin(id);
+      setLogin({ id, loginId });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * A login that stored something: the flow goes and the row it wrote is read
+   * back from the store, which is the only thing that knows what is in it.
+   */
+  const finishLogin = useCallback((): void => {
+    setLogin(null);
     void load();
   }, [load]);
 
@@ -143,7 +205,13 @@ export function Settings() {
             // than written down here: the labels are the registry's.
             stalled={harnesses.filter((h) => kind.harnesses.includes(h.id) && !h.runnable)}
             busy={busy}
-            onSave={(method, secret) => act(() => api.putCredential(kind.id, method, secret))}
+            // The login this card is following, if any: one is open at a time
+            // across the page, and it belongs under the credential it is for.
+            loginId={login?.id === kind.id ? login.loginId : null}
+            onSave={(secret) => act(() => api.putCredential(kind.id, kind.method, secret))}
+            onLogin={() => void beginLogin(kind.id)}
+            onLoginDone={finishLogin}
+            onLoginClose={() => setLogin(null)}
             onRemove={() => setConfirmRemove(kind)}
           />
         ))
@@ -179,13 +247,17 @@ export function Settings() {
   );
 }
 
-/** One credential: what is stored, and the form that replaces it. */
+/** One credential: what is stored, the form that replaces it, and its login. */
 function CredentialCard({
   kind,
   stored,
   stalled,
   busy,
+  loginId,
   onSave,
+  onLogin,
+  onLoginDone,
+  onLoginClose,
   onRemove,
 }: {
   kind: CredentialKind;
@@ -193,7 +265,12 @@ function CredentialCard({
   /** The harnesses that cannot run on it right now, empty when all can. */
   stalled: HarnessHealth[];
   busy: boolean;
-  onSave: (method: 'token', secret: string) => Promise<boolean>;
+  /** The login being followed under this card, or null. */
+  loginId: string | null;
+  onSave: (secret: string) => Promise<boolean>;
+  onLogin: () => void;
+  onLoginDone: () => void;
+  onLoginClose: () => void;
   onRemove: () => void;
 }) {
   const [secret, setSecret] = useState('');
@@ -205,7 +282,7 @@ function CredentialCard({
     // leaving it in the field is leaving it on the screen.
     const typed = secret;
     setSecret('');
-    await onSave('token', typed);
+    await onSave(typed);
   };
 
   return (
@@ -256,7 +333,34 @@ function CredentialCard({
         <Button type="submit" disabled={busy || secret.trim() === ''}>
           {stored ? 'Replace' : 'Save'}
         </Button>
+        {/* The other way in, for a credential that has an account behind it:
+            a subscription has no static form to paste, so the orchestrator
+            runs the harness's own CLI and this follows it. Beside the form
+            rather than instead of it — a deployment on an API key wants the
+            field, and one on a subscription wants this. */}
+        {kind.canLogin && loginId === null ? (
+          <Button
+            type="button"
+            variant="outline"
+            aria-label={`Log in to ${kind.label}`}
+            disabled={busy}
+            onClick={onLogin}
+          >
+            Log in
+          </Button>
+        ) : null}
       </form>
+
+      {loginId ? (
+        <CredentialLogin
+          credential={kind.id}
+          label={kind.label}
+          loginId={loginId}
+          onDone={onLoginDone}
+          onClose={onLoginClose}
+          onRetry={onLogin}
+        />
+      ) : null}
     </Card>
   );
 }
@@ -268,19 +372,42 @@ function describe(stored: CredentialSummary | null, stalled: HarnessHealth[]): s
       ? 'Not set.'
       : `Not set, so ${stalled.map((h) => h.label).join(' and ')} cannot run.`;
   }
-  const parts = [stored.account ? `Ends ${stored.account}` : 'Stored'];
-  if (stored.status === 'expired') parts.push('expired');
+  // Past its own expiry, which is a date rather than the store's opinion of
+  // one: both are shown, and neither is said twice.
+  const expired = stored.expiresAt !== null && stored.expiresAt <= Date.now();
+  const parts = [account(stored)];
+  if (stored.status === 'expired' && !expired) parts.push('expired');
   if (stored.status === 'failing') parts.push('failing');
   parts.push(
     stored.refreshedAt
       ? `refreshed ${shortAge(Date.now() - stored.refreshedAt)} ago`
       : `entered ${shortAge(Date.now() - stored.updatedAt)} ago`,
   );
-  if (stored.expiresAt) parts.push(`expires in ${shortAge(stored.expiresAt - Date.now())}`);
+  if (stored.expiresAt) {
+    parts.push(
+      expired
+        ? `expired ${shortAge(Date.now() - stored.expiresAt)} ago`
+        : `expires in ${shortAge(stored.expiresAt - Date.now())}`,
+    );
+  }
   if (stalled.length > 0) {
     parts.push(`${stalled.map((h) => h.label).join(' and ')} cannot run on it`);
   }
   return `${parts.join(' · ')}.`;
+}
+
+/**
+ * What a person recognises a credential by.
+ *
+ * A pasted secret is known by its last four characters, which is all anybody
+ * can be shown of one. A login knows whose account it is, and saying "ends
+ * someone@example.com" of an email address would be nonsense.
+ */
+function account(stored: CredentialSummary): string {
+  if (!stored.account) return 'Stored';
+  return stored.method === 'oauth'
+    ? `Signed in as ${stored.account}`
+    : `Ends ${stored.account}`;
 }
 
 /** Who a box commits as. Not a secret, and the only reason it lived in .env. */

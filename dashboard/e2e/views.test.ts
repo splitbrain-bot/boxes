@@ -198,6 +198,56 @@ test('the session list says which build of each image is running', async () => {
   }
 });
 
+test('a box busy with work no conversation claims offers to stop all of it', async () => {
+  // The case the session-level kill exists for: the box says it is busy, no
+  // thread of it has a task, and so nothing in the thread's own bar can stop
+  // what is running. After a respawn that is every orphaned build in the box,
+  // because an adapter knows nothing about the shells the one before it left.
+  const orphaned = await startStubOrchestrator(DIST, [
+    stubSession({
+      id: 'orphan01',
+      name: 'orphaned build',
+      backgroundBusy: true,
+      threads: [stubThread({ backgroundBusy: false })],
+    }),
+  ]);
+  const { page, errors, close } = await openPage(orphaned.url, '/');
+  try {
+    const stop = page.getByRole('button', { name: 'Stop everything running in this box' });
+    await expect.poll(() => stop.isVisible()).toBe(true);
+
+    // Asked first: it kills work nobody is watching, and half-done work stays
+    // half-done.
+    await stop.click();
+    await page.getByRole('button', { name: 'Stop', exact: true }).click();
+    await expect.poll(() => orphaned.boxStops).toEqual(['orphan01']);
+
+    // And the offer goes when the box stops being busy, which is the next
+    // reading rather than anything this browser decided.
+    await expect.poll(() => stop.isVisible()).toBe(false);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+    await orphaned.close();
+  }
+});
+
+test('a box whose own conversation is running the work offers no box-wide kill', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    // 'nightly bench' is busy, and its first thread says the work is its own:
+    // that one is stopped by name from its own bar, with the adapter, rather
+    // than by signalling every process in the box.
+    await expect.poll(() => page.getByText('nightly bench').isVisible()).toBe(true);
+    expect(
+      await page.getByRole('button', { name: 'Stop everything running in this box' }).count(),
+    ).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the session list offers to notify this browser', async () => {
   const { page, errors, close } = await openPage(stub.url, '/', 'dark');
   try {

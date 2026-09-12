@@ -26,6 +26,28 @@ import { cn } from '@/lib/utils';
 /** How often the ages are re-read. A minute's work is not timed to the second. */
 const TICK_MS = 15_000;
 
+/**
+ * What to call a task whose `kind` says something the command does not.
+ *
+ * A shell task's name *is* its command line, so a word in front of it would
+ * only repeat what the row already shows. The other three are descriptions of
+ * work rather than commands — a workflow's name says what it is doing, not
+ * what it ran — and there the kind is the one thing that says how it got
+ * there. A kind this build has not heard of is shown as the adapter spelled
+ * it, which is better than dropping it.
+ */
+const KINDS: Record<string, string> = {
+  workflow: 'Workflow',
+  monitor: 'Monitor',
+  task: 'Task',
+};
+
+/** The word this row is prefixed with, or null for a plain command. */
+function kindLabel(kind: string): string | null {
+  if (kind === '' || kind === 'shell') return null;
+  return KINDS[kind] ?? kind;
+}
+
 /** Now, roughly, re-read while there is something whose age is being shown. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -68,6 +90,12 @@ export function BackgroundBar({
     onStop(confirming === 'all' ? undefined : confirming.id);
   };
 
+  // What a stop can reach. Both adapters send `canStop: true` for everything
+  // they announce today, but the flag is theirs to set and a task that says it
+  // cannot be stopped gets no button rather than one that does nothing — and
+  // a bar of nothing but such tasks loses its stop-all too.
+  const stoppable = processes.filter((process) => process.stoppable);
+
   return (
     <div
       data-slot="boxes_background-bar"
@@ -88,7 +116,7 @@ export function BackgroundBar({
               )}
             />
           </CollapsibleTrigger>
-          {onStop ? (
+          {onStop && stoppable.length > 0 ? (
             <button
               type="button"
               aria-label="Stop everything still running"
@@ -108,29 +136,35 @@ export function BackgroundBar({
           )}
         >
           <ul className="mt-1.5 flex flex-col gap-1">
-            {processes.map((process) => (
-              <li key={process.id} className="flex items-baseline gap-2">
-                <span className="min-w-0 flex-1 truncate font-mono">{process.command}</span>
-                {/* Since it started, not since it last said anything: a
-                    command that has printed nothing for an hour is the one
-                    this bar is for. */}
-                {process.startedAt === null ? null : (
+            {processes.map((process) => {
+              const kind = kindLabel(process.kind);
+              return (
+                <li key={process.id} className="flex items-baseline gap-2">
+                  {kind ? <span className="shrink-0 opacity-70">{kind}</span> : null}
+                  {/* Monospaced where the name is a command line and not where
+                      it is a sentence about what something is doing. */}
+                  <span className={cn('min-w-0 flex-1 truncate', kind === null && 'font-mono')}>
+                    {process.command}
+                  </span>
+                  {/* Since it started, not since it last said anything: a
+                      command that has printed nothing for an hour is the one
+                      this bar is for. */}
                   <span className="shrink-0 tabular-nums opacity-80">
                     {formatDuration(Math.max(now - process.startedAt, 0))}
                   </span>
-                )}
-                {onStop ? (
-                  <button
-                    type="button"
-                    aria-label={`Stop ${process.command}`}
-                    onClick={() => setConfirming(process)}
-                    className="inline-flex shrink-0 items-center rounded-md px-1 py-0.5 hover:bg-accent hover:text-accent-foreground"
-                  >
-                    <SquareIcon className="size-2.5 fill-current" aria-hidden />
-                  </button>
-                ) : null}
-              </li>
-            ))}
+                  {onStop && process.stoppable ? (
+                    <button
+                      type="button"
+                      aria-label={`Stop ${process.command}`}
+                      onClick={() => setConfirming(process)}
+                      className="inline-flex shrink-0 items-center rounded-md px-1 py-0.5 hover:bg-accent hover:text-accent-foreground"
+                    >
+                      <SquareIcon className="size-2.5 fill-current" aria-hidden />
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </CollapsibleContent>
       </Collapsible>

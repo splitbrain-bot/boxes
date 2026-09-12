@@ -73,6 +73,15 @@ export interface GatewayScript {
    * browser spends waiting for its history is a window assertions fit in.
    */
   holdLoad?: boolean;
+  /**
+   * What a turn that backgrounds something leaves running, as the adapter's
+   * async-task spawns describe it.
+   *
+   * One shell command by default, which is the ordinary case. A test that
+   * cares what a task's kind or its `canStop` does to the bar says so here
+   * rather than reaching into the stub.
+   */
+  backgroundTasks?: BackgroundProcess[];
 }
 
 /** A running stub gateway. */
@@ -397,15 +406,18 @@ export function attachStubGateway(
         if (found.background) {
           // What the adapter does with a turn that spawned one: the prompt
           // stays open and the agent stops talking.
-          background.set(onThread, [
-            {
-              id: 'bg-1',
-              command: 'npm run build',
-              kind: 'shell',
-              stoppable: true,
-              startedAt: Date.now() - 154_000,
-            },
-          ]);
+          background.set(
+            onThread,
+            script.backgroundTasks ?? [
+              {
+                id: 'bg-1',
+                command: 'npm run build',
+                kind: 'shell',
+                stoppable: true,
+                startedAt: Date.now() - 154_000,
+              },
+            ],
+          );
           speaking.delete(onThread);
           turnState(onThread);
         }

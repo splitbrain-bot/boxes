@@ -8,12 +8,14 @@ import type {
   CreateSessionBody,
   CreateThreadBody,
   CredentialId,
+  CredentialMethod,
   CredentialSummary,
   DeploymentImages,
   ExecRecord,
   HarnessHealth,
   HarnessInfo,
   HealthResponse,
+  LoginState,
   ReviewAnnotation,
   ReviewAnnotationBody,
   ReviewFileResponse,
@@ -22,6 +24,7 @@ import type {
   SessionDetail,
   SessionSummary,
   Settings,
+  StartLoginResponse,
   StoredAttachment,
   ThreadDoneBody,
   ThreadSummary,
@@ -233,6 +236,47 @@ export function stubCredential(over: Partial<CredentialSummary> = {}): Credentia
 }
 
 /**
+ * How a login goes when the page starts one.
+ *
+ * The real flow is a CLI in a throwaway container, and what the page can see
+ * of it is a state per poll. So that is what the stub is: a list of states,
+ * one served per poll, the last repeating until the test pushes another with
+ * `pushLoginState` — which is what keeps the interesting ones on screen long
+ * enough to be asserted about rather than gone by the next tick.
+ */
+export interface StubLoginScript {
+  /** Served in order, one per poll; the last one repeats. */
+  steps: LoginState[];
+  /**
+   * Served instead, from the start, once a code has been posted. Claude's
+   * flow is the one that has one: its CLI blocks until the code arrives.
+   */
+  afterCode?: LoginState[];
+}
+
+/** The two flows as the adapters run them, which is what the tests drive. */
+export function stubLoginScripts(): Record<string, StubLoginScript> {
+  return {
+    // Claude: a URL, then a prompt the page has to answer.
+    claude: {
+      steps: [{ state: 'starting' }, { state: 'awaiting_code', url: 'https://claude.ai/oauth/code' }],
+      afterCode: [{ state: 'done' }],
+    },
+    // Codex: a URL and a one-time code, and the CLI polls for itself.
+    openai: {
+      steps: [
+        { state: 'starting' },
+        {
+          state: 'awaiting_browser',
+          url: 'https://auth.openai.com/codex/device',
+          code: 'WDJB-MJHT',
+        },
+      ],
+    },
+  };
+}
+
+/**
  * A harness the health probe reports. Runnable by default and carrying the
  * credential that makes it so, which is the state a working deployment is in.
  */
@@ -426,6 +470,12 @@ export interface StubState {
   credentials: CredentialSummary[];
   /** The deployment's plain settings, which the settings page round-trips. */
   settings: Settings;
+  /**
+   * How a login for each credential goes, by credential id. A test that wants
+   * a different flow — a failure, a longer wait — replaces the script before
+   * the page starts one.
+   */
+  loginScripts: Record<string, StubLoginScript>;
   /** Which build of each image the health probe says is running. */
   images: DeploymentImages;
   /**
@@ -465,6 +515,14 @@ export interface StubOrchestrator {
    * rather than one command of it.
    */
   backgroundStops: Array<{ sessionId: string; threadId: string; processId?: string }>;
+  /**
+   * Every box-wide kill the browser asked for, in order, by session.
+   *
+   * The one the card offers when the box is busy and no conversation in it
+   * claims the work. It names no thread and no process, which is the whole
+   * difference: the orchestrator reads the box and signals what it finds.
+   */
+  boxStops: string[];
   /** Combined output the exec endpoint streams back, by command. */
   execOutput: (command: string) => { output: string; exitCode: number };
   /** What GET /exec reports, as if from a previous session. */
@@ -481,6 +539,21 @@ export interface StubOrchestrator {
   sessionCalls: CreateSessionBody[];
   /** Every add-a-thread request, with the session it was made against. */
   threadCalls: Array<{ sessionId: string; body: CreateThreadBody }>;
+  /**
+   * Every login the page started, in order, with what happened to it: the
+   * codes pasted back into it, and whether it was cancelled.
+   */
+  logins: Array<{ id: CredentialId; loginId: string; codes: string[]; cancelled: boolean }>;
+  /**
+   * Moves the login running for one credential on to `next`, which every poll
+   * from then on answers with.
+   *
+   * What makes a flow assertable: the stub sits on the last state it was
+   * given, so a test can read the URL and the code off the page and then say
+   * when the CLI finished. Applies to the script instead when no login is
+   * running yet.
+   */
+  pushLoginState: (id: CredentialId, next: LoginState) => void;
   server: Server;
   close(): Promise<void>;
 }
@@ -502,6 +575,7 @@ export async function startStubOrchestrator(
       gitEmail: 'boxes-bot@users.noreply.github.com',
       dialogs: {},
     },
+    loginScripts: stubLoginScripts(),
     images: stubImages(),
     reviews: Object.fromEntries(initial.map((s) => [s.id, stubReview()])),
     agentSets: [stubAgentSet()],
@@ -510,9 +584,13 @@ export async function startStubOrchestrator(
   const reviewCalls: StubOrchestrator['reviewCalls'] = [];
   const sessionCalls: StubOrchestrator['sessionCalls'] = [];
   const threadCalls: StubOrchestrator['threadCalls'] = [];
+  const logins: StubOrchestrator['logins'] = [];
+  /** The logins the stub is still answering for, by the id it handed out. */
+  const running = new Map<string, RunningLogin>();
   const attachmentUploads: StubOrchestrator['attachmentUploads'] = [];
   const execCalls: StubOrchestrator['execCalls'] = [];
   const backgroundStops: StubOrchestrator['backgroundStops'] = [];
+  const boxStops: StubOrchestrator['boxStops'] = [];
   const execLog: ExecRecord[] = [];
   let execOutput: StubOrchestrator['execOutput'] = (command) => ({
     output: `${command}\n`,
@@ -702,6 +780,17 @@ export async function startStubOrchestrator(
       });
       return undefined;
     }
+    const stopBox = /^\/api\/sessions\/([^/]+)\/background\/stop$/.exec(url);
+    if (stopBox && req.method === 'POST') {
+      const sessionId = stopBox[1] ?? '';
+      boxStops.push(sessionId);
+      // The real one TERMs what its reading of the box calls work and answers
+      // with how many pids it signalled; a reading a moment later is what
+      // takes the box out of its busy state, so the stub does that here.
+      const found = state.sessions.find((se) => se.id === sessionId);
+      if (found) found.backgroundBusy = false;
+      return json(res, 200, { stopped: 2 });
+    }
     const attach = /^\/api\/sessions\/([^/]+)\/attachments$/.exec(url);
     if (attach && req.method === 'POST') {
       // `url` above has had its query cut off; the name is in the raw one.
@@ -777,6 +866,17 @@ export async function startStubOrchestrator(
       return answerAgentSets(req, res, state, agentSets[1], agentSets[2] ?? '');
     }
 
+    // Before the credential routes below, which would otherwise take the id
+    // and leave the rest of the path unread.
+    const login = /^\/api\/credentials\/([^/]+)\/login(?:\/([^/]+))?(?:\/(code))?$/.exec(url);
+    if (login) {
+      return answerLogin(req, res, state, logins, running, {
+        id: login[1] as CredentialId,
+        loginId: login[2],
+        tail: login[3],
+      });
+    }
+
     const credentials = /^\/api\/credentials(?:\/([^/]+))?$/.exec(url);
     if (credentials) {
       return answerCredentials(req, res, state, credentials[1]);
@@ -842,10 +942,21 @@ export async function startStubOrchestrator(
     attachmentUploads,
     execCalls,
     backgroundStops,
+    boxStops,
     execLog,
     reviewCalls,
     sessionCalls,
     threadCalls,
+    logins,
+    pushLoginState: (id, next) => {
+      const live = [...running.values()].find((l) => l.id === id);
+      if (live) {
+        live.steps.push(next);
+        return;
+      }
+      const script = state.loginScripts[id] ?? { steps: [] };
+      state.loginScripts[id] = { ...script, steps: [...script.steps, next] };
+    },
     get execOutput() {
       return execOutput;
     },
@@ -1243,22 +1354,18 @@ function answerCredentials(
     let body = '';
     req.on('data', (c: Buffer) => (body += c.toString('utf8')));
     req.on('end', () => {
-      const { secret = '' } = JSON.parse(body || '{}') as { secret?: string };
+      const { method = 'token', secret = '' } = JSON.parse(body || '{}') as {
+        method?: CredentialMethod;
+        secret?: string;
+      };
       if (secret.trim() === '') return json(res, 400, { error: 'secret is required' });
       const stored = stubCredential({
         id: id as CredentialId,
+        method,
         account: secret.length > 4 ? secret.slice(-4) : null,
         updatedAt: Date.now(),
       });
-      state.credentials = [
-        ...state.credentials.filter((c) => c.id !== stored.id),
-        stored,
-      ];
-      // The harness that runs on it can run again, which is what takes the
-      // warning off the session list.
-      state.harnesses = state.harnesses.map((h) =>
-        h.id === stored.id ? { ...h, credential: stored, runnable: true } : h,
-      );
+      remember(state, stored);
       return json(res, 200, stored);
     });
     return undefined;
@@ -1275,4 +1382,136 @@ function answerCredentials(
   }
 
   return json(res, 405, { error: 'Method not allowed' });
+}
+
+/**
+ * Stores one credential and lets the harness that runs on it run again, which
+ * is what takes the warning off the session list.
+ */
+function remember(state: StubState, stored: CredentialSummary): void {
+  state.credentials = [...state.credentials.filter((c) => c.id !== stored.id), stored];
+  state.harnesses = state.harnesses.map((h) =>
+    h.id === stored.id ? { ...h, credential: stored, runnable: true } : h,
+  );
+}
+
+// --- the login endpoints ------------------------------------------------------
+
+/** One login the stub is answering for. */
+interface RunningLogin {
+  id: CredentialId;
+  /** What is left to serve; the last entry repeats. */
+  steps: LoginState[];
+  /** How far the polls have got through them. */
+  at: number;
+  afterCode: LoginState[];
+  record: StubOrchestrator['logins'][number];
+  /** Whether reaching `done` has already written the credential. */
+  stored: boolean;
+}
+
+/**
+ * Answers the four login routes by walking a script.
+ *
+ * The real flow runs a CLI in a container and the page only ever sees a state
+ * per poll, so a scripted walk is the whole of what there is to stand in for.
+ * What the stub keeps that a canned answer could not is the consequence: a
+ * login that reaches `done` writes the credential, so the page's refetch
+ * finds the row the real one would have written.
+ */
+function answerLogin(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  state: StubState,
+  logins: StubOrchestrator['logins'],
+  running: Map<string, RunningLogin>,
+  path: { id: CredentialId; loginId: string | undefined; tail: string | undefined },
+): void {
+  const { id, loginId, tail } = path;
+
+  if (loginId === undefined) {
+    if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
+    // One at a time per credential: starting a second ends the first, as the
+    // orchestrator's own store does.
+    for (const [open, live] of running) {
+      if (live.id !== id) continue;
+      live.record.cancelled = true;
+      running.delete(open);
+    }
+    const script = state.loginScripts[id] ?? { steps: [{ state: 'starting' } as LoginState] };
+    const started = `lg${logins.length + 1}`;
+    const record = { id, loginId: started, codes: [] as string[], cancelled: false };
+    logins.push(record);
+    running.set(started, {
+      id,
+      steps: [...script.steps],
+      at: 0,
+      afterCode: [...(script.afterCode ?? [{ state: 'done' }])],
+      record,
+      stored: false,
+    });
+    return json(res, 200, { loginId: started } satisfies StartLoginResponse);
+  }
+
+  const live = running.get(loginId);
+  if (!live) return json(res, 404, { error: 'No such login' });
+
+  if (tail === 'code') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
+    let body = '';
+    req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+    req.on('end', () => {
+      const { code = '' } = JSON.parse(body || '{}') as { code?: string };
+      live.record.codes.push(code);
+      // What the CLI does with it: the prompt it was blocked on is answered,
+      // and the flow carries on from there.
+      live.steps = [...live.afterCode];
+      live.at = 0;
+      res.writeHead(204);
+      res.end();
+    });
+    return undefined;
+  }
+
+  if (req.method === 'DELETE') {
+    live.record.cancelled = true;
+    running.delete(loginId);
+    res.writeHead(204);
+    res.end();
+    return undefined;
+  }
+
+  if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
+  const current = live.steps[live.at] ?? ({ state: 'starting' } as LoginState);
+  live.at = Math.min(live.at + 1, live.steps.length - 1);
+  if (current.state === 'done' && !live.stored) {
+    live.stored = true;
+    // The CLI wrote something: a login to an account for Codex, whose id
+    // token names the account, and a one-year token for Claude, which names
+    // nobody and is known by its last four characters like any other paste.
+    remember(
+      state,
+      stubCredential(
+        id === 'openai'
+          ? {
+              id,
+              method: 'oauth',
+              account: 'agent@example.com',
+              refreshedAt: Date.now(),
+              expiresAt: Date.now() + 21 * 86_400_000,
+              updatedAt: Date.now(),
+            }
+          : {
+              id,
+              method: 'token',
+              account: '9f2c',
+              expiresAt: Date.now() + 365 * 86_400_000,
+              updatedAt: Date.now(),
+            },
+      ),
+    );
+  }
+  // A finished login is kept rather than dropped: a poll already in flight
+  // when it finished has to be answered with the same ending, not a 404.
+  return json(res, 200, current);
 }

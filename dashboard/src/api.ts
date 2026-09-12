@@ -12,6 +12,8 @@ import type {
   CredentialSummary,
   HarnessInfo,
   HealthResponse,
+  LoginCodeBody,
+  LoginState,
   PushKeyResponse,
   PushSubscribeBody,
   ReviewAnnotationBody,
@@ -22,6 +24,7 @@ import type {
   SessionDetail,
   SessionSummary,
   Settings,
+  StartLoginResponse,
   StoredAttachment,
   ThreadSummary,
 } from '../../shared/types.ts';
@@ -110,6 +113,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ processId }),
     }),
+  /**
+   * Kills everything running in a box, whichever conversation started it, and
+   * answers with how many processes were signalled.
+   *
+   * The one above names a task an adapter announced; this one names nothing.
+   * It is the floor under the bars: after a respawn no adapter knows about
+   * the shells the one before it left running, so the orchestrator reads the
+   * box's own process table and signals what it finds there. The card offers
+   * it only for that case — work running with no conversation claiming it.
+   */
+  stopBoxWork: (id: string) =>
+    request<{ stopped: number }>(`/api/sessions/${id}/background/stop`, { method: 'POST' }),
   /**
    * Stores one file the user attached, and answers with where it landed.
    *
@@ -233,6 +248,37 @@ export const api = {
     }),
   deleteCredential: (id: CredentialId) =>
     request<void>(`/api/credentials/${id}`, { method: 'DELETE' }),
+
+  // --- logging in to an account ---------------------------------------------
+  //
+  // The other way a credential arrives, for the ones that have no static form
+  // to paste. The orchestrator runs the harness's own CLI in a throwaway
+  // container and this is the window onto it: start it, ask where it has got
+  // to until it is somewhere, hand back a code where the CLI wants one, and
+  // give up by saying so rather than by closing the tab.
+
+  /** Starts a login and answers with the id every call below names. */
+  startLogin: (id: CredentialId) =>
+    request<StartLoginResponse>(`/api/credentials/${id}/login`, { method: 'POST' }),
+  /** Where that login has got to, as the page polls it. */
+  loginState: (id: CredentialId, loginId: string) =>
+    request<LoginState>(`/api/credentials/${id}/login/${loginId}`),
+  /**
+   * Hands the CLI the code the login page gave the person.
+   *
+   * Only Claude's flow asks for one: its CLI prints a URL and then blocks on
+   * a prompt. Codex prints the code instead and polls for itself, and there
+   * is nothing to send back. The answer is not read — where the login goes
+   * next is what the poll above says.
+   */
+  submitLoginCode: (id: CredentialId, loginId: string, code: string) =>
+    request<void>(`/api/credentials/${id}/login/${loginId}/code`, {
+      method: 'POST',
+      body: JSON.stringify({ code } satisfies LoginCodeBody),
+    }),
+  /** Gives up on a login, and takes the container it was running in with it. */
+  cancelLogin: (id: CredentialId, loginId: string) =>
+    request<void>(`/api/credentials/${id}/login/${loginId}`, { method: 'DELETE' }),
   getSettings: () => request<Settings>('/api/settings'),
   patchSettings: (body: Partial<Settings>) =>
     request<Settings>('/api/settings', {

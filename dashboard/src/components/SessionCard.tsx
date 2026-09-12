@@ -1,8 +1,9 @@
-import { FileSearch, GitBranch, HardDrive, Info, Plus } from 'lucide-react';
+import { FileSearch, GitBranch, HardDrive, Info, Plus, Square } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { SessionSummary, ThreadSummary } from '../../../shared/types.ts';
 import { DOT, StatusBadge, type BadgeKind } from './StatusBadge';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { NewThreadDialog } from '@/components/NewThreadDialog';
 import { Card } from '@/components/ui/card';
 import { api } from '../api.ts';
@@ -68,6 +69,8 @@ export function SessionCard({ session }: { session: SessionSummary }) {
   const [error, setError] = useState<string | null>(null);
   /** Whether the new-thread dialog is up. */
   const [starting, setStarting] = useState(false);
+  /** Whether the box-wide kill is waiting to be confirmed. */
+  const [stopping, setStopping] = useState(false);
   // What each thread's agent is called. Off the health probe the list is
   // polling anyway rather than a call of its own: a row needs the label and
   // nothing else about the harness, and the dialog is what needs the rest.
@@ -105,7 +108,42 @@ export function SessionCard({ session }: { session: SessionSummary }) {
     }
   }
 
+  /**
+   * Kills everything running in the box and asks the list what it looks like
+   * afterwards.
+   *
+   * Nothing is guessed at here: what the button offers comes from the
+   * orchestrator's reading of the box, and so does whether it is still
+   * offered a moment later. A signal takes a couple of seconds to become an
+   * absence in the process table, and until it does the box is still busy.
+   */
+  async function stopEverything(): Promise<void> {
+    setStopping(false);
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.stopBoxWork(session.id);
+      void refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const current = session.threads.find((t) => t.id === session.currentThreadId);
+  /**
+   * Whether this box holds work that no conversation in it claims.
+   *
+   * The bars are per thread and come from the adapters, which know only about
+   * the tasks they themselves announced: after a respawn an adapter knows
+   * nothing about the shells the one before it left running, and the only
+   * thing that still sees them is the orchestrator's reading of the process
+   * table. That is the gap this offer fills — the box says it is busy, no
+   * thread says what with, and nothing else in the dashboard can stop it.
+   */
+  const orphaned = session.backgroundBusy && !session.threads.some((t) => t.backgroundBusy);
   // What the thread ages are measured from. Read at render rather than kept on
   // a timer: the list is polled every five seconds and every answer re-renders
   // this card, which is a finer clock than an indicator in whole minutes and
@@ -243,12 +281,43 @@ export function SessionCard({ session }: { session: SessionSummary }) {
               Fork
             </button>
           ) : null}
+          {/* Only for work nobody claims: while a thread has a task of its
+              own, its own bar is where that gets stopped, by name and with
+              the adapter rather than with a signal. */}
+          {orphaned ? (
+            <button
+              type="button"
+              disabled={busy}
+              aria-label="Stop everything running in this box"
+              onClick={() => setStopping(true)}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+            >
+              <Square className="size-3.5" />
+              Stop everything
+            </button>
+          ) : null}
         </div>
 
         {error ? (
           <div className="px-2 pt-1 text-xs text-danger" role="alert">
             {error}
           </div>
+        ) : null}
+
+        {stopping ? (
+          <ConfirmDialog
+            title="Stop everything running in this box?"
+            description={
+              'Kills every command still running in it, whoever started it, and anything ' +
+              'those commands started. Half-done work stays half-done, and nothing will ' +
+              'report back. The box itself keeps running.'
+            }
+            confirmLabel="Stop"
+            danger
+            busy={busy}
+            onConfirm={() => void stopEverything()}
+            onCancel={() => setStopping(false)}
+          />
         ) : null}
 
         {/* Asked before it is started, because the agent a thread runs is

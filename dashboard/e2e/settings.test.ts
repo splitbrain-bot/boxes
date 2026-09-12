@@ -124,6 +124,145 @@ test('the git identity round-trips through the deployment', async () => {
   }
 });
 
+/**
+ * The two login flows, against the stub's scripted state machine.
+ *
+ * What is worth proving is that the page follows a flow it does not drive:
+ * the orchestrator runs the harness's own CLI in a container, and all the
+ * browser has is a state per poll. Codex prints a URL and a code and finishes
+ * by itself; Claude prints a URL and blocks until the code is pasted back.
+ */
+
+test('a Codex login shows the URL and the code, and the account arrives with it', async () => {
+  stub = await startStubOrchestrator(DIST, [stubSession()]);
+  stub.state.credentials = [];
+
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
+
+    // What the CLI printed: a link to open somewhere else — often on another
+    // device — and the one-time code to type into it.
+    await expect
+      .poll(() => page.getByText('https://auth.openai.com/codex/device').isVisible())
+      .toBe(true);
+    await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText(/Open this link and enter the code/).isVisible())
+      .toBe(true);
+    expect(stub.logins.map((l) => l.id)).toEqual(['openai']);
+
+    // The CLI finishes on its own, and the page notices on its next poll:
+    // the flow goes, and the row it wrote takes its place.
+    stub.pushLoginState('openai', { state: 'done' });
+    await expect.poll(() => page.getByText(/Signed in as agent@example.com/).isVisible())
+      .toBe(true);
+    await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(false);
+    expect(stub.state.credentials.map((c) => [c.id, c.method])).toEqual([['openai', 'oauth']]);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a Claude login takes the code back and stores what the CLI printed', async () => {
+  stub = await startStubOrchestrator(DIST, [stubSession()]);
+  stub.state.credentials = [];
+
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await page.getByRole('button', { name: 'Log in to Claude' }).click();
+
+    await expect.poll(() => page.getByText('https://claude.ai/oauth/code').isVisible()).toBe(true);
+    const field = page.getByLabel('Claude login code');
+    await expect.poll(() => field.isVisible()).toBe(true);
+
+    await field.fill('AB12-CD34');
+    await page.getByRole('button', { name: 'Send code' }).click();
+
+    // Which is what the CLI was blocked on: it goes to the login, and the
+    // flow carries on from there.
+    await expect.poll(() => stub.logins[0]?.codes).toEqual(['AB12-CD34']);
+    // A setup-token names no account, so the credential is known by its last
+    // four characters like any other paste — and never by its value.
+    await expect.poll(() => page.getByText(/Ends 9f2c/).isVisible()).toBe(true);
+    expect(await page.content()).not.toContain('AB12-CD34');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a login that fails says why, and can be started again', async () => {
+  stub = await startStubOrchestrator(DIST, [stubSession()]);
+  stub.state.credentials = [];
+  stub.state.loginScripts['claude'] = {
+    steps: [
+      { state: 'starting' },
+      { state: 'failed', error: 'The login timed out after ten minutes.' },
+    ],
+  };
+
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await page.getByRole('button', { name: 'Log in to Claude' }).click();
+    await expect
+      .poll(() => page.getByText('The login timed out after ten minutes.').isVisible())
+      .toBe(true);
+    // Nothing was stored, so the card still says what is missing.
+    expect(stub.state.credentials).toEqual([]);
+
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await expect.poll(() => stub.logins.length).toBe(2);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a login can be given up on, and the container goes with it', async () => {
+  stub = await startStubOrchestrator(DIST, [stubSession()]);
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
+    await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
+
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    // Said to the orchestrator rather than only closed here: the login is
+    // holding a container of its own.
+    await expect.poll(() => stub.logins[0]?.cancelled).toBe(true);
+    await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(false);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`the login states render in ${scheme}`, async () => {
+    stub = await startStubOrchestrator(DIST, [stubSession()]);
+    stub.state.credentials = [];
+    const { page, errors, close } = await openPage(stub.url, '/settings', scheme);
+    try {
+      // The flow that shows a code, and the flow that asks for one: the two
+      // shapes a login takes, both under the credential they belong to.
+      await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
+      await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
+      await shoot(page, `settings-login-${scheme}`);
+
+      // Starting another takes the first down, which is the one-at-a-time
+      // rule seen from the page.
+      await page.getByRole('button', { name: 'Log in to Claude' }).click();
+      await expect.poll(() => page.getByLabel('Claude login code').isVisible()).toBe(true);
+      expect(await page.getByText('WDJB-MJHT').count()).toBe(0);
+      await shoot(page, `settings-login-code-${scheme}`);
+      expect(errors).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+}
+
 test('the session list links to the settings page', async () => {
   stub = await startStubOrchestrator(DIST, [stubSession()]);
   const { page, errors, close } = await openPage(stub.url, '/');
