@@ -12,7 +12,9 @@ import { HttpError } from './http-error.ts';
  *
  * The materialized directory is the contract with the session image, so these
  * assert its bytes and its manifest rather than only the store's own answers —
- * the entrypoint copies what is written here and interprets nothing.
+ * the entrypoint copies what is written here and interprets nothing. That
+ * includes writing one copy per harness: the box is what holds a set, and
+ * which agent will read it is a per-thread question nobody asks here.
  */
 
 let dir: string;
@@ -117,7 +119,7 @@ test('naming the global set as the extra one changes nothing', () => {
 
 // --- materializing -----------------------------------------------------------
 
-test('a merged set is written in the layout the entrypoint copies', () => {
+test('a merged set is written in every harness layout the entrypoint copies', () => {
   store.updateSet('global', { agentsMd: 'House rules.' });
   store.putItem('global', { kind: 'skill', name: 'review', content: '---\nname: review\n---\n' });
   const set = store.createSet('go');
@@ -125,15 +127,49 @@ test('a merged set is written in the layout the entrypoint copies', () => {
 
   store.materialize('s1', set.id);
 
+  // Both layouts, always: a box holds threads of either harness, and which it
+  // will hold is not known when this is written.
   assert.deepEqual(manifest('s1').sort(), [
-    'CLAUDE.md',
-    'commands/bench.md',
-    'skills/review',
+    '.agents/skills/review',
+    '.claude/CLAUDE.md',
+    '.claude/commands/bench.md',
+    '.claude/skills/review',
+    '.codex/AGENTS.md',
+    '.codex/prompts/bench.md',
   ]);
-  // What the dashboard calls AGENTS.md lands as Claude's user-level memory.
-  assert.equal(materialized('s1', 'CLAUDE.md'), 'House rules.\n');
-  assert.equal(materialized('s1', 'skills/review/SKILL.md'), '---\nname: review\n---\n');
-  assert.equal(materialized('s1', 'commands/bench.md'), 'Run the benchmarks.\n');
+  // What the dashboard calls AGENTS.md lands as each agent's user-level memory.
+  assert.equal(materialized('s1', '.claude/CLAUDE.md'), 'House rules.\n');
+  assert.equal(materialized('s1', '.codex/AGENTS.md'), 'House rules.\n');
+  // A skill is a directory with a SKILL.md in it under both layouts; a command
+  // is one file, and only its extension and its directory differ.
+  assert.equal(
+    materialized('s1', '.claude/skills/review/SKILL.md'),
+    '---\nname: review\n---\n',
+  );
+  assert.equal(
+    materialized('s1', '.agents/skills/review/SKILL.md'),
+    '---\nname: review\n---\n',
+  );
+  assert.equal(materialized('s1', '.claude/commands/bench.md'), 'Run the benchmarks.\n');
+  assert.equal(materialized('s1', '.codex/prompts/bench.md'), 'Run the benchmarks.\n');
+});
+
+test('every manifest path is home-relative and inside a layout', () => {
+  // The entrypoint installs these relative to $HOME and checks each line
+  // against the same six prefixes before it deletes anything, so a path that
+  // is not in one is a path that silently never arrives.
+  store.updateSet('global', { agentsMd: 'House rules.' });
+  store.putItem('global', { kind: 'skill', name: 'review', content: 'x' });
+  store.putItem('global', { kind: 'command', name: 'ship', content: 'y' });
+  store.materialize('s1', null);
+
+  for (const rel of manifest('s1')) {
+    assert.match(
+      rel,
+      /^(\.claude\/(CLAUDE\.md|skills\/|commands\/)|\.codex\/(AGENTS\.md|prompts\/)|\.agents\/skills\/)/,
+      `${rel} is not in a layout the entrypoint accepts`,
+    );
+  }
 });
 
 test('a session with nothing configured still gets a manifest', () => {
@@ -144,17 +180,24 @@ test('a session with nothing configured still gets a manifest', () => {
   assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')), ['manifest']);
 });
 
-test('materializing again removes what the previous set left', () => {
+test('materializing again removes what the previous set left, in both layouts', () => {
   store.putItem('global', { kind: 'command', name: 'ship', content: 'one' });
   store.materialize('s1', null);
-  assert.deepEqual(manifest('s1'), ['commands/ship.md']);
+  assert.deepEqual(manifest('s1').sort(), ['.claude/commands/ship.md', '.codex/prompts/ship.md']);
 
   store.deleteItem('global', 'command', 'ship');
   store.putItem('global', { kind: 'skill', name: 'review', content: 'two' });
   store.materialize('s1', null);
 
-  assert.deepEqual(manifest('s1'), ['skills/review']);
-  assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')).sort(), ['manifest', 'skills']);
+  // Gone from the manifest, so the container removes it from both homes at its
+  // next start, and gone from the directory the container reads.
+  assert.deepEqual(manifest('s1').sort(), ['.agents/skills/review', '.claude/skills/review']);
+  assert.deepEqual(readdirSync(join(agentConfigPath(dir, 's1'), '.claude')), ['skills']);
+  assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')).sort(), [
+    '.agents',
+    '.claude',
+    'manifest',
+  ]);
 });
 
 test('re-materializing keeps the directory a running container is mounted on', () => {
