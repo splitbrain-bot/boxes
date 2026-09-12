@@ -323,7 +323,7 @@ export function SessionThread() {
                 modes={state.modes}
                 configOptions={state.configOptions}
                 done={thread?.done === true}
-                canFork={session?.canFork === true && thread !== undefined}
+                canFork={thread?.canFork === true}
                 forking={forking}
                 onFork={onFork}
                 // Nothing to mark until the session has been read and said

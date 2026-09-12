@@ -11,6 +11,7 @@ import type {
   DeploymentImages,
   ExecRecord,
   HarnessHealth,
+  HarnessInfo,
   HealthResponse,
   ReviewAnnotation,
   ReviewAnnotationBody,
@@ -54,6 +55,14 @@ const CONTENT_TYPES: Record<string, string> = {
 export function stubThread(over: Partial<ThreadSummary> = {}): ThreadSummary {
   return {
     id: 'th1',
+    // Which agent runs it, and what it is configured with beyond its mode.
+    // Both are the thread's rather than the box's: one checkout may carry a
+    // conversation of each harness.
+    harness: 'claude',
+    modeId: null,
+    config: { model: 'opus' },
+    // Whether this thread's own adapter advertised the fork capability.
+    canFork: true,
     acpSessionId: 'acp-thread-1',
     title: null,
     ordinal: 1,
@@ -89,7 +98,6 @@ export function stubSession(over: Partial<SessionDetail> = {}): SessionDetail {
     wsToken: 'stub-token-0123456789abcdef',
     threads: [stubThread()],
     currentThreadId: 'th1',
-    canFork: true,
     agentSetId: null,
     agentSetName: null,
     diskBytes: 348 * 1024 * 1024,
@@ -238,6 +246,40 @@ export function stubHarness(over: Partial<HarnessHealth> = {}): HarnessHealth {
 }
 
 /**
+ * One harness as the dialogs see it: the registry's answer, what an adapter
+ * last advertised, and whether it can run. The catalogue is what a deployment
+ * that has run Claude once has cached.
+ */
+export function stubHarnessInfo(over: Partial<HarnessInfo> = {}): HarnessInfo {
+  return {
+    ...stubHarness(),
+    defaultModeId: 'auto',
+    forkModeId: 'plan',
+    defaultConfig: { model: 'opus' },
+    catalog: {
+      modes: {
+        currentModeId: 'auto',
+        availableModes: [
+          { id: 'auto', name: 'Auto' },
+          { id: 'plan', name: 'Plan' },
+        ],
+      },
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          currentValue: 'opus',
+          options: [{ value: 'opus' }, { value: 'sonnet' }],
+        },
+      ],
+      seenAt: Date.parse('2026-09-01T10:00:00Z'),
+    },
+    ...over,
+  };
+}
+
+/**
  * The three images the stub says are running: two pulled from a registry and
  * one built on the host, which is the mix a deployment following `latest`
  * with a session image of its own actually has.
@@ -279,6 +321,12 @@ export interface StubState {
    * taking its credential away here.
    */
   harnesses: HarnessHealth[];
+  /**
+   * What GET /api/harnesses answers: the same harnesses with the registry's
+   * defaults and whatever an adapter last advertised, which is what the
+   * dialogs are built from.
+   */
+  harnessInfo: HarnessInfo[];
   /**
    * The credentials the deployment holds, as the settings page sees them:
    * an account and a status, never a secret. Written by PUT and read by GET,
@@ -346,6 +394,7 @@ export async function startStubOrchestrator(
   const state: StubState = {
     sessions: initial,
     harnesses: [stubHarness()],
+    harnessInfo: [stubHarnessInfo()],
     credentials: [stubCredential()],
     settings: {
       gitName: 'boxes-bot',
@@ -400,6 +449,18 @@ export async function startStubOrchestrator(
       };
       return json(res, 200, health);
     }
+    if (url === '/api/harnesses' && req.method === 'GET') {
+      // Kept in step with the health probe, the way the orchestrator's own two
+      // answers are: both are built from the same registry and store.
+      return json(
+        res,
+        200,
+        state.harnessInfo.map((info) => ({
+          ...info,
+          ...(state.harnesses.find((h) => h.id === info.id) ?? {}),
+        })),
+      );
+    }
     if (url === '/api/sessions' && req.method === 'GET') {
       return json(res, 200, state.sessions.map(summary));
     }
@@ -428,7 +489,8 @@ export async function startStubOrchestrator(
         let body = '';
         req.on('data', (c: Buffer) => (body += c.toString('utf8')));
         req.on('end', () => {
-          const from = (JSON.parse(body || '{}') as CreateThreadBody).from;
+          const parsed = JSON.parse(body || '{}') as CreateThreadBody;
+          const from = parsed.from;
           // The orchestrator mints upstream and records what came back, so
           // the stub does the same rather than inventing an id of its own.
           const source = from ? found.threads.find((t) => t.id === from) : undefined;
@@ -440,6 +502,15 @@ export async function startStubOrchestrator(
             id: `th${found.threads.length + 1}`,
             acpSessionId,
             ordinal: found.threads.length + 1,
+            // A fork stays on its source's harness and keeps its settings;
+            // anything else runs what the request asked for.
+            harness: source?.harness ?? parsed.options?.harness ?? 'claude',
+            ...(source
+              ? { config: source.config, canFork: source.canFork }
+              : parsed.options?.config
+                ? { config: parsed.options.config }
+                : {}),
+            ...(parsed.options?.modeId && !source ? { modeId: parsed.options.modeId } : {}),
           });
           found.threads = [...found.threads, created];
           found.currentThreadId = created.id;

@@ -14,6 +14,7 @@ import type {
   ExecLogPage,
   ExecRequest,
   HarnessHealth,
+  HarnessInfo,
   HealthResponse,
   PushKeyResponse,
   PushSubscribeBody,
@@ -38,6 +39,7 @@ import {
 import {
   countPushSubscriptions,
   deletePushSubscription,
+  readHarnessCatalog,
   upsertPushSubscription,
   type openDb,
 } from './db.ts';
@@ -203,6 +205,29 @@ export function buildApp(
         };
       });
   }
+
+  /**
+   * Every harness this deployment can run: what the registry says about it,
+   * what its adapter last advertised, and whether it can run right now.
+   *
+   * What the dialogs are built from. The catalogue half is a cache written by
+   * whichever adapter last answered a `session/new`, `session/load` or
+   * `session/fork`, and it is null on a deployment that has never run one —
+   * such a dialog offers the agent choice alone rather than starting a box to
+   * find out what it would have offered.
+   */
+  app.get('/api/harnesses', async (): Promise<HarnessInfo[]> =>
+    harnessHealth().map((health) => {
+      const entry = HARNESSES[health.id];
+      return {
+        ...health,
+        defaultModeId: entry.defaultModeId,
+        forkModeId: entry.forkModeId,
+        defaultConfig: { ...entry.defaultConfig },
+        catalog: readHarnessCatalog(db, health.id),
+      };
+    }),
+  );
 
   app.get('/api/sessions', async () => manager.list());
 

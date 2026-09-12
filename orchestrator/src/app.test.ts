@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildApp, type Orchestrator } from './app.ts';
 import { config } from './config.ts';
-import { openDb, type Db } from './db.ts';
+import { openDb, upsertHarnessCatalog, type Db } from './db.ts';
 import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 
@@ -78,10 +78,10 @@ let orchestrator: Orchestrator;
 function insertSession(id: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?)`,
   ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, now, now);
   insertThread(id, `${id}-t1`, 1);
@@ -1137,4 +1137,110 @@ test('a credential that is failing is still offered, and says it is not runnable
   assert.equal(health.harnesses[0]!.runnable, false);
   assert.equal(health.harnesses[0]!.credential.status, 'expired');
   assert.equal(health.harnesses[0]!.credential.lastError, 'a year is up');
+});
+
+// --- harnesses, and the thread bodies that name one ---------------------------
+
+test('the harness list carries the registry, the catalogue and the health', async () => {
+  const res = await orchestrator.app.inject({ url: '/api/harnesses' });
+  assert.equal(res.statusCode, 200);
+  const fresh = res.json() as Array<{
+    id: string;
+    runnable: boolean;
+    defaultModeId: string;
+    forkModeId: string;
+    defaultConfig: Record<string, string>;
+    catalog: unknown;
+  }>;
+  // Claude alone, on the same rule the health probe uses: a harness whose
+  // credential this deployment cannot even carry to a box is not offered.
+  assert.deepEqual(
+    fresh.map((h) => h.id),
+    ['claude'],
+  );
+  assert.equal(fresh[0]!.defaultModeId, 'auto');
+  assert.equal(fresh[0]!.forkModeId, 'plan');
+  assert.deepEqual(fresh[0]!.defaultConfig, { model: 'opus' });
+  // Nothing has run an adapter here, so there is nothing cached and no box is
+  // started to find out: the dialog shows the agent choice alone.
+  assert.equal(fresh[0]!.catalog, null);
+  assert.equal(fresh[0]!.runnable, false);
+
+  // What an adapter last advertised, cached by the gateway and read back here.
+  upsertHarnessCatalog(
+    db,
+    'claude',
+    { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
+    [{ id: 'model', category: 'model', currentValue: 'opus' }],
+  );
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcd1234' },
+  });
+
+  const after = (await orchestrator.app.inject({ url: '/api/harnesses' })).json() as Array<{
+    runnable: boolean;
+    catalog: { modes: { availableModes: Array<{ id: string }> } } | null;
+  }>;
+  assert.equal(after[0]!.runnable, true);
+  assert.deepEqual(after[0]!.catalog?.modes.availableModes, [{ id: 'auto' }, { id: 'plan' }]);
+});
+
+test('a thread reports the agent it runs and what it is configured with', async () => {
+  insertSession('harn01');
+  db.prepare(
+    `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
+  ).run('harn01-t1');
+
+  const res = await orchestrator.app.inject({ url: '/api/sessions/harn01/threads' });
+  assert.deepEqual(res.json(), [
+    {
+      id: 'harn01-t1',
+      // Claude, which is what a row written before harnesses existed is and
+      // what a request naming none asks for.
+      harness: 'claude',
+      acpSessionId: null,
+      title: null,
+      ordinal: 1,
+      turnActive: false,
+      speaking: false,
+      backgroundBusy: false,
+      pendingCount: 0,
+      modeId: 'plan',
+      config: { model: 'opus' },
+      // No adapter has been reached, so nothing is claimed about forking.
+      canFork: false,
+      done: false,
+      createdAt: (res.json() as Array<{ createdAt: number }>)[0]!.createdAt,
+      lastActiveAt: (res.json() as Array<{ lastActiveAt: number }>)[0]!.lastActiveAt,
+    },
+  ]);
+});
+
+test('a thread for an agent nobody has is refused before anything is started', async () => {
+  insertSession('harn02');
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/harn02/threads',
+    payload: { options: { harness: 'gemini' } },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /Unknown harness/);
+  // Nothing was created on the way to the refusal: the box still has the one
+  // thread it was seeded with.
+  const threads = (
+    await orchestrator.app.inject({ url: '/api/sessions/harn02/threads' })
+  ).json() as unknown[];
+  assert.equal(threads.length, 1);
+
+  // Same answer when a box is asked for on an agent nobody has, and before
+  // anything is allocated for it — no image pull, no network, no container.
+  const created = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: { name: 'a box on nothing', thread: { harness: 'gemini' } },
+  });
+  assert.equal(created.statusCode, 400);
+  assert.match((created.json() as { error: string }).error, /Unknown harness/);
 });

@@ -502,21 +502,25 @@ export class BackgroundProbe {
   }
 }
 
-/** Claude Code tools that run in the background whatever their input says. */
-const ALWAYS_BACKGROUND = new Set(['Monitor', 'Workflow']);
-
 /**
  * Whether a tool call leaves something running after the turn that made it.
  *
  * Asked in activity.ts, which is a different question about the same calls: a
  * call that runs in the background is exactly the call whose silence says
  * nothing about whether the agent is still working.
+ *
+ * @param alwaysBackground The harness's own tool names that background their
+ *   work whatever their input says — `Monitor` and `Workflow` under Claude,
+ *   none under Codex, and the registry is where that is written down.
  */
-export function startsBackgroundWork(update: {
-  name?: string;
-  rawInput?: unknown;
-  _meta?: { claudeCode?: { toolName?: string } };
-}): boolean {
+export function startsBackgroundWork(
+  update: {
+    name?: string;
+    rawInput?: unknown;
+    _meta?: { claudeCode?: { toolName?: string } };
+  },
+  alwaysBackground: ReadonlySet<string>,
+): boolean {
   const input = update.rawInput;
   if (
     input &&
@@ -526,5 +530,5 @@ export function startsBackgroundWork(update: {
     return true;
   }
   const tool = update._meta?.claudeCode?.toolName ?? update.name ?? null;
-  return typeof tool === 'string' && ALWAYS_BACKGROUND.has(tool);
+  return typeof tool === 'string' && alwaysBackground.has(tool);
 }

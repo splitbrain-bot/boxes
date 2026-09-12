@@ -196,10 +196,11 @@ export function SessionCard({ session }: { session: SessionSummary }) {
             <FileSearch className="size-3.5" />
             Review
           </Link>
-          {/* Forking needs a thread to fork and an adapter that advertised the
-              capability, which is unstable in the ACP schema and may be
-              absent. */}
-          {session.canFork && current ? (
+          {/* Forking needs a thread to fork and that thread's own adapter to
+              have advertised the capability, which is unstable in the ACP
+              schema and may be absent — and a box may hold threads of two
+              harnesses, each answering for itself. */}
+          {current?.canFork ? (
             <button
               type="button"
               disabled={busy}

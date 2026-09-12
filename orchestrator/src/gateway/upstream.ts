@@ -1,7 +1,3 @@
-import { client as acpClient, type ClientConnection } from '@agentclientprotocol/sdk';
-import type { Stream } from '@agentclientprotocol/sdk';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
-import { Readable } from 'node:stream';
 import type { Config } from '../config.ts';
 import {
   appendAcpLog,
@@ -11,12 +7,11 @@ import {
   getThread,
   insertThread,
   pruneAcpLog,
-  setThreadAcpId,
   setThreadMode,
-  setThreadModel,
   setThreadTitle,
   setThreadTurnActive,
   threadByAcpId,
+  threadConfig,
   touchSession,
   touchThread,
   type Db,
@@ -24,47 +19,40 @@ import {
   type ThreadRow,
 } from '../db.ts';
 import * as dk from '../docker.ts';
+import { DEFAULT_HARNESS, harness, HARNESS_IDS, type HarnessId } from '../harness.ts';
 import { log, type Logger } from '../log.ts';
 import type { NotifyKind, Notifier } from '../notify.ts';
 import { Activity } from './activity.ts';
+import { AdapterConnection, inheritedSource, type AdapterHost } from './adapter.ts';
 import { BackgroundProbe, workToStop } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
-import type { TurnStateParams } from '../../../shared/types.ts';
+import type {
+  SessionConfigOption,
+  ThreadOptions,
+  TurnStateParams,
+} from '../../../shared/types.ts';
 
 /**
- * One persistent ACP client per session, connected to the adapter inside the
- * session container over a long-lived docker exec.
+ * Everything about one session that is not one adapter process: the browsers
+ * attached to it, what is running in its box, which conversation each message
+ * is about, and the container all of that happens in.
  *
- * The orchestrator owns this connection, not a browser, so a turn runs to
- * completion whoever is watching. Thread replay belongs to the adapter's own
- * session/load.
+ * `SessionManager` creates one of these per session on first use and keeps it
+ * for the process's life. It owns one {@link AdapterConnection} per harness a
+ * thread of the session runs, started when a thread of that harness first needs
+ * one, and routes every message to the connection whose adapter holds the
+ * conversation it names. A box with only Claude threads never starts a second
+ * adapter; a box with both has two processes over one checkout, and an adapter
+ * that dies takes down only its own conversations.
  *
- * A session owns several threads, and this one connection carries all of the
- * ones anybody is watching. Each browser connection is pinned to a single
+ * The orchestrator owns the connections, not a browser, so a turn runs to
+ * completion whoever is watching. Each browser connection is pinned to a single
  * thread, chosen at the handshake, so two tabs can watch two conversations of
- * one box at once. The session's `current_thread_id` is the default a
- * connection that names no thread gets rather than the truth about what any
- * browser has loaded.
+ * one box at once — and the session's `current_thread_id` is the default a
+ * connection that names none gets rather than the truth about what any browser
+ * has loaded.
  */
-
-/** The modes an adapter advertises for a thread, and the one it is in. */
-interface SessionModeState {
-  currentModeId: string;
-  availableModes: Array<{ id: string }>;
-}
-
-/**
- * One thing about a thread the adapter lets a client set, and its current
- * value. `category` says what the option is for, which is how the model
- * selector is found without depending on the adapter's own id for it.
- */
-interface SessionConfigOption {
-  id: string;
-  category?: string | null;
-  currentValue?: string;
-  options?: Array<{ value: string }>;
-}
 
 /**
  * A JSON.stringify replacer that keeps base64 media out of the debug log.
@@ -104,84 +92,6 @@ export interface DownstreamHandle {
   close(): void;
 }
 
-/** Pass-through parser, leaving params and their _meta untouched. */
-const raw = <T = unknown>(params: unknown): T => params as T;
-
-/** How often a failed adapter spawn is retried before the session errors. */
-const MAX_SPAWN_ATTEMPTS = 3;
-
-/** Wait before each retry, in milliseconds. */
-const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
-
-/** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
-const RESOURCE_NOT_FOUND = -32002;
-
-/**
- * The mode a fresh thread is switched into, when the adapter advertises one
- * by that id. An adapter that offers no such mode is left in whichever mode
- * it starts in.
- */
-const DEFAULT_MODE_ID = 'auto';
-
-/**
- * The mode a fork starts in instead. A fork shares the thread it came from's
- * checkout, and the point of one is to ask questions about work the original
- * is still doing, so it starts in a mode that reads rather than writes. It is
- * the user's from then on, one tap away in the header.
- */
-const FORK_MODE_ID = 'plan';
-
-/**
- * How far a borrowed replay follows the chain of forks back. A fork of a fork
- * inherits through the middle thread, and the bound is what stops a row that
- * somehow points at itself from spinning.
- */
-const MAX_INHERIT_HOPS = 32;
-
-/**
- * The model a fresh thread is put on, when the adapter offers it. An adapter
- * that offers no such model leaves the thread on whichever one it starts on.
- */
-const DEFAULT_MODEL_ID = 'opus';
-
-/**
- * What the adapter is asked for on the thinking side, on every conversation
- * this orchestrator creates or brings back.
- *
- * `display` carries it. Current models default it to `omitted`, which streams
- * thinking blocks carrying a signature and no text, so the adapter has
- * nothing to put in an `agent_thought_chunk` and the dashboard's reasoning
- * disclosure never appears. `summarized` is what makes the agent's reasoning
- * readable.
- *
- * `enabled` with a budget rather than `adaptive`: the two behave the same on
- * a current model, and a model that predates `adaptive` can reject it. Which
- * model a thread runs is the user's choice from the header, while this is
- * fixed at the thread's creation.
- *
- * It travels in `_meta`, which is where ACP puts an agent's own extensions:
- * the adapter reads `_meta.claudeCode.options` and lays it over the options
- * it hands the Claude Agent SDK.
- */
-const THINKING_META = {
-  claudeCode: {
-    options: {
-      thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
-    },
-  },
-} as const;
-
-/**
- * The value to select for a wanted model: the name itself when the adapter
- * offers it, else a bracketed variant of it such as `opus[1m]`, which is the
- * same model with a different context window. A name that merely starts the
- * same way, such as `opusplan`, is a different model and never matches.
- */
-function pickModel(options: Array<{ value: string }>, wanted: string): string | null {
-  if (options.some((option) => option.value === wanted)) return wanted;
-  return options.find((option) => option.value.startsWith(`${wanted}[`))?.value ?? null;
-}
-
 /**
  * How long work gets to stop politely before it is killed.
  *
@@ -192,11 +102,6 @@ const TERM_GRACE_MS = 2_000;
 
 /** Why a thread cannot be forked yet; the API turns this into a 409. */
 export const NOTHING_TO_FORK = 'That thread has nothing to fork from yet';
-
-/** True when the adapter reported a missing thread rather than a failure. */
-function isResourceNotFound(err: unknown): boolean {
-  return (err as { code?: number } | null)?.code === RESOURCE_NOT_FOUND;
-}
 
 /**
  * The block of text a prompt's attachments are named in. The dashboard writes
@@ -234,12 +139,12 @@ function nameFromPrompt(params: unknown): string | null {
   return null;
 }
 
-/** The orchestrator's own ACP connection to one session's adapter. */
-export class UpstreamSession {
-  private exec: dk.AdapterExec | null = null;
-  private conn: ClientConnection | null = null;
-  private initializeResponse: unknown = null;
-  private starting: Promise<void> | null = null;
+/** The orchestrator's own ACP connections to one session's adapters. */
+export class UpstreamSession implements AdapterHost {
+  /** One adapter process per harness a thread of this session runs. */
+  private readonly connections = new Map<HarnessId, AdapterConnection>();
+  /** The container start, shared by every connection that wants one. */
+  private containerStarting: Promise<string> | null = null;
   /** Who each adapter update goes to. */
   private readonly downstreams: Broadcast;
   /** Whether this session still has work running in it. */
@@ -249,31 +154,16 @@ export class UpstreamSession {
   private readonly slog: Logger;
   /** Threads being brought up, so concurrent pins share one; see below. */
   private readonly resolving = new Map<string, Promise<string>>();
-  /**
-   * The conversations this adapter process has been made to hold: every one
-   * it has minted, and every one it has loaded back.
-   *
-   * A stored ACP id says a thread had a conversation once, not that the
-   * adapter running now knows about it. Only this says that, which is what
-   * lets a pin tell a thread it has to bring up from one that is already up.
-   * Emptied with the connection, because a fresh adapter holds nothing.
-   */
-  private readonly live = new Set<string>();
-  private closed = false;
-  /** Guards against reconnect storms after a deliberate stop. */
-  private stopping = false;
-  /** Loads in flight, which is what says an update is history; see below. */
-  private replaying = 0;
   /** The reading's own timer while a browser is watching; see pollWhileWatched. */
   private polling: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     readonly sessionId: string,
-    private readonly db: Db,
+    readonly db: Db,
     private readonly cfg: Config,
     private readonly pending: PendingStore,
     private readonly notifier: Notifier,
-    private readonly onStatus: (status: SessionRow['status']) => void,
+    private readonly onStatusChange: (status: SessionRow['status']) => void,
     /**
      * Run, and awaited, just before the container is started: it writes out
      * this session's agent configuration and rebuilds the container if Docker
@@ -295,7 +185,11 @@ export class UpstreamSession {
     this.downstreams = new Broadcast(sessionId, (thread) => this.threadState(thread));
     this.background = new BackgroundProbe({
       list: () => this.containerProcesses(),
-      adapter: this.adapterToken(),
+      // One token, still: the reading is per adapter process and a box may now
+      // hold two. Milestone 4 replaces it with one answer about the whole box
+      // that knows every harness's token; until then a box is read as the
+      // Claude box every existing one is.
+      adapter: harness(DEFAULT_HARNESS).processToken,
       ttlMs: cfg.BACKGROUND_POLL_SECONDS * 1_000,
       // A probe that cannot read its box holds whatever it last believed, and
       // what it last believed holds the reaper off. Silence here is a session
@@ -336,6 +230,191 @@ export class UpstreamSession {
     });
   }
 
+  // --- the connections ------------------------------------------------------
+
+  /**
+   * The connection for one harness, created on first use.
+   *
+   * Creating one costs nothing and starts nothing: the adapter process is
+   * spawned by `ensureStarted`, which is what a thread of that harness needing
+   * it calls.
+   */
+  private connection(id: HarnessId): AdapterConnection {
+    let conn = this.connections.get(id);
+    if (!conn) {
+      conn = new AdapterConnection(
+        harness(id),
+        this,
+        log.tagged({ session: this.sessionId, harness: id }),
+      );
+      this.connections.set(id, conn);
+    }
+    return conn;
+  }
+
+  /**
+   * Starts the adapter a session needs by default: the one its current thread
+   * runs on, or Claude's before it has a thread at all.
+   *
+   * Every other path names the harness it wants — a pin resolves the thread
+   * first, a forwarded message is routed by the conversation it is about — and
+   * this is what a caller with nothing to go on gets.
+   */
+  async ensureStarted(harnessId?: HarnessId): Promise<void> {
+    await this.connection(harnessId ?? this.defaultHarness()).ensureStarted();
+  }
+
+  /** The harness of the session's current thread, or the registry's default. */
+  private defaultHarness(): HarnessId {
+    return this.current?.harness ?? DEFAULT_HARNESS;
+  }
+
+  /**
+   * Whether threads of one harness can be forked, which is what that adapter's
+   * `initialize` advertised.
+   *
+   * Per harness because the answer is per adapter: two adapters in one box
+   * answer this separately, and an adapter that has not been reached is
+   * reported as not forkable rather than assumed.
+   */
+  canFork(harnessId: HarnessId): boolean {
+    return this.connections.get(harnessId)?.canFork ?? false;
+  }
+
+  /** The harnesses whose adapters have advertised the fork capability. */
+  get forkableHarnesses(): Set<HarnessId> {
+    const forkable = new Set<HarnessId>();
+    for (const [id, conn] of this.connections) if (conn.canFork) forkable.add(id);
+    return forkable;
+  }
+
+  /**
+   * The initialize response to hand a browser: the one cached by the adapter
+   * holding the thread that browser is pinned to.
+   *
+   * The two adapters advertise different things — different modes, different
+   * session capabilities — so answering with either would tell half the
+   * browsers something untrue about the conversation they are watching.
+   */
+  initializeFor(acpThreadId: string): unknown {
+    const conn = this.connectionHolding(acpThreadId);
+    return conn?.cachedInitialize ?? null;
+  }
+
+  /** The connection whose adapter is holding one conversation, if any is. */
+  private connectionHolding(acpThreadId: string): AdapterConnection | null {
+    for (const conn of this.connections.values()) {
+      if (conn.holds(acpThreadId)) return conn;
+    }
+    return null;
+  }
+
+  /**
+   * One of this session's threads by the adapter's own id for it, whichever
+   * harness it belongs to.
+   *
+   * The lookup takes the harness, and here it is not known: an update has come
+   * off a connection that knows it, but a timer in `Activity` or a queued
+   * permission request has only the id. Both adapters mint UUIDs, so asking
+   * each harness in turn finds the one row there is.
+   */
+  private rowOfAcp(acpThreadId: string): ThreadRow | undefined {
+    for (const id of HARNESS_IDS) {
+      const row = threadByAcpId(this.db, this.sessionId, id, acpThreadId);
+      if (row) return row;
+    }
+    return undefined;
+  }
+
+  /**
+   * The connection a forwarded message belongs on: the one holding the
+   * conversation it names, else the one for that conversation's stored
+   * harness, else the browser's own thread, else the session's default.
+   *
+   * A message about a thread has to reach the adapter that has that thread —
+   * routing it to the other one would be a session id the adapter has never
+   * heard of — and a message about nothing in particular (`authenticate`,
+   * `session/list`) belongs to whoever asked.
+   */
+  private connectionFor(params: unknown, from?: DownstreamHandle): AdapterConnection {
+    const acpThreadId = threadOf(params) ?? from?.acpThreadId ?? null;
+    if (acpThreadId) {
+      const holding = this.connectionHolding(acpThreadId);
+      if (holding) return holding;
+      const row = this.rowOfAcp(acpThreadId);
+      if (row) return this.connection(row.harness);
+    }
+    return this.connection(this.defaultHarness());
+  }
+
+  // --- what the connections ask of the session -------------------------------
+
+  /**
+   * Starts the box once, however many adapters want it.
+   *
+   * Two connections coming up together must not race over the container, and a
+   * later one must still start a box that has been stopped since — so the
+   * promise is shared while it is in flight and dropped when it settles.
+   */
+  ensureContainer(): Promise<string> {
+    if (!this.containerStarting) {
+      this.containerStarting = this.startContainer().finally(() => {
+        this.containerStarting = null;
+      });
+    }
+    return this.containerStarting;
+  }
+
+  /** Brings the box up and makes sure the egress proxy is on its network. */
+  private async startContainer(): Promise<string> {
+    if (!this.row().container_id) throw new Error('Session has no container');
+
+    // Awaited, and the row read after it: this may have rebuilt the container
+    // the row named, and the id to start is the one it left behind.
+    await this.beforeStart();
+    const row = this.row();
+    if (!row.container_id) throw new Error('Session has no container');
+
+    await dk.startContainer(row.container_id);
+    await dk.ensureProxyAttached(row.network_name, this.cfg);
+    return row.container_id;
+  }
+
+  /** Every conversation a browser is watching, for a connection coming back up. */
+  watchedThreads(): readonly string[] {
+    return this.downstreams.watchedThreads;
+  }
+
+  /** A connection is up and serving, so the reading's own clock runs again. */
+  onUp(): void {
+    this.pollWhileWatched();
+  }
+
+  /** A connection's outcome, which is the session's status. */
+  onStatus(status: 'running' | 'error'): void {
+    this.onStatusChange(status);
+  }
+
+  /**
+   * Forgets what one adapter's conversations were in the middle of, leaving
+   * every other conversation of the box alone.
+   *
+   * Both facts together, and the browsers told afterwards rather than between,
+   * so a state published halfway through cannot claim a turn on a thread that
+   * has just been cleared. What was running in the background needs no
+   * forgetting: it is read from the container rather than remembered, and an
+   * adapter that has gone took its children with it.
+   */
+  onThreadsLost(acpThreadIds: readonly string[]): void {
+    for (const acpThreadId of acpThreadIds) {
+      setThreadTurnActive(this.db, this.sessionId, acpThreadId, false);
+      this.activity.reset(acpThreadId);
+    }
+    this.downstreams.refreshThreadStates();
+  }
+
+  // --- the box ---------------------------------------------------------------
+
   /** How many browsers are attached to this session. */
   get attachedCount(): number {
     return this.downstreams.size;
@@ -352,15 +431,6 @@ export class UpstreamSession {
   /** Test seam: takes a reading now rather than when one goes stale. */
   refreshBackgroundForTests(): Promise<void> {
     return this.background.refresh();
-  }
-
-  /**
-   * A token from the adapter's command line, which is the command Boxes
-   * launched and so the one thing in the box guaranteed to be recognisable
-   * from out here.
-   */
-  private adapterToken(): string {
-    return JSON.parse(this.row().agent_cmd)[0] as string;
   }
 
   /**
@@ -423,7 +493,7 @@ export class UpstreamSession {
 
     const doomed = workToStop(
       await dk.containerProcessesFromInside(containerId),
-      this.adapterToken(),
+      this.adapterToken(acpThreadId),
       acpThreadId,
       id,
     );
@@ -445,6 +515,20 @@ export class UpstreamSession {
   }
 
   /**
+   * The adapter token a reading of one thread's work is taken against: the
+   * process token of the harness that thread runs.
+   *
+   * Per thread rather than per box, because two adapters may be in the table
+   * and work under one of them is not work under the other. The whole reading
+   * becomes box-wide at milestone 4; this is the half that can already be
+   * asked about one conversation.
+   */
+  private adapterToken(acpThreadId?: string): string {
+    const row = acpThreadId ? this.rowOfAcp(acpThreadId) : undefined;
+    return harness(row?.harness ?? this.defaultHarness()).processToken;
+  }
+
+  /**
    * KILLs whatever a TERM did not stop, a moment later.
    *
    * Detached from the request, which has been answered: a stop is judged by
@@ -458,7 +542,7 @@ export class UpstreamSession {
         try {
           const left = workToStop(
             await dk.containerProcessesFromInside(containerId),
-            this.adapterToken(),
+            this.adapterToken(acpThreadId),
             acpThreadId,
             id,
           );
@@ -519,15 +603,7 @@ export class UpstreamSession {
     };
   }
 
-  /** Whether the adapter connection is up. */
-  get isConnected(): boolean {
-    return this.conn !== null;
-  }
-
-  /** The initialize response to hand browsers, cached verbatim. */
-  get cachedInitialize(): unknown {
-    return this.initializeResponse;
-  }
+  // --- browsers --------------------------------------------------------------
 
   /**
    * Adds a browser to the broadcast set. It counts as attached from here —
@@ -548,12 +624,12 @@ export class UpstreamSession {
    * connection that named none, as an external ACP client does, which gets
    * the session's current one.
    *
-   * The adapter has to be up first: a thread minted and never prompted has no
-   * adapter-side conversation until one is made, and pinning a connection to
-   * an id the adapter has forgotten would leave every prompt on it failing.
+   * The thread's own harness decides which adapter has to be up: a thread
+   * minted and never prompted has no adapter-side conversation until one is
+   * made, and pinning a connection to an id no adapter holds would leave every
+   * prompt on it failing.
    */
   async pin(handle: DownstreamHandle, threadId: string | null): Promise<string> {
-    await this.ensureStarted();
     const acpThreadId = await this.resolveThread(threadId);
     handle.acpThreadId = acpThreadId;
     this.slog.info('downstream pinned to a thread', { handle: handle.id, acpThreadId });
@@ -562,7 +638,7 @@ export class UpstreamSession {
 
   /**
    * The live adapter id for one of the session's threads, bringing the thread
-   * up first when this adapter is not already holding it.
+   * up first when its adapter is not already holding it.
    *
    * The spawn path brings back the session's current thread and the ones
    * browsers were already watching, which is every thread it can know about.
@@ -571,79 +647,25 @@ export class UpstreamSession {
    * has never heard of.
    */
   private async resolveThread(threadId: string | null): Promise<string> {
-    const row = threadId ? getThread(this.db, threadId) : this.current;
+    let row = threadId ? getThread(this.db, threadId) : this.current;
+    if (!row && !threadId) {
+      // A session with no thread at all: its first one is minted by the
+      // default adapter coming up, which is the one path that creates a row
+      // rather than bringing one up.
+      await this.ensureStarted();
+      row = this.current;
+    }
     if (!row || row.session_id !== this.sessionId) throw new Error('Thread not found');
-    if (row.acp_session_id && this.live.has(row.acp_session_id)) return row.acp_session_id;
+    const conn = this.connection(row.harness);
+    if (row.acp_session_id && conn.holds(row.acp_session_id)) return row.acp_session_id;
     // Two tabs opening the same thread at once share one bring-up, so the
     // second neither replays it twice nor overwrites the first's id in the
     // row.
     const inFlight = this.resolving.get(row.id);
     if (inFlight) return inFlight;
-    const attempt = this.bringUp(row.id).finally(() => this.resolving.delete(row.id));
+    const attempt = conn.bringUp(row.id).finally(() => this.resolving.delete(row.id));
     this.resolving.set(row.id, attempt);
     return attempt;
-  }
-
-  /**
-   * Makes this adapter hold one of the session's threads: its stored
-   * conversation when the adapter still has the transcript for it, a fresh
-   * one when it does not.
-   *
-   * A thread minted, never prompted, and left behind by an adapter restart is
-   * the second case — the agent SDK writes no transcript until a prompt has
-   * run — and it has nothing to lose, so a fresh conversation in its row is
-   * the whole repair.
-   */
-  private async bringUp(threadId: string): Promise<string> {
-    const conn = this.conn;
-    if (!conn) throw new Error('Upstream not connected');
-    const row = getThread(this.db, threadId);
-    if (!row) throw new Error('Thread not found');
-    if (row.acp_session_id && (await this.loadSession(conn, row))) return row.acp_session_id;
-    return this.mintInto(threadId);
-  }
-
-  /**
-   * Mints a fresh adapter conversation and records it against a thread row.
-   *
-   * A fork that has not been prompted yet is branched again rather than
-   * started empty: it exists to carry the source's context, and an adapter
-   * restart is not the user changing their mind about that. When the source
-   * cannot be branched either — the same restart may have left it with a
-   * conversation of its own to lose — the thread is started empty, because a
-   * thread with nothing to pin is worse than one with nothing to say.
-   */
-  private async mintInto(threadId: string): Promise<string> {
-    const conn = this.conn;
-    if (!conn) throw new Error('Upstream not connected');
-    const row = getThread(this.db, threadId);
-    const source = row ? this.inheritedSource(row) : null;
-    // What the row remembers beats where a thread of its kind starts: a fork
-    // the user has since flipped to auto is not put back in plan by an
-    // adapter restart.
-    const modeId = row?.mode_id ?? (source ? FORK_MODE_ID : DEFAULT_MODE_ID);
-    const modelId = row?.model_id ?? null;
-    let branched: string | null = null;
-    if (source?.acp_session_id) {
-      try {
-        branched = await this.mintAcpThread(conn, source.acp_session_id, modeId, modelId);
-      } catch (err) {
-        this.slog.warn('could not branch a fork again; starting it empty', {
-          threadId,
-          from: source.id,
-          error: (err as Error).message,
-        });
-      }
-    }
-    const acpSessionId =
-      branched ?? (await this.mintAcpThread(conn, null, modeId, modelId));
-    setThreadAcpId(this.db, threadId, acpSessionId);
-    this.slog.info('thread had no adapter conversation; minted one', {
-      threadId,
-      acpSessionId,
-      forkedFrom: branched ? source?.id : null,
-    });
-    return acpSessionId;
   }
 
   /** Removes a browser from the broadcast set, leaving the upstream running. */
@@ -651,6 +673,24 @@ export class UpstreamSession {
     this.downstreams.remove(handle);
     if (this.downstreams.size === 0) this.stopPolling();
     this.slog.info('downstream detached', { attached: this.downstreams.size });
+  }
+
+  /**
+   * Closes the sockets of the browsers watching one thread, so each
+   * reconnects from scratch and pins whatever that thread is now.
+   *
+   * The only caller is the respawn path, for a thread whose adapter id did
+   * not survive. A connection is pinned to its own thread, so neither
+   * switching the session's default nor adding a thread drops a browser.
+   */
+  dropWatchers(acpThreadId: string): void {
+    for (const handle of this.downstreams.byRecency(acpThreadId)) {
+      try {
+        handle.close();
+      } catch (err) {
+        this.slog.debug('downstream close failed', { error: (err as Error).message });
+      }
+    }
   }
 
   /** This session's stored row. Throws once the session is gone. */
@@ -662,311 +702,20 @@ export class UpstreamSession {
     return row;
   }
 
-  /**
-   * Runs a `session/load` with its replay marked as history rather than news.
-   *
-   * Every load re-sends a conversation as ordinary notifications, which is
-   * what makes replay and live streaming the same code path everywhere else —
-   * and the one place that difference matters is background work, where a
-   * five-hour-old tool call is not evidence of anything running now.
-   */
-  private async whileReplaying<T>(load: () => Promise<T>): Promise<T> {
-    this.replaying += 1;
-    try {
-      return await load();
-    } finally {
-      this.replaying -= 1;
-    }
-  }
-
   /** Marks the session as active now, which holds off the reaper. */
   private touch(): void {
     touchSession(this.db, this.sessionId);
   }
 
   /**
-   * Records whether a prompt turn is running on one thread, and marks the
-   * session active.
-   *
-   * The thread comes from the prompt's own params, so a turn is recorded
-   * against the conversation it is on rather than against the session's
-   * default.
-   */
-  private setTurnActive(acpThreadId: string, active: boolean): void {
-    setThreadTurnActive(this.db, this.sessionId, acpThreadId, active);
-  }
-
-  /**
-   * Forgets everything this session was in the middle of. None of the
-   * callers leaves anything running: a deliberate stop, an adapter exit, the
+   * Forgets everything this session was in the middle of, across every adapter.
+   * None of the callers leaves anything running: a deliberate stop, or the
    * session being closed.
-   *
-   * Both facts together, and the browsers told afterwards rather than
-   * between, so a state published halfway through cannot claim a turn on a
-   * thread that has just been cleared. What was running in the background
-   * needs no forgetting: it is read from the container rather than
-   * remembered, and an adapter that has gone took its children with it.
    */
   private clearThreadStates(): void {
     clearSessionTurns(this.db, this.sessionId);
     this.activity.clear();
     this.downstreams.refreshThreadStates();
-  }
-
-  /**
-   * Brings up the container, the exec and the ACP session. Concurrent callers
-   * share one attempt.
-   *
-   * The guard is the cached initialize response, not the connection: the
-   * connection exists from the moment the exec stream is wired up, but its
-   * handshake takes a few hundred milliseconds, and a browser arriving inside
-   * that window has to wait for the handshake.
-   */
-  async ensureStarted(): Promise<void> {
-    if (this.conn && this.initializeResponse) return;
-    if (!this.starting) {
-      this.starting = this.start().finally(() => {
-        this.starting = null;
-      });
-    }
-    return this.starting;
-  }
-
-  /** Starts the container and spawns the adapter, retrying with a backoff. */
-  private async start(): Promise<void> {
-    this.stopping = false;
-    if (!this.row().container_id) throw new Error('Session has no container');
-
-    // Awaited, and the row read after it: this may have rebuilt the container
-    // the row named, and the id to start is the one it left behind.
-    await this.beforeStart();
-    const row = this.row();
-    if (!row.container_id) throw new Error('Session has no container');
-
-    await dk.startContainer(row.container_id);
-    await dk.ensureProxyAttached(row.network_name, this.cfg);
-
-    let lastError: unknown = null;
-    for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
-      if (attempt > 0) {
-        const wait = SPAWN_BACKOFF_MS[attempt - 1] ?? 8000;
-        this.slog.warn('retrying adapter spawn', { attempt, waitMs: wait });
-        await new Promise((r) => setTimeout(r, wait));
-      }
-      try {
-        await this.spawnAndInitialize(row);
-        this.onStatus('running');
-        // A browser that stayed attached through a stop and start is still
-        // watching, and the clock its bar goes away on was cleared with the
-        // connection.
-        this.pollWhileWatched();
-        return;
-      } catch (err) {
-        lastError = err;
-        this.slog.error('adapter spawn failed', { attempt, error: (err as Error).message });
-        this.teardownConnection();
-      }
-    }
-    this.onStatus('error');
-    throw new Error(
-      `Adapter failed to start after ${MAX_SPAWN_ATTEMPTS} attempts: ${(lastError as Error)?.message}`,
-    );
-  }
-
-  /**
-   * Spawns the adapter, performs the ACP handshake, and either replays the
-   * stored thread or starts a fresh one.
-   */
-  private async spawnAndInitialize(row: SessionRow): Promise<void> {
-    const cmd = JSON.parse(row.agent_cmd) as string[];
-    const exec = await dk.spawnAdapterExec(row.container_id!, cmd, dk.WORKSPACE_DIR);
-    this.exec = exec;
-
-    // stderr is log-only: the adapter sends its console logging there to
-    // keep stdout clean for protocol.
-    exec.stderr.setEncoding('utf8');
-    exec.stderr.on('data', (chunk: string) => {
-      for (const line of chunk.split('\n')) {
-        if (line.trim()) this.slog.debug('adapter stderr', { line: line.slice(0, 2000) });
-      }
-    });
-
-    void exec.exited.then((code) => this.handleExecExit(code));
-
-    const stream = this.makeStream(exec);
-    const app = acpClient({ name: `boxes-${this.sessionId}` })
-      .onNotification('session/update' as string, raw, ({ params }) => {
-        this.onSessionUpdate(params);
-      })
-      .onRequest('session/request_permission' as string, raw, ({ params }) =>
-        this.onPermissionRequest(params),
-      );
-
-    const conn = app.connect(stream);
-    this.conn = conn;
-
-    // Empty capabilities: no fs, no terminal, no elicitation, which confines
-    // client-bound traffic to the two methods handled above.
-    this.initializeResponse = await conn.agent.request('initialize', {
-      protocolVersion: 1,
-      clientCapabilities: {},
-    });
-    this.slog.info('adapter initialized', { workingDir: dk.WORKSPACE_DIR });
-
-    await this.loadThreads(conn);
-  }
-
-  /**
-   * Brings back every conversation this connection has to carry: the
-   * session's current thread, and each thread a browser is watching.
-   *
-   * With two tabs on two threads, a respawn that loaded only the current one
-   * would leave the other browser's next prompt naming a thread the adapter
-   * has never heard of. The set is derived from the attached handles, so it
-   * needs no storage and shrinks as tabs close.
-   */
-  private async loadThreads(conn: ClientConnection): Promise<void> {
-    // The current thread first, because it is the one a session with no
-    // threads at all has to be given.
-    const thread = currentThread(this.db, this.sessionId) ?? null;
-    const replayed = thread?.acp_session_id
-      ? await this.loadSession(conn, thread)
-      : false;
-    if (!replayed) await this.mintCurrent(conn, thread);
-
-    const loaded = new Set<string>();
-    const currentAcpId = this.current?.acp_session_id;
-    if (currentAcpId) loaded.add(currentAcpId);
-
-    for (const acpThreadId of this.downstreams.watchedThreads) {
-      if (loaded.has(acpThreadId)) continue;
-      loaded.add(acpThreadId);
-      const row = threadByAcpId(this.db, this.sessionId, acpThreadId);
-      if (!row?.acp_session_id) continue;
-      try {
-        if (await this.loadSession(conn, row)) continue;
-      } catch (err) {
-        // A fault on a thread that is merely being watched must not cost the
-        // session its spawn; the browsers on it reconnect and resolve again.
-        this.slog.warn('could not reload a watched thread', {
-          threadId: row.id,
-          error: (err as Error).message,
-        });
-      }
-      // Its id is dead, so the browsers pinned to it are holding one the
-      // adapter will reject. Closing their sockets is the repair: each
-      // reconnects, and its handshake pins whatever the thread is now.
-      this.dropWatchers(acpThreadId);
-    }
-  }
-
-  /**
-   * Replays a stored thread. Returns false when the adapter no longer holds
-   * it, which tells the caller to start a fresh one.
-   *
-   * A missing thread is a legitimate state: the agent SDK writes a transcript
-   * only once a prompt has run, so an id minted by session/new and never
-   * prompted does not survive the container stopping. Any other error is
-   * rethrown, which keeps a transient fault from discarding a live thread.
-   */
-  private async loadSession(conn: ClientConnection, thread: ThreadRow): Promise<boolean> {
-    const acpSessionId = thread.acp_session_id!;
-    try {
-      // The same `_meta` a fresh thread gets: a load is where the adapter
-      // rebuilds the query for a conversation it no longer holds, which is
-      // the other place these options are read.
-      const res = (await this.whileReplaying(() =>
-        conn.agent.request('session/load', {
-          sessionId: acpSessionId,
-          cwd: dk.WORKSPACE_DIR,
-          mcpServers: [],
-          _meta: THINKING_META,
-        }),
-      )) as {
-        modes?: SessionModeState | null;
-        configOptions?: SessionConfigOption[] | null;
-      } | null;
-      this.live.add(acpSessionId);
-      this.slog.info('acp session loaded', { threadId: thread.id, acpSessionId });
-      // A load brings the conversation back and nothing else: the mode and the
-      // model were the old process's, and this one starts in its own. Both are
-      // put back from the row, which is why the row has them.
-      await this.applyMode(
-        conn,
-        acpSessionId,
-        res?.modes ?? null,
-        thread.mode_id ?? DEFAULT_MODE_ID,
-      );
-      await this.applyModel(conn, acpSessionId, res?.configOptions ?? null, thread.model_id);
-      return true;
-    } catch (err) {
-      if (!isResourceNotFound(err)) throw err;
-      this.live.delete(acpSessionId);
-      this.slog.warn('stored thread is gone; starting a fresh one', {
-        threadId: thread.id,
-        acpSessionId,
-        error: (err as Error).message,
-      });
-      // Only this thread's row loses its adapter id. The session's other
-      // threads have transcripts of their own and are untouched.
-      setThreadAcpId(this.db, thread.id, null);
-      return false;
-    }
-  }
-
-  /**
-   * Mints an ACP thread and gives it the mode and model it is meant to have.
-   *
-   * `from` forks that thread's context instead of starting empty. `modeId`
-   * and `modelId` are what to put the result in: a fork starts somewhere a
-   * fresh thread does not, and a thread being minted again for a row that
-   * already exists gets back what that row remembers. Both answers carry
-   * `modes` and `configOptions`, so the same two steps apply either way.
-   */
-  private async mintAcpThread(
-    conn: ClientConnection,
-    from: string | null,
-    modeId: string = DEFAULT_MODE_ID,
-    modelId: string | null = null,
-  ): Promise<string> {
-    const method = from ? 'session/fork' : 'session/new';
-    const res = (await conn.agent.request(method, {
-      ...(from ? { sessionId: from } : {}),
-      cwd: dk.WORKSPACE_DIR,
-      mcpServers: [],
-      _meta: THINKING_META,
-    })) as {
-      sessionId?: string;
-      modes?: SessionModeState | null;
-      configOptions?: SessionConfigOption[] | null;
-    };
-    if (!res?.sessionId) throw new Error(`${method} returned no sessionId`);
-    this.live.add(res.sessionId);
-    this.slog.info('acp session created', { method, acpSessionId: res.sessionId, from });
-    await this.applyMode(conn, res.sessionId, res.modes ?? null, modeId);
-    await this.applyModel(conn, res.sessionId, res.configOptions ?? null, modelId);
-    return res.sessionId;
-  }
-
-  /**
-   * Mints a fresh ACP thread for the session's current conversation: into the
-   * existing row when the adapter has forgotten its thread, into a new row
-   * when the session has no thread at all.
-   *
-   * An existing row goes through {@link mintInto}, so it keeps the mode and
-   * model it remembers and, if it is a fork nobody has prompted, is branched
-   * from its source again. Only a session with no thread at all starts from
-   * the deployment's defaults, which is all a row that does not exist yet
-   * could be given.
-   */
-  private async mintCurrent(conn: ClientConnection, thread: ThreadRow | null): Promise<void> {
-    if (thread) {
-      await this.mintInto(thread.id);
-      return;
-    }
-    const acpSessionId = await this.mintAcpThread(conn, null);
-    const created = insertThread(this.db, this.sessionId, acpSessionId);
-    this.slog.info('first thread recorded', { threadId: created.id });
   }
 
   // --- threads --------------------------------------------------------------
@@ -976,20 +725,9 @@ export class UpstreamSession {
     return currentThread(this.db, this.sessionId) ?? null;
   }
 
-  /**
-   * Whether the adapter advertised the fork capability. It is unstable in the
-   * ACP schema, so an adapter that does not offer it — or one that has not
-   * been reached yet — is reported as not forkable rather than assumed.
-   */
-  get canFork(): boolean {
-    // ACP spells a supported capability as an object, `{}` included, and an
-    // unsupported one as absent or null.
-    const fork = (
-      this.initializeResponse as {
-        agentCapabilities?: { sessionCapabilities?: { fork?: unknown } | null } | null;
-      } | null
-    )?.agentCapabilities?.sessionCapabilities?.fork;
-    return fork !== undefined && fork !== null;
+  /** The session's current thread, for the connections. */
+  currentThread(): ThreadRow | null {
+    return this.current;
   }
 
   /**
@@ -997,15 +735,40 @@ export class UpstreamSession {
    * session's default. Nobody is moved onto it: a browser already watching
    * another thread keeps watching it, and the new one is opened by following
    * a link to it.
+   *
+   * The row is written first and the adapter asked afterwards, so that a
+   * harness whose credential has not been entered still gets a thread: the
+   * dialog is what keeps somebody from asking for one, and the API is not a
+   * gate. Such a thread has no conversation until a credential exists, which
+   * is the same state as a thread whose adapter has restarted, and it is
+   * brought up by the next pin.
    */
-  async newThread(): Promise<ThreadRow> {
-    await this.ensureStarted();
-    const conn = this.conn;
-    if (!conn) throw new Error('Upstream not connected');
-    const acpSessionId = await this.mintAcpThread(conn, null);
-    const thread = insertThread(this.db, this.sessionId, acpSessionId);
-    this.slog.info('new thread', { threadId: thread.id, ordinal: thread.ordinal });
-    return thread;
+  async newThread(options?: ThreadOptions): Promise<ThreadRow> {
+    const wanted = harness(options?.harness ?? DEFAULT_HARNESS);
+    const thread = insertThread(this.db, this.sessionId, {
+      harness: wanted.id,
+      modeId: options?.modeId ?? null,
+      config: options?.config ?? { ...wanted.defaultConfig },
+    });
+    this.slog.info('new thread', {
+      threadId: thread.id,
+      ordinal: thread.ordinal,
+      harness: wanted.id,
+    });
+    try {
+      // Through the same resolution a pin uses, because the row is already the
+      // session's current thread: an adapter coming up for it mints its
+      // conversation on the way, and asking for one again would leave two
+      // behind.
+      const acpSessionId = await this.resolveThread(thread.id);
+      return { ...thread, acp_session_id: acpSessionId };
+    } catch (err) {
+      this.slog.warn('the new thread has no conversation yet', {
+        threadId: thread.id,
+        error: (err as Error).message,
+      });
+      return thread;
+    }
   }
 
   /**
@@ -1013,31 +776,43 @@ export class UpstreamSession {
    * the new one the session's default. The source is left exactly as it was,
    * still streaming to whoever is watching it.
    *
-   * A fork starts in `plan` mode rather than `auto`. It shares the source's
-   * checkout, and the motion this exists for is asking a fork about work the
-   * original is still doing — so a fork that decided to edit a file would
-   * collide with a thread mid-turn, and neither agent can see the other doing
-   * it. That does not fix the shared workspace; it stops the common accident,
-   * and flipping the fork to `auto` is one tap in the header.
+   * A fork stays on its source's harness and keeps what the source is
+   * configured with: only the adapter that wrote a transcript can load it, and
+   * a fork is that conversation continued rather than a new one. What it does
+   * not keep is the mode — it starts in its harness's fork mode, `plan` for
+   * Claude, because it shares the source's checkout and the motion this exists
+   * for is asking a fork about work the original is still doing. That does not
+   * fix the shared workspace; it stops the common accident, and flipping the
+   * fork back is one tap in the header.
    */
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
-    await this.ensureStarted();
-    const conn = this.conn;
-    if (!conn) throw new Error('Upstream not connected');
     const source = getThread(this.db, sourceThreadId);
     if (!source || source.session_id !== this.sessionId) {
       throw new Error('Thread not found');
     }
     if (!source.acp_session_id) throw new Error(NOTHING_TO_FORK);
-    const acpSessionId = await this.mintAcpThread(conn, source.acp_session_id, FORK_MODE_ID);
+    const wanted = harness(source.harness);
+    const conn = this.connection(wanted.id);
+    await conn.ensureStarted();
+    const config = threadConfig(source);
+    const acpSessionId = await conn.mintAcpThread(
+      source.acp_session_id,
+      wanted.forkModeId,
+      config,
+    );
     // The source is recorded, not just used: until the fork is prompted the
     // adapter writes it no transcript, and the row is where its replay has to
-    // come from meanwhile.
-    const thread = insertThread(this.db, this.sessionId, acpSessionId, source.id);
-    // Recorded, unlike a fresh thread's mode: a fresh thread is in the
-    // deployment's default, which is what an empty column already means,
-    // where a fork is somewhere the default would not put it back.
-    setThreadMode(this.db, thread.id, FORK_MODE_ID);
+    // come from meanwhile. The mode is recorded too, unlike a fresh thread's:
+    // a fresh thread is in its harness's default, which is what an empty
+    // column already means, where a fork is somewhere the default would not
+    // put it back.
+    const thread = insertThread(this.db, this.sessionId, {
+      harness: wanted.id,
+      acpSessionId,
+      modeId: wanted.forkModeId,
+      config,
+      inheritsFrom: source.id,
+    });
     this.slog.info('thread forked', { from: source.id, threadId: thread.id });
     return thread;
   }
@@ -1061,140 +836,49 @@ export class UpstreamSession {
     return thread;
   }
 
-  /**
-   * Closes the sockets of the browsers watching one thread, so each
-   * reconnects from scratch and pins whatever that thread is now.
-   *
-   * The only caller is the respawn path, for a thread whose adapter id did
-   * not survive. A connection is pinned to its own thread, so neither
-   * switching the session's default nor adding a thread drops a browser.
-   */
-  private dropWatchers(acpThreadId: string): void {
-    for (const handle of this.downstreams.byRecency(acpThreadId)) {
-      try {
-        handle.close();
-      } catch (err) {
-        this.slog.debug('downstream close failed', { error: (err as Error).message });
-      }
-    }
-  }
+  // --- what arrives from the adapters ----------------------------------------
 
   /**
-   * Puts a thread in the mode it is meant to be in: the one recorded for it,
-   * or this deployment's default when nothing is.
+   * Taps an adapter update and delivers it to the browsers it is meant for.
    *
-   * Called on a thread the adapter has just minted and on one it has just
-   * loaded back, because both arrive in whatever mode the adapter starts in.
-   * A mode is the user's choice, and the thread's row is where that choice
-   * outlives the process that was holding it.
-   *
-   * An adapter that does not offer the mode is left alone rather than argued
-   * with, and so is one already in it.
+   * `replaying` is the answering connection's own: a load on one harness says
+   * nothing about whether the other one's agent is talking.
    */
-  private async applyMode(
-    conn: ClientConnection,
-    acpSessionId: string,
-    modes: SessionModeState | null,
-    modeId: string,
-  ): Promise<void> {
-    if (!modes?.availableModes?.some((mode) => mode.id === modeId)) return;
-    if (modes.currentModeId === modeId) return;
-    try {
-      await conn.agent.request('session/set_mode', {
-        sessionId: acpSessionId,
-        modeId,
-      });
-      this.slog.info('thread put in its mode', { acpSessionId, modeId });
-    } catch (err) {
-      // A thread in the adapter's own mode is still usable, so this never
-      // fails the spawn.
-      this.slog.warn('could not set the mode', { error: (err as Error).message });
-    }
-  }
-
-  /**
-   * Puts a thread on the model it is meant to be on, on the same terms as
-   * {@link applyMode}: the one recorded for it, or this deployment's default.
-   *
-   * A recorded model the adapter no longer offers falls back to the default,
-   * since model ids come and go.
-   */
-  private async applyModel(
-    conn: ClientConnection,
-    acpSessionId: string,
-    configOptions: SessionConfigOption[] | null,
-    modelId: string | null,
-  ): Promise<void> {
-    const selector = configOptions?.find((option) => option.category === 'model');
-    if (!selector?.options) return;
-    const offered = modelId && selector.options.some((option) => option.value === modelId);
-    const value = offered ? modelId : pickModel(selector.options, DEFAULT_MODEL_ID);
-    if (!value || value === selector.currentValue) return;
-    try {
-      await conn.agent.request('session/set_config_option', {
-        sessionId: acpSessionId,
-        configId: selector.id,
-        value,
-      });
-      this.slog.info('thread put on its model', { acpSessionId, modelId: value });
-    } catch (err) {
-      // A thread on the adapter's own model is still usable, so this never
-      // fails the spawn.
-      this.slog.warn('could not set the model', { error: (err as Error).message });
-    }
-  }
-
-  /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
-  private makeStream(exec: dk.AdapterExec): Stream {
-    const readable = Readable.toWeb(exec.stdout) as ReadableStream<Uint8Array>;
-    const writable = new WritableStream<Uint8Array>({
-      write: (chunk) =>
-        new Promise<void>((resolve, reject) => {
-          exec.stdin.write(chunk, (err) => (err ? reject(err) : resolve()));
-        }),
-      close: () => {
-        exec.stdin.end();
-      },
-    });
-    return ndJsonStream(writable, readable);
-  }
-
-  /** Taps an adapter update and delivers it to the browsers it is meant for. */
-  private onSessionUpdate(params: unknown): void {
+  onUpdate(harnessId: HarnessId, params: unknown, replaying: boolean): void {
     this.touch();
     // Only what is happening now. A replay re-sends everything the thread
     // ever said, and a transcript arriving in a burst is not the agent
     // talking. The cost is that a turn starting during somebody else's replay
     // goes unobserved, which is a window of milliseconds.
     const thread = threadOf(params);
-    if (this.replaying === 0 && thread) {
+    if (!replaying && thread) {
       const update = (params as { update?: unknown })?.update;
-      this.activity.observe(thread, update);
+      this.activity.observe(thread, update, harnessId);
     }
-    this.recordThreadInfo(params);
+    this.recordThreadInfo(harnessId, params);
     this.tap('up', 'session/update', params);
     this.downstreams.update(params);
   }
 
   /**
    * Keeps a thread's row in step with what the adapter says about it: the
-   * title the agent SDK generates at the end of a turn, the mode and model it
+   * title the agent generates at the end of a turn, the mode and settings it
    * reports itself in, and when it was last heard from.
    *
-   * The mode and model are here as well as on the request that set them
-   * because the adapter changes them on its own too — leaving plan mode when
-   * a plan is accepted, falling back to another model under load — and a
-   * thread should come back in the mode it was in rather than the last one
-   * somebody asked for.
+   * The mode and the settings are here as well as on the requests that set
+   * them because the adapter changes them on its own too — leaving plan mode
+   * when a plan is accepted, falling back to another model under load — and a
+   * thread should come back as it ended up rather than as it was last asked to
+   * be.
    *
-   * The row is found by the update's own ACP id rather than by which thread
-   * is current, so an update that arrives while a switch is in flight lands
-   * on the thread it is about.
+   * The row is found by the update's own ACP id *and the harness it arrived
+   * on*, so an update lands on the thread it is about whichever adapter is
+   * talking and whatever is current.
    */
-  private recordThreadInfo(params: unknown): void {
+  private recordThreadInfo(harnessId: HarnessId, params: unknown): void {
     const acpSessionId = (params as { sessionId?: string })?.sessionId;
     if (!acpSessionId) return;
-    const row = threadByAcpId(this.db, this.sessionId, acpSessionId);
+    const row = threadByAcpId(this.db, this.sessionId, harnessId, acpSessionId);
     if (!row) return;
     touchThread(this.db, row.id);
 
@@ -1223,15 +907,11 @@ export class UpstreamSession {
           setThreadMode(this.db, row.id, update.currentModeId);
         }
         return;
-      case 'config_option_update': {
-        // Which of them is the model is the option's category, not its id:
-        // the id is the adapter's own and this deployment names none of them.
-        const model = update.configOptions?.find((option) => option.category === 'model');
-        if (typeof model?.currentValue === 'string') {
-          setThreadModel(this.db, row.id, model.currentValue);
+      case 'config_option_update':
+        if (Array.isArray(update.configOptions)) {
+          this.connection(harnessId).recordConfigOptions(acpSessionId, update.configOptions);
         }
         return;
-      }
       default:
         return;
     }
@@ -1247,7 +927,7 @@ export class UpstreamSession {
    * different conversation, and a question about one thread's tool call
    * cannot be answered from another's transcript.
    */
-  private onPermissionRequest(params: unknown): Promise<unknown> {
+  onPermission(params: unknown): Promise<unknown> {
     this.touch();
     this.tap('up', 'session/request_permission', params);
 
@@ -1323,9 +1003,7 @@ export class UpstreamSession {
    * a push service.
    */
   private announce(kind: NotifyKind, acpThreadId: string | null): void {
-    const thread = acpThreadId
-      ? threadByAcpId(this.db, this.sessionId, acpThreadId)
-      : undefined;
+    const thread = acpThreadId ? this.rowOfAcp(acpThreadId) : undefined;
     let sessionName: string;
     try {
       sessionName = this.row().name;
@@ -1382,24 +1060,27 @@ export class UpstreamSession {
     }
   }
 
+  // --- what arrives from the browsers ----------------------------------------
+
   /**
-   * Forwards a browser request to the adapter, tracking prompt turns.
+   * Forwards a browser request to the adapter holding the conversation it is
+   * about, tracking prompt turns.
    *
-   * `from` is the browser that asked, which decides who a replay goes to and
-   * lets a prompt be echoed to everyone watching.
+   * `from` is the browser that asked, which decides who a replay goes to, lets
+   * a prompt be echoed to everyone watching, and says which adapter a request
+   * naming no thread belongs to.
    */
   async forwardRequest(
     method: string,
     params: unknown,
     from?: DownstreamHandle,
   ): Promise<unknown> {
-    await this.ensureStarted();
-    const conn = this.conn;
-    if (!conn) throw new Error('Upstream not connected');
+    const conn = this.connectionFor(params, from);
+    await conn.ensureStarted();
     this.tap('down', method, params);
 
     // Which conversation this is about, taken from the message itself: two
-    // threads of one session share this connection, so nothing here may be
+    // threads of one session share this gateway, so nothing here may be
     // decided by which of them is the session's default.
     const thread = threadOf(params);
     const isPrompt = method === 'session/prompt' && thread !== undefined;
@@ -1410,7 +1091,7 @@ export class UpstreamSession {
       // a transcript for it here, and that transcript opens with everything
       // the source had said, so replaying the source as well would say all of
       // it twice.
-      const row = threadByAcpId(this.db, this.sessionId, thread);
+      const row = conn.rowOf(thread);
       if (row?.inherits_from) clearThreadInheritance(this.db, row.id);
       // A thread nobody has named yet is called after the prompt going out,
       // so it is recognisable from the moment it is sent rather than from the
@@ -1433,8 +1114,8 @@ export class UpstreamSession {
 
     try {
       const result = isLoad
-        ? await this.whileReplaying(() => conn.agent.request(method, params))
-        : await conn.agent.request(method, params);
+        ? await conn.whileReplaying(() => conn.request(method, params))
+        : await conn.request(method, params);
       // A mode the adapter accepted is this thread's from now on, including
       // across the restarts that lose the adapter's copy of it. Recorded here
       // as well as from the adapter's own current_mode_update, because that
@@ -1442,13 +1123,19 @@ export class UpstreamSession {
       // request the user made.
       if (method === 'session/set_mode' && thread !== undefined) {
         const modeId = (params as { modeId?: unknown })?.modeId;
-        const row = threadByAcpId(this.db, this.sessionId, thread);
+        const row = conn.rowOf(thread);
         if (row && typeof modeId === 'string') setThreadMode(this.db, row.id, modeId);
+      }
+      // And a setting it accepted is recorded from its own answer, which
+      // carries the whole list and the value it settled on. An adapter that
+      // answers with nothing leaves the request itself as the record.
+      if (method === 'session/set_config_option' && thread !== undefined) {
+        this.recordConfigChange(conn, thread, params, result);
       }
       // A fork's own replay is empty until it has been prompted, so the
       // conversation it branched from is replayed in its place — after its
       // own, which is the part that answers the request.
-      if (isLoad) await this.replayInherited(thread, from);
+      if (isLoad) await this.replayInherited(conn, thread, from);
       return result;
     } finally {
       if (isPrompt) {
@@ -1467,6 +1154,43 @@ export class UpstreamSession {
   }
 
   /**
+   * Records a setting a browser changed, from the adapter's answer where there
+   * is one and from the request where there is not.
+   *
+   * The mode's own option is excluded by both paths: a mode is `mode_id` and
+   * `session/set_mode`, and recording it here as well would give one answer two
+   * homes.
+   */
+  private recordConfigChange(
+    conn: AdapterConnection,
+    acpThreadId: string,
+    params: unknown,
+    result: unknown,
+  ): void {
+    const answered = (result as { configOptions?: SessionConfigOption[] } | null)?.configOptions;
+    if (Array.isArray(answered)) {
+      conn.recordConfigOptions(acpThreadId, answered);
+      return;
+    }
+    const { configId, value } = (params ?? {}) as { configId?: unknown; value?: unknown };
+    if (typeof configId === 'string' && typeof value === 'string') {
+      conn.recordConfigValue(acpThreadId, configId, value);
+    }
+  }
+
+  /**
+   * Records whether a prompt turn is running on one thread, and marks the
+   * session active.
+   *
+   * The thread comes from the prompt's own params, so a turn is recorded
+   * against the conversation it is on rather than against the session's
+   * default.
+   */
+  private setTurnActive(acpThreadId: string, active: boolean): void {
+    setThreadTurnActive(this.db, this.sessionId, acpThreadId, active);
+  }
+
+  /**
    * Shows a fork the conversation it was branched from, when it has none of
    * its own yet.
    *
@@ -1480,27 +1204,32 @@ export class UpstreamSession {
    * It goes to the one browser that asked, exactly as that browser's own
    * replay does, and the source's live updates are held back for its length
    * the same way — a replay of a thread cannot be told apart from what it is
-   * saying right now, and this is the one place where the two threads are the
-   * same thread.
+   * saying right now, and this is the one place where two threads are the
+   * same conversation.
    *
    * A source that cannot be replayed costs the browser the history and
-   * nothing else: it asked to load a thread, and the thread is loaded.
+   * nothing else: it asked to load a thread, and the thread is loaded. The
+   * source is on the same adapter by construction — a fork stays on its
+   * source's harness — so the same connection replays it.
    */
-  private async replayInherited(acpThreadId: string, to: DownstreamHandle): Promise<void> {
-    const fork = threadByAcpId(this.db, this.sessionId, acpThreadId);
+  private async replayInherited(
+    conn: AdapterConnection,
+    acpThreadId: string,
+    to: DownstreamHandle,
+  ): Promise<void> {
+    const fork = conn.rowOf(acpThreadId);
     if (!fork?.inherits_from) return;
-    const source = this.inheritedSource(fork);
-    const conn = this.conn;
-    if (!source?.acp_session_id || !conn) return;
+    const source = inheritedSource(this.db, this.sessionId, fork);
+    if (!source?.acp_session_id) return;
 
     this.downstreams.beginReplay(to, source.acp_session_id, acpThreadId);
     try {
-      await this.whileReplaying(() =>
-        conn.agent.request('session/load', {
+      await conn.whileReplaying(() =>
+        conn.request('session/load', {
           sessionId: source.acp_session_id,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
-          _meta: THINKING_META,
+          ...conn.meta(),
         }),
       );
       this.slog.info('replayed a fork from the thread it came from', {
@@ -1518,31 +1247,10 @@ export class UpstreamSession {
     }
   }
 
-  /**
-   * The nearest thread whose transcript a fork can borrow, or null when there
-   * is none to ask.
-   *
-   * A fork of a fork inherits through the middle one: that thread has no
-   * transcript either, so following the chain is what makes the second branch
-   * show the conversation both of them came from.
-   */
-  private inheritedSource(thread: ThreadRow): ThreadRow | null {
-    let row: ThreadRow | undefined = thread;
-    for (let hop = 0; hop < MAX_INHERIT_HOPS; hop++) {
-      const next: string | null = row?.inherits_from ?? null;
-      if (!next) return null;
-      row = getThread(this.db, next);
-      if (!row || row.session_id !== this.sessionId) return null;
-      if (row.acp_session_id && !row.inherits_from) return row;
-    }
-    return null;
-  }
-
-  /** Forwards a browser notification to the adapter. */
+  /** Forwards a browser notification to the adapter its thread is on. */
   async forwardNotification(method: string, params: unknown): Promise<void> {
-    await this.ensureStarted();
-    const conn = this.conn;
-    if (!conn) throw new Error('Upstream not connected');
+    const conn = this.connectionFor(params);
+    await conn.ensureStarted();
     this.tap('down', method, params);
     // Only the cancelled thread's turn ends. Another thread of the same
     // session may still be mid-turn.
@@ -1554,11 +1262,11 @@ export class UpstreamSession {
       this.activity.reset(thread);
       this.downstreams.threadState(thread);
     }
-    await conn.agent.notify(method, params);
+    await conn.notify(method, params);
   }
 
   /** Records one message in the debug log. A failed write never breaks the flow. */
-  private tap(direction: 'up' | 'down', method: string, params: unknown): void {
+  tap(direction: 'up' | 'down', method: string, params: unknown): void {
     try {
       appendAcpLog(
         this.db,
@@ -1571,52 +1279,22 @@ export class UpstreamSession {
     }
   }
 
-  /**
-   * Drops the connection when the adapter exits on its own. The next forwarded
-   * message calls ensureStarted, which re-spawns and re-issues session/load.
-   */
-  private handleExecExit(code: number | null): void {
-    if (this.closed || this.stopping) return;
-    this.slog.warn('adapter exec exited', { code });
-    this.teardownConnection();
-    this.clearThreadStates();
-  }
+  // --- shutdown --------------------------------------------------------------
 
-  /** Closes the connection and kills the exec, tolerating either being gone. */
-  private teardownConnection(): void {
-    try {
-      this.conn?.close();
-    } catch {
-      // already closed
-    }
-    this.conn = null;
-    // A fresh adapter holds none of them, so the next pin brings its thread
-    // back up rather than trusting an id this process never heard.
-    this.live.clear();
-    try {
-      this.exec?.kill();
-    } catch {
-      // already gone
-    }
-    this.exec = null;
-  }
-
-  /** Stops the connection deliberately, which suppresses the reconnect. */
+  /** Stops every connection deliberately, which suppresses the reconnects. */
   stop(): void {
-    this.stopping = true;
     this.stopPolling();
     // The box is going away, and what was in it went with it. Said now rather
     // than at the next reading, so a card does not carry "still running" over
     // the moment its session was shut down.
     this.background.clear();
-    this.teardownConnection();
+    for (const conn of this.connections.values()) conn.stop();
     this.clearThreadStates();
     this.pending.failSession(this.sessionId, 'Session stopped');
   }
 
-  /** Stops the connection for good and forgets every attached browser. */
+  /** Stops for good and forgets every attached browser. */
   close(): void {
-    this.closed = true;
     this.stop();
     this.downstreams.clear();
   }

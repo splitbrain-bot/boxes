@@ -12,6 +12,7 @@ import {
   workToStop,
 } from './background.ts';
 import type { ContainerProcess } from '../docker.ts';
+import { HARNESSES } from '../harness.ts';
 
 /**
  * What a thread, and the reaper, are told about work a session left running.
@@ -602,11 +603,28 @@ test('two readers in the same moment are one reading', async () => {
 test('a tool call that backgrounds something is still recognisable as one', () => {
   // Not for counting any more — activity.ts asks it, because a call that runs
   // in the background is the call whose silence says nothing about the agent.
-  assert.equal(startsBackgroundWork({ rawInput: { command: 'npm test' } }), false);
+  const claude = HARNESSES.claude.alwaysBackground;
+  assert.equal(startsBackgroundWork({ rawInput: { command: 'npm test' } }, claude), false);
   assert.equal(
-    startsBackgroundWork({ rawInput: { command: 'npm test', run_in_background: true } }),
+    startsBackgroundWork({ rawInput: { command: 'npm test', run_in_background: true } }, claude),
     true,
   );
-  assert.equal(startsBackgroundWork({ _meta: { claudeCode: { toolName: 'Monitor' } } }), true);
-  assert.equal(startsBackgroundWork({ name: 'Bash' }), false);
+  assert.equal(
+    startsBackgroundWork({ _meta: { claudeCode: { toolName: 'Monitor' } } }, claude),
+    true,
+  );
+  assert.equal(startsBackgroundWork({ name: 'Bash' }, claude), false);
+
+  // Which names those are is the harness's, from the registry: Codex has no
+  // tool that backgrounds itself, and `Monitor` there is a tool name like any
+  // other.
+  const codex = HARNESSES.codex.alwaysBackground;
+  assert.equal(
+    startsBackgroundWork({ _meta: { claudeCode: { toolName: 'Monitor' } } }, codex),
+    false,
+  );
+  assert.equal(
+    startsBackgroundWork({ rawInput: { command: 'npm test', run_in_background: true } }, codex),
+    true,
+  );
 });

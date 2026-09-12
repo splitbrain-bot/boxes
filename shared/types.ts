@@ -73,6 +73,69 @@ export interface HarnessHealth {
 }
 
 /**
+ * The modes an adapter advertises for a thread, and the one it is in.
+ *
+ * An ACP shape rather than one of ours: the gateway reads it off every
+ * `session/new`, `session/load` and `session/fork` answer, and it is here so
+ * the dialog that offers the modes and the gateway that applies them agree
+ * about what one is.
+ */
+export interface SessionModeState {
+  currentModeId: string;
+  availableModes: Array<{ id: string; name?: string; description?: string | null }>;
+}
+
+/**
+ * One thing about a thread the adapter lets a client set, and its current
+ * value.
+ *
+ * `category` says what the option is for, which is how the model selector is
+ * found without depending on the adapter's own id for it — and how the option
+ * that merely echoes the mode is kept out of a thread's config map, since the
+ * mode travels through `session/set_mode` alone.
+ */
+export interface SessionConfigOption {
+  id: string;
+  name?: string;
+  category?: string | null;
+  currentValue?: string;
+  options?: Array<{ value: string; name?: string; description?: string | null }>;
+}
+
+/**
+ * What one harness's adapter last advertised, cached against the harness.
+ *
+ * A dialog cannot ask an adapter what it offers, because the thread it would
+ * ask about does not exist yet — and starting a box to find out would cost a
+ * container per dialog. So what an adapter answered the last time one ran is
+ * kept, and the dialog offers that. The adapter corrects it on the thread's
+ * first answer.
+ */
+export interface HarnessCatalog {
+  /** The modes of the last answer, or null when it carried none. */
+  modes: SessionModeState | null;
+  /** The config options of the last answer; empty when it carried none. */
+  configOptions: SessionConfigOption[];
+  /** When the answer arrived, in epoch milliseconds. */
+  seenAt: number;
+}
+
+/**
+ * One harness as the dialogs see it: what the registry says, what its adapter
+ * last advertised, and whether it can run right now.
+ */
+export interface HarnessInfo extends HarnessHealth {
+  /** Mode a fresh thread of this harness is put in. */
+  defaultModeId: string;
+  /** Mode a fork of one starts in instead. */
+  forkModeId: string;
+  /** Config option values a fresh thread starts with, by option id. */
+  defaultConfig: Record<string, string>;
+  /** Null on a deployment that has never run this harness's adapter. */
+  catalog: HarnessCatalog | null;
+}
+
+/**
  * What a thread dialog last chose for one harness, so the next box starts on
  * the same settings from any device.
  *
@@ -127,6 +190,32 @@ export interface BackgroundProcess {
 /** One conversation of a session, as the API reports it. */
 export interface ThreadSummary {
   id: string;
+  /**
+   * Which agent runs this conversation. A property of the thread rather than
+   * of the box: one checkout with two agents working on it is the point.
+   */
+  harness: HarnessId;
+  /**
+   * The mode the thread is meant to be in, or null for its harness's default.
+   * What the adapter is in right now arrives over ACP; this is what a respawn
+   * puts it back into.
+   */
+  modeId: string | null;
+  /**
+   * Everything else the thread is configured with, by the adapter's own id for
+   * each option: the model, an effort level, whatever else it offers. The
+   * option that echoes the mode is never in here — see `modeId`.
+   */
+  config: Record<string, string>;
+  /**
+   * True when this thread's adapter advertised `sessionCapabilities.fork`.
+   *
+   * Per thread rather than per session, because a box may hold threads of two
+   * harnesses and the answer comes from each adapter's own `initialize`. The
+   * capability is unstable in the ACP schema, so an adapter may omit it, and
+   * false is also what a thread whose adapter has not been reached reports.
+   */
+  canFork: boolean;
   /**
    * The adapter's own id for the thread, or null while the adapter has
    * forgotten it. A thread minted and never prompted does not survive the
@@ -219,12 +308,6 @@ export interface SessionSummary {
    */
   currentThreadId: string | null;
   /**
-   * True when the adapter advertised `sessionCapabilities.fork`. The
-   * capability is unstable in the ACP schema, so an adapter may omit it.
-   * False is also what an adapter that has not been reached yet reports.
-   */
-  canFork: boolean;
-  /**
    * The agent set selected when this session was created, or null for the
    * global set alone. Null is also what a session whose set has since been
    * deleted reports.
@@ -281,6 +364,21 @@ export interface SessionDetail extends SessionSummary {
   proxyAttached: boolean;
 }
 
+/**
+ * What a new thread is to run and be configured with.
+ *
+ * Every field but the harness is optional, and an absent one means the
+ * harness's own default: a client that knows nothing about modes or models
+ * still creates a usable thread by naming an agent.
+ */
+export interface ThreadOptions {
+  harness: HarnessId;
+  /** Registry default when absent. */
+  modeId?: string;
+  /** The harness's `defaultConfig` when absent. */
+  config?: Record<string, string>;
+}
+
 /** Body of a request to add a thread to a session. */
 export interface CreateThreadBody {
   /**
@@ -288,6 +386,12 @@ export interface CreateThreadBody {
    * fresh, empty thread on the same workspace.
    */
   from?: string;
+  /**
+   * What the new thread runs. Ignored when `from` is set: a transcript can
+   * only be loaded by the adapter that wrote it, so a fork stays on its
+   * source's harness. Absent means Claude on its defaults.
+   */
+  options?: ThreadOptions;
 }
 
 /** Body of a request to mark a thread done, or to take the mark off again. */
@@ -310,6 +414,12 @@ export interface CreateSessionBody {
    * all mean "the global set alone" — it is applied either way.
    */
   agentSet?: string | null;
+  /**
+   * What the box's first conversation runs. A box is made to be worked in, so
+   * it is made with a thread in it, and the dialog that names the box names
+   * the agent in the same request. Absent means Claude on its defaults.
+   */
+  thread?: ThreadOptions;
 }
 
 /** One tapped ACP message from the debug log. */

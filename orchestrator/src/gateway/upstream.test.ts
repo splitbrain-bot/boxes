@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../config.ts';
-import { openDb, type Db } from '../db.ts';
+import { openDb, readHarnessCatalog, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
 import { CredentialStore } from '../credentials.ts';
 import { EgressManager } from '../egress.ts';
@@ -40,6 +40,22 @@ function frame(text: string): Buffer {
   header[0] = 1;
   header.writeUInt32BE(payload.length, 4);
   return Buffer.concat([header, payload]);
+}
+
+/**
+ * An error the stand-in answers with, by its JSON-RPC code.
+ *
+ * A plain Error is the missing-resource answer every existing test wants; this
+ * is for the ones that turn on *which* refusal it is — an adapter with no
+ * account refuses with -32000 and a sentence, and that is not a spawn failure.
+ */
+class RpcError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 /** A JSON-RPC frame, in either direction. */
@@ -92,9 +108,11 @@ class FakeAdapter extends Duplex {
     // while asserting on what is true meanwhile.
     void Promise.resolve(this.answer(msg)).then((result) => {
       const body =
-        result instanceof Error
-          ? { error: { code: -32002, message: result.message } }
-          : { result };
+        result instanceof RpcError
+          ? { error: { code: result.code, message: result.message } }
+          : result instanceof Error
+            ? { error: { code: -32002, message: result.message } }
+            : { result };
       this.push(frame(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...body })}\n`));
     });
   }
@@ -145,8 +163,32 @@ function execStream(text: string): Readable {
 /** Whether the box this test is pretending to have is up. */
 let containerRunning = true;
 
-function fakeDocker(adapter: FakeAdapter | (() => FakeAdapter)): void {
-  const spawn = typeof adapter === 'function' ? adapter : () => adapter;
+/** A stand-in adapter, or a fresh one per spawn where a respawn is the point. */
+type Standin = FakeAdapter | (() => FakeAdapter);
+
+/**
+ * What each adapter command in the box answers as.
+ *
+ * Keyed by the argv the registry spawns that harness with, because that is
+ * what the orchestrator hands `docker exec` and the only thing in the call
+ * that says which adapter is wanted. One stand-in on its own answers whatever
+ * is spawned, which is every test from before a box could run two.
+ */
+type Standins = Standin | Record<string, Standin>;
+
+/** How many adapter execs have been started, by the command each ran. */
+let spawned: string[] = [];
+
+function fakeDocker(adapter: Standins): void {
+  const byCommand =
+    typeof adapter === 'function' || adapter instanceof FakeAdapter
+      ? null
+      : (adapter as Record<string, Standin>);
+  const spawn = (cmd: string): FakeAdapter => {
+    const standin = byCommand ? byCommand[cmd] : (adapter as Standin);
+    if (!standin) throw new Error(`no stand-in adapter for ${cmd}`);
+    return typeof standin === 'function' ? standin() : standin;
+  };
   const modem = new Docker({ socketPath: '/var/run/docker.sock' }).modem;
   dk.setDockerForTests({
     modem,
@@ -172,8 +214,9 @@ function fakeDocker(adapter: FakeAdapter | (() => FakeAdapter)): void {
             inspect: async () => ({ ExitCode: 0 }),
           };
         }
+        spawned.push(String(cmd[0]));
         return {
-          start: async () => spawn(),
+          start: async () => spawn(String(cmd[0])),
           inspect: async () => ({ ExitCode: 0 }),
         };
       },
@@ -203,10 +246,10 @@ class RecordingNotifier extends Notifier {
 function seed(): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
-     VALUES ('s1', 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES ('s1', 'test', 'DEFAULT', 'img', 'c1',
        'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, ?)`,
   ).run(now, now);
   for (const [id, acp, ordinal] of [
@@ -230,6 +273,7 @@ beforeEach(() => {
   processes = [...BASE_PROCESSES];
   insideProcesses = [];
   killed = [];
+  spawned = [];
   containerRunning = true;
   manager = new SessionManager(
     db,
@@ -405,9 +449,18 @@ test('forking is offered only when the adapter advertises the capability', async
   fakeDocker(withFork);
 
   const up = manager.upstream('s1');
-  assert.equal(up.canFork, false, 'nothing is claimed before the adapter is reached');
+  // Per harness, because the answer is per adapter: a box may run two, and
+  // each says for itself. Nothing is claimed for either before it is reached.
+  assert.equal(up.canFork('claude'), false, 'nothing is claimed before the adapter is reached');
+  assert.equal(up.canFork('codex'), false);
   await up.ensureStarted();
-  assert.equal(up.canFork, true);
+  assert.equal(up.canFork('claude'), true);
+  assert.equal(up.canFork('codex'), false, 'the other adapter has said nothing');
+  // And it reaches the thread rows, which is where the fork button reads it.
+  assert.deepEqual(
+    (await manager.detail('s1')).threads.map((t) => t.canFork),
+    [true, true],
+  );
 });
 
 test('a title the adapter reports lands on the thread it is about', async () => {
@@ -922,10 +975,10 @@ test('a respawn puts a loaded thread back on the model it was left on', async ()
     sessionUpdate: 'config_option_update',
     configOptions: [{ id: 'model', category: 'model', currentValue: 'sonnet' }],
   });
-  await expect.poll(() => thread('t1')['model_id']).toBe('sonnet');
+  await expect.poll(() => thread('t1')['config']).toBe('{"model":"sonnet"}');
 
-  // Left on sonnet, so it comes back on sonnet: the deployment's default is
-  // for a thread nobody has chosen for, not an answer that overrides one.
+  // Left on sonnet, so it comes back on sonnet: the harness's default is for a
+  // thread nobody has chosen for, not an answer that overrides one.
   asked.length = 0;
   up.stop();
   await up.ensureStarted();
@@ -1012,7 +1065,9 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
 test('re-minting the current thread keeps the mode and model its row remembers', async () => {
   // A thread minted and never prompted: the row remembers what it was put
   // into, and the adapter has no transcript to bring back.
-  db.prepare("UPDATE threads SET mode_id = 'plan', model_id = 'opus' WHERE id = ?").run('t1');
+  db.prepare(
+    `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
+  ).run('t1');
   const asked: string[] = [];
   fakeDocker(twoThreadAdapter(asked, new Set(['acp-gone'])));
   const up = manager.upstream('s1');
@@ -1722,4 +1777,479 @@ test('a replayed transcript is history, not work to wait for', async () => {
   const up = manager.upstream('s1');
   await up.ensureStarted();
   assert.equal(up.backgroundActive, false);
+});
+
+// --- two harnesses in one box ------------------------------------------------
+
+/**
+ * A session holds one adapter per harness a thread of it runs, and everything
+ * below is about the seam between them: a message reaches the adapter that has
+ * the conversation it names, an adapter that will not start costs the session
+ * only its own threads, and what each of them advertises is answered
+ * separately.
+ */
+
+/** Adds a thread of any harness to the seeded session. */
+function seedThread(id: string, harness: string, acp: string | null, ordinal: number): void {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO threads (id, session_id, harness, acp_session_id, title, ordinal,
+       created_at, last_active_at)
+     VALUES (?, 's1', ?, ?, NULL, ?, ?, ?)`,
+  ).run(id, harness, acp, ordinal, now, now);
+}
+
+/**
+ * A stand-in for one harness that records every request it was sent.
+ *
+ * `answers` is laid over the ordinary ones, so a test says only what it cares
+ * about: which conversation an adapter minted, or which refusal it gives.
+ */
+function harnessAdapter(
+  seen: string[],
+  tag: string,
+  answers: (msg: Rpc) => unknown = () => undefined,
+): () => FakeAdapter {
+  return () =>
+    new FakeAdapter((msg) => {
+      const session = String(msg.params?.['sessionId'] ?? '');
+      const answer = answers(msg);
+      if (answer !== undefined) {
+        seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
+        return answer;
+      }
+      if (msg.method === 'initialize') {
+        return {
+          protocolVersion: 1,
+          agentCapabilities: { sessionCapabilities: { fork: {} } },
+          _meta: { adapter: tag },
+        };
+      }
+      seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
+      if (msg.method === 'session/new') return { sessionId: `${tag}-minted` };
+      if (msg.method === 'session/fork') return { sessionId: `${tag}-branch` };
+      return {};
+    });
+}
+
+test('each thread is served by its own harness, and only its own is started', async () => {
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    'codex-acp': harnessAdapter(seen, 'codex'),
+  });
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // A box whose only open thread is Claude's never starts the other adapter.
+  assert.deepEqual(spawned, ['claude-agent-acp']);
+  assert.deepEqual(seen, ['claude session/load acp-gone']);
+
+  // Opening the Codex thread is what starts its adapter, and it loads that
+  // thread and nothing of the other harness's.
+  seen.length = 0;
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+  assert.equal(await up.pin(handle, 't3'), 'cx-1');
+  assert.deepEqual(spawned, ['claude-agent-acp', 'codex-acp']);
+  assert.deepEqual(seen, ['codex session/load cx-1']);
+
+  // And a prompt goes to the adapter holding the conversation it names. Sent
+  // to the other one it would be a session id that adapter has never heard of.
+  seen.length = 0;
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'cx-1',
+    prompt: [{ type: 'text', text: 'what does this repo do' }],
+  });
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-gone',
+    prompt: [{ type: 'text', text: 'and refactor it' }],
+  });
+  assert.deepEqual(seen, ['codex session/prompt cx-1', 'claude session/prompt acp-gone']);
+  // Each turn was recorded against its own thread, whichever adapter ran it.
+  assert.equal(thread('t3')['title'], 'what does this repo do');
+  assert.equal(thread('t1')['title'], 'and refactor it');
+});
+
+test('initialize is answered by the adapter holding the thread that asked', async () => {
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    // The other adapter advertises different things, which is the whole reason
+    // the answer cannot be the session's.
+    'codex-acp': () =>
+      new FakeAdapter((msg) =>
+        msg.method === 'initialize'
+          ? { protocolVersion: 1, agentCapabilities: {}, _meta: { adapter: 'codex' } }
+          : {},
+      ),
+  });
+
+  const up = manager.upstream('s1');
+  const claude = fakeHandle(1, null);
+  const codex = fakeHandle(2, null);
+  up.attach(claude);
+  up.attach(codex);
+  await up.pin(claude, 't1');
+  await up.pin(codex, 't3');
+
+  assert.deepEqual(up.initializeFor('acp-gone'), {
+    protocolVersion: 1,
+    agentCapabilities: { sessionCapabilities: { fork: {} } },
+    _meta: { adapter: 'claude' },
+  });
+  assert.deepEqual(up.initializeFor('cx-1'), {
+    protocolVersion: 1,
+    agentCapabilities: {},
+    _meta: { adapter: 'codex' },
+  });
+  // So the fork button is offered on one thread and not on the other, in the
+  // same box.
+  assert.deepEqual(
+    (await manager.detail('s1')).threads.map((t) => [t.harness, t.canFork]),
+    [
+      ['claude', true],
+      ['claude', true],
+      ['codex', false],
+    ],
+  );
+});
+
+test(
+  'an adapter that will not start costs the session only its own threads',
+  async () => {
+    seedThread('t3', 'codex', 'cx-1', 3);
+    const seen: string[] = [];
+    fakeDocker({
+      'claude-agent-acp': harnessAdapter(seen, 'claude'),
+      // Nothing answers the handshake, so every attempt times out as a
+      // connection that died on its own.
+      'codex-acp': () =>
+        new FakeAdapter(() => {
+          throw new Error('codex-acp: not installed in this image');
+        }),
+    });
+
+    const up = manager.upstream('s1');
+    await up.ensureStarted();
+    const handle = fakeHandle(1, null);
+    up.attach(handle);
+
+    // Three attempts and then the session is in error, because a thread of
+    // this box cannot be opened at all.
+    await assert.rejects(() => up.pin(handle, 't3'));
+    assert.deepEqual(
+      spawned.filter((cmd) => cmd === 'codex-acp'),
+      ['codex-acp', 'codex-acp', 'codex-acp'],
+    );
+
+    // And the other adapter is untouched: its conversation is still up, and a
+    // prompt on it runs.
+    seen.length = 0;
+    await up.forwardRequest('session/prompt', {
+      sessionId: 'acp-gone',
+      prompt: [{ type: 'text', text: 'carry on' }],
+    });
+    assert.deepEqual(seen, ['claude session/prompt acp-gone']);
+    assert.equal(up.initializeFor('acp-gone') !== null, true);
+    assert.equal(up.initializeFor('cx-1'), null);
+  },
+  // Two backoffs — one second and three — between the three attempts.
+  20_000,
+);
+
+test('an adapter with no credential is not retried, and is kept up', async () => {
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const seen: string[] = [];
+  const refuse = (msg: Rpc): unknown =>
+    msg.method?.startsWith('session/')
+      ? new RpcError(-32000, 'Authentication required: no account is logged in')
+      : undefined;
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    'codex-acp': harnessAdapter(seen, 'codex', refuse),
+  });
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+
+  await assert.rejects(
+    () => up.pin(handle, 't3'),
+    // The browser's request fails with the adapter's own sentence, which is
+    // the one worth showing: it names what is missing.
+    (err: Error) => err.message.startsWith('Authentication required'),
+  );
+
+  // Spawned once. Retrying cannot conjure a credential, and three attempts
+  // apiece would only be three of the same refusal.
+  assert.deepEqual(
+    spawned.filter((cmd) => cmd === 'codex-acp'),
+    ['codex-acp'],
+  );
+  // The session is not in error: the box is running and the other harness is
+  // working. What is missing is a credential, which the settings page fixes
+  // without restarting anything.
+  const session = db.prepare('SELECT status FROM sessions WHERE id = ?').get('s1') as {
+    status: string;
+  };
+  assert.equal(session.status, 'running');
+  // The connection is kept up, so the next attempt is a request rather than a
+  // spawn — a credential entered meanwhile is picked up by the adapter itself.
+  seen.length = 0;
+  await assert.rejects(() => up.pin(handle, 't3'));
+  assert.deepEqual(
+    spawned.filter((cmd) => cmd === 'codex-acp'),
+    ['codex-acp'],
+  );
+  assert.ok(seen.some((line) => line.startsWith('codex session/')));
+});
+
+// --- the per-thread config map -----------------------------------------------
+
+/**
+ * An adapter that offers three settings and echoes the mode as one of them,
+ * which is what both real ones do.
+ *
+ * Every spawn starts a thread on `opus` at `low` effort in `default` mode, so
+ * what a test reads back is where the orchestrator put it rather than where
+ * the adapter happened to be.
+ */
+function configurableAdapter(asked: string[]): () => FakeAdapter {
+  const state = (): Record<string, unknown> => ({
+    modes: {
+      currentModeId: 'default',
+      availableModes: [{ id: 'default' }, { id: 'auto' }, { id: 'plan' }],
+    },
+    configOptions: [
+      // The mode, echoed as a config option. It is never in the config map and
+      // never replayed from one: the mode is `session/set_mode` and `mode_id`.
+      {
+        id: 'mode',
+        category: 'mode',
+        currentValue: 'default',
+        options: [{ value: 'default' }, { value: 'auto' }, { value: 'plan' }],
+      },
+      {
+        id: 'model',
+        category: 'model',
+        currentValue: 'opus',
+        options: [{ value: 'opus' }, { value: 'sonnet' }],
+      },
+      {
+        id: 'effort',
+        category: 'thought_level',
+        currentValue: 'low',
+        options: [{ value: 'low' }, { value: 'high' }],
+      },
+    ],
+  });
+  return () =>
+    new FakeAdapter((msg) => {
+      if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+      if (msg.method === 'session/new') return { sessionId: 'acp-gone', ...state() };
+      if (msg.method === 'session/load') return state();
+      if (msg.method === 'session/set_mode') {
+        asked.push(`mode ${String(msg.params?.['modeId'])}`);
+        return {};
+      }
+      if (msg.method === 'session/set_config_option') {
+        const id = String(msg.params?.['configId']);
+        const value = String(msg.params?.['value']);
+        asked.push(`${id} ${value}`);
+        // Both adapters answer with the whole list, which is what the gateway
+        // records: the value the adapter settled on, not the one it was asked
+        // for.
+        const answer = state();
+        const options = answer['configOptions'] as Array<Record<string, unknown>>;
+        for (const option of options) if (option['id'] === id) option['currentValue'] = value;
+        return answer;
+      }
+      return {};
+    });
+}
+
+test('a respawn puts a thread back on every setting it was left with', async () => {
+  // What an hour-old thread has on its row: a mode, a model, and an effort
+  // level that used to be forwarded and forgotten.
+  db.prepare(
+    `UPDATE threads SET mode_id = 'plan', config = '{"model":"sonnet","effort":"high"}'
+      WHERE id = ?`,
+  ).run('t1');
+  const asked: string[] = [];
+  fakeDocker(configurableAdapter(asked));
+
+  await manager.upstream('s1').ensureStarted();
+
+  // One request per entry whose value differs, the mode through its own
+  // method, and nothing at all for the option that merely echoes the mode.
+  assert.deepEqual(asked, ['mode plan', 'model sonnet', 'effort high']);
+});
+
+test('a setting changed through the gateway is recorded, and the mode is not', async () => {
+  const asked: string[] = [];
+  fakeDocker(configurableAdapter(asked));
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  await up.forwardRequest('session/set_config_option', {
+    sessionId: 'acp-gone',
+    configId: 'effort',
+    value: 'high',
+  });
+  // Recorded from the adapter's own answer, merged over what the row holds:
+  // the thread was already on opus, by its harness's default.
+  assert.deepEqual(JSON.parse(String(thread('t1')['config'])), {
+    model: 'opus',
+    effort: 'high',
+  });
+
+  // The mode arrives as a config option too, from an adapter that changed it
+  // itself. It belongs to `mode_id` and nowhere else — a mode with two homes
+  // is a mode that comes back wrong.
+  await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'auto' });
+  assert.equal(thread('t1')['mode_id'], 'auto');
+  assert.deepEqual(JSON.parse(String(thread('t1')['config'])), {
+    model: 'opus',
+    effort: 'high',
+  });
+
+  // And the whole of it survives the adapter going away and coming back.
+  asked.length = 0;
+  up.stop();
+  await up.ensureStarted();
+  assert.deepEqual(asked, ['mode auto', 'effort high']);
+});
+
+test('a setting the adapter reports on its own is recorded, the mode excluded', async () => {
+  const asked: string[] = [];
+  const adapter = configurableAdapter(asked);
+  let live: FakeAdapter | null = null;
+  fakeDocker(() => {
+    live = adapter();
+    return live;
+  });
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // A slash command or an accepted plan changes things on the adapter's own
+  // initiative, and this is how it says so.
+  live!.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: {
+      sessionUpdate: 'config_option_update',
+      configOptions: [
+        { id: 'mode', category: 'mode', currentValue: 'plan' },
+        { id: 'model', category: 'model', currentValue: 'sonnet' },
+        { id: 'effort', category: 'thought_level', currentValue: 'high' },
+      ],
+    },
+  });
+
+  await expect
+    .poll(() => thread('t1')['config'])
+    .toBe('{"model":"sonnet","effort":"high"}');
+  // The mode came in the same message and was passed over: it is not a setting
+  // of the thread, it is the thread's mode.
+  assert.equal(thread('t1')['mode_id'], null);
+});
+
+test('a thread is created on the harness and settings it was asked for', async () => {
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    'codex-acp': harnessAdapter(seen, 'codex'),
+  });
+
+  const created = await manager.createThread('s1', {
+    options: { harness: 'codex', modeId: 'read-only', config: { model: 'gpt-5.6-codex' } },
+  });
+
+  assert.equal(created.harness, 'codex');
+  assert.equal(created.modeId, 'read-only');
+  assert.deepEqual(created.config, { model: 'gpt-5.6-codex' });
+  // Minted by the adapter of its own harness, which is the one that was
+  // started for it.
+  assert.equal(created.acpSessionId, 'codex-minted');
+  assert.deepEqual(spawned, ['codex-acp']);
+
+  // A fork of it stays on that harness whatever the body says, because only
+  // the adapter that wrote a transcript can load it back.
+  const forked = await manager.createThread('s1', {
+    from: created.id,
+    options: { harness: 'claude' },
+  });
+  assert.equal(forked.harness, 'codex');
+  assert.equal(forked.acpSessionId, 'codex-branch');
+  assert.deepEqual(forked.config, { model: 'gpt-5.6-codex' });
+  assert.deepEqual(spawned, ['codex-acp']);
+});
+
+test('a thread for a harness with no credential is still created', async () => {
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    'codex-acp': harnessAdapter(seen, 'codex', (msg) =>
+      msg.method?.startsWith('session/')
+        ? new RpcError(-32000, 'Authentication required: no account is logged in')
+        : undefined,
+    ),
+  });
+
+  // No hard gate on the API: the dialog is what keeps somebody from asking for
+  // a harness that cannot run, and a thread whose adapter refuses is a row
+  // with no conversation yet — the same state an adapter restart leaves
+  // behind, and brought up the same way once a credential exists.
+  const created = await manager.createThread('s1', { options: { harness: 'codex' } });
+  assert.equal(created.harness, 'codex');
+  assert.equal(created.acpSessionId, null);
+  assert.equal(manager.threads('s1').length, 3);
+});
+
+test('what an adapter advertises is cached against its harness', async () => {
+  const asked: string[] = [];
+  fakeDocker(configurableAdapter(asked));
+  await manager.upstream('s1').ensureStarted();
+
+  const cached = readHarnessCatalog(db, 'claude');
+  assert.deepEqual(cached?.modes?.availableModes, [
+    { id: 'default' },
+    { id: 'auto' },
+    { id: 'plan' },
+  ]);
+  assert.deepEqual(
+    cached?.configOptions.map((option) => option.id),
+    ['mode', 'model', 'effort'],
+  );
+  // Only the harness that answered. Nothing starts an adapter to fill this.
+  assert.equal(readHarnessCatalog(db, 'codex'), null);
+});
+
+test('pinning to the thread a spawn already brought back does not replay it twice', async () => {
+  // The first browser on a stopped box does both halves at once: its pin
+  // starts the adapter, and the adapter brings back the session's current
+  // thread on its way up. Loading it again afterwards would say the whole
+  // conversation to that browser a second time.
+  const loads: string[] = [];
+  fakeDocker(
+    () =>
+      new FakeAdapter((msg) => {
+        if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+        if (msg.method === 'session/load') {
+          loads.push(String(msg.params?.['sessionId']));
+          return {};
+        }
+        return {};
+      }),
+  );
+
+  const up = manager.upstream('s1');
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
+  assert.equal(await up.pin(handle, 't1'), 'acp-gone');
+  assert.deepEqual(loads, ['acp-gone']);
 });

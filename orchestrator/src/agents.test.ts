@@ -46,10 +46,10 @@ function materialized(sessionId: string, rel: string): string {
 /** Inserts a session row, which is all the set's session count reads. */
 function insertSession(id: string, agentSetId: string | null): void {
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, agent_set_id,
        created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', '', ?, 'running', ?, 0, 0)`,
   ).run(id, `sn-${id}`, `home-${id}`, agentSetId);
 }

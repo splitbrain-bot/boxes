@@ -2,7 +2,12 @@ import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage } from './browser.ts';
-import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
+import {
+  startStubOrchestrator,
+  stubSession,
+  stubThread,
+  type StubOrchestrator,
+} from './stub-orchestrator.ts';
 
 /**
  * Several conversations on one session, and two of them watched at once.
@@ -216,7 +221,9 @@ test('two tabs on two threads each keep to their own conversation', async () => 
 
 test('forking is not offered when the adapter does not advertise it', async () => {
   await stub.close();
-  stub = await startStubOrchestrator(DIST, [stubSession({ canFork: false })]);
+  stub = await startStubOrchestrator(DIST, [
+    stubSession({ threads: [stubThread({ canFork: false })] }),
+  ]);
 
   const { page, errors, close } = await openPage(stub.url, '/');
   try {

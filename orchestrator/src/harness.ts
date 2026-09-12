@@ -175,6 +175,15 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
 export const HARNESS_IDS: readonly HarnessId[] = Object.keys(HARNESSES) as HarnessId[];
 
 /**
+ * The harness a request that names none gets.
+ *
+ * Claude, because it is what every existing thread runs and what every client
+ * from before harnesses existed means. It is a default for callers rather than
+ * a preference: nothing inside the orchestrator branches on it.
+ */
+export const DEFAULT_HARNESS: HarnessId = 'claude';
+
+/**
  * The harness a stored id names.
  *
  * Throws rather than falling back, because every caller has taken the id from

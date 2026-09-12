@@ -82,6 +82,18 @@ const schema = z.object({
    */
   SESSION_IMAGE_PRUNE: flag.default('true'),
   SESSION_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
+  /**
+   * What one box may take. Both of these now cover *two* adapters: a box may
+   * hold threads of either harness, and each one that has a thread runs its own
+   * adapter process with its own agent under it.
+   *
+   * The numbers are unchanged, because they were generous for one and a second
+   * adapter is a native binary that idles cheaply — but they have not been
+   * measured against two busy agents in one box, and a deployment that meets
+   * the ceiling raises them. A pids limit reached shows up as a tool call that
+   * cannot fork; a memory limit reached shows up as the kernel killing
+   * something in the box.
+   */
   SESSION_MEM_LIMIT: z.string().regex(/^\d+[kmgKMG]?$/).default('4g'),
   SESSION_CPUS: z.coerce.number().positive().default(2),
   SESSION_PIDS_LIMIT: z.coerce.number().int().positive().default(512),

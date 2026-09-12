@@ -3,8 +3,10 @@ import {
   GLOBAL_AGENT_SET,
   type CreateSessionBody,
   type CreateThreadBody,
+  type HarnessId,
   type SessionDetail,
   type SessionSummary,
+  type ThreadOptions,
   type ThreadSummary,
 } from '../../shared/types.ts';
 import { AgentStore, ensureAgentsRoot, hostAgentConfigPath } from './agents.ts';
@@ -14,11 +16,13 @@ import {
   clearSessionTurns,
   currentThread,
   getThread,
+  insertThread,
   listThreads,
   nextSubnetIndex,
   sessionTurnActive,
   sessionsWithActiveTurns,
   setThreadDone,
+  threadConfig,
   touchSession,
   type Db,
   type SessionRow,
@@ -26,6 +30,7 @@ import {
 } from './db.ts';
 import { SessionUsage, SESSION_SIZE_TTL_MS } from './diskusage.ts';
 import * as dk from './docker.ts';
+import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
@@ -39,9 +44,6 @@ import { allocateSubnet } from './subnet.ts';
  * Session lifecycle and the owner of every UpstreamSession. Docker is the
  * runtime truth; the sessions table is metadata.
  */
-
-/** argv for the pinned ACP adapter inside the session container. */
-const AGENT_CMD = ['claude-agent-acp'];
 
 /** Creates, starts, stops and describes sessions. */
 export class SessionManager {
@@ -621,6 +623,11 @@ export class SessionManager {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
 
+    // What the box's first conversation is, settled before anything is
+    // allocated so a request naming an agent nobody has does not build a box on
+    // its way to a 400.
+    const thread = threadOptions(body.thread);
+
     // Before anything is allocated, and after the checks above: a request
     // naming a set that is not there should not pull an image on its way to a
     // 400.
@@ -645,7 +652,6 @@ export class SessionManager {
       // global set of credentials is what the settings page manages.
       profile: 'DEFAULT',
       image: this.cfg.SESSION_IMAGE,
-      agent_cmd: JSON.stringify(AGENT_CMD),
       container_id: null,
       network_name: dk.names.network(id),
       subnet,
@@ -667,10 +673,10 @@ export class SessionManager {
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+        `INSERT INTO sessions (id, name, profile, image, container_id,
            network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
            status, agent_set_id, current_thread_id, created_at, last_active_at)
-         VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
+         VALUES (@id, @name, @profile, @image, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @home_dir,
            @status, @agent_set_id, @current_thread_id, @created_at, @last_active_at)`,
       )
@@ -698,7 +704,18 @@ export class SessionManager {
       this.db
         .prepare("UPDATE sessions SET container_id = ?, status = 'running' WHERE id = ?")
         .run(containerId, id);
-      slog.info('session created', { name });
+      // The first conversation, as a row and nothing more. Nothing is minted
+      // here: a thread with no adapter-side conversation is a state the
+      // gateway already handles — it is what an adapter restart leaves behind —
+      // and the first browser to open the box brings it up. So creating a box
+      // costs no adapter spawn, and a box can be created for a harness whose
+      // credential has not been entered yet.
+      insertThread(this.db, id, {
+        harness: thread.harness,
+        modeId: thread.modeId ?? null,
+        config: thread.config ?? { ...harness(thread.harness).defaultConfig },
+      });
+      slog.info('session created', { name, harness: thread.harness });
     } catch (err) {
       slog.error('session create failed; tearing down', { error: (err as Error).message });
       await this.teardownResources(id);
@@ -972,12 +989,19 @@ export class SessionManager {
       attachedCount: upstream?.attachedCount ?? 0,
       wsToken: this.cfg.WS_AUTH_TOKEN,
       threads: listThreads(this.db, row.id).map((thread) =>
-        toThreadSummary(thread, pendingByThread, speaking, working),
+        toThreadSummary(
+          thread,
+          pendingByThread,
+          speaking,
+          working,
+          // Forking is per thread, because the answer is per adapter: a box
+          // may hold two, and each says for itself whether it can branch a
+          // conversation. An adapter that has not been reached is absent from
+          // the set, which is the honest answer rather than an assumed one.
+          upstream?.forkableHarnesses ?? new Set<HarnessId>(),
+        ),
       ),
       currentThreadId: row.current_thread_id,
-      // False until the adapter has been reached and has advertised it. The
-      // capability is unstable, so an absent one is taken at face value.
-      canFork: upstream?.canFork ?? false,
       agentSetId: row.agent_set_id,
       agentSetName: this.agents.nameOf(row.agent_set_id),
       // What was last measured, and null until there is a measurement.
@@ -1021,7 +1045,10 @@ export class SessionManager {
   threads(id: string): ThreadSummary[] {
     this.mustGet(id);
     const pendingByThread = this.pending.countsByThread(id);
-    return listThreads(this.db, id).map((thread) => toThreadSummary(thread, pendingByThread));
+    const forkable = this.upstreams.get(id)?.forkableHarnesses ?? new Set<HarnessId>();
+    return listThreads(this.db, id).map((thread) =>
+      toThreadSummary(thread, pendingByThread, new Set(), new Set(), forkable),
+    );
   }
 
   /**
@@ -1051,18 +1078,33 @@ export class SessionManager {
   }
 
   /**
-   * Adds a conversation to a session and makes it current: empty by default,
-   * or carrying another thread's context when `from` names one.
+   * Adds a conversation to a session and makes it current: on the agent and
+   * settings the body names, or carrying another thread's context when `from`
+   * names one.
    *
-   * Both need the adapter, because only the adapter can mint a thread.
+   * A fork needs the adapter, because only the adapter can branch a
+   * transcript. A fresh thread does not: its row is written first and its
+   * conversation minted after, so a harness whose credential nobody has
+   * entered still gets a thread — the dialog is what keeps a person from
+   * asking for one, and the API is not a gate.
    */
   async createThread(id: string, body: CreateThreadBody | undefined): Promise<ThreadSummary> {
     this.mustGet(id);
     const from = body?.from?.trim();
+    // A fork's options are its source's: only the adapter that wrote a
+    // transcript can load it, so a fork stays on that harness whatever the
+    // request says.
+    const options = from ? undefined : threadOptions(body?.options);
     const up = this.upstream(id);
     try {
-      const row = from ? await up.forkThread(from) : await up.newThread();
-      return toThreadSummary(row, this.pending.countsByThread(id));
+      const row = from ? await up.forkThread(from) : await up.newThread(options);
+      return toThreadSummary(
+        row,
+        this.pending.countsByThread(id),
+        new Set(),
+        new Set(),
+        up.forkableHarnesses,
+      );
     } catch (err) {
       const message = (err as Error).message;
       if (message === 'Thread not found') throw new HttpError(404, message);
@@ -1085,7 +1127,14 @@ export class SessionManager {
     this.mustGet(id);
     const row = getThread(this.db, threadId);
     if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
-    return toThreadSummary(this.upstream(id).switchThread(threadId));
+    const up = this.upstream(id);
+    return toThreadSummary(
+      up.switchThread(threadId),
+      new Map(),
+      new Set(),
+      new Set(),
+      up.forkableHarnesses,
+    );
   }
 
   /**
@@ -1100,7 +1149,13 @@ export class SessionManager {
     const row = getThread(this.db, threadId);
     if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
     setThreadDone(this.db, threadId, done);
-    return toThreadSummary({ ...row, done: done ? 1 : 0 }, this.pending.countsByThread(id));
+    return toThreadSummary(
+      { ...row, done: done ? 1 : 0 },
+      this.pending.countsByThread(id),
+      new Set(),
+      new Set(),
+      this.upstreams.get(id)?.forkableHarnesses ?? new Set<HarnessId>(),
+    );
   }
 
   /**
@@ -1194,10 +1249,12 @@ function toThreadSummary(
   pendingByThread: Map<string, number> = new Map(),
   speaking: ReadonlySet<string> = new Set(),
   working: ReadonlySet<string> = new Set(),
+  forkable: ReadonlySet<HarnessId> = new Set(),
 ): ThreadSummary {
   const acp = row.acp_session_id;
   return {
     id: row.id,
+    harness: row.harness,
     acpSessionId: acp,
     title: row.title,
     ordinal: row.ordinal,
@@ -1208,9 +1265,42 @@ function toThreadSummary(
     speaking: acp ? speaking.has(acp) : false,
     backgroundBusy: acp ? working.has(acp) : false,
     pendingCount: acp ? (pendingByThread.get(acp) ?? 0) : 0,
+    modeId: row.mode_id,
+    config: threadConfig(row),
+    // Whether this thread's own adapter advertised the fork capability, and
+    // false while it has not been reached.
+    canFork: forkable.has(row.harness),
     done: row.done === 1,
     createdAt: row.created_at,
     lastActiveAt: row.last_active_at,
   };
 }
 
+
+/**
+ * What a request asked a thread to be, checked.
+ *
+ * An absent body is Claude on its defaults, which is what every client from
+ * before harnesses existed means and what the dashboard sends until somebody
+ * chooses otherwise. An unknown harness is a 400 rather than a thread on the
+ * wrong agent, and a config map is taken as it comes: which options a harness
+ * offers is the adapter's to say, and one it does not know is refused by the
+ * adapter and logged rather than fatal.
+ */
+function threadOptions(options: ThreadOptions | undefined): ThreadOptions {
+  const wanted = options?.harness ?? DEFAULT_HARNESS;
+  try {
+    harness(wanted);
+  } catch {
+    throw new HttpError(400, `Unknown harness: ${String(wanted)}`);
+  }
+  const config: Record<string, string> = {};
+  for (const [key, value] of Object.entries(options?.config ?? {})) {
+    if (typeof value === 'string') config[key] = value;
+  }
+  return {
+    harness: wanted,
+    ...(options?.modeId ? { modeId: options.modeId } : {}),
+    ...(options?.config ? { config } : {}),
+  };
+}

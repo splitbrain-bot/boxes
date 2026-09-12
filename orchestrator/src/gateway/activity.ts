@@ -1,3 +1,4 @@
+import { harness, type HarnessId } from '../harness.ts';
 import { startsBackgroundWork } from './background.ts';
 
 /**
@@ -135,8 +136,12 @@ export class Activity {
    * that has already happened, and reading one would show a working agent for
    * as long as the replay takes. The caller holds that line, the same one it
    * holds for `background.ts`.
+   *
+   * `harnessId` is whose adapter the update came off, which decides what a
+   * tool name means: the calls that background their own work are one
+   * harness's names and not the other's.
    */
-  observe(acpThreadId: string, update: unknown): void {
+  observe(acpThreadId: string, update: unknown, harnessId: HarnessId): void {
     if (!update || typeof update !== 'object') return;
     const u = update as {
       sessionUpdate?: string;
@@ -157,7 +162,7 @@ export class Activity {
     if (!u.sessionUpdate || !AT_WORK.has(u.sessionUpdate)) return;
 
     if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') {
-      this.track(acpThreadId, u);
+      this.track(acpThreadId, u, harnessId);
     }
     this.mark(acpThreadId);
   }
@@ -179,10 +184,12 @@ export class Activity {
       rawInput?: unknown;
       _meta?: { claudeCode?: { toolName?: string } };
     },
+    harnessId: HarnessId,
   ): void {
     if (!call.toolCallId) return;
     const state = this.state(acpThreadId);
-    if (FINISHED.has(call.status ?? '') || startsBackgroundWork(call)) {
+    const alwaysBackground = harness(harnessId).alwaysBackground;
+    if (FINISHED.has(call.status ?? '') || startsBackgroundWork(call, alwaysBackground)) {
       state.open.delete(call.toolCallId);
       return;
     }

@@ -2,7 +2,13 @@ import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SessionStatus } from '../../shared/types.ts';
+import type {
+  HarnessCatalog,
+  HarnessId,
+  SessionConfigOption,
+  SessionModeState,
+  SessionStatus,
+} from '../../shared/types.ts';
 
 /**
  * SQLite persistence in WAL mode. The database holds session metadata only:
@@ -15,8 +21,6 @@ export interface SessionRow {
   name: string;
   profile: string;
   image: string;
-  /** JSON array of argv for the ACP adapter. */
-  agent_cmd: string;
   container_id: string | null;
   network_name: string;
   subnet: string;
@@ -83,6 +87,14 @@ export interface SessionRow {
 export interface ThreadRow {
   id: string;
   session_id: string;
+  /**
+   * Which agent runs this conversation, by its id in the harness registry.
+   *
+   * On the thread rather than on the session because a box holds one checkout
+   * and may run both agents over it, and because a transcript can only be
+   * loaded back by the adapter that wrote it.
+   */
+  harness: HarnessId;
   acp_session_id: string | null;
   /**
    * What the thread is called: the title the agent generates at the end of a
@@ -113,8 +125,18 @@ export interface ThreadRow {
    * lives, and a respawn loads the conversation back without it.
    */
   mode_id: string | null;
-  /** The model it is meant to be on, on the same terms. */
-  model_id: string | null;
+  /**
+   * Everything else the thread is configured with, as a JSON map of the
+   * adapter's own option id to its value: the model, an effort level, whatever
+   * else the harness offers.
+   *
+   * On the same terms as the mode, and for the same reason — the adapter holds
+   * these only for as long as its process lives. The option that merely echoes
+   * the mode is never stored here: a mode travels through `session/set_mode`
+   * and `mode_id` alone, and a thread put into its mode twice by two
+   * mechanisms is how the two answers drift apart.
+   */
+  config: string;
   /**
    * 1 once the reader has marked this conversation finished with. Read by the
    * dashboard and by nothing else: it changes what a row looks like, never
@@ -452,6 +474,29 @@ export const MIGRATIONS: string[] = [
     value      TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   );
+
+  -- Which agent a thread runs, and what it is configured with beyond its
+  -- mode. Existing threads are Claude's, which is the only harness there has
+  -- been, and the model each was left on keeps meaning what it meant: both
+  -- adapters call that option "model".
+  ALTER TABLE threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
+  ALTER TABLE threads ADD COLUMN config  TEXT NOT NULL DEFAULT '{}';
+  UPDATE threads SET config = json_object('model', model_id) WHERE model_id IS NOT NULL;
+  ALTER TABLE threads DROP COLUMN model_id;
+
+  -- The argv comes from the harness registry now, so a session no longer
+  -- carries the adapter it was created with: the thread says which adapter it
+  -- needs, and a box may need either.
+  ALTER TABLE sessions DROP COLUMN agent_cmd;
+
+  -- What each adapter last advertised, for a dialog that has no thread to ask
+  -- and must not start a box to find out.
+  CREATE TABLE harness_catalog (
+    harness        TEXT PRIMARY KEY,
+    modes          TEXT NOT NULL,
+    config_options TEXT NOT NULL,
+    seen_at        INTEGER NOT NULL
+  );
   `,
 ];
 
@@ -612,19 +657,25 @@ export function getThread(db: Db, threadId: string): ThreadRow | undefined {
 }
 
 /**
- * One thread by the adapter's own id for it, within a session.
+ * One thread by the adapter's own id for it, within a session and a harness.
  *
  * The gateway knows a conversation by that id and nothing else, so this is
  * how a message about it finds the row a link or a name has to come from.
+ * Both adapters mint UUIDs and a collision is not expected; the harness is
+ * part of the key as hygiene, because a message arrives on one adapter's
+ * connection and can only be about a thread of that adapter.
  */
 export function threadByAcpId(
   db: Db,
   sessionId: string,
+  harness: HarnessId,
   acpSessionId: string,
 ): ThreadRow | undefined {
   return db
-    .prepare('SELECT * FROM threads WHERE session_id = ? AND acp_session_id = ?')
-    .get(sessionId, acpSessionId) as ThreadRow | undefined;
+    .prepare(
+      'SELECT * FROM threads WHERE session_id = ? AND harness = ? AND acp_session_id = ?',
+    )
+    .get(sessionId, harness, acpSessionId) as ThreadRow | undefined;
 }
 
 /** The thread a session's gateway is currently answering for, or undefined. */
@@ -638,18 +689,32 @@ export function currentThread(db: Db, sessionId: string): ThreadRow | undefined 
     .get(sessionId) as ThreadRow | undefined;
 }
 
+/** What a thread is created as. Everything but the harness has a default. */
+export interface NewThread {
+  harness: HarnessId;
+  /** The adapter's own id, or null for a thread whose conversation is minted later. */
+  acpSessionId?: string | null;
+  /** The mode it is meant to be in, or null for its harness's default. */
+  modeId?: string | null;
+  /** What it is configured with, by option id. */
+  config?: Record<string, string>;
+  /** The thread it was forked from, while it has no transcript of its own. */
+  inheritsFrom?: string | null;
+}
+
 /**
  * Inserts a thread and makes it the session's current one.
  *
  * The ordinal is one past the highest the session has ever used, so a name
  * like "Thread 2" stays that thread's for good.
+ *
+ * The harness, the mode and the config are given here rather than written
+ * afterwards because they are what the thread *is*: a row created without them
+ * would be a conversation on an unknown agent for as long as it took the
+ * second statement to run, and the first thread of a box is created before
+ * any adapter has been started.
  */
-export function insertThread(
-  db: Db,
-  sessionId: string,
-  acpSessionId: string | null,
-  inheritsFrom: string | null = null,
-): ThreadRow {
+export function insertThread(db: Db, sessionId: string, thread: NewThread): ThreadRow {
   const now = Date.now();
   const id = `t${randomBytes(6).toString('hex')}`;
   const next = db
@@ -658,24 +723,25 @@ export function insertThread(
   const row: ThreadRow = {
     id,
     session_id: sessionId,
-    acp_session_id: acpSessionId,
+    harness: thread.harness,
+    acp_session_id: thread.acpSessionId ?? null,
     title: null,
     ordinal: next.n,
     turn_active: 0,
-    inherits_from: inheritsFrom,
-    mode_id: null,
-    model_id: null,
+    inherits_from: thread.inheritsFrom ?? null,
+    mode_id: thread.modeId ?? null,
+    config: JSON.stringify(thread.config ?? {}),
     done: 0,
     created_at: now,
     last_active_at: now,
   };
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
-         turn_active, inherits_from, mode_id, model_id, done, created_at,
+      `INSERT INTO threads (id, session_id, harness, acp_session_id, title, ordinal,
+         turn_active, inherits_from, mode_id, config, done, created_at,
          last_active_at)
-       VALUES (@id, @session_id, @acp_session_id, @title, @ordinal,
-         @turn_active, @inherits_from, @mode_id, @model_id, @done, @created_at,
+       VALUES (@id, @session_id, @harness, @acp_session_id, @title, @ordinal,
+         @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
          @last_active_at)`,
     ).run(row);
     db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(id, sessionId);
@@ -724,9 +790,44 @@ export function setThreadMode(db: Db, threadId: string, modeId: string | null): 
   db.prepare('UPDATE threads SET mode_id = ? WHERE id = ?').run(modeId, threadId);
 }
 
-/** Records the model a thread is meant to be on, on the same terms. */
-export function setThreadModel(db: Db, threadId: string, modelId: string | null): void {
-  db.prepare('UPDATE threads SET model_id = ? WHERE id = ?').run(modelId, threadId);
+/**
+ * Records everything else a thread is configured with, replacing the whole
+ * map.
+ *
+ * Whole rather than per key, because the adapter answers a change with its
+ * full list of options and that answer is the record that matters. A caller
+ * with one option to change reads, merges and writes; see
+ * `gateway/adapter.ts`.
+ */
+export function setThreadConfig(
+  db: Db,
+  threadId: string,
+  config: Record<string, string>,
+): void {
+  db.prepare('UPDATE threads SET config = ? WHERE id = ?').run(
+    JSON.stringify(config),
+    threadId,
+  );
+}
+
+/**
+ * A thread's config map, as a map.
+ *
+ * Tolerant of anything that is not one: the column is JSON written by this
+ * process, and a row that somehow holds something else should cost the thread
+ * its settings rather than every read of it.
+ */
+export function threadConfig(row: ThreadRow): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(row.config);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+    const entries = Object.entries(parsed as Record<string, unknown>).filter(
+      ([, value]) => typeof value === 'string',
+    );
+    return Object.fromEntries(entries) as Record<string, string>;
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -848,4 +949,69 @@ export function countPushSubscriptions(db: Db): number {
     n: number;
   };
   return row.n;
+}
+
+// --- the harness catalogue ---------------------------------------------------
+
+/** One harness's cached answer, as stored. */
+export interface HarnessCatalogRow {
+  harness: string;
+  /** JSON: the `modes` of the last answer, or `null`. */
+  modes: string;
+  /** JSON: the `configOptions` of the last answer. */
+  config_options: string;
+  seen_at: number;
+}
+
+/**
+ * Records what an adapter advertised, against its harness.
+ *
+ * Called for every `session/new`, `session/load` and `session/fork` answer
+ * that carries either list, because that is every moment a running adapter
+ * says what it offers. A field the answer does not carry leaves what was last
+ * seen alone: an adapter that answers a load with modes and no config options
+ * should not empty the half it said nothing about.
+ */
+export function upsertHarnessCatalog(
+  db: Db,
+  harness: HarnessId,
+  modes: SessionModeState | null | undefined,
+  configOptions: SessionConfigOption[] | null | undefined,
+): void {
+  const previous = readHarnessCatalog(db, harness);
+  const next: HarnessCatalog = {
+    modes: modes ?? previous?.modes ?? null,
+    configOptions: configOptions ?? previous?.configOptions ?? [],
+    seenAt: Date.now(),
+  };
+  db.prepare(
+    `INSERT INTO harness_catalog (harness, modes, config_options, seen_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(harness) DO UPDATE SET modes = excluded.modes,
+       config_options = excluded.config_options, seen_at = excluded.seen_at`,
+  ).run(harness, JSON.stringify(next.modes), JSON.stringify(next.configOptions), next.seenAt);
+}
+
+/**
+ * What one harness's adapter last advertised, or null on a deployment that has
+ * never run it.
+ *
+ * A cache and not a truth: it is what some adapter said at some point, and the
+ * dialog reading it offers it knowing the adapter corrects it on the thread's
+ * first answer. A row that cannot be parsed is treated as no row at all.
+ */
+export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog | null {
+  const row = db.prepare('SELECT * FROM harness_catalog WHERE harness = ?').get(harness) as
+    | HarnessCatalogRow
+    | undefined;
+  if (!row) return null;
+  try {
+    return {
+      modes: JSON.parse(row.modes) as SessionModeState | null,
+      configOptions: JSON.parse(row.config_options) as SessionConfigOption[],
+      seenAt: row.seen_at,
+    };
+  } catch {
+    return null;
+  }
 }
