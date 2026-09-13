@@ -38,7 +38,7 @@ const schema = z.object({
   HOST_DATA_DIR: z.string().default(''),
   PORT: z.coerce.number().int().positive().default(3000),
 
-  SESSION_IMAGE: z.string().min(1).default('boxes-session:latest'),
+  SESSION_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/session:latest'),
   /**
    * uid and gid session containers run as, and so the owner of every file in
    * a workspace.
