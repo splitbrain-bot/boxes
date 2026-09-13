@@ -145,8 +145,22 @@ const MAX_INHERIT_HOPS = 32;
 const DEFAULT_MODEL_ID = 'opus';
 
 /**
- * What the adapter is asked for on the thinking side, on every conversation
- * this orchestrator creates or brings back.
+ * A model named on every conversation, so that the adapter offers it.
+ *
+ * The adapter lists the models the account's plan covers. Fable is billed
+ * against usage credits rather than the plan, so it is left out of that list
+ * unless a conversation names it, and naming it is what puts it in the
+ * dashboard's picker. Naming a model does not select it: a fresh thread
+ * still starts on {@link DEFAULT_MODEL_ID}.
+ */
+const OFFERED_MODEL_ID = 'fable';
+
+/**
+ * What the adapter is asked for on every conversation this orchestrator
+ * creates or brings back.
+ *
+ * `model` names a model to offer beyond the ones the adapter lists of its
+ * own accord. The rest is thinking.
  *
  * `display` carries it. Current models default it to `omitted`, which streams
  * thinking blocks carrying a signature and no text, so the adapter has
@@ -156,16 +170,17 @@ const DEFAULT_MODEL_ID = 'opus';
  *
  * `enabled` with a budget rather than `adaptive`: the two behave the same on
  * a current model, and a model that predates `adaptive` can reject it. Which
- * model a thread runs is the user's choice from the header, while this is
- * fixed at the thread's creation.
+ * model a thread runs is the user's choice from the header, while the
+ * thinking setting is fixed at the thread's creation.
  *
  * It travels in `_meta`, which is where ACP puts an agent's own extensions:
  * the adapter reads `_meta.claudeCode.options` and lays it over the options
  * it hands the Claude Agent SDK.
  */
-const THINKING_META = {
+const SESSION_META = {
   claudeCode: {
     options: {
+      model: OFFERED_MODEL_ID,
       thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
     },
   },
@@ -880,7 +895,7 @@ export class UpstreamSession {
           sessionId: acpSessionId,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
-          _meta: THINKING_META,
+          _meta: SESSION_META,
         }),
       )) as {
         modes?: SessionModeState | null;
@@ -934,7 +949,7 @@ export class UpstreamSession {
       ...(from ? { sessionId: from } : {}),
       cwd: dk.WORKSPACE_DIR,
       mcpServers: [],
-      _meta: THINKING_META,
+      _meta: SESSION_META,
     })) as {
       sessionId?: string;
       modes?: SessionModeState | null;
@@ -1500,7 +1515,7 @@ export class UpstreamSession {
           sessionId: source.acp_session_id,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
-          _meta: THINKING_META,
+          _meta: SESSION_META,
         }),
       );
       this.slog.info('replayed a fork from the thread it came from', {
