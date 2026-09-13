@@ -458,6 +458,195 @@ test('a new review clears every comment, behind a confirmation', async () => {
   }
 });
 
+// --- editing ----------------------------------------------------------------
+
+test('a line can be fixed in place, and the save reaches the workspace', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="2"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+
+    // The same rows, with a textarea over the code: the line numbers and the
+    // highlighting are the pane's own, not a second editor's.
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+    await expect.poll(() => page.locator('[data-line="2"]').isVisible()).toBe(true);
+    await shoot(page, 'review-edit-phone');
+
+    // Nothing to save until something is typed.
+    expect(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled()).toBe(true);
+
+    await editor.fill(
+      'export function boot(): void {\n  wireTheRouter();\n  console.log("up");\n}\n',
+    );
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+    await expect.poll(() => stub.reviewCalls.length).toBe(1);
+    expect(stub.reviewCalls[0]).toMatchObject({
+      method: 'PUT file',
+      sessionId: SESSION,
+      body: { path: 'app/src/boot.ts' },
+    });
+    // The file of the workspace the agent is working in, which is the whole
+    // point of the review living here.
+    await expect
+      .poll(() => stub.state.reviews[SESSION]!.files['app/src/boot.ts'])
+      .toContain('wireTheRouter();');
+    // And saved is saved: nothing left to write.
+    await expect
+      .poll(() => page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
+      .toBe(true);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the line being read stays put across a switch into editing', async () => {
+  // A comment high up, so the card between the rows is what moves everything
+  // below it when edit mode folds it away.
+  stub.state.reviews[SESSION]!.annotations['long.ts'] = {
+    3: { line: 3, comment: 'a card tall enough to push the rest down', outdated: false },
+  };
+  stub.state.reviews[SESSION]!.files['long.ts'] = Array.from(
+    { length: 400 },
+    (_, i) => `const line${i} = ${i};`,
+  ).join('\n');
+  stub.state.reviews[SESSION]!.repos = [
+    { path: '', name: 'workspace', head: 'a'.repeat(40), baseCommit: '' },
+  ];
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=long.ts`,
+  );
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('a card tall enough').isVisible()).toBe(true);
+
+    await pane.evaluate((el) => {
+      el.scrollTop = 2000;
+    });
+    /** The line at the top of the pane, which is what must not move. */
+    const topLine = (): Promise<number | null> =>
+      pane.evaluate((el) => {
+        for (const row of el.querySelectorAll<HTMLElement>('[data-line]')) {
+          if (row.offsetTop + row.offsetHeight > el.scrollTop) return Number(row.dataset.line);
+        }
+        return null;
+      });
+    const before = await topLine();
+    expect(before).toBeGreaterThan(1);
+
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    await expect
+      .poll(() => page.getByRole('textbox', { name: 'File contents' }).isVisible())
+      .toBe(true);
+    // The card folded away, so every pixel offset below it changed — and the
+    // reader is still looking at the line they were looking at.
+    expect(await topLine()).toBe(before);
+
+    // And back again, with the card between the rows once more.
+    await page.getByRole('button', { name: 'Stop editing and go back to commenting' }).click();
+    await expect.poll(() => page.getByText('a card tall enough').isVisible()).toBe(true);
+    expect(await topLine()).toBe(before);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a save the agent got in first is refused, and the choice is offered', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=lib%2Findex.ts`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+    await editor.fill('export const version = "2.0.0";\n');
+
+    // The box is running while the review is open, which is allowed: the
+    // agent writes the same file.
+    stub.state.reviews[SESSION]!.files['lib/index.ts'] = 'export const version = "9.9.9";\n';
+
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect
+      .poll(() => page.getByText('The agent changed this file while you were editing it.').isVisible())
+      .toBe(true);
+    // Refused rather than applied, and the buffer is still there to save.
+    expect(stub.state.reviews[SESSION]!.files['lib/index.ts']).toBe(
+      'export const version = "9.9.9";\n',
+    );
+    await shoot(page, 'review-edit-conflict-desktop');
+
+    await page.getByRole('button', { name: 'Save anyway' }).click();
+    await expect
+      .poll(() => stub.state.reviews[SESSION]!.files['lib/index.ts'])
+      .toBe('export const version = "2.0.0";\n');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('walking away from unsaved edits asks first', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2FREADME.md`,
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+    await editor.fill('# demo\n\nRewritten by hand.\n');
+
+    await page.getByRole('button', { name: 'Back to the file list' }).click();
+    await expect.poll(() => page.getByText('Leave without saving?').isVisible()).toBe(true);
+    // Cancelling leaves the buffer exactly where it was.
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect.poll(() => editor.inputValue()).toContain('Rewritten by hand.');
+
+    await page.getByRole('button', { name: 'Back to the file list' }).click();
+    await page.getByRole('button', { name: 'Discard the edits' }).click();
+    await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
+    // Nothing was written, which is what discarding means.
+    expect(stub.state.reviews[SESSION]!.files['app/README.md']).toBe(
+      '# demo\n\nA project the agent cloned.\n',
+    );
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a file the pane cannot show whole cannot be edited', async () => {
+  stub.state.reviews[SESSION]!.statuses['app/gone.ts'] = 'deleted';
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2Fgone.ts`,
+  );
+  try {
+    await expect.poll(() => page.getByText('This file was deleted').isVisible()).toBe(true);
+    // No control rather than one that refuses: there is nothing to edit.
+    expect(await page.getByRole('button', { name: 'Edit this file' }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // --- the base revision ------------------------------------------------------
 
 test('the base picker sets a revision and says which one is active', async () => {
@@ -709,11 +898,15 @@ test('the review header gives way to reading the file, and returns', async () =>
     // collapsed to nothing. Below md the only way to the file tree is the
     // button in this header, so switching files from here takes a flick up
     // first, the same flick as in a thread.
-    expect(await inReach()).toBe(false);
+    //
+    // Polled rather than read once: the decision is a state change and the
+    // collapse is a transition after it, so a single reading right after the
+    // decision is a reading of whichever frame the animation had got to.
+    await expect.poll(inReach).toBe(false);
 
     await read(-100, 2);
     await expect.poll(away).toBe(false);
-    expect(await inReach()).toBe(true);
+    await expect.poll(inReach).toBe(true);
 
     expect(errors).toEqual([]);
   } finally {

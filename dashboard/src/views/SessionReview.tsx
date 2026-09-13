@@ -1,5 +1,5 @@
 import { ArrowLeft, FilePlus2, Send } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
@@ -13,11 +13,13 @@ import { ReviewToolbar } from '@/components/review/ReviewToolbar';
 import { ReviewTree } from '@/components/review/ReviewTree';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { useCodeEdit } from '@/hooks/use-code-edit';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
+import { anchorAt, rowOffsets, scrollForAnchor, type ScrollAnchor } from '@/lib/anchor';
 import { historyIndex } from '@/lib/history';
 import { stagePrompt } from '@/lib/staged-prompt';
 import { cn } from '@/lib/utils';
@@ -32,7 +34,9 @@ import {
   open as openReview,
   refreshOnReturn,
   saveComment,
+  saveFile,
   setBase,
+  setDirty,
   useReview,
 } from '../stores/review.ts';
 
@@ -92,6 +96,26 @@ export function SessionReview() {
   const [confirmNew, setConfirmNew] = useState(false);
   /** The comment a tap on a bin is asking to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  /** The buffer behind edit mode, and what to colour it with. */
+  const edit = useCodeEdit(file);
+  /**
+   * True once a save has been refused because the file moved under it, until
+   * the reviewer answers. What they are being asked is whose version wins, so
+   * the buffer is kept either way.
+   */
+  const [conflict, setConflict] = useState(false);
+  /**
+   * Something to do once the reviewer has agreed to lose what they typed, or
+   * null. Every way out of a file goes through this, because all of them end
+   * the edit.
+   */
+  const [leaving, setLeaving] = useState<{ go: () => void } | null>(null);
+  /** What they agreed to, waiting for the question to be out of the way. */
+  const agreed = useRef<(() => void) | null>(null);
+  /** The pane's scroller, for holding the reader's line across a mode switch. */
+  const paneRef = useRef<HTMLDivElement>(null);
+  /** An anchor taken before a switch, to be put back after it. */
+  const held = useRef<ScrollAnchor | null>(null);
   /**
    * The conversation this review was opened from, so leaving it goes back
    * there rather than to whichever thread the session has current — after a
@@ -157,6 +181,41 @@ export function SessionReview() {
   }, [path]);
 
   /**
+   * Runs something that ends the edit, asking first when that would lose work.
+   *
+   * Every way out of an open file is one of these: the mode toggle, another
+   * file from the tree, the step back to the list, and the way out of the
+   * review altogether. A comment is a sentence with a composer of its own; a
+   * buffer is a whole file of work with no undo behind it once it is gone, so
+   * it is worth the question.
+   */
+  const guard = useCallback(
+    (go: () => void) => {
+      if (edit.dirty) setLeaving({ go });
+      else go();
+    },
+    [edit.dirty],
+  );
+
+  /**
+   * Does what the reviewer agreed to, once the question is off the stack.
+   *
+   * A dialog is a history entry of its own, so that the phone's back gesture
+   * closes it rather than the screen behind it. Most of what is waiting here
+   * is a navigation, and one made while that entry is still on top would be
+   * spent on the dialog instead of the file. So the intent waits for the
+   * first location that is not the dialog's own — and where a dialog pushed
+   * no entry at all, that is this one, and it goes at once.
+   */
+  useEffect(() => {
+    const go = agreed.current;
+    if (!go || leaving !== null) return;
+    if ((location.state as { overlay?: boolean } | null)?.overlay) return;
+    agreed.current = null;
+    go();
+  }, [leaving, location]);
+
+  /**
    * Opens a file — a step of the stack on a phone, and not one on a pointer.
    *
    * Below md the file takes the screen from the tree, so it is somewhere the
@@ -168,17 +227,19 @@ export function SessionReview() {
    */
   const openPath = useCallback(
     (next: string) => {
-      setParams(
-        (current) => {
-          const params = new URLSearchParams(current);
-          params.set('path', next);
-          return params;
-        },
-        { replace: wide },
-      );
-      setScrollTo(null);
+      guard(() => {
+        setParams(
+          (current) => {
+            const params = new URLSearchParams(current);
+            params.set('path', next);
+            return params;
+          },
+          { replace: wide },
+        );
+        setScrollTo(null);
+      });
     },
-    [setParams, wide],
+    [guard, setParams, wide],
   );
 
   /**
@@ -191,20 +252,107 @@ export function SessionReview() {
    * search string is rewritten in place instead.
    */
   const closeOpenFile = useCallback(() => {
-    if (historyIndex() > up.entry) navigate(-1);
-    else
-      setParams(
-        (current) => {
-          const params = new URLSearchParams(current);
-          params.delete('path');
-          return params;
-        },
-        { replace: true },
-      );
-    // File → tree does not remount, so without this nothing would refetch and
-    // the tree would keep the statuses and counts it was painted with.
-    void loadTree();
-  }, [up.entry, navigate, setParams]);
+    guard(() => {
+      if (historyIndex() > up.entry) navigate(-1);
+      else
+        setParams(
+          (current) => {
+            const params = new URLSearchParams(current);
+            params.delete('path');
+            return params;
+          },
+          { replace: true },
+        );
+      // File → tree does not remount, so without this nothing would refetch and
+      // the tree would keep the statuses and counts it was painted with.
+      void loadTree();
+    });
+  }, [guard, up.entry, navigate, setParams]);
+
+  /**
+   * Switches between commenting and editing, holding the reader's line.
+   *
+   * The comment cards and the deletion markers between the rows fold away on
+   * the way into edit mode and come back on the way out, so without this the
+   * line somebody was looking at would be somewhere else afterwards — and the
+   * line they were looking at is the one they went in to fix. The anchor is
+   * taken here rather than in an effect because by the time the new mode has
+   * painted, the layout it was measured against is gone.
+   */
+  const switchMode = useCallback(
+    (next: boolean) => {
+      const element = paneRef.current;
+      held.current = element ? anchorAt(rowOffsets(element), element.scrollTop) : null;
+      if (next) {
+        // A composer standing open over the file belongs to the other mode.
+        compose(null);
+        edit.start();
+      } else {
+        setConflict(false);
+        edit.stop();
+      }
+    },
+    [edit],
+  );
+
+  const editing = edit.text !== null;
+  /**
+   * Whether this file can be edited at all.
+   *
+   * The three the pane cannot show whole are the three it must not write
+   * back: there is nothing to edit in a deleted file, nothing readable in a
+   * binary one, and saving a truncated one would delete everything past where
+   * the read stopped.
+   */
+  const editable = file !== null && !file.deleted && !file.binary && !file.truncated;
+
+  // Put the reader back on their line, before the new mode is painted.
+  useLayoutEffect(() => {
+    const element = paneRef.current;
+    const anchor = held.current;
+    held.current = null;
+    if (!element || !anchor) return;
+    const top = scrollForAnchor(rowOffsets(element), anchor);
+    if (top !== null) element.scrollTop = top;
+  }, [editing]);
+
+  /**
+   * Writes the buffer to the workspace.
+   *
+   * `force` is the answer to a refused save: the file moved under the edit,
+   * the reviewer has been told so, and they are saying their version is the
+   * one to keep.
+   */
+  const save = useCallback(
+    (force: boolean) => {
+      if (!file || edit.text === null) return;
+      void saveFile(file.path, edit.text, force ? null : file.hash).then((result) => {
+        setConflict(!result.ok && result.conflict);
+      });
+    },
+    [file, edit.text],
+  );
+
+  // Freshness is the store's, so it has to know there is unsaved work in the
+  // pane: a refetch on the way back to the tab would otherwise take it.
+  useEffect(() => {
+    setDirty(edit.dirty);
+  }, [edit.dirty]);
+  useEffect(() => () => setDirty(false), []);
+
+  /**
+   * Opening or closing the composer on a line, with an identity that never
+   * changes — the pane's rows are memoized against typing, and a fresh
+   * function each render would undo that.
+   */
+  const selectLine = useCallback((line: number) => {
+    compose(useReview.getState().composing === line ? null : line);
+  }, []);
+
+  const showHunk = useCallback(
+    (index: number) => setHunk(file?.diff.hunks[index] ?? null),
+    [file?.diff.hunks],
+  );
 
   /** Deletion markers by the line they sit after, for the pane. */
   const deletions = useMemo(
@@ -337,7 +485,10 @@ export function SessionReview() {
 
   return (
     <div ref={container} className="flex h-dvh flex-col">
-      <Shelf away={away}>
+      {/* The header stands aside for reading, and stays put for editing: the
+          toolbar under it carries Save, and a phone with its keyboard up has
+          no room to go looking for a control that has scrolled away. */}
+      <Shelf away={away && !editing}>
         <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
           {/* One back button, one step out, wherever it is pressed.
               On a phone the stack is sessions → thread → file list → file, so
@@ -364,7 +515,20 @@ export function SessionReview() {
             </Button>
           ) : (
             <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
-              <a href={up.href} onClick={up.onClick} aria-label="Back to the thread">
+              <a
+                href={up.href}
+                onClick={(event) => {
+                  // Unsaved work is worth the question here too, and the link
+                  // has to be stopped before the step out rather than after.
+                  if (edit.dirty && plainClick(event)) {
+                    event.preventDefault();
+                    setLeaving({ go: up.go });
+                    return;
+                  }
+                  up.onClick(event);
+                }}
+                aria-label="Back to the thread"
+              >
                 <ArrowLeft className="size-4" />
               </a>
             </Button>
@@ -417,7 +581,8 @@ export function SessionReview() {
               // Back to the conversation, not a second copy of it pushed on
               // top — and the prompt handed over beside the router rather
               // than in the entry's state, which back and forward replay.
-              onClick={handoff}
+              // Guarded, because this leaves the review like any other exit.
+              onClick={() => guard(handoff)}
               title="Open the thread with a prompt to address these comments"
             >
               <Send className="size-3.5" />
@@ -473,9 +638,16 @@ export function SessionReview() {
                 changeCount={changedLines.length}
                 commentCount={commentedLines.length}
                 wrap={wrap}
+                editable={editable}
+                editing={editing}
+                dirty={edit.dirty}
+                busy={saving}
                 onWrap={() => setWrap((w) => !w)}
                 onStepChange={(direction) => step(changedLines, direction)}
                 onStepComment={(direction) => step(commentedLines, direction)}
+                onEdit={() => (editing ? guard(() => switchMode(false)) : switchMode(true))}
+                onSave={() => save(false)}
+                onRevert={edit.revert}
               />
               {file.deleted ? (
                 <Empty>This file was deleted, so there is nothing left to read.</Empty>
@@ -485,13 +657,51 @@ export function SessionReview() {
                 <>
                   {file.truncated ? (
                     <Notice tone="warn" className="shrink-0 border-b px-3 py-1.5 text-xs">
-                      This file is larger than the display limit. Only the first part is shown.
+                      This file is larger than the display limit. Only the first part is shown, and
+                      it cannot be edited.
+                    </Notice>
+                  ) : null}
+                  {/* The agent works while the review is open, so a save can
+                      land on a file that has moved on. Both versions still
+                      exist at this point — theirs on disk, the reviewer's in
+                      the pane — so the choice is the reviewer's to make. */}
+                  {conflict ? (
+                    <Notice tone="warn" className="shrink-0 border-b px-3 py-1.5 text-xs">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span>The agent changed this file while you were editing it.</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={saving}
+                          onClick={() => save(true)}
+                        >
+                          Save anyway
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={saving}
+                          onClick={() => {
+                            // Asked plainly enough already, so no second
+                            // question — and the file is read again, because
+                            // what is on screen is no longer what is on disk.
+                            switchMode(false);
+                            void loadFile(file.path);
+                          }}
+                        >
+                          Drop my changes
+                        </Button>
+                      </span>
                     </Notice>
                   ) : null}
                   <CodePane
+                    scrollRef={paneRef}
                     path={file.path}
                     content={file.content}
-                    tokens={file.tokens}
+                    tokens={edit.tokens}
+                    tokensFor={edit.tokensFor}
                     diffLines={file.diff.lines}
                     deletions={deletions}
                     hunkByLine={hunkByLine}
@@ -499,8 +709,9 @@ export function SessionReview() {
                     composing={composing}
                     wrap={wrap}
                     scrollTo={scrollTo}
-                    onSelectLine={(line) => compose(composing === line ? null : line)}
-                    onShowHunk={(index) => setHunk(file.diff.hunks[index] ?? null)}
+                    edit={edit.text === null ? null : { text: edit.text, onChange: edit.change }}
+                    onSelectLine={selectLine}
+                    onShowHunk={showHunk}
                     renderUnderLine={underLine}
                   />
                 </>
@@ -547,6 +758,25 @@ export function SessionReview() {
         />
       ) : null}
 
+      {leaving ? (
+        <ConfirmDialog
+          title="Leave without saving?"
+          description="The edits in this file are lost. The file on disk is untouched."
+          confirmLabel="Discard the edits"
+          danger
+          busy={saving}
+          onCancel={() => setLeaving(null)}
+          onConfirm={() => {
+            // Out of edit mode here, because that is what was agreed to; what
+            // to do next waits for the dialog's own history entry to go.
+            agreed.current = leaving.go;
+            edit.stop();
+            setConflict(false);
+            setLeaving(null);
+          }}
+        />
+      ) : null}
+
       {confirmNew ? (
         <ConfirmDialog
           title="Start a new review?"
@@ -562,6 +792,24 @@ export function SessionReview() {
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Whether a click is the plain one a link's own handler should answer.
+ *
+ * A modified click is the browser being asked for a tab or a window, which
+ * leaves this one where it is — and the buffer in it untouched, so there is
+ * nothing to ask about.
+ */
+function plainClick(event: React.MouseEvent): boolean {
+  return (
+    !event.defaultPrevented &&
+    event.button === 0 &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey
   );
 }
 

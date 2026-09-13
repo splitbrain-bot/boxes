@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -522,6 +524,152 @@ describe('the file endpoint', () => {
     const { body } = await get<ReviewFileResponse>('/api/sessions/hhh/review/file?path=fresh.ts');
     assert.equal(body.status, 'untracked');
     assert.deepEqual(body.diff.lines, { 1: 'added', 2: 'added' });
+  });
+});
+
+// --- saving an edited file --------------------------------------------------
+
+describe('saving a file', () => {
+  /** A session with a repository, one committed file and one binary. */
+  function editable(id: string): string {
+    const ws = insertSession(id);
+    initRepo(ws);
+    write(ws, 'code.ts', 'one\ntwo\nthree\n');
+    writeFileSync(join(ws, 'binary.dat'), Buffer.from([0x41, 0x00, 0x42]));
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    return ws;
+  }
+
+  /** PUT a file's new content. */
+  async function save(
+    id: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ status: number; body: ReviewFileResponse }> {
+    const res = await orchestrator.app.inject({
+      method: 'PUT',
+      url: `/api/sessions/${id}/review/file`,
+      payload,
+    });
+    return { status: res.statusCode, body: res.json() as ReviewFileResponse };
+  }
+
+  /** The hash the browser would be holding, from the file endpoint itself. */
+  async function hashOf(id: string, path: string): Promise<string> {
+    const { body } = await get<ReviewFileResponse>(
+      `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,
+    );
+    return body.hash;
+  }
+
+  test('an edit reaches the file, and the whole file view comes back', async () => {
+    const ws = editable('aaa');
+    const hash = await hashOf('aaa', 'code.ts');
+
+    const { status, body } = await save('aaa', {
+      path: 'code.ts',
+      content: 'one\nTWO\nthree\n',
+      hash,
+    });
+    assert.equal(status, 200);
+    assert.equal(readFileSync(join(ws, 'code.ts'), 'utf8'), 'one\nTWO\nthree\n');
+    // One round trip repaints the pane: the content, and the diff the edit
+    // just created.
+    assert.equal(body.content, 'one\nTWO\nthree\n');
+    assert.equal(body.status, 'modified');
+    assert.equal(body.diff.lines['2'], 'modified');
+    // And the hash to save against next time, which the edit moved.
+    assert.notEqual(body.hash, hash);
+    assert.equal(body.hash.length, 32);
+  });
+
+  test('a hash the file has moved past is refused, and nothing is written', async () => {
+    const ws = editable('bbb');
+    const hash = await hashOf('bbb', 'code.ts');
+    // The agent, working in the box while the reviewer types.
+    write(ws, 'code.ts', 'one\ntwo\nthree\nfour\n');
+
+    const { status } = await save('bbb', { path: 'code.ts', content: 'mine\n', hash });
+    assert.equal(status, 412);
+    assert.equal(readFileSync(join(ws, 'code.ts'), 'utf8'), 'one\ntwo\nthree\nfour\n');
+  });
+
+  test('saving again against what is now there goes through', async () => {
+    const ws = editable('ccc');
+    const stale = await hashOf('ccc', 'code.ts');
+    write(ws, 'code.ts', 'agent\n');
+    const refused = await save('ccc', { path: 'code.ts', content: 'mine\n', hash: stale });
+    assert.equal(refused.status, 412);
+
+    // Which is the reviewer overruling the refusal: they still hold their
+    // version, and the view offers to save it anyway.
+    const fresh = await hashOf('ccc', 'code.ts');
+    const { status } = await save('ccc', { path: 'code.ts', content: 'mine\n', hash: fresh });
+    assert.equal(status, 200);
+    assert.equal(readFileSync(join(ws, 'code.ts'), 'utf8'), 'mine\n');
+  });
+
+  test('a comment on the edited file follows the code it was written against', async () => {
+    editable('ddd');
+    await orchestrator.app.inject({
+      method: 'PUT',
+      url: '/api/sessions/ddd/review/annotations',
+      payload: { path: 'code.ts', line: 3, comment: 'this one' },
+    });
+
+    const hash = await hashOf('ddd', 'code.ts');
+    const { body } = await save('ddd', {
+      path: 'code.ts',
+      content: 'zero\none\ntwo\nthree\n',
+      hash,
+    });
+    // Drift is what makes editing safe to do under the comments: the comment
+    // moved with its line rather than being left pointing at the wrong one.
+    assert.deepEqual(body.annotations, [{ line: 4, comment: 'this one', outdated: false }]);
+  });
+
+  test('a file the review cannot show cannot be saved either', async () => {
+    const ws = editable('eee');
+    rmSync(join(ws, 'code.ts'));
+    write(ws, 'REVIEW.md', '# Code Review\n');
+
+    // Binary, deleted, and never offered in the first place.
+    assert.equal((await save('eee', { path: 'binary.dat', content: 'x', hash: '' })).status, 409);
+    assert.equal((await save('eee', { path: 'code.ts', content: 'x', hash: '' })).status, 409);
+    assert.equal((await save('eee', { path: 'REVIEW.md', content: 'x', hash: '' })).status, 404);
+  });
+
+  test('a path outside the root is a 404, as it is for reading', async () => {
+    const ws = editable('fff');
+    writeFileSync(join(dir, 'boxes.db.copy'), 'the deployment token');
+    symlinkSync(join(dir, 'boxes.db.copy'), join(ws, 'stolen.txt'));
+
+    for (const path of ['../boxes.db', 'stolen.txt', '/etc/passwd', 'nosuch.txt']) {
+      const { status } = await save('fff', { path, content: 'owned\n', hash: '' });
+      assert.equal(status, 404, path);
+    }
+    assert.equal(readFileSync(join(dir, 'boxes.db.copy'), 'utf8'), 'the deployment token');
+  });
+
+  test('an executable file is still executable after a save', async () => {
+    const ws = editable('ggg');
+    write(ws, 'run.sh', '#!/bin/sh\necho one\n');
+    chmodSync(join(ws, 'run.sh'), 0o755);
+
+    const hash = await hashOf('ggg', 'run.sh');
+    const { status } = await save('ggg', {
+      path: 'run.sh',
+      content: '#!/bin/sh\necho two\n',
+      hash,
+    });
+    assert.equal(status, 200);
+    assert.equal(statSync(join(ws, 'run.sh')).mode & 0o777, 0o755);
+  });
+
+  test('a request with nothing to save is a 400', async () => {
+    editable('hhh');
+    assert.equal((await save('hhh', { content: 'x', hash: '' })).status, 400);
+    assert.equal((await save('hhh', { path: 'code.ts', hash: '' })).status, 400);
   });
 });
 

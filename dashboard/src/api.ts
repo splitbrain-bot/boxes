@@ -13,6 +13,7 @@ import type {
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseResponse,
+  ReviewFileBody,
   ReviewFileResponse,
   ReviewTreeResponse,
   SessionDetail,
@@ -24,6 +25,23 @@ import type {
 /**
  * Typed fetch client for the orchestrator's REST API.
  */
+
+/**
+ * A request the API refused, carrying the status alongside the message.
+ *
+ * The message is what a caller shows; the status is for the few refusals a
+ * caller can act on rather than merely report — a save the file's own hash
+ * turned down, above all.
+ */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 /**
  * Sends one JSON request and returns the parsed body. Throws with the API's
@@ -49,7 +67,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // non-JSON error body
     }
-    throw new Error(message);
+    throw new ApiError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -147,6 +165,11 @@ export const api = {
     request<ReviewFileResponse>(
       `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,
     ),
+  saveReviewFile: (id: string, body: ReviewFileBody) =>
+    request<ReviewFileResponse>(`/api/sessions/${id}/review/file`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
   setAnnotation: (id: string, body: ReviewAnnotationBody) =>
     request<ReviewAnnotationsResponse>(`/api/sessions/${id}/review/annotations`, {
       method: 'PUT',

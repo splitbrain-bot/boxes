@@ -4,7 +4,7 @@ import type {
   ReviewFileResponse,
   ReviewTreeResponse,
 } from '../../../shared/types.ts';
-import { api } from '../api.ts';
+import { ApiError, api } from '../api.ts';
 import { tokenizeLines, type Token } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
@@ -46,6 +46,14 @@ export interface ReviewState {
   composing: number | null;
   /** True while an annotation write is in flight. */
   saving: boolean;
+  /**
+   * True while the pane holds edits nobody has saved.
+   *
+   * The buffer itself is the view's, but freshness is the store's, and a
+   * refetch landing on top of half-typed work would throw it away. Switching
+   * tabs is the common way that happens on a phone.
+   */
+  dirty: boolean;
 }
 
 const EMPTY: ReviewState = {
@@ -57,6 +65,7 @@ const EMPTY: ReviewState = {
   error: null,
   composing: null,
   saving: false,
+  dirty: false,
 };
 
 export const useReview = create<ReviewState>(() => EMPTY);
@@ -132,27 +141,79 @@ export async function loadFile(path: string): Promise<void> {
   set({ loadingFile: true, composing: null });
   try {
     const file = await api.reviewFile(sessionId, path);
-    set({ file: { ...file, tokens: null }, error: null, loadingFile: false });
-
-    if (!file.binary && file.content !== '') {
-      const tokens = await tokenizeLines(file.content, file.language);
-      if (tokens && get().file?.path === path) {
-        set({ file: { ...file, tokens } });
-      }
-    }
+    set({ error: null, loadingFile: false });
+    await show(file);
   } catch (err) {
     set({ error: (err as Error).message, loadingFile: false, file: null });
   }
 }
 
+/** Puts a file in the pane, and its colours there once they arrive. */
+async function show(file: ReviewFileResponse): Promise<void> {
+  set({ file: { ...file, tokens: null } });
+  if (file.binary || file.content === '') return;
+  const tokens = await tokenizeLines(file.content, file.language);
+  if (tokens && get().file?.path === file.path) {
+    set({ file: { ...file, tokens } });
+  }
+}
+
 /** Closes the open file, back to the tree on a phone. */
 export function closeFile(): void {
-  set({ file: null, composing: null });
+  set({ file: null, composing: null, dirty: false });
+}
+
+/** Records whether the pane is holding unsaved edits. */
+export function setDirty(dirty: boolean): void {
+  if (get().dirty !== dirty) set({ dirty });
 }
 
 /** Opens or closes the composer on one line. */
 export function compose(line: number | null): void {
   set({ composing: line });
+}
+
+// --- editing ----------------------------------------------------------------
+
+/** What came of a save. A conflict is the one failure the reviewer can answer. */
+export type SaveResult = { ok: true } | { ok: false; conflict: boolean };
+
+/**
+ * Writes the edited file back to the workspace.
+ *
+ * `hash` is what the pane was opened against, and the server refuses a save
+ * when the file has moved past it — which is the agent having written the same
+ * file while the reviewer was typing. Passing null instead asks for whatever is
+ * on disk now, which is how the reviewer overrules that refusal once they have
+ * been told about it.
+ *
+ * The answer is the whole file view, so the pane repaints from the save alone:
+ * new content, new diff, and the comments where drift has moved them to. The
+ * tree follows separately, because an edit changes a file's status and its
+ * colour in the list.
+ */
+export async function saveFile(
+  path: string,
+  content: string,
+  hash: string | null,
+): Promise<SaveResult> {
+  const { sessionId } = get();
+  if (!sessionId) return { ok: false, conflict: false };
+  set({ saving: true });
+  try {
+    const against = hash ?? (await api.reviewFile(sessionId, path)).hash;
+    const saved = await api.saveReviewFile(sessionId, { path, content, hash: against });
+    set({ saving: false, error: null });
+    await show(saved);
+    void loadTree();
+    return { ok: true };
+  } catch (err) {
+    const conflict = err instanceof ApiError && err.status === 412;
+    // A conflict is the view's to explain, because it comes with a choice.
+    // Anything else is a plain failure and belongs in the error line.
+    set({ saving: false, error: conflict ? null : (err as Error).message });
+    return { ok: false, conflict };
+  }
 }
 
 // --- annotations ------------------------------------------------------------
@@ -278,13 +339,15 @@ export async function setBase(rev: string | null): Promise<void> {
 /**
  * Refetches what is on screen: the tree, and the open file if there is one.
  *
- * Not while a write is in flight or a composer is open — refetching would
- * fight the optimistic annotation list, or drop what is being typed. That
- * guard is the one piece of the poll's logic worth keeping.
+ * Not while a write is in flight, a composer is open, or the pane holds
+ * unsaved edits — refetching would fight the optimistic annotation list, or
+ * drop what is being typed. That guard is the one piece of the poll's logic
+ * worth keeping, and edit mode is the case it matters most for: an edit is a
+ * whole file of work, and coming back to the tab is how a phone returns.
  */
 export async function refresh(): Promise<void> {
-  const { sessionId, file, saving, composing } = get();
-  if (!sessionId || saving || composing !== null) return;
+  const { sessionId, file, saving, composing, dirty } = get();
+  if (!sessionId || saving || dirty || composing !== null) return;
   await loadTree();
   if (file) await loadFile(file.path);
 }

@@ -18,6 +18,7 @@ import type {
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseBody,
+  ReviewFileBody,
   StoredAttachment,
   ThreadDoneBody,
   UpdateAgentSetBody,
@@ -429,6 +430,21 @@ export function buildApp(
     const { path } = req.query as { path?: string };
     if (!path) throw new HttpError(400, 'path is required');
     return review.file(id, path);
+  });
+
+  /**
+   * Saves one file of the workspace, as edited in the review.
+   *
+   * The whole file and the hash it was read at, so a save over an edit the
+   * agent made in the meantime is refused instead of made. The answer is the
+   * file endpoint's, so the view repaints from one round trip.
+   */
+  app.put('/api/sessions/:id/review/file', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as ReviewFileBody | undefined;
+    if (!body?.path) throw new HttpError(400, 'path is required');
+    if (typeof body.content !== 'string') throw new HttpError(400, 'content is required');
+    return review.writeFile(id, body.path, body.content, String(body.hash ?? ''));
   });
 
   /**

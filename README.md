@@ -362,6 +362,15 @@ it, or is marked as no longer matching.
 The format is the desktop [`review`](https://github.com/splitbrain/review)
 tool's, so a review reads the same in both.
 
+**Or fix it yourself.** The pencil in the file's toolbar switches the same pane
+from commenting to editing, for the corrections that are quicker to make than
+to describe. The line numbers, the change marks and the highlighting are the
+ones that were already there, and the line you were looking at stays where it
+was across the switch. **Save** writes the file into the workspace the agent
+works in. If the agent changed the same file while you were typing, the save is
+refused rather than made, and you are asked whose version to keep. A comment on
+a line you have just edited follows the code it was written against.
+
 Reviewing needs no running container — the files are a directory on the
 orchestrator's data volume — so the natural moment, once the agent is done and
 the box has idled out, costs nothing. Nothing is polled while a review sits

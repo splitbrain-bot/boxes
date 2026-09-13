@@ -15,6 +15,7 @@ import {
   fileHash,
   fileLines,
   isDirectory,
+  MAX_FILE_BYTES,
   MAX_REVIEW_BYTES,
   readTextFile,
   removeFile,
@@ -262,6 +263,7 @@ export class ReviewService {
       path: relPath,
       repo: repo?.path ?? null,
       content: read.content,
+      hash: fileHash(path),
       truncated: read.truncated,
       binary: read.binary,
       deleted: false,
@@ -279,6 +281,58 @@ export class ReviewService {
   }
 
   // --- mutation -------------------------------------------------------------
+
+  /**
+   * Replaces one file of the workspace with what the reviewer edited, and
+   * answers with the file as it now stands.
+   *
+   * The whole file, because that is what was being edited. `hash` is what the
+   * browser last read; a file that no longer matches it was written by the
+   * agent in the meantime, and saving over that would drop its work without
+   * anybody seeing it go. The refusal hands the decision back to the reviewer,
+   * who is holding the only other copy.
+   *
+   * A truncated read is refused rather than saved: what the browser was shown
+   * stops at the cap, and writing it back would delete everything past it.
+   *
+   * The answer is the file endpoint's, so one round trip repaints the code,
+   * the diff, the status and the comments — which have followed the edit,
+   * because {@link file} runs the drift check that moves them.
+   */
+  async writeFile(
+    id: string,
+    relPath: string,
+    content: string,
+    hash: string,
+  ): Promise<ReviewFileResponse> {
+    if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) {
+      throw new HttpError(400, 'This file is larger than the display limit.');
+    }
+
+    const workspace = this.workspace(id);
+    const path = await this.resolveListed(workspace, id, relPath);
+    if (path === null) {
+      throw new HttpError(409, 'This file was deleted, so there is nothing to save.');
+    }
+
+    const read = readTextFile(path);
+    if (read.binary) throw new HttpError(409, 'This file is binary, so it cannot be edited.');
+    if (read.truncated) {
+      throw new HttpError(
+        409,
+        'This file is larger than the display limit, so it cannot be saved.',
+      );
+    }
+    // 412 rather than 409, because this is the one refusal the reviewer can
+    // overrule: they still hold their version, and the view offers to save it
+    // anyway. The others say the file cannot be edited at all.
+    if (fileHash(path) !== hash) {
+      throw new HttpError(412, 'This file changed on disk while you were editing it.');
+    }
+
+    writeFileAtomic(path, content);
+    return this.file(id, relPath);
+  }
 
   /** Adds or replaces the comment on one line, and returns the file's comments. */
   async setAnnotation(
@@ -593,6 +647,7 @@ function goneFile(relPath: string, repo: Repo | null): ReviewFileResponse {
     path: relPath,
     repo: repo?.path ?? null,
     content: '',
+    hash: '',
     truncated: false,
     binary: false,
     deleted: true,

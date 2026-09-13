@@ -11,6 +11,7 @@ import type {
   HealthResponse,
   ReviewAnnotation,
   ReviewAnnotationBody,
+  ReviewFileBody,
   ReviewFileResponse,
   ReviewRepo,
   ReviewTreeResponse,
@@ -680,6 +681,7 @@ function answerReview(
         path,
         repo: repoFor(path)?.path ?? null,
         content: '',
+        hash: '',
         truncated: false,
         binary: false,
         deleted: true,
@@ -696,6 +698,7 @@ function answerReview(
       path,
       repo: repoFor(path)?.path ?? null,
       content,
+      hash: hashOf(content),
       truncated: false,
       binary: false,
       deleted: false,
@@ -707,6 +710,38 @@ function answerReview(
       annotations: annotationsOf(path),
     };
     return json(res, 200, body);
+  }
+
+  if (endpoint === 'file' && req.method === 'PUT') {
+    return withBody((body) => {
+      calls.push({ method: 'PUT file', sessionId, body });
+      const { path, content, hash } = body as ReviewFileBody;
+      const current = review.files[path];
+      if (current === undefined) return json(res, 404, { error: 'File not found' });
+      // The same guard the real service has: a file that has moved past the
+      // hash the browser read it at was written by the agent in between.
+      if (hash !== hashOf(current)) {
+        return json(res, 412, { error: 'This file changed on disk while you were editing it.' });
+      }
+      review.files[path] = content;
+      review.statuses[path] = review.statuses[path] ?? 'modified';
+      return json(res, 200, {
+        path,
+        repo: repoFor(path)?.path ?? null,
+        content,
+        hash: hashOf(content),
+        truncated: false,
+        binary: false,
+        deleted: false,
+        size: content.length,
+        lines: content.split('\n').filter((_, i, all) => i < all.length - 1 || all[i] !== '')
+          .length,
+        language: languageOf(path),
+        status: review.statuses[path] ?? null,
+        diff: review.diffs[path] ?? { lines: {}, hunks: [], deletions: [] },
+        annotations: annotationsOf(path),
+      } satisfies ReviewFileResponse);
+    });
   }
 
   if (endpoint === 'annotations' && req.method === 'PUT') {
@@ -821,6 +856,18 @@ function markStubRepos(
         : entry,
     );
   return mark(entries);
+}
+
+/**
+ * A file's hash, as the save guard compares them.
+ *
+ * Cheap and stable is all it has to be: what it is compared against is another
+ * value of itself, which is exactly the bargain the real service takes.
+ */
+function hashOf(content: string): string {
+  let hash = 5381;
+  for (let i = 0; i < content.length; i++) hash = ((hash * 33) ^ content.charCodeAt(i)) >>> 0;
+  return hash.toString(16);
 }
 
 /** The language the real API would report, for the handful the stub serves. */
