@@ -356,7 +356,7 @@ test('a session with no thread yet gets its first one recorded', async () => {
   assert.ok(!adapter.seen.includes('session/load'));
 });
 
-test('every conversation is created asking for readable thinking', async () => {
+test('every conversation is created asking for Fable and readable thinking', async () => {
   /** The `_meta` each session-creating call carried. */
   const meta: Array<{ method: string; meta: unknown }> = [];
   const adapter = new FakeAdapter((msg) => {
@@ -377,11 +377,14 @@ test('every conversation is created asking for readable thinking', async () => {
 
   await manager.upstream('s1').ensureStarted();
 
-  // Without `display`, a current model streams thinking blocks with no text
-  // in them and the dashboard has no reasoning to show.
+  // Without `model`, the adapter offers only what the account's plan covers
+  // and the picker has no Fable in it. Without `display`, a current model
+  // streams thinking blocks with no text in them and the dashboard has no
+  // reasoning to show.
   const wanted = {
     claudeCode: {
       options: {
+        model: 'fable',
         thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
       },
     },
