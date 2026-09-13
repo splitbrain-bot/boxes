@@ -326,7 +326,13 @@ const Row = memo(function Row({
           }
           className={cn(
             'block pr-3 pl-2 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset',
-            wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre',
+            // Wrapping: `min-w-0` is what makes it wrap at the pane's width.
+            // A grid item is at least as wide as its longest unbreakable run
+            // unless it is told otherwise, and `break-word` does not count as
+            // breakable for that measurement — so one long URL in a line makes
+            // the cell wider than the pane, and the line wraps later than the
+            // textarea over it does, or not at all.
+            wrap ? 'min-w-0 whitespace-pre-wrap break-words' : 'whitespace-pre',
           )}
         >
           {tokens ? <Tokens tokens={tokens} /> : text}

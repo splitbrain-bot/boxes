@@ -1756,12 +1756,22 @@ what switching has to cost: nothing. CodeMirror or Monaco would bring a second
 highlighter, a second gutter and its own line metrics, so the code would move
 under the reader on the way in — which is the opposite of what somebody
 switching modes wants, since the line they are looking at is the line they went
-in to fix. Four things follow from carrying the overlay:
+in to fix. Five things follow from carrying the overlay:
 
 - **The gutter is one width for every row**, `calc(Nch + 2.75rem)` as a custom
   property the rows and the overlay both read. Sizing each row to its own
   content puts the rows past line 99 a few pixels wider, and the overlay has to
   agree with the code cells to the pixel.
+- **The code cell is `min-w-0`** while wrapping, so it wraps at the pane's
+  width. A grid item is at least as wide as its longest unbreakable run unless
+  it is told otherwise, and `overflow-wrap: break-word` does not count as
+  breakable for that measurement — so one long URL made the cell wider than the
+  pane and that line wrapped later than the textarea over it did. Every line
+  that wraps differently pushes the ones below it another row out of step, so
+  the error grows down the file: near the top of a README the caret is right,
+  and by line 150 it is rows away from what is typed. The rows and the textarea
+  being the same height is the invariant, and a browser test asserts it against
+  a file of long links, deep indentation and unbreakable runs.
 - **The pane is 16px below `md`** and 13px from `md` up. Safari zooms the page
   when a control smaller than 16px takes focus, and a zoom on the way into edit
   mode is exactly the jump this is avoiding. The same size in both modes, so
