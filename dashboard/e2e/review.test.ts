@@ -965,6 +965,16 @@ test('the review header gives way to reading the file, and returns', async () =>
     await expect.poll(away).toBe(false);
     await expect.poll(inReach).toBe(true);
 
+    // And it is back over the file list, after a file left while it was away.
+    // The phone's own back gesture leaves whether the header is in reach or
+    // not, and the pane the decision was read from goes with the file — so a
+    // header still away over the list would be a list with no way out of it.
+    await read(100, 4);
+    await expect.poll(away).toBe(true);
+    await page.goBack();
+    await expect.poll(away).toBe(false);
+    await expect.poll(inReach).toBe(true);
+
     expect(errors).toEqual([]);
   } finally {
     await close();

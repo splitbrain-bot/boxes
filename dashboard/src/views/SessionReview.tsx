@@ -475,7 +475,13 @@ export function SessionReview() {
 
   // And the same header behaviour as the thread's, called the same way:
   // reading down a file puts the chrome away, a flick back up returns it.
-  const { away, container } = useScrollAway('[data-slot="review-code-pane"]');
+  const { away, container, reset } = useScrollAway('[data-slot="review-code-pane"]');
+
+  // The pane that put the header away goes with the file, and what follows it
+  // — the file list, or the next file — is read from its top. So the header
+  // comes back whenever the open file changes: there is no pane left to flick
+  // up, and below md the list's only way out is the button in that header.
+  useEffect(reset, [reset, path]);
 
   // No state symbol: a review is something being done rather than something
   // waiting. What it needs to say is which box, and which file of it.
