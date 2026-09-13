@@ -631,6 +631,63 @@ test('walking away from unsaved edits asks first', async () => {
   }
 });
 
+test('the rows and the editor over them wrap in the same places', async () => {
+  // The shapes that decide where a line breaks, and a file long enough for a
+  // disagreement about any of them to add up: what is typed lands where the
+  // caret is only while the rows behind the textarea wrap exactly as it does,
+  // and every line that wraps differently pushes everything below it further
+  // out of step.
+  const shapes = [
+    'The review starts with a file browser over the whole workspace, which is where reading one begins.',
+    'The format is the desktop [review](https://github.com/splitbrain/review/blob/main/README.md) tool of the same name.',
+    '\t\tconst deeplyIndented = somethingWithAPrettyLongNameIndeed(first, second, third, fourth);',
+    'const blob = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";',
+    'A line that ends in two spaces, which markdown reads as a break.  ',
+  ];
+  const lines = Array.from({ length: 25 }, (_, i) => shapes[i % shapes.length]!);
+  stub.state.reviews[SESSION]!.files['readme.md'] = `${lines.join('\n')}\n`;
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=readme.md`,
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+
+    // The whole invariant in one number: the textarea is exactly as tall as
+    // the rows it covers, so it cannot have wrapped the file into a different
+    // number of visual lines than they did.
+    const heights = await page.evaluate(() => {
+      const ta = document.querySelector('textarea') as HTMLTextAreaElement;
+      return { box: ta.clientHeight, content: ta.scrollHeight };
+    });
+    expect(heights.content).toBe(heights.box);
+
+    // And the behaviour that rests on it, taken at a line far enough down for
+    // any drift above to have shown up: type into the last visual row of a
+    // wrapped line, and the text lands in that line.
+    await page.locator('[data-slot="review-code-pane"]').evaluate((pane) => {
+      const target = pane.querySelector('[data-line="22"]') as HTMLElement;
+      pane.scrollTop = target.offsetTop - 120;
+    });
+    const row = (await page.locator('[data-line="22"]').boundingBox())!;
+    const code = (await page.locator('[data-line="22"] code').boundingBox())!;
+    expect(row.height).toBeGreaterThan(code.height / 2);
+    await page.mouse.click(code.x + 60, row.y + row.height - 8);
+    await page.keyboard.type('INSERTED');
+
+    const typed = (await editor.inputValue()).split('\n');
+    expect(typed[21]).toContain('INSERTED');
+    expect(typed[20]).not.toContain('INSERTED');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a file the pane cannot show whole cannot be edited', async () => {
   stub.state.reviews[SESSION]!.statuses['app/gone.ts'] = 'deleted';
   const { page, errors, close } = await openPage(
