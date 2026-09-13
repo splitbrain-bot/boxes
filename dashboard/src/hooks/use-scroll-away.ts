@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { scrollAway, scrollAwayStart, type ScrollAwayState } from '@/lib/scroll-away.ts';
 
 /**
@@ -26,6 +26,8 @@ export function useScrollAway(scroller: string): {
   away: boolean;
   /** Put on the element the scroller lives inside. */
   container: React.RefObject<HTMLDivElement | null>;
+  /** Forget the reading so far, and bring the header back. */
+  reset: () => void;
 } {
   const container = useRef<HTMLDivElement>(null);
   const [away, setAway] = useState(false);
@@ -35,6 +37,19 @@ export function useScrollAway(scroller: string): {
    * decides on every event of a run, not only the one that crosses the line.
    */
   const state = useRef<ScrollAwayState>(scrollAwayStart());
+
+  /**
+   * Puts the header back and forgets the run that sent it away.
+   *
+   * A decision belongs to the scroller it was read from. When a view closes
+   * that scroller, or opens another in its place, the reader is at the top of
+   * something new and there is nothing left to flick back up — so a header
+   * left away would stay away, with no control anywhere asking for it.
+   */
+  const reset = useCallback(() => {
+    state.current = scrollAwayStart();
+    setAway(false);
+  }, []);
 
   useEffect(() => {
     const root = container.current;
@@ -59,5 +74,5 @@ export function useScrollAway(scroller: string): {
     return () => root.removeEventListener('scroll', onScroll, true);
   }, [scroller]);
 
-  return { away, container };
+  return { away, container, reset };
 }
