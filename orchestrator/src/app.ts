@@ -265,13 +265,17 @@ export function buildApp(
    * user, and never reaches a command line on the host.
    *
    * It is logged against the thread it was typed in, which the path names —
-   * or, on the short path, whichever thread the session has current.
+   * or, on the short path, whichever thread the session has current — and
+   * with the id the browser says the transcript ended on, so a replay can
+   * put it back where it was typed.
    */
   const runExec: RouteHandlerMethod = async (req, reply) => {
     const { id, threadId } = req.params as { id: string; threadId?: string };
-    const command = (req.body as ExecRequest | undefined)?.command?.trim();
+    const body = req.body as ExecRequest | undefined;
+    const command = body?.command?.trim();
     if (!command) throw new HttpError(400, 'command is required');
     if (command.length > 8000) throw new HttpError(400, 'command is too long');
+    const after = typeof body?.after === 'string' && body.after.length <= 200 ? body.after : null;
 
     const thread = manager.resolveThread(id, threadId);
     const target = await manager.execTarget(id);
@@ -291,7 +295,7 @@ export function buildApp(
     });
     reply.raw.end(execs.trailer(outcome));
 
-    execs.record(db, id, thread, command, outcome, startedAt);
+    execs.record(db, id, thread, command, outcome, startedAt, after);
     manager.touch(id);
     return reply;
   };

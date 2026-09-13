@@ -183,6 +183,7 @@ test('records are stored and read back in the API shape', () => {
       'git status',
       { output: 'clean\n', exitCode: 0, truncated: false, timedOut: false },
       1000,
+      null,
     );
     record(
       db,
@@ -191,6 +192,7 @@ test('records are stored and read back in the API shape', () => {
       'yes',
       { output: 'y'.repeat(10), exitCode: null, truncated: true, timedOut: true },
       2000,
+      'toolu_1',
     );
     record(
       db,
@@ -199,6 +201,7 @@ test('records are stored and read back in the API shape', () => {
       'pwd',
       { output: '/workspace\n', exitCode: 0, truncated: false, timedOut: false },
       2500,
+      null,
     );
     record(
       db,
@@ -207,6 +210,7 @@ test('records are stored and read back in the API shape', () => {
       'ls',
       { output: '', exitCode: 0, truncated: false, timedOut: false },
       3000,
+      null,
     );
 
     const rows = history(db, 's1', 't1');
@@ -218,6 +222,8 @@ test('records are stored and read back in the API shape', () => {
     assert.equal(rows[1]!.truncated, true);
     assert.equal(rows[1]!.timedOut, true);
     assert.equal(rows[1]!.startedAt, 2000);
+    assert.equal(rows[0]!.after, null);
+    assert.equal(rows[1]!.after, 'toolu_1');
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

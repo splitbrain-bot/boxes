@@ -207,9 +207,17 @@ shown rather than folded away behind a tool call that has to be opened first.
 The fence is grown past the longest run of backticks in the output, so output
 carrying a fence of its own cannot break out of the block.
 
-The browser appends stored runs *after* whatever the replay produced rather
-than interleaving them. ACP replay carries no timestamps, so where they belong
-in the transcript is not recoverable.
+ACP replay carries no timestamps, so where a stored run belongs in the
+transcript cannot be read off the replay. It is recorded instead: the browser
+sends, with the command, the id of what the transcript ended with when it was
+typed, and the run is stored with it. Assistant message ids and tool call ids
+are the adapter's own and come back unchanged on replay; the id of the user's
+own prompt does not, because the gateway echoes a prompt without one. So the
+anchor is the last tool call of the last assistant message, or that message's
+id when it has none, and on replay the run is put back right after it, behind
+any earlier run anchored there. A run whose anchor is not in the replay —
+a compaction, a fork, a command typed before the agent said anything — goes at
+the end, in the order it ran.
 
 ### Attachments
 
