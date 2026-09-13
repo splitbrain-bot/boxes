@@ -1,11 +1,4 @@
-import {
-  ArrowLeft,
-  CircleCheck,
-  FileSearch,
-  GitBranch,
-  Info,
-  SlidersHorizontal,
-} from 'lucide-react';
+import { ArrowLeft, CircleCheck, FileSearch, GitBranch, SlidersHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
@@ -306,16 +299,6 @@ export function ThreadHeader({
           title="Review this session's code"
         >
           <FileSearch />
-        </Link>
-      </Button>
-
-      <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
-        <Link
-          to={`/sessions/${sessionId}/info`}
-          state={{ threadId }}
-          aria-label="Session details and controls"
-        >
-          <Info />
         </Link>
       </Button>
     </header>

@@ -25,7 +25,7 @@ test('an empty environment yields the documented defaults', () => {
   withDataDir((dir) => {
     const cfg = loadConfig({ DATA_DIR: dir });
     assert.equal(cfg.PORT, 3000);
-    assert.equal(cfg.SESSION_IMAGE, 'boxes-session:latest');
+    assert.equal(cfg.SESSION_IMAGE, 'ghcr.io/splitbrain/boxes/session:latest');
     assert.equal(cfg.SESSION_SUBNET_POOL, '10.200.0.0/16');
     assert.equal(cfg.SESSION_MEM_LIMIT, '4g');
     assert.equal(cfg.SESSION_CPUS, 2);

@@ -508,14 +508,14 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The header is the dashboard's, and the thread must not cover it: the
-    // back link, the mode switcher and the info link all have to be
+    // back link, the mode switcher and the review link all have to be
     // clickable, not painted over by a floating panel.
     const header = (await page.locator('header').boundingBox())!;
     const thread = (await page.locator('.aui-thread-root').boundingBox())!;
     expect(header.height).toBeGreaterThan(0);
     expect(thread.y).toBeGreaterThanOrEqual(header.y + header.height);
     await expect.poll(() => page.getByLabel('Back to sessions').isVisible()).toBe(true);
-    await expect.poll(() => page.getByLabel('Session details and controls').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel("Review this session's code").isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
