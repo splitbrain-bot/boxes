@@ -366,3 +366,28 @@ test('threads from before the done column read as not done', () => {
     upgraded.close();
   }
 });
+
+test('the exec log gains where each command was typed, and older rows have none', () => {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
+  db.pragma('user_version = 16');
+  db.prepare(
+    `INSERT INTO exec_log (session_id, thread_id, command, output, exit_code, truncated,
+       timed_out, started_at, finished_at)
+     VALUES ('s1', 't1', 'git status', 'clean', 0, 0, 0, 1000, 2000)`,
+  ).run();
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    assert.ok(columns(upgraded, 'exec_log').includes('after_id'));
+    // A row from before was typed somewhere, but nothing recorded where. It
+    // is listed at the end, which is where every row used to go.
+    const row = upgraded.prepare('SELECT after_id FROM exec_log').get() as {
+      after_id: string | null;
+    };
+    assert.equal(row.after_id, null);
+  } finally {
+    upgraded.close();
+  }
+});

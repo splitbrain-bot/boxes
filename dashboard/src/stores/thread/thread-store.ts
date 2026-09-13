@@ -470,17 +470,24 @@ export class ThreadStore {
    * than folded away behind a tool call that has to be opened.
    */
   async runCommand(command: string): Promise<void> {
-    const execId = `bang-${this.nextExecId++}`;
+    const after = this.lastAnchor();
+    const execId = `${EXEC_ID}${this.nextExecId++}`;
     this.appendExecCommand(execId, command);
     let output = '';
     this.setExecOutput(execId, output);
 
     const exec = this.deps.runExec ?? runExec;
     try {
-      const outcome = await exec(this.deps.sessionId, this.deps.threadId, command, (soFar) => {
-        output = soFar;
-        this.setExecOutput(execId, output);
-      });
+      const outcome = await exec(
+        this.deps.sessionId,
+        this.deps.threadId,
+        command,
+        after,
+        (soFar) => {
+          output = soFar;
+          this.setExecOutput(execId, output);
+        },
+      );
       this.setExecOutput(execId, output, trailerOf(outcome));
     } catch (err) {
       this.setExecOutput(execId, output, (err as Error).message);
@@ -488,11 +495,13 @@ export class ThreadStore {
   }
 
   /**
-   * Appends the commands already run in this thread, after whatever the
-   * replay produced.
+   * Puts the commands already run in this thread back where they were typed.
    *
-   * ACP replay carries no timestamps, so interleaving them into the
-   * transcript is not attempted; they go at the end, in the order they ran.
+   * Each record names what the transcript ended with at the time, and the run
+   * goes in right after that — behind any earlier run placed there too, so
+   * runs that followed the same message keep their order. A record that names
+   * nothing, or names something the replay did not bring back, goes at the
+   * end.
    */
   async loadExecHistory(): Promise<void> {
     const list = this.deps.listExec ?? listExec;
@@ -505,10 +514,57 @@ export class ThreadStore {
     for (const record of records) {
       if (this.replayedExec.has(record.id)) continue;
       this.replayedExec.add(record.id);
-      const execId = `bang-log-${record.id}`;
+      const execId = `${EXEC_ID}log-${record.id}`;
+      const slot = this.slotAfter(record.after);
       this.appendExecCommand(execId, record.command);
       this.setExecOutput(execId, record.output, trailerOf(record));
+      if (slot !== null) {
+        const pair = this.model.messages.splice(-2, 2);
+        this.model.messages.splice(slot, 0, ...pair);
+        this.refreshMessages(null);
+      }
     }
+  }
+
+  /**
+   * What the transcript ends with right now, as something a replay will name
+   * again: the last tool call of the last assistant message, or that
+   * message's id when it has no tool call. Null before the agent has said
+   * anything.
+   *
+   * A tool call is preferred because a message that opens with one gets no
+   * id from the adapter. The user's own prompts are echoed without one too,
+   * which is why they cannot serve. Earlier runs are skipped: they are not
+   * part of the transcript and a replay does not bring them back.
+   */
+  private lastAnchor(): string | null {
+    for (let i = this.model.messages.length - 1; i >= 0; i--) {
+      const message = this.model.messages[i]!;
+      if (message.role !== 'assistant' || isExecMessage(message)) continue;
+      for (let j = message.parts.length - 1; j >= 0; j--) {
+        const part = message.parts[j]!;
+        if (part.type === 'tool') return part.toolCallId;
+      }
+      return message.id;
+    }
+    return null;
+  }
+
+  /**
+   * Where a replayed run belongs: just past the message the anchor names —
+   * by its id, or by a tool call in it — and past every run already put
+   * there. Null when nothing in the model answers to the anchor.
+   */
+  private slotAfter(anchor: string | null): number | null {
+    if (!anchor) return null;
+    const messages = this.model.messages;
+    let slot = messages.findIndex(
+      (m) => m.id === anchor || m.parts.some((p) => p.type === 'tool' && p.toolCallId === anchor),
+    );
+    if (slot < 0) return null;
+    slot++;
+    while (slot < messages.length && isExecMessage(messages[slot]!)) slot++;
+    return slot;
   }
 
   /** Echoes a bang line into the thread as the user message it was typed as. */
@@ -656,6 +712,14 @@ export class ThreadStore {
       this.flushReplay();
     }
   }
+}
+
+/** What the ids of a local command's echo and output start with. */
+const EXEC_ID = 'bang-';
+
+/** Whether a message is a local command's echo or output rather than the agent's. */
+function isExecMessage(message: Message): boolean {
+  return message.id.startsWith(EXEC_ID);
 }
 
 /**

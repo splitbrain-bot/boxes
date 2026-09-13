@@ -197,6 +197,7 @@ test('commands from a previous visit come back after the replay', async () => {
     timedOut: false,
     startedAt: Date.now() - 60_000,
     finishedAt: Date.now() - 59_000,
+    after: null,
   });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);

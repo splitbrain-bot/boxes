@@ -424,7 +424,7 @@ test('a finished run is stored and listed', async () => {
   await orchestrator.app.inject({
     method: 'POST',
     url: '/api/sessions/abc123/exec',
-    payload: { command: 'git status' },
+    payload: { command: 'git status', after: 'msg_1' },
   });
 
   const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/exec' });
@@ -435,6 +435,8 @@ test('a finished run is stored and listed', async () => {
   assert.equal(records[0]!['output'], 'clean\n');
   assert.equal(records[0]!['exitCode'], 0);
   assert.equal(records[0]!['truncated'], false);
+  // Where it was typed comes back with it, for the replay to place it.
+  assert.equal(records[0]!['after'], 'msg_1');
 });
 
 test('running a command holds off the reaper', async () => {

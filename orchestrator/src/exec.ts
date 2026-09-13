@@ -131,6 +131,10 @@ export function trailer(outcome: ExecOutcome): string {
  *
  * The thread is what the run is listed under. Null when the session had no
  * thread to log it against, which stores a row nobody is shown.
+ *
+ * `after` is where in the thread the command was typed: the id of the tool
+ * call or message the transcript ended with, as the browser saw it. It is
+ * stored as given, and a replay that cannot find it lists the run last.
  */
 export function record(
   db: Db,
@@ -139,6 +143,7 @@ export function record(
   command: string,
   outcome: ExecOutcome & { output: string },
   startedAt: number,
+  after: string | null,
 ): void {
   try {
     appendExecLog(db, sessionId, {
@@ -150,6 +155,7 @@ export function record(
       timed_out: outcome.timedOut ? 1 : 0,
       started_at: startedAt,
       finished_at: Date.now(),
+      after_id: after,
     });
   } catch (err) {
     log.session(sessionId).warn('exec_log write failed', { error: (err as Error).message });
@@ -168,6 +174,7 @@ function toRecord(row: ExecRow): ExecRecord {
     timedOut: row.timed_out === 1,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    after: row.after_id,
   };
 }
 

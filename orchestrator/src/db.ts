@@ -141,6 +141,11 @@ export interface ExecRow {
   timed_out: number;
   started_at: number;
   finished_at: number;
+  /**
+   * The id of the tool call or message the thread ended with when the command
+   * was typed, or null when there was none or the browser did not say.
+   */
+  after_id: string | null;
 }
 
 /** A permission request the adapter is still blocked on. */
@@ -420,6 +425,12 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE threads ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
   `,
+  // Where in its thread a command was typed: the id of the tool call or
+  // message the transcript ended with, so a replay can put the run back
+  // there. Rows from before know no such place and stay at the end.
+  `
+  ALTER TABLE exec_log ADD COLUMN after_id TEXT;
+  `,
 ];
 
 /** An open database handle. */
@@ -518,8 +529,8 @@ export function appendExecLog(
     .prepare(
       `INSERT INTO exec_log
          (session_id, thread_id, command, output, exit_code, truncated, timed_out,
-          started_at, finished_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          started_at, finished_at, after_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sessionId,
@@ -531,6 +542,7 @@ export function appendExecLog(
       record.timed_out,
       record.started_at,
       record.finished_at,
+      record.after_id,
     );
   pruneRing(db, 'exec_log', sessionId, EXEC_RING);
   return Number(info.lastInsertRowid);

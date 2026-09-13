@@ -324,6 +324,12 @@ export interface StoredAttachment {
 export interface ExecRequest {
   /** Run with `bash -lc`, inside the session's own isolation. */
   command: string;
+  /**
+   * What the thread ended with when the command was typed: the id of its last
+   * tool call, or of its last assistant message. Null when the agent had not
+   * said anything yet. A replay puts the run back right after it.
+   */
+  after?: string | null;
 }
 
 /** One finished local command, as the exec log stores it. */
@@ -341,6 +347,8 @@ export interface ExecRecord {
   timedOut: boolean;
   startedAt: number;
   finishedAt: number;
+  /** The tool call or message the run followed, or null when there was none. */
+  after: string | null;
 }
 
 /** A page of exec records for one session, oldest first. */

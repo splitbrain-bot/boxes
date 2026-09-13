@@ -235,9 +235,8 @@ export function SessionThread() {
     [id, store],
   );
 
-  // Commands already run in this session, appended once the thread is up.
-  // ACP replay carries no timestamps, so they go after the transcript rather
-  // than interleaved into it.
+  // Commands already run in this thread, put back where they were typed once
+  // the replay is in.
   useEffect(() => {
     if (!store || state.connection !== 'ready') return;
     void store.loadExecHistory();

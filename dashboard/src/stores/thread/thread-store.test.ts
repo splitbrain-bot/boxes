@@ -660,7 +660,7 @@ test('a turn blocked on a permission request is not reported as running', async 
 test('a bang command runs locally, streams, and never reaches the adapter', async () => {
   const chunks: string[] = [];
   const { store, client } = makeStore(undefined, {
-    runExec: async (sessionId, threadId, command, onChunk) => {
+    runExec: async (sessionId, threadId, command, _after, onChunk) => {
       assert.equal(sessionId, 'box-1');
       // The command is run against the thread it was typed in, not the box.
       assert.equal(threadId, 'thread-1');
@@ -688,7 +688,7 @@ test('a bang command runs locally, streams, and never reaches the adapter', asyn
 
 test('a non-zero exit shows the code under the output', async () => {
   const { store } = makeStore(undefined, {
-    runExec: async (_id, _thread, _cmd, onChunk) => {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
       onChunk('bash: nope: command not found');
       return { exitCode: 127, truncated: false, timedOut: false };
     },
@@ -702,7 +702,7 @@ test('a non-zero exit shows the code under the output', async () => {
 
 test('a killed or truncated run says so beside its exit code', async () => {
   const { store } = makeStore(undefined, {
-    runExec: async (_id, _thread, _cmd, onChunk) => {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
       onChunk('a lot of output');
       return { exitCode: null, truncated: true, timedOut: true };
     },
@@ -717,7 +717,7 @@ test('a killed or truncated run says so beside its exit code', async () => {
 
 test('output carrying a fence of its own cannot break out of the block', async () => {
   const { store } = makeStore(undefined, {
-    runExec: async (_id, _thread, _cmd, onChunk) => {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
       onChunk('```\nnot a fence\n```');
       return { exitCode: 0, truncated: false, timedOut: false };
     },
@@ -753,6 +753,7 @@ test('previously run commands are appended once, however often they are loaded',
         timedOut: false,
         startedAt: 1,
         finishedAt: 2,
+        after: null,
       },
     ],
   });
@@ -763,6 +764,104 @@ test('previously run commands are appended once, however often they are loaded',
   assert.deepEqual(partsOf(store.getSnapshot().messages[0]!), [
     { type: 'text', text: '!git status' },
   ]);
+});
+
+test('a run names the tool call or message the transcript ended with', async () => {
+  const anchors: Array<string | null> = [];
+  const { store, client } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, after) => {
+      anchors.push(after);
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+  });
+
+  // Before the agent has said anything there is nothing to come after.
+  await store.runCommand('ls');
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'one' },
+    messageId: 'msg_1',
+  });
+  await store.runCommand('ls');
+  // A tool call in the message wins over the message's own id: a message
+  // that opens with a tool call has none the adapter gave it.
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'two' },
+    messageId: 'msg_2',
+  });
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read', status: 'completed' });
+  await store.runCommand('ls');
+  // The user's own prompt is echoed without an id a replay would repeat.
+  push(client, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'and?' } });
+  await store.runCommand('ls');
+
+  assert.deepEqual(anchors, [null, 'msg_1', 'toolu_1', 'toolu_1']);
+});
+
+test('replayed runs go back after the message or tool call they followed', async () => {
+  const record = (id: number, command: string, after: string | null) => ({
+    id,
+    sessionId: 'box-1',
+    command,
+    output: `${command}\n`,
+    exitCode: 0,
+    truncated: false,
+    timedOut: false,
+    startedAt: id,
+    finishedAt: id,
+    after,
+  });
+  const { store, client } = makeStore(undefined, {
+    listExec: async () => [
+      record(1, 'first', 'msg_1'),
+      record(2, 'second', 'msg_1'),
+      record(3, 'third', 'toolu_1'),
+      record(4, 'lost', 'msg_gone'),
+      record(5, 'old', null),
+    ],
+  });
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'one' },
+    messageId: 'msg_1',
+  });
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'two' },
+    messageId: 'msg_2',
+  });
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read', status: 'completed' });
+  push(client, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'three' },
+    messageId: 'msg_3',
+  });
+
+  await store.loadExecHistory();
+
+  // Two runs after the same message keep their order; one whose anchor the
+  // replay did not bring back, and one from before anchors were recorded,
+  // go at the end.
+  assert.deepEqual(
+    store.getSnapshot().messages.map((m) => m.id),
+    [
+      'msg_1',
+      'bang-log-1-command',
+      'bang-log-1',
+      'bang-log-2-command',
+      'bang-log-2',
+      'msg_2',
+      'bang-log-3-command',
+      'bang-log-3',
+      'msg_3',
+      'bang-log-4-command',
+      'bang-log-4',
+      'bang-log-5-command',
+      'bang-log-5',
+    ],
+  );
+  assert.equal(outputOf(store.getSnapshot().messages[2]!), '```console\nfirst\n[exit 0]\n```');
 });
 
 test("a tool call's image is converted as a part beside the card, not inside it", () => {
