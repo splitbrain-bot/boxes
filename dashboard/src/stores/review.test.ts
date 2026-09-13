@@ -12,7 +12,9 @@ import {
   refresh,
   rememberScroll,
   saveComment,
+  saveFile,
   setBase,
+  setDirty,
   useReview,
 } from './review.ts';
 
@@ -29,11 +31,17 @@ import {
 /** Requests the stub answered, in order. */
 let requested: string[] = [];
 
+/** The bodies of the ones that carried a body, in the same order. */
+let bodies: string[] = [];
+
 /** The canned answers, by URL fragment. */
 let answers: Record<string, unknown>;
 
 /** How the next matching request should fail, if at all. */
 let failWith: string | null = null;
+
+/** And with what status, for the refusals a caller can act on. */
+let failStatus = 500;
 
 function tree(over: Partial<ReviewTreeResponse> = {}): ReviewTreeResponse {
   return {
@@ -55,6 +63,7 @@ function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
     path: 'a.ts',
     repo: '',
     content: 'one\ntwo\n',
+    hash: 'h1',
     truncated: false,
     binary: false,
     deleted: false,
@@ -72,17 +81,20 @@ function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
 
 beforeEach(() => {
   requested = [];
+  bodies = [];
   failWith = null;
+  failStatus = 500;
   answers = {
     '/review/tree': tree(),
     '/review/file': file(),
   };
 
-  vi.stubGlobal('fetch', async (url: string) => {
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
     requested.push(url);
+    if (typeof init?.body === 'string') bodies.push(init.body);
     if (failWith) {
       return new Response(JSON.stringify({ error: failWith }), {
-        status: 500,
+        status: failStatus,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -101,6 +113,11 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+/** What the last request that carried a body sent. */
+function lastBody(): string {
+  return bodies.at(-1) ?? '';
+}
 
 /** Requests whose URL mentions a fragment. */
 function hits(fragment: string): number {
@@ -224,6 +241,17 @@ test('a refresh while a composer is open is skipped', async () => {
   // Refetching would drop what is being typed.
   assert.equal(requested.length, before);
   useReview.setState({ composing: null });
+});
+
+test('a refresh while the pane holds unsaved edits is skipped', async () => {
+  await loadTree();
+  setDirty(true);
+  const before = requested.length;
+  await refresh();
+  // Coming back to the tab is how a phone returns to a review, and an edit is
+  // a whole file of work to lose to it.
+  assert.equal(requested.length, before);
+  setDirty(false);
 });
 
 test('nothing is fetched before a session is set', async () => {
@@ -383,6 +411,72 @@ test('an unknown revision reports itself and changes nothing', async () => {
   // Nothing is refetched, because nothing changed server-side.
   assert.equal(hits('/review/tree'), before);
   assert.equal(useReview.getState().saving, false);
+});
+
+// --- editing ----------------------------------------------------------------
+
+test('a save sends the hash the file was read at, and repaints from the answer', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/file'] = file({ content: 'one\nTWO\n', hash: 'h2', status: 'modified' });
+
+  const result = await saveFile('a.ts', 'one\nTWO\n', 'h1');
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(JSON.parse(lastBody()) as Record<string, unknown>, {
+    path: 'a.ts',
+    content: 'one\nTWO\n',
+    hash: 'h1',
+  });
+  // One round trip repaints the pane: content, diff, status and comments.
+  assert.equal(useReview.getState().file?.content, 'one\nTWO\n');
+  assert.equal(useReview.getState().file?.status, 'modified');
+  // And the tree follows, because an edit changes a file's colour in the list.
+  assert.equal(hits('/review/tree'), 2);
+});
+
+test('a file that moved under the edit comes back as a conflict, not an error', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  failWith = 'This file changed on disk while you were editing it.';
+  failStatus = 412;
+
+  const result = await saveFile('a.ts', 'mine\n', 'h1');
+
+  assert.deepEqual(result, { ok: false, conflict: true });
+  // The view explains this one, because it comes with a choice to make.
+  assert.equal(useReview.getState().error, null);
+  assert.equal(useReview.getState().saving, false);
+});
+
+test('any other refusal is a plain error, said in the error line', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  failWith = 'This file is binary, so it cannot be edited.';
+  failStatus = 409;
+
+  const result = await saveFile('a.ts', 'mine\n', 'h1');
+
+  assert.deepEqual(result, { ok: false, conflict: false });
+  assert.match(useReview.getState().error!, /binary/);
+});
+
+test('saving anyway reads what is on disk first, then writes over it', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/file'] = file({ content: 'the agent wrote this\n', hash: 'h9' });
+  const before = hits('/review/file');
+
+  await saveFile('a.ts', 'mine\n', null);
+
+  // Two calls: the read that asks what the hash is now, and the write against
+  // it — which is the reviewer overruling the refusal.
+  assert.equal(hits('/review/file'), before + 2);
+  assert.deepEqual(JSON.parse(lastBody()) as Record<string, unknown>, {
+    path: 'a.ts',
+    content: 'mine\n',
+    hash: 'h9',
+  });
 });
 
 test('an outdated comment is carried through as such', async () => {

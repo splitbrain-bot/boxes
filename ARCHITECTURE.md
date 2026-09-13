@@ -1627,6 +1627,25 @@ accidentally committed or show up in a repository's own status, and "address
 the comments in REVIEW.md" stays one line however many repositories there are.
 Its paths are workspace-relative (`repo-a/src/x.ts`).
 
+**A file can be edited as well as commented on.** `PUT /review/file` takes the
+whole file and the hash it was read at, and answers with what the file endpoint
+would — so one round trip repaints the code, the diff, the status and the
+comments, which drift has already moved. Three files are refused rather than
+written: a deleted one, a binary one, and a truncated one, because saving back
+a read that stopped at the 2 MiB cap would delete everything past it. A file
+that has moved past the hash is refused with **412**, which is the one refusal
+the reviewer can overrule — both versions still exist at that moment, theirs on
+disk and the reviewer's in the pane, so the choice is offered rather than
+taken. Writes go through the same `writeFileAtomic` as `REVIEW.md`, which now
+keeps an existing file's permissions so that saving a script does not take its
+executable bit off.
+
+That the agent may be writing the same file is expected rather than guarded
+against: the box runs while the review is open, and 412 plus "save anyway" is
+the whole mechanism. Editing needs no new containment — the path goes through
+the same tree check and the same `resolveInRoot` as a read, so `REVIEW.md`
+itself, an ignored file and a symlink out are all the same 404 they were.
+
 **Nothing here starts a container.** Reads and git both run in the
 orchestrator, so the natural moment to review — the agent is done, the box has
 idled out — costs nothing, and none of these endpoints touches a session's
@@ -1638,8 +1657,10 @@ review fetch already reads the filesystem on the spot — the tree endpoint runs
 drift recomputes on both — so what matters is being fresh *on arrival*, and
 arrival is three moments: the view mounting, a file closing back to the tree,
 and the tab becoming visible again. The last of those is skipped while a
-composer is open or a write is in flight, which is the one piece of the poll's
-logic worth keeping.
+composer is open, a write is in flight, or the pane holds unsaved edits, which
+is the one piece of the poll's logic worth keeping. Edit mode is the case that
+matters most: switching apps and coming back is how a phone returns to a
+review, and a buffer is a whole file of work to lose to a refetch.
 
 A poll would cost three git processes a round, roughly `1 + 2N` for N
 repositories every five seconds per open review. It would also keep a view
@@ -1725,6 +1746,49 @@ parallel UIs:
   code cell scrolling horizontally as one block, and a wrap toggle that starts
   on, because a phone is narrower than most source files. Every line being its
   own element is what makes it addressable at all.
+- **Editing is a mode of the same pane**, for the corrections that are quicker
+  to make than to describe. A transparent textarea floats over the code column
+  and the rows behind it do the highlighting, so the font, the gutter, the
+  colours and the line heights are the same ones in both modes.
+
+Edit mode is the pane's own rows rather than an editor component because of
+what switching has to cost: nothing. CodeMirror or Monaco would bring a second
+highlighter, a second gutter and its own line metrics, so the code would move
+under the reader on the way in — which is the opposite of what somebody
+switching modes wants, since the line they are looking at is the line they went
+in to fix. Four things follow from carrying the overlay:
+
+- **The gutter is one width for every row**, `calc(Nch + 2.75rem)` as a custom
+  property the rows and the overlay both read. Sizing each row to its own
+  content puts the rows past line 99 a few pixels wider, and the overlay has to
+  agree with the code cells to the pixel.
+- **The pane is 16px below `md`** and 13px from `md` up. Safari zooms the page
+  when a control smaller than 16px takes focus, and a zoom on the way into edit
+  mode is exactly the jump this is avoiding. The same size in both modes, so
+  switching moves nothing.
+- **Editing always wraps.** A textarea that scrolls sideways scrolls
+  independently of the rows behind it, and the two part company on the first
+  long line.
+- **The reader's line is held across the switch** (`lib/anchor.ts`). The
+  comment cards, the composer and the deletion markers fold away in edit mode,
+  because a textarea is one run of text and nothing can sit between its lines —
+  so the position is remembered as a line and an offset into it, taken before
+  the switch and put back after. A pixel offset means nothing once the rows
+  above it have changed height.
+
+Typing re-renders the whole file, so the rows are memoized and unchanged lines
+cost a comparison rather than a render. Re-tokenizing waits for a pause in the
+typing; until it lands, a line the tokens no longer describe is rendered plain
+rather than painted with the colours of what used to be there. The header stays
+put while editing, since the toolbar under it carries Save and a phone with its
+keyboard up has no room to go looking for a control that scrolled away.
+
+Every way out of an open file — the mode toggle, another file from the tree,
+the step back to the list, the way out of the review — asks first when there
+are unsaved edits, and what was agreed to then waits for the dialog's own
+history entry to be popped before it runs. A dialog is a step the back button
+can take back (see *Going back*), so a navigation made while it is still on top
+is spent on the dialog rather than on the file.
 
 Highlighting is client-side, with Shiki: the API ships plain text and the
 browser tokenizes it. Both themes are tokenized at once and travel as

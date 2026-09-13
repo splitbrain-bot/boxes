@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   lstatSync,
   readFileSync,
   realpathSync,
@@ -169,11 +170,17 @@ export function fileLines(content: string): string[] {
  * sees a half-written document, and so a crash mid-write leaves the previous
  * version rather than a truncated one. The chown is what lets the agent edit
  * or delete what was written.
+ *
+ * A file that is already there keeps its permissions, because the rename
+ * replaces it whole: without this, saving a shell script from the review would
+ * take its executable bit off.
  */
 export function writeFileAtomic(path: string, content: string): void {
   const tmp = `${path}.tmp`;
   try {
     writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o644 });
+    // After the write rather than through its mode, which the umask masks.
+    chmodSync(tmp, currentMode(path));
     chownToAgent(tmp);
     renameSync(tmp, path);
   } catch (err) {
@@ -183,6 +190,15 @@ export function writeFileAtomic(path: string, content: string): void {
       // nothing to clean up
     }
     throw err;
+  }
+}
+
+/** The permissions a file already has, or the default for a new one. */
+function currentMode(path: string): number {
+  try {
+    return statSync(path).mode & 0o777;
+  } catch {
+    return 0o644;
   }
 }
 

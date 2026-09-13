@@ -549,6 +549,12 @@ export interface ReviewFileResponse {
   repo: string | null;
   /** Plain text; the browser tokenizes it. */
   content: string;
+  /**
+   * A hash of the file as it was read, which a save sends back so a write
+   * over an agent's edit is refused rather than made. Empty for a file that
+   * is not there.
+   */
+  hash: string;
   /** True when the file was longer than the cap and the rest was dropped. */
   truncated: boolean;
   /** True when the file holds a NUL byte, in which case content is empty. */
@@ -581,6 +587,18 @@ export interface ReviewAnnotationBody {
   path: string;
   line: number;
   comment: string;
+}
+
+/**
+ * Body of a save-file request.
+ *
+ * `hash` is what the browser last read, and the save is refused when the file
+ * on disk no longer matches it.
+ */
+export interface ReviewFileBody {
+  path: string;
+  content: string;
+  hash: string;
 }
 
 /** Body of a set-base request. Null clears the base back to the working tree. */
