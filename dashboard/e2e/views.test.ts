@@ -110,7 +110,6 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/sessions/a1b2c3d4/info', scheme);
     try {
       await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('Connect an external ACP client').isVisible()).toBe(true);
       await expect
         .poll(() => page.getByText('348 MB of workspace and home').isVisible())
         .toBe(true);

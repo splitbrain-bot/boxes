@@ -4,7 +4,6 @@ import type { SessionDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { CopyField } from '@/components/CopyField';
 import { Notice } from '@/components/Notice';
 import { sessionBadges } from '@/components/SessionCard';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -13,7 +12,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { pollWhileVisible } from '@/lib/poll';
 import { shortSize } from '@/lib/rough';
-import { wsUrlFor } from '@/lib/ws-url';
 import { refresh } from '../stores/sessions.ts';
 
 /** How often the detail view re-reads the session, while its tab is visible. */
@@ -177,23 +175,6 @@ export function SessionInfo() {
               }
             />
           </dl>
-        </CardContent>
-      </Card>
-
-      {/* The dashboard needs none of this — it derives both from the page and
-          the session list. It is here for an external ACP client. */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Connect an external ACP client</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <p className="text-xs text-muted-foreground">
-            Any ACP client that speaks JSON-RPC over a WebSocket can attach to this session.
-            The token travels as a <code className="font-mono">bearer.&lt;token&gt;</code>{' '}
-            subprotocol entry, because a browser cannot set headers on a WebSocket.
-          </p>
-          <CopyField label="WebSocket URL" value={wsUrlFor(session.id)} />
-          <CopyField label="Bearer token" value={session.wsToken} masked />
         </CardContent>
       </Card>
 
