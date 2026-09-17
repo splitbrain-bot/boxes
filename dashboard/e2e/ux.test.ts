@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
-import type { GatewayScript } from './stub-gateway.ts';
+import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
  * The six complaints that forced the frontend decision, each asserted
@@ -17,11 +17,6 @@ let stub: StubOrchestrator;
 
 async function start(script?: Partial<GatewayScript>): Promise<void> {
   stub = await startStubOrchestrator(DIST, [SESSION], script);
-}
-
-/** A one-chunk assistant reply. */
-function reply(text: string): SessionUpdate[] {
-  return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } as SessionUpdate];
 }
 
 afterEach(async () => {

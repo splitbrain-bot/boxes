@@ -1,6 +1,7 @@
 import { Plus, SlidersHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
 import { ImageFooter } from '@/components/ImageFooter';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { PushToggle } from '@/components/PushToggle';
 import { SessionCard } from '@/components/SessionCard';
@@ -43,9 +44,7 @@ export function SessionList() {
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
-      {loading && sessions.length === 0 ? (
-        <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
-      ) : null}
+      {loading && sessions.length === 0 ? <Loading className="py-8 text-center" /> : null}
 
       {/* Only where the list is genuinely empty. A failed poll knows nothing
           about how many sessions there are, and saying there are none under

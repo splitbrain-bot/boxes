@@ -10,7 +10,7 @@ import type {
   SessionModeState,
   SessionNotification,
 } from './acp-types.ts';
-import { AcpClient, type ConnectionState } from './acp-client.ts';
+import { AcpClient, loadParams, type ConnectionState } from './acp-client.ts';
 import { BANG, listExec, runExec } from './exec.ts';
 import {
   applyUpdate,
@@ -81,6 +81,21 @@ export interface ThreadSnapshot {
   loading: boolean;
 }
 
+/** What a thread shows before anything has been read into it. */
+export const INITIAL_SNAPSHOT: ThreadSnapshot = {
+  messages: [],
+  isRunning: false,
+  background: [],
+  awaiting: null,
+  connection: 'connecting',
+  modes: null,
+  configOptions: [],
+  plan: null,
+  commands: [],
+  error: null,
+  loading: true,
+};
+
 /** A permission request that has been shown but not yet answered. */
 interface OpenApproval {
   toolCallId: string;
@@ -146,19 +161,7 @@ export class ThreadStore {
   private replaying = false;
 
   constructor(private readonly deps: ThreadStoreDeps) {
-    this.snapshot = {
-      messages: [],
-      isRunning: false,
-      background: [],
-      awaiting: null,
-      connection: 'connecting',
-      modes: null,
-      configOptions: [],
-      plan: null,
-      commands: [],
-      error: null,
-      loading: true,
-    };
+    this.snapshot = INITIAL_SNAPSHOT;
   }
 
   // --- React glue ----------------------------------------------------------
@@ -261,7 +264,13 @@ export class ThreadStore {
         // reaches the view.
         this.flushReplay();
       },
-      onState: (connection) => this.emit({ connection }),
+      // A state the snapshot already holds is not news, and a publish
+      // re-renders the whole thread. The client reports 'reconnecting' twice
+      // on every attempt, which is two of them for nothing.
+      onState: (connection) => {
+        if (connection !== this.snapshot.connection) this.emit({ connection });
+      },
+      onError: (message) => this.emit({ error: message }),
       onTurnState: (state) => {
         this.speakingUpstream = state.speaking;
         this.backgroundUpstream = state.background;
@@ -382,7 +391,11 @@ export class ThreadStore {
    * agent's turn. A request the adapter cancels resolves as cancelled.
    */
   private onPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    const toolCallId = params.toolCall?.toolCallId ?? '';
+    const toolCallId = params.toolCall?.toolCallId;
+    // A request naming no call is a question with nothing to ask it about.
+    // Answering it cancelled leaves the turn moving; drawing it would leave a
+    // card with no title and no call behind it in the transcript.
+    if (!toolCallId) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
     const id = `approval-${this.nextApprovalId++}`;
 
     // The call may not have been announced yet; make a placeholder so the
@@ -703,13 +716,14 @@ export class ThreadStore {
     if (!client || !sessionId) return;
     this.reset();
     try {
-      await client.request('session/load', {
-        sessionId,
-        cwd: '/workspace',
-        mcpServers: [],
-      });
+      await client.request('session/load', loadParams(sessionId));
     } finally {
       this.flushReplay();
+      // reset() forgot which local commands are already in the transcript,
+      // and the view asks for them again only when a connection reports
+      // ready, which this is not. Without this every !bang run is gone from
+      // the thread until the next reconnect.
+      void this.loadExecHistory();
     }
   }
 }

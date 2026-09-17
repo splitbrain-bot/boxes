@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from 'vitest';
+import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { resolve } from 'node:path';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import {
@@ -23,6 +23,11 @@ let stub: StubOrchestrator;
 
 beforeAll(async () => {
   stub = await startStubOrchestrator(DIST, [stubSession()]);
+});
+
+beforeEach(() => {
+  // A fresh pair of sets per test: one of these writes a skill for real, and
+  // a leftover one would change what the next test is offered.
   stub.state.agentSets = [
     stubAgentSet({
       agentsMd: '# House rules\n\nRun the tests.\n',

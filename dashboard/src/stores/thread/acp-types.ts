@@ -46,7 +46,7 @@ export type ToolCallContent =
   | { type: 'terminal'; terminalId: string };
 
 /** A tool call the model asked for. */
-export interface ToolCall {
+interface ToolCall {
   toolCallId: string;
   title: string;
   name?: string | null;
@@ -62,7 +62,7 @@ export interface ToolCall {
 export type ToolCallUpdate = Partial<ToolCall> & { toolCallId: string };
 
 /** One mode the adapter can operate in. */
-export interface SessionMode {
+interface SessionMode {
   id: string;
   name: string;
   description?: string | null;
@@ -75,7 +75,7 @@ export interface SessionModeState {
 }
 
 /** One selectable value of a session configuration option. */
-export interface SessionConfigSelectOption {
+interface SessionConfigSelectOption {
   value: string;
   name: string;
   description?: string | null;
@@ -167,11 +167,9 @@ export interface RequestPermissionResponse {
   outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
 }
 
-/** What session/new answers with. Modes are absent when the adapter has none. */
+/** What session/new answers with: the thread the connection is pinned to. */
 export interface NewSessionResponse {
   sessionId: string;
-  modes?: SessionModeState | null;
-  configOptions?: SessionConfigOption[] | null;
 }
 
 /** What session/load answers with. */

@@ -17,7 +17,7 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
 import { threadTitle, type TabState } from '@/lib/tab-title';
-import { useSessions } from '../stores/sessions.ts';
+import { refresh, useSessions } from '../stores/sessions.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
@@ -95,25 +95,37 @@ export function SessionThread() {
    * re-stage it.
    */
   const [prefill, setPrefill] = useState<string | null>(null);
-  const [session, setSession] = useState<SessionDetail | null>(null);
+  /** The session as this view found it. What it renders is `session` below. */
+  const [fetched, setFetched] = useState<SessionDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   /** The thread a fork just made, revealed as a link rather than opened. */
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
-  const { claudeTokenConfigured } = useSessions();
+  const { sessions, claudeTokenConfigured } = useSessions();
 
   // The WS token comes from the session API, behind the deployment's auth.
   useEffect(() => {
     let live = true;
     api
       .getSession(id)
-      .then((s) => live && setSession(s))
+      .then((s) => live && setFetched(s))
       .catch((err: Error) => live && setLoadError(err.message));
     return () => {
       live = false;
     };
   }, [id]);
+
+  /**
+   * The session: the polled row wherever the list has it, and the one-shot
+   * fetch until then.
+   *
+   * The fetch is what paints the first frame and what reports a session that
+   * is not there, and it is a snapshot of that moment — a thread the agent
+   * titles at the end of its first turn would keep its ordinal until a
+   * reload. The polled row carries every field this view reads.
+   */
+  const session = sessions.find((s) => s.id === id) ?? fetched;
 
   // On arrival, and once: taking it clears it, and the guard is what makes a
   // second run — React mounting effects twice in development — harmless.
@@ -182,28 +194,19 @@ export function SessionThread() {
   /**
    * Marks this conversation done, or takes the mark off again.
    *
-   * The answer is the row as the orchestrator now has it, and only the mark
-   * is taken from it: the rest of the summary was read once on arrival and
-   * whatever it says about a running turn is older than this browser's own
-   * view of one.
+   * The mark is the orchestrator's to keep, so nothing is drawn from the
+   * answer: the session list is asked for again instead, and the header shows
+   * the mark when that row carries it.
    */
   const onSetDone = useCallback(
     (next: boolean) => {
       if (!thread) return;
       api
         .setThreadDone(id, thread.id, next)
-        .then((updated) =>
-          setSession((current) =>
-            current === null
-              ? current
-              : {
-                  ...current,
-                  threads: current.threads.map((t) =>
-                    t.id === updated.id ? { ...t, done: updated.done } : t,
-                  ),
-                },
-          ),
-        )
+        // The polled row is what the header reads, so the mark appears when
+        // that row does. Asking for it now rather than waiting out the poll
+        // is what keeps the control answering under the finger that hit it.
+        .then(() => refresh())
         // Nothing was marked, so nothing is drawn as marked. It goes where the
         // rest of this thread's trouble goes.
         .catch((err: Error) => store?.reportError(err.message));

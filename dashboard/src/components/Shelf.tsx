@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { cn } from '@/lib/utils';
 
 /**
  * A row that can be put away, taking its height with it.
@@ -19,12 +18,10 @@ import { cn } from '@/lib/utils';
  */
 export function Shelf({
   away,
-  className,
   children,
 }: {
   /** True to put it away. */
   away: boolean;
-  className?: string;
   children: React.ReactNode;
 }) {
   const content = useRef<HTMLDivElement>(null);
@@ -50,10 +47,7 @@ export function Shelf({
       // parent collapsing around it keeps a box of its own, so measuring the
       // header says nothing.
       data-away={away ? '' : undefined}
-      className={cn(
-        'shrink-0 overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none',
-        className,
-      )}
+      className="shrink-0 overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none"
       style={height === null ? undefined : { height: away ? 0 : height }}
       // Nothing in a row that is not on screen should be reachable by tab or
       // readable by a screen reader. `inert` is both, and it also drops focus

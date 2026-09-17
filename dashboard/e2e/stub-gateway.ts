@@ -47,6 +47,18 @@ export interface PromptScript {
   background?: boolean;
 }
 
+/**
+ * A streamed assistant reply, in the chunks an adapter would send it.
+ *
+ * Shared, because a script's updates are what every thread test builds.
+ */
+export function reply(...texts: string[]): SessionUpdate[] {
+  return texts.map(
+    (text) =>
+      ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as SessionUpdate,
+  );
+}
+
 /** A permission question the stub raises instead of answering a prompt. */
 export interface PermissionScript {
   match: (text: string) => boolean;
@@ -59,8 +71,6 @@ export interface PermissionScript {
 /** How the stub behaves, mutable between tests. */
 export interface GatewayScript {
   token: string;
-  /** Whether a prompt is echoed back as a user_message_chunk. */
-  echoPrompt?: boolean;
   modes: SessionModeState | null;
   /** The options the adapter offers, such as the model. */
   configOptions: SessionConfigOption[];
@@ -78,18 +88,14 @@ export interface GatewayScript {
 /** A running stub gateway. */
 export interface StubGateway {
   script: GatewayScript;
-  /** The default thread's updates, in order. */
-  history: SessionUpdate[];
-  /** One thread's updates, by its ACP id. */
-  historyOf: (threadId: string) => SessionUpdate[];
   /** Prompt texts the stub received, across every thread. */
   prompts: string[];
   /** The content blocks of each prompt, which is what text loses. */
   promptBlocks: PromptBlock[][];
+  /** Notifications the stub received, in order, such as session/cancel. */
+  notifications: Array<{ method: string; params: Record<string, unknown> }>;
   /** How many sockets are attached right now, across every thread. */
   attached: () => number;
-  /** The ACP id a socket naming no thread is pinned to. */
-  current: () => string;
   /** Mints an empty thread and makes it the default; returns its ACP id. */
   newThread: () => string;
   /** Mints a thread carrying another's history and makes it the default. */
@@ -152,6 +158,8 @@ export function attachStubGateway(
   let nextThread = 2;
   const prompts: string[] = [];
   const promptBlocks: PromptBlock[][] = [];
+  /** Every notification received, which is how a test sees session/cancel. */
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   /** Set while a prompt is held open, so the test can end the turn. */
   let releaseHeld: (() => void) | null = null;
   /** Loads waiting for releaseLoad, when the script holds them. */
@@ -236,8 +244,15 @@ export function attachStubGateway(
     }
 
     // Which conversation this socket is for, settled at the handshake and
-    // fixed for its whole life, exactly as the real gateway pins it.
-    const pinned = (resolve ? resolve(sessionId, threadId) : null) ?? current;
+    // fixed for its whole life, exactly as the real gateway pins it. A
+    // session or thread nobody knows is refused here, before there is a
+    // socket to answer on, rather than pinned to whatever is current.
+    const pinned = resolve ? resolve(sessionId, threadId) : current;
+    if (pinned === null) {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     if (!threads.has(pinned)) threads.set(pinned, []);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -256,7 +271,15 @@ export function attachStubGateway(
     } catch {
       return;
     }
-    if (msg.id === undefined || !msg.method) return;
+    if (!msg.method) return;
+    if (msg.id === undefined) {
+      // A notification, which is what session/cancel is in ACP. Recorded for
+      // the tests, and the cancel ends the turn it names the way the adapter
+      // ends it: the held prompt returns.
+      notifications.push({ method: msg.method, params: params(msg) });
+      if (msg.method === 'session/cancel') releaseHeld?.();
+      return;
+    }
     const reply = (result: unknown): void => send(ws, { jsonrpc: '2.0', id: msg.id, result });
 
     switch (msg.method) {
@@ -371,14 +394,12 @@ export function attachStubGateway(
     promptText: string,
     reply: (result: unknown) => void,
   ): Promise<void> {
-    if (script.echoPrompt !== false) {
-      // Block by block, as the real gateway echoes it: a prompt carrying an
-      // image and a note about what was attached is three blocks, and
-      // flattening them to their text is exactly the part a client renders
-      // differently.
-      for (const content of blocks) {
-        emit({ sessionUpdate: 'user_message_chunk', content } as SessionUpdate, onThread);
-      }
+    // Block by block, as the real gateway echoes it: a prompt carrying an
+    // image and a note about what was attached is three blocks, and
+    // flattening them to their text is exactly the part a client renders
+    // differently.
+    for (const content of blocks) {
+      emit({ sessionUpdate: 'user_message_chunk', content } as SessionUpdate, onThread);
     }
 
     const permission = script.permissions.find((p) => p.match(promptText));
@@ -456,14 +477,10 @@ export function attachStubGateway(
 
   return {
     script,
-    get history() {
-      return historyOf(current);
-    },
-    historyOf,
     prompts,
     promptBlocks,
+    notifications,
     attached: () => sockets.size,
-    current: () => current,
     newThread: () => mint(null),
     forkThread: (from) => mint(from),
     select: (threadId) => {

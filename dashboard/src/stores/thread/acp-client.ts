@@ -23,6 +23,9 @@ import type {
 /** What the header shows about the connection. */
 export type ConnectionState = 'connecting' | 'ready' | 'reconnecting' | 'closed';
 
+/** The part of a turn-state notification the store reads. */
+export type ThreadTurnState = Pick<TurnStateParams, 'speaking' | 'background'>;
+
 /** Everything the store hands the client to react to. */
 export interface AcpClientHandlers {
   /** A session/update notification, live or from a replay. */
@@ -37,14 +40,19 @@ export interface AcpClientHandlers {
   /** The connection state changed. */
   onState(state: ConnectionState): void;
   /**
-   * The gateway said what this thread is doing: whether a prompt is open on
-   * it, whether the agent is talking, and what it has left running in the
-   * background. It says so once after every replay and again on every
-   * transition, which is how a browser that did not send the prompt knows
-   * there is one — and the only way any browser learns about a monitor
-   * somebody started an hour ago.
+   * The connection could not be brought up, and says why. A reconnect is
+   * already on its way; this is the reason to put in front of the reader
+   * while it runs.
    */
-  onTurnState(state: TurnStateParams): void;
+  onError(message: string): void;
+  /**
+   * The gateway said what this thread is doing: whether the agent is talking,
+   * and what it has left running in the background. It says so once after
+   * every replay and again on every transition, which is how a browser that
+   * did not send the prompt knows there is one — and the only way any browser
+   * learns about a monitor somebody started an hour ago.
+   */
+  onTurnState(state: ThreadTurnState): void;
   /**
    * A fresh connection is about to replay the thread, so whatever the store
    * holds is stale and must be thrown away.
@@ -65,8 +73,17 @@ interface RpcMessage {
 /** Waits between reconnect attempts, in milliseconds, then holds at the last. */
 const BACKOFF_MS = [500, 1000, 2000, 5000, 10_000];
 
+/** What a session/load asks for: the thread, and the workspace it runs in. */
+export function loadParams(sessionId: string): {
+  sessionId: string;
+  cwd: string;
+  mcpServers: never[];
+} {
+  return { sessionId, cwd: '/workspace', mcpServers: [] };
+}
+
 /** An error carrying a JSON-RPC error payload. */
-export class RpcError extends Error {
+class RpcError extends Error {
   constructor(
     message: string,
     readonly code: number,
@@ -183,12 +200,12 @@ export class AcpClient {
   }
 
   /**
-   * initialize, then either resume the adapter's thread or start one.
+   * initialize, then resume the thread this connection is pinned to.
    *
-   * The gateway answers session/new with the bare `{ sessionId }` once the
-   * session already has a thread, so a response without `modes` is how a
-   * browser learns it is joining an existing one and has to ask for the
-   * replay itself. A fresh thread's response carries the adapter's modes.
+   * The gateway answers session/new with the bare `{ sessionId }`: which
+   * thread a connection is on is decided outside ACP, so the answer names
+   * that thread and says nothing else about it. The replay, the modes and the
+   * config options all come from the session/load that follows.
    */
   private async handshake(): Promise<void> {
     try {
@@ -206,24 +223,19 @@ export class AcpClient {
       // Whatever this connection knew is about to be re-sent from the top.
       this.handlers.onResetThread();
 
-      let modes = created.modes ?? null;
-      let configOptions = created.configOptions ?? null;
-      if (!created.modes) {
-        const loaded = await this.request<LoadSessionResponse>('session/load', {
-          sessionId: created.sessionId,
-          cwd: '/workspace',
-          mcpServers: [],
-        });
-        modes = loaded?.modes ?? null;
-        configOptions = loaded?.configOptions ?? null;
-      }
+      const loaded = await this.request<LoadSessionResponse>(
+        'session/load',
+        loadParams(created.sessionId),
+      );
 
       this.attempt = 0;
       this.handlers.onState('ready');
-      this.handlers.onReady(modes, configOptions ?? []);
-    } catch {
-      // A failed handshake is a failed connection: close and let the
-      // backoff bring up a fresh one rather than sitting half-open.
+      this.handlers.onReady(loaded?.modes ?? null, loaded?.configOptions ?? []);
+    } catch (err) {
+      // A failed handshake is a failed connection: report why, then close and
+      // let the backoff bring up a fresh one rather than sitting half-open.
+      // Without the reason the view is a reconnecting dot and nothing else.
+      this.handlers.onError((err as Error).message);
       try {
         this.ws?.close(1011, 'handshake failed');
       } catch {
@@ -269,19 +281,12 @@ export class AcpClient {
 
     if (msg.method === TURN_STATE_METHOD) {
       const params = msg.params as Partial<TurnStateParams> | undefined;
-      // Read defensively: an older orchestrator may omit fields this build
-      // expects.
+      // Read defensively: the notification is a message off the wire like any
+      // other, and a field it omits is a field this thread knows nothing new
+      // about.
       this.handlers.onTurnState({
-        sessionId: params?.sessionId ?? '',
-        active: params?.active === true,
         speaking: params?.speaking === true,
-        // An older orchestrator sends one boolean about the whole box. Whose
-        // work it is cannot be known here, so it becomes one unnamed entry.
-        background: Array.isArray(params?.background)
-          ? params.background
-          : params?.background === true
-            ? [{ id: 'unnamed', command: 'Something is still running', startedAt: null }]
-            : [],
+        background: Array.isArray(params?.background) ? params.background : [],
       });
     }
   }

@@ -68,7 +68,7 @@ const GRAMMARS: Record<string, () => Promise<unknown>> = {
 };
 
 /** Whether a language has a grammar to load at all. */
-export function canHighlight(language: string): boolean {
+function canHighlight(language: string): boolean {
   return language in GRAMMARS;
 }
 

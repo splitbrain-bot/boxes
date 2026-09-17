@@ -250,7 +250,7 @@ export interface StubState {
    * would be checking, or null for the loopback default that has none.
    *
    * Boxes has no auth of its own, so anything past a single-user machine is
-   * behind one (README, "Behind a reverse proxy"). Named here because that
+   * behind one (ARCHITECTURE.md, "One origin, one port"). Named here because that
    * changes what the browser sees: a request the proxy does not recognize is
    * bounced to a login page rather than answered, and not every request the
    * page makes carries credentials.
@@ -317,7 +317,19 @@ export async function startStubOrchestrator(
     exitCode: 0,
   });
 
-  const summary = (s: SessionDetail): SessionSummary => s;
+  // Fixtures are built once, before the browser starts, so an age written as
+  // "12 seconds ago" reads as a minute by the fourth test in a file. Every
+  // reading is carried forward by how long the stub has been up, which holds
+  // each fixture at the age it was written as.
+  const startedAt = Date.now();
+  const asOfNow = (s: SessionDetail): SessionDetail => {
+    const elapsed = Date.now() - startedAt;
+    return {
+      ...s,
+      lastActiveAt: s.lastActiveAt + elapsed,
+      threads: s.threads.map((t) => ({ ...t, lastActiveAt: t.lastActiveAt + elapsed })),
+    };
+  };
 
   const server = createServer((req, res) => {
     const url = (req.url ?? '/').split('?')[0] ?? '/';
@@ -350,12 +362,12 @@ export async function startStubOrchestrator(
       return json(res, 200, health);
     }
     if (url === '/api/sessions' && req.method === 'GET') {
-      return json(res, 200, state.sessions.map(summary));
+      return json(res, 200, state.sessions.map(asOfNow) satisfies SessionSummary[]);
     }
     const detail = /^\/api\/sessions\/([^/]+)$/.exec(url);
     if (detail && req.method === 'GET') {
       const found = state.sessions.find((s) => s.id === detail[1]);
-      return found ? json(res, 200, found) : json(res, 404, { error: 'Not found' });
+      return found ? json(res, 200, asOfNow(found)) : json(res, 404, { error: 'Not found' });
     }
     // Removed from the list for real, so what the browser does next — the
     // list it lands on, and the entry it must not be able to go back to — is

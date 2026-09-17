@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { resolve } from 'node:path';
-import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage } from './browser.ts';
 import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
+import { reply } from './stub-gateway.ts';
 
 /**
  * Several conversations on one session, and two of them watched at once.
@@ -20,13 +20,6 @@ const ID = 'a1b2c3d4';
 /** The `text-decoration-line` the browser computed for one element. */
 function decoration(target: import('playwright').Locator): Promise<string> {
   return target.evaluate((el) => getComputedStyle(el).textDecorationLine);
-}
-
-/** A streamed assistant reply, in the chunks an adapter would send it. */
-function reply(...texts: string[]): SessionUpdate[] {
-  return texts.map(
-    (text) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as SessionUpdate,
-  );
 }
 
 let stub: StubOrchestrator;

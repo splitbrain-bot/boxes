@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { FileMessagePartComponent } from "@assistant-ui/react";
 import { cn } from "@/lib/utils";
+import { formatBytes } from "@/lib/attachments";
 
 const fileVariants = cva(
   "aui-file-root inline-flex items-center gap-3 rounded-lg transition-colors",
@@ -79,15 +80,10 @@ function getBase64Size(base64: string): number {
   return Math.floor((base64Data.length * 3) / 4) - padding;
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+// Boxes edit: one implementation of this in the app, in lib/attachments.ts,
+// where the composer's own attachment chips read it too. The name the
+// registry exports stays.
+const formatFileSize = formatBytes;
 
 export type FileRootProps = React.ComponentProps<"div"> &
   VariantProps<typeof fileVariants>;

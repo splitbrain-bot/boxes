@@ -30,13 +30,13 @@ import {
  */
 
 /** A run of assistant or user prose. */
-export interface TextPart {
+interface TextPart {
   type: 'text';
   text: string;
 }
 
 /** The agent thinking out loud, rendered collapsed. */
-export interface ReasoningPart {
+interface ReasoningPart {
   type: 'reasoning';
   text: string;
 }
@@ -49,7 +49,7 @@ export interface ReasoningPart {
  * once, on arrival, by `imageSrc`. A block that yields no src never becomes
  * one of these — it is said in words instead.
  */
-export interface ImagePart {
+interface ImagePart {
   type: 'image';
   src: string;
 }

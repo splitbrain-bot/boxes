@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
-import type { GatewayScript } from './stub-gateway.ts';
+import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
  * The live thread against a stub gateway speaking the agent side of ACP.
@@ -16,13 +16,6 @@ import type { GatewayScript } from './stub-gateway.ts';
 
 const DIST = resolve(import.meta.dirname, '../dist');
 const SESSION = stubSession();
-
-/** A streamed assistant reply, in the chunks an adapter would send it. */
-function reply(...texts: string[]): SessionUpdate[] {
-  return texts.map(
-    (text) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as SessionUpdate,
-  );
-}
 
 /**
  * A real PNG, small enough to sit in the source: two bands and a diagonal, so
@@ -353,10 +346,15 @@ test('cancelling stops the run state', async () => {
     await expect.poll(() => cancel.isVisible()).toBe(true);
 
     await cancel.click();
+    // The cancel reaches the gateway as an ACP notification, and the turn it
+    // names ends there: nothing is released by hand, and the composer takes
+    // prompts again once the turn state says the thread is idle.
+    await expect
+      .poll(() => stub.gateway.notifications.some((n) => n.method === 'session/cancel'))
+      .toBe(true);
     await expect.poll(() => cancel.isVisible()).toBe(false);
     await expect.poll(() => page.getByLabel('Send message').isVisible()).toBe(true);
 
-    stub.gateway.release();
     expect(errors).toEqual([]);
   } finally {
     await close();

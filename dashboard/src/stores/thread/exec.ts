@@ -56,13 +56,11 @@ export async function runExec(
   command: string,
   after: string | null,
   onChunk: (outputSoFar: string) => void,
-  signal?: AbortSignal,
 ): Promise<ExecOutcome> {
   const res = await fetch(execUrl(sessionId, threadId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command, after }),
-    ...(signal ? { signal } : {}),
   });
   if (!res.ok || !res.body) {
     const message = await res.text().catch(() => '');

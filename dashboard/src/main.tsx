@@ -1,6 +1,7 @@
 import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { Loading } from './components/Loading.tsx';
 import { installWorker, refreshPush } from './stores/push.ts';
 import { startPolling } from './stores/sessions.ts';
 import { AgentSetEditor } from './views/AgentSetEditor.tsx';
@@ -50,9 +51,9 @@ function App() {
           element={
             <Suspense
               fallback={
-                <div className="flex h-dvh items-center justify-center text-sm text-muted-foreground">
+                <Loading className="flex h-dvh items-center justify-center">
                   Loading the review…
-                </div>
+                </Loading>
               }
             >
               <SessionReview />

@@ -113,17 +113,38 @@ export function open(sessionId: string): void {
   set({ ...EMPTY, sessionId });
 }
 
-/** Fetches the tree, statuses and comment counts. */
+/**
+ * Fetches the tree, statuses and comment counts.
+ *
+ * An answer for a session the store has since left is dropped: a slow tree
+ * landing after the route moved on would paint another box's files.
+ */
 export async function loadTree(): Promise<void> {
   const { sessionId } = get();
   if (!sessionId) return;
   set({ loadingTree: true });
   try {
     const tree = await api.reviewTree(sessionId);
+    if (get().sessionId !== sessionId) return;
     set({ tree, error: null, loadingTree: false });
   } catch (err) {
+    if (get().sessionId !== sessionId) return;
     set({ error: (err as Error).message, loadingTree: false });
   }
+}
+
+/**
+ * What the last loadFile call asked for, so an answer something else has
+ * overtaken can be dropped.
+ *
+ * Outside the state because nothing renders from it: it says what was asked
+ * for rather than what the pane is showing.
+ */
+let requestedPath: string | null = null;
+
+/** Whether a fetch's answer is still the one the store is waiting for. */
+function stillWanted(sessionId: string, path: string): boolean {
+  return get().sessionId === sessionId && requestedPath === path;
 }
 
 /**
@@ -133,17 +154,22 @@ export async function loadTree(): Promise<void> {
  * The content is shown before the tokens arrive rather than after, so a slow
  * grammar import never delays reading the code. The token pass then checks the
  * file is still the open one, because a fast tap through the tree can outrun
- * it.
+ * it — and so does the content itself, because two taps whose answers land
+ * out of order would otherwise leave the pane on the first file while the URL
+ * and the tree both say the second.
  */
 export async function loadFile(path: string): Promise<void> {
   const { sessionId } = get();
   if (!sessionId) return;
+  requestedPath = path;
   set({ loadingFile: true, composing: null });
   try {
     const file = await api.reviewFile(sessionId, path);
+    if (!stillWanted(sessionId, path)) return;
     set({ error: null, loadingFile: false });
     await show(file);
   } catch (err) {
+    if (!stillWanted(sessionId, path)) return;
     set({ error: (err as Error).message, loadingFile: false, file: null });
   }
 }
@@ -160,6 +186,7 @@ async function show(file: ReviewFileResponse): Promise<void> {
 
 /** Closes the open file, back to the tree on a phone. */
 export function closeFile(): void {
+  requestedPath = null;
   set({ file: null, composing: null, dirty: false });
 }
 
@@ -229,13 +256,14 @@ export async function saveComment(path: string, line: number, comment: string): 
   const { sessionId, file } = get();
   if (!sessionId) return;
   const previous = file?.annotations ?? [];
+  set({ saving: true });
 
   if (file && file.path === path) {
     const optimistic = [
       ...previous.filter((a) => a.line !== line),
       { line, comment: comment.trim(), outdated: false },
     ].sort((a, b) => a.line - b.line);
-    set({ file: { ...file, annotations: optimistic }, composing: null, saving: true });
+    set({ file: { ...file, annotations: optimistic }, composing: null });
   }
 
   try {
@@ -253,12 +281,12 @@ export async function deleteComment(path: string, line: number): Promise<void> {
   const { sessionId, file } = get();
   if (!sessionId) return;
   const previous = file?.annotations ?? [];
+  set({ saving: true });
 
   if (file && file.path === path) {
     set({
       file: { ...file, annotations: previous.filter((a) => a.line !== line) },
       composing: null,
-      saving: true,
     });
   }
 

@@ -7,22 +7,6 @@ import { commandsRunning } from '@/lib/activity';
 import { formatDuration } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
 
-/**
- * What this thread has left running, above the composer, for as long as it is
- * running.
- *
- * It covers the one state nothing else expresses: the agent has finished, the
- * thread is quiet, the composer is free, and a monitor is watching a log or a
- * build has twenty minutes left. Without it such a thread looks finished, and
- * the only evidence is an old line where the agent promised to report back.
- *
- * This thread's work and nobody else's: what is listed is what runs under
- * this conversation's own agent process.
- *
- * Quiet, at the weight of the tool rows, because it is a standing fact about
- * the box rather than a thing that just happened.
- */
-
 /** How often the ages are re-read. A minute's work is not timed to the second. */
 const TICK_MS = 15_000;
 
@@ -38,6 +22,21 @@ function useNow(active: boolean): number {
   return now;
 }
 
+/**
+ * What this thread has left running, above the composer, for as long as it is
+ * running.
+ *
+ * It covers the one state nothing else expresses: the agent has finished, the
+ * thread is quiet, the composer is free, and a monitor is watching a log or a
+ * build has twenty minutes left. Without it such a thread looks finished, and
+ * the only evidence is an old line where the agent promised to report back.
+ *
+ * This thread's work and nobody else's: what is listed is what runs under
+ * this conversation's own agent process.
+ *
+ * Quiet, at the weight of the tool rows, because it is a standing fact about
+ * the box rather than a thing that just happened.
+ */
 export function BackgroundBar({
   processes,
   onStop,

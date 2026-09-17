@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -13,7 +12,6 @@ import {
 export function ConfirmDialog({
   title,
   description,
-  children,
   confirmLabel,
   danger = false,
   busy = false,
@@ -22,7 +20,6 @@ export function ConfirmDialog({
 }: {
   title: string;
   description?: string;
-  children?: ReactNode;
   confirmLabel: string;
   danger?: boolean;
   busy?: boolean;
@@ -36,7 +33,6 @@ export function ConfirmDialog({
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
-        {children}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
             Cancel

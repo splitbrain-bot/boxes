@@ -5,7 +5,7 @@ import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
 import { Shelf } from '@/components/Shelf';
 import { BasePicker } from '@/components/review/BasePicker';
-import { CodePane } from '@/components/review/CodePane';
+import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
 import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
 import { HunkSheet } from '@/components/review/HunkSheet';
@@ -91,8 +91,8 @@ export function SessionReview() {
    */
   const [wrap, setWrap] = useState(true);
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
-  /** A line to scroll to once, set by the prev/next toolbar. */
-  const [scrollTo, setScrollTo] = useState<number | null>(null);
+  /** The line the prev/next toolbar last asked for, or null. */
+  const [scrollTo, setScrollTo] = useState<ScrollTarget | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
   /** The comment a tap on a bin is asking to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -461,12 +461,15 @@ export function SessionReview() {
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
     if (lines.length === 0) return;
-    const from = scrollTo ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
+    const from = scrollTo?.line ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
     const next =
       direction === 1
         ? (lines.find((line) => line > from) ?? lines[0]!)
         : ([...lines].reverse().find((line) => line < from) ?? lines.at(-1)!);
-    setScrollTo(next);
+    // Every press is its own request, because a file with one change in it
+    // and a step that wrapped round both land on the line already showing —
+    // and the pane has to take the reader back to it either way.
+    setScrollTo((current) => ({ line: next, nonce: (current?.nonce ?? 0) + 1 }));
   };
 
   // The code pane is the scroller here, the same way the thread is in a
@@ -630,10 +633,13 @@ export function SessionReview() {
         >
           {tree ? (
             <ReviewTree tree={tree} activePath={file?.path ?? null} onOpen={openPath} />
-          ) : (
-            <p className="px-3 py-4 text-sm text-muted-foreground">
-              {loadingTree ? 'Loading…' : 'Nothing to show.'}
-            </p>
+          ) : loadingTree ? (
+            <p className="px-3 py-4 text-sm text-muted-foreground">Loading…</p>
+          ) : error ? null : (
+            // Only where the tree came back empty. A fetch that failed has the
+            // banner above to say so, and "nothing to show" under it reads as
+            // an answer about the workspace rather than about the failure.
+            <p className="px-3 py-4 text-sm text-muted-foreground">Nothing to show.</p>
           )}
         </aside>
 

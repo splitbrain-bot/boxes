@@ -1,5 +1,4 @@
 import type {
-  AcpLogPage,
   AgentBundlePreview,
   AgentItemBody,
   AgentItemKind,
@@ -139,8 +138,6 @@ export const api = {
         body: file,
       },
     ),
-  getLog: (id: string, after = 0) =>
-    request<AcpLogPage>(`/api/sessions/${id}/log?after=${after}&limit=200`),
   health: () => request<HealthResponse>('/healthz'),
   pushKey: () => request<PushKeyResponse>('/api/push/key'),
   subscribePush: (body: PushSubscribeBody) =>

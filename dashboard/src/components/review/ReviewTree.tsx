@@ -8,21 +8,6 @@ import type {
 import { Notice } from '@/components/Notice';
 import { cn } from '@/lib/utils';
 
-/**
- * The workspace's files, with git status and comment counts on them.
- *
- * One tree over the whole workspace, not over one repository in it: paths are
- * workspace-relative, and the directory a repository is rooted at is marked,
- * so the boundaries are visible while scrolling across them. Which repository
- * a file belongs to is what decides its status letter and its gutter markers,
- * and there is nothing to switch between.
- *
- * One component for both arrangements: a collapsible left column from `md` up
- * and a Sheet below it. The desktop tool's three panels do not survive a
- * phone, but the tree does — what changes is where it is mounted, not what it
- * renders.
- */
-
 /** What a status colours its row, and the single letter that names it. */
 const STATUS: Record<ReviewFileStatus, { className: string; mark: string; label: string }> = {
   modified: { className: 'text-warn', mark: 'M', label: 'modified' },
@@ -52,6 +37,21 @@ function initialOpen(entries: ReviewTreeEntry[]): Set<string> {
   return open;
 }
 
+/**
+ * The workspace's files, with git status and comment counts on them.
+ *
+ * One tree over the whole workspace, not over one repository in it: paths are
+ * workspace-relative, and the directory a repository is rooted at is marked,
+ * so the boundaries are visible while scrolling across them. Which repository
+ * a file belongs to is what decides its status letter and its gutter markers,
+ * and there is nothing to switch between.
+ *
+ * One component for both arrangements: a column beside the pane from `md` up,
+ * and below it a full-width step of the navigation stack that the open file
+ * takes the screen from. The desktop tool's three panels do not survive a
+ * phone, but the tree does — what changes is where it is mounted, not what it
+ * renders.
+ */
 export function ReviewTree({
   tree,
   activePath,
@@ -185,6 +185,7 @@ function Level({
               {entry.repo ? (
                 <GitBranch
                   className="size-3 shrink-0 text-muted-foreground"
+                  role="img"
                   aria-label="a git repository"
                 />
               ) : null}
@@ -200,6 +201,7 @@ function Level({
                 // Collapsed, with changed files inside: the letters belong to
                 // the files, but a branch that hides one has to say so.
                 <span
+                  role="img"
                   aria-label="contains changes"
                   title="contains changes"
                   className="size-1.5 shrink-0 rounded-full bg-warn"
@@ -218,6 +220,7 @@ function Level({
                 // which is what makes the tree usable as a to-do list.
                 <MessageSquare
                   className="size-3 shrink-0 text-primary"
+                  role="img"
                   aria-label="contains comments"
                 />
               ) : null}
