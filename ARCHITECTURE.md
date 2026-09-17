@@ -308,8 +308,7 @@ gateway answers any ACP client, and an ACP prompt may carry an image inline.
 One React app, served at `/`. The session list is the thread list: a thread is
 `/sessions/:id/threads/:threadId`, and `/sessions/:id` is whichever thread the
 session has current — so every older link and bookmark still works. The ops —
-start, stop, delete, the details, the connection fields for an external ACP
-client — live at `/sessions/:id/info`.
+start, stop, delete, the details — live at `/sessions/:id/info`.
 What the agent is configured with belongs to the deployment rather than to any
 one box, so it hangs off the list instead: `/agents` lists the sets and
 `/agents/:setId` edits one.
@@ -481,8 +480,8 @@ The browser speaks plain ACP to the gateway, so it is a client like any other
 and the gateway stays client-agnostic. That is not only tidiness: this
 dashboard replaced a separate chat application served alongside it, and the
 gateway needed no protocol change to swap one for the other. An external ACP
-client still attaches to the same endpoint, with the URL and token from
-`/sessions/:id/info`.
+client still attaches to the same endpoint, with the path shape below and the
+deployment's `WS_AUTH_TOKEN`.
 
 ```
 AcpClient    ⇄ …/threads/:threadId/acp  JSON-RPC over one WebSocket, one thread
