@@ -157,12 +157,10 @@ describe('discovery', () => {
     assert.deepEqual(await paths(), [atLimit]);
   });
 
-  test('the directory cap is a real number that bounds the walk', async () => {
+  test('the directory cap is a real number, and a small workspace is under it', async () => {
+    // Building 4000 directories per test run is not worth the seconds, so the
+    // cap itself is asserted and an ordinary workspace is walked whole.
     assert.equal(MAX_SCANNED_DIRS, 4000);
-    // Cheap proof the cap is wired to the walk rather than only declared: a
-    // repository behind more directories than the cap allows is not reached.
-    // (Building 4000 directories per test run is not worth the seconds, so
-    // the limit itself is asserted and the wiring is read at the call site.)
     for (let i = 0; i < 20; i++) mkdirSync(join(dir, `sib${i}`));
     repo('project');
     assert.deepEqual(await paths(), ['project']);

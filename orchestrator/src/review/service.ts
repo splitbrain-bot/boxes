@@ -10,7 +10,7 @@ import type {
 import type { Db, SessionRow } from '../db.ts';
 import { HttpError } from '../http-error.ts';
 import { log } from '../log.ts';
-import { fileDiff } from './difflines.ts';
+import { emptyDiff, fileDiff } from './difflines.ts';
 import {
   fileHash,
   fileLines,
@@ -30,6 +30,7 @@ import {
   resolveBases,
   workspaceStatuses,
   type Base,
+  type FileStatuses,
 } from './gitstatus.ts';
 import { discoverRepos, inRepo, type Repo, type RepoMap } from './repos.ts';
 import {
@@ -200,14 +201,13 @@ export class ReviewService {
     const rev = this.baseRev(id);
     const bases = await resolveBases(map, rev);
 
-    const [tree, statuses, repos] = await Promise.all([
-      reviewTree(map),
-      workspaceStatuses(map, bases),
+    const [listing, repos] = await Promise.all([
+      this.listing(map, bases),
       this.describeRepos(map, bases),
     ]);
 
     const review = await this.driftAll(id, workspace);
-    const entries = markRepoRoots(withDeleted(tree.entries, deletedPaths(statuses)), map);
+    const entries = markRepoRoots(listing.entries, map);
     // The paths this response offers, remembered for the file open that
     // almost always follows it.
     this.rememberPaths(id, entries);
@@ -216,8 +216,8 @@ export class ReviewService {
       repos,
       hasGit: map.hasGit,
       entries,
-      truncated: tree.truncated,
-      statuses,
+      truncated: listing.truncated,
+      statuses: listing.statuses,
       counts: Object.fromEntries(annotationCounts(review)),
       base: { rev },
       hasReview: fileHash(this.reviewPath(workspace)) !== '',
@@ -240,7 +240,9 @@ export class ReviewService {
     const map = await this.repos(id);
     const repo = map.repoFor(relPath);
     const path = await this.resolveListed(workspace, id, relPath);
-    if (path === null) return goneFile(relPath, repo);
+    if (path === null) {
+      return goneFile(relPath, repo, await this.annotationsOf(id, workspace, relPath));
+    }
     const read = readTextFile(path);
     const base = repo ? await this.baseIn(id, repo) : NO_BASE;
 
@@ -255,9 +257,13 @@ export class ReviewService {
       repo ? fileStatuses(repo.absolute, base) : Promise.resolve(null),
     ]);
 
-    const annotations = read.binary
-      ? []
-      : await this.driftFile(id, workspace, relPath, fileLines(read.content));
+    // A binary file and a file past the display cap are not what the comments
+    // were written against, so they come back as they stand: a drift check
+    // against lines this process cannot read whole would mark them outdated.
+    const annotations =
+      read.binary || read.truncated
+        ? await this.annotationsOf(id, workspace, relPath)
+        : await this.driftFile(id, workspace, relPath, fileLines(read.content));
 
     return {
       path: relPath,
@@ -398,6 +404,9 @@ export class ReviewService {
    * resolves nowhere. Null clears it.
    */
   async setBase(id: string, rev: string | null): Promise<ReviewBaseResponse> {
+    // The session is validated here as it is everywhere else, because the held
+    // repository map would otherwise answer for a session that has none.
+    this.workspace(id);
     const map = await this.repos(id);
     if (rev === null || rev.trim() === '') {
       this.db.prepare('UPDATE sessions SET review_base_rev = NULL WHERE id = ?').run(id);
@@ -447,7 +456,14 @@ export class ReviewService {
       for (let attempt = 0; attempt < 2; attempt++) {
         const before = fileHash(path);
         const review = this.read(path);
+        const asRead = serializeReview(review);
         apply(review);
+        // A change that applied to nothing — deleting a comment that is not
+        // there — leaves the file alone, rather than creating a review that
+        // holds none.
+        if (serializeReview(review) === asRead) {
+          return toAnnotations(annotationsFor(review, relPath));
+        }
         if (review.started === '') review.started = todayStamp();
         const serialized = serializeReview(review);
 
@@ -475,6 +491,23 @@ export class ReviewService {
   }
 
   /**
+   * One file's comments as REVIEW.md holds them, without a drift check.
+   *
+   * For the files drift has nothing to check against: one the change deleted,
+   * one that is binary, one longer than the display cap. The tree counts those
+   * comments, so the file view has to show them — a badge promising a comment
+   * the reviewer cannot read or delete is worse than no badge.
+   */
+  private async annotationsOf(
+    id: string,
+    workspace: string,
+    relPath: string,
+  ): Promise<ReviewAnnotation[]> {
+    const path = this.reviewPath(workspace);
+    return this.withLock(id, () => toAnnotations(annotationsFor(this.read(path), relPath)));
+  }
+
+  /**
    * Runs drift on every annotated file and writes the result once if anything
    * moved. Returns the review as it now stands.
    */
@@ -487,7 +520,11 @@ export class ReviewService {
 
       let changed = false;
       for (const [file, annotations] of review.data) {
-        if (checkDrift(annotations, sourceLines(workspace, file))) changed = true;
+        const source = sourceLines(workspace, file);
+        // Undefined is a file that cannot be read honestly: it is skipped
+        // rather than having its annotations declared outdated.
+        if (source === undefined) continue;
+        if (checkDrift(annotations, source)) changed = true;
       }
       if (changed && fileHash(path) === before) {
         writeFileAtomic(path, serializeReview(review));
@@ -610,11 +647,28 @@ export class ReviewService {
     if (cached && Date.now() - cached.at < ReviewService.TREE_CACHE_MS) return cached.paths;
     const map = await this.repos(id);
     const bases = await resolveBases(map, this.baseRev(id));
-    const [tree, statuses] = await Promise.all([
-      reviewTree(map),
-      workspaceStatuses(map, bases),
-    ]);
-    return this.rememberPaths(id, withDeleted(tree.entries, deletedPaths(statuses)));
+    return this.rememberPaths(id, (await this.listing(map, bases)).entries);
+  }
+
+  /**
+   * The tree a review browses, with the files a change deleted put back into
+   * it, and the statuses that named them.
+   *
+   * Only the statuses know a deleted file's path, so the two are built
+   * together — and the tree endpoint and {@link listed} offer exactly the same
+   * entries, which is what makes a path the browser was shown one the file
+   * endpoint serves.
+   */
+  private async listing(
+    map: RepoMap,
+    bases: Map<string, Base>,
+  ): Promise<{ entries: TreeEntry[]; statuses: FileStatuses; truncated: boolean }> {
+    const [tree, statuses] = await Promise.all([reviewTree(map), workspaceStatuses(map, bases)]);
+    return {
+      entries: withDeleted(tree.entries, deletedPaths(statuses)),
+      statuses,
+      truncated: tree.truncated,
+    };
   }
 
   /**
@@ -640,9 +694,15 @@ export class ReviewService {
 
 /**
  * The answer for a file the change removed: it is in the tree because git
- * reports it deleted, and there is nothing on disk to read.
+ * reports it deleted, and there is nothing on disk to read. Its comments come
+ * with it, because the tree counts them and they are still there to be read
+ * and deleted.
  */
-function goneFile(relPath: string, repo: Repo | null): ReviewFileResponse {
+function goneFile(
+  relPath: string,
+  repo: Repo | null,
+  annotations: ReviewAnnotation[],
+): ReviewFileResponse {
   return {
     path: relPath,
     repo: repo?.path ?? null,
@@ -655,27 +715,29 @@ function goneFile(relPath: string, repo: Repo | null): ReviewFileResponse {
     lines: 0,
     language: detectLang(relPath),
     status: 'deleted',
-    diff: { lines: {}, hunks: [], deletions: [] },
-    annotations: [],
+    diff: emptyDiff(),
+    annotations,
   };
 }
 
 /**
- * A file's current lines for a drift check, or null when the file is gone —
- * which is what marks every annotation on it outdated.
+ * A file's current lines for a drift check.
+ *
+ * Null says the file is gone, which is what marks every annotation on it
+ * outdated. Undefined says it is there and cannot be read honestly — it is
+ * binary, or longer than the display cap — where the lines on hand are not
+ * what the comments were written against and drift has nothing to say.
  *
  * The path is workspace-relative and so is the annotation's, which is why a
  * file that moves between repositories needs nothing new: a comment follows
  * the path, and drift already handles its content moving.
  */
-function sourceLines(workspace: string, relPath: string): string[] | null {
+function sourceLines(workspace: string, relPath: string): string[] | null | undefined {
   const resolved = resolveInRoot(workspace, relPath);
   if (!resolved.ok || isDirectory(resolved.path)) return null;
   try {
     const read = readTextFile(resolved.path);
-    // A truncated or binary read has nothing honest to compare against, so
-    // the annotations are left alone rather than declared outdated.
-    if (read.binary || read.truncated) return null;
+    if (read.binary || read.truncated) return undefined;
     return fileLines(read.content);
   } catch {
     return null;

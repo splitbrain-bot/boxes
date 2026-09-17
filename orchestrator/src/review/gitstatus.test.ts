@@ -20,8 +20,13 @@ import {
 /** Git statuses and base resolution, ported from the Go implementation's. */
 
 describe('parsePorcelain', () => {
+  /** The output `git status -z` produces: one NUL-terminated record per file. */
+  function records(entries: string[]): string {
+    return entries.map((entry) => `${entry}\0`).join('');
+  }
+
   test('classifies the index and work-tree pairs', () => {
-    const out = [
+    const out = records([
       '?? new.txt',
       ' M modified.txt',
       'M  staged.txt',
@@ -32,7 +37,7 @@ describe('parsePorcelain', () => {
       'UU conflict.txt',
       'AA both-added.txt',
       'DD both-deleted.txt',
-    ].join('\n');
+    ]);
     assert.deepEqual(parsePorcelain(out), {
       'new.txt': 'untracked',
       'modified.txt': 'modified',
@@ -48,19 +53,24 @@ describe('parsePorcelain', () => {
     });
   });
 
-  test('a rename is reported under its new path', () => {
-    assert.deepEqual(parsePorcelain('R  old/name.txt -> new/name.txt'), {
-      'new/name.txt': 'staged',
+  test('an arrow in a name is part of the name, not a rename', () => {
+    assert.deepEqual(parsePorcelain(records(['?? a -> b.txt'])), { 'a -> b.txt': 'untracked' });
+  });
+
+  test('a leading or a trailing space in a name survives', () => {
+    assert.deepEqual(parsePorcelain(records(['??  leading.txt', '?? trailing.txt '])), {
+      ' leading.txt': 'untracked',
+      'trailing.txt ': 'untracked',
     });
   });
 
-  test('short and empty lines are skipped', () => {
+  test('short and empty records are skipped', () => {
     assert.deepEqual(parsePorcelain(''), {});
-    assert.deepEqual(parsePorcelain('\n\nxy\n'), {});
+    assert.deepEqual(parsePorcelain(records(['', 'xy'])), {});
   });
 
   test('a path with a leading ./ is cleaned to match the tree', () => {
-    assert.deepEqual(parsePorcelain('?? ./a/b.txt'), { 'a/b.txt': 'untracked' });
+    assert.deepEqual(parsePorcelain(records(['?? ./a/b.txt'])), { 'a/b.txt': 'untracked' });
   });
 });
 
@@ -132,6 +142,17 @@ describe('over a real repository', () => {
     const statuses = await fileStatuses(dir, NO_BASE);
     assert.equal(statuses?.['newdir/a.go'], 'untracked');
     assert.equal(statuses?.['newdir/sub/b.go'], 'untracked');
+  });
+
+  test('a rename is reported as a deletion and an addition', async () => {
+    // Renames are turned off, so the path the file was moved away from is
+    // named too: the tree can only show a file the change removed when
+    // something reports it gone.
+    run('mv', 'tracked.txt', 'moved.txt');
+
+    const statuses = await fileStatuses(dir, NO_BASE);
+    assert.equal(statuses?.['tracked.txt'], 'deleted');
+    assert.equal(statuses?.['moved.txt'], 'added');
   });
 
   test('a directory that is no repository has no statuses at all', async () => {

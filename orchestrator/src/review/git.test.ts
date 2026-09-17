@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
@@ -117,6 +117,12 @@ describe('the hardened environment', () => {
     }
   });
 
+  test('a pathspec is a path, not a glob', () => {
+    // A filename holding `*`, `?` or `[` would otherwise make `-- path` match
+    // files nobody asked about.
+    assert.equal(env['GIT_LITERAL_PATHSPECS'], '1');
+  });
+
   test('drops the proxy variables, since nothing here is remote', () => {
     for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
       assert.equal(env[name], undefined, name);
@@ -173,7 +179,6 @@ describe('running git', () => {
 
     const result = await git(dir, ['status', '--porcelain', '-uall']);
     assert.equal(result.ok, true);
-    const { existsSync } = await import('node:fs');
     assert.equal(existsSync(marker), false, 'core.fsmonitor was executed');
   });
 
@@ -189,8 +194,8 @@ describe('running git', () => {
     execFileSync('git', ['config', 'diff.conv.textconv', filter], { cwd: dir, stdio: 'pipe' });
     writeFileSync(join(dir, 'tracked.txt'), 'changed\n');
 
-    await git(dir, ['diff', 'HEAD', ...DIFF_SAFETY_FLAGS, '--', 'tracked.txt']);
-    const { existsSync } = await import('node:fs');
+    // The safety flags are added by `git()` itself, so a plain diff carries them.
+    await git(dir, ['diff', 'HEAD', '--', 'tracked.txt']);
     assert.equal(existsSync(marker), false, 'textconv was executed');
   });
 });

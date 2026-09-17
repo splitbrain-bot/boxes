@@ -1,7 +1,6 @@
 import { readdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { topLevel } from './git.ts';
-import { IGNORED_DIRS } from './tree.ts';
 
 /**
  * Which repositories a workspace holds, and which of them owns a path.
@@ -38,6 +37,25 @@ export interface Repo {
 }
 
 /**
+ * Directory names the discovery walk does not descend into.
+ *
+ * An agent's dependency tree can hold dozens of repositories nobody wants
+ * listed, and `npm install` is a normal thing for an agent to do. The cost is
+ * that a repository deliberately cloned into `vendor/` is not found, which is
+ * the right trade at this size.
+ */
+const PRUNED_DIRS = new Set([
+  '.boxes',
+  'vendor',
+  'node_modules',
+  'dist',
+  'build',
+  '.git',
+  '.svn',
+  '.hg',
+]);
+
+/**
  * How deep under the workspace a repository is looked for.
  *
  * `/workspace/projects/foo` is a shape that occurs; anything much deeper is a
@@ -49,14 +67,14 @@ export const MAX_REPO_DEPTH = 6;
  * How many directories one discovery walk may read before it gives up looking.
  *
  * An agent that ran `npm install` has a workspace with tens of thousands of
- * directories in it. The ignore list prunes most of that, and this is what
+ * directories in it. The prune list drops most of that, and this is what
  * bounds the rest — a walk is one bounded cost per tree fetch, not an
  * unbounded one.
  */
 export const MAX_SCANNED_DIRS = 4000;
 
 /** How many repositories a workspace may contribute before the rest are left out. */
-export const MAX_REPOS = 32;
+const MAX_REPOS = 32;
 
 /**
  * The repositories of one workspace, with the lookup that assigns a path to
@@ -131,12 +149,8 @@ export function inRepo(repo: Repo, path: string): string {
 /**
  * Finds every repository in a workspace.
  *
- * The walk prunes `IGNORED_DIRS` and never follows a symlink, and is bounded
- * by {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}. Pruning the ignore
- * list is deliberate: an agent's dependency tree can hold dozens of
- * repositories nobody wants listed, and `npm install` is a normal thing for an
- * agent to do. The cost is that a repository deliberately cloned into
- * `vendor/` is not discovered, which is the right trade at this size.
+ * The walk prunes {@link PRUNED_DIRS} and never follows a symlink, and is
+ * bounded by {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}.
  *
  * A directory holding a `.git` entry — file *or* directory, so submodules and
  * linked worktrees count — is a candidate, and every candidate is confirmed by
@@ -191,7 +205,7 @@ function candidateDirs(workspace: string): Repo[] {
         // `isDirectory` is false for a link to one, so a link is never
         // descended into: the tree is agent-controlled and a link to `/`
         // would otherwise be walked.
-        if (!entry.isDirectory() || IGNORED_DIRS.has(entry.name)) continue;
+        if (!entry.isDirectory() || PRUNED_DIRS.has(entry.name)) continue;
         next.push({
           absolute: join(dir.absolute, entry.name),
           path: dir.path === '' ? entry.name : `${dir.path}/${entry.name}`,

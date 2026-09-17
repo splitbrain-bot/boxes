@@ -14,7 +14,7 @@ import { REVIEW_FILE } from './tree.ts';
  */
 
 /** The git status of a file, as the tree shows it. */
-export type FileStatus =
+type FileStatus =
   | 'modified'
   | 'staged'
   | 'untracked'
@@ -59,7 +59,12 @@ function cleanPath(path: string): string {
 }
 
 /**
- * Parses `git status --porcelain -uall` into per-file statuses.
+ * Parses `git status --porcelain -z -uall` into per-file statuses.
+ *
+ * One NUL-terminated record per file, `XY path`, and the path verbatim: `-z`
+ * is what stops git quoting a name with a special character in it and what
+ * makes a name holding a space, an arrow or a newline one record rather than
+ * an ambiguous line.
  *
  * Untracked files are listed individually — `-uall` — because the file tree
  * lists them individually too; a collapsed directory entry would match none of
@@ -67,16 +72,17 @@ function cleanPath(path: string): string {
  */
 export function parsePorcelain(out: string): FileStatuses {
   const result: FileStatuses = {};
-  for (const line of out.split('\n')) {
-    if (line.length < 4) continue;
-    const x = line[0]!;
-    const y = line[1]!;
-    let path = line.slice(3).trim();
-    // Renames and copies report both paths: "R  old -> new".
-    const arrow = path.indexOf(' -> ');
-    if (arrow >= 0) path = path.slice(arrow + 4);
+  const records = out.split('\0');
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i]!;
+    if (record.length < 4) continue;
+    const x = record[0]!;
+    const y = record[1]!;
+    // A rename or a copy is followed by a second record holding the path it
+    // came from, which is not this record's.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i++;
     const status = classifyStatus(x, y);
-    if (status) result[cleanPath(path)] = status;
+    if (status) result[cleanPath(record.slice(3))] = status;
   }
   return result;
 }
@@ -145,6 +151,10 @@ function classifyStatus(x: string, y: string): FileStatus | null {
  * The status of every file in a repository. With a base commit set, files are
  * reported by how they differ from that commit rather than from HEAD.
  *
+ * `--no-renames` makes git report a rename as a deletion and an addition, so
+ * the path the file was moved away from is still named — the tree can only
+ * show a file the change removed if something reports it gone.
+ *
  * Returns null when the directory is no git repository, which is the same
  * answer a separate check would have given and is what turns the git features
  * off in the UI.
@@ -152,7 +162,7 @@ function classifyStatus(x: string, y: string): FileStatus | null {
 export async function fileStatuses(root: string, base: Base): Promise<FileStatuses | null> {
   if (base.commit !== '') return statusesSince(root, base);
 
-  const result = await git(root, ['status', '--porcelain', '-uall']);
+  const result = await git(root, ['status', '--porcelain', '-z', '-uall', '--no-renames']);
   if (!result.ok) return null;
   return parsePorcelain(result.stdout);
 }
@@ -163,7 +173,7 @@ export async function fileStatuses(root: string, base: Base): Promise<FileStatus
  * of what is under review.
  */
 async function statusesSince(root: string, base: Base): Promise<FileStatuses | null> {
-  const named = await git(root, ['diff', '--name-status', base.commit]);
+  const named = await git(root, ['diff', '--name-status', '--no-renames', base.commit]);
   if (!named.ok) return null;
   const result = parseNameStatus(named.stdout);
 

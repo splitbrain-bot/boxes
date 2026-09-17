@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -227,10 +228,19 @@ describe('writeFileAtomic', () => {
   });
 
   test('a failed write leaves the previous version and no temp file', () => {
-    const path = join(root, 'sub', 'REVIEW.md');
-    // No parent directory, so the temp write fails.
-    assert.throws(() => writeFileAtomic(path, 'x'));
-    assert.deepEqual(readdirSync(root), []);
+    const dir = join(root, 'sub');
+    mkdirSync(dir);
+    const path = join(dir, 'REVIEW.md');
+    writeFileAtomic(path, 'the previous version\n');
+    // Read-only directory, so the temp write fails.
+    chmodSync(dir, 0o555);
+    try {
+      assert.throws(() => writeFileAtomic(path, 'the one that fails\n'));
+      assert.equal(readFileSync(path, 'utf8'), 'the previous version\n');
+      assert.deepEqual(readdirSync(dir), ['REVIEW.md']);
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 });
 

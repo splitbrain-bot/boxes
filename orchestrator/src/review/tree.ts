@@ -8,8 +8,7 @@ import { inWorkspace, type RepoMap } from './repos.ts';
  *
  * A port of the desktop tool's `internal/filetree`, with one addition the
  * desktop tool does not need: an entry cap, because a Boxes workspace can hold
- * an agent's `node_modules` at a depth no ignore list anticipated, and a phone
- * on a slow link is the client.
+ * an agent's whole dependency tree, and a phone on a slow link is the client.
  *
  * `buildTree` is pure and takes a flat path list. `walkPaths` is the one
  * function here that touches the filesystem, and it walks only the space no
@@ -24,24 +23,16 @@ import { inWorkspace, type RepoMap } from './repos.ts';
 export const REVIEW_FILE = 'REVIEW.md';
 
 /**
- * Directory names never included in the tree, whether it comes from git or
- * from a walk. Version-control metadata is here because its contents are not
- * source code anybody reviews.
+ * Directory names the walk steps over, because they hold nothing a person
+ * reviews: a version control system's own metadata, and Boxes' scratch inside
+ * a workspace, which holds the files the user attached to a prompt.
  */
-export const IGNORED_DIRS = new Set([
-  // Boxes' own scratch inside a workspace: the files the user attached to a
-  // prompt. They are input to the conversation, not source anybody reviews.
-  '.boxes',
-  'vendor',
-  'node_modules',
-  'dist',
-  'build',
-  '.git',
-  '.svn',
-  '.hg',
-]);
+const UNWALKED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
 
-/** File extensions left out of the tree, lowercased and with the dot. */
+/**
+ * File extensions taken as binary, lowercased and with the dot. A file with
+ * one of them is left out of the tree.
+ */
 const IGNORED_EXTS = new Set([
   '.exe',
   '.bin',
@@ -82,13 +73,14 @@ export interface Tree {
   truncated: boolean;
 }
 
-/** Whether a path is one the tree leaves out. */
-function ignored(path: string): boolean {
-  const parts = path.split('/');
-  const name = parts[parts.length - 1] ?? '';
+/**
+ * Whether a file is binary by its extension, and so not worth listing. A
+ * reviewer cannot read it, and the view cannot show it.
+ */
+function isBinary(path: string): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1);
   const dot = name.lastIndexOf('.');
-  if (dot > 0 && IGNORED_EXTS.has(name.slice(dot).toLowerCase())) return true;
-  return parts.slice(0, -1).some((dir) => IGNORED_DIRS.has(dir));
+  return dot > 0 && IGNORED_EXTS.has(name.slice(dot).toLowerCase());
 }
 
 /** A node while a tree is being assembled. */
@@ -152,26 +144,32 @@ function collect(node: Node): TreeEntry[] {
 }
 
 /**
- * Every tracked and not-ignored file in a git repository, as paths.
+ * Every file a git repository lists, as paths.
+ *
+ * `--exclude-standard` applies the project's own ignore rules, so whatever git
+ * still names is a file the project chose to keep, and only binary files are
+ * dropped on top of that. A committed `vendor/` or `dist/` is therefore
+ * browsable like any other part of the project.
  *
  * `-z` gives NUL-separated, unquoted paths, so a filename with non-ASCII or
  * other special characters comes back verbatim rather than in git's C-style
- * quoted form. Returns null when the directory is no repository, which is what
- * sends the caller to the walk.
+ * quoted form. Returns null when git named nothing at all, which is a
+ * repository holding no files and a directory that is no repository alike: the
+ * caller cannot tell them apart from this and reads both as "no files here".
  *
  * The paths are the repository's own. REVIEW.md is not filtered here, because
  * which one is the review's is a question about the workspace: only
  * `/workspace/REVIEW.md` is, and a `repo-a/REVIEW.md` is a file of that
  * project like any other.
  */
-export async function gitFiles(root: string): Promise<string[] | null> {
+async function gitFiles(root: string): Promise<string[] | null> {
   const out = await gitOut(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
   if (out === '') {
     // Genuinely empty, or not a repository — the caller cannot tell from this
     // alone, and both answers lead to the same place.
     return null;
   }
-  return out.split('\0').filter((path) => path !== '' && !ignored(path));
+  return out.split('\0').filter((path) => path !== '' && !isBinary(path));
 }
 
 /**
@@ -179,9 +177,10 @@ export async function gitFiles(root: string): Promise<string[] | null> {
  *
  * `skipDir` is asked about every directory before it is descended into, the
  * root included, and is what keeps the walk out of the repositories: inside
- * one, `git ls-files` is the better answer, because it knows what the project
- * called noise. Outside one nobody has said, so loose files all show — an
- * asymmetry that is intended.
+ * one, `git ls-files` is the better answer, because `--exclude-standard`
+ * applies the ignore rules the project wrote. Out here there is no such file
+ * to consult, so the walk steps over {@link UNWALKED_DIRS} and lists
+ * everything else that is not binary.
  *
  * Directories are read with `withFileTypes`, and a symlink is skipped rather
  * than followed: the tree is agent-controlled, and a link to `/` would
@@ -216,10 +215,10 @@ export function walkPaths(
       const rel = relDir === '' ? name : `${relDir}/${name}`;
 
       if (entry.isDirectory()) {
-        if (IGNORED_DIRS.has(name)) continue;
+        if (UNWALKED_DIRS.has(name)) continue;
         walk(join(absDir, name), rel);
       } else if (entry.isFile()) {
-        if (ignored(rel)) continue;
+        if (isBinary(rel)) continue;
         paths.push(rel);
       }
       // Anything else — a symlink, a socket, a device — is not walked and not
@@ -305,7 +304,7 @@ export function markRepoRoots(entries: TreeEntry[], map: RepoMap): TreeEntry[] {
 export function withDeleted(entries: TreeEntry[], deleted: string[]): TreeEntry[] {
   const paths = treePaths(entries);
   const gone = deleted.filter(
-    (path) => !paths.has(path) && path !== REVIEW_FILE && !ignored(path),
+    (path) => !paths.has(path) && path !== REVIEW_FILE && !isBinary(path),
   );
   if (gone.length === 0) return entries;
   return buildTree([...paths, ...gone]);

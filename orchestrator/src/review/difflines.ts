@@ -1,4 +1,5 @@
-import { DIFF_SAFETY_FLAGS, git, gitOut } from './git.ts';
+import { git, gitOut } from './git.ts';
+import { fileLines } from './fs.ts';
 import { baseRev, type Base } from './gitstatus.ts';
 
 /**
@@ -24,7 +25,7 @@ const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * How many were removed is not recorded: the hunk the marker points at shows
  * them.
  */
-export interface DiffDeletion {
+interface DiffDeletion {
   /** The deletion sits after this line; 0 means the top of the file. */
   afterLine: number;
   /** Index into `hunks`, so tapping the marker can show the removed lines. */
@@ -32,7 +33,7 @@ export interface DiffDeletion {
 }
 
 /** One diff hunk with the range of new-file lines it covers. */
-export interface DiffHunk {
+interface DiffHunk {
   /** First new-file line in the hunk. */
   startLine: number;
   /** Last new-file line in the hunk. */
@@ -174,10 +175,8 @@ export function parseDiff(out: string): FileDiff {
 
 /** Marks every line of a file as added, for a file git does not track yet. */
 export function allLinesAdded(content: string): Record<number, LineChange> {
-  let count = (content.match(/\n/g) ?? []).length;
-  if (content.length > 0 && !content.endsWith('\n')) count++;
   const lines: Record<number, LineChange> = {};
-  for (let i = 1; i <= count; i++) lines[i] = 'added';
+  for (let i = 1; i <= fileLines(content).length; i++) lines[i] = 'added';
   return lines;
 }
 
@@ -196,14 +195,7 @@ export async function fileDiff(
   content: string,
 ): Promise<FileDiff> {
   const [diff, untracked] = await Promise.all([
-    git(root, [
-      'diff',
-      baseRev(base),
-      `--unified=${DIFF_CONTEXT}`,
-      ...DIFF_SAFETY_FLAGS,
-      '--',
-      path,
-    ]),
+    git(root, ['diff', baseRev(base), `--unified=${DIFF_CONTEXT}`, '--', path]),
     gitOut(root, ['ls-files', '--others', '--exclude-standard', '--', path]),
   ]);
 

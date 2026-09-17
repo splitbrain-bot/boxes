@@ -478,10 +478,10 @@ describe('the file endpoint', () => {
 
   test('a file the tree leaves out is not served either', async () => {
     const ws = repoSession('eee');
-    write(ws, 'node_modules/pkg/index.js', 'x\n');
+    write(ws, 'logo.png', 'x\n');
     write(ws, 'REVIEW.md', '# Code Review\n');
     // The API serves what the browser was offered and nothing more.
-    for (const path of ['node_modules/pkg/index.js', 'REVIEW.md']) {
+    for (const path of ['logo.png', 'REVIEW.md']) {
       const res = await orchestrator.app.inject({
         url: `/api/sessions/eee/review/file?path=${encodeURIComponent(path)}`,
       });
@@ -771,6 +771,21 @@ describe('annotations', () => {
     assert.deepEqual(tree.body.counts, {});
   });
 
+  test('deleting a comment that is not there leaves no review behind', async () => {
+    const ws = commentable('lll');
+    const res = await orchestrator.app.inject({
+      method: 'DELETE',
+      url: '/api/sessions/lll/review/annotations?path=nosuch.txt&line=1',
+    });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual((res.json() as ReviewAnnotationsResponse).annotations, []);
+    // Nothing was changed, so nothing is written: a review the reviewer never
+    // started must not appear because of a delete that applied to nothing.
+    assert.equal(existsSync(join(ws, 'REVIEW.md')), false);
+    const tree = await get<ReviewTreeResponse>('/api/sessions/lll/review/tree');
+    assert.equal(tree.body.hasReview, false);
+  });
+
   test('a comment the agent wrote by hand is read, not overwritten', async () => {
     const ws = commentable('eee');
     // REVIEW.md is shared: the agent can edit it, and the next mutation has to
@@ -820,6 +835,36 @@ describe('annotations', () => {
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 3 \(outdated\)/);
   });
 
+  test('a comment on a file that became binary is kept as it stands', async () => {
+    const ws = commentable('mmm');
+    await put('mmm', { path: 'code.ts', line: 3, comment: 'about three' });
+    // There is nothing readable to compare the comment against, which is not
+    // the same as the code it was about being gone.
+    writeFileSync(join(ws, 'code.ts'), Buffer.from([0x41, 0x00, 0x42]));
+
+    await get<ReviewTreeResponse>('/api/sessions/mmm/review/tree');
+    assert.ok(!readFileSync(join(ws, 'REVIEW.md'), 'utf8').includes('(outdated)'));
+
+    const { body } = await get<ReviewFileResponse>('/api/sessions/mmm/review/file?path=code.ts');
+    assert.equal(body.binary, true);
+    // The tree counts the comment, so the file view shows it: it is where the
+    // reviewer reads and deletes it.
+    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: false }]);
+  });
+
+  test('a comment on a file the change deleted comes back with it', async () => {
+    const ws = commentable('nnn');
+    await put('nnn', { path: 'code.ts', line: 3, comment: 'about three' });
+    rmSync(join(ws, 'code.ts'));
+
+    const tree = await get<ReviewTreeResponse>('/api/sessions/nnn/review/tree');
+    assert.deepEqual(tree.body.counts, { 'code.ts': 1 });
+
+    const { body } = await get<ReviewFileResponse>('/api/sessions/nnn/review/file?path=code.ts');
+    assert.equal(body.deleted, true);
+    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: true }]);
+  });
+
   test('bad input is refused before REVIEW.md is touched', async () => {
     const ws = commentable('iii');
     for (const payload of [
@@ -860,7 +905,8 @@ describe('annotations', () => {
 
   test('a comment on a path outside the root is a 404', async () => {
     const ws = commentable('jjj');
-    for (const path of ['../escape.txt', 'nosuch.ts', 'node_modules/x.js']) {
+    write(ws, 'logo.png', 'x\n');
+    for (const path of ['../escape.txt', 'nosuch.ts', 'logo.png']) {
       const res = await orchestrator.app.inject({
         method: 'PUT',
         url: '/api/sessions/jjj/review/annotations',

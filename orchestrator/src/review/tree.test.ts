@@ -106,15 +106,23 @@ describe('walkPaths', () => {
     assert.equal(truncated, false);
   });
 
-  test('leaves out the noise directories and the binary extensions', () => {
+  test('leaves out git metadata and the binary extensions, and nothing else', () => {
     file('keep.ts');
     file('node_modules/pkg/index.js');
     file('dist/bundle.js');
-    file('.git/config');
     file('vendor/lib.go');
+    file('.git/config');
+    file('.boxes/attached.txt');
     file('logo.png');
     file('tool.exe');
-    assert.deepEqual(walkPaths(dir).paths, ['keep.ts']);
+    // Out here no ignore file says what is noise, so every file a person can
+    // read shows.
+    assert.deepEqual(walkPaths(dir).paths.toSorted(), [
+      'dist/bundle.js',
+      'keep.ts',
+      'node_modules/pkg/index.js',
+      'vendor/lib.go',
+    ]);
   });
 
   test("leaves out the review's own file, but only at the root", () => {
@@ -206,6 +214,19 @@ describe('reviewTree', () => {
       ['.gitignore', 'tracked.ts', 'untracked.ts'],
     );
     assert.equal(truncated, false);
+  });
+
+  test('a committed vendor or dist directory is browsable', async () => {
+    repo('');
+    file('src/main.ts');
+    file('vendor/lib.php');
+    file('dist/bundle.js');
+    file('logo.png');
+    git('', 'add', '.');
+    git('', 'commit', '-q', '-m', 'init');
+    // What the project committed is what the project chose to keep. Only the
+    // binary file stays out, because nobody can review it.
+    assert.deepEqual(await paths(), ['dist/bundle.js', 'src/main.ts', 'vendor/lib.php']);
   });
 
   test('a plain directory falls back to a walk', async () => {
@@ -300,7 +321,7 @@ describe('withDeleted', () => {
     assert.equal(withDeleted(before, ['a.ts']), before);
   });
 
-  test('the review file and ignored paths stay out', () => {
+  test('the review file and binary files stay out', () => {
     const entries = withDeleted(buildTree(['a.ts']), ['REVIEW.md', 'logo.png', 'b.ts']);
     assert.deepEqual([...treePaths(entries)].toSorted(), ['a.ts', 'b.ts']);
   });

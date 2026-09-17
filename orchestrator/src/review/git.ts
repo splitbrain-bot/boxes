@@ -111,12 +111,26 @@ export function hardenedEnv(): NodeJS.ProcessEnv {
     // Nothing here is interactive, and a pager would never be read.
     GIT_PAGER: 'cat',
     PAGER: 'cat',
+    // A pathspec is a path, not a glob: a filename holding `*`, `?` or `[`
+    // would otherwise make `-- path` match files nobody asked about.
+    GIT_LITERAL_PATHSPECS: '1',
     LC_ALL: 'C',
   };
 }
 
 /** Diff flags that keep a repository's own config from running a program. */
 export const DIFF_SAFETY_FLAGS = ['--no-ext-diff', '--no-textconv', '--no-color'] as const;
+
+/**
+ * A subcommand's arguments, with the diff safety flags added to every `diff`.
+ *
+ * Here rather than at the call sites, so a diff written later cannot be the
+ * one that leaves them out.
+ */
+function withDiffSafety(args: string[]): string[] {
+  if (args[0] !== 'diff') return args;
+  return ['diff', ...DIFF_SAFETY_FLAGS, ...args.slice(1)];
+}
 
 /** How long a single git invocation may take before it is killed. */
 const TIMEOUT_MS = 20_000;
@@ -137,8 +151,9 @@ export interface GitResult {
 /**
  * Runs one git subcommand in a workspace and returns its output.
  *
- * `args` is the subcommand and its own arguments; the hardening prefix and the
- * environment are added here and cannot be passed in. A non-zero exit is a
+ * `args` is the subcommand and its own arguments; the hardening prefix, the
+ * diff safety flags and the environment are added here and cannot be passed
+ * in. A non-zero exit is a
  * result rather than a throw, because most callers have a meaningful answer for
  * it: "this is not a repository", "this revision is unknown", "there is no
  * diff".
@@ -147,7 +162,7 @@ export async function git(root: string, args: string[]): Promise<GitResult> {
   return new Promise((resolve) => {
     execFile(
       'git',
-      [...hardeningFlags(root), ...args],
+      [...hardeningFlags(root), ...withDiffSafety(args)],
       {
         cwd: root,
         env: hardenedEnv(),
