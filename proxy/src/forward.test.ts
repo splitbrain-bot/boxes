@@ -51,6 +51,7 @@ describe('vetTarget', () => {
     );
     await expect(vetTarget({ host: 'example.com', port: 22 }, EMPTY_POLICY)).resolves.toEqual({
       ok: false,
+      category: 'port',
       reason: 'port 22 not allowed',
     });
   });
@@ -58,7 +59,11 @@ describe('vetTarget', () => {
   it('checks the allowlist before resolving anything', async () => {
     const lookup = vi.spyOn(dns.promises, 'lookup');
     const verdict = await vetTarget({ host: 'evil.com', port: 443 }, allowing('example.com'));
-    expect(verdict).toEqual({ ok: false, reason: 'host is not on the egress allowlist' });
+    expect(verdict).toEqual({
+      ok: false,
+      category: 'allowlist',
+      reason: 'host is not on the egress allowlist',
+    });
     expect(lookup).not.toHaveBeenCalled();
   });
 
@@ -73,6 +78,7 @@ describe('vetTarget', () => {
     resolvesTo('93.184.216.34', '192.168.1.5');
     await expect(vetTarget({ host: 'rebind.example', port: 443 }, EMPTY_POLICY)).resolves.toEqual({
       ok: false,
+      category: 'blocked-address',
       reason: 'hostname resolves to a blocked address',
     });
   });
@@ -81,12 +87,17 @@ describe('vetTarget', () => {
     for (const host of ['192.168.1.1', '10.0.0.1', '169.254.169.254', '127.0.0.1', '::1']) {
       await expect(vetTarget({ host, port: 443 }, EMPTY_POLICY)).resolves.toEqual({
         ok: false,
+        category: 'blocked-address',
         reason: 'target address is in a blocked range',
       });
     }
     await expect(
       vetTarget({ host: '::ffff:192.168.1.1', port: 443 }, EMPTY_POLICY),
-    ).resolves.toEqual({ ok: false, reason: 'target address is in a blocked range' });
+    ).resolves.toEqual({
+      ok: false,
+      category: 'blocked-address',
+      reason: 'target address is in a blocked range',
+    });
   });
 
   it('matches an address literal against the allowlist as a literal', async () => {
@@ -104,13 +115,15 @@ describe('vetTarget', () => {
     vi.spyOn(dns.promises, 'lookup').mockRejectedValue(new Error('ENOTFOUND'));
     await expect(vetTarget({ host: 'nope.example', port: 443 }, EMPTY_POLICY)).resolves.toEqual({
       ok: false,
+      category: 'dns',
       reason: 'DNS lookup failed: ENOTFOUND',
     });
 
     vi.spyOn(dns.promises, 'lookup').mockResolvedValue([] as never);
     await expect(vetTarget({ host: 'nope.example', port: 443 }, EMPTY_POLICY)).resolves.toEqual({
       ok: false,
-      reason: 'hostname resolves to a blocked address',
+      category: 'dns',
+      reason: 'no addresses resolved',
     });
   });
 });

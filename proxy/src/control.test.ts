@@ -141,8 +141,14 @@ describe('the control channel', () => {
     expect(JSON.parse(res.body).error).toMatch(/engine would not start/);
   });
 
-  it('answers anything else with a 404', async () => {
-    const { port } = await start();
+  it('answers anything else with a 404, and is claimed by none of it', async () => {
+    const { port, claimed } = await start();
+    // Only a policy push may claim the channel, so every other path is
+    // unauthorized until one has.
+    expect((await call(port, 'GET', '/secrets', 'token')).status).toBe(401);
+    expect(claimed()).toBe(false);
+
+    expect((await call(port, 'POST', '/policy', 'token', policy)).status).toBe(200);
     expect((await call(port, 'GET', '/secrets', 'token')).status).toBe(404);
     expect((await call(port, 'POST', '/status', 'token', {})).status).toBe(404);
   });
