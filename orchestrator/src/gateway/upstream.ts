@@ -208,6 +208,9 @@ const TERM_GRACE_MS = 2_000;
 /** Why a thread cannot be forked yet; the API turns this into a 409. */
 export const NOTHING_TO_FORK = 'That thread has nothing to fork from yet';
 
+/** A thread id that names none of the session's threads; the API turns this into a 404. */
+export const THREAD_NOT_FOUND = 'Thread not found';
+
 /** True when the adapter reported a missing thread rather than a failure. */
 function isResourceNotFound(err: unknown): boolean {
   return (err as { code?: number } | null)?.code === RESOURCE_NOT_FOUND;
@@ -221,10 +224,20 @@ function isResourceNotFound(err: unknown): boolean {
 const ATTACHMENTS_OPEN = '<attachments>';
 
 /**
- * How much of a prompt a name may be taken from. Long enough for a sentence,
- * and short enough to stay a name rather than the message it came out of.
+ * How long a thread's name may be, whoever wrote it. Long enough for a
+ * sentence, and short enough to stay a name rather than the message it came
+ * out of.
  */
 const MAX_PROMPT_NAME_LENGTH = 120;
+
+/**
+ * A name cut to {@link MAX_PROMPT_NAME_LENGTH}, with an ellipsis standing for
+ * what was cut. One already short enough comes back as it is.
+ */
+function capName(name: string): string {
+  if (name.length <= MAX_PROMPT_NAME_LENGTH) return name;
+  return `${name.slice(0, MAX_PROMPT_NAME_LENGTH - 1)}…`;
+}
 
 /**
  * What to call a thread from a prompt sent on it, or null when the prompt has
@@ -242,9 +255,7 @@ function nameFromPrompt(params: unknown): string | null {
     if (block.text.startsWith(ATTACHMENTS_OPEN)) continue;
     const line = block.text.split('\n').find((candidate) => candidate.trim() !== '');
     if (line === undefined) continue;
-    const name = line.trim().replace(/\s+/g, ' ');
-    if (name.length <= MAX_PROMPT_NAME_LENGTH) return name;
-    return `${name.slice(0, MAX_PROMPT_NAME_LENGTH - 1)}…`;
+    return capName(line.trim().replace(/\s+/g, ' '));
   }
   return null;
 }
@@ -277,8 +288,8 @@ export class UpstreamSession {
   private closed = false;
   /** Guards against reconnect storms after a deliberate stop. */
   private stopping = false;
-  /** Loads in flight, which is what says an update is history; see below. */
-  private replaying = 0;
+  /** Loads in flight per thread, which is what says an update is history. */
+  private readonly replaying = new Map<string, number>();
   /** The reading's own timer while a browser is watching; see pollWhileWatched. */
   private polling: ReturnType<typeof setInterval> | null = null;
 
@@ -290,12 +301,12 @@ export class UpstreamSession {
     private readonly notifier: Notifier,
     private readonly onStatus: (status: SessionRow['status']) => void,
     /**
-     * Run, and awaited, just before the container is started: it writes out
-     * this session's agent configuration and rebuilds the container if Docker
-     * no longer has it.
+     * Run, and awaited, just before the container is started: it brings the
+     * session's container up to date, which is everything from writing out
+     * the agent configuration to rebuilding a box Docker no longer has.
      *
      * Opening a thread on a stopped box is the other way a container starts,
-     * so neither repair can live only in `SessionManager.start`. The
+     * so the repairs cannot live only in `SessionManager.start`. The
      * entrypoint installs whatever is on disk at that moment, so the
      * configuration has to be current here too — and a box something pruned
      * has to be made again here too, or opening a thread on one is a 404 from
@@ -534,11 +545,6 @@ export class UpstreamSession {
     };
   }
 
-  /** Whether the adapter connection is up. */
-  get isConnected(): boolean {
-    return this.conn !== null;
-  }
-
   /** The initialize response to hand browsers, cached verbatim. */
   get cachedInitialize(): unknown {
     return this.initializeResponse;
@@ -587,7 +593,7 @@ export class UpstreamSession {
    */
   private async resolveThread(threadId: string | null): Promise<string> {
     const row = threadId ? getThread(this.db, threadId) : this.current;
-    if (!row || row.session_id !== this.sessionId) throw new Error('Thread not found');
+    if (!row || row.session_id !== this.sessionId) throw new Error(THREAD_NOT_FOUND);
     if (row.acp_session_id && this.live.has(row.acp_session_id)) return row.acp_session_id;
     // Two tabs opening the same thread at once share one bring-up, so the
     // second neither replays it twice nor overwrites the first's id in the
@@ -613,7 +619,7 @@ export class UpstreamSession {
     const conn = this.conn;
     if (!conn) throw new Error('Upstream not connected');
     const row = getThread(this.db, threadId);
-    if (!row) throw new Error('Thread not found');
+    if (!row) throw new Error(THREAD_NOT_FOUND);
     if (row.acp_session_id && (await this.loadSession(conn, row))) return row.acp_session_id;
     return this.mintInto(threadId);
   }
@@ -678,19 +684,27 @@ export class UpstreamSession {
   }
 
   /**
-   * Runs a `session/load` with its replay marked as history rather than news.
+   * Runs a `session/load` with that thread's replay marked as history rather
+   * than news.
    *
    * Every load re-sends a conversation as ordinary notifications, which is
    * what makes replay and live streaming the same code path everywhere else —
    * and the one place that difference matters is background work, where a
    * five-hour-old tool call is not evidence of anything running now.
+   *
+   * Counted per thread, because a replay is about one conversation: a turn
+   * starting on a second thread while this one rebuilds is the agent talking,
+   * and has to be seen as such. `acpThreadId` is the id the updates being
+   * replayed carry, which for a borrowed replay is the source's own.
    */
-  private async whileReplaying<T>(load: () => Promise<T>): Promise<T> {
-    this.replaying += 1;
+  private async whileReplaying<T>(acpThreadId: string, load: () => Promise<T>): Promise<T> {
+    this.replaying.set(acpThreadId, (this.replaying.get(acpThreadId) ?? 0) + 1);
     try {
       return await load();
     } finally {
-      this.replaying -= 1;
+      const left = (this.replaying.get(acpThreadId) ?? 1) - 1;
+      if (left > 0) this.replaying.set(acpThreadId, left);
+      else this.replaying.delete(acpThreadId);
     }
   }
 
@@ -755,6 +769,10 @@ export class UpstreamSession {
     // Awaited, and the row read after it: this may have rebuilt the container
     // the row named, and the id to start is the one it left behind.
     await this.beforeStart();
+    // A repair that replaces the container stops this session's upstream,
+    // which is this one. Said again, so the flag it set cannot make the spawn
+    // below ignore its own exec exiting.
+    this.stopping = false;
     const row = this.row();
     if (!row.container_id) throw new Error('Session has no container');
 
@@ -806,7 +824,12 @@ export class UpstreamSession {
       }
     });
 
-    void exec.exited.then((code) => this.handleExecExit(code));
+    // Only while this is still the connection's exec: one that was torn down
+    // and replaced reports its exit late, and acting on it would take the
+    // successor with it.
+    void exec.exited.then((code) => {
+      if (this.exec === exec) this.handleExecExit(code);
+    });
 
     const stream = this.makeStream(exec);
     const app = acpClient({ name: `boxes-${this.sessionId}` })
@@ -849,22 +872,20 @@ export class UpstreamSession {
       : false;
     if (!replayed) await this.mintCurrent(conn, thread);
 
-    const loaded = new Set<string>();
-    const currentAcpId = this.current?.acp_session_id;
-    if (currentAcpId) loaded.add(currentAcpId);
-
     for (const acpThreadId of this.downstreams.watchedThreads) {
-      if (loaded.has(acpThreadId)) continue;
-      loaded.add(acpThreadId);
+      // What this adapter already holds: the current thread above, and a
+      // thread a second tab is watching as well.
+      if (this.live.has(acpThreadId)) continue;
+      // No row under that id either — the thread it named was re-minted, and
+      // the browsers on it are pinned to the id it lost.
       const row = threadByAcpId(this.db, this.sessionId, acpThreadId);
-      if (!row?.acp_session_id) continue;
       try {
-        if (await this.loadSession(conn, row)) continue;
+        if (row?.acp_session_id && (await this.loadSession(conn, row))) continue;
       } catch (err) {
         // A fault on a thread that is merely being watched must not cost the
         // session its spawn; the browsers on it reconnect and resolve again.
         this.slog.warn('could not reload a watched thread', {
-          threadId: row.id,
+          threadId: row?.id ?? null,
           error: (err as Error).message,
         });
       }
@@ -890,7 +911,7 @@ export class UpstreamSession {
       // The same `_meta` a fresh thread gets: a load is where the adapter
       // rebuilds the query for a conversation it no longer holds, which is
       // the other place these options are read.
-      const res = (await this.whileReplaying(() =>
+      const res = (await this.whileReplaying(acpSessionId, () =>
         conn.agent.request('session/load', {
           sessionId: acpSessionId,
           cwd: dk.WORKSPACE_DIR,
@@ -986,7 +1007,10 @@ export class UpstreamSession {
 
   // --- threads --------------------------------------------------------------
 
-  /** The thread the gateway answers session/new with, or null before one exists. */
+  /**
+   * The session's default conversation: what a connection naming no thread is
+   * pinned to. Null before the session has one.
+   */
   get current(): ThreadRow | null {
     return currentThread(this.db, this.sessionId) ?? null;
   }
@@ -1041,7 +1065,7 @@ export class UpstreamSession {
     if (!conn) throw new Error('Upstream not connected');
     const source = getThread(this.db, sourceThreadId);
     if (!source || source.session_id !== this.sessionId) {
-      throw new Error('Thread not found');
+      throw new Error(THREAD_NOT_FOUND);
     }
     if (!source.acp_session_id) throw new Error(NOTHING_TO_FORK);
     const acpSessionId = await this.mintAcpThread(conn, source.acp_session_id, FORK_MODE_ID);
@@ -1067,7 +1091,7 @@ export class UpstreamSession {
   switchThread(threadId: string): ThreadRow {
     const thread = getThread(this.db, threadId);
     if (!thread || thread.session_id !== this.sessionId) {
-      throw new Error('Thread not found');
+      throw new Error(THREAD_NOT_FOUND);
     }
     this.db
       .prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?')
@@ -1131,8 +1155,10 @@ export class UpstreamSession {
    * Puts a thread on the model it is meant to be on, on the same terms as
    * {@link applyMode}: the one recorded for it, or this deployment's default.
    *
-   * A recorded model the adapter no longer offers falls back to the default,
-   * since model ids come and go.
+   * The recorded model is matched the way {@link pickModel} matches any
+   * other, so a thread left on `opus` comes back on `opus[1m]` where that is
+   * the variant the adapter now lists. One the adapter no longer offers at
+   * all falls back to the default, since model ids come and go.
    */
   private async applyModel(
     conn: ClientConnection,
@@ -1142,8 +1168,9 @@ export class UpstreamSession {
   ): Promise<void> {
     const selector = configOptions?.find((option) => option.category === 'model');
     if (!selector?.options) return;
-    const offered = modelId && selector.options.some((option) => option.value === modelId);
-    const value = offered ? modelId : pickModel(selector.options, DEFAULT_MODEL_ID);
+    const value =
+      (modelId ? pickModel(selector.options, modelId) : null) ??
+      pickModel(selector.options, DEFAULT_MODEL_ID);
     if (!value || value === selector.currentValue) return;
     try {
       await conn.agent.request('session/set_config_option', {
@@ -1179,10 +1206,11 @@ export class UpstreamSession {
     this.touch();
     // Only what is happening now. A replay re-sends everything the thread
     // ever said, and a transcript arriving in a burst is not the agent
-    // talking. The cost is that a turn starting during somebody else's replay
-    // goes unobserved, which is a window of milliseconds.
+    // talking. Only that thread's own replay silences it, and the cost is a
+    // turn starting on a thread while it rebuilds, which is a window of
+    // milliseconds.
     const thread = threadOf(params);
-    if (this.replaying === 0 && thread) {
+    if (thread && !this.replaying.has(thread)) {
       const update = (params as { update?: unknown })?.update;
       this.activity.observe(thread, update);
     }
@@ -1205,13 +1233,17 @@ export class UpstreamSession {
    * The row is found by the update's own ACP id rather than by which thread
    * is current, so an update that arrives while a switch is in flight lands
    * on the thread it is about.
+   *
+   * A replayed update does not count as the thread having been heard from:
+   * it is the transcript being read back, so opening a thread would otherwise
+   * move it to the top of the list for having been opened.
    */
   private recordThreadInfo(params: unknown): void {
     const acpSessionId = (params as { sessionId?: string })?.sessionId;
     if (!acpSessionId) return;
     const row = threadByAcpId(this.db, this.sessionId, acpSessionId);
     if (!row) return;
-    touchThread(this.db, row.id);
+    if (!this.replaying.has(acpSessionId)) touchThread(this.db, row.id);
 
     const update = (
       params as {
@@ -1230,7 +1262,9 @@ export class UpstreamSession {
         // adapter clearing it, which puts the thread back on its ordinal.
         if (update.title === null) setThreadTitle(this.db, row.id, null);
         else if (typeof update.title === 'string' && update.title.trim()) {
-          setThreadTitle(this.db, row.id, update.title.trim());
+          // Cut to the same length a prompt-derived name is, so no adapter's
+          // idea of a title can push a paragraph into the thread list.
+          setThreadTitle(this.db, row.id, capName(update.title.trim()));
         }
         return;
       case 'current_mode_update':
@@ -1448,7 +1482,7 @@ export class UpstreamSession {
 
     try {
       const result = isLoad
-        ? await this.whileReplaying(() => conn.agent.request(method, params))
+        ? await this.whileReplaying(thread, () => conn.agent.request(method, params))
         : await conn.agent.request(method, params);
       // A mode the adapter accepted is this thread's from now on, including
       // across the restarts that lose the adapter's copy of it. Recorded here
@@ -1510,7 +1544,7 @@ export class UpstreamSession {
 
     this.downstreams.beginReplay(to, source.acp_session_id, acpThreadId);
     try {
-      await this.whileReplaying(() =>
+      await this.whileReplaying(source.acp_session_id, () =>
         conn.agent.request('session/load', {
           sessionId: source.acp_session_id,
           cwd: dk.WORKSPACE_DIR,

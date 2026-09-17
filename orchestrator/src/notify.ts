@@ -19,6 +19,9 @@ import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';
  * gateway and nothing here throws.
  */
 
+/** Longest a thread title may be in a notification, in characters. */
+const MAX_TITLE = 80;
+
 /** What happened, which picks the wording. */
 export type NotifyKind = 'approval' | 'idle';
 
@@ -62,7 +65,7 @@ interface PushPayload {
  */
 export function wording(event: NotifyEvent): { title: string; body: string } {
   const where = event.threadName
-    ? `${event.sessionName} · ${event.threadName}`
+    ? `${event.sessionName} · ${shortTitle(event.threadName)}`
     : event.sessionName;
   if (event.kind === 'approval') {
     return {
@@ -77,6 +80,17 @@ export function wording(event: NotifyEvent): { title: string; body: string } {
     title: 'Boxes: waiting for you',
     body: `${where} has stopped and is waiting for input.${still}`,
   };
+}
+
+/**
+ * A thread title short enough for a notification.
+ *
+ * A title is whatever the first prompt was about and can run long, while the
+ * whole payload has to fit one encrypted record, and no lock screen shows
+ * more than a line of it anyway.
+ */
+function shortTitle(name: string): string {
+  return name.length <= MAX_TITLE ? name : `${name.slice(0, MAX_TITLE - 1)}…`;
 }
 
 /** Where a notification about this event points. */

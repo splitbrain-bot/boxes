@@ -242,7 +242,8 @@ test('a deployment on the previous release upgrades cleanly', () => {
 
 test('threads from before the mode column upgrade to the deployment default', () => {
   const db = new Database(join(dir, 'boxes.db'));
-  const before = MIGRATIONS.length - 1;
+  // The schema as it stood before the migration that adds the two columns.
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN mode_id'));
   for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
   db.pragma(`user_version = ${before}`);
   db.prepare(

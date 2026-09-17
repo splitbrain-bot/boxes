@@ -1,4 +1,4 @@
-import { chownSync, mkdirSync, rmSync } from 'node:fs';
+import { chownSync, mkdirSync, readdirSync, rmSync, type Dirent } from 'node:fs';
 import { join, posix } from 'node:path';
 import { log } from './log.ts';
 
@@ -53,10 +53,10 @@ export function sessionOwner(): { readonly uid: number; readonly gid: number } {
 }
 
 /** Directory under DATA_DIR holding one directory per session workspace. */
-export const WORKSPACES_SUBDIR = 'workspaces';
+const WORKSPACES_SUBDIR = 'workspaces';
 
 /** Directory under DATA_DIR holding one directory per session home. */
-export const HOMES_SUBDIR = 'homes';
+const HOMES_SUBDIR = 'homes';
 
 /** The parent of every workspace directory. */
 export function workspacesRoot(dataDir: string): string {
@@ -138,6 +138,30 @@ export function createHome(dataDir: string, sessionId: string): string {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chownToAgent(path);
   return path;
+}
+
+/**
+ * The session ids that have a workspace or a home directory on disk.
+ *
+ * Read from the two roots rather than from the database, which is what makes
+ * it an answer about what is there: a teardown that removed a session's
+ * Docker objects and then failed leaves these behind with nothing naming
+ * them. A root that does not exist yet contributes nothing.
+ */
+export function sessionDirectoryIds(dataDir: string): string[] {
+  const ids = new Set<string>();
+  for (const root of [workspacesRoot(dataDir), homesRoot(dataDir)]) {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) ids.add(entry.name);
+    }
+  }
+  return [...ids];
 }
 
 /** Removes a session's workspace directory and everything in it. */

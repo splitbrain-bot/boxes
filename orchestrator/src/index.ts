@@ -5,12 +5,13 @@ import { buildApp } from './app.ts';
 import { config } from './config.ts';
 import { openDb } from './db.ts';
 import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downstream.ts';
-import { log } from './log.ts';
+import { log, setLogLevel } from './log.ts';
 import { startImageRefresher, startProxyReconciler, startReaper } from './reaper.ts';
 
 // --- the app and its database ----------------------------------------------
 
 const cfg = config();
+setLogLevel(cfg.LOG_LEVEL);
 const db = openDb(cfg.DATA_DIR);
 const { app, manager, egress, setProxyWarnings } = buildApp(cfg, db);
 
@@ -129,14 +130,18 @@ async function main(): Promise<void> {
   log.info('orchestrator listening', { port: cfg.PORT });
 }
 
+// Once: a second signal while the server is closing must not re-enter this.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(signal, () => {
+  process.once(signal, () => {
     log.info('shutting down', { signal });
     manager.closeAll();
-    void app.close().then(() => {
-      db.close();
-      process.exit(0);
-    });
+    app
+      .close()
+      .catch((err: Error) => log.error('server close failed', { error: err.message }))
+      .finally(() => {
+        db.close();
+        process.exit(0);
+      });
   });
 }
 

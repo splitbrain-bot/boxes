@@ -4,7 +4,6 @@ import { createReadStream, readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  AcpLogEntry,
   AcpLogPage,
   AgentItemBody,
   CreateAgentSetBody,
@@ -25,12 +24,14 @@ import type {
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
-import type { config } from './config.ts';
+import type { Config } from './config.ts';
 import {
+  countLiveSessions,
   countPushSubscriptions,
   deletePushSubscription,
+  listAcpLog,
   upsertPushSubscription,
-  type openDb,
+  type Db,
 } from './db.ts';
 import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
@@ -38,7 +39,7 @@ import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
-import { resolveInRoot } from './review/fs.ts';
+import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { SessionManager } from './sessions.ts';
 import { setSessionOwner } from './workspaces.ts';
@@ -53,20 +54,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
 
-/** Everything one orchestrator process owns, wired together. */
+/** What one orchestrator process hands its boot and its tests, wired together. */
 export interface Orchestrator {
   app: ReturnType<typeof Fastify>;
-  db: ReturnType<typeof openDb>;
   manager: SessionManager;
-  cfg: ReturnType<typeof config>;
+  cfg: Config;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
-  /** Where "a thread wants you" goes. */
-  notifier: Notifier;
-  /** Reads and writes review data over the sessions' workspace directories. */
-  review: ReviewService;
-  /** The AGENTS.md, skills and commands sessions are configured with. */
-  agents: AgentStore;
   /** Session ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -78,10 +72,7 @@ export interface Orchestrator {
  * Boot lives in main(); this is separate so a test can drive the real routes
  * over a real database without a Docker socket or an open port.
  */
-export function buildApp(
-  cfg: ReturnType<typeof config>,
-  db: ReturnType<typeof openDb>,
-): Orchestrator {
+export function buildApp(cfg: Config, db: Db): Orchestrator {
   // Before anything creates a workspace directory or a container: everything
   // that writes files for the agent, or runs a process as it, reads this.
   setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
@@ -127,13 +118,11 @@ export function buildApp(
   });
 
   app.get('/healthz', async (): Promise<HealthResponse> => {
-    const row = db
-      .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
-      .get() as { n: number };
+    const sessions = countLiveSessions(db);
     return {
       ok: true,
       version: VERSION,
-      sessions: row.n,
+      sessions,
       proxyWarnings,
       egress: egress.status(),
       claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
@@ -243,12 +232,8 @@ export function buildApp(
     const { after, limit } = req.query as { after?: string; limit?: string };
     const afterId = Number(after ?? 0) || 0;
     const max = Math.min(Math.max(Number(limit ?? 200) || 200, 1), 1000);
-    const entries = db
-      .prepare(
-        `SELECT id, direction, ts, payload FROM acp_log
-         WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-      )
-      .all(id, afterId, max) as AcpLogEntry[];
+    manager.mustGet(id);
+    const entries = listAcpLog(db, id, afterId, max);
     return { entries, cursor: entries.at(-1)?.id ?? afterId };
   });
 
@@ -259,7 +244,8 @@ export function buildApp(
    * The response is chunked text rather than JSON so the browser can render
    * the output growing; the last line is a trailer carrying the exit code and
    * whether either limit was hit. Both limits live in exec.ts: 120 seconds of
-   * wall clock and 256 KiB of output, after which the exec is killed.
+   * wall clock, which the container holds itself, and 256 KiB of output,
+   * which ends the response rather than the command.
    *
    * The command runs inside the session's own isolation, as the non-root agent
    * user, and never reaches a command line on the host.
@@ -290,12 +276,18 @@ export function buildApp(
       'X-Accel-Buffering': 'no',
     });
 
-    const outcome = await execs.runCommand(target, command, (chunk) => {
-      reply.raw.write(chunk);
-    });
-    reply.raw.end(execs.trailer(outcome));
-
-    execs.record(db, id, thread, command, outcome, startedAt, after);
+    // The head is on the wire, so a failure from here on cannot become an
+    // error status: it ends the stream with a trailer that says so instead.
+    try {
+      const outcome = await execs.runCommand(target, command, (chunk) => {
+        reply.raw.write(chunk);
+      });
+      reply.raw.end(execs.trailer(outcome));
+      execs.record(db, id, thread, command, outcome, startedAt, after);
+    } catch (err) {
+      log.session(id).warn('exec failed', { error: (err as Error).message });
+      reply.raw.end(`\n[exec failed: ${(err as Error).message}]\n`);
+    }
     manager.touch(id);
     return reply;
   };
@@ -377,7 +369,9 @@ export function buildApp(
     void reply.headers({
       'Content-Type': served.contentType,
       'Content-Length': String(stat.size),
-      'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename="${name}"`,
+      // The name is percent-encoded: it comes from a directory the agent
+      // writes to, and a quote or a newline in it must not reach the header.
+      'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
       // The type is decided here rather than sniffed from the bytes, so a
       // download is never treated as a document.
       'X-Content-Type-Options': 'nosniff',
@@ -443,13 +437,20 @@ export function buildApp(
    * agent made in the meantime is refused instead of made. The answer is the
    * file endpoint's, so the view repaints from one round trip.
    */
-  app.put('/api/sessions/:id/review/file', async (req) => {
-    const { id } = req.params as { id: string };
-    const body = req.body as ReviewFileBody | undefined;
-    if (!body?.path) throw new HttpError(400, 'path is required');
-    if (typeof body.content !== 'string') throw new HttpError(400, 'content is required');
-    return review.writeFile(id, body.path, body.content, String(body.hash ?? ''));
-  });
+  app.put(
+    '/api/sessions/:id/review/file',
+    // Above the display limit the service enforces, because a file that size
+    // grows when it is JSON-encoded, and a save must not fail before that
+    // check is reached.
+    { bodyLimit: 2 * MAX_FILE_BYTES },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const body = req.body as ReviewFileBody | undefined;
+      if (!body?.path) throw new HttpError(400, 'path is required');
+      if (typeof body.content !== 'string') throw new HttpError(400, 'content is required');
+      return review.writeFile(id, body.path, body.content, String(body.hash ?? ''));
+    },
+  );
 
   /**
    * Creates or replaces the comment on one line. The same route for both,
@@ -689,13 +690,9 @@ export function buildApp(
 
   return {
     app,
-    db,
     manager,
     cfg,
     egress,
-    notifier,
-    review,
-    agents,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

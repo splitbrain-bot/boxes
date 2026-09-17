@@ -50,13 +50,15 @@ function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
             const stream = new PassThrough();
             queueMicrotask(() => {
               // The repo probe is a plain `test -d`, which produces nothing.
-              if (opts.Cmd[0] !== 'bash') return stream.end();
+              // A local command runs under `timeout`, which is what tells the
+              // two apart.
+              if (opts.Cmd[0] !== 'timeout') return stream.end();
               stream.write(frame(output));
               stream.end();
             });
             return stream;
           },
-          inspect: async () => ({ ExitCode: opts.Cmd[0] === 'bash' ? exitCode : 1 }),
+          inspect: async () => ({ ExitCode: opts.Cmd[0] === 'timeout' ? exitCode : 1 }),
         };
       },
     }),
@@ -401,8 +403,16 @@ test('a command runs in the container and streams its output with a trailer', as
   assert.match(res.headers['content-type'] as string, /text\/plain/);
   assert.equal(res.body, 'hello\n\n[exit 0]\n');
   // The command travels as an argument to bash inside the container; nothing
-  // is assembled into a host command line.
-  assert.deepEqual(execs.at(-1), ['bash', '-lc', 'echo hello']);
+  // is assembled into a host command line. The container is handed the wall
+  // clock along with it.
+  assert.deepEqual(execs.at(-1), [
+    'timeout',
+    '--kill-after=5s',
+    '120s',
+    'bash',
+    '-lc',
+    'echo hello',
+  ]);
 });
 
 test('a non-zero exit is reported in the trailer', async () => {

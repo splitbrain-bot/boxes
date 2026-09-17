@@ -19,6 +19,13 @@ import { sessionOwner } from './workspaces.ts';
 export const LABEL = 'boxes.session';
 
 /**
+ * Label on the short-lived helper containers that copy a session's files.
+ * They carry the session label too, so the orphan sweep takes them, and this
+ * one so boot reconciliation never adopts one as the session's container.
+ */
+export const HELPER_LABEL = 'boxes.helper';
+
+/**
  * Label the session image carries, so a superseded copy of it can be
  * recognised after it has lost its tag.
  *
@@ -133,8 +140,11 @@ export interface CreateContainerSpec {
   egress: SessionEgress;
 }
 
+/** The agent user's home inside a session container, where its own files and caches live. */
+export const HOME_DIR = '/home/agent';
+
 /** Where the entrypoint writes the CA, and where the CA env vars point. */
-const CA_PATH = '/home/agent/.boxes/proxy-ca.crt';
+const CA_PATH = `${HOME_DIR}/.boxes/proxy-ca.crt`;
 
 /**
  * Environment of a session container.
@@ -152,7 +162,7 @@ export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     GIT_NAME: spec.profile.gitName,
     GIT_EMAIL: spec.profile.gitEmail,
     TERM: 'dumb',
-    CLAUDE_CONFIG_DIR: '/home/agent/.claude',
+    CLAUDE_CONFIG_DIR: `${HOME_DIR}/.claude`,
     // Every proxy-aware client honours these; anything else has no route
     // out, which is the intended failure mode.
     HTTP_PROXY: proxyUrl,
@@ -412,7 +422,10 @@ export function inContainer(): boolean {
 export async function resolveHostMountSource(destination: string): Promise<string | null> {
   const self = selfContainerId();
   if (!self) return null;
-  const info = await docker().getContainer(self).inspect();
+  // A host whose hostname happens to look like a container id has no such
+  // container; that is "no mount" rather than a failed boot.
+  const info = await inspecting(() => docker().getContainer(self).inspect());
+  if (!info) return null;
   const mount = (info.Mounts ?? []).find((m) => m.Destination === destination);
   return mount?.Source ?? null;
 }
@@ -469,7 +482,7 @@ export async function seedHomeFromImage(
     image,
     sessionId,
     binds: [`${hostDirectory}:/to`],
-    script: `cp -a /home/agent/. /to/ && chown ${uid}:${gid} /to`,
+    script: `cp -a ${HOME_DIR}/. /to/ && chown ${uid}:${gid} /to`,
   });
 }
 
@@ -496,7 +509,7 @@ async function oneShot(spec: {
     // and exits, so the entrypoint is replaced rather than run.
     Entrypoint: ['sh', '-c'],
     Cmd: [spec.script],
-    Labels: { [LABEL]: spec.sessionId },
+    Labels: { [LABEL]: spec.sessionId, [HELPER_LABEL]: spec.what },
     HostConfig: {
       Binds: spec.binds,
       NetworkMode: 'none',
@@ -557,7 +570,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
         // paths. A session from before homes became directories names its
         // volume here instead, and Docker takes either.
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
-        `${spec.homeSource}:/home/agent`,
+        `${spec.homeSource}:${HOME_DIR}`,
         // Read-only: what the dashboard says a box is configured with is not
         // something the agent inside it gets to rewrite.
         `${spec.agentConfigSource}:${AGENT_CONFIG_DIR}:ro`,
@@ -889,9 +902,13 @@ export async function hasMount(containerId: string, destination: string): Promis
   }
 }
 
-/** Every labelled session container Docker knows about, for boot reconciliation. */
+/**
+ * Every labelled session container Docker knows about, for boot
+ * reconciliation and the orphan sweep. `helper` marks a copy container that
+ * outlived its job rather than the session's own.
+ */
 export async function listSessionContainers(): Promise<
-  Array<{ id: string; sessionId: string; running: boolean }>
+  Array<{ id: string; sessionId: string; running: boolean; helper: boolean }>
 > {
   const containers = await docker().listContainers({
     all: true,
@@ -900,7 +917,14 @@ export async function listSessionContainers(): Promise<
   return containers.flatMap((c) => {
     const sessionId = c.Labels?.[LABEL];
     if (!sessionId) return [];
-    return [{ id: c.Id, sessionId, running: c.State === 'running' }];
+    return [
+      {
+        id: c.Id,
+        sessionId,
+        running: c.State === 'running',
+        helper: c.Labels?.[HELPER_LABEL] !== undefined,
+      },
+    ];
   });
 }
 
@@ -1088,14 +1112,22 @@ export interface CommandExec {
  * command line the host assembles, and it runs inside the container's
  * existing isolation: internal network, read-only rootfs, capabilities
  * dropped.
+ *
+ * `wallClockMs` is how long the command may run for. It is enforced inside
+ * the container, by `timeout`, because the daemon offers no way to signal a
+ * running exec: dropping the attached stream leaves the command running. The
+ * limit is rounded up to whole seconds, and a command that survives the term
+ * signal is killed five seconds later.
  */
 export async function runCommandExec(
   containerId: string,
   command: string,
   workingDir: string,
+  wallClockMs: number,
 ): Promise<CommandExec> {
+  const seconds = Math.ceil(wallClockMs / 1000);
   const exec = await docker().getContainer(containerId).exec({
-    Cmd: ['bash', '-lc', command],
+    Cmd: ['timeout', '--kill-after=5s', `${seconds}s`, 'bash', '-lc', command],
     AttachStdin: false,
     AttachStdout: true,
     AttachStderr: true,

@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import {
-  isTerminalStatus,
-  parseTaskNotifications,
-} from '../../../shared/task-notifications.ts';
+import { parseTaskNotifications } from '../../../shared/task-notifications.ts';
 
 /**
  * The block the harness wakes the agent with when a background task reports
@@ -12,8 +9,8 @@ import {
  *
  * The fixtures are the shapes the harness actually sends: a monitor's event,
  * a background command that finished, and a subagent's answer with what it
- * cost. What these cover is that each is read, that a terminal one is known
- * to be terminal, and that anything else is left as the text it is.
+ * cost. What these cover is that each is read, and that anything else is left
+ * as the text it is.
  */
 
 const MONITOR = [
@@ -68,25 +65,12 @@ test("a monitor's event becomes a row carrying what it saw", () => {
   });
 });
 
-test('a finished command carries its status, and the call that started it', () => {
+test('a finished command carries its status, and nothing it is not read for', () => {
   assert.deepEqual(only(COMMAND), {
     taskId: 'bm74el4o7',
-    // ACP's toolCallId, which is what correlates the report with the call.
-    toolUseId: 'toolu_01EKK7RLryD2H8fFoDDB6dmJ',
     status: 'completed',
     summary: 'Background command "Run the full suite" completed (exit code 0)',
   });
-});
-
-test('a status says whether the task will report again', () => {
-  assert.equal(isTerminalStatus(only(COMMAND)?.status), true);
-  assert.equal(isTerminalStatus('failed'), true);
-  assert.equal(isTerminalStatus('killed'), true);
-  // A monitor's event has no status at all, and a status this build has not
-  // heard of is not proof that anything ended.
-  assert.equal(isTerminalStatus(only(MONITOR)?.status), false);
-  assert.equal(isTerminalStatus('blocked'), false);
-  assert.equal(isTerminalStatus('something-newer'), false);
 });
 
 test("a subagent's answer and what it cost are both read", () => {
@@ -125,5 +109,20 @@ test('a message the user typed is not a notification', () => {
 test('a block this build cannot read is left as the text it is', () => {
   const noSummary = MONITOR.replace(/<summary>.*<\/summary>\n/, '');
   assert.equal(parseTaskNotifications(noSummary), null);
+});
+
+test('a block that cannot be read costs only itself', () => {
+  const noSummary = MONITOR.replace(/<summary>.*<\/summary>\n/, '');
+  const segments = parseTaskNotifications(`${noSummary}\n${COMMAND}`);
+  assert.deepEqual(
+    segments?.map((s) => s.type),
+    ['text', 'notification'],
+  );
+  // The block nobody could read is prose now, kept where it was said.
+  assert.equal(segments?.[0]?.type === 'text' && segments[0].text, noSummary);
+  assert.deepEqual(
+    segments?.[1]?.type === 'notification' && segments[1].notification,
+    only(COMMAND),
+  );
 });
 

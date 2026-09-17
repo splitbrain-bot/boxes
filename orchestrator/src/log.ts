@@ -15,7 +15,7 @@ const SECRET_VALUE = /\b(sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,})\b/
  * Returns a copy of a value with credentials replaced by a marker. Recurses
  * into arrays and objects up to a fixed depth.
  */
-export function redact(value: unknown, depth = 0): unknown {
+function redact(value: unknown, depth = 0): unknown {
   if (depth > 8) return '[deep]';
   if (typeof value === 'string') return value.replace(SECRET_VALUE, '[redacted]');
   if (value === null || typeof value !== 'object') return value;
@@ -28,13 +28,24 @@ export function redact(value: unknown, depth = 0): unknown {
 }
 
 /** Severity of a log line. */
-type Level = 'debug' | 'info' | 'warn' | 'error';
+export type Level = 'debug' | 'info' | 'warn' | 'error';
 
 /** Numeric severities, so levels can be compared against the threshold. */
 const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-/** Lowest severity that is written, from LOG_LEVEL. */
-const threshold = LEVELS[(process.env['LOG_LEVEL'] as Level) ?? 'info'] ?? LEVELS.info;
+/**
+ * Lowest severity that is written. `info` until the parsed configuration
+ * installs LOG_LEVEL, so a line written on the way to that is not lost.
+ */
+let threshold = LEVELS.info;
+
+/**
+ * Installs the lowest severity that is written. Called from the boot, once
+ * the configuration has been parsed.
+ */
+export function setLogLevel(level: Level): void {
+  threshold = LEVELS[level];
+}
 
 /** Writes one redacted JSON line, unless the level is below the threshold. */
 function emit(level: Level, msg: string, fields?: Record<string, unknown>): void {

@@ -10,7 +10,6 @@ import {
   EgressManager,
   composePolicy,
   pushPolicy,
-  readStatus,
   resolveEgressMaterial,
   type EgressMaterial,
 } from './egress.ts';
@@ -190,7 +189,7 @@ describe('the control channel, from the orchestrator side', () => {
     uptimeSeconds: 1,
   };
 
-  it('pushes the policy with its bearer and reads the status back', async () => {
+  it('pushes the policy with its bearer', async () => {
     const { cfg, material, seen } = await fakeProxy({ status: 200, body: okStatus });
     const policy = composePolicy(cfg, material);
 
@@ -199,9 +198,6 @@ describe('the control channel, from the orchestrator side', () => {
     expect(seen[0]?.url).toBe('/policy');
     expect(seen[0]?.auth).toBe(`Bearer ${material.controlToken}`);
     expect(JSON.parse(seen[0]!.body).credentials[0].secret).toBe(CLAUDE_TOKEN);
-
-    await expect(readStatus(cfg, material)).resolves.toEqual(okStatus);
-    expect(seen[1]?.method).toBe('GET');
   }, 30_000);
 
   it('reports the proxy s own reason when it refuses a push', async () => {

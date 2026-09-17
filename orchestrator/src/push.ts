@@ -6,9 +6,10 @@ import {
   randomBytes,
   sign as signWith,
 } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './log.ts';
+import { writeSecretFile } from './secret.ts';
 
 /**
  * Web Push: the part of a notification that survives the app being closed.
@@ -42,6 +43,9 @@ export interface VapidKeys {
 
 /** Record size the payload is written with; every message here fits one. */
 const RECORD_SIZE = 4096;
+
+/** What one record adds to its plaintext: the padding delimiter and the tag. */
+const RECORD_OVERHEAD = 17;
 
 /** How long a push service should hold an undelivered message, in seconds. */
 const DEFAULT_TTL = 12 * 60 * 60;
@@ -124,11 +128,7 @@ export function loadVapidKeys(dataDir: string): VapidKeys {
   }
 
   const keys = generateVapidKeys();
-  mkdirSync(dataDir, { recursive: true });
-  writeFileSync(path, `${JSON.stringify(keys, null, 2)}\n`, { mode: 0o600 });
-  // writeFileSync applies the mode only when it creates the file, so a
-  // replaced malformed file keeps its old mode without this.
-  chmodSync(path, 0o600);
+  writeSecretFile(path, `${JSON.stringify(keys, null, 2)}\n`);
   log.info('generated a VAPID keypair for this deployment', { path });
   return keys;
 }
@@ -138,6 +138,10 @@ export function loadVapidKeys(dataDir: string): VapidKeys {
 /**
  * Encrypts one push message for one subscriber, producing a whole
  * `aes128gcm` body: header, then a single record.
+ *
+ * A plaintext that does not fit that one record is refused, because the
+ * header promises a receiver records of RECORD_SIZE and a longer one would
+ * be split rather than padded.
  *
  * `salt` and `senderKeys` exist so the test can pin the random inputs to the
  * RFC's own; nothing else passes them.
@@ -149,6 +153,13 @@ export function encryptPayload(
   salt: Buffer = randomBytes(16),
   senderKeys: VapidKeys = generateVapidKeys(),
 ): Buffer {
+  if (plaintext.length + RECORD_OVERHEAD > RECORD_SIZE) {
+    throw new Error(
+      `a push payload must be at most ${RECORD_SIZE - RECORD_OVERHEAD} bytes, ` +
+        `and this one is ${plaintext.length}`,
+    );
+  }
+
   const senderPublic = unb64url(senderKeys.publicKey);
 
   const ecdh = createECDH('prime256v1');

@@ -79,11 +79,6 @@ export class Broadcast {
       .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }
 
-  /** Every attached browser, whichever thread it watches. */
-  get all(): DownstreamHandle[] {
-    return [...this.downstreams];
-  }
-
   /**
    * Adds a browser. Its thread may still be resolving, in which case it is
    * counted as attached — it is holding a socket open — but nothing is routed
@@ -233,12 +228,22 @@ export class Broadcast {
     targets.add({ handle, as });
   }
 
-  /** Ends that, returning the thread to its watchers. */
+  /**
+   * Ends one of those, returning the thread to its watchers once the last one
+   * is over.
+   *
+   * One target rather than every target of that browser: a browser with two
+   * loads open on one thread ends them one at a time, and the second is still
+   * replaying when the first comes back.
+   */
   endReplay(handle: DownstreamHandle, acpThreadId: string): void {
     const targets = this.replayTargets.get(acpThreadId);
     if (!targets) return;
     for (const target of targets) {
-      if (target.handle === handle) targets.delete(target);
+      if (target.handle === handle) {
+        targets.delete(target);
+        break;
+      }
     }
     if (targets.size === 0) this.replayTargets.delete(acpThreadId);
   }

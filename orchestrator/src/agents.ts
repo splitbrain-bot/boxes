@@ -34,7 +34,7 @@ import { chownToAgent } from './workspaces.ts';
  */
 
 /** Where the merged sets are materialized, under DATA_DIR. */
-export const AGENTS_SUBDIR = 'agents';
+const AGENTS_SUBDIR = 'agents';
 
 /**
  * A name that is safe as a single path component and is what the agent will
@@ -46,13 +46,13 @@ const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_SET_NAME = 100;
 
 /** Longest an AGENTS.md or one item's content may be. */
-export const MAX_CONTENT = 100_000;
+const MAX_CONTENT = 100_000;
 
 /** Most items of one kind a single set may hold. */
 const MAX_ITEMS_PER_KIND = 100;
 
 /** The parent of every materialized set. */
-export function agentsRoot(dataDir: string): string {
+function agentsRoot(dataDir: string): string {
   return join(dataDir, AGENTS_SUBDIR);
 }
 

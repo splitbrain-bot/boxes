@@ -65,16 +65,17 @@ function usage(over: {
   now?: () => number;
 } = {}) {
   const walks: string[] = [];
+  const measure = over.measure ?? ((): Promise<number> => Promise.resolve(42));
   const cache = new SessionUsage({
     pathsOf: over.pathsOf ?? ((id) => [`/data/workspaces/${id}`]),
     ttlMs: 1000,
     now: over.now ?? (() => 0),
-    measure:
-      over.measure ??
-      ((path) => {
-        walks.push(path);
-        return Promise.resolve(42);
-      }),
+    // Recorded around whichever measurer the test supplied, so the walks are
+    // countable whether or not it brought its own sizes.
+    measure: (path) => {
+      walks.push(path);
+      return measure(path);
+    },
   });
   return { cache, walks };
 }
@@ -136,7 +137,7 @@ test('what a session is using is its workspace and its home, together', async ()
   // got — and the home, with the caches and the installed tools in it, is
   // usually the larger half of the answer.
   assert.equal(cache.bytes('s1', up), 1000);
-  assert.deepEqual(walks, []);
+  assert.deepEqual(walks, ['/data/workspaces/s1', '/data/homes/s1']);
 });
 
 test('a session whose home is still a volume is measured by its workspace alone', async () => {

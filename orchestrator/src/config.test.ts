@@ -38,6 +38,7 @@ test('an empty environment yields the documented defaults', () => {
     assert.equal(cfg.EGRESS_PROXY_CONTAINER, 'boxes-egress-proxy');
     assert.equal(cfg.EGRESS_PROXY_ALIAS, 'proxy');
     assert.equal(cfg.EGRESS_PROXY_PORT, 3128);
+    assert.equal(cfg.LOG_LEVEL, 'info');
     assert.equal(cfg.profiles['DEFAULT']?.gitName, 'boxes-bot');
   });
 });
@@ -107,6 +108,7 @@ test('a genuinely invalid value still fails the boot', () => {
   withDataDir((dir) => {
     assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_MEM_LIMIT: 'lots' }), /Invalid configuration/);
     assert.throws(() => loadConfig({ DATA_DIR: dir, PERMISSION_FALLBACK: 'maybe' }), /Invalid configuration/);
+    assert.throws(() => loadConfig({ DATA_DIR: dir, LOG_LEVEL: 'verbose' }), /Invalid configuration/);
     assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_CPUS: '-1' }), /Invalid configuration/);
     assert.throws(
       () => loadConfig({ DATA_DIR: dir, PUSH_SUBJECT: 'ops@example.com' }),

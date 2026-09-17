@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SessionStatus } from '../../shared/types.ts';
+import type { AcpLogEntry, SessionStatus } from '../../shared/types.ts';
 
 /**
  * SQLite persistence in WAL mode. The database holds session metadata only:
@@ -465,6 +465,21 @@ function migrate(db: Db): void {
   }
 }
 
+/**
+ * The subnets the sessions that still exist are on.
+ *
+ * What the allocator has to skip: the counter behind nextSubnetIndex only
+ * rises, so it wraps back onto subnets that are still held once the pool has
+ * been round once. A deleted session gives its subnet back with its network,
+ * so its tombstone is not counted.
+ */
+export function takenSubnets(db: Db): Set<string> {
+  const rows = db
+    .prepare("SELECT subnet FROM sessions WHERE status != 'deleted'")
+    .all() as Array<{ subnet: string }>;
+  return new Set(rows.map((row) => row.subnet));
+}
+
 /** Returns the next value of the subnet counter, incrementing it in place. */
 export function nextSubnetIndex(db: Db): number {
   const row = db
@@ -750,7 +765,7 @@ export function setThreadTurnActive(
  * Clears the running-turn flag on every thread of a session.
  *
  * None of the callers leaves a turn running: a deliberate stop, an adapter
- * exit, a cancel, boot reconciliation.
+ * exit, boot reconciliation.
  */
 export function clearSessionTurns(db: Db, sessionId: string): void {
   db.prepare('UPDATE threads SET turn_active = 0 WHERE session_id = ?').run(sessionId);
@@ -819,6 +834,27 @@ export function touchPushSubscription(db: Db, endpoint: string): void {
     Date.now(),
     endpoint,
   );
+}
+
+/** How many sessions exist that have not been deleted. */
+export function countLiveSessions(db: Db): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
+    .get() as { n: number };
+  return row.n;
+}
+
+/**
+ * A page of a session's ACP debug log: the entries after `afterId`, oldest
+ * first, at most `limit` of them.
+ */
+export function listAcpLog(db: Db, sessionId: string, afterId: number, limit: number): AcpLogEntry[] {
+  return db
+    .prepare(
+      `SELECT id, direction, ts, payload FROM acp_log
+       WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+    )
+    .all(sessionId, afterId, limit) as AcpLogEntry[];
 }
 
 /** How many browsers are subscribed. */

@@ -64,6 +64,20 @@ test('encryptPayload writes a header a receiver can parse', () => {
   assert.equal(body.readUInt8(21), 0x04);
 });
 
+test('a payload too long for one record is refused rather than mangled', () => {
+  // The header promises records of 4096 bytes, and the padding delimiter and
+  // the GCM tag take 17 of them. One byte more than that fits would be sent
+  // as a record no receiver can read.
+  const room = 4096 - 17;
+  const fits = () =>
+    encryptPayload(Buffer.alloc(room, 0x61), b64(RFC8291.uaPublic), b64(RFC8291.authSecret));
+  const overflows = () =>
+    encryptPayload(Buffer.alloc(room + 1, 0x61), b64(RFC8291.uaPublic), b64(RFC8291.authSecret));
+
+  assert.doesNotThrow(fits);
+  assert.throws(overflows, /at most 4079 bytes/);
+});
+
 test('a subscriber can decrypt what encryptPayload produced', () => {
   // The receiver's side of RFC 8291, done independently of the sender's: the
   // round trip covers the random salt and ephemeral key the vector cannot.

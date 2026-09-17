@@ -707,8 +707,9 @@ export interface AgentBundlePreview {
 // --- the gateway's one ACP extension ----------------------------------------
 
 /**
- * Notification the gateway sends a browser to say whether a prompt turn is
- * running on the thread it is watching.
+ * Notification the gateway sends a browser about the thread it is watching:
+ * whether a prompt turn is running, whether the agent is talking, and what it
+ * has left running in the background.
  *
  * ACP has no method for this: a client learns a turn is running by awaiting
  * the prompt it sent, which a browser that navigated away and came back never

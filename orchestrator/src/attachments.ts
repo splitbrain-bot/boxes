@@ -122,14 +122,29 @@ export function safeAttachmentName(name: string): string {
   return cleaned.slice(0, MAX_NAME - ext.length) + ext;
 }
 
-/** `name`, `name-2`, `name-3`… — the first that is not taken. */
-function freePath(dir: string, name: string): { name: string; path: string } {
+/**
+ * Writes `bytes` under the first free name: `name`, `name-2`, `name-3`…
+ *
+ * The open is exclusive and a taken name is tried again with the next
+ * suffix, so two uploads of the same name at once land on two files rather
+ * than one of them overwriting the other.
+ */
+function writeUnderFreeName(
+  dir: string,
+  name: string,
+  bytes: Buffer,
+): { name: string; path: string } {
   const ext = extname(name);
   const stem = ext ? name.slice(0, -ext.length) : name;
   for (let n = 1; n <= MAX_COLLISIONS; n++) {
     const candidate = n === 1 ? name : `${stem}-${n}${ext}`;
     const path = join(dir, candidate);
-    if (!existsSync(path)) return { name: candidate, path };
+    try {
+      writeFileSync(path, bytes, { mode: 0o644, flag: 'wx' });
+      return { name: candidate, path };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
   }
   throw new Error(`too many attachments named ${name}`);
 }
@@ -161,8 +176,7 @@ export function storeAttachment(
     chownToAgent(ignore);
   }
 
-  const target = freePath(dir, safeAttachmentName(name));
-  writeFileSync(target.path, bytes, { mode: 0o644 });
+  const target = writeUnderFreeName(dir, safeAttachmentName(name), bytes);
   // The agent reads these, and in the normal deployment it is a different uid
   // from the one that just wrote them.
   chownToAgent(target.path);

@@ -245,7 +245,10 @@ export class Activity {
     state.cancel = this.delay(ms, () => {
       const current = this.threads.get(acpThreadId);
       if (!current || current.speaking) return;
-      current.cancel = null;
+      // Nothing left worth remembering: a settled thread is quiet, holds no
+      // open call and has no timer armed, which is what a thread this has
+      // never heard of already answers.
+      this.threads.delete(acpThreadId);
       this.onSettled(acpThreadId);
     });
   }

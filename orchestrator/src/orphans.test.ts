@@ -238,6 +238,22 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(homeOf('orphan-by-accident')));
   });
 
+  it('takes the files of a session whose Docker objects are already gone', async () => {
+    insertSession('keep');
+    // The shape a failed teardown leaves: it removes the container, the
+    // network and the volumes first, so a session it gave up on halfway is
+    // two directories and nothing else.
+    insertObjects('half-torn-down');
+    fake.containers.delete('c-half-torn-down');
+    fake.networks.delete('sn-half-torn-down');
+    fake.volumes.delete('home-half-torn-down');
+
+    await orchestrator.manager.sweepOrphans();
+
+    assert.ok(!existsSync(workspaceOf('half-torn-down')));
+    assert.ok(!existsSync(homeOf('half-torn-down')));
+  });
+
   it('sweeps for a deployment whose sessions have all been deleted', async () => {
     // The tombstone is what tells the two cases apart: this database made
     // these objects, and one of its teardowns did not finish.

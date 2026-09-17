@@ -282,6 +282,19 @@ describe('starting a session whose image has moved', () => {
     ]);
   });
 
+  it('moves a session onto the current image for a local command too', async () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    fake.images.set(IMAGE, 'sha256:two');
+
+    // A `!bang` command starts a stopped box without going through start(),
+    // and runs the same repairs it does.
+    const target = await orchestrator.manager.execTarget('a1');
+
+    assert.deepEqual(fake.removed, ['c1']);
+    assert.notEqual(target.containerId, 'c1');
+    assert.equal(fake.created[0]!['Image'], IMAGE);
+  });
+
   it('leaves a session already on the current image alone', async () => {
     insertSession('a3', 'c1', 'sha256:one');
 

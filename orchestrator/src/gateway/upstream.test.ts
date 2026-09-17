@@ -741,6 +741,42 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
   assert.equal(thread('t2')['acp_session_id'], null);
 });
 
+test('a respawn that re-mints the current thread drops the browsers on its old id', async () => {
+  let firstLoadDone = false;
+  fakeDocker(
+    () =>
+      new FakeAdapter((msg) => {
+        if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+        if (msg.method === 'session/load') {
+          // The current thread's own transcript is gone by the time the
+          // adapter restarts, so its stored id is re-minted rather than
+          // loaded back.
+          if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
+            return new Error('Session not found');
+          }
+          return {};
+        }
+        if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+        return {};
+      }),
+  );
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  firstLoadDone = true;
+
+  const stranded = fakeHandle(1, 'acp-gone');
+  up.attach(stranded);
+
+  up.stop();
+  await up.ensureStarted();
+
+  // The row names the fresh conversation now, so the id this browser is
+  // pinned to belongs to no thread at all: its socket is closed, and its
+  // handshake pins whatever the thread is next.
+  assert.equal(thread('t1')['acp_session_id'], 'acp-fresh');
+  assert.equal(stranded.closed, 1);
+});
+
 test('a connection pins the thread it named, and a bare one gets the default', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };

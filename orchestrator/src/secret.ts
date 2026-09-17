@@ -1,15 +1,32 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { log } from './log.ts';
 
 /**
- * Resolution of the gateway's WebSocket auth token.
+ * Resolution of the gateway's WebSocket auth token, and the write every
+ * generated secret in the data volume goes through.
  *
  * An unset WS_AUTH_TOKEN means the deployment generates its own. The
  * generated value lives in the data volume, so it survives restarts and
  * rebuilds, and that file is the only place the token is written.
  */
+
+/**
+ * Writes a generated secret to `path`, readable by this process alone.
+ *
+ * The content goes to a fresh temporary file beside it and is then renamed
+ * over the target, so no reader ever sees a half-written file, and a file
+ * replaced this way cannot keep a wider mode than 0600: the mode is applied
+ * when the temporary file is created, which is always a create. Missing
+ * parent directories are made first.
+ */
+export function writeSecretFile(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+  writeFileSync(temp, content, { mode: 0o600 });
+  renameSync(temp, path);
+}
 
 /** Filename under DATA_DIR holding the generated token. */
 const TOKEN_FILE = 'ws-auth-token';
@@ -41,11 +58,7 @@ export function resolveWsAuthToken(dataDir: string, configured: string): string 
   }
 
   const token = randomBytes(32).toString('hex');
-  mkdirSync(dataDir, { recursive: true });
-  writeFileSync(path, `${token}\n`, { mode: 0o600 });
-  // writeFileSync applies the mode only when it creates the file, so a
-  // replaced short-token file keeps its old mode.
-  chmodSync(path, 0o600);
+  writeSecretFile(path, `${token}\n`);
   log.info('generated a WebSocket auth token for this deployment', { path });
   return token;
 }
