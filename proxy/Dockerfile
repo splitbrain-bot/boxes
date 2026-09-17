@@ -21,5 +21,7 @@ COPY proxy/package.json proxy/package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /build/proxy/dist/main.js ./main.js
 USER node
-EXPOSE 3128 3129
+# Only the proxy port is advertised. The control port stays unadvertised on
+# purpose: it is for the orchestrator on the shared network, not for publishing.
+EXPOSE 3128
 CMD ["node", "main.js"]

@@ -6,7 +6,7 @@ process owns everything: the REST API, the web assets, the agent connections,
 the container lifecycle and the database.
 
 This document describes how the system is put together. [`README.md`](./README.md)
-covers running it and the risks that come with it.
+covers setting it up and using it.
 
 ## The property everything else serves
 
@@ -145,6 +145,7 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `{"from":"<threadId>"}` forks that one instead of starting empty |
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
 | `POST /api/sessions/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
+| `POST /api/sessions/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
 | `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
 | `POST /api/sessions/:id/attachments?name=` | Stores one file, raw bytes, in the session's workspace |
 | `GET /api/sessions/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
@@ -154,6 +155,7 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id/threads/:threadId/exec` | Commands already run on that thread |
 | `GET /api/sessions/:id/review/tree` | Tree, git status per path, comment counts, the workspace's repositories and the base — the whole left panel |
 | `GET /api/sessions/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
+| `PUT /api/sessions/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
 | `PUT /api/sessions/:id/review/annotations` | Creates or replaces one line's comment |
 | `DELETE /api/sessions/:id/review/annotations?path=&line=` | Deletes one comment |
 | `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it; answers with where it resolved in each repository |
@@ -183,17 +185,21 @@ A composer line starting with `!` is a local command: the dashboard
 intercepts it, so it never reaches the model, costs no tokens, and cannot be
 read as an instruction.
 
-`exec.ts` runs it as `bash -lc <command>` inside the session container, as the
-non-root `agent` user, in the container's existing isolation — internal
-network, read-only rootfs, capabilities dropped. No new privilege is
+`exec.ts` runs it as `timeout <limit> bash -lc <command>` inside the session
+container, as the non-root `agent` user, in the container's existing isolation
+— internal network, read-only rootfs, capabilities dropped. No new privilege is
 introduced, and nothing shell-executes on the host: the command travels as an
 argument to the container's own shell and never reaches a host command line.
 
 The response is chunked `text/plain` rather than JSON, so the browser can
 render the output as it arrives, and ends with a trailer line carrying the
-exit code and whether either limit was hit. Both limits are enforced by the
-orchestrator rather than trusted to the container: 120 seconds of wall clock
-and 256 KiB of output, after which the exec is killed. Finished runs go into
+exit code and whether either limit was hit. The two limits are held in
+different places, because they can be. The wall clock — 120 seconds — is the
+container's own, through the `timeout` the command is wrapped in: the daemon
+cannot signal a running exec, so a limit the orchestrator held alone would
+end the response and leave the command running. The output cap — 256 KiB —
+is the orchestrator's, and it ends the response rather than the command; what it
+belongs to is ended by the wall clock at the latest. Finished runs go into
 `exec_log` against the thread they were typed in, ring-pruned per session.
 
 The thread is part of the endpoint, the way it is part of a WebSocket path: a
@@ -1280,7 +1286,9 @@ session's home is a named volume Docker ownership-initialises from the image
 and nothing outside the container can chown it afterwards; `ensureSessionImage`
 reads the image's own user back and warns when the two have drifted. Pointing
 the orchestrator's own user at `SESSION_UID` is what lets it drop root, since
-the workspace chown then has nothing to do.
+the workspace chown then has nothing to do. That is a deployment's own
+arrangement — a `user:` on the orchestrator service and a data directory
+owned by the same uid — rather than something the shipped compose does.
 
 It runs non-root with `ReadonlyRootfs`, `CapDrop: ALL`,
 `no-new-privileges`, a tmpfs `/tmp`, memory, CPU and pids limits, and
@@ -1395,8 +1403,8 @@ path and mount that, so a failure to resolve it is fatal at boot.
 
 **Ownership.** A bind mount, unlike a named volume, is not
 ownership-initialised by Docker, so every path the orchestrator creates in a
-workspace is chowned to uid 1000 — the session image's `agent` user, named as
-a constant in `workspaces.ts`. That is what lets the agent write in its own
+workspace is chowned to `SESSION_UID` — the session image's `agent` user,
+1020 by default and named as a constant in `workspaces.ts`. That is what lets the agent write in its own
 workspace, and lets it edit or delete the `REVIEW.md` the review surface
 writes there. `workspaces/` itself is 0700: one session's files are not
 another's, and the only thing that reads across all of them is this process.
@@ -1575,7 +1583,7 @@ under a per-session lock, with the file's hash checked between the read and the
 write. A moved hash means the agent edited the file mid-mutation, and the whole
 thing is re-read and re-applied once. A lost race costs one visible refresh
 rather than data, because every write re-serializes the whole parsed file. What
-is written is chowned to uid 1000, so the agent can edit or delete it.
+is written is chowned to `SESSION_UID`, so the agent can edit or delete it.
 
 **The workspace is the review.** A session's workspace is not one repository:
 the agent clones what it was pointed at, forks and clones a second thing to
@@ -1597,16 +1605,18 @@ A nested repository needs no special case — it is a longer prefix that wins �
 and a file no repository claims is shown without git, which is the old
 no-git-for-the-whole-session behaviour narrowed to the one file.
 
-**Discovery** walks the workspace pruning the same ignore list the tree uses,
-never following a symlink, bounded by a depth limit and a cap on directories
+**Discovery** walks the workspace pruning a list of its own — the dependency
+and build directories a repository is not expected to be found in — never
+following a symlink, bounded by a depth limit and a cap on directories
 scanned. A directory holding a `.git` entry — file *or* directory, so
 submodules and linked worktrees count — is a candidate, confirmed by comparing
 `rev-parse --show-toplevel` **realpath to realpath**: git resolves symlinks, so
 comparing its answer against a raw path silently loses git for every session of
-any deployment whose workspace path has a linked component. Pruning the ignore
-list means a repository deliberately cloned into `vendor/` is not found, which
-is the right trade against an agent's `npm install`. The map is cached per
-session and rediscovered by the tree fetch.
+any deployment whose workspace path has a linked component. Pruning that list
+means a repository deliberately cloned into `vendor/` is not found, which is
+the right trade against an agent's `npm install`; the files in it are still
+listed, by whichever repository encloses them. The map is cached per session
+and rediscovered by the tree fetch.
 
 **The tree** is merged from each repository's `ls-files` with its own prefix
 prepended, a walk of the space no repository claims, and the files each
@@ -1618,9 +1628,11 @@ stops an outer repository's `--others` reporting an inner work tree as one
 nameless `inner/` row, and what stops the duplicate once the inner repository
 contributes the same files. The merged list is sorted before the entry cap, so
 a truncated tree is deterministic rather than "whichever repository was read
-first". Ignored files stay hidden inside repositories and loose files all show
-outside them: inside one the project has said what is noise, outside one nobody
-has.
+first". Inside a repository the tree lists what git lists, so the project's
+own ignore rules are the only ones applied and a committed `vendor/` or
+`dist/` shows; outside one, where nobody has said what is noise, every loose
+file shows. Binary files are left out either way, and the walk steps over a
+version control system's metadata.
 
 **One base expression, resolved per repository.** `main` means main-in-each,
 through the merge base with that repository's own HEAD. A repository the
@@ -1882,9 +1894,17 @@ TLS under the deployment CA and `decideCredentials` rules on the request:
 
 | The request carries | What happens |
 |---|---|
-| the deployment's placeholder | rewritten to carry the real credential |
-| any other credential | 403 from the proxy; nothing reaches the host |
-| no credential | forwarded unauthenticated, as it always was |
+| the placeholder, in a credential header | rewritten to carry the real credential |
+| any other value in a credential header | 403 from the proxy; nothing reaches the host |
+| nothing in a credential header | forwarded as it stands |
+
+A *credential header* is one the credential set names: `Authorization` for
+both of them, and `X-Api-Key` for Anthropic as well. Nothing else is read as a
+credential. A request that authenticates some other way — a session cookie is
+the case worth naming — is forwarded as it stands, which is what keeps logging
+in to a translated host from inside a session working. The refusal above is
+about the deployment's own credentials, not about every way to reach an
+account at that host.
 
 The swap is value-level: the placeholder is replaced wherever it appears in the
 credential header, which covers `Bearer <p>`, `token <p>`, a bare value, and
@@ -1924,6 +1944,10 @@ generated once and persisted in `DATA_DIR` at mode 0600, beside the generated
 WebSocket token — regenerating them per boot would strand every running
 session, which holds the old certificate in its trust file. Rotation is
 deleting that file.
+
+The channel's port is named on both sides: `EGRESS_CONTROL_PORT` for the
+orchestrator and `CONTROL_PORT` for the proxy, 3129 by default in each. They
+are one port, so moving it means setting both.
 
 ## State, and where truth lives
 
@@ -1976,13 +2000,19 @@ working default, which is why the stack runs with no `.env` at all.
 That file is the only place a default is written down, and the only place
 that knows which settings exist. `compose.yaml` hands the orchestrator an env
 file wholesale (`BOXES_ENV`, defaulting to `.env` and optional), so adding a
-setting means editing the schema and nothing else. It sets no value at all.
-The one thing it names is the two credentials, listed with no value so that
-they can be exported in a shell rather than written down at all. The cost is
-that `environment` overrides `env_file` whether or not the shell has a value,
-so those two names cannot come from a `BOXES_ENV` file outside the repo —
-they come from the shell or from `./.env`, which compose reads for both.
-Every other setting is unaffected. Where compose has to agree with a default
+setting means editing the schema and nothing else. It hands the orchestrator
+no setting of its own. The one thing it names is the two credentials, listed
+with no value so that they can be exported in a shell rather than written
+down at all. The cost is that `environment` overrides `env_file` whether or
+not the shell has a value, so those two names cannot come from a `BOXES_ENV`
+file outside the repo — they come from the shell or from `./.env`, which
+compose reads for both. Every other setting is unaffected.
+
+`BIND_ADDR` and `HOST_PORT` are the two names compose reads for itself, each
+with its default written into the published port line. They are variable
+substitutions rather than settings of the orchestrator's, and compose
+resolves a substitution from `./.env` or the shell, never from a `BOXES_ENV`
+file. Setting either one there changes nothing. Where compose has to agree with a default
 — `/data`
 for the volume mount, `boxes-egress-proxy` for the container the orchestrator
 attaches to session networks — it agrees by using the same value, not by
@@ -2020,9 +2050,13 @@ the four CA-trust variables to point at.
 
 ## Build-time pins
 
-The ACP adapter version is pinned in `session-image/Dockerfile` rather than in
-configuration, so the running agent is the one this commit names and no `.env`
-entry can change it.
+The agent, the ACP adapter and the browser CLI are pinned in
+`session-image/Dockerfile` rather than in configuration, so what runs in a
+session is what this commit names and no `.env` entry can change it. Each is
+pinned to a major line rather than to an exact release, so a rebuild takes
+fixes on that line and a new major is an edit to that file. Two of the three
+are below 1.0, where a caret pins the minor, which is where a package that
+young puts its breaking changes.
 
 Frontend dependencies are pinned in `dashboard/package.json` and resolved by
 `package-lock.json`, which every Docker stage installs with `npm ci` rather
@@ -2040,7 +2074,9 @@ image cannot be built from code that fails `tsc --noEmit`.
 orchestrator/src/
   index.ts              Boot, the WS upgrade, the background loops, shutdown
   app.ts                REST routes, the exec endpoint, the static bundle
+  http-error.ts         The one error that carries an HTTP status, thrown wherever a request is refused
   exec.ts               Local commands: limits, streaming, the exec log
+  attachments.ts        Files a prompt carries, written into the session's own workspace
   config.ts             Environment parsing, and the translatable credential set
   secret.ts             WS auth token: configured, stored, or generated
   notify.ts             "A thread wants you", pushed to every subscribed browser
@@ -2094,6 +2130,7 @@ dashboard/
     stores/
       sessions.ts       Polled session list and health, read by useSyncExternalStore
       push.ts           Web Push registration: the service worker, the subscription, the toggle's state
+      review.ts         The review view's whole state: the tree and the open file, fetched on arrival
       thread/
         acp-types.ts    The slice of the ACP schema the browser speaks
         acp-client.ts   JSON-RPC over the WebSocket, and the handshake
@@ -2107,7 +2144,8 @@ dashboard/
     lib/
       history.ts        Where in the stack the browser is, which both of the above read
       staged-prompt.ts  A prompt handed from one view to another, consumed once, out of history's reach
-    views/              SessionList, SessionCreate, SessionThread, SessionInfo, AgentSets
+    views/              SessionList, SessionCreate, SessionThread, SessionInfo,
+                        SessionReview, AgentSets, AgentSetEditor, Playground, Shell
     components/
       Spinner.tsx       The one thing that says "working": blocks-wave, in every running state
       assistant-ui/     Installed registry sources, ours to edit
@@ -2116,7 +2154,11 @@ dashboard/
 shared/
   types.ts              REST shapes and the control-channel contract
   task-notifications.ts How a background task reports in, read by both sides
-session-image/          The per-session container image and its entrypoint
+session-image/          The per-session container image, in four files
+  Dockerfile            What a session has installed, and the uid it runs as
+  entrypoint.sh         Identity, the CA and the agent configuration install; then it holds the container open
+  playwright-cli.config.json  Browser defaults for a container with no Chrome and no sandbox
+  profile-image-path.sh Puts the image's PATH back after /etc/profile has replaced it
 scripts/                Security smoke test and credentialed live test
 ```
 

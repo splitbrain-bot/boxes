@@ -130,8 +130,8 @@ jobs:
           - image: egress-proxy
             context: .
             dockerfile: proxy/Dockerfile
-          # The session image copies only entrypoint.sh, so its own directory
-          # is the whole context.
+          # The session image copies only files from session-image/, so its
+          # own directory is the whole context.
           - image: session
             context: session-image
             dockerfile: session-image/Dockerfile

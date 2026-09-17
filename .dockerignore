@@ -1,0 +1,12 @@
+# Keeps the build context to what the images build from.
+#
+# The orchestrator image runs `npm ci` and only then copies dashboard/ and
+# orchestrator/ over the result, so a developer's node_modules would land on
+# top of the freshly installed tree without this file.
+**/node_modules
+**/dist
+.git
+.claude
+dashboard/e2e/screenshots
+.env
+data/
