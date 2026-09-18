@@ -138,7 +138,15 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   const sessionId = match[1]!;
   const threadId = match[2] ?? null;
 
-  const check = checkUpgrade(req.headers['sec-websocket-protocol'], cfg);
+  // The upgrade is checked against the token of the session the path names,
+  // so a token opens that session and no other one. A session that is not
+  // there, or one that is deleted, has no token, and the upgrade is then
+  // refused the way a wrong token is: the handshake never says which sessions
+  // exist.
+  const row = manager.getRow(sessionId);
+  const live = row && row.status !== 'deleted' ? row : null;
+
+  const check = checkUpgrade(req.headers['sec-websocket-protocol'], live?.ws_token ?? null);
   if (!check.ok) {
     log.warn('rejected WS upgrade', { sessionId, reason: check.reason });
     // The handshake fails before a WebSocket exists, so the refusal is an
@@ -148,15 +156,10 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
     return;
   }
 
-  const row = manager.getRow(sessionId);
-  if (!row || row.status === 'deleted') {
-    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-    socket.destroy();
-    return;
-  }
   // A thread that is not this session's is refused here, before a WebSocket
-  // exists, the same way an unknown session is. A connection is pinned for
-  // its whole life, so there is no later point at which to find this out.
+  // exists. Whoever asks has the session's token, so a 404 tells them only
+  // about their own session. A connection is pinned for its whole life, so
+  // there is no later point at which to find this out.
   if (threadId !== null && !manager.hasThread(sessionId, threadId)) {
     log.warn('rejected WS upgrade for an unknown thread', { sessionId, threadId });
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');

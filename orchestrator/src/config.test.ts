@@ -11,7 +11,7 @@ import { join } from 'node:path';
  * having to restate any of them.
  */
 
-/** Runs a case against a throwaway data dir, since a token is written there. */
+/** Runs a case against a throwaway data dir, so no case names a real one. */
 function withDataDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-config-'));
   try {

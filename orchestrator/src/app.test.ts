@@ -82,10 +82,10 @@ function insertSession(id: string): void {
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
-       created_at, last_active_at)
+       ws_token, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
-       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?)`,
-  ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, now, now);
+       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?, ?)`,
+  ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 
@@ -101,7 +101,7 @@ function insertThread(sessionId: string, threadId: string, ordinal: number): voi
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
-  // Before config(), which generates and writes the WS token on first read.
+  // Before config(), which reads DATA_DIR once and keeps it for the process.
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
@@ -364,9 +364,10 @@ test('a link planted in the attachments directory serves nothing', async () => {
     payload: Buffer.from('x'),
   });
   // What an agent with a foothold in its own workspace would try: the
-  // orchestrator's own uid can read the database and the gateway token.
+  // orchestrator's own uid can read the database, and every session's gateway
+  // token is in it.
   const secret = join(dir, 'secret.txt');
-  writeFileSync(secret, 'ws-auth-token');
+  writeFileSync(secret, 'a gateway token');
   symlinkSync(secret, join(workspace, '.boxes/attachments/escape.png'));
 
   const res = await orchestrator.app.inject({
@@ -1006,4 +1007,22 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
     last_active_at: number;
   };
   assert.equal(after.last_active_at, before.last_active_at);
+});
+
+test('a listed session carries its own WebSocket token', async () => {
+  insertSession('abc123');
+  insertSession('def456');
+
+  const res = await orchestrator.app.inject({ url: '/api/sessions' });
+  const listed = res.json() as Array<{ id: string; wsToken: string }>;
+
+  // Each summary hands out the token of the session it is about, so a reader
+  // of one session never learns what opens the one beside it.
+  assert.deepEqual(
+    listed.map((s) => [s.id, s.wsToken]).sort(),
+    [
+      ['abc123', 'token-abc123'],
+      ['def456', 'token-def456'],
+    ],
+  );
 });

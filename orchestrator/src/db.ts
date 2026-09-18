@@ -69,6 +69,11 @@ export interface SessionRow {
    * the session's threads instead.
    */
   current_thread_id: string | null;
+  /**
+   * The bearer token a WebSocket upgrade to this session has to present. Its
+   * own: it opens this session and no other one in the deployment.
+   */
+  ws_token: string;
   created_at: number;
   last_active_at: number;
 }
@@ -430,6 +435,17 @@ export const MIGRATIONS: string[] = [
   // there. Rows from before know no such place and stay at the end.
   `
   ALTER TABLE exec_log ADD COLUMN after_id TEXT;
+  `,
+  // The token a WebSocket upgrade presents belongs to one session, so it
+  // opens that session alone rather than every session of the deployment.
+  //
+  // Every existing row is given a token here rather than at its first read:
+  // this is the one moment that reaches all of them, and it leaves no session
+  // without one. SQLite draws randomblob per row, so no two sessions share a
+  // token.
+  `
+  ALTER TABLE sessions ADD COLUMN ws_token TEXT NOT NULL DEFAULT '';
+  UPDATE sessions SET ws_token = lower(hex(randomblob(32)));
   `,
 ];
 

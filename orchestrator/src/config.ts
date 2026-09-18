@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { resolveWsAuthToken } from './secret.ts';
 import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 
 /**
@@ -131,12 +130,6 @@ const schema = z.object({
    * request the orchestrator buffers in memory before writing it out.
    */
   MAX_ATTACHMENT_MB: z.coerce.number().int().positive().default(25),
-
-  /**
-   * Validated against the bearer.<token> WebSocket subprotocol. Unset means
-   * the orchestrator generates one and keeps it in the data volume.
-   */
-  WS_AUTH_TOKEN: z.string().default(''),
 
   PERMISSION_FALLBACK: z.enum(['hold', 'deny']).default('hold'),
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
@@ -315,7 +308,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     ...base,
-    WS_AUTH_TOKEN: resolveWsAuthToken(base.DATA_DIR, base.WS_AUTH_TOKEN),
     egressAllowedHosts: allowedHosts,
     egressCredentials: CREDENTIAL_SET.flatMap((spec) => {
       const secret = secrets[spec.id] ?? '';

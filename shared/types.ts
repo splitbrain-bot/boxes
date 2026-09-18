@@ -116,7 +116,8 @@ export interface SessionSummary {
   attachedCount: number;
   /**
    * Bearer token an ACP client authenticates the WebSocket upgrade with,
-   * carried in the subprotocol. One token covers the whole deployment.
+   * carried in the subprotocol. This session's own: it opens this session and
+   * no other one in the deployment.
    */
   wsToken: string;
   /** Every conversation this session owns, oldest first. */

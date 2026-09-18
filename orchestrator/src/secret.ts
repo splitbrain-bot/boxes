@@ -1,15 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { log } from './log.ts';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 /**
- * Resolution of the gateway's WebSocket auth token, and the write every
- * generated secret in the data volume goes through.
- *
- * An unset WS_AUTH_TOKEN means the deployment generates its own. The
- * generated value lives in the data volume, so it survives restarts and
- * rebuilds, and that file is the only place the token is written.
+ * The secrets this deployment generates, and the write every generated secret
+ * in the data volume goes through.
  */
 
 /**
@@ -28,37 +23,15 @@ export function writeSecretFile(path: string, content: string): void {
   renameSync(temp, path);
 }
 
-/** Filename under DATA_DIR holding the generated token. */
-const TOKEN_FILE = 'ws-auth-token';
-
-/** Shortest token accepted, configured or generated. */
-const MIN_LENGTH = 32;
+/** Bytes of randomness behind one session's WebSocket token. */
+const WS_TOKEN_BYTES = 32;
 
 /**
- * Returns the token for this deployment. A configured token wins and must be
- * at least MIN_LENGTH characters; otherwise the token stored under dataDir is
- * reused, or a fresh one is generated and stored there.
+ * Returns a fresh WebSocket auth token for one session to keep.
+ *
+ * Hex of WS_TOKEN_BYTES random bytes, from the same source as every other
+ * secret this deployment generates.
  */
-export function resolveWsAuthToken(dataDir: string, configured: string): string {
-  if (configured) {
-    if (configured.length < MIN_LENGTH) {
-      throw new Error(
-        `WS_AUTH_TOKEN must be at least ${MIN_LENGTH} characters; ` +
-          'leave it unset to have one generated instead',
-      );
-    }
-    return configured;
-  }
-
-  const path = join(dataDir, TOKEN_FILE);
-  if (existsSync(path)) {
-    const stored = readFileSync(path, 'utf8').trim();
-    if (stored.length >= MIN_LENGTH) return stored;
-    log.warn('stored WS auth token is too short; generating a replacement', { path });
-  }
-
-  const token = randomBytes(32).toString('hex');
-  writeSecretFile(path, `${token}\n`);
-  log.info('generated a WebSocket auth token for this deployment', { path });
-  return token;
+export function generateWsToken(): string {
+  return randomBytes(WS_TOKEN_BYTES).toString('hex');
 }

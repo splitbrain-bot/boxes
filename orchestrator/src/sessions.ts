@@ -30,6 +30,7 @@ import * as dk from './docker.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
+import { generateWsToken } from './secret.ts';
 import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamSession } from './gateway/upstream.ts';
@@ -697,6 +698,9 @@ export class SessionManager {
       status: 'creating',
       agent_set_id: agentSetId,
       current_thread_id: null,
+      // Its own from the start: what opens this session's WebSocket opens no
+      // other session.
+      ws_token: generateWsToken(),
       created_at: now,
       last_active_at: now,
     };
@@ -705,10 +709,10 @@ export class SessionManager {
       .prepare(
         `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
            network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-           status, agent_set_id, current_thread_id, created_at, last_active_at)
+           status, agent_set_id, current_thread_id, ws_token, created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @home_dir,
-           @status, @agent_set_id, @current_thread_id, @created_at, @last_active_at)`,
+           @status, @agent_set_id, @current_thread_id, @ws_token, @created_at, @last_active_at)`,
       )
       .run(row);
 
@@ -1018,7 +1022,7 @@ export class SessionManager {
       backgroundBusy: upstream?.backgroundActive ?? false,
       pendingCount,
       attachedCount: upstream?.attachedCount ?? 0,
-      wsToken: this.cfg.WS_AUTH_TOKEN,
+      wsToken: row.ws_token,
       threads: listThreads(this.db, row.id).map((thread) =>
         toThreadSummary(thread, pendingByThread, speaking, working),
       ),

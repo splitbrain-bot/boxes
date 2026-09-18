@@ -393,6 +393,38 @@ test('the exec log gains where each command was typed, and older rows have none'
   }
 });
 
+test('sessions from before the token column each get one of their own', () => {
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN ws_token'));
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  for (const id of ['s1', 's2']) {
+    db.prepare(
+      `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+         network_name, subnet, ws_volume, home_volume, status, created_at, last_active_at)
+       VALUES (?, 'old session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+         ?, '10.200.0.0/24', '', '', 'running', 1000, 2000)`,
+    ).run(id, `sn-${id}`);
+  }
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    // A session that existed before this went on being reachable, so it needs
+    // a token now rather than at its next start.
+    const rows = upgraded
+      .prepare('SELECT id, ws_token FROM sessions ORDER BY id')
+      .all() as Array<{ id: string; ws_token: string }>;
+    assert.equal(rows.length, 2);
+    for (const row of rows) assert.match(row.ws_token, /^[0-9a-f]{64}$/);
+    // One each: the backfill is what keeps a leaked token from opening the
+    // session next to it.
+    assert.notEqual(rows[0]!.ws_token, rows[1]!.ws_token);
+  } finally {
+    upgraded.close();
+  }
+});
+
 test('a database written by a newer build is refused rather than opened', () => {
   // A rollback puts this build on a schema it does not know: the columns a
   // later migration changed are the ones every query here names, so opening

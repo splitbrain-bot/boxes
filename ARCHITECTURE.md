@@ -487,7 +487,7 @@ and the gateway stays client-agnostic. That is not only tidiness: this
 dashboard replaced a separate chat application served alongside it, and the
 gateway needed no protocol change to swap one for the other. An external ACP
 client still attaches to the same endpoint, with the path shape below and the
-deployment's `WS_AUTH_TOKEN`.
+`wsToken` the session's own summary carries.
 
 ```
 AcpClient    ⇄ …/threads/:threadId/acp  JSON-RPC over one WebSocket, one thread
@@ -778,14 +778,23 @@ thread the session has current. The short path is what an external ACP client
 and every link from before this existed use, so their contract does not change
 at all — only the dashboard learns the longer one. A path naming a thread that
 is not the session's is refused at the handshake, as a 404 before a WebSocket
-exists, the same way an unknown session is: a connection is pinned for its
-whole life, so there is no later point at which to find this out.
+exists: a connection is pinned for its whole life, so there is no later point
+at which to find this out.
 
 The upgrade is authenticated on the handshake. A browser cannot set an
 `Authorization` header on a WebSocket, so a client offers the token as a
 `bearer.<token>` subprotocol entry alongside `acp.v1`. The gateway compares it
-against `WS_AUTH_TOKEN` in constant time and selects `acp.v1` explicitly,
-rather than relying on the client to list it first.
+in constant time against the token of the session the path names, and selects
+`acp.v1` explicitly rather than relying on the client to list it first.
+
+Each session has its own token, minted when it is created and carried in its
+own summary, so a token that leaks reaches that one session rather than every
+session in the deployment. Authentication comes before disclosure: a session
+that does not exist is answered the same 401 as a wrong token, because `/ws`
+is the one endpoint the operator's proxy does not sit in front of, and a 404
+there would say which session ids are real to anyone who asked. The 404 above
+is for a thread, and it is reached only once the session's token has proved
+the caller may know.
 
 Which thread the connection is on is settled once, at attach, and needs the
 adapter first. Pinning is where a thread the spawn did not reach is brought
@@ -2038,11 +2047,9 @@ An empty value counts as unset. `SESSION_MEM_LIMIT=` in an env file arrives
 as an empty string, and failing the boot on a setting nobody set would be a
 poor way to read it.
 
-`WS_AUTH_TOKEN` is the exception, because a shipped default for a secret would
-be a published password. Left unset, `secret.ts` generates a token on first
-boot and writes it to `DATA_DIR/ws-auth-token` with mode 0600, so it survives
-restarts and rebuilds. Setting the variable wins, which is also how the token
-is rotated.
+Secrets are the exception, because a shipped default for one would be a
+published password. A session's gateway token is not configured at all: it is
+minted with the session and stored in its row.
 
 The same reasoning covers the egress material. `egress.ts` generates the CA,
 the placeholders and the control-channel bearer on first boot and stores them
