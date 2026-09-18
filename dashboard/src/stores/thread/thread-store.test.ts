@@ -103,6 +103,21 @@ function makeStore(
   return { store, client };
 }
 
+/**
+ * Puts a permission request to the store, as the gateway would.
+ *
+ * `withdrawn` is the signal the gateway aborts when somebody else answers the
+ * question first; a test that does not care about that gets one nobody
+ * aborts.
+ */
+function ask(
+  client: FakeClient,
+  params: RequestPermissionRequest,
+  withdrawn: AbortSignal = new AbortController().signal,
+): Promise<RequestPermissionResponse> {
+  return client.handlers.onPermission(params, withdrawn);
+}
+
 /** Pushes one session/update at the store, as the gateway would. */
 function push(client: FakeClient, update: SessionUpdate): void {
   client.handlers.onUpdate({ sessionId: 'acp-1', update });
@@ -267,7 +282,7 @@ test('an open permission request is reported as one', async () => {
     title: 'Write a file',
     status: 'pending',
   } as SessionUpdate);
-  void client.handlers.onPermission({
+  void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     options: [
@@ -288,7 +303,7 @@ test('several ways to say yes is a question, not a gate', async () => {
     title: 'Leave plan mode',
     status: 'pending',
   } as SessionUpdate);
-  void client.handlers.onPermission({
+  void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     // What leaving plan mode asks: three different things to do next.
@@ -310,7 +325,7 @@ test('answering a request leaves nothing waiting', async () => {
     title: 'Write a file',
     status: 'pending',
   } as SessionUpdate);
-  void client.handlers.onPermission({
+  void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     options: [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }],
@@ -409,6 +424,56 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
   assert.match(JSON.stringify(store.getSnapshot().messages), /and again/);
 });
 
+test('a refetch keeps an open question rather than refusing the call it is about', async () => {
+  const { store, client } = makeStore();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
+  let settled = false;
+  const answered = ask(client, {
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+  void answered.then(() => {
+    settled = true;
+  });
+
+  // The connection is up, so an answer sent here reaches the agent: a refetch
+  // that cancelled would refuse the tool call the user is being asked about.
+  const done = store.refetch();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
+  await done;
+
+  assert.equal(settled, false, 'the question is still open for the agent');
+  const part = partsOf(store.getSnapshot().messages[0]!)[0]!;
+  assert.equal(part.type, 'tool-call');
+  assert.ok(part.approval, 'and it is back on the call the replay rebuilt');
+
+  store.respondToApproval(part.approval.id, 'yes');
+  assert.deepEqual(await answered, { outcome: { outcome: 'selected', optionId: 'yes' } });
+});
+
+test('a question the gateway withdraws stops waiting', async () => {
+  const { store, client } = makeStore();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
+  const withdrawn = new AbortController();
+  const answered = ask(
+    client,
+    {
+      sessionId: 'acp-1',
+      toolCall: { toolCallId: 't1' },
+      options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+    },
+    withdrawn.signal,
+  );
+
+  // Another browser on the thread answered first, so this card has nothing
+  // left to decide.
+  withdrawn.abort();
+
+  assert.deepEqual(await answered, { outcome: { outcome: 'cancelled' } });
+  assert.equal(store.getSnapshot().awaiting, null);
+});
+
 test('a refetch whose load fails still gives the view back what arrived', async () => {
   const { store, client } = makeStore();
   client.fail = 'adapter is gone';
@@ -437,7 +502,7 @@ test('a permission request attaches to its tool call and its answer unblocks the
       { optionId: 'no', name: 'Reject', kind: 'reject_once' },
     ],
   };
-  const answered: Promise<RequestPermissionResponse> = client.handlers.onPermission(request);
+  const answered: Promise<RequestPermissionResponse> = ask(client, request);
 
   // The options render on the tool call, mapped into approval vocabulary.
   const part = partsOf(store.getSnapshot().messages[0]!)[0]!;
@@ -469,7 +534,7 @@ test('a call awaiting permission reports no result, so the question can render',
     content: [{ type: 'diff', path: '/workspace/hello.txt', oldText: null, newText: 'hello' }],
   });
 
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 'td' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -496,7 +561,7 @@ test('a call awaiting permission reports no result, so the question can render',
 test('declining to choose cancels the request rather than answering it', async () => {
   const { store, client } = makeStore();
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't2', title: 'Delete file' });
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't2' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -508,7 +573,7 @@ test('declining to choose cancels the request rather than answering it', async (
 
 test('a permission request for an unannounced call makes a place for itself', async () => {
   const { store, client } = makeStore();
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 'tX', title: 'Run rm -rf' },
     options: [{ optionId: 'no', name: 'Reject', kind: 'reject_once' }],
@@ -525,7 +590,7 @@ test('a permission request for an unannounced call makes a place for itself', as
 test('answering the same approval twice does nothing the second time', async () => {
   const { store, client } = makeStore();
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't3', title: 'Edit' });
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't3' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -662,7 +727,7 @@ test('a turn blocked on a permission request is not reported as running', async 
   assert.equal(store.getSnapshot().isRunning, true);
 
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write main.ts' });
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -1113,7 +1178,7 @@ test('a resume gives up the questions the dead connection was showing', async ()
     status: 'pending',
   } as SessionUpdate);
   push(client, said('agent', 'msg_2', 'and then this'));
-  const answer = client.handlers.onPermission({
+  const answer = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 'toolu_1' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],

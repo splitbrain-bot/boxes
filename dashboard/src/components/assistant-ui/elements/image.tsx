@@ -210,6 +210,11 @@ function ImagePreview({
           ref={imgRef}
           src={src}
           alt={alt}
+          /* Boxes edit: a thread runs long, so an image is fetched and
+             decoded as it comes into view rather than the moment a replay
+             puts the whole transcript on the page. */
+          loading="lazy"
+          decoding="async"
           className={cn(
             "block h-auto w-full object-contain",
             !loaded && "invisible",

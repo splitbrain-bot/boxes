@@ -858,8 +858,15 @@ Three methods are answered or reshaped rather than forwarded:
   sends none.
 
 Everything else in `FORWARDED_REQUESTS` and `FORWARDED_NOTIFICATIONS` goes
-upstream untouched, `_meta` included. Detaching removes the handle from the
-broadcast set and touches nothing else.
+upstream untouched, `_meta` included, once the pin has settled. A request
+naming a thread that is not this connection's pin is refused rather than
+forwarded: a connection is pinned in both directions, so it can neither be
+sent another thread's updates nor act on one. Detaching removes the handle
+from the broadcast set and touches nothing else.
+
+A browser that cannot keep up is disconnected rather than buffered without
+limit. Once what is queued for its socket passes a ceiling the gateway closes
+it, and the reconnect resumes from what it already had.
 
 ### Who each update goes to
 
@@ -1018,7 +1025,9 @@ proceeding without consent.
 - With nobody on that thread, the request is stored in `pending_requests`
   against the thread's ACP id and a notification is pushed. The next browser
   to attach *to that thread* gets its queued requests delivered to it, and
-  only those.
+  only those. Every browser on the thread holds its own copy of the question,
+  and the first answer withdraws it from the rest, so a second device stops
+  waiting for something already decided rather than being quietly ignored.
 - After `PERMISSION_HOLD_MINUTES`, `PERMISSION_FALLBACK` decides. `hold` keeps
   waiting. `deny` answers with a reject option taken from the request's own
   options list, never an invented one, and cancels the request when none is
@@ -1218,9 +1227,12 @@ that is talking, `◍` for one that is waiting for you with work still running,
 Two events are worth interrupting somebody for: a permission request has been
 queued, and a turn has finished and is waiting for somebody. Both are
 announced from the gateway through `notify.ts`, and both are gated on the same
-condition — **no browser is watching that thread**. That is not a heuristic about attention, it is the
-same test that decides whether a permission request is queued in the first
-place, so the two agree about what "you are not here" means. A turn finishing
+condition — **no browser is watching that thread**. That is not a heuristic
+about attention, it is the same test that decides whether a permission request
+is queued in the first place, so the two agree about what "you are not here"
+means. An approval also carries a floor of one announcement per thread per
+hold window, so an agent asking in a loop cannot turn a lock screen into a
+notification feed. A turn finishing
 in front of you is the screen you are already looking at.
 
 The finished turn is announced when the agent goes quiet, not when the prompt
@@ -1263,7 +1275,11 @@ whatever authenticates `/api` is what decides who may register. An endpoint
 must be `https` and must name a host rather than an address literal, so the
 route cannot be used to aim the orchestrator at the LAN it can see. A
 subscription the push service answers with 404 or 410 is dropped on the spot:
-that is the ordinary end of one, not an error.
+that is the ordinary end of one, not an error. A subscription also records the
+key it was made under, and one made under any other key is dropped at the next
+fan-out rather than being retried for the life of the deployment: a rotated
+key makes every older subscription unusable, and the failure it answers with
+is neither of the two that mean "gone".
 
 Delivery needs two things Boxes cannot provide for itself. The Push API does
 not exist on a page served over plain HTTP (`http://localhost` excepted), so
@@ -2194,7 +2210,7 @@ orchestrator/src/
     store.ts            REVIEW.md: parse, serialize, mutate, drift (pure)
     gitstatus.ts        Porcelain and name-status parsing, base resolution, the merged workspace layer
     difflines.ts        Unified diff to line markers, hunks and deletion markers (pure)
-    tree.ts             Per-repository ls-files plus a walk of what none of them claims, merged
+    tree.ts             One directory read, with git status and comment counts merged into it
     fs.ts               Contained reads and writes under the workspace: the symlink invariant
     git.ts              The one place a git process is spawned: fixed argv, scrubbed env
   subnet.ts             Per-session /24 allocation

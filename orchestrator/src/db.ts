@@ -187,6 +187,14 @@ export interface PushSubscriptionRow {
   label: string | null;
   created_at: number;
   last_used_at: number;
+  /**
+   * The deployment's VAPID public key at the moment this subscription was
+   * made, or null for a row stored before it was recorded.
+   *
+   * A subscription belongs to the key it was made under: a push signed with
+   * any other one is refused for good.
+   */
+  vapid_key: string | null;
 }
 
 /**
@@ -452,6 +460,14 @@ export const MIGRATIONS: string[] = [
   `
   DROP INDEX IF EXISTS idx_acp_log_session;
   DROP TABLE IF EXISTS acp_log;
+  `,
+  // Which VAPID key a browser subscribed under. A push signed with another
+  // one is refused by the push service with a status that says nothing about
+  // the subscription, so without this the row is retried at every event for
+  // as long as the deployment lives. Existing rows are left empty, which is
+  // no key at all: the browser subscribes again on its next visit.
+  `
+  ALTER TABLE push_subscriptions ADD COLUMN vapid_key TEXT;
   `,
 ];
 
@@ -833,14 +849,34 @@ export function upsertPushSubscription(
   p256dh: string,
   auth: string,
   label: string | null,
+  vapidKey: string,
 ): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label, created_at, last_used_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO push_subscriptions
+       (endpoint, p256dh, auth, label, created_at, last_used_at, vapid_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(endpoint) DO UPDATE SET
-       p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label`,
-  ).run(endpoint, p256dh, auth, label, now, now);
+       p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label,
+       vapid_key = excluded.vapid_key`,
+  ).run(endpoint, p256dh, auth, label, now, now, vapidKey);
+}
+
+/**
+ * Forgets the subscriptions made under any key but this one, and says how
+ * many went.
+ *
+ * A subscription is only good for the VAPID key it was made under, so one
+ * left from a rotated key can never be delivered to again — and a push
+ * service refuses it with a status that is neither 404 nor 410, which is
+ * what the ordinary pruning reads. A row that names no key at all is from
+ * before the key was recorded and goes the same way; the browser subscribes
+ * again on its next visit.
+ */
+export function dropOtherKeySubscriptions(db: Db, vapidKey: string): number {
+  return db
+    .prepare('DELETE FROM push_subscriptions WHERE vapid_key IS NOT ?')
+    .run(vapidKey).changes;
 }
 
 /** Every subscription this deployment would push to. */

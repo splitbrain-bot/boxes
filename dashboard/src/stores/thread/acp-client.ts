@@ -41,8 +41,15 @@ export interface AcpClientHandlers {
   /**
    * The adapter asking permission. The promise resolves with the user's
    * answer, which is what unblocks the agent's turn.
+   *
+   * `signal` aborts when the gateway withdraws the question, which is what
+   * happens when another browser on the thread answers it first. The card has
+   * nothing left to answer then, and whatever it resolves with is discarded.
    */
-  onPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse>;
+  onPermission(
+    params: RequestPermissionRequest,
+    signal: AbortSignal,
+  ): Promise<RequestPermissionResponse>;
   /** The handshake finished; a replay, if any, has been requested. */
   onReady(modes: SessionModeState | null, configOptions: SessionConfigOption[]): void;
   /** The connection state changed. */
@@ -94,6 +101,15 @@ interface RpcMessage {
 const BACKOFF_MS = [500, 1000, 2000, 5000, 10_000];
 
 /**
+ * The JSON-RPC notification a peer sends to withdraw a request it is still
+ * waiting on. Its params name the request by id.
+ *
+ * Not part of ACP itself but of the JSON-RPC layer under it, which is why it
+ * is spelled here rather than with the ACP methods.
+ */
+const CANCEL_REQUEST_METHOD = '$/cancel_request';
+
+/**
  * What a session/load asks for: the thread, the workspace it runs in, and
  * where a replay of it can start.
  *
@@ -142,6 +158,11 @@ export class AcpClient {
   private retryTimer: number | null = null;
   private disposed = false;
   private acpSessionId: string | null = null;
+  /**
+   * Requests from the gateway that are still being answered, by their
+   * JSON-RPC id, so one it withdraws can be aborted.
+   */
+  private readonly answering = new Map<number | string, AbortController>();
 
   constructor(
     private readonly url: string,
@@ -321,6 +342,12 @@ export class AcpClient {
       return;
     }
 
+    if (msg.method === CANCEL_REQUEST_METHOD) {
+      const requestId = (msg.params as { requestId?: number | string } | undefined)?.requestId;
+      if (requestId !== undefined) this.answering.get(requestId)?.abort();
+      return;
+    }
+
     if (msg.method === ACP_METHOD.sessionUpdate) {
       this.handlers.onUpdate(msg.params as SessionNotification);
       return;
@@ -359,11 +386,19 @@ export class AcpClient {
       return;
     }
 
+    const id = msg.id!;
+    const withdrawn = new AbortController();
+    this.answering.set(id, withdrawn);
     try {
-      const result = await this.handlers.onPermission(msg.params as RequestPermissionRequest);
+      const result = await this.handlers.onPermission(
+        msg.params as RequestPermissionRequest,
+        withdrawn.signal,
+      );
       reply({ result });
     } catch (err) {
       reply({ error: { code: -32603, message: (err as Error).message } });
+    } finally {
+      this.answering.delete(id);
     }
   }
 

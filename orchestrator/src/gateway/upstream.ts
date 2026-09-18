@@ -100,8 +100,15 @@ export interface DownstreamHandle {
   lastActiveAt: number;
   /** Sends a notification to this browser. */
   notify(method: string, params: unknown): void;
-  /** Sends a request to this browser and awaits its answer. */
-  request(method: string, params: unknown): Promise<unknown>;
+  /**
+   * Sends a request to this browser and awaits its answer.
+   *
+   * `signal` withdraws the question once it has gone out, which is how a
+   * browser holding a copy of a question somebody else has answered is told
+   * to stop waiting. The promise still settles on that browser's own answer:
+   * a withdrawal asks it to stop, it does not end the exchange.
+   */
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
   /** Closes this browser's socket, which makes it reconnect from scratch. */
   close(): void;
 }
@@ -307,6 +314,16 @@ export class UpstreamSession {
   private stopping = false;
   /** Loads in flight per thread, which is what says an update is history. */
   private readonly replaying = new Map<string, number>();
+  /**
+   * When each thread last had an approval announced, by the adapter's own
+   * thread id and the empty string for a question naming no thread.
+   *
+   * A thread announces one approval per hold window. An agent asking in a
+   * loop would otherwise be a push to every subscribed browser per question,
+   * and a lock screen nobody can read is a notification that has stopped
+   * working.
+   */
+  private readonly announcedApprovals = new Map<string, number>();
   /** The reading's own timer while a browser is watching; see pollWhileWatched. */
   private polling: ReturnType<typeof setInterval> | null = null;
   /**
@@ -1402,8 +1419,26 @@ export class UpstreamSession {
         (timedOut) => this.applyPermissionFallback(timedOut.row.id, params, resolve),
       );
       this.slog.info('permission request queued', { pendingId: entry.row.id });
-      this.announce('approval', threadOf(params) ?? null);
+      const thread = threadOf(params) ?? null;
+      if (this.mayAnnounceApproval(thread)) this.announce('approval', thread);
     });
+  }
+
+  /**
+   * Whether a thread may say it is waiting for a decision, and records that
+   * it has when it may.
+   *
+   * The window is the hold: the first question of a thread is worth waking
+   * somebody for, and the ones behind it are the same trip back to the same
+   * conversation. Whoever comes back finds all of them.
+   */
+  private mayAnnounceApproval(acpThreadId: string | null): boolean {
+    const key = acpThreadId ?? '';
+    const last = this.announcedApprovals.get(key) ?? 0;
+    const now = Date.now();
+    if (now - last < this.cfg.PERMISSION_HOLD_MINUTES * 60_000) return false;
+    this.announcedApprovals.set(key, now);
+    return true;
   }
 
   /**
@@ -1491,12 +1526,19 @@ export class UpstreamSession {
     this.downstreams.threadStateTo(handle);
     for (const entry of this.pending.listForThread(this.sessionId, thread)) {
       const params = JSON.parse(entry.row.params) as unknown;
+      // This browser's own copy of the question, withdrawn when another
+      // browser answers it first. Dropped as soon as this browser has
+      // answered, so its own answer does not withdraw itself.
+      const delivery = new AbortController();
+      entry.deliveries.add(delivery);
       handle
-        .request(ACP_METHOD.sessionRequestPermission, params)
+        .request(ACP_METHOD.sessionRequestPermission, params, delivery.signal)
         .then((result) => {
+          entry.deliveries.delete(delivery);
           if (this.pending.settle(entry.row.id)) entry.resolve(result);
         })
         .catch((err) => {
+          entry.deliveries.delete(delivery);
           this.slog.warn('pending permission delivery failed; leaving queued', {
             pendingId: entry.row.id,
             error: (err as Error).message,
@@ -1730,6 +1772,9 @@ export class UpstreamSession {
     // thread says afterwards is taken for history: no agent speaking, no
     // turn settling, and a row that is never touched again.
     this.replaying.clear();
+    // A question this adapter asked cannot be answered any more, so the next
+    // one a fresh adapter asks is news again.
+    this.announcedApprovals.clear();
     try {
       this.exec?.kill();
     } catch {

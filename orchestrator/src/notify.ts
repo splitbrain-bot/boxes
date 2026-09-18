@@ -1,6 +1,7 @@
 import type { Config } from './config.ts';
 import {
   deletePushSubscription,
+  dropOtherKeySubscriptions,
   listPushSubscriptions,
   touchPushSubscription,
   type Db,
@@ -156,10 +157,25 @@ export class Notifier {
    *
    * A dead subscription is the normal end of one — the browser was
    * uninstalled, the permission revoked, Safari expired it — so pruning on a
-   * 404 or 410 is ordinary housekeeping rather than an error path.
+   * 404 or 410 is ordinary housekeeping rather than an error path. A key
+   * rotation ends one just as surely, and the row says which key it was made
+   * under, so those go the same way.
    */
   private async push(event: NotifyEvent): Promise<void> {
-    const subscriptions = listPushSubscriptions(this.db);
+    const stored = listPushSubscriptions(this.db);
+    // Before the keypair is asked for, so a deployment nobody subscribes from
+    // still writes none.
+    if (stored.length === 0) return;
+
+    const keys = this.vapid();
+    // A subscription made under an earlier key can never be delivered to
+    // again, and a push service refuses it with a status the pruning below
+    // does not read, so it would be retried at every event forever.
+    const dropped = dropOtherKeySubscriptions(this.db, keys.publicKey);
+    if (dropped > 0) {
+      log.info('dropped push subscriptions made under an earlier key', { count: dropped });
+    }
+    const subscriptions = stored.filter((row) => row.vapid_key === keys.publicKey);
     if (subscriptions.length === 0) return;
 
     const { title, body } = wording(event);
@@ -170,7 +186,6 @@ export class Notifier {
       url: target(event),
     };
     const message = JSON.stringify(payload);
-    const keys = this.vapid();
 
     await Promise.all(
       subscriptions.map(async (row) => {

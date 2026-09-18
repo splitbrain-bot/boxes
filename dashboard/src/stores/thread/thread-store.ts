@@ -102,6 +102,11 @@ export const INITIAL_SNAPSHOT: ThreadSnapshot = {
 /** A permission request that has been shown but not yet answered. */
 interface OpenApproval {
   toolCallId: string;
+  /**
+   * What the request offered, so the card can be drawn again on the tool call
+   * a refetch rebuilt.
+   */
+  options: PermissionOption[];
   resolve: (response: RequestPermissionResponse) => void;
 }
 
@@ -269,7 +274,7 @@ export class ThreadStore {
   start(): void {
     this.client = this.deps.createClient({
       onUpdate: (params) => this.onUpdate(params),
-      onPermission: (params) => this.onPermission(params),
+      onPermission: (params, signal) => this.onPermission(params, signal),
       onReady: (modes, configOptions) => {
         this.model.modes = modes;
         this.model.configOptions = configOptions;
@@ -317,8 +322,12 @@ export class ThreadStore {
    * the model is what is stale, and blanking a conversation somebody is
    * reading — because the socket dropped and came back — says the thread is
    * empty when what is true is that it is being re-read.
+   *
+   * `keepApprovals` is for a replay on a connection that is still up, where
+   * cancelling an open question would reach the agent and refuse the tool
+   * call it is about. See {@link refetch}.
    */
-  private reset(): void {
+  private reset(opts: { keepApprovals?: boolean } = {}): void {
     const { modes, configOptions } = this.model;
     this.model = emptyModel();
     this.model.modes = modes;
@@ -332,7 +341,7 @@ export class ThreadStore {
     // browser can learn it.
     this.speakingUpstream = false;
     this.backgroundUpstream = [];
-    this.failOpenApprovals();
+    if (!opts.keepApprovals) this.failOpenApprovals();
     this.replaying = true;
     // A snapshot with no patch: what the thread is doing is re-derived — the
     // turn claim is gone and so are the open questions — while the messages,
@@ -426,17 +435,36 @@ export class ThreadStore {
    * Gives up the approvals this store can no longer show, answering each as
    * cancelled on the way out.
    *
-   * The usual caller is a connection that died, where the answer reaches
-   * nobody and the adapter asks again on the next one. Where the connection is
-   * still up — a replay this browser asked for — the answer is what keeps the
-   * turn moving: an abandoned question no card is left for would otherwise
-   * block the adapter until the hold expires.
+   * Every caller is a connection that is gone: one that died and is being
+   * replayed, one whose resume point could not be found, or a store being
+   * disposed. The answer reaches nobody, and the gateway puts a question that
+   * is still waiting back after the replay. A refetch runs on a live
+   * connection and keeps its questions instead — see {@link restoreApprovals}.
    */
   private failOpenApprovals(): void {
     for (const open of this.approvals.values()) {
       open.resolve({ outcome: { outcome: 'cancelled' } });
     }
     this.approvals.clear();
+  }
+
+  /**
+   * Puts the questions that were open before a refetch back on the tool calls
+   * the replay rebuilt.
+   *
+   * A question whose tool call the replay did not bring back has nowhere to
+   * be shown and so nowhere to be answered from; it is answered cancelled,
+   * which is what keeps the agent moving.
+   */
+  private restoreApprovals(): void {
+    for (const [id, open] of [...this.approvals]) {
+      const part = findTool(this.model, open.toolCallId);
+      if (!part) {
+        this.respondToApproval(id, undefined);
+        continue;
+      }
+      part.approval = { id, options: open.options };
+    }
   }
 
   // --- incoming ------------------------------------------------------------
@@ -467,9 +495,14 @@ export class ThreadStore {
    * the options render inside that call rather than as a separate prompt.
    *
    * The promise resolves when the user picks, which is what unblocks the
-   * agent's turn. A request the adapter cancels resolves as cancelled.
+   * agent's turn. A request the adapter cancels resolves as cancelled, and so
+   * does one the gateway withdraws because another browser answered it: the
+   * card comes off the tool call either way.
    */
-  private onPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+  private onPermission(
+    params: RequestPermissionRequest,
+    signal: AbortSignal,
+  ): Promise<RequestPermissionResponse> {
     const toolCallId = params.toolCall?.toolCallId;
     // A request naming no call is a question with nothing to ask it about.
     // Answering it cancelled leaves the turn moving; drawing it would leave a
@@ -490,10 +523,14 @@ export class ThreadStore {
     }
     if (!part) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
 
-    part.approval = { id, options: params.options ?? [] };
+    const options = params.options ?? [];
+    part.approval = { id, options };
 
     return new Promise<RequestPermissionResponse>((resolve) => {
-      this.approvals.set(id, { toolCallId, resolve });
+      this.approvals.set(id, { toolCallId, options, resolve });
+      signal.addEventListener('abort', () => this.respondToApproval(id, undefined), {
+        once: true,
+      });
       this.refreshMessages(this.messageOfTool(toolCallId));
     });
   }
@@ -811,10 +848,14 @@ export class ThreadStore {
     const client = this.client;
     const sessionId = client?.sessionId;
     if (!client || !sessionId) return;
-    this.reset();
+    // The questions open here are open on a live connection, so cancelling
+    // them would reach the agent and refuse the tool calls they are about.
+    // They are put back on the transcript the replay rebuilds instead.
+    this.reset({ keepApprovals: true });
     try {
       await client.request(ACP_METHOD.sessionLoad, loadParams(sessionId));
     } finally {
+      this.restoreApprovals();
       this.flushReplay();
       // reset() forgot which local commands are already in the transcript,
       // and the view asks for them again only when a connection reports

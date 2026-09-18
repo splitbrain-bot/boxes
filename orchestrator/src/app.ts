@@ -486,7 +486,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       const workspace = manager.workspacePathOf(id);
       if (!workspace) throw new HttpError(404, 'Session not found');
 
-      const stored = storeAttachment(workspace, name, body);
+      const stored = await storeAttachment(workspace, name, body);
       // The same touch every other thing a user does to a session makes: an
       // upload is somebody working here, and the reaper counts idleness.
       manager.touch(id);
@@ -783,7 +783,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const auth = validKey(body.keys.auth, 16, 'auth');
     const label = typeof body.label === 'string' ? body.label.slice(0, 100) : null;
 
-    upsertPushSubscription(db, endpoint, p256dh, auth, label);
+    // Under the key this deployment holds now: a subscription outlives a key
+    // rotation as a row that can never be delivered to again.
+    upsertPushSubscription(db, endpoint, p256dh, auth, label, notifier.publicKey);
     log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
     return reply.code(204).send();
   });

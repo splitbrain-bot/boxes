@@ -6,6 +6,7 @@ import { afterEach, beforeEach, test } from 'vitest';
 import { loadConfig, type Config } from './config.ts';
 import { openDb, upsertPushSubscription, type Db } from './db.ts';
 import { Notifier, wording, type NotifyEvent } from './notify.ts';
+import { loadVapidKeys } from './push.ts';
 
 /**
  * The fan-out, with the transport faked at fetch.
@@ -33,8 +34,13 @@ function fakeFetch(answer: (url: string) => { status: number } | Error): void {
   }) as typeof globalThis.fetch;
 }
 
-/** One subscription row, with keys of the sizes the crypto needs. */
-function subscribe(endpoint: string): void {
+/**
+ * One subscription row, with keys of the sizes the crypto needs.
+ *
+ * `vapidKey` is the deployment's own unless a test says otherwise, which is
+ * what a browser subscribing right now records.
+ */
+function subscribe(endpoint: string, vapidKey = loadVapidKeys(dir).publicKey): void {
   upsertPushSubscription(
     db,
     endpoint,
@@ -49,6 +55,7 @@ function subscribe(endpoint: string): void {
     ]).toString('base64url'),
     'BTBZMqHH6r4Tts7J_aSIgg',
     'phone',
+    vapidKey,
   );
 }
 
@@ -135,6 +142,28 @@ test('a push service that is merely down keeps its subscription', async () => {
     .prepare('SELECT COUNT(*) AS n FROM push_subscriptions')
     .get() as { n: number };
   assert.equal(remaining.n, 1);
+});
+
+test('a subscription made under an earlier key is forgotten rather than retried', async () => {
+  // The push service refuses it with a status that says nothing about the
+  // subscription, so nothing else here would ever drop the row.
+  subscribe('https://push.example.net/rotated', 'a-key-this-deployment-no-longer-holds');
+  subscribe('https://push.example.net/live');
+  fakeFetch(() => ({ status: 201 }));
+
+  await new Notifier(db, cfg).notify(event);
+
+  assert.deepEqual(
+    calls.map((c) => c.url),
+    ['https://push.example.net/live'],
+  );
+  const rows = db.prepare('SELECT endpoint FROM push_subscriptions').all() as Array<{
+    endpoint: string;
+  }>;
+  assert.deepEqual(
+    rows.map((r) => r.endpoint),
+    ['https://push.example.net/live'],
+  );
 });
 
 test('nothing is sent when no browser has subscribed', async () => {

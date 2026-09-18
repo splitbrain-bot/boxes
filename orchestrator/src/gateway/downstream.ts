@@ -1,8 +1,14 @@
-import { agent as acpAgent, type AgentConnection, type Stream } from '@agentclientprotocol/sdk';
+import {
+  agent as acpAgent,
+  RequestError,
+  type AgentConnection,
+  type Stream,
+} from '@agentclientprotocol/sdk';
 import type { WebSocket } from 'ws';
 import { ACP_METHOD, ACP_SUBPROTOCOL } from '../../../shared/acp.ts';
 import { log } from '../log.ts';
 import type { SessionManager } from '../sessions.ts';
+import { threadOf } from './broadcast.ts';
 import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
 
 /**
@@ -34,6 +40,17 @@ const FORWARDED_REQUESTS = [
 
 /** Notifications forwarded to the adapter verbatim. */
 const FORWARDED_NOTIFICATIONS = [ACP_METHOD.sessionCancel] as const;
+
+/**
+ * How many bytes one browser's socket may have waiting on it.
+ *
+ * A send the socket cannot take is buffered in this process, so a browser
+ * that has stopped reading — a phone asleep with the tab open — would grow
+ * that buffer for as long as its session keeps talking. Past this it is
+ * closed instead, which costs it nothing it cannot get back: it reconnects
+ * and resumes from the message it holds.
+ */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 /** Source of handle ids, unique within the process. */
 let nextHandleId = 1;
@@ -134,7 +151,20 @@ function wsStream(ws: WebSocket, sessionId: string): Stream {
   const writable = new WritableStream<unknown>({
     write(msg) {
       if (ws.readyState !== ws.OPEN) return;
-      ws.send(JSON.stringify(msg));
+      // Settled by the send itself, so the writer waits for the socket
+      // instead of handing it everything a session says at once. A send that
+      // failed settles too: a socket that has gone is the read side's to
+      // notice, and it closes the stream.
+      return new Promise<void>((resolve) => {
+        ws.send(JSON.stringify(msg), () => resolve());
+        if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return;
+        slog.warn('closing a browser that cannot keep up', {
+          buffered: ws.bufferedAmount,
+        });
+        // 1008 is "policy violation": this connection broke a rule of the
+        // gateway rather than hitting a fault in it.
+        ws.close(1008, 'too far behind');
+      });
     },
     close() {
       if (ws.readyState === ws.OPEN) ws.close(1000, 'gateway closed');
@@ -179,9 +209,9 @@ export function attachDownstream(
         slog.debug('downstream notify failed', { error: err.message });
       });
     },
-    request: (method, params) => {
+    request: (method, params, signal) => {
       if (!conn) return Promise.reject(new Error('downstream closed'));
-      return conn.client.request(method, params);
+      return conn.client.request(method, params, { cancellationSignal: signal });
     },
     // 1012 is "service restart": the browser's own backoff brings it back,
     // and its fresh handshake pins whatever its thread is now. The only
@@ -237,6 +267,22 @@ export function attachDownstream(
   for (const method of FORWARDED_REQUESTS) {
     app.onRequest(method as string, raw, async ({ params }) => {
       handle.lastActiveAt = Date.now();
+      // Every forwarded request waits for the pin. A client that knows a
+      // thread id and loads it before saying hello would otherwise be
+      // answered by a handle with no thread: its replay goes nowhere, and
+      // the questions waiting on that thread are not flushed to it.
+      const pin = await pinned;
+      const asked = threadOf(params);
+      // And it asks about the thread this connection is pinned to, or about
+      // no thread at all. Another thread's id would route that thread's
+      // replay here alone, and echo this connection's prompt where nobody is
+      // watching.
+      if (asked !== undefined && asked !== pin) {
+        throw RequestError.invalidParams(
+          { sessionId: asked },
+          'this connection is pinned to another thread',
+        );
+      }
       // The handle goes with the request: a replay belongs to the browser
       // that asked for it, and a prompt is echoed on that browser's behalf.
       const result = await up.forwardRequest(method, params, handle);

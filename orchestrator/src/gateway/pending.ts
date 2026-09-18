@@ -20,6 +20,15 @@ export interface PendingEntry {
   reject: (error: Error) => void;
   /** Fires when the hold expires. */
   timer: NodeJS.Timeout;
+  /**
+   * One per browser this request has been put to and not yet heard from.
+   *
+   * The same question goes to every browser that opens the thread, and only
+   * the first answer counts. Aborting the rest is what tells those browsers
+   * the question is over, so a card is not left waiting for an answer that
+   * would be discarded.
+   */
+  readonly deliveries: Set<AbortController>;
 }
 
 /** The queue of unanswered permission requests, in memory and in the database. */
@@ -75,7 +84,7 @@ export class PendingStore {
     }, holdMs);
     // Do not keep the process alive purely for a hold timer.
     timer.unref?.();
-    const entry: PendingEntry = { row, ...handlers, timer };
+    const entry: PendingEntry = { row, ...handlers, timer, deliveries: new Set() };
     this.entries.set(id, entry);
     return entry;
   }
@@ -85,6 +94,11 @@ export class PendingStore {
     const entry = this.entries.get(id);
     if (entry) {
       clearTimeout(entry.timer);
+      // Whoever else is still showing this question is told it is over,
+      // however it was settled: an answer from another browser, the hold
+      // running out, or the session stopping.
+      for (const delivery of entry.deliveries) delivery.abort();
+      entry.deliveries.clear();
       this.entries.delete(id);
     }
     this.db.prepare('DELETE FROM pending_requests WHERE id = ?').run(id);

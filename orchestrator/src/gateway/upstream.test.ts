@@ -298,12 +298,41 @@ function fakeHandle(
   };
 }
 
-/** A session/request_permission from the adapter, about one thread. */
-function permissionFrame(acpThreadId: string): Buffer {
+/**
+ * A browser that shows a question and never answers it, counting how many it
+ * was shown and how many were taken back.
+ */
+function holdingHandle(
+  id: number,
+  acpThreadId: string,
+): DownstreamHandle & { shown: number; withdrawn: number } {
+  return {
+    id,
+    acpThreadId,
+    lastActiveAt: Date.now(),
+    shown: 0,
+    withdrawn: 0,
+    notify() {},
+    request(this: { shown: number; withdrawn: number }, _method, _params, signal) {
+      this.shown++;
+      signal?.addEventListener('abort', () => {
+        this.withdrawn++;
+      });
+      return new Promise<unknown>(() => {});
+    },
+    close() {},
+  };
+}
+
+/**
+ * A session/request_permission from the adapter, about one thread. `id` tells
+ * two of them apart, which a test asking twice needs.
+ */
+function permissionFrame(acpThreadId: string, id = 9000): Buffer {
   return frame(
     `${JSON.stringify({
       jsonrpc: '2.0',
-      id: 9000,
+      id,
       method: 'session/request_permission',
       params: {
         sessionId: acpThreadId,
@@ -694,6 +723,31 @@ test('a queued request is delivered only to a browser on its own thread', async 
   up.attach(rightThread);
   up.flushPendingTo(rightThread);
   await expect.poll(() => rightThread.asked.length).toBe(1);
+});
+
+test('a question one browser answers is taken back from the other', async () => {
+  const adapter = plainAdapter();
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  adapter.push(permissionFrame('acp-kept'));
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+
+  // Two browsers on the thread are shown the same question, and only the
+  // first answer counts.
+  const waiting = holdingHandle(1, 'acp-kept');
+  up.attach(waiting);
+  up.flushPendingTo(waiting);
+  await expect.poll(() => waiting.shown).toBe(1);
+
+  const answering = fakeHandle(2, 'acp-kept');
+  up.attach(answering);
+  up.flushPendingTo(answering);
+
+  // So the other one is told the question is over rather than left showing a
+  // card whose answer would be thrown away.
+  await expect.poll(() => waiting.withdrawn).toBe(1);
 });
 
 test('a respawn re-issues session/load for every watched thread', async () => {
@@ -1488,6 +1542,22 @@ test('a queued permission request is announced as one', async () => {
     threadName: 'Thread 2',
     background: false,
   });
+});
+
+test('a thread that asks again inside the hold window is announced once', async () => {
+  const adapter = plainAdapter();
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  adapter.push(permissionFrame('acp-kept'));
+  await expect.poll(() => announced.length).toBe(1);
+  adapter.push(permissionFrame('acp-kept', 9001));
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(2);
+
+  // An agent asking in a loop is one trip back to that conversation, where
+  // every question it has is waiting.
+  assert.equal(announced.length, 1);
 });
 
 test('a tapped image block is logged without its base64 payload', async () => {
