@@ -17,13 +17,14 @@ import { useCodeEdit } from '@/hooks/use-code-edit';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useScrollAway } from '@/hooks/use-scroll-away';
+import { useSession } from '@/hooks/use-session';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { anchorAt, rowOffsets, scrollForAnchor, type ScrollAnchor } from '@/lib/anchor';
+import { withinLineLimit } from '@/lib/highlight';
 import { historyIndex } from '@/lib/history';
 import { stagePrompt } from '@/lib/staged-prompt';
 import { cn } from '@/lib/utils';
-import { useSessions } from '../stores/sessions.ts';
 import {
   closeFile,
   compose,
@@ -79,8 +80,9 @@ export function SessionReview() {
 
   const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
     useReview();
-  const { sessions } = useSessions();
-  const session = sessions.find((s) => s.id === id);
+  // This box, polled: its name for the header and its current thread for the
+  // way out. One session off the wire rather than the whole list.
+  const { session } = useSession(id);
 
   /**
    * Long lines wrap unless the reader turns it off.
@@ -163,7 +165,7 @@ export function SessionReview() {
   //
   // The mount is one of the three moments a review refetches; coming back to
   // the tab is the second, and closing a file back to the tree is the third.
-  // There is no poll, so nothing costs anything while this sits open.
+  // Nothing polls the workspace, so a review left open costs nothing.
   useEffect(() => {
     openReview(id);
     void loadTree();
@@ -299,14 +301,21 @@ export function SessionReview() {
 
   const editing = edit.text !== null;
   /**
+   * Whether the pane shows this file as one plain block rather than as rows.
+   *
+   * Past the line limit it does, so there is no line to step to, none to
+   * comment on and nothing to edit — see CodePane.
+   */
+  const tooLong = file !== null && !withinLineLimit(file.content);
+  /**
    * Whether this file can be edited at all.
    *
-   * The three the pane cannot show whole are the three it must not write
-   * back: there is nothing to edit in a deleted file, nothing readable in a
-   * binary one, and saving a truncated one would delete everything past where
-   * the read stopped.
+   * What the pane cannot show a line at a time it must not write back: there
+   * is nothing to edit in a deleted file, nothing readable in a binary one,
+   * saving a truncated one would delete everything past where the read
+   * stopped, and a file past the line limit has no rows to edit.
    */
-  const editable = file !== null && !file.deleted && !file.binary && !file.truncated;
+  const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
 
   // Put the reader back on their line, before the new mode is painted.
   useLayoutEffect(() => {
@@ -657,6 +666,9 @@ export function SessionReview() {
               <ReviewToolbar
                 changeCount={changedLines.length}
                 commentCount={commentedLines.length}
+                // A file shown as one block has no rows, so the counts are
+                // still worth saying and there is nowhere to step to.
+                steppable={!tooLong}
                 wrap={wrap}
                 editable={editable}
                 editing={editing}
@@ -753,7 +765,7 @@ export function SessionReview() {
 
       {/* Below md, writing a comment happens here rather than inline. */}
       <ComposerSheet
-        line={!wide && file ? composing : null}
+        line={!wide && file && !tooLong ? composing : null}
         initial={composing === null ? '' : (annotations.get(composing)?.comment ?? '')}
         busy={saving}
         onSave={(comment) => {

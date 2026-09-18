@@ -238,6 +238,45 @@ test('a file the change deleted is listed, and says it is gone', async () => {
   }
 });
 
+test('a file past the line limit is one plain block with nothing to tap', async () => {
+  // Long enough that a row per line is tens of thousands of elements, which is
+  // what freezes a phone — and one line of it changed, so the toolbar has
+  // something to count.
+  const body = Array.from({ length: 9000 }, (_, i) => `const line${i} = ${i};`).join('\n');
+  const workspace = reviewWorkspace();
+  workspace.files['app/long.ts'] = `const first = false;\n${body}\n`;
+  workspace.committed!['app/long.ts'] = `const first = true;\n${body}\n`;
+  stub.review(SESSION, workspace);
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2Flong.ts`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect
+      .poll(() => page.getByText('too long to review line by line').isVisible())
+      .toBe(true);
+    // The file is still there to read, as one block of text.
+    await expect.poll(() => page.getByText('const line8999 = 8999;').isVisible()).toBe(true);
+
+    // No row per line, so no gutter to tap, no line to comment on and no way
+    // into edit mode.
+    expect(await page.locator('[data-line]').count()).toBe(0);
+    expect(await page.getByLabel(/^Show the change at line/).count()).toBe(0);
+    expect(await page.getByLabel('Edit this file').count()).toBe(0);
+
+    // The change is still counted, because it is still a fact about the file.
+    // There is just no row to step to.
+    await expect.poll(() => page.getByLabel('1 change').isVisible()).toBe(true);
+    expect(await page.getByRole('button', { name: 'Next change' }).isDisabled()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('prev/next steps through the changes', async () => {
   const { page, errors, close } = await openPage(
     stub.url,

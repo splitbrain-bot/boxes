@@ -1197,3 +1197,80 @@ test('a resume gives up the questions the dead connection was showing', async ()
   const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool');
   assert.equal(tool?.approval, undefined);
 });
+
+test('a resume puts the runs back without reading the exec log again', async () => {
+  let listed = 0;
+  const { store, client } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
+      onChunk('two files\n');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+    listExec: async () => {
+      listed++;
+      return [];
+    },
+  });
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  await store.runCommand('ls');
+
+  client.resumes = true;
+  client.load();
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  client.finish();
+  // What the view does on every ready connection. The runs were taken out by
+  // the resume, and this is where they go back.
+  await store.loadExecHistory();
+
+  // The store held them, so the server was never asked — which is the whole
+  // point: every run's output would come back over the wire otherwise.
+  assert.equal(listed, 0);
+  assert.deepEqual(
+    store.getSnapshot().messages.map((m) => m.id),
+    ['msg_1', 'bang-1-command', 'bang-1'],
+  );
+  assert.match(outputOf(store.getSnapshot().messages[2]!), /two files\n\[exit 0\]/);
+});
+
+test('a thread replayed whole reads its runs back off the log', async () => {
+  let listed = 0;
+  const { store, client } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
+      onChunk('two files\n');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+    listExec: async () => {
+      listed++;
+      return [
+        {
+          id: 7,
+          sessionId: 'box-1',
+          command: 'ls',
+          output: 'two files\n',
+          exitCode: 0,
+          truncated: false,
+          timedOut: false,
+          startedAt: 1,
+          finishedAt: 2,
+          after: 'msg_1',
+        },
+      ];
+    },
+  });
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  await store.runCommand('ls');
+
+  // No resume point to pick up from, so the thread comes whole — and the runs
+  // come with it from the log, which is also how a run another tab made
+  // arrives here.
+  client.resumes = false;
+  client.load();
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  client.finish();
+  await store.loadExecHistory();
+
+  assert.equal(listed, 1);
+  assert.deepEqual(
+    store.getSnapshot().messages.map((m) => m.id),
+    ['msg_1', 'bang-log-7-command', 'bang-log-7'],
+  );
+});

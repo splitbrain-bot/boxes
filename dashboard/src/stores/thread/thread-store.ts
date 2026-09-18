@@ -110,6 +110,27 @@ interface OpenApproval {
   resolve: (response: RequestPermissionResponse) => void;
 }
 
+/**
+ * One local command as the store draws it, kept for as long as it is part of
+ * the thread.
+ *
+ * Held rather than only rendered, because a resume takes the runs out of the
+ * model so they can go back around whatever the replay brings. This is what
+ * goes back.
+ */
+interface ExecRun {
+  /** The id of the messages this run is drawn as, unique within the store. */
+  id: string;
+  /** The line that was typed, without its bang. */
+  command: string;
+  /** The output so far, which grows while the command runs. */
+  output: string;
+  /** The exit line under the output, absent while the run is going. */
+  trailer?: string;
+  /** What the transcript ended with when the command was typed, or null. */
+  after: string | null;
+}
+
 /** How the store reaches the outside world; swapped wholesale in tests. */
 export interface ThreadStoreDeps {
   /** Builds the client. Present so a test can supply a fake. */
@@ -151,8 +172,19 @@ export class ThreadStore {
   private backgroundUpstream: readonly BackgroundProcess[] = [];
   private nextApprovalId = 1;
   private nextExecId = 1;
-  /** Exec records already replayed, so a re-attach does not double them. */
-  private replayedExec = new Set<number>();
+  /**
+   * Every local run drawn in this thread, in the order they were drawn.
+   *
+   * Kept so a resume can put them back without reading the exec log again: a
+   * replay never brings a run back, and this store already holds every one of
+   * them. It is also what stops a second load doubling them.
+   */
+  private readonly runs = new Map<string, ExecRun>();
+  /**
+   * True while the runs to put back are the ones already held rather than the
+   * ones the server would list. A resume sets it, and the next load spends it.
+   */
+  private restoreRuns = false;
   /** Per run: how much of its output has been read for backticks, and the longest run found. */
   private readonly execFences = new Map<string, { scanned: number; longest: number }>();
   /**
@@ -333,7 +365,11 @@ export class ThreadStore {
     this.model.modes = modes;
     this.model.configOptions = configOptions;
     this.views = new Map();
-    this.replayedExec.clear();
+    // The runs go with the model: a thread coming whole is a thread whose
+    // runs are read from the log again, which is also how this browser hears
+    // about the ones another tab made.
+    this.runs.clear();
+    this.restoreRuns = false;
     this.execFences.clear();
     // Whatever was said about the thread belonged to the connection that is
     // being replaced. The gateway says it again after this replay — including
@@ -388,12 +424,13 @@ export class ThreadStore {
       return;
     }
     // Local runs are not part of the transcript and no replay brings them
-    // back. They are taken out whole and put back by loadExecHistory once the
-    // connection is ready, which is also what re-orders them around the
-    // messages arriving now.
+    // back. They are taken out whole and put back from what this store holds
+    // once the connection is ready, which is also what re-orders them around
+    // the messages arriving now. Nothing is asked of the server: the runs
+    // that were on screen are the runs that go back.
     this.model.messages = this.model.messages.filter((m) => !isExecMessage(m));
     this.views = new Map();
-    this.replayedExec.clear();
+    this.restoreRuns = true;
     this.execFences.clear();
     // The questions this store was showing were asked over the connection
     // that has gone, and nobody is listening for the answers. The gateway
@@ -597,6 +634,7 @@ export class ThreadStore {
   async runCommand(command: string): Promise<void> {
     const after = this.lastAnchor();
     const execId = `${EXEC_ID}${this.nextExecId++}`;
+    this.runs.set(execId, { id: execId, command, output: '', after });
     this.appendExecCommand(execId, command);
     let output = '';
     this.setExecOutput(execId, output);
@@ -622,13 +660,18 @@ export class ThreadStore {
   /**
    * Puts the commands already run in this thread back where they were typed.
    *
-   * Each record names what the transcript ended with at the time, and the run
-   * goes in right after that — behind any earlier run placed there too, so
-   * runs that followed the same message keep their order. A record that names
-   * nothing, or names something the replay did not bring back, goes at the
-   * end.
+   * After a resume the runs are the ones this store holds, and nothing is
+   * asked of the server: the replay brought the transcript back, and the runs
+   * that came out of it go back around it whole, with their output. Otherwise
+   * the thread's exec log is read, and every run in it this thread is not
+   * already showing is drawn.
    */
   async loadExecHistory(): Promise<void> {
+    if (this.restoreRuns) {
+      this.restoreRuns = false;
+      for (const run of this.runs.values()) this.placeRun(run);
+      return;
+    }
     const list = this.deps.listExec ?? listExec;
     let records;
     try {
@@ -637,17 +680,35 @@ export class ThreadStore {
       return;
     }
     for (const record of records) {
-      if (this.replayedExec.has(record.id)) continue;
-      this.replayedExec.add(record.id);
       const execId = `${EXEC_ID}log-${record.id}`;
-      const slot = this.slotAfter(record.after);
-      this.appendExecCommand(execId, record.command);
-      this.setExecOutput(execId, record.output, trailerOf(record));
-      if (slot !== null) {
-        const pair = this.model.messages.splice(-2, 2);
-        this.model.messages.splice(slot, 0, ...pair);
-        this.refreshMessages(null);
-      }
+      if (this.runs.has(execId)) continue;
+      const run: ExecRun = {
+        id: execId,
+        command: record.command,
+        output: record.output,
+        trailer: trailerOf(record),
+        after: record.after,
+      };
+      this.runs.set(execId, run);
+      this.placeRun(run);
+    }
+  }
+
+  /**
+   * Draws one run into the thread, right after the message it names.
+   *
+   * It goes in behind any earlier run placed there too, so runs that followed
+   * the same message keep their order. A run that names nothing, or names
+   * something the replay did not bring back, goes at the end.
+   */
+  private placeRun(run: ExecRun): void {
+    const slot = this.slotAfter(run.after);
+    this.appendExecCommand(run.id, run.command);
+    this.setExecOutput(run.id, run.output, run.trailer);
+    if (slot !== null) {
+      const pair = this.model.messages.splice(-2, 2);
+      this.model.messages.splice(slot, 0, ...pair);
+      this.refreshMessages(null);
     }
   }
 
@@ -726,8 +787,16 @@ export class ThreadStore {
   /**
    * Writes a shell run's output into the thread as a code block, replacing
    * whatever was there so the block can grow while the command runs.
+   *
+   * The run this store holds is written too, so what goes back after a resume
+   * is the output as it stands rather than the output as it started.
    */
   private setExecOutput(execId: string, output: string, trailer?: string): void {
+    const run = this.runs.get(execId);
+    if (run) {
+      run.output = output;
+      run.trailer = trailer;
+    }
     const text = execBlock(output, this.longestFence(execId, output), trailer);
     const existing = this.model.messages.find((m) => m.id === execId);
     if (existing) {

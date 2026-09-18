@@ -1,6 +1,7 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
-import type { Token } from '@/lib/highlight';
+import { Notice } from '@/components/Notice';
+import { withinLineLimit, type Token } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
@@ -123,6 +124,11 @@ export interface CodePaneProps {
  * sit between its lines. The view holds the reader's line across that, with
  * `lib/anchor.ts`.
  *
+ * A file past the line limit gets none of this. It is shown as one block of
+ * plain text under a notice saying so, because tens of thousands of rows are
+ * more than a phone can lay out — and with no rows there is no gutter, no line
+ * to tap and nothing to edit.
+ *
  * File content and comments are agent-influenced and hostile by assumption, so
  * both are rendered as text nodes only. Highlight tokens become React
  * elements; nothing here goes near `dangerouslySetInnerHTML`.
@@ -150,6 +156,8 @@ export function CodePane({
   const editing = edit !== null;
   /** What the pane is showing: the buffer while editing, the file otherwise. */
   const source = edit ? edit.text : content;
+  /** Whether this file is too long to be read a line at a time. */
+  const tooLong = !withinLineLimit(source);
 
   /**
    * Puts each file back where it was left, and every file this review has not
@@ -191,7 +199,7 @@ export function CodePane({
     return () => element.removeEventListener('scroll', onScroll);
   }, [scrollRef, path]);
 
-  const lines = useMemo(() => splitLines(source), [source]);
+  const lines = useMemo(() => (tooLong ? [] : splitLines(source)), [source, tooLong]);
   /** The lines the tokens describe, which is the file itself until it is typed in. */
   const tokenLines = useMemo(
     () => (tokensFor === source ? lines : splitLines(tokensFor)),
@@ -215,38 +223,48 @@ export function CodePane({
         // The same size in both modes, so switching moves nothing.
         'min-h-0 flex-1 overflow-auto font-mono text-[16px] leading-[1.55] md:text-[13px]',
         // The pane scrolls, not the page: the header and the toolbar stay put.
-        wrapped ? 'overflow-x-hidden' : 'overflow-x-auto',
+        wrapped || tooLong ? 'overflow-x-hidden' : 'overflow-x-auto',
       )}
     >
-      <div
-        className={cn('relative min-w-full', editing && 'pb-[1.55em]')}
-        style={{ '--review-gutter': gutterWidth(digits) } as React.CSSProperties}
-      >
-        {deletions.has(0) && !editing ? (
-          <DeletionMarker hunkIndex={deletions.get(0)!} onShowHunk={onShowHunk} />
-        ) : null}
+      {tooLong ? (
+        <>
+          <Notice tone="warn" className="border-b px-3 py-1.5 text-xs">
+            This file is too long to review line by line. It is shown as plain text, so it has no
+            line numbers, no comments and no edit mode.
+          </Notice>
+          <pre className="px-2 py-1 whitespace-pre-wrap break-words">{source}</pre>
+        </>
+      ) : (
+        <div
+          className={cn('relative min-w-full', editing && 'pb-[1.55em]')}
+          style={{ '--review-gutter': gutterWidth(digits) } as React.CSSProperties}
+        >
+          {deletions.has(0) && !editing ? (
+            <DeletionMarker hunkIndex={deletions.get(0)!} onShowHunk={onShowHunk} />
+          ) : null}
 
-        {lines.map((text, index) => (
-          <Row
-            key={index + 1}
-            line={index + 1}
-            text={text}
-            tokens={tokenLines[index] === text ? (tokens?.[index] ?? null) : null}
-            change={diffLines[String(index + 1)]}
-            annotation={annotations.get(index + 1)}
-            composing={composing === index + 1}
-            hunkIndex={hunkByLine.get(index + 1)}
-            deletionHunk={deletions.get(index + 1)}
-            wrap={wrapped}
-            editing={editing}
-            under={editing ? null : (renderUnderLine?.(index + 1) ?? null)}
-            onSelectLine={onSelectLine}
-            onShowHunk={onShowHunk}
-          />
-        ))}
+          {lines.map((text, index) => (
+            <Row
+              key={index + 1}
+              line={index + 1}
+              text={text}
+              tokens={tokenLines[index] === text ? (tokens?.[index] ?? null) : null}
+              change={diffLines[String(index + 1)]}
+              annotation={annotations.get(index + 1)}
+              composing={composing === index + 1}
+              hunkIndex={hunkByLine.get(index + 1)}
+              deletionHunk={deletions.get(index + 1)}
+              wrap={wrapped}
+              editing={editing}
+              under={editing ? null : (renderUnderLine?.(index + 1) ?? null)}
+              onSelectLine={onSelectLine}
+              onShowHunk={onShowHunk}
+            />
+          ))}
 
-        {edit ? <Editor text={edit.text} onChange={edit.onChange} /> : null}
-      </div>
+          {edit ? <Editor text={edit.text} onChange={edit.onChange} /> : null}
+        </div>
+      )}
     </div>
   );
 }

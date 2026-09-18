@@ -1,4 +1,5 @@
 import { Plus, SlidersHorizontal } from 'lucide-react';
+import { useEffect } from 'react';
 import { Link } from 'react-router';
 import { ImageFooter } from '@/components/ImageFooter';
 import { Loading } from '@/components/Loading';
@@ -7,11 +8,16 @@ import { PushToggle } from '@/components/PushToggle';
 import { SessionCard } from '@/components/SessionCard';
 import { TokenWarning } from '@/components/TokenWarning';
 import { Button } from '@/components/ui/button';
-import { useSessions } from '../stores/sessions.ts';
+import { startPolling, useSessions } from '../stores/sessions.ts';
 
 /** The dashboard's home: every session as a card, and the card is the thread. */
 export function SessionList() {
   const { sessions, claudeTokenConfigured, images, error, loading } = useSessions();
+
+  // The whole list is polled while this screen is up, and only while it is:
+  // every other view watches one session, and none of them needs the rest of
+  // the deployment fetched every few seconds.
+  useEffect(() => startPolling(), []);
 
   return (
     <div className="flex flex-col gap-3">

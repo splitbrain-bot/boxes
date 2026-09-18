@@ -239,7 +239,10 @@ anchor is the last tool call of the last assistant message, or that message's
 id when it has none, and on replay the run is put back right after it, behind
 any earlier run anchored there. A run whose anchor is not in the replay —
 a compaction, a fork, a command typed before the agent said anything — goes at
-the end, in the order it ran.
+the end, in the order it ran. The log is read when a thread comes whole. A
+resumed reconnect puts back the runs the browser already holds, output and
+all, and asks the server for nothing: a replay never carries a run, and the
+runs on screen are the runs that go back.
 
 ### Attachments
 
@@ -1752,9 +1755,10 @@ Its paths are workspace-relative (`repo-a/src/x.ts`).
 **A file can be edited as well as commented on.** `PUT /review/file` takes the
 whole file and the hash it was read at, and answers with what the file endpoint
 would — so one round trip repaints the code, the diff, the status and the
-comments, which drift has already moved. Three files are refused rather than
-written: a deleted one, a binary one, and a truncated one, because saving back
-a read that stopped at the 2 MiB cap would delete everything past it. A file
+comments, which drift has already moved. Four files are refused rather than
+written: a deleted one, a binary one, a truncated one, because saving back
+a read that stopped at the 2 MiB cap would delete everything past it, and one
+past the line limit, because it has no rows to edit. A file
 that has moved past the hash is refused with **412**, which is the one refusal
 the reviewer can overrule — both versions still exist at that moment, theirs on
 disk and the reviewer's in the pane, so the choice is offered rather than
@@ -1932,7 +1936,12 @@ Highlighting is client-side, with Shiki: the API ships plain text and the
 browser tokenizes it. Both themes are tokenized at once and travel as
 `--shiki-light`/`--shiki-dark` custom properties on each span, so a light/dark
 switch costs no re-tokenize. The engine is Shiki's JavaScript regex engine, so
-there is no wasm fetch, and grammars load per file type on demand. The whole
+there is no wasm fetch, and grammars load per file type on demand. The
+highlighter's line limit of 8,000 is the pane's too: past it a file is shown
+as one block of plain text under a notice, with no rows, so no gutter, no line
+comments, no stepping and no edit mode. Tens of thousands of rows are more
+than a phone lays out in time, and a file that long is not reviewed a line at
+a time anyway. The whole
 review route is lazily imported, so none of it — the pane, the tree, the sheet
 primitives, the engine, the grammars — is in the bundle a browser opening a
 conversation downloads.
@@ -2103,8 +2112,10 @@ restart; the resolver that answers the request is in memory only, so
 | Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
 | Orphan sweep (`sessions.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with sessions that no longer exist. See below |
 
-The dashboard polls `GET /api/sessions` every 5 seconds while its tab is
-visible, and pauses while it is hidden.
+The list screen polls `GET /api/sessions` every 5 seconds while it is up and
+its tab is visible. A view watching one box — its thread, its review, its info
+— polls that session alone at the same cadence, so a browser reading one
+conversation is not asking for every session in the deployment.
 
 ## Configuration and secrets
 

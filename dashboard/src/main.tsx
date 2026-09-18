@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { Loading } from './components/Loading.tsx';
 import { installWorker, refreshPush } from './stores/push.ts';
-import { startPolling } from './stores/sessions.ts';
 import './globals.css';
 
 /**
@@ -108,7 +107,6 @@ if (root) {
       <App />
     </StrictMode>,
   );
-  startPolling();
   // The service worker first and unconditionally: it is what makes the app
   // installable, and installing is what an iPhone has to do before push is
   // even offered to it.

@@ -5,7 +5,7 @@ import {
 } from '@assistant-ui/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import type { SessionDetail, ThreadSummary } from '../../../shared/types.ts';
+import type { ThreadSummary } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { BackgroundBar } from '@/components/BackgroundBar';
 import { Notice } from '@/components/Notice';
@@ -14,10 +14,11 @@ import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api, ApiError } from '../api.ts';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useSession } from '@/hooks/use-session';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
 import { threadTitle, type TabState } from '@/lib/tab-title';
-import { refresh, useSessions } from '../stores/sessions.ts';
+import { refreshHealth, useSessions } from '../stores/sessions.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
@@ -129,43 +130,38 @@ export function SessionThread() {
    * re-stage it.
    */
   const [prefill, setPrefill] = useState<string | null>(null);
-  /** The session as this view found it. What it renders is `session` below. */
-  const [fetched, setFetched] = useState<SessionDetail | null>(null);
-  const [loadError, setLoadError] = useState<LoadError | null>(null);
   /** The thread a fork just made, revealed as a link rather than opened. */
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
-  const { sessions, claudeTokenConfigured } = useSessions();
-
-  // The WS token comes from the session API, behind the deployment's auth.
-  useEffect(() => {
-    let live = true;
-    api
-      .getSession(id)
-      .then((s) => live && setFetched(s))
-      .catch((err: Error) => live && setLoadError(describeLoadError(err)));
-    return () => {
-      live = false;
-    };
-  }, [id]);
+  const { claudeTokenConfigured } = useSessions();
 
   /**
-   * The session: the polled row wherever the list has it, and the one-shot
-   * fetch until then.
+   * This session, polled: the WS token the connection needs, the name in the
+   * header, the threads, and the mark on the one being read. It comes from
+   * the session API, behind the deployment's auth.
    *
-   * The fetch is what paints the first frame and what reports a session that
-   * is not there, and it is a snapshot of that moment — a thread the agent
-   * titles at the end of its first turn would keep its ordinal until a
-   * reload. The polled row carries every field this view reads.
+   * Polled rather than read once, because a snapshot of arrival goes stale —
+   * a thread the agent titles at the end of its first turn would keep its
+   * ordinal until a reload.
    */
-  const session = sessions.find((s) => s.id === id) ?? fetched;
+  const { session, error: readError, reload } = useSession(id);
 
-  // The poll answering for this session is proof the first fetch's failure was
-  // a moment rather than a fact, so the screen it produced goes away.
+  /**
+   * Why there is nothing to show, or null.
+   *
+   * Only while the session has never been read: a poll that failed after one
+   * answered says the deployment is busy, not that the box is gone, and the
+   * conversation on screen is still worth reading.
+   */
+  const loadError: LoadError | null = session || !readError ? null : describeLoadError(readError);
+
+  // Whether the deployment holds a Claude token, which the warning below
+  // reads. A fact about the deployment rather than about this box, so it is
+  // asked for on arrival and not again.
   useEffect(() => {
-    if (session) setLoadError(null);
-  }, [session]);
+    void refreshHealth();
+  }, []);
 
   // On arrival, and once: taking it clears it, and the guard is what makes a
   // second run — React mounting effects twice in development — harmless.
@@ -243,15 +239,16 @@ export function SessionThread() {
       if (!thread) return;
       api
         .setThreadDone(id, thread.id, next)
-        // The polled row is what the header reads, so the mark appears when
-        // that row does. Asking for it now rather than waiting out the poll
-        // is what keeps the control answering under the finger that hit it.
-        .then(() => refresh())
+        // The polled session is what the header reads, so the mark appears
+        // when that reading does. Asking for it now rather than waiting out
+        // the poll is what keeps the control answering under the finger that
+        // hit it.
+        .then(() => reload())
         // Nothing was marked, so nothing is drawn as marked. It goes where the
         // rest of this thread's trouble goes.
         .catch((err: Error) => store?.reportError(err.message));
     },
-    [id, thread, store],
+    [id, thread, store, reload],
   );
 
   /**
