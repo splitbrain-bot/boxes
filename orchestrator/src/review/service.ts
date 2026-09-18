@@ -94,8 +94,8 @@ export class ReviewService {
    *
    * A path is validated against the tree rather than merely against the
    * workspace, so the file endpoint serves exactly what the browser was
-   * offered and nothing the ignore lists left out. Building the tree costs one
-   * `git ls-files` per repository plus a walk, and opening a file almost
+   * offered and no binary or metadata the tree leaves out. Building the tree
+   * costs a walk of the workspace plus a status per repository, and opening a file almost
    * always follows a tree fetch — so it is cached for a few seconds rather
    * than rebuilt per request.
    */

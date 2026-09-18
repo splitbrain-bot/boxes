@@ -196,7 +196,7 @@ describe('reviewTree', () => {
     return [...treePaths(entries)].toSorted();
   }
 
-  test('a repository is listed by git, ignored files included in the ignoring', async () => {
+  test('a repository lists every file, whatever git thinks of it', async () => {
     repo('');
     file('.gitignore', 'ignored.txt\n');
     file('tracked.ts');
@@ -207,11 +207,12 @@ describe('reviewTree', () => {
     git('', 'commit', '-q', '-m', 'init');
 
     const { entries, truncated } = await reviewTree(await discoverRepos(dir));
-    // Tracked and untracked, but not gitignored, and never the workspace's
-    // own REVIEW.md.
+    // Tracked, untracked and ignored alike: a file the project's rules hide
+    // from git is still one a person may need to read. Only the workspace's
+    // own REVIEW.md and git's metadata stay out.
     assert.deepEqual(
       [...treePaths(entries)].toSorted(),
-      ['.gitignore', 'tracked.ts', 'untracked.ts'],
+      ['.gitignore', 'ignored.txt', 'tracked.ts', 'untracked.ts'],
     );
     assert.equal(truncated, false);
   });
@@ -255,8 +256,7 @@ describe('reviewTree', () => {
     file('project/a.ts');
     file('notes/todo.md');
     file('loose.txt');
-    // Inside a repository the project has said what is noise; outside one
-    // nobody has, so everything shows.
+    // The same rule on both sides of a repository boundary: everything shows.
     assert.deepEqual(await paths(), ['loose.txt', 'notes/todo.md', 'project/a.ts']);
   });
 
@@ -273,10 +273,8 @@ describe('reviewTree', () => {
     repo('outer/inner');
     file('outer/inner/b.txt');
 
-    // The outer repository's `ls-files --others` reports the inner work tree
-    // as a single `inner/` entry, which used to become a nameless row that
-    // 404ed when tapped. The closest-repo filter drops it, and the inner
-    // repository contributes the real files under the same prefix.
+    // One walk finds each file once, so the inner repository's files appear
+    // under their full path and nothing appears for the directory itself.
     const listed = await paths();
     assert.deepEqual(listed, ['outer/a.ts', 'outer/inner/b.txt']);
     assert.ok(!listed.includes('outer/inner'));

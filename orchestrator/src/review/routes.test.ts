@@ -205,8 +205,8 @@ describe('the tree endpoint', () => {
     const { body } = await get<ReviewTreeResponse>('/api/sessions/str/review/tree');
     assert.equal(body.hasGit, true);
     assert.equal(body.statuses['project/a.txt'], 'untracked');
-    // Outside every repository there is no .gitignore to consult, so loose
-    // files all show — and they have no status at all.
+    // Loose files outside every repository show like any other, and they
+    // have no status at all.
     assert.deepEqual([...treePaths(body.entries)].toSorted(), [
       'notes/todo.md',
       'project/a.txt',
@@ -237,9 +237,8 @@ describe('the tree endpoint', () => {
 
     const { body } = await get<ReviewTreeResponse>('/api/sessions/nst/review/tree');
     assert.deepEqual(body.repos.map((r) => r.path), ['', 'inner']);
-    // The outer repository's `ls-files --others` reports the inner work tree
-    // as one `inner/` entry, which used to become a nameless row that 404ed
-    // when tapped. The inner repository's own files are here instead.
+    // The inner repository's files appear under their full path, and nothing
+    // appears for the directory itself.
     assert.deepEqual([...treePaths(body.entries)].toSorted(), ['a.txt', 'inner/b.txt']);
     assert.equal(body.statuses['inner'], undefined);
     assert.equal(body.statuses['inner/b.txt'], 'untracked');
@@ -359,7 +358,7 @@ describe('the tree endpoint', () => {
       payload: { rev: 'HEAD~1' },
     });
 
-    // Committed, so neither on disk nor in ls-files. A review that cannot
+    // Committed and removed, so nowhere the walk can find it. A review that cannot
     // show a deletion is missing one of the three things a change can do.
     const { body } = await get<ReviewTreeResponse>('/api/sessions/iii/review/tree');
     assert.deepEqual([...treePaths(body.entries)].toSorted(), ['gone.txt', 'keep.txt']);

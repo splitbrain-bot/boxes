@@ -1,7 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitOut } from './git.ts';
-import { inWorkspace, type RepoMap } from './repos.ts';
+import type { RepoMap } from './repos.ts';
 
 /**
  * The file tree a review browses.
@@ -11,12 +10,13 @@ import { inWorkspace, type RepoMap } from './repos.ts';
  * an agent's whole dependency tree, and a phone on a slow link is the client.
  *
  * `buildTree` is pure and takes a flat path list. `walkPaths` is the one
- * function here that touches the filesystem, and it walks only the space no
- * repository claims.
+ * function here that touches the filesystem.
  *
- * The tree is over the workspace rather than over one repository in it, so it
- * is merged from as many sources as the workspace has repositories, plus one
- * walk of what is left over.
+ * The tree is every file under the workspace that a person could read,
+ * whether git tracks it, ignores it, or has never seen it: one walk of the
+ * whole workspace, stepping over version-control metadata and Boxes' own
+ * scratch, leaving out binaries. Git contributes only what the walk cannot
+ * find, which is a file the change deleted.
  */
 
 /** The annotation file, written at the workspace root. Not part of the review. */
@@ -144,43 +144,14 @@ function collect(node: Node): TreeEntry[] {
 }
 
 /**
- * Every file a git repository lists, as paths.
+ * Walks a directory into a path list.
  *
- * `--exclude-standard` applies the project's own ignore rules, so whatever git
- * still names is a file the project chose to keep, and only binary files are
- * dropped on top of that. A committed `vendor/` or `dist/` is therefore
- * browsable like any other part of the project.
- *
- * `-z` gives NUL-separated, unquoted paths, so a filename with non-ASCII or
- * other special characters comes back verbatim rather than in git's C-style
- * quoted form. Returns null when git named nothing at all, which is a
- * repository holding no files and a directory that is no repository alike: the
- * caller cannot tell them apart from this and reads both as "no files here".
- *
- * The paths are the repository's own. REVIEW.md is not filtered here, because
- * which one is the review's is a question about the workspace: only
- * `/workspace/REVIEW.md` is, and a `repo-a/REVIEW.md` is a file of that
- * project like any other.
- */
-async function gitFiles(root: string): Promise<string[] | null> {
-  const out = await gitOut(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
-  if (out === '') {
-    // Genuinely empty, or not a repository — the caller cannot tell from this
-    // alone, and both answers lead to the same place.
-    return null;
-  }
-  return out.split('\0').filter((path) => path !== '' && !isBinary(path));
-}
-
-/**
- * Walks a directory into a path list, for the space no repository claims.
- *
- * `skipDir` is asked about every directory before it is descended into, the
- * root included, and is what keeps the walk out of the repositories: inside
- * one, `git ls-files` is the better answer, because `--exclude-standard`
- * applies the ignore rules the project wrote. Out here there is no such file
- * to consult, so the walk steps over {@link UNWALKED_DIRS} and lists
- * everything else that is not binary.
+ * Every file is listed whatever git thinks of it: a tracked one, an untracked
+ * one and one the project's ignore rules cover are all things a person may
+ * need to read. The walk steps over {@link UNWALKED_DIRS} and leaves out
+ * binaries, and nothing else. `skipDir` is asked about every directory before
+ * it is descended into, the root included, for a caller with a reason of its
+ * own to stay out of one.
  *
  * Directories are read with `withFileTypes`, and a symlink is skipped rather
  * than followed: the tree is agent-controlled, and a link to `/` would
@@ -231,44 +202,20 @@ export function walkPaths(
 }
 
 /**
- * One workspace-relative tree, merged from every repository the workspace
- * holds and a walk of what none of them claims.
+ * One workspace-relative tree: a walk of the whole workspace.
  *
- * The merge runs one filter over all of it: an entry contributed by repository
- * `P` for path `p` is dropped when the closest repository to `P/p` is not `P`.
- * That single rule drops both the nameless `inner/` row an outer repository's
- * `ls-files --others` reports for a work tree inside it, and the duplicate
- * that the inner repository contributes under the same prefix. It is what
- * makes the repositories a partition of the workspace rather than overlapping
- * views of it.
+ * The repositories play no part in what is listed. A walk finds every file
+ * once, so nothing has to be merged or deduplicated, and a file inside a
+ * repository shows whether or not the project's ignore rules cover it. The
+ * map is here for where the workspace is.
  *
- * The merged list is sorted before the cap is applied, so a truncated tree is
- * deterministic rather than "whichever repository was read first".
+ * The list is sorted before the cap is applied, so a truncated tree is
+ * deterministic.
  */
 export async function reviewTree(map: RepoMap): Promise<Tree> {
-  const claimed = await Promise.all(
-    map.repos.map(async (repo) => {
-      const files = (await gitFiles(repo.absolute)) ?? [];
-      return files
-        .map((path) => inWorkspace(repo, path))
-        .filter((path) => map.repoFor(path)?.path === repo.path);
-    }),
-  );
-
-  // Everything outside every repository, which is the current no-git
-  // behaviour moved from being a property of the session to being a property
-  // of the file.
-  const unclaimed = walkPaths(map.workspace, MAX_ENTRIES, (relDir) => map.at(relDir) !== null);
-
-  const paths = [...claimed.flat(), ...unclaimed.paths]
-    .filter((path) => path !== REVIEW_FILE)
-    // A trailing slash is git naming a directory rather than a file, which
-    // `buildTree` would turn into a row with an empty name that 404s when it
-    // is tapped. The closest-repo filter already drops the one case that
-    // produces them; this is the guard that they can never reach the tree.
-    .filter((path) => !path.endsWith('/'))
-    .sort();
-  const truncated = unclaimed.truncated || paths.length > MAX_ENTRIES;
+  const walked = walkPaths(map.workspace, MAX_ENTRIES);
+  const paths = walked.paths.filter((path) => path !== REVIEW_FILE).sort();
+  const truncated = walked.truncated || paths.length > MAX_ENTRIES;
   return {
     entries: buildTree(truncated ? paths.slice(0, MAX_ENTRIES) : paths),
     truncated,
