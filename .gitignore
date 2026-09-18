@@ -4,3 +4,4 @@ dist/
 .env
 data/
 dashboard/e2e/screenshots/
+.claude/
