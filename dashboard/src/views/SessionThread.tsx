@@ -12,7 +12,7 @@ import { Notice } from '@/components/Notice';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { api } from '../api.ts';
+import { api, ApiError } from '../api.ts';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
@@ -82,6 +82,40 @@ function blocksOf(message: AppendMessage): ContentBlock[] {
  * part of the connection's own URL, so two tabs on two threads of one box
  * each get their own conversation and neither sees the other's stream.
  */
+/** Why this view could not read its session, in the words it shows. */
+interface LoadError {
+  message: string;
+  detail: string;
+}
+
+/**
+ * What to say about a session that would not load.
+ *
+ * Only a 404 means the box is gone. An authenticating proxy in front of the
+ * deployment answers 401 or 403 once its cookie expires, and telling that
+ * reader their box was deleted is both wrong and alarming; everything else is
+ * the deployment being unreachable, which is a thing that passes.
+ */
+function describeLoadError(err: Error): LoadError {
+  const status = err instanceof ApiError ? err.status : 0;
+  if (status === 404) {
+    return {
+      message: err.message,
+      detail: 'It may have been deleted. Nothing can be sent to it from here.',
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      message: 'This deployment wants you to sign in again.',
+      detail: 'Reload the page to do that. The box itself is untouched.',
+    };
+  }
+  return {
+    message: err.message,
+    detail: 'The deployment could not be reached. The box itself may be fine.',
+  };
+}
+
 export function SessionThread() {
   const { id = '', threadId } = useParams();
   /**
@@ -97,7 +131,7 @@ export function SessionThread() {
   const [prefill, setPrefill] = useState<string | null>(null);
   /** The session as this view found it. What it renders is `session` below. */
   const [fetched, setFetched] = useState<SessionDetail | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<LoadError | null>(null);
   /** The thread a fork just made, revealed as a link rather than opened. */
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
@@ -110,7 +144,7 @@ export function SessionThread() {
     api
       .getSession(id)
       .then((s) => live && setFetched(s))
-      .catch((err: Error) => live && setLoadError(err.message));
+      .catch((err: Error) => live && setLoadError(describeLoadError(err)));
     return () => {
       live = false;
     };
@@ -126,6 +160,12 @@ export function SessionThread() {
    * reload. The polled row carries every field this view reads.
    */
   const session = sessions.find((s) => s.id === id) ?? fetched;
+
+  // The poll answering for this session is proof the first fetch's failure was
+  // a moment rather than a fact, so the screen it produced goes away.
+  useEffect(() => {
+    if (session) setLoadError(null);
+  }, [session]);
 
   // On arrival, and once: taking it clears it, and the guard is what makes a
   // second run — React mounting effects twice in development — harmless.
@@ -385,10 +425,8 @@ export function SessionThread() {
                   bookmark for a deleted box lands on. */}
               {loadError ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <p className="text-sm">{loadError}</p>
-                  <p className="text-sm text-muted-foreground">
-                    It may have been deleted. Nothing can be sent to it from here.
-                  </p>
+                  <p className="text-sm">{loadError.message}</p>
+                  <p className="text-sm text-muted-foreground">{loadError.detail}</p>
                   {/* The same step out as the header's, so a session that
                       turned out to be gone is left the same way any other is:
                       whatever sent the visitor here, not a list pushed over

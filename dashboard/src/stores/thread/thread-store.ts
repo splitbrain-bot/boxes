@@ -16,6 +16,7 @@ import {
   applyUpdate,
   emptyModel,
   findTool,
+  messageOfTool,
   type Message,
   type ThreadModel,
 } from './translate.ts';
@@ -145,6 +146,8 @@ export class ThreadStore {
   private nextExecId = 1;
   /** Exec records already replayed, so a re-attach does not double them. */
   private replayedExec = new Set<number>();
+  /** Per run: how much of its output has been read for backticks, and the longest run found. */
+  private readonly execFences = new Map<string, { scanned: number; longest: number }>();
   /**
    * True from the moment a connection says it is about to replay until the
    * replay has been read.
@@ -306,6 +309,7 @@ export class ThreadStore {
     this.model.configOptions = configOptions;
     this.views = new Map();
     this.replayedExec.clear();
+    this.execFences.clear();
     // Whatever was said about the thread belonged to the connection that is
     // being replaced. The gateway says it again after this replay — including
     // what is still running in the background, which is the only way this
@@ -421,11 +425,7 @@ export class ThreadStore {
 
   /** The message holding a tool call, for a targeted snapshot refresh. */
   private messageOfTool(toolCallId: string): Message | null {
-    return (
-      this.model.messages.find((m) =>
-        m.parts.some((p) => p.type === 'tool' && p.toolCallId === toolCallId),
-      ) ?? null
-    );
+    return messageOfTool(this.model, toolCallId);
   }
 
   // --- actions -------------------------------------------------------------
@@ -590,11 +590,33 @@ export class ThreadStore {
   }
 
   /**
+   * The longest run of backticks a run's output has held so far, which is what
+   * the fence around it has to beat.
+   *
+   * Each chunk arrives as the whole output so far, so only the part that has
+   * not been read yet is scanned; a run of backticks lying across that edge is
+   * measured whole by stepping back over it first. Without this the fence is
+   * recomputed over everything on every chunk, which is quadratic in the
+   * output of a command like a test run.
+   */
+  private longestFence(execId: string, output: string): number {
+    const seen = this.execFences.get(execId) ?? { scanned: 0, longest: 0 };
+    let from = Math.min(seen.scanned, output.length);
+    while (from > 0 && output[from - 1] === '`') from--;
+    for (const run of output.slice(from).matchAll(/`+/g)) {
+      if (run[0].length > seen.longest) seen.longest = run[0].length;
+    }
+    seen.scanned = output.length;
+    this.execFences.set(execId, seen);
+    return seen.longest;
+  }
+
+  /**
    * Writes a shell run's output into the thread as a code block, replacing
    * whatever was there so the block can grow while the command runs.
    */
   private setExecOutput(execId: string, output: string, trailer?: string): void {
-    const text = execBlock(output, trailer);
+    const text = execBlock(output, this.longestFence(execId, output), trailer);
     const existing = this.model.messages.find((m) => m.id === execId);
     if (existing) {
       existing.parts = [{ type: 'text', text }];
@@ -742,10 +764,10 @@ function isExecMessage(message: Message): boolean {
  * The fence is grown past the longest run of backticks in the body, so output
  * that contains a fence of its own cannot break out of the block.
  */
-function execBlock(output: string, trailer?: string): string {
+function execBlock(output: string, longestRun: number, trailer?: string): string {
   const body = [output.replace(/\n+$/, ''), trailer].filter(Boolean).join('\n');
-  const longestFence = Math.max(0, ...[...body.matchAll(/`+/g)].map((m) => m[0].length));
-  const fence = '`'.repeat(Math.max(3, longestFence + 1));
+  const inTrailer = Math.max(0, ...[...(trailer ?? '').matchAll(/`+/g)].map((m) => m[0].length));
+  const fence = '`'.repeat(Math.max(3, Math.max(longestRun, inTrailer) + 1));
   return `${fence}console\n${body}\n${fence}`;
 }
 

@@ -200,10 +200,20 @@ test('a command list replaces the previous one', () => {
   assert.deepEqual(model.messages, []);
 });
 
-test('an unknown update kind is kept and renders nothing', () => {
+test('an unknown update kind is noted by name and renders nothing', () => {
   const model = fold({ sessionUpdate: 'usage_update', tokens: 12 } as unknown as SessionUpdate);
   assert.equal(model.messages.length, 0);
-  assert.equal(model.unknown.length, 1);
+  assert.deepEqual([...model.unknown], ['usage_update']);
+});
+
+test('a kind that arrives over and over is noted once', () => {
+  // The adapter sends a usage update at the end of every cycle, so what is
+  // kept has to be the fact rather than the updates.
+  const model = emptyModel();
+  for (let i = 0; i < 100; i++) {
+    applyUpdate(model, { sessionUpdate: 'usage_update', tokens: i } as unknown as SessionUpdate);
+  }
+  assert.equal(model.unknown.size, 1);
 });
 
 test('replaying the same script twice from a fresh model gives the same thread', () => {

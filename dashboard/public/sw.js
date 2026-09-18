@@ -98,7 +98,12 @@ self.addEventListener('pushsubscriptionchange', (event) => {
       await fetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(subscription.toJSON()),
+        // Labelled the way the page labels it, so a subscription the browser
+        // rotated on its own is still recognisable in the deployment's list.
+        body: JSON.stringify({
+          ...subscription.toJSON(),
+          label: navigator.userAgent.slice(0, 100),
+        }),
       });
     })().catch(() => {
       // Nothing useful to do from here: the page re-subscribes on its next

@@ -131,8 +131,22 @@ export interface ThreadModel {
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
   commands: AvailableCommand[];
-  /** Updates whose kind this build does not know, kept for forward compatibility. */
-  unknown: SessionUpdate[];
+  /**
+   * Kinds of update this build does not know, by name.
+   *
+   * The names rather than the updates: what a newer adapter sending something
+   * unrecognised is worth knowing for is that it happened, and a thread can
+   * carry hundreds of thousands of updates.
+   */
+  unknown: Set<string>;
+  /**
+   * Every tool call in the thread, by the adapter's id for it.
+   *
+   * A tool call is looked up whenever one is updated, answered or refreshed,
+   * and a long thread holds thousands of them, so the lookup is an index
+   * rather than a walk of every message.
+   */
+  tools: Map<string, { part: ToolPart; message: Message }>;
 }
 
 /** A model with nothing in it. */
@@ -143,7 +157,8 @@ export function emptyModel(): ThreadModel {
     configOptions: [],
     plan: null,
     commands: [],
-    unknown: [],
+    unknown: new Set(),
+    tools: new Map(),
   };
 }
 
@@ -255,16 +270,14 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
   appendText(message, kind, text);
 }
 
-/** Finds a tool part anywhere in the thread, newest first. */
+/** Finds a tool part anywhere in the thread. */
 export function findTool(model: ThreadModel, toolCallId: string): ToolPart | undefined {
-  for (let i = model.messages.length - 1; i >= 0; i--) {
-    const parts = model.messages[i]!.parts;
-    for (let j = parts.length - 1; j >= 0; j--) {
-      const part = parts[j]!;
-      if (part.type === 'tool' && part.toolCallId === toolCallId) return part;
-    }
-  }
-  return undefined;
+  return model.tools.get(toolCallId)?.part;
+}
+
+/** The message a tool call sits in, or null when the thread has no such call. */
+export function messageOfTool(model: ThreadModel, toolCallId: string): Message | null {
+  return model.tools.get(toolCallId)?.message ?? null;
 }
 
 /**
@@ -333,7 +346,7 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
       return null;
     }
     default:
-      model.unknown.push(update);
+      model.unknown.add(update.sessionUpdate);
       return null;
   }
 }
@@ -347,13 +360,13 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
  * either of them first.
  */
 function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message | null {
-  const existing = findTool(model, u.toolCallId);
-  if (existing) {
-    mergeTool(existing, u);
-    return messageOf(model, existing);
+  const indexed = model.tools.get(u.toolCallId);
+  if (indexed) {
+    mergeTool(indexed.part, u);
+    return indexed.message;
   }
   const message = messageFor(model, 'assistant', null);
-  message.parts.push({
+  const part: ToolPart = {
     type: 'tool',
     toolCallId: u.toolCallId,
     title,
@@ -363,13 +376,10 @@ function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message
     ...(u.rawInput === undefined ? {} : { rawInput: u.rawInput }),
     content: u.content ?? [],
     locations: u.locations ?? [],
-  });
+  };
+  message.parts.push(part);
+  model.tools.set(u.toolCallId, { part, message });
   return message;
-}
-
-/** The message a part belongs to. */
-function messageOf(model: ThreadModel, part: Part): Message | null {
-  return model.messages.find((m) => m.parts.includes(part)) ?? null;
 }
 
 /**

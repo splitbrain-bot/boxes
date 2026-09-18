@@ -686,6 +686,24 @@ test('a bang command runs locally, streams, and never reaches the adapter', asyn
   assert.equal(outputOf(messages[1]!), '```console\nhi\nthere\n[exit 0]\n```');
 });
 
+test('a fence in the output is escaped by a longer one, however it arrives', async () => {
+  // The fence is measured as the output grows, so a run of backticks split
+  // across two chunks still has to be beaten by the fence around it.
+  const { store } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
+      onChunk('start ``');
+      onChunk('start ````` end');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+  });
+
+  await store.runCommand('cat notes.md');
+  const output = outputOf(store.getSnapshot().messages[1]!);
+  // Five backticks in the body, so the fence is six.
+  assert.ok(output.startsWith('``````console\n'), output.slice(0, 20));
+  assert.ok(output.endsWith('\n``````'), output.slice(-20));
+});
+
 test('a non-zero exit shows the code under the output', async () => {
   const { store } = makeStore(undefined, {
     runExec: async (_id, _thread, _cmd, _after, onChunk) => {
