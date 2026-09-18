@@ -1317,14 +1317,17 @@ workspace directory and starts empty.
 | `creating` | The row exists, the Docker objects are being built |
 | `running` | The container is up |
 | `stopped` | Stopped deliberately, reaped, or found missing at boot |
-| `error` | Creation failed, or the adapter would not start |
+| `error` | Creation failed, the adapter would not start, or a directory the box is made of is gone |
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
 network, the workspace directory, the home directory and the materialized agent
 configuration, and clears the session's pending requests and log rows. Nothing
 refers to any of it once the session is gone, so it goes with the session rather
-than being left orphaned.
+than being left orphaned. The tombstone is written first, under the session's
+own slot in the operation queue, and the writers that could still be in flight —
+the debug log, the exec log — refuse a row for a session that carries one, so a
+delete cannot be undone a moment later by work that had not finished.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
 the stored rows with them: live containers are adopted, missing ones are marked
@@ -1351,6 +1354,31 @@ And all three ways a box starts do it: `start`, a local command through
 gateway's own path rather than through `start`. That last one is why the
 gateway's `beforeStart` seam is awaited and the row re-read after it — the
 repair may have changed the container id the caller is about to use.
+
+Every repair asks Docker a question and acts on the answer, which is only safe
+while one of them runs at a time. Three of those ways in can arrive at once,
+and the reaper is a fourth, so two starts could have one remove the container
+the other was about to use. **Each session has an operation queue**, one slot at
+a time, and every mutating operation takes it: create, start, stop, delete, the
+repairs, a local command, and the gateway's own seam. Reads never queue.
+
+Waiting is the answer for an ordinary request, because these are seconds rather
+than minutes and the one slow case — a first pull — is a spinner either way.
+Stop and delete are the exception: they mark whatever is in flight as
+pre-empted and take the slot behind it, so the work gives up at its next step
+rather than the stop waiting out a start it is about to undo. The reaper never
+waits at all; a busy session is skipped and tried again next tick. Re-entering
+is impossible by construction rather than by care: the queued method is a
+wrapper whose only job is to take the slot, and the work lives in an unqueued
+form that nothing inside a slot can call back into.
+
+**Shutdown drains.** SIGTERM stops the background loops, stops listening, and
+then gives running turns a bounded moment to reach a settle point before the
+adapters are torn down. A turn still going when that runs out is cut and said
+so in the log, but the common case — a deploy landing while somebody's agent is
+mid-answer — no longer ends the turn the instant the signal arrives. The grace
+is deliberately shorter than the container stop grace it sits inside, so the
+process finishes on its own terms rather than being killed part-way.
 
 ## Where a session's files live
 
@@ -1515,12 +1543,12 @@ mounted into one are both refused; a removal that fails is a log line and the
 next sweep tries again. The workspace directory goes with them, being the size
 of all of it put together.
 
-One guard: if the sessions table is *entirely* empty — not one row, tombstones
-included — and the host is full of labelled objects, the sweep refuses and
-says so. That shape is likelier to be a data volume mounted from the wrong
-place than a genuine pile of orphans, and it is the one mistake here that
-nothing could recover. A deployment whose sessions have all been deleted still
-has its tombstones, so its failed teardowns are still swept.
+One guard: when the sessions the host carries outnumber the rows the database
+knows by a wide margin — an empty table beside a full host being the extreme of
+it — the sweep refuses and says so. That shape is likelier to be a data volume
+mounted from the wrong place than a genuine pile of orphans, and it is the one
+mistake here that nothing could recover. A deployment whose sessions have all
+been deleted still has its tombstones, so its failed teardowns are still swept.
 
 The materialized agent configuration under `${DATA_DIR}/agents/<id>` is not in
 the sweep. It is kilobytes of markdown, rewritten from the database at every
@@ -1682,10 +1710,13 @@ the whole mechanism. Editing needs no new containment — the path goes through
 the same tree check and the same `resolveInRoot` as a read, so `REVIEW.md`
 itself, an ignored file and a symlink out are all the same 404 they were.
 
-**Nothing here starts a container.** Reads and git both run in the
-orchestrator, so the natural moment to review — the agent is done, the box has
-idled out — costs nothing, and none of these endpoints touches a session's
-activity timestamp: polling a review must not hold off the reaper.
+**A review needs the box.** File content is read here, but git runs inside the
+session's own container, so any endpoint that asks git something starts a
+stopped session and marks it active. Reviewing is use of the box, and the
+reaper stopping one under its reader would take the next request's answer with
+it. What this costs is the old property that reviewing an idled-out session was
+free; what it buys is that a repository can only ever run its own code in its
+own box.
 
 **Freshness is the fetch.** There is no poll and no fingerprint endpoint. Every
 review fetch already reads the filesystem on the spot — the tree endpoint runs
@@ -2002,9 +2033,9 @@ restart; the resolver that answers the request is in memory only, so
 
 | Loop | Interval | Does |
 |---|---|---|
-| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes. The turn count is derived from the threads; the rest stay session-scoped, because they are about the box rather than the conversation |
+| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes, and it never waits: a session with an operation already in flight is skipped and tried again next tick. The turn count is derived from the threads; the rest stay session-scoped, because they are about the box rather than the conversation |
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running session's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
-| Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size |
+| Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
 | Orphan sweep (`sessions.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with sessions that no longer exist. See below |
 
 The dashboard polls `GET /api/sessions` every 5 seconds while its tab is
@@ -2207,7 +2238,8 @@ handlers, a real database and a real git repository in a temp directory, with
 git itself supplied through the one seam it is started from, so the suite needs
 no Docker; every invocation is checked to be addressed to a session's container
 and a path inside its workspace. They cover root resolution, drift, concurrent
-writes and that none of them touches a session's activity timestamp.
+writes, and that reading a review marks the session active, since git now runs
+in the box.
 
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update

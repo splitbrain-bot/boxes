@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -7,8 +7,9 @@ import Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
-import { openDb, type Db } from './db.ts';
+import { appendAcpLog, openDb, touchSession, type Db } from './db.ts';
 import * as dk from './docker.ts';
+import * as ws from './workspaces.ts';
 
 /**
  * Keeping a session on the current session image.
@@ -47,6 +48,10 @@ interface Fake {
   imagesRemoved: string[];
   /** What a pull does to `images`, which is how a tag moves in a test. */
   onPull?: (image: string) => void;
+  /** Run as a container is created, for what arrives mid-operation. */
+  onCreate?: () => void;
+  /** Run as a container is removed, for what arrives mid-teardown. */
+  onRemove?: () => void;
   /** Networks the daemon has. A prune takes the container's with it. */
   networks: Set<string>;
   next: number;
@@ -110,11 +115,13 @@ function dockerFor(fake: Fake): Docker {
         if (c) c.running = false;
       },
       remove: async () => {
+        fake.onRemove?.();
         fake.removed.push(id);
         fake.containers.delete(id);
       },
     }),
     createContainer: async (opts: Record<string, unknown>) => {
+      fake.onCreate?.();
       fake.created.push(opts);
       const id = `container-${++fake.next}`;
       const binds = (opts['HostConfig'] as { Binds?: string[] } | undefined)?.Binds ?? [];
@@ -166,6 +173,9 @@ let fake: Fake;
  * `home` makes the older shape instead — a session from before homes became
  * directories, which keeps its named volume and goes on mounting it. Nothing
  * migrates it, so both shapes have to keep working.
+ *
+ * The directories are made as well as named, because a start refuses a
+ * session whose bind sources are gone.
  */
 function insertSession(
   id: string,
@@ -199,6 +209,8 @@ function insertSession(
     now,
     now,
   );
+  ws.createWorkspace(dir, id);
+  if (home === 'directory') ws.createHome(dir, id);
 }
 
 beforeEach(async () => {
@@ -568,5 +580,169 @@ describe('reading the uid back off the session image', () => {
   it('says nothing about an image with no USER at all', async () => {
     withImageUser(undefined);
     assert.equal(await dk.imageUserUid(IMAGE), null);
+  });
+});
+
+describe('starting a session whose files are gone', () => {
+  /** The session status as the row now stands. */
+  function status(id: string): string {
+    return (db.prepare('SELECT status FROM sessions WHERE id = ?').get(id) as { status: string })
+      .status;
+  }
+
+  it('refuses rather than letting the daemon make an empty workspace', async () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    // What a crash during a delete, or a backup restored in part, leaves.
+    // Docker would create the bind source itself, empty and owned by root:
+    // the box would start, look healthy, and the agent could not write in it.
+    rmSync(ws.workspacePath(dir, 'a1'), { recursive: true, force: true });
+
+    await assert.rejects(
+      () => orchestrator.manager.start('a1'),
+      /workspace directory/,
+    );
+    assert.deepEqual(fake.created, []);
+    assert.equal(status('a1'), 'error');
+    // And nothing was put back: the missing half is not this process's to
+    // invent.
+    assert.ok(!existsSync(ws.workspacePath(dir, 'a1')));
+  });
+
+  it('refuses for a home that is gone, and seeds no fresh one over it', async () => {
+    insertSession('a2', 'c1', 'sha256:one');
+    rmSync(ws.homePath(dir, 'a2'), { recursive: true, force: true });
+
+    await assert.rejects(() => orchestrator.manager.start('a2'), /home directory/);
+    assert.deepEqual(fake.created, []);
+    assert.equal(status('a2'), 'error');
+    // The home holds the adapter's thread transcripts, so a fresh one would
+    // erase every conversation while looking like a repair.
+    assert.ok(!existsSync(ws.homePath(dir, 'a2')));
+  });
+
+  it('names both when both are gone', async () => {
+    insertSession('a3', 'c1', 'sha256:one');
+    rmSync(ws.workspacePath(dir, 'a3'), { recursive: true, force: true });
+    rmSync(ws.homePath(dir, 'a3'), { recursive: true, force: true });
+
+    await assert.rejects(
+      () => orchestrator.manager.execTarget('a3'),
+      /workspace directory.*and.*home directory/s,
+    );
+  });
+
+  it('says nothing about a session whose halves are still volumes', async () => {
+    // A session from before either became a directory mounts a named volume,
+    // which Docker keeps on its own and this has no path to check.
+    insertSession('a4', 'c1', 'sha256:one', 'volume');
+    fake.containers.get('c1')!.running = true;
+
+    await orchestrator.manager.start('a4');
+
+    assert.equal(status('a4'), 'running');
+  });
+});
+
+describe('one operation per session at a time', () => {
+  it('does not let two starts both replace the same container', async () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    fake.images.set(IMAGE, 'sha256:two');
+
+    // Both requests read the same row, and both decide the container has to
+    // be replaced. Run together, the second removes the container the first
+    // just built and started.
+    await Promise.all([orchestrator.manager.start('a1'), orchestrator.manager.start('a1')]);
+
+    assert.deepEqual(fake.removed, ['c1']);
+    assert.equal(fake.created.length, 1);
+  });
+
+  it('lets a stop overtake the start it arrived under', async () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    fake.images.set(IMAGE, 'sha256:two');
+    let stopping: Promise<unknown> | null = null;
+    // The stop arrives while the replacement container is being created,
+    // which is the middle of the start rather than a gap between requests.
+    fake.onCreate = () => {
+      stopping ??= orchestrator.manager.stop('a1');
+    };
+
+    await assert.rejects(() => orchestrator.manager.start('a1'), /stopped/);
+    await stopping;
+
+    // The start gave up at its next step, and the stop did not wait it out.
+    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('a1') as {
+      status: string;
+    };
+    assert.equal(row.status, 'stopped');
+  });
+
+  it('tells the reaper no rather than making it wait', async () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    fake.images.set(IMAGE, 'sha256:two');
+    let asked: Promise<boolean> | null = null;
+    fake.onCreate = () => {
+      asked ??= orchestrator.manager.stopUnlessBusy('a1');
+    };
+
+    await orchestrator.manager.start('a1');
+
+    // A tick that waited here would hold up every other session it has to
+    // look at. This one comes back next minute instead.
+    assert.equal(await asked, false);
+    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('a1') as {
+      status: string;
+    };
+    assert.equal(row.status, 'running');
+  });
+
+  it('stops writing to a session the moment it is deleted', async () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    /** Rows this session had after work landed mid-teardown. */
+    let logged = -1;
+    // The teardown takes seconds, and the ACP tap and a finishing command are
+    // both still able to write during it.
+    fake.onRemove = () => {
+      appendAcpLog(db, 'a1', 'down', '{}');
+      touchSession(db, 'a1');
+      logged = (
+        db.prepare('SELECT COUNT(*) AS n FROM acp_log WHERE session_id = ?').get('a1') as {
+          n: number;
+        }
+      ).n;
+    };
+
+    await orchestrator.manager.remove('a1');
+
+    // The tombstone goes down before anything else of the session does, so
+    // there was never a moment when a write would have landed.
+    assert.equal(logged, 0);
+  });
+});
+
+describe('the upstreams the manager is holding', () => {
+  it('forgets one for a box that is down and holding nothing', () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    const first = orchestrator.manager.upstream('a1');
+
+    orchestrator.manager.maintenance();
+
+    // The reaper builds one of these for every running session on every tick,
+    // and nothing else lets go of them. A fresh one rebuilds everything this
+    // holds, because it holds nothing.
+    assert.notEqual(orchestrator.manager.upstream('a1'), first);
+  });
+
+  it('keeps the one for a box that is up, which holds the reading of it', () => {
+    insertSession('a1', 'c1', 'sha256:one');
+    db.prepare("UPDATE sessions SET status = 'running' WHERE id = 'a1'").run();
+    const first = orchestrator.manager.upstream('a1');
+
+    orchestrator.manager.maintenance();
+
+    // What is running in a box is read onto its upstream, and the reaper asks
+    // for that reading every tick. Dropping this would throw the answer away
+    // a minute after it was taken, and a box with no answer is held.
+    assert.equal(orchestrator.manager.upstream('a1'), first);
   });
 });

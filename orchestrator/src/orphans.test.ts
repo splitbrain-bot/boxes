@@ -262,6 +262,32 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(homeOf('orphan-by-accident')));
   });
 
+  it('refuses when the host holds far more sessions than the database knows of', async () => {
+    // The same wrong database, a minute later: somebody whose dashboard looked
+    // empty created a session in it. One row must not disarm the guard, so it
+    // is a ratio rather than an empty table.
+    insertSession('created-against-the-wrong-database');
+    for (const id of ['a', 'b', 'c', 'd']) insertObjects(id);
+
+    await orchestrator.manager.sweepOrphans();
+
+    assert.deepEqual(fake.removed, []);
+    assert.ok(existsSync(homeOf('a')));
+  });
+
+  it('still sweeps a handful of strays beside a database that knows its sessions', async () => {
+    // And the guard is not so wide that it stops the sweep doing its job: a
+    // deployment with its rows intact has its failed teardowns taken.
+    for (const id of ['live-1', 'live-2', 'live-3']) insertSession(id);
+    insertSession('gone', 'deleted');
+    insertObjects('gone');
+
+    await orchestrator.manager.sweepOrphans();
+
+    assert.deepEqual(fake.removed, ['c-gone', 'sn-gone', 'home-gone']);
+    assert.ok(!existsSync(homeOf('gone')));
+  });
+
   it('takes the files of a session whose Docker objects are already gone', async () => {
     insertSession('keep');
     // The shape a failed teardown leaves: it removes the container, the

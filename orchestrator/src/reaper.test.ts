@@ -76,6 +76,8 @@ async function tick(
     onStop?: (id: string) => void;
     /** The count asked for again just before a session is stopped. */
     pendingNow?: (id: string) => number;
+    /** Sessions with an operation of their own in flight, which never wait. */
+    busy?: Set<string>;
   } = {},
 ): Promise<string[]> {
   const stopped: string[] = [];
@@ -89,10 +91,11 @@ async function tick(
       attachedCount: over.attachedCount ?? 0,
       backgroundActive: over.backgroundActive === undefined ? false : over.backgroundActive,
     }),
-    stop: (id: string) => {
+    stopUnlessBusy: (id: string) => {
+      if (over.busy?.has(id)) return Promise.resolve(false);
       stopped.push(id);
       over.onStop?.(id);
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
     maintenance: () => undefined,
     sweepOrphans: () => Promise.resolve(),
@@ -194,7 +197,7 @@ test('a tick still running when the next one is due is not joined by it', async 
       countForSession: () => 0,
     },
     upstream: () => ({ attachedCount: 0, backgroundActive: false }),
-    stop: () => Promise.resolve(),
+    stopUnlessBusy: () => Promise.resolve(true),
     maintenance: () => undefined,
     sweepOrphans: () => {
       sweeps += 1;
@@ -222,4 +225,12 @@ test("a session that is not running is not the reaper's to stop", async () => {
   insertSession('s1', IDLE_MINUTES + 1);
   db.prepare("UPDATE sessions SET status = 'stopped' WHERE id = 's1'").run();
   assert.deepEqual(await tick(), []);
+});
+
+test('a session something else is already working on is left for the next tick', async () => {
+  // Starting a box, replacing its container or deleting it all hold the
+  // session's own queue. The reaper never waits on that: the session is
+  // skipped and looked at again a minute later.
+  insertSession('s1', IDLE_MINUTES + 1);
+  assert.deepEqual(await tick({ busy: new Set(['s1']) }), []);
 });

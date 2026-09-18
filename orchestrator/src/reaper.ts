@@ -89,7 +89,13 @@ export function startReaper(
       if (manager.pending.countForSession(row.id) > 0) continue;
 
       try {
-        await manager.stop(row.id);
+        // Never waits for the session's own queue: a box something else is
+        // already working on is not idle, whatever the counts above said, and
+        // this tick has other sessions to get to.
+        if (!(await manager.stopUnlessBusy(row.id))) {
+          log.session(row.id).info('not reaping a session that is busy; trying again next tick');
+          continue;
+        }
         log.session(row.id).info('reaped idle session', {
           idleMinutes: Math.round((now - row.last_active_at) / 60_000),
         });

@@ -89,6 +89,9 @@ export interface ReviewSessions {
   /**
    * The session's container, started if it was stopped, and the directory a
    * command runs in inside it.
+   *
+   * Asking for it marks the session active, so a review that keeps asking
+   * keeps the box it is asking about.
    */
   execTarget(id: string): Promise<{ containerId: string; workingDir: string }>;
 }

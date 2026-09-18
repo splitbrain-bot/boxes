@@ -544,7 +544,15 @@ function pruneRing(db: Db, table: 'acp_log' | 'exec_log', sessionId: string, kee
 /** Debug log rows kept per session. */
 const LOG_RING = 5000;
 
-/** Records one tapped ACP message, truncating the payload at 64,000 characters. */
+/**
+ * Records one tapped ACP message, truncating the payload at 64,000 characters.
+ *
+ * A session whose row says deleted is written nothing, the rule setStatus
+ * keeps. The tap forwards messages from a connection that can still be
+ * draining when the session is removed, and a row inserted then would outlive
+ * the delete that cleared the table. The tombstone goes down before anything
+ * else of a session does, so this one statement is the whole check.
+ */
 export function appendAcpLog(
   db: Db,
   sessionId: string,
@@ -552,8 +560,10 @@ export function appendAcpLog(
   payload: string,
 ): void {
   db.prepare(
-    'INSERT INTO acp_log (session_id, direction, ts, payload) VALUES (?, ?, ?, ?)',
-  ).run(sessionId, direction, Date.now(), payload.slice(0, 64_000));
+    `INSERT INTO acp_log (session_id, direction, ts, payload)
+     SELECT ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND status = 'deleted')`,
+  ).run(sessionId, direction, Date.now(), payload.slice(0, 64_000), sessionId);
 }
 
 /** Drops all but the newest LOG_RING debug log entries of one session. */
@@ -564,7 +574,15 @@ export function pruneAcpLog(db: Db, sessionId: string): void {
 /** Local command runs kept per session. */
 const EXEC_RING = 200;
 
-/** Records one finished local command and returns its stored row id. */
+/**
+ * Records one finished local command and returns its stored row id.
+ *
+ * A session whose row says deleted is written nothing and gets 0 back, the
+ * rule setStatus keeps. A command streams its output for up to two minutes
+ * and is stored when it ends, which is long enough for the session to have
+ * been removed under it — and a row inserted then would outlive the delete
+ * that cleared the table.
+ */
 export function appendExecLog(
   db: Db,
   sessionId: string,
@@ -575,7 +593,8 @@ export function appendExecLog(
       `INSERT INTO exec_log
          (session_id, thread_id, command, output, exit_code, truncated, timed_out,
           started_at, finished_at, after_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND status = 'deleted')`,
     )
     .run(
       sessionId,
@@ -588,7 +607,9 @@ export function appendExecLog(
       record.started_at,
       record.finished_at,
       record.after_id,
+      sessionId,
     );
+  if (info.changes === 0) return 0;
   pruneRing(db, 'exec_log', sessionId, EXEC_RING);
   return Number(info.lastInsertRowid);
 }

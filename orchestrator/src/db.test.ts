@@ -4,7 +4,14 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MIGRATIONS, openDb, type Db } from './db.ts';
+import {
+  appendAcpLog,
+  appendExecLog,
+  MIGRATIONS,
+  openDb,
+  touchSession,
+  type Db,
+} from './db.ts';
 
 /**
  * The migrations that moved a session's conversation onto its threads.
@@ -437,4 +444,68 @@ test('a database written by a newer build is refused rather than opened', () => 
   assert.throws(() => openDb(dir), {
     message: new RegExp(`version ${MIGRATIONS.length + 1}.*knows ${MIGRATIONS.length}`, 's'),
   });
+});
+
+/** A live session row, in the shape today's schema wants. */
+function insertLiveSession(db: Db, id: string): void {
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       ?, '10.200.0.0/24', '', '', 'running', NULL, 1000, 2000)`,
+  ).run(id, `sn-${id}`);
+}
+
+/** One stored command, in the shape the exec route records. */
+function execRecord(): Parameters<typeof appendExecLog>[2] {
+  return {
+    thread_id: null,
+    command: 'ls',
+    output: '',
+    exit_code: 0,
+    truncated: 0,
+    timed_out: 0,
+    started_at: 1000,
+    finished_at: 2000,
+    after_id: null,
+  };
+}
+
+test('a deleted session takes no more writes', () => {
+  // Deleting sets the tombstone before it clears the tables, so work still in
+  // flight — the ACP tap, a command that is just finishing, a touch — must
+  // not put rows back behind it.
+  const db = openDb(dir);
+  insertLiveSession(db, 's1');
+  appendAcpLog(db, 's1', 'down', '{"before":true}');
+  assert.equal(appendExecLog(db, 's1', execRecord()) > 0, true);
+
+  db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = 's1'").run();
+  appendAcpLog(db, 's1', 'down', '{"after":true}');
+  assert.equal(appendExecLog(db, 's1', execRecord()), 0);
+  touchSession(db, 's1');
+
+  const counts = (table: string): number =>
+    (
+      db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE session_id = ?`).get('s1') as {
+        n: number;
+      }
+    ).n;
+  assert.equal(counts('acp_log'), 1);
+  assert.equal(counts('exec_log'), 1);
+  const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('s1') as {
+    last_active_at: number;
+  };
+  assert.equal(row.last_active_at, 2000);
+  db.close();
+});
+
+test('a log row is still stored for a session that has no row at all', () => {
+  // The guard is the tombstone, not the row: a test or a caller logging
+  // against an id the sessions table never had is not what it is there for.
+  const db = openDb(dir);
+  appendAcpLog(db, 'nowhere', 'down', '{}');
+  assert.equal(appendExecLog(db, 'nowhere', execRecord()) > 0, true);
+  db.close();
 });

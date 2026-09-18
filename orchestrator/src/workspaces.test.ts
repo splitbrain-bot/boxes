@@ -146,3 +146,20 @@ test.skipIf(process.getuid?.() !== 0)(
     assert.equal(statSync(target).uid, 0);
   },
 );
+
+test('a directory that is there is reported, and one that is gone is not', () => {
+  // What a start asks before it binds either half of a session: Docker would
+  // create a missing bind source itself, empty and owned by root.
+  const path = ws.createWorkspace(dir, 's1');
+  assert.equal(ws.directoryExists(path), true);
+
+  rmSync(path, { recursive: true, force: true });
+  assert.equal(ws.directoryExists(path), false);
+});
+
+test('a file where a directory should be is not a directory', () => {
+  ws.ensureWorkspacesRoot(dir);
+  const path = ws.workspacePath(dir, 's2');
+  writeFileSync(path, 'not a directory');
+  assert.equal(ws.directoryExists(path), false);
+});

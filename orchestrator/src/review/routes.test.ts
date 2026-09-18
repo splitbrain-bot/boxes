@@ -147,10 +147,15 @@ beforeEach(() => {
   misaddressed = [];
   // The box a review runs git in: no container is started here, so the
   // session id stands in for one and the workspace is where it always is.
-  vi.spyOn(SessionManager.prototype, 'execTarget').mockImplementation(async (id: string) => ({
-    containerId: id,
-    workingDir: '/workspace',
-  }));
+  // Asking for the box marks the session active, as the real one does, because
+  // that is the half of it these tests are about.
+  vi.spyOn(SessionManager.prototype, 'execTarget').mockImplementation(async function (
+    this: SessionManager,
+    id: string,
+  ) {
+    this.touch(id);
+    return { containerId: id, workingDir: '/workspace' };
+  });
   setGitRunnerForTests(localGit);
 });
 
@@ -1223,7 +1228,7 @@ describe('freshness is the fetch', () => {
     assert.equal(body.content, 'one\nTWO\n');
   });
 
-  test('reading a review does not hold off the reaper', async () => {
+  test('reading a review keeps the box it is read from alive', async () => {
     const ws = insertSession('bbb');
     write(ws, 'a.txt', 'x\n');
     db.prepare('UPDATE sessions SET last_active_at = 0 WHERE id = ?').run('bbb');
@@ -1231,10 +1236,12 @@ describe('freshness is the fetch', () => {
     await get<ReviewTreeResponse>('/api/sessions/bbb/review/tree');
     await get<ReviewFileResponse>('/api/sessions/bbb/review/file?path=a.txt');
 
-    // Reviewing is not the agent working, so it must not keep a box alive.
+    // A review asks git about the workspace, and git runs in the session's own
+    // container, so reading one is use of the box. The reaper stopping it under
+    // the reader would take the next request's answer with it.
     const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('bbb') as {
       last_active_at: number;
     };
-    assert.equal(row.last_active_at, 0);
+    assert.ok(row.last_active_at > 0, 'reading a review should mark the session active');
   });
 });

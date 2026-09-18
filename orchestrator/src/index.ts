@@ -5,7 +5,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { buildApp } from './app.ts';
 import { config } from './config.ts';
-import { openDb } from './db.ts';
+import { openDb, sessionsWithActiveTurns } from './db.ts';
 import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { log, setLogLevel } from './log.ts';
 import { startImageRefresher, startProxyReconciler, startReaper } from './reaper.ts';
@@ -174,6 +174,9 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
 
 // --- boot -------------------------------------------------------------------
 
+/** The background loops, so shutdown can stop them before anything else. */
+const loops: Array<{ stop: () => void }> = [];
+
 /** Reconciles against Docker, starts the background loops, and listens. */
 async function main(): Promise<void> {
   // The policy has to exist before the first session is created, because a
@@ -206,22 +209,75 @@ async function main(): Promise<void> {
   }
 
   await manager.reconcile();
-  startReaper(db, cfg, manager);
-  startImageRefresher(cfg, manager);
-  startProxyReconciler(manager, egress, setProxyWarnings);
+  loops.push(startReaper(db, cfg, manager));
+  loops.push(startImageRefresher(cfg, manager));
+  loops.push(startProxyReconciler(manager, egress, setProxyWarnings));
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });
   log.info('orchestrator listening', { port: cfg.PORT });
+}
+
+/**
+ * How long a turn still in flight is given to finish before shutdown tears the
+ * adapters down, in milliseconds.
+ *
+ * Tearing an upstream down kills the adapter exec, which ends whatever turn is
+ * running in it, so a routine deploy cuts live work unless it waits first.
+ * Eight seconds is the trade: long enough for a turn that is nearly done to
+ * reach a settle point and have what it wrote stored, and short enough to
+ * finish inside the ten seconds Docker gives a container between SIGTERM and
+ * SIGKILL by default, with room left for the teardown and the database close.
+ * Waiting past that point buys nothing, because the process is killed anyway.
+ */
+const TURN_DRAIN_MS = 8_000;
+
+/** How often the drain looks again at what is still running. */
+const TURN_DRAIN_POLL_MS = 250;
+
+/**
+ * Waits for the turns in flight to finish, up to TURN_DRAIN_MS.
+ *
+ * A turn that has not finished by then is cut when the adapters go, which
+ * nothing here can avoid — so it is named in the log rather than left to look
+ * like a clean shutdown.
+ */
+async function drainTurns(): Promise<void> {
+  let busy = sessionsWithActiveTurns(db);
+  if (busy.size === 0) return;
+  log.info('waiting for the turns in flight to finish', {
+    sessions: [...busy],
+    graceMs: TURN_DRAIN_MS,
+  });
+  const deadline = Date.now() + TURN_DRAIN_MS;
+  while (busy.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, TURN_DRAIN_POLL_MS));
+    busy = sessionsWithActiveTurns(db);
+  }
+  if (busy.size > 0) {
+    log.warn('shutting down with turns still running; they are cut here', {
+      sessions: [...busy],
+    });
+    return;
+  }
+  log.info('every turn in flight finished');
 }
 
 // Once: a second signal while the server is closing must not re-enter this.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     log.info('shutting down', { signal });
-    manager.closeAll();
-    app
+    // No new work is taken on first: the background loops stop, and the server
+    // stops listening while it finishes the requests it already has.
+    for (const loop of loops) loop.stop();
+    const closed = app
       .close()
-      .catch((err: Error) => log.error('server close failed', { error: err.message }))
+      .catch((err: Error) => log.error('server close failed', { error: err.message }));
+    // Then the turns get their grace, and only then are the adapters killed.
+    void drainTurns()
+      .then(() => {
+        manager.closeAll();
+        return closed;
+      })
       .finally(() => {
         db.close();
         process.exit(0);

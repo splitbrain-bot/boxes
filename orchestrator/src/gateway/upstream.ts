@@ -384,6 +384,26 @@ export class UpstreamSession {
     return this.background.active;
   }
 
+  /**
+   * Whether this upstream is holding nothing at all: no browser attached, no
+   * permission request waiting, no connection to an adapter, no start in
+   * flight and no stop armed.
+   *
+   * What lets the manager forget one it built only to answer a question about
+   * a box. Nothing is lost by that: the connection is what carries the
+   * conversations an adapter knows, and there is none.
+   */
+  get holdsNothing(): boolean {
+    return (
+      this.downstreams.size === 0 &&
+      this.conn === null &&
+      this.exec === null &&
+      this.starting === null &&
+      this.escalations.size === 0 &&
+      this.pending.countForSession(this.sessionId) === 0
+    );
+  }
+
   /** Test seam: takes a reading now rather than when one goes stale. */
   refreshBackgroundForTests(): Promise<void> {
     return this.background.refresh();

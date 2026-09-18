@@ -1,4 +1,12 @@
-import { fchownSync, lchownSync, mkdirSync, readdirSync, rmSync, type Dirent } from 'node:fs';
+import {
+  fchownSync,
+  lchownSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  type Dirent,
+} from 'node:fs';
 import { join, posix } from 'node:path';
 import { log } from './log.ts';
 
@@ -138,6 +146,19 @@ export function createHome(dataDir: string, sessionId: string): string {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chownToAgent(path);
   return path;
+}
+
+/**
+ * Whether a path is there and is a directory.
+ *
+ * Asked before a session's workspace or home is bind-mounted. Docker creates
+ * a bind source it cannot find, empty and owned by root, so a box whose
+ * directory has gone starts and looks healthy while the agent cannot write to
+ * it. Nothing is created here: the answer is what turns that into a refusal
+ * naming what is missing.
+ */
+export function directoryExists(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
 }
 
 /**

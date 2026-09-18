@@ -268,8 +268,8 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
     const after = typeof body?.after === 'string' && body.after.length <= 200 ? body.after : null;
 
     const thread = manager.resolveThread(id, threadId);
+    // Marks the session active on its own, so the box is held from here.
     const target = await manager.execTarget(id);
-    manager.touch(id);
     const startedAt = Date.now();
 
     reply.raw.writeHead(200, {
@@ -418,8 +418,10 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    * the tree endpoint carries the whole left panel, the file endpoint the
    * whole file view.
    *
-   * None of them touches a session's activity timestamp. Reviewing is not the
-   * agent working, so reading a review must not hold off the reaper.
+   * A route that asks git something marks the session active, the same way a
+   * local command does: running git in the box is use of the box, and the
+   * reaper stopping one under an open review would only be followed by the
+   * next request starting it again.
    *
    * Every one reads the filesystem on the spot, so a fetch is the freshness
    * and there is nothing to poll.
