@@ -100,8 +100,12 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** An ACP Stream over a WebSocket: one JSON-RPC message per text frame. */
-function wsStream(ws: WebSocket, sessionId: string): Stream {
+/**
+ * An ACP Stream over a WebSocket: one JSON-RPC message per text frame.
+ *
+ * Exported so the tests can drive the write side directly.
+ */
+export function wsStream(ws: WebSocket, sessionId: string): Stream {
   const slog = log.session(sessionId);
 
   const readable = new ReadableStream<unknown>({
