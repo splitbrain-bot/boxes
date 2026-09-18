@@ -392,3 +392,17 @@ test('the exec log gains where each command was typed, and older rows have none'
     upgraded.close();
   }
 });
+
+test('a database written by a newer build is refused rather than opened', () => {
+  // A rollback puts this build on a schema it does not know: the columns a
+  // later migration changed are the ones every query here names, so opening
+  // it happily means failing at the first request instead of at boot.
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS) db.exec(sql);
+  db.pragma(`user_version = ${MIGRATIONS.length + 1}`);
+  db.close();
+
+  assert.throws(() => openDb(dir), {
+    message: new RegExp(`version ${MIGRATIONS.length + 1}.*knows ${MIGRATIONS.length}`, 's'),
+  });
+});

@@ -292,6 +292,12 @@ export class UpstreamSession {
   private readonly replaying = new Map<string, number>();
   /** The reading's own timer while a browser is watching; see pollWhileWatched. */
   private polling: ReturnType<typeof setInterval> | null = null;
+  /**
+   * KILL escalations armed and not yet fired. Held so a stop can cancel
+   * them: each names a container, and one that fires after the session has
+   * gone reads processes in a box that is not there.
+   */
+  private readonly escalations = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(
     readonly sessionId: string,
@@ -370,8 +376,11 @@ export class UpstreamSession {
   /**
    * Whether this session has work running in the background, which holds the
    * idle reaper off the way an attached browser or a running turn does.
+   *
+   * Null until the box has been read: the reaper holds a session it has no
+   * answer for, and a card shows it as nothing running.
    */
-  get backgroundActive(): boolean {
+  get backgroundActive(): boolean | null {
     return this.background.active;
   }
 
@@ -480,6 +489,7 @@ export class UpstreamSession {
    */
   private escalate(containerId: string, acpThreadId: string, id?: string): void {
     const timer = setTimeout(() => {
+      this.escalations.delete(timer);
       void (async () => {
         try {
           const left = workToStop(
@@ -501,6 +511,7 @@ export class UpstreamSession {
       })();
     }, TERM_GRACE_MS);
     timer.unref?.();
+    this.escalations.add(timer);
   }
 
   /**
@@ -781,6 +792,7 @@ export class UpstreamSession {
 
     let lastError: unknown = null;
     for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
+      if (this.abandoned) return;
       if (attempt > 0) {
         const wait = SPAWN_BACKOFF_MS[attempt - 1] ?? 8000;
         this.slog.warn('retrying adapter spawn', { attempt, waitMs: wait });
@@ -788,6 +800,13 @@ export class UpstreamSession {
       }
       try {
         await this.spawnAndInitialize(row);
+        // The stop arrived while this was coming up, so what it brought up
+        // goes with it: the session was asked to be down, and the exec left
+        // behind would answer for a box nobody is holding.
+        if (this.abandoned) {
+          this.teardownConnection();
+          return;
+        }
         this.onStatus('running');
         // A browser that stayed attached through a stop and start is still
         // watching, and the clock its bar goes away on was cleared with the
@@ -800,10 +819,22 @@ export class UpstreamSession {
         this.teardownConnection();
       }
     }
+    if (this.abandoned) return;
     this.onStatus('error');
     throw new Error(
       `Adapter failed to start after ${MAX_SPAWN_ATTEMPTS} attempts: ${(lastError as Error)?.message}`,
     );
+  }
+
+  /**
+   * Whether a start still in flight has been overtaken by a stop or a close.
+   *
+   * A spawn retries for twelve seconds, which is long enough for the session
+   * to be stopped under it. What it would report then is about a box that is
+   * already down, so it gives up quietly instead.
+   */
+  private get abandoned(): boolean {
+    return this.stopping || this.closed;
   }
 
   /**
@@ -1629,6 +1660,10 @@ export class UpstreamSession {
     this.slog.warn('adapter exec exited', { code });
     this.teardownConnection();
     this.clearThreadStates();
+    // The adapter that asked them is gone, so no answer can reach it any
+    // more. Left queued, each one holds its session out of the reaper and
+    // shows a question nobody can answer.
+    this.pending.failSession(this.sessionId, 'The agent adapter exited');
   }
 
   /** Closes the connection and kills the exec, tolerating either being gone. */
@@ -1642,6 +1677,11 @@ export class UpstreamSession {
     // A fresh adapter holds none of them, so the next pin brings its thread
     // back up rather than trusting an id this process never heard.
     this.live.clear();
+    // The loads counted here belong to the connection going away. A count
+    // left behind reads as a replay that never ends, and everything its
+    // thread says afterwards is taken for history: no agent speaking, no
+    // turn settling, and a row that is never touched again.
+    this.replaying.clear();
     try {
       this.exec?.kill();
     } catch {
@@ -1654,6 +1694,10 @@ export class UpstreamSession {
   stop(): void {
     this.stopping = true;
     this.stopPolling();
+    // Each one names a container this session may not have by the time it
+    // fires, and reads the box it named.
+    for (const timer of this.escalations) clearTimeout(timer);
+    this.escalations.clear();
     // The box is going away, and what was in it went with it. Said now rather
     // than at the next reading, so a card does not carry "still running" over
     // the moment its session was shut down.

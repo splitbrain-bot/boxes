@@ -280,21 +280,24 @@ export class SessionManager {
    * still mounted into one, is refused. Containers go first.
    */
   async sweepOrphans(): Promise<void> {
-    const live = new Set(this.allRows().map((row) => row.id));
     const containers = await dk.listSessionContainers();
     const networks = await dk.listSessionNetworks();
     const volumes = await dk.listSessionVolumes();
+    // The files are read separately, because a teardown removes the Docker
+    // objects first: a session it gave up on halfway has nothing left to find
+    // it by except the two directories it wrote.
+    const directories = ws.sessionDirectoryIds(this.cfg.DATA_DIR);
+    // Last, after everything it is matched against: create() inserts the row
+    // before it makes anything, so a session created while the readings
+    // above were running has its row by now, and its network, workspace and
+    // home are not orphans.
+    const live = new Set(this.allRows().map((row) => row.id));
     const orphaned = <T extends { sessionId: string }>(all: T[]): T[] =>
       all.filter((o) => !live.has(o.sessionId));
     const strayContainers = orphaned(containers);
     const strayNetworks = orphaned(networks);
     const strayVolumes = orphaned(volumes);
-    // The files are read separately, because a teardown removes the Docker
-    // objects first: a session it gave up on halfway has nothing left to find
-    // it by except the two directories it wrote.
-    const strayDirectories = ws
-      .sessionDirectoryIds(this.cfg.DATA_DIR)
-      .filter((id) => !live.has(id));
+    const strayDirectories = directories.filter((id) => !live.has(id));
 
     const strays = [...strayContainers, ...strayNetworks, ...strayVolumes];
     const sessions = new Set([...strays.map((o) => o.sessionId), ...strayDirectories]);
@@ -505,9 +508,10 @@ export class SessionManager {
 
   /**
    * Replaces a session's container with a fresh one built from `row`, and
-   * returns the new container's id. The row names the new container before it
-   * is started, so a start that fails cannot leave the row naming the removed
-   * one; the caller records whatever else changed with it.
+   * returns the new container's id. The row names the new container and the
+   * workspace directory it binds before it is started, so a start that fails
+   * cannot leave the row naming the removed container or the mount it no
+   * longer has; the caller records whatever else changed with it.
    *
    * The old container is stopped before it is removed even where it is known
    * to be down already: both calls tolerate a container that is gone, and one
@@ -522,7 +526,9 @@ export class SessionManager {
       this.containerSpec(row, this.profileFor(row)),
       this.cfg,
     );
-    this.db.prepare('UPDATE sessions SET container_id = ? WHERE id = ?').run(containerId, row.id);
+    this.db
+      .prepare('UPDATE sessions SET container_id = ?, workspace_dir = ? WHERE id = ?')
+      .run(containerId, row.workspace_dir, row.id);
     await dk.startContainer(containerId);
     return containerId;
   }
@@ -795,9 +801,10 @@ export class SessionManager {
    * here — a session container has a read-only rootfs and everything durable
    * lives in its two mounts — but it is not free of risk, so the order is
    * chosen to lose nothing at any step: copy first, recreate second, and drop
-   * the volume only once the new container has started. A crash anywhere
-   * before the row is updated leaves a volume-backed session that migrates
-   * again on the next attempt.
+   * the volume only once the new container has started. The row says which
+   * mount it has the moment the container that has it exists, so a crash
+   * cannot leave a running container on the directory beside a row that says
+   * volume, which is what copies the volume over the agent's own work.
    *
    * A running legacy session is left alone. Its container works, and it will
    * come through here at its next stop/start cycle.
@@ -818,13 +825,10 @@ export class SessionManager {
     // own ownership with it, which a Docker-initialised volume gets right.
     ws.chownToAgent(directory);
 
-    const containerId = await this.recreateContainer(row);
-    this.db
-      .prepare(
-        `UPDATE sessions SET container_id = ?, workspace_dir = ?, ws_volume = ''
-          WHERE id = ?`,
-      )
-      .run(containerId, directory, row.id);
+    // The directory it is given is the one the new container binds, and
+    // recreateContainer records both together before the start.
+    await this.recreateContainer({ ...row, workspace_dir: directory });
+    this.db.prepare("UPDATE sessions SET ws_volume = '' WHERE id = ?").run(row.id);
 
     if (row.ws_volume) await dk.removeVolume(row.ws_volume);
     slog.info('workspace migrated', { directory });
@@ -1170,9 +1174,10 @@ export class SessionManager {
   // --- boot reconciliation --------------------------------------------------
 
   /**
-   * Aligns the stored rows with what Docker runs: adopts live
-   * containers, marks missing ones stopped, and re-attaches the egress proxy.
-   * Upstream connections are re-established on first use.
+   * Aligns the stored rows with what Docker runs: adopts live containers,
+   * marks missing ones stopped, fails a create that was interrupted, and
+   * re-attaches the egress proxy. Upstream connections are re-established on
+   * first use.
    */
   async reconcile(): Promise<void> {
     this.pending.clearStale();
@@ -1191,6 +1196,13 @@ export class SessionManager {
         if (row.status === 'running') {
           log.session(row.id).warn('container missing at boot; marking stopped');
           this.setStatus(row.id, 'stopped');
+        } else if (row.status === 'creating') {
+          // create() fails a session it cannot finish, so a row still saying
+          // this has nobody left to finish it: the process that was creating
+          // it is gone. Nothing is deleted — the sweep takes what it left —
+          // but the row has to stop holding its subnet and refusing a start.
+          log.session(row.id).warn('create did not finish before the restart; marking error');
+          this.setStatus(row.id, 'error');
         }
         continue;
       }

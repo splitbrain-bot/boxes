@@ -70,20 +70,28 @@ async function tick(
   over: {
     pending?: number;
     attachedCount?: number;
-    backgroundActive?: boolean;
+    /** Null is a box whose work has not been read yet. */
+    backgroundActive?: boolean | null;
+    /** Run as each session is stopped, for what a slow stop lets happen. */
+    onStop?: (id: string) => void;
+    /** The count asked for again just before a session is stopped. */
+    pendingNow?: (id: string) => number;
   } = {},
 ): Promise<string[]> {
   const stopped: string[] = [];
   const manager = {
     pending: {
       countsBySession: () => new Map(over.pending ? [['s1', over.pending]] : []),
+      countForSession: (id: string) =>
+        over.pendingNow?.(id) ?? (id === 's1' ? (over.pending ?? 0) : 0),
     },
     upstream: () => ({
       attachedCount: over.attachedCount ?? 0,
-      backgroundActive: over.backgroundActive ?? false,
+      backgroundActive: over.backgroundActive === undefined ? false : over.backgroundActive,
     }),
     stop: (id: string) => {
       stopped.push(id);
+      over.onStop?.(id);
       return Promise.resolve();
     },
     maintenance: () => undefined,
@@ -128,6 +136,86 @@ test('a browser still attached holds the box', async () => {
 test('work left running in the background holds the box', async () => {
   insertSession('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ backgroundActive: true }), []);
+});
+
+test('a box whose work has not been read yet is held for this tick', async () => {
+  // The state after every restart: the probe has not answered, and a box
+  // with a build in it and nobody watching looks exactly like an idle one.
+  // The reading lands well before the next sweep.
+  insertSession('s1', IDLE_MINUTES + 1);
+  assert.deepEqual(await tick({ backgroundActive: null }), []);
+});
+
+test('a turn that starts while another box is being stopped holds its own box', async () => {
+  // The counts the tick opens with are one reading of the whole deployment,
+  // and stopping a box takes seconds. By the time a sweep of many idle boxes
+  // reaches the last of them, a prompt sent meanwhile is minutes old.
+  insertSession('s1', IDLE_MINUTES + 1);
+  insertSession('s2', IDLE_MINUTES + 1);
+  insertThread('t2', 's2');
+  const stopped = await tick({
+    onStop: (id) => {
+      if (id === 's1') {
+        db.prepare("UPDATE threads SET turn_active = 1 WHERE id = 't2'").run();
+      }
+    },
+  });
+  assert.deepEqual(stopped, ['s1']);
+});
+
+test('a permission request that arrives mid-sweep holds its box', async () => {
+  // The same window as the turn above: the question is asked while the first
+  // box is being stopped, and only a fresh count can see it.
+  insertSession('s1', IDLE_MINUTES + 1);
+  insertSession('s2', IDLE_MINUTES + 1);
+  let asked = false;
+  const stopped = await tick({
+    onStop: () => {
+      asked = true;
+    },
+    pendingNow: (id) => (asked && id === 's2' ? 1 : 0),
+  });
+  assert.deepEqual(stopped, ['s1']);
+});
+
+test('a tick still running when the next one is due is not joined by it', async () => {
+  // Every tick re-asserts the same thing, and stopping many boxes takes
+  // longer than the interval. Two of them at once sweep each other's
+  // half-finished work.
+  insertSession('s1', IDLE_MINUTES + 1);
+  let sweeps = 0;
+  let finish: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const manager = {
+    pending: {
+      countsBySession: () => new Map<string, number>(),
+      countForSession: () => 0,
+    },
+    upstream: () => ({ attachedCount: 0, backgroundActive: false }),
+    stop: () => Promise.resolve(),
+    maintenance: () => undefined,
+    sweepOrphans: () => {
+      sweeps += 1;
+      return held;
+    },
+  } as unknown as SessionManager;
+
+  vi.useFakeTimers();
+  const cfg = loadConfig({ DATA_DIR: dir, IDLE_STOP_MINUTES: String(IDLE_MINUTES) });
+  const reaper = startReaper(db, cfg, manager);
+  await vi.advanceTimersByTimeAsync(60_000);
+  assert.equal(sweeps, 1);
+
+  // The first tick is still in its sweep three intervals later.
+  await vi.advanceTimersByTimeAsync(180_000);
+  assert.equal(sweeps, 1);
+
+  finish();
+  await vi.advanceTimersByTimeAsync(60_000);
+  assert.equal(sweeps, 2);
+  reaper.stop();
 });
 
 test("a session that is not running is not the reaper's to stop", async () => {

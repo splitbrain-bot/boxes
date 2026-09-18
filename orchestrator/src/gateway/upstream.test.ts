@@ -1759,5 +1759,101 @@ test('a replayed transcript is history, not work to wait for', async () => {
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
+  await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
+});
+
+test('a box the gateway has not read yet is not a box known to be empty', async () => {
+  // What the reaper meets on its first sweep after every restart. Answered
+  // as "nothing running", a box with an hour-long build in it and nobody
+  // watching is stopped, and the build goes with it.
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  assert.equal(up.backgroundActive, null);
+  await up.refreshBackgroundForTests();
+  assert.equal(up.backgroundActive, false);
+});
+
+test('a start that is stopped under it gives up quietly', async () => {
+  // A spawn retries for twelve seconds, and a session can be stopped inside
+  // that window. Every answer the retries have then is about a box that has
+  // been shut down on purpose, an error status included.
+  let attempts = 0;
+  const up = manager.upstream('s1');
+  fakeDocker(() => {
+    attempts += 1;
+    // The session is stopped while the first attempt is in flight.
+    up.stop();
+    throw new Error('no adapter in this box');
+  });
+
+  await up.ensureStarted();
+
+  assert.equal(attempts, 1);
+  const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('s1') as {
+    status: string;
+  };
+  assert.equal(row.status, 'running');
+});
+
+test('a queued question is failed when the adapter exec exits', async () => {
+  // The adapter that asked it is gone, so no answer can reach it. Left
+  // queued, the request holds its session out of the reaper for good and
+  // shows a browser a question nobody can answer.
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // Nobody is watching the thread that asked, so it queues.
+  adapter.push(permissionFrame('acp-gone'));
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+
+  // The adapter dies on its own, which is not a stop: the session stays up.
+  adapter.push(null);
+
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(0);
+});
+
+test('a thread whose load was cut short is heard from again after the restart', async () => {
+  // An update arriving during a load is the transcript being replayed, not
+  // the agent talking, and a count per thread is what says which. A count
+  // left over from a connection that is gone reads as a replay that never
+  // ends: the thread never shows the agent speaking again.
+  const adapters: FakeAdapter[] = [];
+  let answerLoads = false;
+  fakeDocker(() => {
+    const adapter: FakeAdapter = new FakeAdapter((msg) => {
+      if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+      if (msg.method === 'session/load' && !answerLoads) return new Promise(() => {});
+      return {};
+    });
+    adapters.push(adapter);
+    return adapter;
+  });
+
+  const up = manager.upstream('s1');
+  const stranded = up.ensureStarted();
+  await expect.poll(() => adapters[0]?.seen.includes('session/load') ?? false).toBe(true);
+
+  // The box is stopped with the load still open, and comes back up.
+  up.stop();
+  await stranded;
+  answerLoads = true;
+  await up.ensureStarted();
+
+  adapters.at(-1)?.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } },
+  });
+
+  await expect.poll(() => up.speakingThreads).toEqual(['acp-gone']);
 });

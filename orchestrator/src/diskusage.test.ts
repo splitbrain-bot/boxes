@@ -377,3 +377,40 @@ test('a deleted session takes its measurement with it', async () => {
   cache.forget('s1');
   assert.equal(cache.bytes('s1', up), null);
 });
+
+test('a walk that was measuring while the workspace changed is not the answer', async () => {
+  // The upload lands mid-walk, so what the walk is about to store is the
+  // size before it. Stored with a fresh timestamp it would be the answer for
+  // the whole interval — and for a box that is down, for good, since nothing
+  // else makes one due.
+  let size = 42;
+  let walks = 0;
+  let land: () => void = () => {};
+  const { cache } = usage({
+    measure: () =>
+      new Promise<number>((resolve) => {
+        walks++;
+        land = () => resolve(size);
+      }),
+  });
+  /** Lets a queued walk reach the measurer above. */
+  const queued = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  cache.bytes('s1', down);
+  await queued();
+  const overtaken = cache.settled();
+  cache.forget('s1');
+  size = 99;
+  land();
+  await overtaken;
+
+  // Nothing was kept from the walk the upload overtook, so the next read has
+  // no answer yet and starts a walk of its own.
+  assert.equal(cache.bytes('s1', down), null);
+  await queued();
+  assert.equal(walks, 2);
+  const settling = cache.settled();
+  land();
+  await settling;
+  assert.equal(cache.bytes('s1', down), 99);
+});

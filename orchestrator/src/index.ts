@@ -1,4 +1,6 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
+import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { buildApp } from './app.ts';
@@ -10,8 +12,87 @@ import { startImageRefresher, startProxyReconciler, startReaper } from './reaper
 
 // --- the app and its database ----------------------------------------------
 
+/** The file that says which process owns DATA_DIR, under DATA_DIR itself. */
+const LOCK_FILE = 'orchestrator.lock';
+
+/**
+ * Whether a process id is one somebody is still running.
+ *
+ * Signal 0 asks the kernel about a process without sending anything: no such
+ * process is the answer this is here for, and a process that is somebody
+ * else's is still a process that is there.
+ */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Claims DATA_DIR for this process, and exits when another orchestrator holds
+ * it.
+ *
+ * Two orchestrators on one directory share a database, a subnet pool and a
+ * set of containers, and the second one's boot clears the first one's queue
+ * of permission requests — questions a person is looking at, gone, with the
+ * turns behind them left waiting.
+ *
+ * The claim is a file created exclusively and holding this process's id.
+ * Node has no advisory file lock without a dependency, so the file outlives a
+ * crash: what tells a held lock from an abandoned one is the id in it, since
+ * a process nobody is running cannot be signalled.
+ *
+ * Taken before the database is opened, which is the first thing under this
+ * directory two processes cannot share, and given up as this process exits.
+ */
+function lockDataDir(dataDir: string): void {
+  mkdirSync(dataDir, { recursive: true });
+  const path = join(dataDir, LOCK_FILE);
+  /** Writes the lock, or false where one is already there. */
+  const claim = (): boolean => {
+    try {
+      writeFileSync(path, `${process.pid}\n`, { flag: 'wx' });
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      return false;
+    }
+  };
+  /** The id in the lock, or null where there is none to read. */
+  const holder = (): number | null => {
+    try {
+      const pid = Number.parseInt(readFileSync(path, 'utf8').trim(), 10);
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+      return null;
+    }
+  };
+
+  if (!claim()) {
+    const pid = holder();
+    if (pid !== null && alive(pid)) {
+      log.error('another orchestrator is already running on this data directory', {
+        dataDir,
+        pid,
+      });
+      process.exit(1);
+    }
+    log.warn('taking over a lock no running orchestrator holds', { dataDir, pid });
+    rmSync(path, { force: true });
+    if (!claim()) {
+      log.error('could not claim the data directory', { dataDir });
+      process.exit(1);
+    }
+  }
+  process.on('exit', () => rmSync(path, { force: true }));
+}
+
 const cfg = config();
 setLogLevel(cfg.LOG_LEVEL);
+lockDataDir(cfg.DATA_DIR);
 const db = openDb(cfg.DATA_DIR);
 const { app, manager, egress, setProxyWarnings } = buildApp(cfg, db);
 

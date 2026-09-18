@@ -389,11 +389,44 @@ function probe(initial: ContainerProcess[] | null): {
 
 test('the first reading is not waited for, and lands behind the reader', async () => {
   const { p, settle } = probe(WORKING);
-  // Nothing has been read yet, and an unstarted box has nothing in it.
-  assert.equal(p.active, false);
+  // Nothing has been read yet, which is its own answer: a box nobody has
+  // asked about is not a box known to be empty, and a build has been running
+  // in this one all along.
+  assert.equal(p.active, null);
   await settle();
   assert.equal(p.active, true);
   assert.equal(p.work(ONE).length, 1);
+});
+
+test('a box that has been stopped is empty rather than unread', async () => {
+  // Stopping is the one moment the answer is known without asking, so it is
+  // knowledge like any reading: nothing has to hold the box after it.
+  const { p } = probe(WORKING);
+  p.clear();
+  assert.equal(p.active, false);
+});
+
+test('a reading already on the wire does not undo the stop that overtook it', async () => {
+  // The box was read, shut down, and the reading arrived afterwards. Stored,
+  // it would tell every browser that work is still running in a container
+  // that is gone, until a poll that can no longer reach it says otherwise.
+  let land: (procs: ContainerProcess[]) => void = () => {};
+  const p = new BackgroundProbe({
+    list: () =>
+      new Promise<ContainerProcess[]>((resolve) => {
+        land = resolve;
+      }),
+    adapter: ADAPTER,
+    ttlMs: 5_000,
+  });
+  const reading = p.refresh();
+
+  p.clear();
+  land(WORKING);
+  await reading;
+
+  assert.equal(p.active, false);
+  assert.deepEqual(p.work(ONE), []);
 });
 
 test('a reading stands until it goes stale', async () => {

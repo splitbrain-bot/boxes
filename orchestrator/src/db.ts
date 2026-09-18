@@ -447,9 +447,23 @@ export function openDb(dataDir: string): Db {
   return db;
 }
 
-/** Runs every migration the database has not applied yet, one per transaction. */
+/**
+ * Runs every migration the database has not applied yet, one per transaction,
+ * and refuses a database from ahead of this build.
+ *
+ * A rollback puts an older orchestrator on a database a newer one migrated,
+ * whose columns are not the ones this build reads and writes. There is no
+ * migration back, so the only safe answer is to say so and stop, rather than
+ * to boot and fail against the first query that meets a changed column.
+ */
 function migrate(db: Db): void {
   const current = db.pragma('user_version', { simple: true }) as number;
+  if (current > MIGRATIONS.length) {
+    throw new Error(
+      `This database is at version ${current} and this build knows ` +
+        `${MIGRATIONS.length}: it was written by a newer build of Boxes.`,
+    );
+  }
   for (let v = current; v < MIGRATIONS.length; v++) {
     const sql = MIGRATIONS[v];
     if (!sql) continue;

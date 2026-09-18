@@ -33,6 +33,8 @@ interface Fake {
   removed: string[];
   /** Objects the daemon refuses to remove, by name. */
   stuck: Set<string>;
+  /** Run as the daemon answers a listing, for what happens mid-sweep. */
+  whileListing?: () => void;
 }
 
 function install(fake: Fake): void {
@@ -51,12 +53,15 @@ function install(fake: Fake): void {
         Name: name,
         Labels: { [dk.LABEL]: sessionId },
       })),
-    listVolumes: async () => ({
-      Volumes: [...fake.volumes].map(([name, sessionId]) => ({
-        Name: name,
-        Labels: { [dk.LABEL]: sessionId },
-      })),
-    }),
+    listVolumes: async () => {
+      fake.whileListing?.();
+      return {
+        Volumes: [...fake.volumes].map(([name, sessionId]) => ({
+          Name: name,
+          Labels: { [dk.LABEL]: sessionId },
+        })),
+      };
+    },
     getContainer: (id: string) => ({
       remove: async () => {
         refuse(id);
@@ -200,6 +205,25 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(homeOf('newborn')));
   });
 
+  it('leaves a session created while it was reading the daemon alone', async () => {
+    // The sweep asks Docker three questions and reads the directories, which
+    // takes long enough for a create to run: its row is inserted before it
+    // makes anything, so it exists by the time the sweep decides. A snapshot
+    // taken before the readings does not have it, and the session loses its
+    // network, its workspace and its home while it is being built.
+    insertSession('keep');
+    fake.whileListing = (): void => {
+      insertSession('newborn', 'creating');
+      insertObjects('newborn');
+    };
+
+    await orchestrator.manager.sweepOrphans();
+
+    assert.deepEqual(fake.removed, []);
+    assert.ok(existsSync(workspaceOf('newborn')));
+    assert.ok(existsSync(homeOf('newborn')));
+  });
+
   it('keeps going when one object cannot be removed', async () => {
     insertSession('keep');
     insertSession('gone', 'deleted');
@@ -263,5 +287,41 @@ describe('sweeping objects no session owns', () => {
     await orchestrator.manager.sweepOrphans();
 
     assert.deepEqual(fake.removed, ['c-gone', 'sn-gone', 'home-gone']);
+  });
+});
+
+describe('boot reconciliation', () => {
+  it('fails a create that the last orchestrator did not finish', async () => {
+    // create() inserts the row first and fails the session itself if any step
+    // throws, so a row still saying `creating` at boot is one whose creator
+    // is gone. Nothing else touches it: the sweep protects every row that
+    // exists, so the session held its subnet and answered 409 to start for
+    // as long as the deployment lived.
+    insertSession('newborn', 'creating');
+    insertObjects('newborn');
+    fake.containers.delete('c-newborn');
+
+    await orchestrator.manager.reconcile();
+
+    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('newborn') as {
+      status: string;
+    };
+    assert.equal(row.status, 'error');
+    // Its files are still there for the sweep, which is the only thing that
+    // deletes anything.
+    assert.ok(existsSync(workspaceOf('newborn')));
+  });
+
+  it('adopts a half-created session whose container is up', async () => {
+    insertSession('newborn', 'creating');
+    insertObjects('newborn');
+    fake.containers.set('c-newborn', { sessionId: 'newborn', running: true });
+
+    await orchestrator.manager.reconcile();
+
+    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('newborn') as {
+      status: string;
+    };
+    assert.equal(row.status, 'running');
   });
 });

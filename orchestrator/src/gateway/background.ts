@@ -383,6 +383,17 @@ export class BackgroundProbe {
   private reading: BackgroundReading = NOTHING;
   private readAt = -Infinity;
   private inFlight: Promise<void> | null = null;
+  /**
+   * Whether the box has been read at all, which is what makes an empty
+   * reading an answer rather than a starting point.
+   */
+  private read = false;
+  /**
+   * How many times the answer has been settled without asking the box. A
+   * reading carries the number it started under, so one still on the wire
+   * when a session is stopped is dropped rather than put back.
+   */
+  private generation = 0;
   /** Whether the last reading failed, so the trouble is reported once. */
   private failing = false;
   /** The last reason reported, so the same one is not reported twice. */
@@ -407,16 +418,17 @@ export class BackgroundProbe {
   }
 
   /**
-   * Whether anything at all is running in the box, and a refresh started if
-   * the reading has gone stale.
+   * Whether anything at all is running in the box, null before any reading
+   * has landed, and a refresh started if the reading has gone stale.
    *
-   * Never awaits: the first call answers false, which is what a session that
-   * has just started has, and the reading behind it arrives before the
-   * reaper's next sweep.
+   * Never awaits: the first call answers null and the reading behind it
+   * arrives before the reaper's next sweep. Null is not "nothing running" —
+   * a box that has not been read is not a box known to be empty, and a
+   * caller that stops boxes has to hold it.
    */
-  get active(): boolean {
+  get active(): boolean | null {
     this.freshen();
-    return anyWorkRunning(this.reading);
+    return this.read ? anyWorkRunning(this.reading) : null;
   }
 
   /**
@@ -449,6 +461,10 @@ export class BackgroundProbe {
     const before = this.reading;
     this.reading = NOTHING;
     this.readAt = -Infinity;
+    // Knowledge rather than a starting point: a box that has been shut down
+    // is empty, and a reading taken before it went down is history.
+    this.read = true;
+    this.generation += 1;
     const changed = changedThreads(before, this.reading);
     if (changed.length > 0) this.onChange(changed);
     if (this.reported !== null) {
@@ -465,14 +481,19 @@ export class BackgroundProbe {
   /** Reads the box, at most one reading at a time. */
   refresh(): Promise<void> {
     if (this.inFlight) return this.inFlight;
+    const generation = this.generation;
     this.inFlight = this.list()
       .then((processes) => {
+        // A stop while this was on the wire already settled the answer, and
+        // this reading is of the box as it was before it.
+        if (generation !== this.generation) return;
         const before = this.reading;
         // No box to ask is not the same as a box that would not answer: it is
         // empty, and known to be.
         this.reading =
           processes === null ? NOTHING : readBackgroundWork(processes, this.adapter, this.now());
         this.readAt = this.now();
+        this.read = true;
         if (this.failing) {
           this.failing = false;
           this.onTrouble(null);
