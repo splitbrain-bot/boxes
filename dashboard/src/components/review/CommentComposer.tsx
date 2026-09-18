@@ -10,9 +10,10 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sh
  * pane ends up behind it. Both render the same form, so there is one place
  * where "what a comment is" is decided.
  *
- * The two arrangements are chosen by CSS presence rather than by a media
- * query in JavaScript: the view renders whichever one its breakpoint shows, so
- * a resize cannot leave the wrong one mounted.
+ * Which one is mounted is a media query in JavaScript rather than a CSS
+ * breakpoint, because a Sheet renders into a portal: it is not inside the
+ * element a `md:hidden` wrapper would hide. The view asks the query and
+ * renders one of the two, so a resize never leaves both.
  */
 
 /**

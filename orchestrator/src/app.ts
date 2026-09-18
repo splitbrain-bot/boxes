@@ -1,44 +1,51 @@
+import compress from '@fastify/compress';
 import Fastify from 'fastify';
 import type { FastifyReply, RouteHandlerMethod } from 'fastify';
-import { createReadStream, readFileSync, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  AcpLogEntry,
-  AcpLogPage,
-  AgentItemBody,
-  CreateAgentSetBody,
-  CreateSessionBody,
-  CreateThreadBody,
   ExecLogPage,
-  ExecRequest,
   HealthResponse,
   PushKeyResponse,
-  PushSubscribeBody,
-  ReviewAnnotationBody,
+  ReadyResponse,
   ReviewAnnotationsResponse,
-  ReviewBaseBody,
-  ReviewFileBody,
   StoredAttachment,
-  ThreadDoneBody,
-  UpdateAgentSetBody,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
-import type { config } from './config.ts';
 import {
+  agentItemBody,
+  backgroundStopBody,
+  createAgentSetBody,
+  createSessionBody,
+  createThreadBody,
+  execBody,
+  parseBody,
+  pushSubscribeBody,
+  pushUnsubscribeBody,
+  reviewAnnotationBody,
+  reviewBaseBody,
+  reviewFileBody,
+  threadDoneBody,
+  updateAgentSetBody,
+} from './bodies.ts';
+import type { Config } from './config.ts';
+import {
+  countLiveSessions,
   countPushSubscriptions,
   deletePushSubscription,
   upsertPushSubscription,
-  type openDb,
+  type Db,
 } from './db.ts';
+import * as dk from './docker.ts';
 import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
-import { resolveInRoot } from './review/fs.ts';
+import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { SessionManager } from './sessions.ts';
 import { setSessionOwner } from './workspaces.ts';
@@ -50,23 +57,128 @@ const VERSION = '1.0.0';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
+/**
+ * Dashboard bundle, copied into the image by the Dockerfile's build stage.
+ *
+ * A caller may name another one: the browser suite serves the bundle it just
+ * built, rather than putting a copy where the image would have.
+ */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
 
-/** Everything one orchestrator process owns, wired together. */
+/**
+ * The bundle directory whose filenames carry a content hash, which is Vite's
+ * `build.assetsDir`.
+ */
+const HASHED_ASSETS = '/assets/';
+
+/** How long a content-hashed asset may be held, in seconds. A year. */
+const ASSET_MAX_AGE = 31_536_000;
+
+/**
+ * How long one file of the bundle may be held.
+ *
+ * A name under the hashed-asset directory is derived from the bytes under it,
+ * so a build that changes a file changes its name and this copy can never be
+ * the wrong one. Every other name in the bundle — index.html above all, which
+ * is the file that says which assets are current — stays the same across
+ * builds and is therefore revalidated on every load.
+ */
+function cacheControlFor(path: string): string {
+  return path.startsWith(HASHED_ASSETS)
+    ? `public, max-age=${ASSET_MAX_AGE}, immutable`
+    : 'no-cache';
+}
+
+/**
+ * SHA-256 of the one inline script of index.html, base64.
+ *
+ * The theme switch that runs before first paint. It is the page's only inline
+ * script and it is stated here rather than allowed wholesale, so the policy
+ * still refuses every script it does not know. Editing that script means
+ * editing this.
+ */
+const THEME_SCRIPT_HASH = "'sha256-4AdoNi/wvSpHLY3qRCPU3bCPtiW7L8VuMIcRP0Slv5s='";
+
+/** A Host header worth putting in a header this process writes. */
+const SAFE_HOST = /^[A-Za-z0-9.\-[\]]+(:\d+)?$/;
+
+/**
+ * The content security policy the dashboard document is served under.
+ *
+ * The thread renders markdown the agent wrote, and a remote `<img>` in it
+ * would carry whatever it names out through the reader's browser instead of
+ * through the egress proxy. So every fetch the page can make is pinned to
+ * this origin: its own scripts and styles, images from here plus the `data:`
+ * and `blob:` URLs an attachment preview is built from, and the gateway
+ * socket on this same host.
+ *
+ * `'unsafe-inline'` for styles and not for scripts: the overlay primitives
+ * position themselves and the code pane colours every token through the style
+ * attribute, and a style attribute cannot be hashed.
+ *
+ * The socket is spelled out as well as covered by `'self'`, because not every
+ * browser reads `'self'` as including the ws and wss forms of its origin. A
+ * Host header that is not a plain host is dropped instead, which leaves the
+ * page working everywhere that does.
+ */
+function documentCsp(host: string | undefined): string {
+  const origin = host !== undefined && SAFE_HOST.test(host) ? host : null;
+  return [
+    "default-src 'none'",
+    `script-src 'self' ${THEME_SCRIPT_HASH}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    `connect-src 'self'${origin ? ` ws://${origin} wss://${origin}` : ''}`,
+    "manifest-src 'self'",
+    "worker-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+/**
+ * Smallest body that is compressed, in bytes. Below it the encoding headers
+ * cost more than the saving.
+ */
+const COMPRESS_THRESHOLD_BYTES = 1024;
+
+/** Whether the database answers a query, for the readiness probe. */
+function databaseAnswers(db: Db): boolean {
+  try {
+    db.prepare('SELECT 1').get();
+    return true;
+  } catch (err) {
+    log.warn('the database did not answer', { error: (err as Error).message });
+    return false;
+  }
+}
+
+/** Whether the Docker daemon answers, for the readiness probe. */
+async function dockerAnswers(): Promise<boolean> {
+  try {
+    await dk.docker().ping();
+    return true;
+  } catch (err) {
+    log.warn('the Docker daemon did not answer', { error: (err as Error).message });
+    return false;
+  }
+}
+
+/** What a caller may put in place of a default when it builds the app. */
+export interface BuildOptions {
+  /** Where the dashboard bundle is, for a caller serving one it built itself. */
+  bundleDir?: string;
+}
+
+/** What one orchestrator process hands its boot and its tests, wired together. */
 export interface Orchestrator {
   app: ReturnType<typeof Fastify>;
-  db: ReturnType<typeof openDb>;
   manager: SessionManager;
-  cfg: ReturnType<typeof config>;
+  cfg: Config;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
-  /** Where "a thread wants you" goes. */
-  notifier: Notifier;
-  /** Reads and writes review data over the sessions' workspace directories. */
-  review: ReviewService;
-  /** The AGENTS.md, skills and commands sessions are configured with. */
-  agents: AgentStore;
   /** Session ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -78,10 +190,8 @@ export interface Orchestrator {
  * Boot lives in main(); this is separate so a test can drive the real routes
  * over a real database without a Docker socket or an open port.
  */
-export function buildApp(
-  cfg: ReturnType<typeof config>,
-  db: ReturnType<typeof openDb>,
-): Orchestrator {
+export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestrator {
+  const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
   // Before anything creates a workspace directory or a container: everything
   // that writes files for the agent, or runs a process as it, reads this.
   setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
@@ -90,9 +200,13 @@ export function buildApp(
   const notifier = new Notifier(db, cfg);
   const agents = new AgentStore(db, cfg.DATA_DIR);
   const manager = new SessionManager(db, cfg, egress, notifier, agents);
-  // The review surface reaches the files through the manager, which is the one
-  // thing that knows whether a session is directory-backed yet.
-  const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
+  // The review surface reaches the files and the box through the manager,
+  // which is the one thing that knows whether a session is directory-backed
+  // yet and how to get a container of it running.
+  const review = new ReviewService(db, {
+    workspacePath: (id) => manager.workspacePathOf(id),
+    execTarget: (id) => manager.execTarget(id),
+  });
 
   let proxyWarnings: string[] = [];
 
@@ -108,6 +222,25 @@ export function buildApp(
     { parseAs: 'buffer' },
     (_req, body, done) => done(null, body),
   );
+
+  /**
+   * One line per response, which is the whole request log: Fastify's own
+   * logger is off and everything here goes through the structured one.
+   *
+   * The path is taken without its query string, which can carry a filename or
+   * a path the reader typed. A refusal is the caller's problem and a failure
+   * is the deployment's, so the two get different levels.
+   */
+  app.addHook('onResponse', async (req, reply) => {
+    const status = reply.statusCode;
+    const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+    log[level]('request', {
+      method: req.method,
+      path: req.url.split('?')[0],
+      status,
+      ms: Math.round(reply.elapsedTime),
+    });
+  });
 
   // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
@@ -126,14 +259,17 @@ export function buildApp(
     return reply.code(500).send({ error: 'Internal error' });
   });
 
+  /**
+   * Liveness: this process is serving requests. Always 200 while it answers
+   * at all, so a probe reading the status code restarts nothing that is
+   * merely misconfigured. What is wrong with the deployment is in the body.
+   */
   app.get('/healthz', async (): Promise<HealthResponse> => {
-    const row = db
-      .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
-      .get() as { n: number };
+    const sessions = countLiveSessions(db);
     return {
       ok: true,
       version: VERSION,
-      sessions: row.n,
+      sessions,
       proxyWarnings,
       egress: egress.status(),
       claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
@@ -145,10 +281,35 @@ export function buildApp(
     };
   });
 
+  /**
+   * Readiness: whether this deployment can serve sessions, as a status code.
+   *
+   * Three things decide it, because a session cannot be created or started
+   * without all three: the database answers, the proxy holds the egress
+   * policy this orchestrator composed, and the Docker daemon is reachable. An
+   * egress policy that is not in sync counts because a session started
+   * against a stale one reaches hosts the deployment has stopped allowing.
+   *
+   * What /healthz also reports stays out of this. A missing Claude token is a
+   * deployment that serves sessions nobody has given a credential, and a
+   * proxy warning names one session's network rather than the instance — a
+   * probe that took the instance out of service for either would be answering
+   * about the wrong thing.
+   */
+  app.get('/readyz', async (_req, reply): Promise<ReadyResponse> => {
+    const checks = {
+      database: databaseAnswers(db),
+      egress: egress.status()?.inSync === true,
+      docker: await dockerAnswers(),
+    };
+    const ready = Object.values(checks).every(Boolean);
+    return reply.code(ready ? 200 : 503).send({ ready, version: VERSION, checks });
+  });
+
   app.get('/api/sessions', async () => manager.list());
 
   app.post('/api/sessions', async (req, reply) => {
-    const created = await manager.create(req.body as CreateSessionBody);
+    const created = await manager.create(parseBody(createSessionBody, req.body));
     return reply.code(201).send(created);
   });
 
@@ -191,7 +352,7 @@ export function buildApp(
    */
   app.post('/api/sessions/:id/threads', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const created = await manager.createThread(id, req.body as CreateThreadBody | undefined);
+    const created = await manager.createThread(id, parseBody(createThreadBody, req.body));
     return reply.code(201).send(created);
   });
 
@@ -214,8 +375,7 @@ export function buildApp(
    */
   app.post('/api/sessions/:id/threads/:threadId/done', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
-    const done = (req.body as ThreadDoneBody | undefined)?.done;
-    if (typeof done !== 'boolean') throw new HttpError(400, 'done must be true or false');
+    const { done } = parseBody(threadDoneBody, req.body);
     return manager.setThreadDone(id, threadId, done);
   });
 
@@ -233,23 +393,8 @@ export function buildApp(
    */
   app.post('/api/sessions/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
-    const body = req.body as { processId?: unknown } | undefined;
-    const processId = typeof body?.processId === 'string' ? body.processId : undefined;
+    const { processId } = parseBody(backgroundStopBody, req.body);
     return manager.stopBackgroundWork(id, threadId, processId);
-  });
-
-  app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
-    const { id } = req.params as { id: string };
-    const { after, limit } = req.query as { after?: string; limit?: string };
-    const afterId = Number(after ?? 0) || 0;
-    const max = Math.min(Math.max(Number(limit ?? 200) || 200, 1), 1000);
-    const entries = db
-      .prepare(
-        `SELECT id, direction, ts, payload FROM acp_log
-         WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-      )
-      .all(id, afterId, max) as AcpLogEntry[];
-    return { entries, cursor: entries.at(-1)?.id ?? afterId };
   });
 
   /**
@@ -259,7 +404,8 @@ export function buildApp(
    * The response is chunked text rather than JSON so the browser can render
    * the output growing; the last line is a trailer carrying the exit code and
    * whether either limit was hit. Both limits live in exec.ts: 120 seconds of
-   * wall clock and 256 KiB of output, after which the exec is killed.
+   * wall clock, which the container holds itself, and 256 KiB of output,
+   * which ends the response rather than the command.
    *
    * The command runs inside the session's own isolation, as the non-root agent
    * user, and never reaches a command line on the host.
@@ -271,31 +417,40 @@ export function buildApp(
    */
   const runExec: RouteHandlerMethod = async (req, reply) => {
     const { id, threadId } = req.params as { id: string; threadId?: string };
-    const body = req.body as ExecRequest | undefined;
-    const command = body?.command?.trim();
+    const body = parseBody(execBody, req.body);
+    const command = body.command.trim();
     if (!command) throw new HttpError(400, 'command is required');
     if (command.length > 8000) throw new HttpError(400, 'command is too long');
-    const after = typeof body?.after === 'string' && body.after.length <= 200 ? body.after : null;
+    const after = typeof body.after === 'string' && body.after.length <= 200 ? body.after : null;
 
     const thread = manager.resolveThread(id, threadId);
+    // Marks the session active on its own, so the box is held from here.
     const target = await manager.execTarget(id);
-    manager.touch(id);
     const startedAt = Date.now();
 
     reply.raw.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-store',
+      // The body is whatever the command printed, so a browser must read it
+      // as the plain text it is declared to be and sniff nothing else out.
+      'X-Content-Type-Options': 'nosniff',
       // Nothing may buffer this: the point is that output appears as it is
       // produced.
       'X-Accel-Buffering': 'no',
     });
 
-    const outcome = await execs.runCommand(target, command, (chunk) => {
-      reply.raw.write(chunk);
-    });
-    reply.raw.end(execs.trailer(outcome));
-
-    execs.record(db, id, thread, command, outcome, startedAt, after);
+    // The head is on the wire, so a failure from here on cannot become an
+    // error status: it ends the stream with a trailer that says so instead.
+    try {
+      const outcome = await execs.runCommand(target, command, (chunk) => {
+        reply.raw.write(chunk);
+      });
+      reply.raw.end(execs.trailer(outcome));
+      execs.record(db, id, thread, command, outcome, startedAt, after);
+    } catch (err) {
+      log.session(id).warn('exec failed', { error: (err as Error).message });
+      reply.raw.end(`\n[exec failed: ${(err as Error).message}]\n`);
+    }
     manager.touch(id);
     return reply;
   };
@@ -331,7 +486,7 @@ export function buildApp(
       const workspace = manager.workspacePathOf(id);
       if (!workspace) throw new HttpError(404, 'Session not found');
 
-      const stored = storeAttachment(workspace, name, body);
+      const stored = await storeAttachment(workspace, name, body);
       // The same touch every other thing a user does to a session makes: an
       // upload is somebody working here, and the reaper counts idleness.
       manager.touch(id);
@@ -377,7 +532,9 @@ export function buildApp(
     void reply.headers({
       'Content-Type': served.contentType,
       'Content-Length': String(stat.size),
-      'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename="${name}"`,
+      // The name is percent-encoded: it comes from a directory the agent
+      // writes to, and a quote or a newline in it must not reach the header.
+      'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
       // The type is decided here rather than sniffed from the bytes, so a
       // download is never treated as a document.
       'X-Content-Type-Options': 'nosniff',
@@ -408,25 +565,37 @@ export function buildApp(
   // --- Code review over a session's workspace ---------------------------------
 
   /**
-   * The review surface. None of these routes starts or touches a session
-   * container: the workspace is a directory this process can read, which is what
-   * makes reviewing a stopped session — the natural moment, once the agent is
-   * done — cost nothing.
+   * The review surface. Files come off the workspace directory this process
+   * can read; git runs in the session's own container, over repositories the
+   * agent controls. So a route that asks git something starts a stopped box,
+   * and reviewing keeps it running.
    *
-   * The responses are batched so a client gets one round trip per screen:
-   * the tree endpoint carries the whole left panel, the file endpoint the
-   * whole file view.
+   * The responses are batched so a client gets one round trip per screen: the
+   * directory endpoint carries a folder and everything the left panel needs
+   * around it, the file endpoint the whole file view.
    *
-   * None of them touches a session's activity timestamp. Reviewing is not the
-   * agent working, so reading a review must not hold off the reaper.
+   * A route that asks git something marks the session active, the same way a
+   * local command does: running git in the box is use of the box, and the
+   * reaper stopping one under an open review would only be followed by the
+   * next request starting it again.
    *
-   * Every one reads the filesystem on the spot, so a fetch is the freshness
-   * and there is nothing to poll.
+   * Every one reads the filesystem on the spot and there is nothing to poll, so
+   * a fetch is the freshness. Git is the exception: its answer for the whole
+   * workspace is held for as long as a review is being browsed, and the browser
+   * asks for a new one when it arrives.
    */
 
-  app.get('/api/sessions/:id/review/tree', async (req) => {
+  /**
+   * One directory of the review, with the facts the whole view needs.
+   *
+   * `path` is workspace-relative and empty for the root. `fresh` is the browser
+   * saying it has arrived rather than opened a folder: it takes git's answer
+   * for the workspace again and runs the drift check.
+   */
+  app.get('/api/sessions/:id/review/dir', async (req) => {
     const { id } = req.params as { id: string };
-    return review.tree(id);
+    const { path, fresh } = req.query as { path?: string; fresh?: string };
+    return review.dir(id, path ?? '', fresh === '1');
   });
 
   app.get('/api/sessions/:id/review/file', async (req) => {
@@ -443,13 +612,18 @@ export function buildApp(
    * agent made in the meantime is refused instead of made. The answer is the
    * file endpoint's, so the view repaints from one round trip.
    */
-  app.put('/api/sessions/:id/review/file', async (req) => {
-    const { id } = req.params as { id: string };
-    const body = req.body as ReviewFileBody | undefined;
-    if (!body?.path) throw new HttpError(400, 'path is required');
-    if (typeof body.content !== 'string') throw new HttpError(400, 'content is required');
-    return review.writeFile(id, body.path, body.content, String(body.hash ?? ''));
-  });
+  app.put(
+    '/api/sessions/:id/review/file',
+    // Above the display limit the service enforces, because a file that size
+    // grows when it is JSON-encoded, and a save must not fail before that
+    // check is reached.
+    { bodyLimit: 2 * MAX_FILE_BYTES },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const body = parseBody(reviewFileBody, req.body);
+      return review.writeFile(id, body.path, body.content, body.hash ?? '');
+    },
+  );
 
   /**
    * Creates or replaces the comment on one line. The same route for both,
@@ -458,14 +632,8 @@ export function buildApp(
    */
   app.put('/api/sessions/:id/review/annotations', async (req) => {
     const { id } = req.params as { id: string };
-    const body = req.body as ReviewAnnotationBody | undefined;
-    if (!body?.path) throw new HttpError(400, 'path is required');
-    const annotations = await review.setAnnotation(
-      id,
-      body.path,
-      Number(body.line),
-      String(body.comment ?? ''),
-    );
+    const body = parseBody(reviewAnnotationBody, req.body);
+    const annotations = await review.setAnnotation(id, body.path, body.line, body.comment);
     return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
   });
 
@@ -484,10 +652,8 @@ export function buildApp(
    */
   app.put('/api/sessions/:id/review/base', async (req) => {
     const { id } = req.params as { id: string };
-    const body = req.body as ReviewBaseBody | undefined;
-    const rev = body?.rev ?? null;
-    if (rev !== null && typeof rev !== 'string') throw new HttpError(400, 'rev must be a string');
-    return review.setBase(id, rev);
+    const { rev } = parseBody(reviewBaseBody, req.body);
+    return review.setBase(id, rev ?? null);
   });
 
   /** Deletes REVIEW.md — the "New review" button. The file is the review. */
@@ -512,8 +678,8 @@ export function buildApp(
   app.get('/api/agent-sets', async () => agents.listSets());
 
   app.post('/api/agent-sets', async (req, reply) => {
-    const body = req.body as CreateAgentSetBody | undefined;
-    return reply.code(201).send(agents.createSet(body?.name as string));
+    const body = parseBody(createAgentSetBody, req.body);
+    return reply.code(201).send(agents.createSet(body.name));
   });
 
   app.get('/api/agent-sets/:setId', async (req) => {
@@ -523,7 +689,7 @@ export function buildApp(
 
   app.patch('/api/agent-sets/:setId', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.updateSet(setId, (req.body ?? {}) as UpdateAgentSetBody);
+    return agents.updateSet(setId, parseBody(updateAgentSetBody, req.body));
   });
 
   app.delete('/api/agent-sets/:setId', async (req, reply) => {
@@ -535,7 +701,7 @@ export function buildApp(
   /** Creates a skill or command, or replaces the one already under that name. */
   app.put('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.putItem(setId, req.body as AgentItemBody | undefined);
+    return agents.putItem(setId, parseBody(agentItemBody, req.body));
   });
 
   app.delete('/api/agent-sets/:setId/items', async (req) => {
@@ -611,22 +777,23 @@ export function buildApp(
    * authenticates the rest of `/api` decides who may add one.
    */
   app.post('/api/push/subscribe', async (req, reply) => {
-    const body = req.body as PushSubscribeBody | undefined;
-    const endpoint = validEndpoint(body?.endpoint);
-    const p256dh = validKey(body?.keys?.p256dh, 65, 'p256dh');
-    const auth = validKey(body?.keys?.auth, 16, 'auth');
-    const label = typeof body?.label === 'string' ? body.label.slice(0, 100) : null;
+    const body = parseBody(pushSubscribeBody, req.body);
+    const endpoint = validEndpoint(body.endpoint);
+    const p256dh = validKey(body.keys.p256dh, 65, 'p256dh');
+    const auth = validKey(body.keys.auth, 16, 'auth');
+    const label = typeof body.label === 'string' ? body.label.slice(0, 100) : null;
 
-    upsertPushSubscription(db, endpoint, p256dh, auth, label);
+    // Under the key this deployment holds now: a subscription outlives a key
+    // rotation as a row that can never be delivered to again.
+    upsertPushSubscription(db, endpoint, p256dh, auth, label, notifier.publicKey);
     log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
     return reply.code(204).send();
   });
 
   /** Forgets a browser's subscription, on its own way out. */
   app.delete('/api/push/subscribe', async (req, reply) => {
-    const body = req.body as { endpoint?: unknown } | undefined;
-    if (typeof body?.endpoint !== 'string') throw new HttpError(400, 'endpoint is required');
-    deletePushSubscription(db, body.endpoint);
+    const { endpoint } = parseBody(pushUnsubscribeBody, req.body);
+    deletePushSubscription(db, endpoint);
     return reply.code(204).send();
   });
 
@@ -659,11 +826,15 @@ export function buildApp(
    * The path is resolved under the bundle directory and has to stay there, with
    * the separator in the prefix check so a sibling directory whose name merely
    * starts the same way is not inside it.
+   *
+   * Every file is streamed rather than read in one piece: the entry chunk is
+   * over a megabyte, and reading it synchronously would stop the event loop
+   * on every request for it.
    */
-  function sendBundle(reply: FastifyReply, path: string): FastifyReply {
-    const candidate = resolve(DASHBOARD_DIR, `.${normalize(path)}`);
+  function sendBundle(reply: FastifyReply, path: string, host: string | undefined): FastifyReply {
+    const candidate = resolve(bundleDir, `.${normalize(path)}`);
     if (
-      candidate.startsWith(`${DASHBOARD_DIR}/`) &&
+      candidate.startsWith(`${bundleDir}/`) &&
       path !== '/' &&
       existsSync(candidate) &&
       statSync(candidate).isFile()
@@ -671,31 +842,57 @@ export function buildApp(
       const ext = candidate.slice(candidate.lastIndexOf('.'));
       return reply
         .type(CONTENT_TYPES[ext] ?? 'application/octet-stream')
-        .send(readFileSync(candidate));
+        .header('Cache-Control', cacheControlFor(path))
+        .send(createReadStream(candidate));
     }
-    const index = join(DASHBOARD_DIR, 'index.html');
+    const index = join(bundleDir, 'index.html');
     if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
-    return reply.type('text/html; charset=utf-8').send(readFileSync(index));
+    return reply
+      .headers({
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': cacheControlFor('/index.html'),
+        'Content-Security-Policy': documentCsp(host),
+      })
+      .send(createReadStream(index));
   }
 
-  app.setNotFoundHandler((req, reply) => {
-    if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
-    const url = req.url.split('?')[0] ?? '/';
-    if (url.startsWith('/api') || url.startsWith('/ws')) {
-      return reply.code(404).send({ error: 'Not found' });
-    }
-    return sendBundle(reply, url);
+  /**
+   * The bundle, and the compression it is served with.
+   *
+   * The compression plugin wires itself into each route as that route is
+   * declared, so it is loaded first and the route below is declared from
+   * inside it. That is also why the bundle is a route rather than the
+   * not-found handler: a handler Fastify never announces as a route is a
+   * handler the plugin never sees.
+   *
+   * The entry chunk is over a megabyte of JavaScript and about a third of
+   * that gzipped. The plugin picks whichever encoding the browser offered and
+   * leaves a body it knows is already compressed — a PNG, a font — alone.
+   */
+  void app.register(async (bundle) => {
+    await bundle.register(compress, { global: true, threshold: COMPRESS_THRESHOLD_BYTES });
+    /**
+     * Every GET that is not the API or the gateway is the dashboard: a file
+     * of the bundle where the path names one, and index.html where it names a
+     * client-side route.
+     */
+    bundle.get('/*', async (req, reply) => {
+      const url = req.url.split('?')[0] ?? '/';
+      if (url.startsWith('/api') || url.startsWith('/ws')) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      return sendBundle(reply, url, req.headers.host);
+    });
   });
+
+  /** Anything the routes above did not match, which is never the dashboard. */
+  app.setNotFoundHandler(async (_req, reply) => reply.code(404).send({ error: 'Not found' }));
 
   return {
     app,
-    db,
     manager,
     cfg,
     egress,
-    notifier,
-    review,
-    agents,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

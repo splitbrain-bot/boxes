@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils';
 export function ReviewToolbar({
   changeCount,
   commentCount,
+  steppable,
   wrap,
   editable,
   editing,
@@ -42,6 +43,8 @@ export function ReviewToolbar({
 }: {
   changeCount: number;
   commentCount: number;
+  /** Whether the pane has rows to step to. A file shown as one block has none. */
+  steppable: boolean;
   wrap: boolean;
   /** Whether this file can be edited at all. */
   editable: boolean;
@@ -65,6 +68,7 @@ export function ReviewToolbar({
         icon={<GitCompare className="size-3.5" />}
         label="change"
         count={changeCount}
+        steppable={steppable}
         onStep={onStepChange}
       />
       <span aria-hidden className="mx-1 h-4 w-px bg-border" />
@@ -72,6 +76,7 @@ export function ReviewToolbar({
         icon={<MessageSquare className="size-3.5" />}
         label="comment"
         count={commentCount}
+        steppable={steppable}
         onStep={onStepComment}
       />
       <span className="flex-1" />
@@ -138,13 +143,17 @@ function Group({
   icon,
   label,
   count,
+  steppable,
   onStep,
 }: {
   icon: React.ReactNode;
   label: string;
   count: number;
+  /** Whether there is a row to step to. */
+  steppable: boolean;
   onStep: (direction: -1 | 1) => void;
 }) {
+  const nothingToStepTo = count === 0 || !steppable;
   const plural = count === 1 ? label : `${label}s`;
   return (
     <div className="flex items-center gap-0.5">
@@ -159,7 +168,7 @@ function Group({
         type="button"
         variant="ghost"
         size="icon-sm"
-        disabled={count === 0}
+        disabled={nothingToStepTo}
         onClick={() => onStep(-1)}
         aria-label={`Previous ${label}`}
         title={`Previous ${label}`}
@@ -170,7 +179,7 @@ function Group({
         type="button"
         variant="ghost"
         size="icon-sm"
-        disabled={count === 0}
+        disabled={nothingToStepTo}
         onClick={() => onStep(1)}
         aria-label={`Next ${label}`}
         title={`Next ${label}`}

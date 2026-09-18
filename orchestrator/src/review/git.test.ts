@@ -1,196 +1,245 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, test } from 'vitest';
-import { DIFF_SAFETY_FLAGS, git, hardenedEnv, hardeningFlags, headCommit, topLevel } from './git.ts';
+import {
+  DIFF_PARSE_FLAGS,
+  git,
+  gitArgv,
+  gitEnv,
+  gitOut,
+  headCommit,
+  isTopLevel,
+  setGitRunnerForTests,
+  type GitResult,
+  type GitRunner,
+  type GitTarget,
+} from './git.ts';
 
 /**
- * The hardened git invocation.
+ * How review invokes git.
  *
- * The flag set is asserted rather than described, because review runs git over
- * a tree the agent controls and repo-local config can execute commands on
- * exactly the operations it runs. Removing one of these has to fail a test.
+ * Git runs in the session's container, so what is pinned down here is the
+ * command line and the environment the builders produce, that every
+ * invocation is addressed to a container and a directory inside it, and that
+ * no file of the orchestrator can start a process at all.
  */
 
-let dir: string;
+/** A target naming a container and a path inside it, as the service builds one. */
+const target: GitTarget = { containerId: 'box-1', dir: '/workspace/project' };
 
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'boxes-git-'));
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
-});
-
-/** A repository with one commit, built with the ambient git. */
-function repo(): string {
-  const run = (...args: string[]): void => {
-    execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
-  };
-  run('init', '-q');
-  run('config', 'user.email', 'test@example.com');
-  run('config', 'user.name', 'test');
-  run('config', 'commit.gpgsign', 'false');
-  writeFileSync(join(dir, 'tracked.txt'), 'x\n');
-  run('add', '.');
-  run('commit', '-q', '-m', 'init');
-  return dir;
+/** A runner that answers nothing and records how it was called. */
+function recorder(result: Partial<GitResult> = {}): {
+  calls: Array<{ target: GitTarget; argv: string[]; env: Record<string, string> }>;
+} {
+  const calls: Array<{ target: GitTarget; argv: string[]; env: Record<string, string> }> = [];
+  setGitRunnerForTests(async (called, argv, env) => {
+    calls.push({ target: called, argv, env });
+    return { ok: true, stdout: '', stderr: '', code: 0, ...result };
+  });
+  return { calls };
 }
 
-describe('the hardening flag set', () => {
-  const flags = hardeningFlags('/data/workspaces/abc/repo');
-
-  /** Whether `-c name=value` is in the prefix, whatever the value. */
-  function sets(name: string): string | undefined {
-    for (let i = 0; i < flags.length - 1; i++) {
-      if (flags[i] === '-c' && flags[i + 1]!.startsWith(`${name}=`)) {
-        return flags[i + 1]!.slice(name.length + 1);
-      }
-    }
-    return undefined;
+/**
+ * A runner that starts git on this machine, in the directory the target names.
+ *
+ * The repositories these tests build are their own, so running their git here
+ * is what keeps the builders honest about real git. Nothing in the
+ * orchestrator does this: the runner it ships with execs in a container.
+ */
+const localGit: GitRunner = async (called, argv, env) => {
+  try {
+    const stdout = execFileSync(argv[0]!, argv.slice(1), {
+      cwd: called.dir,
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return { ok: true, stdout, stderr: '', code: 0 };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: string; stderr?: string };
+    return {
+      ok: false,
+      stdout: failed.stdout ?? '',
+      stderr: failed.stderr ?? '',
+      code: failed.status ?? null,
+    };
   }
+};
 
-  test('turns off the config value that makes status run a command', () => {
-    // core.fsmonitor is a hook path git runs on every status. Overridden here
-    // rather than trusted to be absent from an agent-written .git/config.
-    assert.equal(sets('core.fsmonitor'), 'false');
-  });
+afterEach(() => setGitRunnerForTests(null));
 
-  test('points hooksPath away from the repository', () => {
-    const hooks = sets('core.hooksPath');
-    assert.ok(hooks);
-    assert.ok(!hooks.includes('/data/workspaces/abc'));
-  });
-
-  test('marks the root safe, and only the root', () => {
-    // Without this git refuses a repository owned by uid 1000. Scoped to the
-    // one directory rather than '*'.
-    assert.equal(sets('safe.directory'), '/data/workspaces/abc/repo');
-  });
-
-  test('refuses the protocols that would run a program to fetch', () => {
-    assert.equal(sets('protocol.ext.allow'), 'never');
-    assert.equal(sets('protocol.file.allow'), 'never');
-  });
-
-  test('keeps non-ASCII paths unquoted, so they match the tree', () => {
-    assert.equal(sets('core.quotepath'), 'false');
-  });
-
-  test('every entry is a -c pair, so nothing can smuggle a subcommand', () => {
+describe('the command line', () => {
+  test('every invocation is git, with its flags as -c pairs', () => {
+    const argv = gitArgv(['status', '--porcelain']);
+    assert.equal(argv[0], 'git');
+    const flags = argv.slice(1, argv.indexOf('status'));
     assert.equal(flags.length % 2, 0);
     for (let i = 0; i < flags.length; i += 2) assert.equal(flags[i], '-c');
   });
-});
 
-describe('the hardened environment', () => {
-  const env = hardenedEnv();
-
-  test('reads no system and no user configuration', () => {
-    assert.equal(env['GIT_CONFIG_NOSYSTEM'], '1');
-    // HOME is an empty directory this process made, so ~/.gitconfig does not
-    // exist to be read.
-    assert.ok(env['HOME']);
-    assert.notEqual(env['HOME'], process.env['HOME']);
-    assert.equal(env['XDG_CONFIG_HOME'], env['HOME']);
+  test('non-ASCII paths stay unquoted, so they match the tree', () => {
+    assert.ok(gitArgv(['status']).includes('core.quotepath=false'));
   });
 
-  test('never prompts and never takes an optional lock', () => {
-    assert.equal(env['GIT_TERMINAL_PROMPT'], '0');
+  test('the subcommand and its arguments are passed through as they were given', () => {
+    const argv = gitArgv(['rev-parse', '--verify', '--quiet', 'main^{commit}']);
+    assert.deepEqual(argv.slice(argv.indexOf('rev-parse')), [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      'main^{commit}',
+    ]);
+  });
+
+  test('a diff carries the flags the parser needs, ahead of what was asked for', () => {
+    // An external driver or a textconv filter would produce something the
+    // hunk parser cannot read, and colour would corrupt it.
+    assert.deepEqual([...DIFF_PARSE_FLAGS], ['--no-ext-diff', '--no-textconv', '--no-color']);
+    const argv = gitArgv(['diff', 'HEAD', '--', 'a.txt']);
+    assert.deepEqual(argv.slice(argv.indexOf('diff')), [
+      'diff',
+      ...DIFF_PARSE_FLAGS,
+      'HEAD',
+      '--',
+      'a.txt',
+    ]);
+  });
+
+  test('a subcommand that is not a diff gets none of them', () => {
+    assert.ok(!gitArgv(['status', '--porcelain']).includes('--no-textconv'));
+  });
+});
+
+describe('the environment', () => {
+  const env = gitEnv();
+
+  test('reads, never writes, and never waits for a lock or a prompt', () => {
     assert.equal(env['GIT_OPTIONAL_LOCKS'], '0');
+    assert.equal(env['GIT_TERMINAL_PROMPT'], '0');
   });
 
-  test('drops every variable that would point git at a program', () => {
-    for (const name of [
-      'GIT_EXTERNAL_DIFF',
-      'GIT_SSH',
-      'GIT_SSH_COMMAND',
-      'GIT_ASKPASS',
-      'GIT_CONFIG',
-      'GIT_CONFIG_GLOBAL',
-      'GIT_DIR',
-      'GIT_WORK_TREE',
-    ]) {
-      assert.equal(env[name], undefined, name);
-    }
+  test('a pathspec is a path, not a glob', () => {
+    // A filename holding `*`, `?` or `[` would otherwise make `-- path` match
+    // files nobody asked about.
+    assert.equal(env['GIT_LITERAL_PATHSPECS'], '1');
   });
 
-  test('drops the proxy variables, since nothing here is remote', () => {
-    for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
-      assert.equal(env[name], undefined, name);
-    }
+  test('git writes one language, whatever the box is set to', () => {
+    assert.equal(env['LC_ALL'], 'C');
+  });
+
+  test('nothing of this process travels into the box', () => {
+    // The container has an environment of its own, and this is added to it.
+    assert.deepEqual(Object.keys(env).sort(), [
+      'GIT_LITERAL_PATHSPECS',
+      'GIT_OPTIONAL_LOCKS',
+      'GIT_TERMINAL_PROMPT',
+      'LC_ALL',
+    ]);
   });
 });
 
-test('diff runs with the flags that stop a repository running a program', () => {
-  // textconv and external diff drivers are configured per repository and run
-  // on diff. Both are refused, and colour would only corrupt the parse.
-  assert.deepEqual([...DIFF_SAFETY_FLAGS], ['--no-ext-diff', '--no-textconv', '--no-color']);
+describe('where an invocation is addressed', () => {
+  test('the container and the directory it was given, and the built argv', async () => {
+    const { calls } = recorder();
+    await git(target, ['status', '--porcelain']);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0]!.target, target);
+    assert.equal(calls[0]!.argv[0], 'git');
+    assert.deepEqual(calls[0]!.env, gitEnv());
+  });
+
+  test('every helper goes through the same runner, with the same target', async () => {
+    const { calls } = recorder({ stdout: 'abc\n' });
+    await gitOut(target, ['ls-files']);
+    await isTopLevel(target);
+    await headCommit(target);
+    assert.deepEqual(
+      calls.map((call) => call.target),
+      [target, target, target],
+    );
+    assert.deepEqual(
+      calls.map((call) => call.argv.slice(call.argv.indexOf('-c') + 2)),
+      [['ls-files'], ['rev-parse', '--show-prefix'], ['rev-parse', 'HEAD']],
+    );
+  });
+
+  test('a runner that cannot reach the box answers like a git that failed', async () => {
+    setGitRunnerForTests(async () => {
+      throw new Error('no such container');
+    });
+    const result = await git(target, ['status']);
+    assert.deepEqual(result, { ok: false, stdout: '', stderr: '', code: null });
+  });
 });
 
-describe('running git', () => {
-  test('a subcommand runs in the root and reports its output', async () => {
-    repo();
-    const result = await git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+test('no file of the orchestrator can start a process of its own', () => {
+  // The whole of the protection: a repository's own configuration runs
+  // commands on `status` and on `diff`, and this process holds the Docker
+  // socket. Git runs in the box instead, so nothing here spawns anything.
+  const src = fileURLToPath(new URL('..', import.meta.url));
+  const offenders = readdirSync(src, { recursive: true, encoding: 'utf8' })
+    .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))
+    .filter((file) => readFileSync(join(src, file), 'utf8').includes('child_process'));
+  assert.deepEqual(offenders, []);
+});
+
+describe('over a repository git really answers about', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'boxes-git-'));
+    setGitRunnerForTests(localGit);
+    const run = (...args: string[]): void => {
+      execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+    };
+    run('init', '-q');
+    run('config', 'user.email', 'test@example.com');
+    run('config', 'user.name', 'test');
+    writeFileSync(join(dir, 'tracked.txt'), 'x\n');
+    run('add', '.');
+    run('commit', '-q', '-m', 'init');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The repository this test built, addressed the way the service addresses one. */
+  function here(sub = ''): GitTarget {
+    return { containerId: 'box-1', dir: sub === '' ? dir : join(dir, sub) };
+  }
+
+  test('a subcommand runs in the directory and reports its output', async () => {
+    const result = await git(here(), ['rev-parse', '--abbrev-ref', 'HEAD']);
     assert.equal(result.ok, true);
     assert.ok(result.stdout.trim().length > 0);
   });
 
   test('a non-zero exit is a result, not a throw', async () => {
-    repo();
-    const result = await git(dir, ['rev-parse', '--verify', '--quiet', 'nosuchrev^{commit}']);
+    const result = await git(here(), ['rev-parse', '--verify', '--quiet', 'nosuchrev^{commit}']);
     assert.equal(result.ok, false);
     assert.equal(typeof result.code, 'number');
   });
 
+  test('the top of a work tree is the top, and a directory inside it is not', async () => {
+    mkdirSync(join(dir, 'sub'));
+    assert.equal(await isTopLevel(here()), true);
+    assert.equal(await isTopLevel(here('sub')), false);
+    assert.match(await headCommit(here()), /^[0-9a-f]{40}$/);
+  });
+
   test('outside a repository there is no top level and no HEAD', async () => {
-    assert.equal(await topLevel(dir), null);
-    assert.equal(await headCommit(dir), '');
-  });
-
-  test('inside a repository both are reported', async () => {
-    repo();
-    const top = await topLevel(dir);
-    assert.ok(top);
-    // macOS puts temp directories behind /private, so compare the real paths.
-    assert.equal(top, execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      cwd: dir,
-      encoding: 'utf8',
-    }).trim());
-    assert.match(await headCommit(dir), /^[0-9a-f]{40}$/);
-  });
-
-  test('a repository-local fsmonitor hook is not run', async () => {
-    repo();
-    // The shape of the attack: a config value in a tree the agent wrote, on an
-    // operation review runs. The hook writes a file if it is ever executed.
-    const marker = join(dir, 'fsmonitor-ran');
-    const hook = join(dir, 'evil.sh');
-    writeFileSync(hook, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`, { mode: 0o755 });
-    execFileSync('git', ['config', 'core.fsmonitor', hook], { cwd: dir, stdio: 'pipe' });
-
-    const result = await git(dir, ['status', '--porcelain', '-uall']);
-    assert.equal(result.ok, true);
-    const { existsSync } = await import('node:fs');
-    assert.equal(existsSync(marker), false, 'core.fsmonitor was executed');
-  });
-
-  test('a repository-local textconv is not run on diff', async () => {
-    repo();
-    const marker = join(dir, 'textconv-ran');
-    const filter = join(dir, 'conv.sh');
-    writeFileSync(filter, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\ncat "$1"\n`, {
-      mode: 0o755,
-    });
-    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
-    writeFileSync(join(dir, '.git', 'info', 'attributes'), '*.txt diff=conv\n');
-    execFileSync('git', ['config', 'diff.conv.textconv', filter], { cwd: dir, stdio: 'pipe' });
-    writeFileSync(join(dir, 'tracked.txt'), 'changed\n');
-
-    await git(dir, ['diff', 'HEAD', ...DIFF_SAFETY_FLAGS, '--', 'tracked.txt']);
-    const { existsSync } = await import('node:fs');
-    assert.equal(existsSync(marker), false, 'textconv was executed');
+    const bare = mkdtempSync(join(tmpdir(), 'boxes-nogit-'));
+    try {
+      assert.equal(await isTopLevel({ containerId: 'box-1', dir: bare }), false);
+      assert.equal(await headCommit({ containerId: 'box-1', dir: bare }), '');
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
   });
 });

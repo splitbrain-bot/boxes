@@ -1,8 +1,14 @@
-import { agent as acpAgent, type AgentConnection, type Stream } from '@agentclientprotocol/sdk';
+import {
+  agent as acpAgent,
+  RequestError,
+  type AgentConnection,
+  type Stream,
+} from '@agentclientprotocol/sdk';
 import type { WebSocket } from 'ws';
-import type { Config } from '../config.ts';
+import { ACP_METHOD, ACP_SUBPROTOCOL } from '../../../shared/acp.ts';
 import { log } from '../log.ts';
 import type { SessionManager } from '../sessions.ts';
+import { threadOf } from './broadcast.ts';
 import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
 
 /**
@@ -16,51 +22,66 @@ import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
 /** Pass-through parser, leaving params and their _meta untouched. */
 const raw = <T = unknown>(params: unknown): T => params as T;
 
-/** The subprotocol the server negotiates; the rest of the offer is credentials. */
-export const ACP_SUBPROTOCOL = 'acp.v1';
-
 /** Methods forwarded to the adapter verbatim, _meta intact. */
 const FORWARDED_REQUESTS = [
-  'session/load',
-  'session/prompt',
-  'session/list',
-  'session/set_mode',
-  'session/set_model',
-  'session/set_config_option',
-  'session/fork',
-  'session/resume',
-  'session/close',
-  'session/delete',
-  'session/select_provider',
-  'authenticate',
+  ACP_METHOD.sessionLoad,
+  ACP_METHOD.sessionPrompt,
+  ACP_METHOD.sessionList,
+  ACP_METHOD.sessionSetMode,
+  ACP_METHOD.sessionSetModel,
+  ACP_METHOD.sessionSetConfigOption,
+  ACP_METHOD.sessionFork,
+  ACP_METHOD.sessionResume,
+  ACP_METHOD.sessionClose,
+  ACP_METHOD.sessionDelete,
+  ACP_METHOD.sessionSelectProvider,
+  ACP_METHOD.authenticate,
 ] as const;
 
 /** Notifications forwarded to the adapter verbatim. */
-const FORWARDED_NOTIFICATIONS = ['session/cancel'] as const;
+const FORWARDED_NOTIFICATIONS = [ACP_METHOD.sessionCancel] as const;
+
+/**
+ * How many bytes one browser's socket may have waiting on it.
+ *
+ * A send the socket cannot take is buffered in this process, so a browser
+ * that has stopped reading — a phone asleep with the tab open — would grow
+ * that buffer for as long as its session keeps talking. Past this it is
+ * closed instead, which costs it nothing it cannot get back: it reconnects
+ * and resumes from the message it holds.
+ */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 /** Source of handle ids, unique within the process. */
 let nextHandleId = 1;
 
 /**
- * Validates a WebSocket upgrade, saying why when it refuses.
+ * Validates a WebSocket upgrade against the token of the session it names,
+ * saying why when it refuses.
  *
  * A browser cannot set an Authorization header on a WebSocket, so a client
  * offers the token as a bearer.<token> subprotocol entry alongside acp.v1.
  * The gateway checks it here, on the upgrade itself. Which subprotocol is
  * negotiated is decided by the server's own `handleProtocols`.
+ *
+ * `sessionToken` is the token of the session being connected to, so a token
+ * reaches that session alone. An id no live session holds has none, which is
+ * null here and refuses every offer: an upgrade never says which sessions
+ * exist.
  */
 export function checkUpgrade(
   protocolHeader: string | undefined,
-  cfg: Config,
+  sessionToken: string | null,
 ): { ok: true } | { ok: false; reason: string } {
   const offered = (protocolHeader ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
   if (!offered.includes(ACP_SUBPROTOCOL)) {
-    return { ok: false, reason: 'missing acp.v1 subprotocol' };
+    return { ok: false, reason: `missing ${ACP_SUBPROTOCOL} subprotocol` };
   }
-  const expected = `bearer.${cfg.WS_AUTH_TOKEN}`;
+  if (!sessionToken) return { ok: false, reason: 'no such session' };
+  const expected = `bearer.${sessionToken}`;
   const presented = offered.find((p) => p.startsWith('bearer.'));
   if (!presented) return { ok: false, reason: 'missing bearer token subprotocol' };
   if (!timingSafeEqualStr(presented, expected)) {
@@ -79,8 +100,12 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** An ACP Stream over a WebSocket: one JSON-RPC message per text frame. */
-function wsStream(ws: WebSocket, sessionId: string): Stream {
+/**
+ * An ACP Stream over a WebSocket: one JSON-RPC message per text frame.
+ *
+ * Exported so the tests can drive the write side directly.
+ */
+export function wsStream(ws: WebSocket, sessionId: string): Stream {
   const slog = log.session(sessionId);
 
   const readable = new ReadableStream<unknown>({
@@ -130,7 +155,20 @@ function wsStream(ws: WebSocket, sessionId: string): Stream {
   const writable = new WritableStream<unknown>({
     write(msg) {
       if (ws.readyState !== ws.OPEN) return;
-      ws.send(JSON.stringify(msg));
+      // Settled by the send itself, so the writer waits for the socket
+      // instead of handing it everything a session says at once. A send that
+      // failed settles too: a socket that has gone is the read side's to
+      // notice, and it closes the stream.
+      return new Promise<void>((resolve) => {
+        ws.send(JSON.stringify(msg), () => resolve());
+        if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return;
+        slog.warn('closing a browser that cannot keep up', {
+          buffered: ws.bufferedAmount,
+        });
+        // 1008 is "policy violation": this connection broke a rule of the
+        // gateway rather than hitting a fault in it.
+        ws.close(1008, 'too far behind');
+      });
     },
     close() {
       if (ws.readyState === ws.OPEN) ws.close(1000, 'gateway closed');
@@ -175,9 +213,9 @@ export function attachDownstream(
         slog.debug('downstream notify failed', { error: err.message });
       });
     },
-    request: (method, params) => {
+    request: (method, params, signal) => {
       if (!conn) return Promise.reject(new Error('downstream closed'));
-      return conn.client.request(method, params);
+      return conn.client.request(method, params, { cancellationSignal: signal });
     },
     // 1012 is "service restart": the browser's own backoff brings it back,
     // and its fresh handshake pins whatever its thread is now. The only
@@ -211,7 +249,7 @@ export function attachDownstream(
   const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
     // Answered from the cached upstream response, so its _meta extensions
     // reach the browser intact.
-    .onRequest('initialize' as string, raw, async () => {
+    .onRequest(ACP_METHOD.initialize as string, raw, async () => {
       handle.lastActiveAt = Date.now();
       await up.ensureStarted();
       const cached = up.cachedInitialize;
@@ -223,7 +261,7 @@ export function attachDownstream(
     // id rather than starting a second conversation on every reconnect.
     // Which thread that is, is decided outside ACP, so the contract a client
     // speaks does not change.
-    .onRequest('session/new' as string, raw, async () => {
+    .onRequest(ACP_METHOD.sessionNew as string, raw, async () => {
       handle.lastActiveAt = Date.now();
       const acpThreadId = await pinned;
       slog.info('session/new answered with the pinned thread', { acpThreadId });
@@ -233,6 +271,22 @@ export function attachDownstream(
   for (const method of FORWARDED_REQUESTS) {
     app.onRequest(method as string, raw, async ({ params }) => {
       handle.lastActiveAt = Date.now();
+      // Every forwarded request waits for the pin. A client that knows a
+      // thread id and loads it before saying hello would otherwise be
+      // answered by a handle with no thread: its replay goes nowhere, and
+      // the questions waiting on that thread are not flushed to it.
+      const pin = await pinned;
+      const asked = threadOf(params);
+      // And it asks about the thread this connection is pinned to, or about
+      // no thread at all. Another thread's id would route that thread's
+      // replay here alone, and echo this connection's prompt where nobody is
+      // watching.
+      if (asked !== undefined && asked !== pin) {
+        throw RequestError.invalidParams(
+          { sessionId: asked },
+          'this connection is pinned to another thread',
+        );
+      }
       // The handle goes with the request: a replay belongs to the browser
       // that asked for it, and a prompt is echoed on that browser's behalf.
       const result = await up.forwardRequest(method, params, handle);
@@ -240,7 +294,7 @@ export function attachDownstream(
       // the moment the socket opens. A client rebuilds its whole thread from
       // the replay, so a question delivered before it lands is thrown away
       // with everything else that was on screen, and it is sent only once.
-      if (method === 'session/load') up.flushPendingTo(handle);
+      if (method === ACP_METHOD.sessionLoad) up.flushPendingTo(handle);
       // An empty answer is not an error: session/load delivers the replay as
       // session/update notifications rather than as its result.
       return result ?? {};

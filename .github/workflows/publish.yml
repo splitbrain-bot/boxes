@@ -67,12 +67,22 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+          # Every lock file, because the dashboard job installs the
+          # orchestrator's dependencies as well as its own.
+          cache-dependency-path: '*/package-lock.json'
 
       # ci, not install: the same resolved versions the Dockerfiles build from,
       # including the exactly-pinned assistant-ui packages.
       - name: Install dependencies
         working-directory: ${{ matrix.package }}
+        run: npm ci
+
+      # The browser suite runs the real orchestrator in process rather than a
+      # stub of it, so the orchestrator's dependencies have to be installed for
+      # the dashboard to type-check or to test.
+      - name: Install orchestrator dependencies
+        if: matrix.package == 'dashboard'
+        working-directory: orchestrator
         run: npm ci
 
       # The dashboard's `e2e` project builds the production bundle and drives
@@ -130,8 +140,8 @@ jobs:
           - image: egress-proxy
             context: .
             dockerfile: proxy/Dockerfile
-          # The session image copies only entrypoint.sh, so its own directory
-          # is the whole context.
+          # The session image copies only files from session-image/, so its
+          # own directory is the whole context.
           - image: session
             context: session-image
             dockerfile: session-image/Dockerfile

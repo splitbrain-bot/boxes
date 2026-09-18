@@ -5,12 +5,44 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import { allLinesAdded, fileDiff, parseDiff, type LineChange } from './difflines.ts';
+import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 import { NO_BASE } from './gitstatus.ts';
 
 /**
  * Unified diff to gutter markers. The tables are ports of the Go
  * implementation's, which is what says these markers are the right ones.
+ *
+ * The one part that runs git is driven through a runner that starts it on this
+ * machine instead of in a session container, over a repository the test built
+ * itself: what is being checked is that the parser reads what git really
+ * writes.
  */
+
+/** A runner that starts git here, in the directory the target names. */
+const localGit: GitRunner = async (target, argv, env) => {
+  try {
+    const stdout = execFileSync(argv[0]!, argv.slice(1), {
+      cwd: target.dir,
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return { ok: true, stdout, stderr: '', code: 0 };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: string; stderr?: string };
+    return {
+      ok: false,
+      stdout: failed.stdout ?? '',
+      stderr: failed.stderr ?? '',
+      code: failed.status ?? null,
+    };
+  }
+};
+
+/** A directory addressed the way the service addresses a repository. */
+function at(dir: string): GitTarget {
+  return { containerId: 'box-1', dir };
+}
 
 describe('parseDiff line markers', () => {
   const cases: Array<{ name: string; diff: string; want: Record<number, LineChange> }> = [
@@ -222,6 +254,7 @@ describe('over output git actually produces', () => {
   let dir: string;
 
   beforeEach(() => {
+    setGitRunnerForTests(localGit);
     dir = mkdtempSync(join(tmpdir(), 'boxes-diff-'));
     const run = (...args: string[]): void => {
       execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
@@ -236,13 +269,14 @@ describe('over output git actually produces', () => {
   });
 
   afterEach(() => {
+    setGitRunnerForTests(null);
     rmSync(dir, { recursive: true, force: true });
   });
 
   test('a modification, a deletion and an append are all marked', async () => {
     // two -> TWO, four and five removed, seven appended.
     writeFileSync(join(dir, 'code.go'), 'one\nTWO\nthree\nsix\nseven\n');
-    const info = await fileDiff(dir, NO_BASE, 'code.go', '');
+    const info = await fileDiff(at(dir), NO_BASE, 'code.go', '');
 
     assert.equal(info.lines[2], 'modified');
     assert.equal(info.lines[5], 'added');
@@ -255,12 +289,12 @@ describe('over output git actually produces', () => {
 
   test('an untracked file counts as entirely new', async () => {
     writeFileSync(join(dir, 'fresh.go'), 'a\nb\nc\n');
-    const info = await fileDiff(dir, NO_BASE, 'fresh.go', 'a\nb\nc\n');
+    const info = await fileDiff(at(dir), NO_BASE, 'fresh.go', 'a\nb\nc\n');
     assert.deepEqual(info.lines, { 1: 'added', 2: 'added', 3: 'added' });
   });
 
   test('an unchanged file has nothing to report', async () => {
-    const info = await fileDiff(dir, NO_BASE, 'tracked.txt', 'x\n');
+    const info = await fileDiff(at(dir), NO_BASE, 'tracked.txt', 'x\n');
     assert.deepEqual(info, { lines: {}, hunks: [], deletions: [] });
   });
 
@@ -270,7 +304,7 @@ describe('over output git actually produces', () => {
       writeFileSync(join(bare, 'a.txt'), 'a\n');
       // Degrading rather than failing is the point: a workspace need not be a
       // repository at all.
-      assert.deepEqual(await fileDiff(bare, NO_BASE, 'a.txt', 'a\n'), {
+      assert.deepEqual(await fileDiff(at(bare), NO_BASE, 'a.txt', 'a\n'), {
         lines: {},
         hunks: [],
         deletions: [],

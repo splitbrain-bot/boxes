@@ -8,6 +8,7 @@ import {
   findTool,
   resetIds,
   toolOutputText,
+  truncateFrom,
   type ThreadModel,
   type ToolPart,
 } from './translate.ts';
@@ -200,10 +201,20 @@ test('a command list replaces the previous one', () => {
   assert.deepEqual(model.messages, []);
 });
 
-test('an unknown update kind is kept and renders nothing', () => {
+test('an unknown update kind is noted by name and renders nothing', () => {
   const model = fold({ sessionUpdate: 'usage_update', tokens: 12 } as unknown as SessionUpdate);
   assert.equal(model.messages.length, 0);
-  assert.equal(model.unknown.length, 1);
+  assert.deepEqual([...model.unknown], ['usage_update']);
+});
+
+test('a kind that arrives over and over is noted once', () => {
+  // The adapter sends a usage update at the end of every cycle, so what is
+  // kept has to be the fact rather than the updates.
+  const model = emptyModel();
+  for (let i = 0; i < 100; i++) {
+    applyUpdate(model, { sessionUpdate: 'usage_update', tokens: i } as unknown as SessionUpdate);
+  }
+  assert.equal(model.unknown.size, 1);
 });
 
 test('replaying the same script twice from a fresh model gives the same thread', () => {
@@ -422,4 +433,62 @@ test('a notification this build cannot read is shown rather than swallowed', () 
     chunk('user_message_chunk', NOTIFICATION.replace(/<task-id>.*<\/task-id>\n/, '')),
   );
   assert.equal(model.messages[0]!.parts[0]!.type, 'text');
+});
+
+test('only a message the adapter named carries its id', () => {
+  const model = fold(
+    chunk('agent_message_chunk', 'named', 'msg_1'),
+    chunk('user_message_chunk', 'not'),
+  );
+  assert.equal(model.messages[0]!.named, true);
+  // Numbered by this model, so a replay never says it back and it cannot be
+  // asked for as a resume point.
+  assert.equal(model.messages[1]!.named, undefined);
+});
+
+test('truncating drops the message named and everything after it', () => {
+  const model = fold(
+    chunk('user_message_chunk', 'first', 'msg_1'),
+    chunk('agent_message_chunk', 'second', 'msg_2'),
+    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as SessionUpdate,
+    chunk('agent_message_chunk', 'third', 'msg_3'),
+  );
+
+  const dropped = truncateFrom(model, 'msg_2');
+
+  assert.deepEqual(dropped.map((m) => m.id), ['msg_2', 'msg_3']);
+  assert.deepEqual(model.messages.map((m) => m.id), ['msg_1']);
+  // The index every tool lookup goes through has to lose a call in a message
+  // that has gone, or an update for it would be merged into nothing.
+  assert.equal(findTool(model, 'toolu_1'), undefined);
+});
+
+test('truncating from a message the model does not hold changes nothing', () => {
+  const model = fold(chunk('agent_message_chunk', 'only', 'msg_1'));
+  assert.deepEqual(truncateFrom(model, 'msg_gone'), []);
+  assert.deepEqual(model.messages.map((m) => m.id), ['msg_1']);
+});
+
+test('a truncated model plus the rest is the model the whole thread builds', () => {
+  const script = [
+    chunk('user_message_chunk', 'the first question', 'msg_1'),
+    chunk('agent_message_chunk', 'the first answer', 'msg_2'),
+    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as SessionUpdate,
+    {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'toolu_1',
+      status: 'completed',
+    } as SessionUpdate,
+    chunk('agent_message_chunk', 'and the rest', 'msg_3'),
+  ];
+  const whole = fold(...script);
+
+  resetIds();
+  const resumed = fold(...script.slice(0, 2));
+  truncateFrom(resumed, 'msg_2');
+  for (const u of script.slice(1)) applyUpdate(resumed, u);
+
+  // Cutting the fold at a message boundary and applying the rest is the same
+  // fold, which is what lets a reconnect take the tail alone.
+  assert.deepEqual(resumed.messages, whole.messages);
 });

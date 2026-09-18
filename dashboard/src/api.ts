@@ -1,5 +1,4 @@
 import type {
-  AcpLogPage,
   AgentBundlePreview,
   AgentItemBody,
   AgentItemKind,
@@ -13,9 +12,9 @@ import type {
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseResponse,
+  ReviewDirResponse,
   ReviewFileBody,
   ReviewFileResponse,
-  ReviewTreeResponse,
   SessionDetail,
   SessionSummary,
   StoredAttachment,
@@ -139,8 +138,6 @@ export const api = {
         body: file,
       },
     ),
-  getLog: (id: string, after = 0) =>
-    request<AcpLogPage>(`/api/sessions/${id}/log?after=${after}&limit=200`),
   health: () => request<HealthResponse>('/healthz'),
   pushKey: () => request<PushKeyResponse>('/api/push/key'),
   subscribePush: (body: PushSubscribeBody) =>
@@ -156,11 +153,19 @@ export const api = {
 
   // --- code review over the session's workspace ---------------------------
   //
-  // Batched to match the endpoints: the tree call carries the whole left
-  // panel and the file call the whole file view, so a phone on a slow link
-  // makes one request per screen.
+  // Batched to match the endpoints: the directory call carries a folder and
+  // everything the left panel needs around it, and the file call the whole
+  // file view, so a phone on a slow link makes one request per screen.
 
-  reviewTree: (id: string) => request<ReviewTreeResponse>(`/api/sessions/${id}/review/tree`),
+  /**
+   * One directory of the review. `path` is empty for the workspace root, and
+   * `fresh` says the browser has arrived rather than opened a folder — which
+   * is what asks the orchestrator for git's answer again.
+   */
+  reviewDir: (id: string, path: string, fresh: boolean) =>
+    request<ReviewDirResponse>(
+      `/api/sessions/${id}/review/dir?path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`,
+    ),
   reviewFile: (id: string, path: string) =>
     request<ReviewFileResponse>(
       `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,

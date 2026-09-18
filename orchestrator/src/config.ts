@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { resolveWsAuthToken } from './secret.ts';
 import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 
 /**
@@ -37,6 +36,12 @@ const schema = z.object({
    */
   HOST_DATA_DIR: z.string().default(''),
   PORT: z.coerce.number().int().positive().default(3000),
+  /**
+   * Lowest severity written to stderr. `debug` carries every forwarded ACP
+   * message, which is a lot of output for a busy deployment, so the default
+   * is one step above it.
+   */
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
   SESSION_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/session:latest'),
   /**
@@ -126,12 +131,6 @@ const schema = z.object({
    */
   MAX_ATTACHMENT_MB: z.coerce.number().int().positive().default(25),
 
-  /**
-   * Validated against the bearer.<token> WebSocket subprotocol. Unset means
-   * the orchestrator generates one and keeps it in the data volume.
-   */
-  WS_AUTH_TOKEN: z.string().default(''),
-
   PERMISSION_FALLBACK: z.enum(['hold', 'deny']).default('hold'),
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
 
@@ -191,7 +190,7 @@ export type Config = Readonly<z.infer<typeof schema>> & {
  * The host lists and header names are fixed here rather than configured:
  * they are facts about the services rather than preferences.
  */
-export interface CredentialSpec {
+interface CredentialSpec {
   /** Stable identifier, used in logs, status and the placeholder file. */
   id: string;
   /** Hosts intercepted so the credential can be swapped in. */
@@ -211,7 +210,7 @@ export interface CredentialSpec {
 }
 
 /** A credential spec together with the secret this deployment configured. */
-export interface ConfiguredCredential extends CredentialSpec {
+interface ConfiguredCredential extends CredentialSpec {
   secret: string;
 }
 
@@ -220,7 +219,7 @@ export interface ConfiguredCredential extends CredentialSpec {
  * the ones it configures a secret for; the rest stay ordinary passthrough
  * hosts, which is what preserves the "log in inside a session" flow.
  */
-export const CREDENTIAL_SET: readonly CredentialSpec[] = [
+const CREDENTIAL_SET: readonly CredentialSpec[] = [
   {
     id: 'claude',
     hosts: ['api.anthropic.com'],
@@ -243,7 +242,7 @@ export const CREDENTIAL_SET: readonly CredentialSpec[] = [
 ];
 
 /** Splits a comma or whitespace separated host list into patterns. */
-export function parseHostList(value: string): string[] {
+function parseHostList(value: string): string[] {
   return [
     ...new Set(
       value
@@ -309,7 +308,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     ...base,
-    WS_AUTH_TOKEN: resolveWsAuthToken(base.DATA_DIR, base.WS_AUTH_TOKEN),
     egressAllowedHosts: allowedHosts,
     egressCredentials: CREDENTIAL_SET.flatMap((spec) => {
       const secret = secrets[spec.id] ?? '';

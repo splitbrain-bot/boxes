@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Docker from 'dockerode';
 import { Duplex, Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../config.ts';
+import { setLogLevel } from '../log.ts';
 import { openDb, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
 import { EgressManager } from '../egress.ts';
@@ -14,7 +15,7 @@ import { AgentStore } from '../agents.ts';
 import { SessionManager } from '../sessions.ts';
 import { processId } from './background.ts';
 import type { DownstreamHandle } from './upstream.ts';
-import type { TurnStateParams } from '../../../shared/types.ts';
+import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 
 // A turn is announced when the thread it ran on has gone quiet, not when the
 // prompt comes back — so these tests have to wait one out. Turned down to the
@@ -143,6 +144,8 @@ function execStream(text: string): Readable {
 
 /** Whether the box this test is pretending to have is up. */
 let containerRunning = true;
+/** Every line the logger wrote during a test. */
+let written: string[] = [];
 
 function fakeDocker(adapter: FakeAdapter | (() => FakeAdapter)): void {
   const spawn = typeof adapter === 'function' ? adapter : () => adapter;
@@ -221,6 +224,11 @@ function seed(): void {
 }
 
 beforeEach(() => {
+  written = [];
+  vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+    written.push(String(chunk));
+    return true;
+  });
   dir = mkdtempSync(join(tmpdir(), 'boxes-upstream-'));
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
@@ -244,6 +252,8 @@ afterEach(() => {
   manager.closeAll();
   db.close();
   dk.setDockerForTests(null);
+  setLogLevel('info');
+  vi.restoreAllMocks();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -256,15 +266,26 @@ function thread(id: string): Record<string, unknown> {
 function fakeHandle(
   id: number,
   acpThreadId: string | null,
-): DownstreamHandle & { asked: unknown[]; told: unknown[]; closed: number } {
+): DownstreamHandle & {
+  asked: unknown[];
+  told: unknown[];
+  replays: ReplayParams[];
+  closed: number;
+} {
   return {
     id,
     acpThreadId,
     lastActiveAt: Date.now(),
     asked: [] as unknown[],
     told: [] as unknown[],
+    /** How each replay this browser read was said to have turned out. */
+    replays: [] as ReplayParams[],
     closed: 0,
-    notify(this: { told: unknown[] }, _method, params) {
+    notify(this: { told: unknown[]; replays: ReplayParams[] }, method, params) {
+      if (method === REPLAY_METHOD) {
+        this.replays.push(params as ReplayParams);
+        return;
+      }
       this.told.push(params);
     },
     request(this: { asked: unknown[] }, _method, params) {
@@ -277,12 +298,41 @@ function fakeHandle(
   };
 }
 
-/** A session/request_permission from the adapter, about one thread. */
-function permissionFrame(acpThreadId: string): Buffer {
+/**
+ * A browser that shows a question and never answers it, counting how many it
+ * was shown and how many were taken back.
+ */
+function holdingHandle(
+  id: number,
+  acpThreadId: string,
+): DownstreamHandle & { shown: number; withdrawn: number } {
+  return {
+    id,
+    acpThreadId,
+    lastActiveAt: Date.now(),
+    shown: 0,
+    withdrawn: 0,
+    notify() {},
+    request(this: { shown: number; withdrawn: number }, _method, _params, signal) {
+      this.shown++;
+      signal?.addEventListener('abort', () => {
+        this.withdrawn++;
+      });
+      return new Promise<unknown>(() => {});
+    },
+    close() {},
+  };
+}
+
+/**
+ * A session/request_permission from the adapter, about one thread. `id` tells
+ * two of them apart, which a test asking twice needs.
+ */
+function permissionFrame(acpThreadId: string, id = 9000): Buffer {
   return frame(
     `${JSON.stringify({
       jsonrpc: '2.0',
-      id: 9000,
+      id,
       method: 'session/request_permission',
       params: {
         sessionId: acpThreadId,
@@ -675,6 +725,31 @@ test('a queued request is delivered only to a browser on its own thread', async 
   await expect.poll(() => rightThread.asked.length).toBe(1);
 });
 
+test('a question one browser answers is taken back from the other', async () => {
+  const adapter = plainAdapter();
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  adapter.push(permissionFrame('acp-kept'));
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+
+  // Two browsers on the thread are shown the same question, and only the
+  // first answer counts.
+  const waiting = holdingHandle(1, 'acp-kept');
+  up.attach(waiting);
+  up.flushPendingTo(waiting);
+  await expect.poll(() => waiting.shown).toBe(1);
+
+  const answering = fakeHandle(2, 'acp-kept');
+  up.attach(answering);
+  up.flushPendingTo(answering);
+
+  // So the other one is told the question is over rather than left showing a
+  // card whose answer would be thrown away.
+  await expect.poll(() => waiting.withdrawn).toBe(1);
+});
+
 test('a respawn re-issues session/load for every watched thread', async () => {
   const loaded: string[] = [];
   // A fresh stand-in per spawn, because the first one's stream is destroyed
@@ -739,6 +814,42 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
   // closed: the browser reconnects and pins whatever that thread is next.
   assert.equal(stranded.closed, 1);
   assert.equal(thread('t2')['acp_session_id'], null);
+});
+
+test('a respawn that re-mints the current thread drops the browsers on its old id', async () => {
+  let firstLoadDone = false;
+  fakeDocker(
+    () =>
+      new FakeAdapter((msg) => {
+        if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+        if (msg.method === 'session/load') {
+          // The current thread's own transcript is gone by the time the
+          // adapter restarts, so its stored id is re-minted rather than
+          // loaded back.
+          if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
+            return new Error('Session not found');
+          }
+          return {};
+        }
+        if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+        return {};
+      }),
+  );
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  firstLoadDone = true;
+
+  const stranded = fakeHandle(1, 'acp-gone');
+  up.attach(stranded);
+
+  up.stop();
+  await up.ensureStarted();
+
+  // The row names the fresh conversation now, so the id this browser is
+  // pinned to belongs to no thread at all: its socket is closed, and its
+  // handshake pins whatever the thread is next.
+  assert.equal(thread('t1')['acp_session_id'], 'acp-fresh');
+  assert.equal(stranded.closed, 1);
 });
 
 test('a connection pins the thread it named, and a bare one gets the default', async () => {
@@ -1196,6 +1307,157 @@ function plainAdapter(): FakeAdapter {
   );
 }
 
+/** Every session/load the adapter was asked for, with the `_meta` it carried. */
+let loadMeta: unknown[] = [];
+
+/**
+ * An adapter that replays a thread as a run of named messages, which is what
+ * a resume needs: a browser names one of them, and the gateway has to find it
+ * in the stream.
+ */
+function transcriptAdapter(history: Record<string, Array<Record<string, unknown>>>): FakeAdapter {
+  loaded = [];
+  loadMeta = [];
+  const adapter: FakeAdapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    if (msg.method === 'session/load') {
+      const of = String(msg.params?.['sessionId']);
+      loaded.push(of);
+      loadMeta.push(msg.params?.['_meta']);
+      for (const update of history[of] ?? []) {
+        adapter.notify('session/update', { sessionId: of, update });
+      }
+      return {};
+    }
+    return {};
+  });
+  return adapter;
+}
+
+/** One named message of a transcript, as the adapter replays it. */
+function said(role: 'user' | 'agent', messageId: string, text: string): Record<string, unknown> {
+  return {
+    sessionUpdate: `${role}_message_chunk`,
+    messageId,
+    content: { type: 'text', text },
+  };
+}
+
+/** A three-message transcript on the thread these tests resume. */
+const TRANSCRIPT = [
+  said('user', 'm1', 'the first question'),
+  said('agent', 'm2', 'the first answer'),
+  said('user', 'm3', 'and while you were away'),
+];
+
+test('a browser that says how much it has is sent only the rest', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-kept',
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { boxes: { resumeFrom: 'm2' } },
+    },
+    reader,
+  );
+
+  // The phone on a bad link paid for the tail, not for the conversation. The
+  // message it named comes with the tail because it drops that one and takes
+  // it again, which is what makes the model the same either way.
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
+  // Passed on as it stands: `_meta` is ACP's extension slot, and an adapter
+  // ignores a key in it that it knows nothing about.
+  assert.deepEqual(loadMeta.at(-1), { boxes: { resumeFrom: 'm2' } });
+  assert.deepEqual(
+    reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
+    ['m2', 'm3'],
+  );
+});
+
+test('a resume point the transcript no longer holds is answered with all of it', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-kept',
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { boxes: { resumeFrom: 'm-compacted-away' } },
+    },
+    reader,
+  );
+
+  // A tail with a hole in front of it is worse than a slow replay, so the
+  // whole thread goes out instead — and the browser is told before any of it
+  // lands that it has to rebuild.
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
+  assert.deepEqual(
+    reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
+    ['m1', 'm2', 'm3'],
+  );
+});
+
+test('a browser that asks for no resume point is sent the thread whole', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    { sessionId: 'acp-kept', cwd: '/workspace', mcpServers: [] },
+    reader,
+  );
+
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
+  assert.equal(reader.told.length, 3);
+});
+
+test('a fork borrowing a transcript is told once that it is rebuilding', async () => {
+  fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
+  await manager.createThread('s1', { from: 't2' });
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-branch-1');
+  up.attach(reader);
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-branch-1',
+      cwd: '/workspace',
+      mcpServers: [],
+      // A fork that has never been prompted replays nothing of its own, so
+      // whatever this browser holds came from the source and the point it
+      // names is not in the fork's own stream.
+      _meta: { boxes: { resumeFrom: 'm2' } },
+    },
+    reader,
+  );
+
+  // One load, one answer, and the borrowed history arrives behind it. A
+  // second answer would have the browser throw that history away.
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-branch-1', resumed: false }]);
+  assert.equal(reader.told.length, 1);
+});
+
 test('a turn that finishes with nobody watching is announced, naming the thread', async () => {
   fakeDocker(plainAdapter());
   const up = manager.upstream('s1');
@@ -1282,6 +1544,22 @@ test('a queued permission request is announced as one', async () => {
   });
 });
 
+test('a thread that asks again inside the hold window is announced once', async () => {
+  const adapter = plainAdapter();
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  adapter.push(permissionFrame('acp-kept'));
+  await expect.poll(() => announced.length).toBe(1);
+  adapter.push(permissionFrame('acp-kept', 9001));
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(2);
+
+  // An agent asking in a loop is one trip back to that conversation, where
+  // every question it has is waiting.
+  assert.equal(announced.length, 1);
+});
+
 test('a tapped image block is logged without its base64 payload', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
@@ -1291,6 +1569,7 @@ test('a tapped image block is logged without its base64 payload', async () => {
   fakeDocker(adapter);
   const up = manager.upstream('s1');
   await up.ensureStarted();
+  setLogLevel('debug');
 
   const data = 'A'.repeat(100_000);
   adapter.notify('session/update', {
@@ -1309,23 +1588,46 @@ test('a tapped image block is logged without its base64 payload', async () => {
     },
   });
 
-  const tapped = (): string | undefined =>
-    (
-      db
-        .prepare("SELECT payload FROM acp_log WHERE payload LIKE '%tc-shot%' ORDER BY id DESC")
-        .get() as { payload?: string } | undefined
-    )?.payload;
+  // The line is JSON and the tapped message is a field in it, so what the
+  // reader sees is the decoded payload rather than the line's own escaping.
+  const tapped = (): string | undefined => {
+    const line = written.find((l) => l.includes('tc-shot'));
+    return line ? (JSON.parse(line) as { payload: string }).payload : undefined;
+  };
   await expect.poll(tapped).toBeDefined();
   const logged = tapped()!;
 
-  // The bytes are gone, their size is not, and the row is nowhere near the
-  // 64,000-character truncation that would otherwise have eaten it.
+  // The bytes are gone, their size is not, and the line is nowhere near the
+  // truncation that would otherwise have eaten it.
   assert.ok(!logged.includes(data.slice(0, 200)), 'the payload is not in the log');
   assert.ok(logged.includes('[100000 base64 chars omitted]'), 'its size is');
   assert.ok(logged.includes('image/png'), 'and so is its type');
-  assert.ok(logged.length < 2000, `the row stays small (${logged.length})`);
+  assert.ok(logged.length < 2000, `the line stays small (${logged.length})`);
   // The terminal output under the same key survived.
   assert.ok(logged.includes('ok 1\\nok 2'), "a terminal's output is untouched");
+  assert.ok(logged.includes('tool_call_update'), 'and the update it belongs to');
+});
+
+test('nothing is tapped unless the log level asks for it', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // At the default level the tap does not even serialize the message.
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'tool_call_update', toolCallId: 'tc-quiet', status: 'completed' },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(
+    written.some((line) => line.includes('tc-quiet')),
+    false,
+  );
 });
 
 test('work the agent leaves running in the background holds the reaper off', async () => {
@@ -1723,5 +2025,101 @@ test('a replayed transcript is history, not work to wait for', async () => {
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
+  await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
+});
+
+test('a box the gateway has not read yet is not a box known to be empty', async () => {
+  // What the reaper meets on its first sweep after every restart. Answered
+  // as "nothing running", a box with an hour-long build in it and nobody
+  // watching is stopped, and the build goes with it.
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  assert.equal(up.backgroundActive, null);
+  await up.refreshBackgroundForTests();
+  assert.equal(up.backgroundActive, false);
+});
+
+test('a start that is stopped under it gives up quietly', async () => {
+  // A spawn retries for twelve seconds, and a session can be stopped inside
+  // that window. Every answer the retries have then is about a box that has
+  // been shut down on purpose, an error status included.
+  let attempts = 0;
+  const up = manager.upstream('s1');
+  fakeDocker(() => {
+    attempts += 1;
+    // The session is stopped while the first attempt is in flight.
+    up.stop();
+    throw new Error('no adapter in this box');
+  });
+
+  await up.ensureStarted();
+
+  assert.equal(attempts, 1);
+  const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('s1') as {
+    status: string;
+  };
+  assert.equal(row.status, 'running');
+});
+
+test('a queued question is failed when the adapter exec exits', async () => {
+  // The adapter that asked it is gone, so no answer can reach it. Left
+  // queued, the request holds its session out of the reaper for good and
+  // shows a browser a question nobody can answer.
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // Nobody is watching the thread that asked, so it queues.
+  adapter.push(permissionFrame('acp-gone'));
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+
+  // The adapter dies on its own, which is not a stop: the session stays up.
+  adapter.push(null);
+
+  await expect.poll(() => manager.pending.countForSession('s1')).toBe(0);
+});
+
+test('a thread whose load was cut short is heard from again after the restart', async () => {
+  // An update arriving during a load is the transcript being replayed, not
+  // the agent talking, and a count per thread is what says which. A count
+  // left over from a connection that is gone reads as a replay that never
+  // ends: the thread never shows the agent speaking again.
+  const adapters: FakeAdapter[] = [];
+  let answerLoads = false;
+  fakeDocker(() => {
+    const adapter: FakeAdapter = new FakeAdapter((msg) => {
+      if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+      if (msg.method === 'session/load' && !answerLoads) return new Promise(() => {});
+      return {};
+    });
+    adapters.push(adapter);
+    return adapter;
+  });
+
+  const up = manager.upstream('s1');
+  const stranded = up.ensureStarted();
+  await expect.poll(() => adapters[0]?.seen.includes('session/load') ?? false).toBe(true);
+
+  // The box is stopped with the load still open, and comes back up.
+  up.stop();
+  await stranded;
+  answerLoads = true;
+  await up.ensureStarted();
+
+  adapters.at(-1)?.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } },
+  });
+
+  await expect.poll(() => up.speakingThreads).toEqual(['acp-gone']);
 });

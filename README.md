@@ -73,9 +73,9 @@ a reverse proxy in front of it and let the proxy handle authentication.
 
 ### Session list
 
-The start page lists every session. A session is one container with a home and
-a workspace volume mounted. It contains one or more threads, and a thread is one
-instance of the agent harness. Idle sessions are suspended, which stops their
+The start page lists every session. A session is one container with a home
+directory and a workspace directory bind-mounted into it. It contains one or
+more threads, and a thread is one instance of the agent harness. Idle sessions are suspended, which stops their
 container.
 
 A session shows its name, its id, its disk usage and one or more status badges:
@@ -168,7 +168,7 @@ The review tool provides a file browser for the workspace with git based change 
 Opening a file shows its syntax highlighted contents. git change info is marked in the line number gutter. Clicking the gutter shows the git diff
 hunk around that line.
 
-By default, the tool opens I review mode. Clicking a code line opens the comment field, and the
+By default, the tool opens in review mode. Clicking a code line opens the comment field, and the
 comment appears as a card under its line, where it can be edited and deleted.
 
 The toolbar steps from change to change and from comment to comment, and it

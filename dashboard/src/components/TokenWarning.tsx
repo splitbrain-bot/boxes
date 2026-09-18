@@ -1,4 +1,4 @@
-import { cn } from '@/lib/utils';
+import { Notice } from '@/components/Notice';
 
 /**
  * The banner shown while the deployment holds no Claude token.
@@ -9,10 +9,10 @@ import { cn } from '@/lib/utils';
  */
 export function TokenWarning({ className }: { className?: string }) {
   return (
-    <div className={cn('border-warn/40 bg-warn/10 text-sm', className)}>
+    <Notice tone="warn" className={className}>
       No Claude token is set, so an agent turn cannot run. Set{' '}
       <code className="font-mono">PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN</code> and restart
       Boxes, or log in inside a session.
-    </div>
+    </Notice>
   );
 }

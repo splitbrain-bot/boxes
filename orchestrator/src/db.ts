@@ -69,6 +69,11 @@ export interface SessionRow {
    * the session's threads instead.
    */
   current_thread_id: string | null;
+  /**
+   * The bearer token a WebSocket upgrade to this session has to present. Its
+   * own: it opens this session and no other one in the deployment.
+   */
+  ws_token: string;
   created_at: number;
   last_active_at: number;
 }
@@ -182,6 +187,14 @@ export interface PushSubscriptionRow {
   label: string | null;
   created_at: number;
   last_used_at: number;
+  /**
+   * The deployment's VAPID public key at the moment this subscription was
+   * made, or null for a row stored before it was recorded.
+   *
+   * A subscription belongs to the key it was made under: a push signed with
+   * any other one is refused for good.
+   */
+  vapid_key: string | null;
 }
 
 /**
@@ -431,6 +444,31 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE exec_log ADD COLUMN after_id TEXT;
   `,
+  // The token a WebSocket upgrade presents belongs to one session, so it
+  // opens that session alone rather than every session of the deployment.
+  //
+  // Every existing row is given a token here rather than at its first read:
+  // this is the one moment that reaches all of them, and it leaves no session
+  // without one. SQLite draws randomblob per row, so no two sessions share a
+  // token.
+  `
+  ALTER TABLE sessions ADD COLUMN ws_token TEXT NOT NULL DEFAULT '';
+  UPDATE sessions SET ws_token = lower(hex(randomblob(32)));
+  `,
+  // The forwarded ACP messages go to stderr at debug level, where `docker
+  // logs` sees them, so the table that held them has no reader and no writer.
+  `
+  DROP INDEX IF EXISTS idx_acp_log_session;
+  DROP TABLE IF EXISTS acp_log;
+  `,
+  // Which VAPID key a browser subscribed under. A push signed with another
+  // one is refused by the push service with a status that says nothing about
+  // the subscription, so without this the row is retried at every event for
+  // as long as the deployment lives. Existing rows are left empty, which is
+  // no key at all: the browser subscribes again on its next visit.
+  `
+  ALTER TABLE push_subscriptions ADD COLUMN vapid_key TEXT;
+  `,
 ];
 
 /** An open database handle. */
@@ -447,9 +485,23 @@ export function openDb(dataDir: string): Db {
   return db;
 }
 
-/** Runs every migration the database has not applied yet, one per transaction. */
+/**
+ * Runs every migration the database has not applied yet, one per transaction,
+ * and refuses a database from ahead of this build.
+ *
+ * A rollback puts an older orchestrator on a database a newer one migrated,
+ * whose columns are not the ones this build reads and writes. There is no
+ * migration back, so the only safe answer is to say so and stop, rather than
+ * to boot and fail against the first query that meets a changed column.
+ */
 function migrate(db: Db): void {
   const current = db.pragma('user_version', { simple: true }) as number;
+  if (current > MIGRATIONS.length) {
+    throw new Error(
+      `This database is at version ${current} and this build knows ` +
+        `${MIGRATIONS.length}: it was written by a newer build of Boxes.`,
+    );
+  }
   for (let v = current; v < MIGRATIONS.length; v++) {
     const sql = MIGRATIONS[v];
     if (!sql) continue;
@@ -463,6 +515,21 @@ function migrate(db: Db): void {
       throw err;
     }
   }
+}
+
+/**
+ * The subnets the sessions that still exist are on.
+ *
+ * What the allocator has to skip: the counter behind nextSubnetIndex only
+ * rises, so it wraps back onto subnets that are still held once the pool has
+ * been round once. A deleted session gives its subnet back with its network,
+ * so its tombstone is not counted.
+ */
+export function takenSubnets(db: Db): Set<string> {
+  const rows = db
+    .prepare("SELECT subnet FROM sessions WHERE status != 'deleted'")
+    .all() as Array<{ subnet: string }>;
+  return new Set(rows.map((row) => row.subnet));
 }
 
 /** Returns the next value of the subnet counter, incrementing it in place. */
@@ -486,7 +553,7 @@ export function nextSubnetIndex(db: Db): number {
  * name is interpolated because SQLite cannot bind an identifier; it is never
  * caller-supplied.
  */
-function pruneRing(db: Db, table: 'acp_log' | 'exec_log', sessionId: string, keep: number): void {
+function pruneRing(db: Db, table: 'exec_log', sessionId: string, keep: number): void {
   db.prepare(
     `DELETE FROM ${table}
      WHERE session_id = ?
@@ -496,30 +563,18 @@ function pruneRing(db: Db, table: 'acp_log' | 'exec_log', sessionId: string, kee
   ).run(sessionId, sessionId, keep);
 }
 
-/** Debug log rows kept per session. */
-const LOG_RING = 5000;
-
-/** Records one tapped ACP message, truncating the payload at 64,000 characters. */
-export function appendAcpLog(
-  db: Db,
-  sessionId: string,
-  direction: 'up' | 'down' | 'stderr',
-  payload: string,
-): void {
-  db.prepare(
-    'INSERT INTO acp_log (session_id, direction, ts, payload) VALUES (?, ?, ?, ?)',
-  ).run(sessionId, direction, Date.now(), payload.slice(0, 64_000));
-}
-
-/** Drops all but the newest LOG_RING debug log entries of one session. */
-export function pruneAcpLog(db: Db, sessionId: string): void {
-  pruneRing(db, 'acp_log', sessionId, LOG_RING);
-}
-
 /** Local command runs kept per session. */
 const EXEC_RING = 200;
 
-/** Records one finished local command and returns its stored row id. */
+/**
+ * Records one finished local command and returns its stored row id.
+ *
+ * A session whose row says deleted is written nothing and gets 0 back, the
+ * rule setStatus keeps. A command streams its output for up to two minutes
+ * and is stored when it ends, which is long enough for the session to have
+ * been removed under it — and a row inserted then would outlive the delete
+ * that cleared the table.
+ */
 export function appendExecLog(
   db: Db,
   sessionId: string,
@@ -530,7 +585,8 @@ export function appendExecLog(
       `INSERT INTO exec_log
          (session_id, thread_id, command, output, exit_code, truncated, timed_out,
           started_at, finished_at, after_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND status = 'deleted')`,
     )
     .run(
       sessionId,
@@ -543,7 +599,9 @@ export function appendExecLog(
       record.started_at,
       record.finished_at,
       record.after_id,
+      sessionId,
     );
+  if (info.changes === 0) return 0;
   pruneRing(db, 'exec_log', sessionId, EXEC_RING);
   return Number(info.lastInsertRowid);
 }
@@ -750,7 +808,7 @@ export function setThreadTurnActive(
  * Clears the running-turn flag on every thread of a session.
  *
  * None of the callers leaves a turn running: a deliberate stop, an adapter
- * exit, a cancel, boot reconciliation.
+ * exit, boot reconciliation.
  */
 export function clearSessionTurns(db: Db, sessionId: string): void {
   db.prepare('UPDATE threads SET turn_active = 0 WHERE session_id = ?').run(sessionId);
@@ -791,14 +849,34 @@ export function upsertPushSubscription(
   p256dh: string,
   auth: string,
   label: string | null,
+  vapidKey: string,
 ): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label, created_at, last_used_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO push_subscriptions
+       (endpoint, p256dh, auth, label, created_at, last_used_at, vapid_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(endpoint) DO UPDATE SET
-       p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label`,
-  ).run(endpoint, p256dh, auth, label, now, now);
+       p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label,
+       vapid_key = excluded.vapid_key`,
+  ).run(endpoint, p256dh, auth, label, now, now, vapidKey);
+}
+
+/**
+ * Forgets the subscriptions made under any key but this one, and says how
+ * many went.
+ *
+ * A subscription is only good for the VAPID key it was made under, so one
+ * left from a rotated key can never be delivered to again — and a push
+ * service refuses it with a status that is neither 404 nor 410, which is
+ * what the ordinary pruning reads. A row that names no key at all is from
+ * before the key was recorded and goes the same way; the browser subscribes
+ * again on its next visit.
+ */
+export function dropOtherKeySubscriptions(db: Db, vapidKey: string): number {
+  return db
+    .prepare('DELETE FROM push_subscriptions WHERE vapid_key IS NOT ?')
+    .run(vapidKey).changes;
 }
 
 /** Every subscription this deployment would push to. */
@@ -819,6 +897,14 @@ export function touchPushSubscription(db: Db, endpoint: string): void {
     Date.now(),
     endpoint,
   );
+}
+
+/** How many sessions exist that have not been deleted. */
+export function countLiveSessions(db: Db): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
+    .get() as { n: number };
+  return row.n;
 }
 
 /** How many browsers are subscribed. */

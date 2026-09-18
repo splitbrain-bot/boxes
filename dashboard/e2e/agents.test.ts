@@ -1,12 +1,6 @@
-import { afterAll, beforeAll, expect, test } from 'vitest';
-import { resolve } from 'node:path';
+import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubAgentSet,
-  stubSession,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * Managing what the agent is configured with, in a real browser.
@@ -17,30 +11,32 @@ import {
  * editor shows the merge rather than only the half being edited.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
-  stub.state.agentSets = [
-    stubAgentSet({
+  stub = await startOrchestrator();
+});
+
+beforeEach(async () => {
+  // A fresh pair of sets per test: one of these writes a skill for real, and
+  // a leftover one would change what the next test is offered.
+  await stub.agentSets(
+    {
       agentsMd: '# House rules\n\nRun the tests.\n',
       items: [
-        { kind: 'skill', name: 'review', content: '---\nname: review\n---\n', updatedAt: 0 },
-        { kind: 'command', name: 'ship', content: 'Open a PR.\n', updatedAt: 0 },
+        { kind: 'skill', name: 'review', content: '---\nname: review\n---\n' },
+        { kind: 'command', name: 'ship', content: 'Open a PR.\n' },
       ],
-    }),
-    stubAgentSet({
-      id: 'as1',
-      name: 'Go projects',
-      global: false,
-      agentsMd: 'Use table-driven tests.\n',
-      items: [
-        { kind: 'skill', name: 'review', content: '---\nname: review\n---\ngo\n', updatedAt: 0 },
-      ],
-    }),
-  ];
+    },
+    [
+      {
+        id: 'as1',
+        name: 'Go projects',
+        agentsMd: 'Use table-driven tests.\n',
+        items: [{ kind: 'skill', name: 'review', content: '---\nname: review\n---\ngo\n' }],
+      },
+    ],
+  );
 });
 
 afterAll(async () => {
@@ -123,9 +119,8 @@ test('a skill is written through the dialog and appears in the set', async () =>
     await page.getByRole('button', { name: 'Save' }).click();
 
     await expect.poll(() => page.getByText('bench').first().isVisible()).toBe(true);
-    expect(
-      stub.state.agentSets[0]!.items.some((i) => i.kind === 'skill' && i.name === 'bench'),
-    ).toBe(true);
+    const global = await stub.agentSet('global');
+    expect(global.items.some((i) => i.kind === 'skill' && i.name === 'bench')).toBe(true);
   } finally {
     await close();
   }

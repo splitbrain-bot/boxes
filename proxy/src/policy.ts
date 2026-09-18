@@ -41,7 +41,7 @@ export function hostMatches(host: string, pattern: string): boolean {
 }
 
 /** Whether a hostname matches any of the patterns. */
-export function hostMatchesAny(host: string, patterns: readonly string[]): boolean {
+function hostMatchesAny(host: string, patterns: readonly string[]): boolean {
   return patterns.some((p) => hostMatches(host, p));
 }
 
@@ -119,24 +119,37 @@ export type CredentialVerdict =
   /** Refuse it here rather than let a foreign credential reach the host. */
   | { action: 'deny'; reason: string };
 
-/** Case-insensitive single-value read of a header. */
+/**
+ * Case-insensitive single-value read of a header. Every name in the set is
+ * compared in lower case, so a client's capitalisation cannot hide a header.
+ */
 function headerValue(
   headers: Readonly<Record<string, string | string[] | undefined>>,
   name: string,
 ): string | null {
-  const raw = headers[name] ?? headers[name.toLowerCase()];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof value !== 'string' || value.trim() === '') return null;
-  return value;
+  const wanted = name.toLowerCase();
+  for (const [key, raw] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue;
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    return value;
+  }
+  return null;
 }
 
 /**
  * Decides what a request to an intercepted host may carry.
  *
- * A request with no credential passes through unauthenticated. One carrying
- * the deployment's placeholder is rewritten to carry the real credential. One
- * carrying anything else is refused here, so a host being allowed does not
- * make every account at that host reachable.
+ * Only the headers the credential names are read. One holding the
+ * deployment's placeholder is rewritten to hold the real credential, and one
+ * holding any other value is refused, so a host being allowed does not make
+ * the deployment's own credential swappable for somebody else's.
+ *
+ * A request that authenticates some other way is not a credential to this and
+ * passes through. A session cookie is the case that matters: logging in to a
+ * translated host from inside a session is a flow this keeps working, and the
+ * refusal above is about the deployment's credentials rather than about every
+ * way to reach an account.
  */
 export function decideCredentials(
   host: string,

@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
@@ -12,13 +21,15 @@ import { safeAttachmentName, storeAttachment, ATTACHMENTS_DIR } from './attachme
  */
 
 let workspace: string;
+let outside: string;
 
 beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), 'boxes-attach-'));
+  outside = mkdtempSync(join(tmpdir(), 'boxes-attach-outside-'));
 });
 
 afterEach(() => {
-  rmSync(workspace, { recursive: true, force: true });
+  for (const d of [workspace, outside]) rmSync(d, { recursive: true, force: true });
 });
 
 test('an ordinary name is kept as it is', () => {
@@ -61,8 +72,8 @@ test('an empty or nameless upload still gets a name', () => {
   assert.equal(safeAttachmentName('???'), 'attachment');
 });
 
-test('storing writes the file and reports a workspace-relative path', () => {
-  const stored = storeAttachment(workspace, 'shot.png', Buffer.from('hello'));
+test('storing writes the file and reports a workspace-relative path', async () => {
+  const stored = await storeAttachment(workspace, 'shot.png', Buffer.from('hello'));
 
   assert.equal(stored.name, 'shot.png');
   assert.equal(stored.path, `${ATTACHMENTS_DIR}/shot.png`);
@@ -71,20 +82,40 @@ test('storing writes the file and reports a workspace-relative path', () => {
   assert.ok(statSync(join(workspace, ATTACHMENTS_DIR)).isDirectory());
 });
 
-test('the attachments directory carries a gitignore that hides it whole', () => {
-  storeAttachment(workspace, 'shot.png', Buffer.from('x'));
+test('the attachments directory carries a gitignore that hides it whole', async () => {
+  await storeAttachment(workspace, 'shot.png', Buffer.from('x'));
   // Inside .boxes rather than in the repository's own .gitignore, which is a
   // file the user owns; `*` covers this file too, so nothing shows up in a
   // git status the user reads.
   assert.equal(readFileSync(join(workspace, '.boxes', '.gitignore'), 'utf8'), '*\n');
 });
 
-test('a second file of the same name is suffixed, not overwritten', () => {
-  const first = storeAttachment(workspace, 'shot.png', Buffer.from('one'));
-  const second = storeAttachment(workspace, 'shot.png', Buffer.from('two'));
+test('a second file of the same name is suffixed, not overwritten', async () => {
+  const first = await storeAttachment(workspace, 'shot.png', Buffer.from('one'));
+  const second = await storeAttachment(workspace, 'shot.png', Buffer.from('two'));
 
   assert.equal(first.name, 'shot.png');
   assert.equal(second.name, 'shot-2.png');
   assert.equal(readFileSync(join(workspace, first.path), 'utf8'), 'one');
   assert.equal(readFileSync(join(workspace, second.path), 'utf8'), 'two');
+});
+
+test('a link planted where the attachments directory goes is refused', async () => {
+  // The workspace is a tree the agent writes, so it can put a link where the
+  // upload expects a directory. Following one would create directories, write
+  // the bytes and give ownership away outside the workspace.
+  symlinkSync(outside, join(workspace, '.boxes'));
+
+  await assert.rejects(storeAttachment(workspace, 'shot.png', Buffer.from('hello')));
+
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test('a link planted where the attachments leaf goes is refused', async () => {
+  mkdirSync(join(workspace, '.boxes'));
+  symlinkSync(outside, join(workspace, ATTACHMENTS_DIR));
+
+  await assert.rejects(storeAttachment(workspace, 'shot.png', Buffer.from('hello')));
+
+  assert.equal(existsSync(join(outside, 'shot.png')), false);
 });

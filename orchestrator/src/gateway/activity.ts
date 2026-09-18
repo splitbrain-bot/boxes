@@ -1,3 +1,4 @@
+import { UPDATE_KIND } from '../../../shared/acp.ts';
 import { startsBackgroundWork } from './background.ts';
 
 /**
@@ -57,13 +58,13 @@ const realDelay: Delay = (ms, fn) => {
  * just been given to the agent, and the answer to "is it working" is yes
  * before its first token arrives.
  */
-const AT_WORK = new Set([
-  'user_message_chunk',
-  'agent_message_chunk',
-  'agent_thought_chunk',
-  'tool_call',
-  'tool_call_update',
-  'plan',
+const AT_WORK = new Set<string>([
+  UPDATE_KIND.userMessageChunk,
+  UPDATE_KIND.agentMessageChunk,
+  UPDATE_KIND.agentThoughtChunk,
+  UPDATE_KIND.toolCall,
+  UPDATE_KIND.toolCallUpdate,
+  UPDATE_KIND.plan,
 ]);
 
 /** Tool call statuses that say the call is over, either way. */
@@ -150,13 +151,16 @@ export class Activity {
     // The end of a processing cycle, said outright. Whatever was open is
     // over: a turn does not end with the agent still waiting on a call, and a
     // cancelled one is not waiting for it any more either.
-    if (u.sessionUpdate === 'usage_update' && endsCycle(u)) {
+    if (u.sessionUpdate === UPDATE_KIND.usage && endsCycle(u)) {
       this.stop(acpThreadId);
       return;
     }
     if (!u.sessionUpdate || !AT_WORK.has(u.sessionUpdate)) return;
 
-    if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') {
+    if (
+      u.sessionUpdate === UPDATE_KIND.toolCall ||
+      u.sessionUpdate === UPDATE_KIND.toolCallUpdate
+    ) {
       this.track(acpThreadId, u);
     }
     this.mark(acpThreadId);
@@ -245,7 +249,10 @@ export class Activity {
     state.cancel = this.delay(ms, () => {
       const current = this.threads.get(acpThreadId);
       if (!current || current.speaking) return;
-      current.cancel = null;
+      // Nothing left worth remembering: a settled thread is quiet, holds no
+      // open call and has no timer armed, which is what a thread this has
+      // never heard of already answers.
+      this.threads.delete(acpThreadId);
       this.onSettled(acpThreadId);
     });
   }

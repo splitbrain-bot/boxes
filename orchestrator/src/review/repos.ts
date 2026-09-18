@@ -1,7 +1,6 @@
-import { readdirSync, realpathSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { topLevel } from './git.ts';
-import { IGNORED_DIRS } from './tree.ts';
+import { isTopLevel, type GitBox, type GitTarget } from './git.ts';
 
 /**
  * Which repositories a workspace holds, and which of them owns a path.
@@ -31,11 +30,30 @@ export interface Repo {
    * workspace is itself the repository.
    */
   path: string;
-  /** Its absolute path on this process's filesystem. */
-  absolute: string;
   /** What to call it: its last path segment, or the workspace's own name. */
   name: string;
+  /** Where its git runs: the session's container, and its root inside it. */
+  git: GitTarget;
 }
+
+/**
+ * Directory names the discovery walk does not descend into.
+ *
+ * An agent's dependency tree can hold dozens of repositories nobody wants
+ * listed, and `npm install` is a normal thing for an agent to do. The cost is
+ * that a repository deliberately cloned into `vendor/` is not found, which is
+ * the right trade at this size.
+ */
+const PRUNED_DIRS = new Set([
+  '.boxes',
+  'vendor',
+  'node_modules',
+  'dist',
+  'build',
+  '.git',
+  '.svn',
+  '.hg',
+]);
 
 /**
  * How deep under the workspace a repository is looked for.
@@ -49,14 +67,14 @@ export const MAX_REPO_DEPTH = 6;
  * How many directories one discovery walk may read before it gives up looking.
  *
  * An agent that ran `npm install` has a workspace with tens of thousands of
- * directories in it. The ignore list prunes most of that, and this is what
+ * directories in it. The prune list drops most of that, and this is what
  * bounds the rest — a walk is one bounded cost per tree fetch, not an
  * unbounded one.
  */
 export const MAX_SCANNED_DIRS = 4000;
 
 /** How many repositories a workspace may contribute before the rest are left out. */
-export const MAX_REPOS = 32;
+const MAX_REPOS = 32;
 
 /**
  * The repositories of one workspace, with the lookup that assigns a path to
@@ -119,6 +137,20 @@ export function inWorkspace(repo: Repo, path: string): string {
 }
 
 /**
+ * Where one repository's git runs, from where the repository sits.
+ *
+ * A workspace-relative path is all the map holds, and the container holds the
+ * whole workspace at one known place, so a repository root inside the box is
+ * the two joined. It is the only translation between the two namings.
+ */
+export function gitTarget(box: GitBox, repoPath: string): GitTarget {
+  return {
+    containerId: box.containerId,
+    dir: repoPath === '' ? box.workspaceDir : `${box.workspaceDir}/${repoPath}`,
+  };
+}
+
+/**
  * A workspace-relative path as its own repository names it.
  *
  * The caller has already established that the repository encloses the path —
@@ -131,24 +163,21 @@ export function inRepo(repo: Repo, path: string): string {
 /**
  * Finds every repository in a workspace.
  *
- * The walk prunes `IGNORED_DIRS` and never follows a symlink, and is bounded
- * by {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}. Pruning the ignore
- * list is deliberate: an agent's dependency tree can hold dozens of
- * repositories nobody wants listed, and `npm install` is a normal thing for an
- * agent to do. The cost is that a repository deliberately cloned into
- * `vendor/` is not discovered, which is the right trade at this size.
+ * The walk reads the workspace directory on this process's filesystem, which
+ * is the same tree the box holds at `box.workspaceDir`. It prunes
+ * {@link PRUNED_DIRS}, never follows a symlink, and is bounded by
+ * {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}.
  *
  * A directory holding a `.git` entry — file *or* directory, so submodules and
  * linked worktrees count — is a candidate, and every candidate is confirmed by
- * asking git for its top level. The comparison is realpath to realpath:
- * `rev-parse --show-toplevel` resolves symlinks, so comparing its answer
- * against a raw path fails for any workspace whose path has a symlinked
- * component, and silently loses git for every session in that deployment.
+ * asking git in the box whether it is the top of a work tree. A `.git` that
+ * belongs to a repository above it is how a directory becomes a candidate and
+ * not a repository.
  */
-export async function discoverRepos(workspace: string): Promise<RepoMap> {
-  const candidates = candidateDirs(workspace);
+export async function discoverRepos(workspace: string, box: GitBox): Promise<RepoMap> {
+  const candidates = candidateDirs(workspace, box);
   const confirmed = await Promise.all(
-    candidates.map(async (candidate) => ((await isWorkTree(candidate.absolute)) ? candidate : null)),
+    candidates.map(async (candidate) => ((await isTopLevel(candidate.git)) ? candidate : null)),
   );
   return new RepoMap(workspace, confirmed.filter((repo) => repo !== null).slice(0, MAX_REPOS));
 }
@@ -160,7 +189,7 @@ export async function discoverRepos(workspace: string): Promise<RepoMap> {
  * unread: a repository the reviewer cloned sits near the top, and a dependency
  * tree is what fills the bottom.
  */
-function candidateDirs(workspace: string): Repo[] {
+function candidateDirs(workspace: string, box: GitBox): Repo[] {
   const found: Repo[] = [];
   let scanned = 0;
   let queue: Array<{ absolute: string; path: string }> = [{ absolute: workspace, path: '' }];
@@ -183,15 +212,15 @@ function candidateDirs(workspace: string): Repo[] {
         // repositories the reviewer can be looking at.
         if (entry.name === '.git' && (entry.isDirectory() || entry.isFile())) {
           found.push({
-            absolute: dir.absolute,
             path: dir.path,
             name: dir.path === '' ? workspaceName(workspace) : (dir.path.split('/').pop() ?? ''),
+            git: gitTarget(box, dir.path),
           });
         }
         // `isDirectory` is false for a link to one, so a link is never
         // descended into: the tree is agent-controlled and a link to `/`
         // would otherwise be walked.
-        if (!entry.isDirectory() || IGNORED_DIRS.has(entry.name)) continue;
+        if (!entry.isDirectory() || PRUNED_DIRS.has(entry.name)) continue;
         next.push({
           absolute: join(dir.absolute, entry.name),
           path: dir.path === '' ? entry.name : `${dir.path}/${entry.name}`,
@@ -202,23 +231,6 @@ function candidateDirs(workspace: string): Repo[] {
   }
 
   return found;
-}
-
-/**
- * Whether a directory really is the top of a git work tree.
- *
- * Both sides are resolved before they are compared, because git's answer
- * always is: a repository reached through a symlinked parent has a top level
- * that is not the path it was asked about, and it is the same directory.
- */
-async function isWorkTree(dir: string): Promise<boolean> {
-  const top = await topLevel(dir);
-  if (top === null) return false;
-  try {
-    return realpathSync(top) === realpathSync(dir);
-  } catch {
-    return false;
-  }
 }
 
 /** What to call a repository that is the workspace itself. */

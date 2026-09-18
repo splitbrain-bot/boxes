@@ -46,6 +46,17 @@ services:
       # its generated token — the default of DATA_DIR in
       # orchestrator/src/config.ts. Mount it elsewhere and set that too.
       - boxes-data:/data
+    # A ceiling, not a budget: the orchestrator buffers a whole attachment
+    # upload (MAX_ATTACHMENT_MB, 25 MiB by default) and a whole WebSocket
+    # frame (16 MiB) in memory per request, and holds one ACP connection per
+    # live session. Without a limit, one large upload is charged to the host.
+    # A gigabyte is several times what a small deployment's steady state needs
+    # and still leaves the host standing when something runs away.
+    #
+    # The process count covers node's own threads plus the git it runs over a
+    # workspace for the review.
+    mem_limit: 1g
+    pids_limit: 512
     ports:
       # Loopback by default, because the orchestrator has no authentication of
       # its own: binding it to every interface would publish a
@@ -82,6 +93,13 @@ services:
     # in memory and writes nothing anywhere.
     networks:
       - default
+    # Smaller than the orchestrator's, because this holds no database and no
+    # session state — only the in-flight requests of every session at once,
+    # each of which it buffers to swap a credential into. Half a gigabyte is
+    # room for a busy moment and a bound on a session that uploads or
+    # downloads something enormous.
+    mem_limit: 512m
+    pids_limit: 256
 
 volumes:
   boxes-data:

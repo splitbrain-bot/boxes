@@ -16,7 +16,7 @@
  * Source lines kept above and below an annotated line, so the code can be
  * recognised again after it moved.
  */
-export const CONTEXT_RADIUS = 3;
+const CONTEXT_RADIUS = 3;
 
 /**
  * Appears in the info string of a context block's fence and tells it apart
@@ -36,7 +36,7 @@ export interface Annotation {
 }
 
 /** Annotations by file path, then by line number. */
-export type ReviewData = Map<string, Map<number, Annotation>>;
+type ReviewData = Map<string, Map<number, Annotation>>;
 
 /** A whole parsed REVIEW.md. */
 export interface Review {
@@ -319,8 +319,12 @@ export function serializeReview(review: Review): string {
     for (const lineNum of [...lines.keys()].sort((a, b) => a - b)) {
       const ann = lines.get(lineNum)!;
       out.push(ann.outdated ? `\n#### Line ${lineNum} (outdated)\n\n` : `\n#### Line ${lineNum}\n\n`);
-      out.push(escapeComment(ann.comment));
+      const { text, openFence } = escapeComment(ann.comment);
+      out.push(text);
       if (ann.context.length > 0) {
+        // A fence the comment left open would swallow the context block, which
+        // reads back as part of the comment and takes the block with it.
+        if (openFence !== '') out.push(openFence, '\n');
         out.push(`\n\`\`\`${contextFenceInfo(path)}\n`);
         out.push(formatContext(ann.context, ann.contextFrom));
         out.push('```\n');
@@ -347,13 +351,15 @@ function sortedPaths(data: ReviewData): string[] {
 }
 
 /**
- * Writes a comment as the reviewer wrote it. Only a line that would be read
- * back as one of the document's own headings is prefixed with a backslash,
- * which markdown renders as the plain text that was meant. Lines inside the
- * comment's own code fences are left alone, as nothing in them is read as
- * structure.
+ * Writes a comment as the reviewer wrote it, and reports the code fence it
+ * left open, if any.
+ *
+ * Only a line that would be read back as one of the document's own headings is
+ * prefixed with a backslash, which markdown renders as the plain text that was
+ * meant. Lines inside the comment's own code fences are left alone, as nothing
+ * in them is read as structure.
  */
-function escapeComment(comment: string): string {
+function escapeComment(comment: string): { text: string; openFence: string } {
   const out: string[] = [];
   let fence = '';
   for (const line of comment.split('\n')) {
@@ -366,7 +372,7 @@ function escapeComment(comment: string): string {
     }
     out.push(line, '\n');
   }
-  return out.join('');
+  return { text: out.join(''), openFence: fence };
 }
 
 /**
@@ -571,7 +577,7 @@ export function checkDrift(
   }
 
   let changed = false;
-  const relocations: Array<{ oldLine: number; newLine: number; ann: Annotation }> = [];
+  const relocations: Relocation[] = [];
 
   for (const [lineNum, ann] of annotations) {
     if (ann.context.length === 0) {
@@ -609,12 +615,51 @@ export function checkDrift(
     }
   }
 
-  for (const r of relocations) {
-    annotations.delete(r.oldLine);
-    annotations.set(r.newLine, r.ann);
-  }
+  if (relocations.length > 0) relocate(annotations, relocations);
 
   return changed;
+}
+
+/** An annotation that moved, with the lines it moved from and to. */
+interface Relocation {
+  oldLine: number;
+  newLine: number;
+  ann: Annotation;
+}
+
+/**
+ * Moves relocated annotations onto their new lines, in place.
+ *
+ * A move is taken only where its line is free of every annotation that is
+ * staying put and is wanted by no other move. One that is not taken leaves
+ * its annotation where it was, which frees nothing and can therefore block a
+ * move that looked safe a moment ago — so the set is settled by refusing one
+ * at a time until the rest hold. The result keeps every annotation and puts
+ * no two on one line, which is all REVIEW.md can hold. The map is rebuilt in
+ * line order, the order the document lists lines in.
+ */
+function relocate(annotations: Map<number, Annotation>, relocations: Relocation[]): void {
+  const moves = new Map(relocations.map((r) => [r.oldLine, r]));
+  for (;;) {
+    const held = new Set([...annotations.keys()].filter((line) => !moves.has(line)));
+    const claimed = new Set<number>();
+    const refused = [...moves.values()].find((r) => {
+      if (held.has(r.newLine) || claimed.has(r.newLine)) return true;
+      claimed.add(r.newLine);
+      return false;
+    });
+    if (!refused) break;
+    moves.delete(refused.oldLine);
+  }
+
+  const moved = new Map(annotations);
+  for (const r of moves.values()) moved.delete(r.oldLine);
+  for (const r of moves.values()) moved.set(r.newLine, r.ann);
+
+  annotations.clear();
+  for (const line of [...moved.keys()].sort((a, b) => a - b)) {
+    annotations.set(line, moved.get(line)!);
+  }
 }
 
 /** Whether the context lines match the file at a given 1-based position. */

@@ -107,7 +107,7 @@ export function ThreadHeader({
   onSetConfigOption,
 }: {
   sessionId: string;
-  /** Which thread this is, so the info view can come back to it exactly. */
+  /** Which thread this is, which the review link carries so it leads back here. */
   threadId: string | null;
   /** The way out, which pops the thread rather than pushing the list. */
   up: Up;

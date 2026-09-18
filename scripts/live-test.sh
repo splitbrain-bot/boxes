@@ -48,7 +48,9 @@ grey "session=$SESSION_ID  ws=$LOCAL_WS"
 echo
 echo "== M1: the subscription token works inside the container =="
 # No API key is present, so a reply here proves the OAuth token is in use.
-if docker exec -u agent "$CONTAINER" claude -p 'reply ok' 2>&1 | tee /dev/stderr | grep -qi ok; then
+CLAUDE_REPLY=$(docker exec -u agent "$CONTAINER" claude -p 'reply ok' 2>&1)
+printf '%s\n' "$CLAUDE_REPLY" >&2
+if grep -qiw ok <<<"$CLAUDE_REPLY"; then
   ok "claude -p 'reply ok' answered via the subscription"
 else
   no "claude -p 'reply ok' produced no answer - check PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN"

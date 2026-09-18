@@ -23,6 +23,9 @@ import { parsePolicy } from './policy.ts';
 /** Largest policy body accepted, in bytes. */
 const MAX_BODY = 1 << 20;
 
+/** How long one control request may take to arrive, in milliseconds. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 /** What the control server does with what it receives. */
 export interface ControlOptions {
   /** Applies a pushed policy. Rejecting it answers the push with a 400. */
@@ -112,19 +115,21 @@ export function createControlServer(opts: ControlOptions): ControlServer {
     res.end(text);
   };
 
-  /** Checks the bearer, claiming the channel if nobody has yet. */
+  /**
+   * Checks the bearer. Only a policy push may claim an unclaimed channel, so a
+   * caller that knows no more than the shape of the endpoint cannot take it.
+   */
   const authorize = (req: http.IncomingMessage): boolean => {
     const header = req.headers['authorization'];
     const value = Array.isArray(header) ? header[0] : header;
     const presented = /^bearer\s+(.+)$/i.exec(value ?? '')?.[1]?.trim();
     if (!presented) return false;
+    if (token !== null) return tokensMatch(token, presented);
 
-    if (token === null) {
-      token = presented;
-      opts.log('control channel claimed by its first caller');
-      return true;
-    }
-    return tokensMatch(token, presented);
+    if (req.method !== 'POST' || req.url !== '/policy') return false;
+    token = presented;
+    opts.log('control channel claimed by its first push');
+    return true;
   };
 
   const server = http.createServer((req, res) => {
@@ -151,8 +156,9 @@ export function createControlServer(opts: ControlOptions): ControlServer {
       body += chunk;
       if (body.length > MAX_BODY) {
         oversized = true;
+        // The refusal has to reach the caller before the socket goes.
+        res.on('finish', () => req.destroy());
         send(res, 413, { error: 'policy too large' });
-        req.destroy();
       }
     });
     req.on('end', () => {
@@ -170,6 +176,9 @@ export function createControlServer(opts: ControlOptions): ControlServer {
       })();
     });
   });
+
+  // A push that stalls halfway must not hold a connection open for good.
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
 
   return { server, claimed: () => token !== null };
 }

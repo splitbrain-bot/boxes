@@ -1,6 +1,7 @@
 import type { Config } from './config.ts';
 import {
   deletePushSubscription,
+  dropOtherKeySubscriptions,
   listPushSubscriptions,
   touchPushSubscription,
   type Db,
@@ -18,6 +19,9 @@ import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';
  * also be waiting on a push service, so nothing here is ever awaited by the
  * gateway and nothing here throws.
  */
+
+/** Longest a thread title may be in a notification, in characters. */
+const MAX_TITLE = 80;
 
 /** What happened, which picks the wording. */
 export type NotifyKind = 'approval' | 'idle';
@@ -62,7 +66,7 @@ interface PushPayload {
  */
 export function wording(event: NotifyEvent): { title: string; body: string } {
   const where = event.threadName
-    ? `${event.sessionName} · ${event.threadName}`
+    ? `${event.sessionName} · ${shortTitle(event.threadName)}`
     : event.sessionName;
   if (event.kind === 'approval') {
     return {
@@ -77,6 +81,17 @@ export function wording(event: NotifyEvent): { title: string; body: string } {
     title: 'Boxes: waiting for you',
     body: `${where} has stopped and is waiting for input.${still}`,
   };
+}
+
+/**
+ * A thread title short enough for a notification.
+ *
+ * A title is whatever the first prompt was about and can run long, while the
+ * whole payload has to fit one encrypted record, and no lock screen shows
+ * more than a line of it anyway.
+ */
+function shortTitle(name: string): string {
+  return name.length <= MAX_TITLE ? name : `${name.slice(0, MAX_TITLE - 1)}…`;
 }
 
 /** Where a notification about this event points. */
@@ -142,10 +157,25 @@ export class Notifier {
    *
    * A dead subscription is the normal end of one — the browser was
    * uninstalled, the permission revoked, Safari expired it — so pruning on a
-   * 404 or 410 is ordinary housekeeping rather than an error path.
+   * 404 or 410 is ordinary housekeeping rather than an error path. A key
+   * rotation ends one just as surely, and the row says which key it was made
+   * under, so those go the same way.
    */
   private async push(event: NotifyEvent): Promise<void> {
-    const subscriptions = listPushSubscriptions(this.db);
+    const stored = listPushSubscriptions(this.db);
+    // Before the keypair is asked for, so a deployment nobody subscribes from
+    // still writes none.
+    if (stored.length === 0) return;
+
+    const keys = this.vapid();
+    // A subscription made under an earlier key can never be delivered to
+    // again, and a push service refuses it with a status the pruning below
+    // does not read, so it would be retried at every event forever.
+    const dropped = dropOtherKeySubscriptions(this.db, keys.publicKey);
+    if (dropped > 0) {
+      log.info('dropped push subscriptions made under an earlier key', { count: dropped });
+    }
+    const subscriptions = stored.filter((row) => row.vapid_key === keys.publicKey);
     if (subscriptions.length === 0) return;
 
     const { title, body } = wording(event);
@@ -156,7 +186,6 @@ export class Notifier {
       url: target(event),
     };
     const message = JSON.stringify(payload);
-    const keys = this.vapid();
 
     await Promise.all(
       subscriptions.map(async (row) => {

@@ -67,6 +67,22 @@ test('vets v4-compatible IPv6 as the IPv4 address it reaches', () => {
   assert.equal(isBlockedAddress('::8.8.8.8'), false);
 });
 
+test('vets v4-translated IPv6 as the IPv4 address it reaches', () => {
+  assert.equal(isBlockedAddress('::ffff:0:192.168.1.1'), true);
+  assert.equal(isBlockedAddress('::ffff:0:8.8.8.8'), false);
+});
+
+test('vets NAT64 and 6to4 addresses as the IPv4 address they reach', () => {
+  // Both carry an IPv4 address an agent would otherwise reach unvetted.
+  assert.equal(isBlockedAddress('64:ff9b::192.168.1.1'), true);
+  assert.equal(isBlockedAddress('64:ff9b::169.254.169.254'), true);
+  assert.equal(isBlockedAddress('64:ff9b::c0a8:101'), true);
+  assert.equal(isBlockedAddress('64:ff9b::8.8.8.8'), false);
+  assert.equal(isBlockedAddress('2002:c0a8:0101::1'), true);
+  assert.equal(isBlockedAddress('2002:7f00:0001::1'), true);
+  assert.equal(isBlockedAddress('2002:0808:0808::1'), false);
+});
+
 test('handles bracketed and zoned IPv6 literals', () => {
   assert.equal(isBlockedAddress('[::1]'), true);
   assert.equal(isBlockedAddress('fe80::1%eth0'), true);

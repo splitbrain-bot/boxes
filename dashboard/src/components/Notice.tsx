@@ -16,7 +16,7 @@ const TONE: Record<NoticeTone, string> = {
  * The colour and the alert role belong to the component; the arrangement stays
  * the caller's, because a notice sits as a card in a stacked view and as a
  * band across the top of a pane, and each view has its own padding rhythm to
- * match. That is the same bargain TokenWarning makes.
+ * match.
  */
 export function Notice({
   tone = 'danger',

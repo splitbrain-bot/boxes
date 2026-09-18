@@ -11,6 +11,7 @@ import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { useUp } from '@/hooks/use-up';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -55,22 +56,34 @@ export function AgentSetEditor() {
   );
   const [confirmDelete, setConfirmDelete] = useState<AgentItem | null>(null);
 
-  /** Loads the set and, for a non-global one, what it merges to. */
-  const load = useCallback(async (): Promise<void> => {
-    try {
-      const detail = await api.getAgentSet(setId);
-      setSet(detail);
-      setAgentsMd(detail.agentsMd);
-      setName(detail.name);
-      setPreview(detail.global ? null : await api.agentSetPreview(setId));
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }, [setId]);
+  /**
+   * Loads the set and, for a non-global one, what it merges to.
+   *
+   * `seed` fills the two text buffers from the answer, and only the first
+   * load asks for it: every section saves on its own, so a reload after
+   * adding a skill would otherwise throw away an AGENTS.md or a name that is
+   * still being typed.
+   */
+  const load = useCallback(
+    async (seed = false): Promise<void> => {
+      try {
+        const detail = await api.getAgentSet(setId);
+        setSet(detail);
+        if (seed) {
+          setAgentsMd(detail.agentsMd);
+          setName(detail.name);
+        }
+        setPreview(detail.global ? null : await api.agentSetPreview(setId));
+        setError(null);
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    },
+    [setId],
+  );
 
   useEffect(() => {
-    void load();
+    void load(true);
   }, [load]);
 
   /** Runs one mutation and reloads, so the view never guesses at the result. */
@@ -93,11 +106,7 @@ export function AgentSetEditor() {
     return (
       <div className="flex flex-col gap-4">
         <BackLink up={up} label="Agent configuration" />
-        {error ? (
-          <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-        ) : (
-          <div className="text-sm text-muted-foreground">Loading…</div>
-        )}
+        {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : <Loading />}
       </div>
     );
   }

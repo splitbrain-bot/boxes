@@ -42,12 +42,6 @@ export interface TaskNotification {
   /** The harness's id for the task, which outlives any one notification. */
   taskId: string;
   /**
-   * The tool call that started the task, when the harness names it, which it
-   * does for a background command and not for a subagent or a monitor. The
-   * same id ACP calls `toolCallId`.
-   */
-  toolUseId?: string;
-  /**
    * `completed`, `failed`, `killed` or `blocked` — and absent on a task that
    * is still going, which is what a monitor's event is.
    */
@@ -108,13 +102,11 @@ function notificationOf(body: string): TaskNotification | null {
 
   // A subagent answers with `result`, a monitor with an `event`.
   const said = [field(body, 'result'), field(body, 'event')].filter(Boolean).join('\n\n');
-  const toolUseId = field(body, 'tool-use-id');
   const status = field(body, 'status');
   const usage = usageOf(body);
 
   return {
     taskId,
-    ...(toolUseId ? { toolUseId } : {}),
     ...(status ? { status } : {}),
     summary,
     ...(said ? { body: said } : {}),
@@ -126,31 +118,37 @@ function notificationOf(body: string): TaskNotification | null {
  * A block of message text as the notifications in it and the prose around
  * them, or null when it holds none.
  *
- * Null rather than one text segment, so a caller can tell that there is
- * nothing to do here.
+ * A block this build cannot read costs only itself: it stays in the text
+ * around it, and the blocks beside it are still read. Null rather than one
+ * text segment, so a caller can tell that there is nothing to do here.
  */
 export function parseTaskNotifications(text: string): NotificationSegment[] | null {
   if (!text.includes(OPEN)) return null;
 
   const segments: NotificationSegment[] = [];
+  // Where the next text segment starts, and where the next block is looked
+  // for. The two differ over a block that was passed over, which is prose
+  // from here on and so belongs to the run of text around it.
   let read = 0;
+  let scan = 0;
 
   for (;;) {
-    const open = text.indexOf(OPEN, read);
+    const open = text.indexOf(OPEN, scan);
     if (open === -1) break;
     const close = text.indexOf(CLOSE, open);
     // An unclosed opening tag is prose about the format rather than a block,
     // and is left as text. The harness sends a notification as one content
     // block, so a block cannot be cut in half here.
     if (close === -1) break;
+    scan = close + CLOSE.length;
 
     const notification = notificationOf(text.slice(open + OPEN.length, close));
-    if (!notification) return null;
+    if (!notification) continue;
 
     const before = text.slice(read, open).trim();
     if (before) segments.push({ type: 'text', text: before });
     segments.push({ type: 'notification', notification });
-    read = close + CLOSE.length;
+    read = scan;
   }
 
   if (segments.length === 0) return null;
@@ -158,19 +156,4 @@ export function parseTaskNotifications(text: string): NotificationSegment[] | nu
   const after = text.slice(read).trim();
   if (after) segments.push({ type: 'text', text: after });
   return segments;
-}
-
-
-/**
- * Statuses that say the task will not report again.
- *
- * An absent status is a task still going, which is what a monitor's event
- * is. An unknown one is read the same way: a status this build has not heard
- * of is no proof that anything ended.
- */
-const TERMINAL = new Set(['completed', 'failed', 'killed']);
-
-/** Whether a notification's status means the task is over. */
-export function isTerminalStatus(status: string | undefined): boolean {
-  return status !== undefined && TERMINAL.has(status);
 }

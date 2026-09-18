@@ -1,44 +1,9 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
-import type { Token } from '@/lib/highlight';
+import { Notice } from '@/components/Notice';
+import { withinLineLimit, type Token } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
-
-/**
- * The file, one addressable row per line.
- *
- * A CSS grid rather than a `<pre>`: the line-number gutter is sticky against
- * the pane's horizontal scroll, the code cell scrolls as one block so the
- * numbers stay put, and every line is its own element — which is what makes
- * tapping one to comment possible at all.
- *
- * Tap replaces hover throughout, and the row is split between the two things
- * a reader does to a line. The gutter is the change: tapping it opens the hunk
- * around that line, which is where the desktop tool's hover tooltip went and
- * the only place deleted lines exist. The code is the comment: tapping it
- * opens the composer, and comments are inline cards under their line on every
- * screen size.
- *
- * That way round because the code cell is the larger target by far and
- * commenting is the frequent act, while a gutter with no hunk behind it —
- * every line of a file git does not track yet — is not a target at all.
- *
- * These same rows are also the editor. Edit mode floats a transparent
- * textarea over the code column and leaves the rows behind it to do the
- * highlighting: same font, same wrapping, same gutter, so a switch between
- * reading and editing changes no measurement on the screen. An editor
- * component would have brought its own highlighter, its own gutter and its own
- * line heights, and moved the code out from under the reader on the way in.
- *
- * What a switch does move is the comment cards, the composer and the deletion
- * markers, which fold away: the textarea is one run of text and nothing can
- * sit between its lines. The view holds the reader's line across that, with
- * `lib/anchor.ts`.
- *
- * File content and comments are agent-influenced and hostile by assumption, so
- * both are rendered as text nodes only. Highlight tokens become React
- * elements; nothing here goes near `dangerouslySetInnerHTML`.
- */
 
 /** What a changed line gets in its gutter and behind its code. */
 const CHANGE: Record<ReviewLineChange, { bar: string; row: string; label: string }> = {
@@ -63,8 +28,20 @@ function gutterWidth(digits: number): string {
 /** The gutter's width, wherever something has to agree with it. */
 const GUTTER = 'var(--review-gutter)';
 
+/**
+ * A line to bring into view, and which request asked for it.
+ *
+ * The nonce is what makes each request its own. Prev/next lands on the line
+ * that is already the target whenever a file holds one change, and whenever a
+ * step wraps round to where it started — and both of those have to scroll.
+ */
+export interface ScrollTarget {
+  line: number;
+  nonce: number;
+}
+
 /** A buffer being edited, and the way to change it. */
-export interface CodeEdit {
+interface CodeEdit {
   text: string;
   onChange: (text: string) => void;
 }
@@ -106,8 +83,8 @@ export interface CodePaneProps {
   composing: number | null;
   /** Wrap long lines instead of scrolling them. */
   wrap: boolean;
-  /** A line to scroll to once, when prev/next or a link asks for it. */
-  scrollTo: number | null;
+  /** A line to scroll to once, when prev/next asks for it. */
+  scrollTo: ScrollTarget | null;
   /** The buffer being edited, or null when the file is being read. */
   edit: CodeEdit | null;
   onSelectLine: (line: number) => void;
@@ -116,6 +93,46 @@ export interface CodePaneProps {
   renderUnderLine?: (line: number) => React.ReactNode;
 }
 
+/**
+ * The file, one addressable row per line.
+ *
+ * A CSS grid rather than a `<pre>`: the line-number gutter is sticky against
+ * the pane's horizontal scroll, the code cell scrolls as one block so the
+ * numbers stay put, and every line is its own element — which is what makes
+ * tapping one to comment possible at all.
+ *
+ * Tap replaces hover throughout, and the row is split between the two things
+ * a reader does to a line. The gutter is the change: tapping it opens the hunk
+ * around that line, which is where the desktop tool's hover tooltip went and
+ * the only place deleted lines exist. The code is the comment: tapping it
+ * opens the composer, and comments are inline cards under their line on every
+ * screen size.
+ *
+ * That way round because the code cell is the larger target by far and
+ * commenting is the frequent act, while a gutter with no hunk behind it —
+ * every line of a file git does not track yet — is not a target at all.
+ *
+ * These same rows are also the editor. Edit mode floats a transparent
+ * textarea over the code column and leaves the rows behind it to do the
+ * highlighting: same font, same wrapping, same gutter, so a switch between
+ * reading and editing changes no measurement on the screen. An editor
+ * component would have brought its own highlighter, its own gutter and its own
+ * line heights, and moved the code out from under the reader on the way in.
+ *
+ * What a switch does move is the comment cards, the composer and the deletion
+ * markers, which fold away: the textarea is one run of text and nothing can
+ * sit between its lines. The view holds the reader's line across that, with
+ * `lib/anchor.ts`.
+ *
+ * A file past the line limit gets none of this. It is shown as one block of
+ * plain text under a notice saying so, because tens of thousands of rows are
+ * more than a phone can lay out — and with no rows there is no gutter, no line
+ * to tap and nothing to edit.
+ *
+ * File content and comments are agent-influenced and hostile by assumption, so
+ * both are rendered as text nodes only. Highlight tokens become React
+ * elements; nothing here goes near `dangerouslySetInnerHTML`.
+ */
 export function CodePane({
   scrollRef,
   path,
@@ -139,6 +156,8 @@ export function CodePane({
   const editing = edit !== null;
   /** What the pane is showing: the buffer while editing, the file otherwise. */
   const source = edit ? edit.text : content;
+  /** Whether this file is too long to be read a line at a time. */
+  const tooLong = !withinLineLimit(source);
 
   /**
    * Puts each file back where it was left, and every file this review has not
@@ -157,6 +176,20 @@ export function CodePane({
     element.scrollTop = recallScroll(path);
   }, [scrollRef, path, content]);
 
+  /**
+   * Brings the line prev/next asked for into the middle of the pane.
+   *
+   * Every line of the file is a row of its own, so the row is in the document
+   * by the time this runs; what it waits for is the request, which is a new
+   * object each time even where the line is the one already showing.
+   */
+  useEffect(() => {
+    if (!scrollTo) return;
+    scrollRef.current
+      ?.querySelector(`[data-line="${scrollTo.line}"]`)
+      ?.scrollIntoView({ block: 'center' });
+  }, [scrollRef, scrollTo]);
+
   /** Records where the reader is, for the next time they open this file. */
   useEffect(() => {
     const element = scrollRef.current;
@@ -166,7 +199,7 @@ export function CodePane({
     return () => element.removeEventListener('scroll', onScroll);
   }, [scrollRef, path]);
 
-  const lines = useMemo(() => splitLines(source), [source]);
+  const lines = useMemo(() => (tooLong ? [] : splitLines(source)), [source, tooLong]);
   /** The lines the tokens describe, which is the file itself until it is typed in. */
   const tokenLines = useMemo(
     () => (tokensFor === source ? lines : splitLines(tokensFor)),
@@ -190,39 +223,48 @@ export function CodePane({
         // The same size in both modes, so switching moves nothing.
         'min-h-0 flex-1 overflow-auto font-mono text-[16px] leading-[1.55] md:text-[13px]',
         // The pane scrolls, not the page: the header and the toolbar stay put.
-        wrapped ? 'overflow-x-hidden' : 'overflow-x-auto',
+        wrapped || tooLong ? 'overflow-x-hidden' : 'overflow-x-auto',
       )}
     >
-      <div
-        className={cn('relative min-w-full', editing && 'pb-[1.55em]')}
-        style={{ '--review-gutter': gutterWidth(digits) } as React.CSSProperties}
-      >
-        {deletions.has(0) && !editing ? (
-          <DeletionMarker hunkIndex={deletions.get(0)!} onShowHunk={onShowHunk} />
-        ) : null}
+      {tooLong ? (
+        <>
+          <Notice tone="warn" className="border-b px-3 py-1.5 text-xs">
+            This file is too long to review line by line. It is shown as plain text, so it has no
+            line numbers, no comments and no edit mode.
+          </Notice>
+          <pre className="px-2 py-1 whitespace-pre-wrap break-words">{source}</pre>
+        </>
+      ) : (
+        <div
+          className={cn('relative min-w-full', editing && 'pb-[1.55em]')}
+          style={{ '--review-gutter': gutterWidth(digits) } as React.CSSProperties}
+        >
+          {deletions.has(0) && !editing ? (
+            <DeletionMarker hunkIndex={deletions.get(0)!} onShowHunk={onShowHunk} />
+          ) : null}
 
-        {lines.map((text, index) => (
-          <Row
-            key={index + 1}
-            line={index + 1}
-            text={text}
-            tokens={tokenLines[index] === text ? (tokens?.[index] ?? null) : null}
-            change={diffLines[String(index + 1)]}
-            annotation={annotations.get(index + 1)}
-            composing={composing === index + 1}
-            hunkIndex={hunkByLine.get(index + 1)}
-            deletionHunk={deletions.get(index + 1)}
-            wrap={wrapped}
-            editing={editing}
-            scrollTo={scrollTo}
-            under={editing ? null : (renderUnderLine?.(index + 1) ?? null)}
-            onSelectLine={onSelectLine}
-            onShowHunk={onShowHunk}
-          />
-        ))}
+          {lines.map((text, index) => (
+            <Row
+              key={index + 1}
+              line={index + 1}
+              text={text}
+              tokens={tokenLines[index] === text ? (tokens?.[index] ?? null) : null}
+              change={diffLines[String(index + 1)]}
+              annotation={annotations.get(index + 1)}
+              composing={composing === index + 1}
+              hunkIndex={hunkByLine.get(index + 1)}
+              deletionHunk={deletions.get(index + 1)}
+              wrap={wrapped}
+              editing={editing}
+              under={editing ? null : (renderUnderLine?.(index + 1) ?? null)}
+              onSelectLine={onSelectLine}
+              onShowHunk={onShowHunk}
+            />
+          ))}
 
-        {edit ? <Editor text={edit.text} onChange={edit.onChange} /> : null}
-      </div>
+          {edit ? <Editor text={edit.text} onChange={edit.onChange} /> : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -246,7 +288,6 @@ const Row = memo(function Row({
   deletionHunk,
   wrap,
   editing,
-  scrollTo,
   under,
   onSelectLine,
   onShowHunk,
@@ -264,7 +305,6 @@ const Row = memo(function Row({
   deletionHunk: number | undefined;
   wrap: boolean;
   editing: boolean;
-  scrollTo: number | null;
   under: React.ReactNode;
   onSelectLine: (line: number) => void;
   onShowHunk: (hunkIndex: number) => void;
@@ -273,7 +313,6 @@ const Row = memo(function Row({
     <Fragment>
       <div
         data-line={line}
-        ref={line === scrollTo ? scrollIntoView : undefined}
         className={cn(
           'group grid grid-cols-[auto_1fr] items-start',
           change && CHANGE[change].row,
@@ -540,13 +579,3 @@ function splitLines(content: string): string[] {
   return lines;
 }
 
-/**
- * Brings a line into view when it is first rendered.
- *
- * A ref callback rather than an effect, because the element does not exist
- * until the row it belongs to renders, and the row that needs scrolling to may
- * be the one that just appeared.
- */
-function scrollIntoView(element: HTMLDivElement | null): void {
-  element?.scrollIntoView({ block: 'center' });
-}

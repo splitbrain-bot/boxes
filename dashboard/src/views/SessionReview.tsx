@@ -5,7 +5,7 @@ import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
 import { Shelf } from '@/components/Shelf';
 import { BasePicker } from '@/components/review/BasePicker';
-import { CodePane } from '@/components/review/CodePane';
+import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
 import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
 import { HunkSheet } from '@/components/review/HunkSheet';
@@ -17,13 +17,14 @@ import { useCodeEdit } from '@/hooks/use-code-edit';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useScrollAway } from '@/hooks/use-scroll-away';
+import { useSession } from '@/hooks/use-session';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { anchorAt, rowOffsets, scrollForAnchor, type ScrollAnchor } from '@/lib/anchor';
+import { withinLineLimit } from '@/lib/highlight';
 import { historyIndex } from '@/lib/history';
 import { stagePrompt } from '@/lib/staged-prompt';
 import { cn } from '@/lib/utils';
-import { useSessions } from '../stores/sessions.ts';
 import {
   closeFile,
   compose,
@@ -37,6 +38,7 @@ import {
   saveFile,
   setBase,
   setDirty,
+  toggleDir,
   useReview,
 } from '../stores/review.ts';
 
@@ -76,9 +78,11 @@ export function SessionReview() {
   const location = useLocation();
   const path = params.get('path');
 
-  const { tree, file, loadingTree, loadingFile, error, composing, saving } = useReview();
-  const { sessions } = useSessions();
-  const session = sessions.find((s) => s.id === id);
+  const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
+    useReview();
+  // This box, polled: its name for the header and its current thread for the
+  // way out. One session off the wire rather than the whole list.
+  const { session } = useSession(id);
 
   /**
    * Long lines wrap unless the reader turns it off.
@@ -91,8 +95,8 @@ export function SessionReview() {
    */
   const [wrap, setWrap] = useState(true);
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
-  /** A line to scroll to once, set by the prev/next toolbar. */
-  const [scrollTo, setScrollTo] = useState<number | null>(null);
+  /** The line the prev/next toolbar last asked for, or null. */
+  const [scrollTo, setScrollTo] = useState<ScrollTarget | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
   /** The comment a tap on a bin is asking to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -161,7 +165,7 @@ export function SessionReview() {
   //
   // The mount is one of the three moments a review refetches; coming back to
   // the tab is the second, and closing a file back to the tree is the third.
-  // There is no poll, so nothing costs anything while this sits open.
+  // Nothing polls the workspace, so a review left open costs nothing.
   useEffect(() => {
     openReview(id);
     void loadTree();
@@ -297,14 +301,21 @@ export function SessionReview() {
 
   const editing = edit.text !== null;
   /**
+   * Whether the pane shows this file as one plain block rather than as rows.
+   *
+   * Past the line limit it does, so there is no line to step to, none to
+   * comment on and nothing to edit — see CodePane.
+   */
+  const tooLong = file !== null && !withinLineLimit(file.content);
+  /**
    * Whether this file can be edited at all.
    *
-   * The three the pane cannot show whole are the three it must not write
-   * back: there is nothing to edit in a deleted file, nothing readable in a
-   * binary one, and saving a truncated one would delete everything past where
-   * the read stopped.
+   * What the pane cannot show a line at a time it must not write back: there
+   * is nothing to edit in a deleted file, nothing readable in a binary one,
+   * saving a truncated one would delete everything past where the read
+   * stopped, and a file past the line limit has no rows to edit.
    */
-  const editable = file !== null && !file.deleted && !file.binary && !file.truncated;
+  const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
 
   // Put the reader back on their line, before the new mode is painted.
   useLayoutEffect(() => {
@@ -461,12 +472,15 @@ export function SessionReview() {
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
     if (lines.length === 0) return;
-    const from = scrollTo ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
+    const from = scrollTo?.line ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
     const next =
       direction === 1
         ? (lines.find((line) => line > from) ?? lines[0]!)
         : ([...lines].reverse().find((line) => line < from) ?? lines.at(-1)!);
-    setScrollTo(next);
+    // Every press is its own request, because a file with one change in it
+    // and a step that wrapped round both land on the line already showing —
+    // and the pane has to take the reader back to it either way.
+    setScrollTo((current) => ({ line: next, nonce: (current?.nonce ?? 0) + 1 }));
   };
 
   // The code pane is the scroller here, the same way the thread is in a
@@ -549,26 +563,26 @@ export function SessionReview() {
               {/* Which repository the open file belongs to, rather than a root
                   the review no longer has. A file no repository claims says
                   so, since that is why it has no statuses and no markers. */}
-              {file ? ` · ${whichRepo(file.repo, tree?.repos ?? [])}` : ''}
-              {tree && !tree.hasGit ? ' · no git' : ''}
+              {file ? ` · ${whichRepo(file.repo, facts?.repos ?? [])}` : ''}
+              {facts && !facts.hasGit ? ' · no git' : ''}
               {/* Which base is active belongs in the status line, the way the
                   desktop tool's does: it changes what every colour in the tree
                   and every marker in the gutter means. One expression resolves
                   separately in each repository, so where it landed is part of
                   what it means. */}
-              {tree?.base.rev
-                ? ` · vs ${tree.base.rev}${resolvedIn(tree.repos)}`
-                : tree?.hasGit
+              {facts?.base.rev
+                ? ` · vs ${facts.base.rev}${resolvedIn(facts.repos)}`
+                : facts?.hasGit
                   ? ' · vs working tree'
                   : ''}
             </span>
           </div>
 
           {/* Only where there is a repository to compare in. */}
-          {tree?.hasGit ? (
+          {facts?.hasGit ? (
             <BasePicker
-              base={tree.base}
-              repos={tree.repos}
+              base={facts.base}
+              repos={facts.repos}
               busy={saving}
               onSet={(rev) => void setBase(rev)}
             />
@@ -578,7 +592,7 @@ export function SessionReview() {
               a file of the project the agent is working on, so handing it over is
               one line of prompt rather than an export. Staged in the composer,
               not sent — the reviewer decides when to ask. */}
-          {tree && Object.keys(tree.counts).length > 0 ? (
+          {facts && facts.commentCount > 0 ? (
             <Button
               type="button"
               variant="outline"
@@ -596,7 +610,7 @@ export function SessionReview() {
             </Button>
           ) : null}
 
-          {tree?.hasReview ? (
+          {facts?.hasReview ? (
             <Button
               type="button"
               variant="ghost"
@@ -628,12 +642,21 @@ export function SessionReview() {
             file ? 'hidden' : 'w-full',
           )}
         >
-          {tree ? (
-            <ReviewTree tree={tree} activePath={file?.path ?? null} onOpen={openPath} />
-          ) : (
-            <p className="px-3 py-4 text-sm text-muted-foreground">
-              {loadingTree ? 'Loading…' : 'Nothing to show.'}
-            </p>
+          {dirs[''] ? (
+            <ReviewTree
+              dirs={dirs}
+              expanded={expanded}
+              activePath={file?.path ?? null}
+              onOpen={openPath}
+              onToggle={toggleDir}
+            />
+          ) : loadingTree ? (
+            <p className="px-3 py-4 text-sm text-muted-foreground">Loading…</p>
+          ) : error ? null : (
+            // Only where the tree came back empty. A fetch that failed has the
+            // banner above to say so, and "nothing to show" under it reads as
+            // an answer about the workspace rather than about the failure.
+            <p className="px-3 py-4 text-sm text-muted-foreground">Nothing to show.</p>
           )}
         </aside>
 
@@ -643,6 +666,9 @@ export function SessionReview() {
               <ReviewToolbar
                 changeCount={changedLines.length}
                 commentCount={commentedLines.length}
+                // A file shown as one block has no rows, so the counts are
+                // still worth saying and there is nowhere to step to.
+                steppable={!tooLong}
                 wrap={wrap}
                 editable={editable}
                 editing={editing}
@@ -739,7 +765,7 @@ export function SessionReview() {
 
       {/* Below md, writing a comment happens here rather than inline. */}
       <ComposerSheet
-        line={!wide && file ? composing : null}
+        line={!wide && file && !tooLong ? composing : null}
         initial={composing === null ? '' : (annotations.get(composing)?.comment ?? '')}
         busy={saving}
         onSave={(comment) => {

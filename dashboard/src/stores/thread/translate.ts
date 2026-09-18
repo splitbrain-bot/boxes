@@ -1,3 +1,4 @@
+import { UPDATE_KIND, type UpdateKind } from '../../../../shared/acp.ts';
 import {
   blockText,
   imageFallbackText,
@@ -29,14 +30,17 @@ import {
  * path. Replay is just the adapter re-sending the history as notifications.
  */
 
+/** The member of the update union that carries one kind. */
+type UpdateOf<K extends UpdateKind> = Extract<SessionUpdate, { sessionUpdate: K }>;
+
 /** A run of assistant or user prose. */
-export interface TextPart {
+interface TextPart {
   type: 'text';
   text: string;
 }
 
 /** The agent thinking out loud, rendered collapsed. */
-export interface ReasoningPart {
+interface ReasoningPart {
   type: 'reasoning';
   text: string;
 }
@@ -49,7 +53,7 @@ export interface ReasoningPart {
  * once, on arrival, by `imageSrc`. A block that yields no src never becomes
  * one of these — it is said in words instead.
  */
-export interface ImagePart {
+interface ImagePart {
   type: 'image';
   src: string;
 }
@@ -118,6 +122,14 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   parts: Part[];
+  /**
+   * True when the id is the adapter's own rather than one this model made up.
+   *
+   * A replay says an adapter's id again, which is what lets a reconnect ask
+   * for the thread from one message on. An id this model numbered itself
+   * names nothing the adapter would repeat.
+   */
+  named?: boolean;
 }
 
 /** Everything the thread view reads. */
@@ -131,8 +143,22 @@ export interface ThreadModel {
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
   commands: AvailableCommand[];
-  /** Updates whose kind this build does not know, kept for forward compatibility. */
-  unknown: SessionUpdate[];
+  /**
+   * Kinds of update this build does not know, by name.
+   *
+   * The names rather than the updates: what a newer adapter sending something
+   * unrecognised is worth knowing for is that it happened, and a thread can
+   * carry hundreds of thousands of updates.
+   */
+  unknown: Set<string>;
+  /**
+   * Every tool call in the thread, by the adapter's id for it.
+   *
+   * A tool call is looked up whenever one is updated, answered or refreshed,
+   * and a long thread holds thousands of them, so the lookup is an index
+   * rather than a walk of every message.
+   */
+  tools: Map<string, { part: ToolPart; message: Message }>;
 }
 
 /** A model with nothing in it. */
@@ -143,7 +169,8 @@ export function emptyModel(): ThreadModel {
     configOptions: [],
     plan: null,
     commands: [],
-    unknown: [],
+    unknown: new Set(),
+    tools: new Map(),
   };
 }
 
@@ -157,7 +184,8 @@ export function resetIds(): void {
 
 /** A new empty message, in the given role. */
 function newMessage(role: Message['role'], id?: string | null): Message {
-  return { id: id ?? `m${nextId++}`, role, parts: [] };
+  if (id) return { id, role, parts: [], named: true };
+  return { id: `m${nextId++}`, role, parts: [] };
 }
 
 /**
@@ -255,16 +283,35 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
   appendText(message, kind, text);
 }
 
-/** Finds a tool part anywhere in the thread, newest first. */
-export function findTool(model: ThreadModel, toolCallId: string): ToolPart | undefined {
-  for (let i = model.messages.length - 1; i >= 0; i--) {
-    const parts = model.messages[i]!.parts;
-    for (let j = parts.length - 1; j >= 0; j--) {
-      const part = parts[j]!;
-      if (part.type === 'tool' && part.toolCallId === toolCallId) return part;
+/**
+ * Drops the message an id names and everything after it, so a replay that
+ * starts there builds them again.
+ *
+ * Returns what went, which is empty when no message answers to the id — and
+ * then the model is left exactly as it was.
+ */
+export function truncateFrom(model: ThreadModel, messageId: string): Message[] {
+  const from = model.messages.findIndex((m) => m.id === messageId);
+  if (from < 0) return [];
+  const dropped = model.messages.splice(from);
+  // The index is what every tool lookup goes through, so a call in a message
+  // that has gone has to go with it.
+  for (const message of dropped) {
+    for (const part of message.parts) {
+      if (part.type === 'tool') model.tools.delete(part.toolCallId);
     }
   }
-  return undefined;
+  return dropped;
+}
+
+/** Finds a tool part anywhere in the thread. */
+export function findTool(model: ThreadModel, toolCallId: string): ToolPart | undefined {
+  return model.tools.get(toolCallId)?.part;
+}
+
+/** The message a tool call sits in, or null when the thread has no such call. */
+export function messageOfTool(model: ThreadModel, toolCallId: string): Message | null {
+  return model.tools.get(toolCallId)?.message ?? null;
 }
 
 /**
@@ -276,64 +323,61 @@ export function findTool(model: ThreadModel, toolCallId: string): ToolPart | und
  */
 export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message | null {
   switch (update.sessionUpdate) {
-    case 'user_message_chunk': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'user_message_chunk' }>;
+    case UPDATE_KIND.userMessageChunk: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.userMessageChunk>;
       const message = messageFor(model, 'user', u.messageId);
       appendBlock(message, 'text', u.content);
       return message;
     }
-    case 'agent_message_chunk': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'agent_message_chunk' }>;
+    case UPDATE_KIND.agentMessageChunk: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.agentMessageChunk>;
       const message = messageFor(model, 'assistant', u.messageId);
       appendBlock(message, 'text', u.content);
       return message;
     }
-    case 'agent_thought_chunk': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'agent_thought_chunk' }>;
+    case UPDATE_KIND.agentThoughtChunk: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.agentThoughtChunk>;
       const message = messageFor(model, 'assistant', u.messageId);
       appendBlock(message, 'reasoning', u.content);
       return message;
     }
-    case 'tool_call': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'tool_call' }>;
+    case UPDATE_KIND.toolCall: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.toolCall>;
       // A re-announced call is an update, not a second card: an adapter may
       // resend one, and replay always does.
       return openTool(model, u, u.title);
     }
-    case 'tool_call_update': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>;
+    case UPDATE_KIND.toolCallUpdate: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.toolCallUpdate>;
       // Out of order: an update can arrive before the call it belongs to, and
       // dropping it would lose the tool's result. What it lacks is a title, so
       // the id stands in until the announcement arrives with one.
       return openTool(model, u, u.title ?? u.toolCallId);
     }
-    case 'plan': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'plan' }>;
+    case UPDATE_KIND.plan: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.plan>;
       model.plan = u.entries ?? [];
       return null;
     }
-    case 'available_commands_update': {
-      const u = update as Extract<
-        SessionUpdate,
-        { sessionUpdate: 'available_commands_update' }
-      >;
+    case UPDATE_KIND.availableCommands: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.availableCommands>;
       model.commands = u.availableCommands ?? [];
       return null;
     }
-    case 'config_option_update': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'config_option_update' }>;
+    case UPDATE_KIND.configOption: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.configOption>;
       // The adapter sends the whole set every time, so this replaces rather
       // than merges.
       model.configOptions = u.configOptions ?? [];
       return null;
     }
-    case 'current_mode_update': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'current_mode_update' }>;
+    case UPDATE_KIND.currentMode: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.currentMode>;
       if (model.modes) model.modes = { ...model.modes, currentModeId: u.currentModeId };
       return null;
     }
     default:
-      model.unknown.push(update);
+      model.unknown.add(update.sessionUpdate);
       return null;
   }
 }
@@ -347,13 +391,13 @@ export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message 
  * either of them first.
  */
 function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message | null {
-  const existing = findTool(model, u.toolCallId);
-  if (existing) {
-    mergeTool(existing, u);
-    return messageOf(model, existing);
+  const indexed = model.tools.get(u.toolCallId);
+  if (indexed) {
+    mergeTool(indexed.part, u);
+    return indexed.message;
   }
   const message = messageFor(model, 'assistant', null);
-  message.parts.push({
+  const part: ToolPart = {
     type: 'tool',
     toolCallId: u.toolCallId,
     title,
@@ -363,13 +407,10 @@ function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message
     ...(u.rawInput === undefined ? {} : { rawInput: u.rawInput }),
     content: u.content ?? [],
     locations: u.locations ?? [],
-  });
+  };
+  message.parts.push(part);
+  model.tools.set(u.toolCallId, { part, message });
   return message;
-}
-
-/** The message a part belongs to. */
-function messageOf(model: ThreadModel, part: Part): Message | null {
-  return model.messages.find((m) => m.parts.includes(part)) ?? null;
 }
 
 /**

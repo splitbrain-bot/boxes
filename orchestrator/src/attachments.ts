@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { StoredAttachment } from '../../shared/types.ts';
+import { resolveInRoot } from './review/fs.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
@@ -122,47 +124,91 @@ export function safeAttachmentName(name: string): string {
   return cleaned.slice(0, MAX_NAME - ext.length) + ext;
 }
 
-/** `name`, `name-2`, `name-3`… — the first that is not taken. */
-function freePath(dir: string, name: string): { name: string; path: string } {
+/**
+ * Writes `bytes` under the first free name: `name`, `name-2`, `name-3`…
+ *
+ * The open is exclusive and a taken name is tried again with the next
+ * suffix, so two uploads of the same name at once land on two files rather
+ * than one of them overwriting the other.
+ *
+ * The write itself is asynchronous: an attachment is as large as
+ * MAX_ATTACHMENT_MB allows, and one process carries every session's stream,
+ * so writing it in one blocking call stops all of them for as long as the
+ * disk takes.
+ */
+async function writeUnderFreeName(
+  dir: string,
+  name: string,
+  bytes: Buffer,
+): Promise<{ name: string; path: string }> {
   const ext = extname(name);
   const stem = ext ? name.slice(0, -ext.length) : name;
   for (let n = 1; n <= MAX_COLLISIONS; n++) {
     const candidate = n === 1 ? name : `${stem}-${n}${ext}`;
     const path = join(dir, candidate);
-    if (!existsSync(path)) return { name: candidate, path };
+    try {
+      await writeFile(path, bytes, { mode: 0o644, flag: 'wx' });
+      return { name: candidate, path };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
   }
   throw new Error(`too many attachments named ${name}`);
+}
+
+/**
+ * One directory of the attachments chain, created if it is not there yet and
+ * handed to the agent. Returns where it really is.
+ *
+ * The workspace is a tree the agent writes, so a level of the chain can be a
+ * link when an upload arrives: creating through one would put the directory,
+ * the bytes and the chown outside the workspace. Every level is resolved
+ * under the workspace first, which refuses a link as the last component and a
+ * link anywhere above it, and is then created on its own rather than
+ * recursively.
+ */
+function containedDir(workspace: string, relative: string): string {
+  const resolved = resolveInRoot(workspace, relative, false);
+  if (!resolved.ok) {
+    throw new Error(
+      `cannot store an attachment: ${relative} is not a usable directory (${resolved.reason})`,
+    );
+  }
+  if (!existsSync(resolved.path)) {
+    mkdirSync(resolved.path, { mode: 0o755 });
+    chownToAgent(resolved.path);
+  }
+  return resolved.path;
 }
 
 /**
  * Writes one attachment into a workspace and hands back where it landed.
  *
  * The name is sanitised to a single path component before it is used, so
- * containment here is by construction rather than by a check: there is no
- * path to resolve and compare, because the client never supplies one.
+ * containment for it is by construction rather than by a check: there is no
+ * path to resolve and compare, because the client never supplies one. The
+ * directory it lands in is resolved under the workspace, because that part of
+ * the path is a tree the agent can rearrange.
  */
-export function storeAttachment(
+export async function storeAttachment(
   workspace: string,
   name: string,
   bytes: Buffer,
-): StoredAttachment {
-  const boxes = join(workspace, '.boxes');
-  const dir = join(workspace, ATTACHMENTS_DIR);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o755 });
-    // Both levels, because either may be the one this call created.
-    chownToAgent(boxes);
-    chownToAgent(dir);
-  }
+): Promise<StoredAttachment> {
+  const boxes = containedDir(workspace, '.boxes');
+  const dir = containedDir(workspace, ATTACHMENTS_DIR);
 
   const ignore = join(boxes, '.gitignore');
-  if (!existsSync(ignore)) {
-    writeFileSync(ignore, GITIGNORE, { mode: 0o644 });
+  // Exclusive, so a link planted under this name is refused rather than
+  // followed, and a file already there is left as it is.
+  try {
+    writeFileSync(ignore, GITIGNORE, { mode: 0o644, flag: 'wx' });
     chownToAgent(ignore);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
 
-  const target = freePath(dir, safeAttachmentName(name));
-  writeFileSync(target.path, bytes, { mode: 0o644 });
+  const target = await writeUnderFreeName(dir, safeAttachmentName(name), bytes);
   // The agent reads these, and in the normal deployment it is a different uid
   // from the one that just wrote them.
   chownToAgent(target.path);

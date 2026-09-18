@@ -1,8 +1,10 @@
+import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer } from './control.ts';
+import { policyHash } from './policy.ts';
 
 /**
  * The control channel, which is how the proxy gets a policy without a file and
@@ -141,9 +143,93 @@ describe('the control channel', () => {
     expect(JSON.parse(res.body).error).toMatch(/engine would not start/);
   });
 
-  it('answers anything else with a 404', async () => {
-    const { port } = await start();
+  it('answers anything else with a 404, and is claimed by none of it', async () => {
+    const { port, claimed } = await start();
+    // Only a policy push may claim the channel, so every other path is
+    // unauthorized until one has.
+    expect((await call(port, 'GET', '/secrets', 'token')).status).toBe(401);
+    expect(claimed()).toBe(false);
+
+    expect((await call(port, 'POST', '/policy', 'token', policy)).status).toBe(200);
     expect((await call(port, 'GET', '/secrets', 'token')).status).toBe(404);
     expect((await call(port, 'POST', '/status', 'token', {})).status).toBe(404);
+  });
+});
+
+/**
+ * A listener that binds nothing, so importing the proxy's entry point starts
+ * no server and takes no port.
+ */
+function fakeServer(): http.Server {
+  const server = new EventEmitter() as unknown as http.Server;
+  server.listen = ((_port: number, _host: string, ready: () => void) => {
+    ready();
+    return server;
+  }) as typeof server.listen;
+  server.address = () => ({ address: '127.0.0.1', family: 'IPv4', port: 1 });
+  return server;
+}
+
+/**
+ * How the proxy's entry point handles two pushes at once.
+ *
+ * The listeners and the interception engine are stood in for, so what is
+ * under test is the entry point's own policy handling: everything else it
+ * boots is a shell that binds nothing.
+ */
+describe('overlapping policy pushes', () => {
+  it('leave the policy of the push that succeeded', async () => {
+    let engineCalls = 0;
+    let livePolicy: () => EgressPolicy = () => policy as EgressPolicy;
+    let push: (pushed: EgressPolicy) => Promise<void> = async () => {};
+    let liveStatus: () => EgressStatus = () => emptyStatus;
+
+    vi.doMock('./forward.ts', () => ({
+      ALLOWED_PORTS: new Set([443]),
+      createForwardServer: () => fakeServer(),
+    }));
+    vi.doMock('./inject.ts', () => ({
+      // The first call refuses, which is what makes the first push roll back,
+      // and the delay is what makes the two pushes overlap.
+      Interceptor: class {
+        constructor(opts: { policy: () => EgressPolicy }) {
+          livePolicy = opts.policy;
+        }
+        apply(): Promise<void> {
+          const refuses = ++engineCalls === 1;
+          return new Promise((resolve, reject) => {
+            setTimeout(() => (refuses ? reject(new Error('engine refused')) : resolve()), 5);
+          });
+        }
+        port(): number | null {
+          return null;
+        }
+        stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      },
+    }));
+    vi.doMock('./control.ts', () => ({
+      createControlServer: (opts: { apply: typeof push; status: typeof liveStatus }) => {
+        push = opts.apply;
+        liveStatus = opts.status;
+        return { server: fakeServer(), claimed: () => false };
+      },
+      resolveControlAddress: async () => '127.0.0.1',
+    }));
+
+    await import('./main.ts');
+
+    const refused = policy as EgressPolicy;
+    const wanted: EgressPolicy = { ...refused, allowedHosts: ['example.com'] };
+    const first = push(refused).catch(() => undefined);
+    const second = push(wanted);
+    await Promise.all([first, second]);
+
+    // The first push rolls its own policy back. Rolling back over the second
+    // one would leave the proxy running a policy nobody pushed, and saying it
+    // had applied one.
+    expect(livePolicy()).toEqual(wanted);
+    expect(liveStatus().policyHash).toBe(policyHash(wanted));
   });
 });

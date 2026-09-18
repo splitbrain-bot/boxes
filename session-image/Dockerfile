@@ -154,8 +154,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
  && rm -rf /root/.cache
 
-# The adapter is pinned here and nowhere else. Do not switch to
-# @zed-industries/claude-code-acp, which is stale at 0.16.2.
+# The agent and the adapter are pinned here and nowhere else, to a major line
+# each rather than to an exact release: a rebuild picks up fixes on that line,
+# and a new major is a deliberate edit to this file. The adapter is below 1.0,
+# where a caret pins the minor, which is the line that carries its breaking
+# changes. Do not switch to @zed-industries/claude-code-acp, which is stale at
+# 0.16.2.
 #
 # --prefix names /usr/local rather than leaving npm to work it out, because
 # what npm works out is the grandparent of the node binary -- and no npmrc
@@ -167,8 +171,8 @@ RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
 # distribution's own packages own, and it is what the identity check below
 # asserts the adapter resolves to.
 RUN npm install -g --prefix /usr/local \
-      @anthropic-ai/claude-code \
-      @agentclientprotocol/claude-agent-acp@0.75.1 \
+      @anthropic-ai/claude-code@^2 \
+      @agentclientprotocol/claude-agent-acp@^0.78.0 \
  && npm cache clean --force
 
 # The browser an agent drives, and the tool it drives it with.
@@ -243,7 +247,8 @@ RUN npm install -g --prefix /usr/local \
 # note the entrypoint appends tells an agent not to run it at all. What the
 # link buys is the one install a session does have a reason to run -- the
 # Firefox and WebKit one, which names a writable path and works.
-ARG PLAYWRIGHT_CLI_VERSION=0.1.19
+# Below 1.0, so the caret pins the minor: rebuilds take 0.1.x and nothing more.
+ARG PLAYWRIGHT_CLI_VERSION=^0.1.19
 ENV BOXES_IMAGE_BROWSERS=/opt/playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=${BOXES_IMAGE_BROWSERS}
 RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION} \
@@ -437,11 +442,15 @@ RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
 # list -- `p7zip-full` going virtual, or `dnsutils` doing the same -- which apt
 # reports as an unsatisfiable dependency only if the name is gone entirely,
 # and silently installs nothing useful if some other package still provides it.
+#
+# `timeout` is the base image's rather than one of ours, and it is here because
+# the orchestrator wraps every local command in it: that is what holds a
+# command to its wall clock, since the daemon cannot signal a running exec.
 RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
              sqlite3 fd fdfind shellcheck yq cmake uv uvx dig playwright-cli playwright \
-             certutil; do \
+             certutil timeout; do \
       command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
     done
 

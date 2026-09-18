@@ -32,10 +32,31 @@ class FakeClient {
   constructor(readonly handlers: AcpClientHandlers) {}
 
   start(): void {
-    this.handlers.onResetThread();
+    this.load();
     this.handlers.onState('ready');
     this.handlers.onReady(this.modes, this.configOptions);
   }
+
+  /**
+   * A session/load, as the handshake and a reconnect run one: the store is
+   * asked how much it has, and the gateway answers whether the replay picks
+   * up there. `resumes` is that answer.
+   */
+  load(): void {
+    const from = this.handlers.resumePoint();
+    this.resumePoints.push(from);
+    this.handlers.onReplay(this.resumes && from !== null);
+  }
+
+  /** The replay is over, which is what publishes what it built. */
+  finish(): void {
+    this.handlers.onReady(this.modes, this.configOptions);
+  }
+
+  /** Whether the next load is answered as a resume rather than a full replay. */
+  resumes = false;
+  /** The resume point each load asked for, in order. */
+  readonly resumePoints: Array<string | null> = [];
 
   modes: SessionModeState | null = null;
   configOptions: SessionConfigOption[] = [];
@@ -80,6 +101,21 @@ function makeStore(
   });
   store.start();
   return { store, client };
+}
+
+/**
+ * Puts a permission request to the store, as the gateway would.
+ *
+ * `withdrawn` is the signal the gateway aborts when somebody else answers the
+ * question first; a test that does not care about that gets one nobody
+ * aborts.
+ */
+function ask(
+  client: FakeClient,
+  params: RequestPermissionRequest,
+  withdrawn: AbortSignal = new AbortController().signal,
+): Promise<RequestPermissionResponse> {
+  return client.handlers.onPermission(params, withdrawn);
 }
 
 /** Pushes one session/update at the store, as the gateway would. */
@@ -223,7 +259,7 @@ test('a replay drops the turn state it was told before it', () => {
   // A reconnect: the gateway re-states the thread after the replay, so
   // holding the old answer over one would claim a turn nobody has confirmed
   // and a task nobody has said is still running.
-  client.handlers.onResetThread();
+  client.handlers.onReplay(false);
   assert.equal(store.getSnapshot().isRunning, false);
   assert.deepEqual(store.getSnapshot().background, []);
 });
@@ -246,7 +282,7 @@ test('an open permission request is reported as one', async () => {
     title: 'Write a file',
     status: 'pending',
   } as SessionUpdate);
-  void client.handlers.onPermission({
+  void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     options: [
@@ -267,7 +303,7 @@ test('several ways to say yes is a question, not a gate', async () => {
     title: 'Leave plan mode',
     status: 'pending',
   } as SessionUpdate);
-  void client.handlers.onPermission({
+  void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     // What leaving plan mode asks: three different things to do next.
@@ -289,7 +325,7 @@ test('answering a request leaves nothing waiting', async () => {
     title: 'Write a file',
     status: 'pending',
   } as SessionUpdate);
-  void client.handlers.onPermission({
+  void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     options: [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }],
@@ -333,8 +369,9 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   for (const u of script) push(client, u);
   assert.equal(store.getSnapshot().messages.length, 2);
 
-  // What a fresh connection does: reset, then replay the same history.
-  client.handlers.onResetThread();
+  // What a fresh connection with nothing to resume from does: the gateway
+  // says the thread is coming whole, and the same history follows.
+  client.handlers.onReplay(false);
   // The conversation somebody is reading is not blanked to do that: the model
   // is what went stale, and the socket dropping is not news about the thread.
   assert.equal(store.getSnapshot().messages.length, 2);
@@ -387,6 +424,56 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
   assert.match(JSON.stringify(store.getSnapshot().messages), /and again/);
 });
 
+test('a refetch keeps an open question rather than refusing the call it is about', async () => {
+  const { store, client } = makeStore();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
+  let settled = false;
+  const answered = ask(client, {
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 't1' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+  void answered.then(() => {
+    settled = true;
+  });
+
+  // The connection is up, so an answer sent here reaches the agent: a refetch
+  // that cancelled would refuse the tool call the user is being asked about.
+  const done = store.refetch();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
+  await done;
+
+  assert.equal(settled, false, 'the question is still open for the agent');
+  const part = partsOf(store.getSnapshot().messages[0]!)[0]!;
+  assert.equal(part.type, 'tool-call');
+  assert.ok(part.approval, 'and it is back on the call the replay rebuilt');
+
+  store.respondToApproval(part.approval.id, 'yes');
+  assert.deepEqual(await answered, { outcome: { outcome: 'selected', optionId: 'yes' } });
+});
+
+test('a question the gateway withdraws stops waiting', async () => {
+  const { store, client } = makeStore();
+  push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
+  const withdrawn = new AbortController();
+  const answered = ask(
+    client,
+    {
+      sessionId: 'acp-1',
+      toolCall: { toolCallId: 't1' },
+      options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+    },
+    withdrawn.signal,
+  );
+
+  // Another browser on the thread answered first, so this card has nothing
+  // left to decide.
+  withdrawn.abort();
+
+  assert.deepEqual(await answered, { outcome: { outcome: 'cancelled' } });
+  assert.equal(store.getSnapshot().awaiting, null);
+});
+
 test('a refetch whose load fails still gives the view back what arrived', async () => {
   const { store, client } = makeStore();
   client.fail = 'adapter is gone';
@@ -415,7 +502,7 @@ test('a permission request attaches to its tool call and its answer unblocks the
       { optionId: 'no', name: 'Reject', kind: 'reject_once' },
     ],
   };
-  const answered: Promise<RequestPermissionResponse> = client.handlers.onPermission(request);
+  const answered: Promise<RequestPermissionResponse> = ask(client, request);
 
   // The options render on the tool call, mapped into approval vocabulary.
   const part = partsOf(store.getSnapshot().messages[0]!)[0]!;
@@ -447,7 +534,7 @@ test('a call awaiting permission reports no result, so the question can render',
     content: [{ type: 'diff', path: '/workspace/hello.txt', oldText: null, newText: 'hello' }],
   });
 
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 'td' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -474,7 +561,7 @@ test('a call awaiting permission reports no result, so the question can render',
 test('declining to choose cancels the request rather than answering it', async () => {
   const { store, client } = makeStore();
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't2', title: 'Delete file' });
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't2' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -486,7 +573,7 @@ test('declining to choose cancels the request rather than answering it', async (
 
 test('a permission request for an unannounced call makes a place for itself', async () => {
   const { store, client } = makeStore();
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 'tX', title: 'Run rm -rf' },
     options: [{ optionId: 'no', name: 'Reject', kind: 'reject_once' }],
@@ -503,7 +590,7 @@ test('a permission request for an unannounced call makes a place for itself', as
 test('answering the same approval twice does nothing the second time', async () => {
   const { store, client } = makeStore();
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't3', title: 'Edit' });
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't3' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -640,7 +727,7 @@ test('a turn blocked on a permission request is not reported as running', async 
   assert.equal(store.getSnapshot().isRunning, true);
 
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write main.ts' });
-  const answered = client.handlers.onPermission({
+  const answered = ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
@@ -684,6 +771,24 @@ test('a bang command runs locally, streams, and never reaches the adapter', asyn
   assert.equal(messages[0]!.role, 'user');
   assert.deepEqual(partsOf(messages[0]!), [{ type: 'text', text: '!echo hi' }]);
   assert.equal(outputOf(messages[1]!), '```console\nhi\nthere\n[exit 0]\n```');
+});
+
+test('a fence in the output is escaped by a longer one, however it arrives', async () => {
+  // The fence is measured as the output grows, so a run of backticks split
+  // across two chunks still has to be beaten by the fence around it.
+  const { store } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
+      onChunk('start ``');
+      onChunk('start ````` end');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+  });
+
+  await store.runCommand('cat notes.md');
+  const output = outputOf(store.getSnapshot().messages[1]!);
+  // Five backticks in the body, so the fence is six.
+  assert.ok(output.startsWith('``````console\n'), output.slice(0, 20));
+  assert.ok(output.endsWith('\n``````'), output.slice(-20));
 });
 
 test('a non-zero exit shows the code under the output', async () => {
@@ -912,5 +1017,260 @@ test("an update that replaces a call's content replaces its images with it", () 
   assert.deepEqual(
     parts.map((p) => p.image).filter(Boolean),
     ['data:image/png;base64,BBBB'],
+  );
+});
+
+
+/** One named message of a transcript, as the adapter replays it. */
+function said(
+  role: 'user' | 'agent',
+  messageId: string,
+  text: string,
+): SessionUpdate {
+  return {
+    sessionUpdate: `${role}_message_chunk`,
+    messageId,
+    content: { type: 'text', text },
+  } as SessionUpdate;
+}
+
+/** The whole conversation these resume tests replay. */
+const TRANSCRIPT: SessionUpdate[] = [
+  said('user', 'msg_1', 'the first question'),
+  said('agent', 'msg_2', 'the first answer'),
+  said('user', 'msg_3', 'and while you were away'),
+  said('agent', 'msg_4', 'this came back'),
+];
+
+/** Every message as its id, role and text, which is what a reader sees. */
+function shapeOf(store: ThreadStore): Array<[string, string, string]> {
+  return store.getSnapshot().messages.map((m) => [
+    m.id,
+    m.role,
+    partsOf(m)
+      .map((p) => p.text ?? '')
+      .join(''),
+  ]);
+}
+
+test('a reconnect resumes from the last message the adapter named', () => {
+  const { store, client } = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
+
+  client.resumes = true;
+  client.load();
+  // What the browser holds up to is what it names, so the gateway can send
+  // the rest and nothing before it.
+  assert.deepEqual(client.resumePoints, [null, 'msg_2']);
+
+  // The tail as the gateway sends it: the message named, then what followed.
+  for (const u of TRANSCRIPT.slice(1)) push(client, u);
+  client.finish();
+
+  assert.deepEqual(shapeOf(store), [
+    ['msg_1', 'user', 'the first question'],
+    ['msg_2', 'assistant', 'the first answer'],
+    ['msg_3', 'user', 'and while you were away'],
+    ['msg_4', 'assistant', 'this came back'],
+  ]);
+});
+
+test('a resumed thread reads the same as one replayed whole', () => {
+  const resumed = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(resumed.client, u);
+  resumed.client.resumes = true;
+  resumed.client.load();
+  for (const u of TRANSCRIPT.slice(1)) push(resumed.client, u);
+  resumed.client.finish();
+
+  const whole = makeStore();
+  for (const u of TRANSCRIPT) push(whole.client, u);
+
+  // The model is the updates applied in order, and a resume is a cut across
+  // that order rather than a different way of reading it.
+  assert.deepEqual(shapeOf(resumed.store), shapeOf(whole.store));
+});
+
+test('a resume the gateway cannot honour rebuilds the thread from the top', () => {
+  const { store, client } = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
+
+  // The gateway looked for the point and did not find it — the transcript was
+  // compacted under this browser — so it sends the whole thread instead.
+  client.resumes = false;
+  client.load();
+  for (const u of TRANSCRIPT) push(client, u);
+  client.finish();
+
+  assert.deepEqual(shapeOf(store), [
+    ['msg_1', 'user', 'the first question'],
+    ['msg_2', 'assistant', 'the first answer'],
+    ['msg_3', 'user', 'and while you were away'],
+    ['msg_4', 'assistant', 'this came back'],
+  ]);
+});
+
+test('a reconnect mid-turn takes in what was said while the socket was down', () => {
+  const { store, client } = makeStore();
+  push(client, said('user', 'msg_1', 'the first question'));
+  push(client, said('agent', 'msg_2', 'half an ans'));
+
+  client.resumes = true;
+  client.load();
+  // The transcript holds the whole of the message the socket dropped in the
+  // middle of, and the browser takes that message again rather than keeping
+  // the half it has.
+  push(client, said('agent', 'msg_2', 'half an answer, and the rest'));
+  push(client, said('agent', 'msg_3', 'then this'));
+  client.finish();
+
+  assert.deepEqual(shapeOf(store), [
+    ['msg_1', 'user', 'the first question'],
+    ['msg_2', 'assistant', 'half an answer, and the rest'],
+    ['msg_3', 'assistant', 'then this'],
+  ]);
+});
+
+test('nothing is published while a resumed replay is being read', () => {
+  const { store, client } = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
+  const before = store.getSnapshot().messages;
+
+  client.resumes = true;
+  client.load();
+  // What is on screen stays on screen: the socket dropping is not news about
+  // the conversation, and the tail is published in one go at the end.
+  assert.equal(store.getSnapshot().messages, before);
+  for (const u of TRANSCRIPT.slice(1)) push(client, u);
+  assert.equal(store.getSnapshot().messages, before);
+
+  client.finish();
+  assert.equal(store.getSnapshot().messages.length, 4);
+});
+
+test('a resume names an adapter message rather than a local run', async () => {
+  const { store, client } = makeStore(undefined, {
+    runExec: async () => ({ exitCode: 0, truncated: false, timedOut: false }),
+  });
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  await store.runCommand('ls');
+  assert.equal(store.getSnapshot().messages.length, 3);
+
+  client.resumes = true;
+  client.load();
+
+  // A run's echo carries an id only this browser knows, so a replay would
+  // never say it back. The runs go out of the thread with the resume and the
+  // view asks for them again once the connection is ready.
+  assert.deepEqual(client.resumePoints.at(-1), 'msg_1');
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  client.finish();
+  assert.deepEqual(shapeOf(store), [['msg_1', 'assistant', 'the first answer']]);
+});
+
+test('a resume gives up the questions the dead connection was showing', async () => {
+  const { store, client } = makeStore();
+  push(client, said('agent', 'msg_1', 'about to read a file'));
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 'toolu_1',
+    title: 'Read',
+    status: 'pending',
+  } as SessionUpdate);
+  push(client, said('agent', 'msg_2', 'and then this'));
+  const answer = ask(client, {
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 'toolu_1' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+  assert.equal(store.getSnapshot().awaiting, 'permission');
+
+  client.resumes = true;
+  client.load();
+  push(client, said('agent', 'msg_2', 'and then this'));
+  client.finish();
+
+  // Nobody is listening for the answer on the socket that has gone, and the
+  // gateway puts a question that is still open back after the replay.
+  assert.deepEqual(await answer, { outcome: { outcome: 'cancelled' } });
+  assert.equal(store.getSnapshot().awaiting, null);
+  const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool');
+  assert.equal(tool?.approval, undefined);
+});
+
+test('a resume puts the runs back without reading the exec log again', async () => {
+  let listed = 0;
+  const { store, client } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
+      onChunk('two files\n');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+    listExec: async () => {
+      listed++;
+      return [];
+    },
+  });
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  await store.runCommand('ls');
+
+  client.resumes = true;
+  client.load();
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  client.finish();
+  // What the view does on every ready connection. The runs were taken out by
+  // the resume, and this is where they go back.
+  await store.loadExecHistory();
+
+  // The store held them, so the server was never asked — which is the whole
+  // point: every run's output would come back over the wire otherwise.
+  assert.equal(listed, 0);
+  assert.deepEqual(
+    store.getSnapshot().messages.map((m) => m.id),
+    ['msg_1', 'bang-1-command', 'bang-1'],
+  );
+  assert.match(outputOf(store.getSnapshot().messages[2]!), /two files\n\[exit 0\]/);
+});
+
+test('a thread replayed whole reads its runs back off the log', async () => {
+  let listed = 0;
+  const { store, client } = makeStore(undefined, {
+    runExec: async (_id, _thread, _cmd, _after, onChunk) => {
+      onChunk('two files\n');
+      return { exitCode: 0, truncated: false, timedOut: false };
+    },
+    listExec: async () => {
+      listed++;
+      return [
+        {
+          id: 7,
+          sessionId: 'box-1',
+          command: 'ls',
+          output: 'two files\n',
+          exitCode: 0,
+          truncated: false,
+          timedOut: false,
+          startedAt: 1,
+          finishedAt: 2,
+          after: 'msg_1',
+        },
+      ];
+    },
+  });
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  await store.runCommand('ls');
+
+  // No resume point to pick up from, so the thread comes whole — and the runs
+  // come with it from the log, which is also how a run another tab made
+  // arrives here.
+  client.resumes = false;
+  client.load();
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  client.finish();
+  await store.loadExecHistory();
+
+  assert.equal(listed, 1);
+  assert.deepEqual(
+    store.getSnapshot().messages.map((m) => m.id),
+    ['msg_1', 'bang-log-7-command', 'bang-log-7'],
   );
 });

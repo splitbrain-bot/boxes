@@ -14,7 +14,10 @@ WORKDIR /build/dashboard
 # resolved, including the exactly-pinned assistant-ui packages.
 RUN npm ci
 COPY dashboard/ ./
-RUN npm run check && npm run build
+# The application alone, which is what this stage bundles. The browser suite
+# drives the orchestrator's own source, which is not in this stage and has no
+# business being here; `npm run check` covers it where both packages are.
+RUN npm run check:app && npm run build
 
 # --- orchestrator ------------------------------------------------------------
 FROM node:22-bookworm AS orchestrator-build

@@ -13,31 +13,77 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, test } from 'vitest';
+import { afterEach, beforeEach, describe, test, vi } from 'vitest';
 import type {
   ReviewAnnotationsResponse,
   ReviewBaseResponse,
+  ReviewDirEntry,
+  ReviewDirResponse,
   ReviewFileResponse,
-  ReviewTreeResponse,
 } from '../../../shared/types.ts';
 import { buildApp, type Orchestrator } from '../app.ts';
 import { loadConfig, setConfigForTests } from '../config.ts';
 import { openDb, type Db } from '../db.ts';
-import { treePaths } from './tree.ts';
+import { SessionManager } from '../sessions.ts';
+import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 
 /**
  * The review routes over their real handlers, a real database and a real git
  * repository in a temp directory — no Docker anywhere.
  *
- * That is the payoff of workspaces being directories: what used to need a
- * container to read a file now needs a directory, so the API can be driven
- * end to end in a unit test.
+ * Files are read off the workspace directory, which is why the API can be
+ * driven end to end in a unit test at all. Git is the other half: the routes
+ * ask the session for a running container and address every invocation at a
+ * path inside it, so both of those are stubbed here — the box by a manager
+ * that hands out the session id, and git by a runner that starts it on this
+ * machine over the workspace the box would have held.
  *
  * The review is over the *workspace*, so most of what is worth pinning down
  * here is a workspace shape: two clones side by side, a clone beside a stray
- * directory, a repository inside a repository. Each of those used to turn the
- * whole review into a plain file browser with no git in it, or worse.
+ * directory, a repository inside a repository. Each of those turns the whole
+ * review into a plain file browser with no git in it when it goes wrong.
  */
+
+/** Invocations addressed at anything but a session's own workspace. */
+let misaddressed: GitTarget[] = [];
+
+/** How many times git has been run, for the paths that must not run it. */
+let invocations = 0;
+
+/**
+ * A runner that starts git here, in the host directory that the container
+ * path names.
+ *
+ * The workspace is at `/workspace` inside a box, and the stubbed container id
+ * is the session's own, so the two together say which directory on this
+ * machine an invocation means. One addressed anywhere else is recorded and
+ * refused rather than run.
+ */
+const localGit: GitRunner = async (target, argv, env) => {
+  invocations++;
+  const inside = target.dir === '/workspace' || target.dir.startsWith('/workspace/');
+  if (!inside || !existsSync(workspace(target.containerId))) {
+    misaddressed.push(target);
+    return { ok: false, stdout: '', stderr: 'misaddressed', code: null };
+  }
+  try {
+    const stdout = execFileSync(argv[0]!, argv.slice(1), {
+      cwd: join(workspace(target.containerId), target.dir.slice('/workspace'.length)),
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return { ok: true, stdout, stderr: '', code: 0 };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: string; stderr?: string };
+    return {
+      ok: false,
+      stdout: failed.stdout ?? '',
+      stderr: failed.stderr ?? '',
+      code: failed.status ?? null,
+    };
+  }
+};
 
 let dir: string;
 let db: Db;
@@ -102,13 +148,32 @@ beforeEach(() => {
   setConfigForTests(cfg);
   db = openDb(dir);
   orchestrator = buildApp(cfg, db);
+  misaddressed = [];
+  invocations = 0;
+  // The box a review runs git in: no container is started here, so the
+  // session id stands in for one and the workspace is where it always is.
+  // Asking for the box marks the session active, as the real one does, because
+  // that is the half of it these tests are about.
+  vi.spyOn(SessionManager.prototype, 'execTarget').mockImplementation(async function (
+    this: SessionManager,
+    id: string,
+  ) {
+    this.touch(id);
+    return { containerId: id, workingDir: '/workspace' };
+  });
+  setGitRunnerForTests(localGit);
 });
 
 afterEach(async () => {
   await orchestrator.app.close();
   db.close();
+  setGitRunnerForTests(null);
+  vi.restoreAllMocks();
   setConfigForTests(null as never);
   rmSync(dir, { recursive: true, force: true });
+  // Every invocation the requests above made was addressed to the session's
+  // own container and to a path inside its workspace.
+  assert.deepEqual(misaddressed, []);
 });
 
 /** GET, parsed. */
@@ -117,9 +182,35 @@ async function get<T>(url: string): Promise<{ status: number; body: T }> {
   return { status: res.statusCode, body: res.json() as T };
 }
 
-// --- the tree ---------------------------------------------------------------
+// --- the directory listing --------------------------------------------------
 
-describe('the tree endpoint', () => {
+/**
+ * One directory of a review, at the workspace root unless a path is given.
+ *
+ * `fresh` is what the browser sends on arrival: it takes git's answer for the
+ * workspace again. The tests that watch something change over two requests
+ * need it, which is exactly the shape the browser has.
+ */
+async function openDir(
+  id: string,
+  path = '',
+  fresh = true,
+): Promise<{ status: number; body: ReviewDirResponse }> {
+  const query = `path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`;
+  return get<ReviewDirResponse>(`/api/sessions/${id}/review/dir?${query}`);
+}
+
+/** The entries of a directory, as `d:name` or `f:name`, in the order they came. */
+function named(body: ReviewDirResponse): string[] {
+  return body.entries.map((entry) => `${entry.isDir ? 'd' : 'f'}:${entry.name}`);
+}
+
+/** One entry of a directory, by name. */
+function entry(body: ReviewDirResponse, name: string): ReviewDirEntry | undefined {
+  return body.entries.find((e) => e.name === name);
+}
+
+describe('the directory endpoint', () => {
   test('a cloned project is browsable under its own prefix, with git on', async () => {
     const ws = insertSession('aaa');
     // The shape a clone actually leaves: /workspace holds one directory and
@@ -132,20 +223,22 @@ describe('the tree endpoint', () => {
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'init');
 
-    const { status, body } = await get<ReviewTreeResponse>('/api/sessions/aaa/review/tree');
-    assert.equal(status, 200);
-    assert.equal(body.hasGit, true);
+    const root = await openDir('aaa');
+    assert.equal(root.status, 200);
+    assert.equal(root.body.hasGit, true);
     assert.deepEqual(
-      body.repos.map((r) => ({ path: r.path, name: r.name })),
+      root.body.repos.map((r) => ({ path: r.path, name: r.name })),
       [{ path: 'project', name: 'project' }],
     );
+    assert.deepEqual(named(root.body), ['d:project']);
+    assert.equal(root.body.hasReview, false);
+    assert.deepEqual(root.body.base, { rev: '' });
+
     // Paths are the workspace's, so the repository's own prefix is in them.
-    assert.deepEqual([...treePaths(body.entries)].toSorted(), [
-      'project/README.md',
-      'project/src/app.ts',
-    ]);
-    assert.equal(body.hasReview, false);
-    assert.deepEqual(body.base, { rev: '' });
+    const inside = await openDir('aaa', 'project');
+    assert.deepEqual(named(inside.body), ['d:src', 'f:README.md']);
+    assert.deepEqual(named((await openDir('aaa', 'project/src')).body), ['f:app.ts']);
+    assert.equal(entry(inside.body, 'src')!.path, 'project/src');
   });
 
   test('a workspace that is itself a repository claims every path in it', async () => {
@@ -155,23 +248,24 @@ describe('the tree endpoint', () => {
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/bbb/review/tree');
+    const { body } = await openDir('bbb');
     assert.equal(body.hasGit, true);
     assert.deepEqual(body.repos.map((r) => r.path), ['']);
-    assert.deepEqual([...treePaths(body.entries)], ['a.txt']);
+    assert.deepEqual(named(body), ['f:a.txt']);
   });
 
   test('a workspace with no repository browses without the git features', async () => {
     const ws = insertSession('ccc');
     write(ws, 'notes/todo.txt', 'x\n');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/ccc/review/tree');
+    const { body } = await openDir('ccc');
     assert.equal(body.hasGit, false);
     assert.deepEqual(body.repos, []);
     // Everything still works but the git features, the way the desktop tool
     // degrades outside a repository.
-    assert.deepEqual([...treePaths(body.entries)], ['notes/todo.txt']);
-    assert.deepEqual(body.statuses, {});
+    assert.deepEqual(named(body), ['d:notes']);
+    assert.equal(entry(body, 'notes')!.changed, undefined);
+    assert.deepEqual(named((await openDir('ccc', 'notes')).body), ['f:todo.txt']);
   });
 
   test('two clones side by side both keep their git', async () => {
@@ -187,11 +281,14 @@ describe('the tree endpoint', () => {
     }
     // The most common multi-repository shape, and the one that used to get
     // the worst mode: a filesystem walk with no statuses and no diffs.
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/ddd/review/tree');
+    const { body } = await openDir('ddd');
     assert.equal(body.hasGit, true);
     assert.deepEqual(body.repos.map((r) => r.path), ['one', 'two']);
-    assert.equal(body.statuses['one/a.txt'], 'modified');
-    assert.equal(body.statuses['two/a.txt'], 'modified');
+    // The folders say their subtrees hold a change, without either being read.
+    assert.equal(entry(body, 'one')!.changed, true);
+    assert.equal(entry(body, 'two')!.changed, true);
+    assert.equal(entry((await openDir('ddd', 'one')).body, 'a.txt')!.status, 'modified');
+    assert.equal(entry((await openDir('ddd', 'two')).body, 'a.txt')!.status, 'modified');
   });
 
   test('a clone beside a stray directory keeps its git, and the stray shows too', async () => {
@@ -202,16 +299,15 @@ describe('the tree endpoint', () => {
     write(repo, 'a.txt', 'x\n');
     write(ws, 'notes/todo.md', 'x\n');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/str/review/tree');
+    const { body } = await openDir('str');
     assert.equal(body.hasGit, true);
-    assert.equal(body.statuses['project/a.txt'], 'untracked');
-    // Outside every repository there is no .gitignore to consult, so loose
-    // files all show — and they have no status at all.
-    assert.deepEqual([...treePaths(body.entries)].toSorted(), [
-      'notes/todo.md',
-      'project/a.txt',
-    ]);
-    assert.equal(body.statuses['notes/todo.md'], undefined);
+    assert.deepEqual(named(body), ['d:notes', 'd:project']);
+    assert.equal(entry(body, 'project')!.changed, true);
+    // Loose files outside every repository show like any other, and they
+    // have no status at all.
+    assert.equal(entry(body, 'notes')!.changed, undefined);
+    assert.equal(entry((await openDir('str', 'project')).body, 'a.txt')!.status, 'untracked');
+    assert.equal(entry((await openDir('str', 'notes')).body, 'todo.md')!.status, undefined);
   });
 
   test('a clone one level deeper is found', async () => {
@@ -221,9 +317,10 @@ describe('the tree endpoint', () => {
     initRepo(repo);
     write(repo, 'a.txt', 'x\n');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/dpt/review/tree');
+    const { body } = await openDir('dpt');
     assert.deepEqual(body.repos.map((r) => r.path), ['projects/foo']);
-    assert.equal(body.statuses['projects/foo/a.txt'], 'untracked');
+    const deep = await openDir('dpt', 'projects/foo');
+    assert.equal(entry(deep.body, 'a.txt')!.status, 'untracked');
   });
 
   test('a repository inside a repository is listed, with no ghost row', async () => {
@@ -235,17 +332,17 @@ describe('the tree endpoint', () => {
     initRepo(inner);
     write(inner, 'b.txt', 'y\n');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/nst/review/tree');
+    const { body } = await openDir('nst');
     assert.deepEqual(body.repos.map((r) => r.path), ['', 'inner']);
-    // The outer repository's `ls-files --others` reports the inner work tree
-    // as one `inner/` entry, which used to become a nameless row that 404ed
-    // when tapped. The inner repository's own files are here instead.
-    assert.deepEqual([...treePaths(body.entries)].toSorted(), ['a.txt', 'inner/b.txt']);
-    assert.equal(body.statuses['inner'], undefined);
-    assert.equal(body.statuses['inner/b.txt'], 'untracked');
+    // The inner repository is a folder with its own root mark, and the outer
+    // one reports nothing for it as a file.
+    assert.deepEqual(named(body), ['d:inner', 'f:a.txt']);
+    assert.equal(entry(body, 'inner')!.repo, true);
+    assert.equal(entry(body, 'inner')!.status, undefined);
+    assert.equal(entry((await openDir('nst', 'inner')).body, 'b.txt')!.status, 'untracked');
   });
 
-  test('the repository roots are marked in the tree', async () => {
+  test('the repository roots are marked in the listing', async () => {
     const ws = insertSession('mrk');
     const repo = join(ws, 'project');
     mkdirSync(repo);
@@ -253,10 +350,9 @@ describe('the tree endpoint', () => {
     write(repo, 'a.txt', 'x\n');
     write(ws, 'notes/todo.md', 'x\n');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/mrk/review/tree');
-    const byName = new Map(body.entries.map((e) => [e.name, e]));
-    assert.equal(byName.get('project')?.repo, true);
-    assert.equal(byName.get('notes')?.repo, undefined);
+    const { body } = await openDir('mrk');
+    assert.equal(entry(body, 'project')!.repo, true);
+    assert.equal(entry(body, 'notes')!.repo, undefined);
   });
 
   test('nothing about a root is stored on the session row', async () => {
@@ -266,7 +362,7 @@ describe('the tree endpoint', () => {
     initRepo(repo);
     write(repo, 'a.txt', 'x\n');
 
-    await get<ReviewTreeResponse>('/api/sessions/eee/review/tree');
+    await openDir('eee');
     // There is no root to remember: /workspace is the root, and which
     // repository a path belongs to is derived from the path.
     const columns = (db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map(
@@ -276,11 +372,11 @@ describe('the tree endpoint', () => {
     assert.ok(!columns.includes('review_base_commit'));
   });
 
-  test('a repository that appears later is picked up by the next tree fetch', async () => {
+  test('a repository that appears later is picked up by the next arrival', async () => {
     const ws = insertSession('ggg');
     // What a curious user does: open the review on a fresh box, before the
     // agent has fetched anything.
-    const empty = await get<ReviewTreeResponse>('/api/sessions/ggg/review/tree');
+    const empty = await openDir('ggg');
     assert.equal(empty.body.hasGit, false);
     assert.deepEqual(empty.body.entries, []);
 
@@ -291,11 +387,30 @@ describe('the tree endpoint', () => {
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'init');
 
-    // The tree fetch is the clock: it rediscovers, so there is no TTL to be
-    // wrong about and no root decided before the repository existed.
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/ggg/review/tree');
+    // Opening a folder answers from the git the review already has, and an
+    // arrival takes it again — so there is no root decided before the
+    // repository existed.
+    assert.equal((await openDir('ggg', '', false)).body.hasGit, false);
+    const { body } = await openDir('ggg');
     assert.equal(body.hasGit, true);
     assert.deepEqual(body.repos.map((r) => r.path), ['project']);
+  });
+
+  test('opening a folder runs no git at all', async () => {
+    const ws = insertSession('cch');
+    initRepo(ws);
+    write(ws, 'src/a.txt', 'x\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    await openDir('cch');
+
+    // Git is a `docker exec` into the session container, so a status per
+    // folder tap would be an exec per tap. The whole workspace is asked once
+    // and a folder is a slice of the answer.
+    const before = invocations;
+    const { body } = await openDir('cch', 'src', false);
+    assert.deepEqual(named(body), ['f:a.txt']);
+    assert.equal(invocations, before);
   });
 
   test('a review written before a clone stays the workspace review', async () => {
@@ -316,14 +431,15 @@ describe('the tree endpoint', () => {
 
     // REVIEW.md is at /workspace and stays there whatever the agent clones,
     // so a comment written before the clone is still in the review after it.
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/hhh/review/tree');
+    const { body } = await openDir('hhh');
     assert.equal(body.hasGit, true);
-    assert.deepEqual(body.counts, { 'notes.txt': 1 });
+    assert.equal(body.commentCount, 1);
+    assert.equal(entry(body, 'notes.txt')!.comments, 1);
     assert.equal(existsSync(join(ws, 'REVIEW.md')), true);
     assert.equal(existsSync(join(repo, 'REVIEW.md')), false);
   });
 
-  test('the workspace REVIEW.md is not in any repository status', async () => {
+  test('the workspace REVIEW.md is neither listed nor given a status', async () => {
     const ws = insertSession('out');
     initRepo(ws);
     write(ws, 'code.ts', 'x\n');
@@ -335,23 +451,22 @@ describe('the tree endpoint', () => {
       payload: { path: 'code.ts', line: 1, comment: 'x' },
     });
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/out/review/tree');
+    const { body } = await openDir('out');
     // It is a real untracked file of this repository, since the workspace is
-    // one — but the tree and the statuses both leave it out, because it is
-    // the review rather than a file of it.
+    // one — but the listing leaves it out, because it is the review rather
+    // than a file of it.
     assert.equal(body.hasReview, true);
-    assert.ok(![...treePaths(body.entries)].includes('REVIEW.md'));
-    assert.equal(body.statuses['REVIEW.md'], undefined);
+    assert.deepEqual(named(body), ['f:code.ts']);
   });
 
-  test('a file the change deleted is still listed', async () => {
+  test('a file the change deleted is still listed, in its own directory', async () => {
     const ws = insertSession('iii');
     initRepo(ws);
-    write(ws, 'keep.txt', 'x\n');
-    write(ws, 'gone.txt', 'y\n');
+    write(ws, 'src/keep.txt', 'x\n');
+    write(ws, 'src/gone.txt', 'y\n');
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
-    git(ws, 'rm', '-q', 'gone.txt');
+    git(ws, 'rm', '-q', 'src/gone.txt');
     git(ws, 'commit', '-q', '-m', 'drop it');
     await orchestrator.app.inject({
       method: 'PUT',
@@ -359,14 +474,39 @@ describe('the tree endpoint', () => {
       payload: { rev: 'HEAD~1' },
     });
 
-    // Committed, so neither on disk nor in ls-files. A review that cannot
-    // show a deletion is missing one of the three things a change can do.
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/iii/review/tree');
-    assert.deepEqual([...treePaths(body.entries)].toSorted(), ['gone.txt', 'keep.txt']);
-    assert.equal(body.statuses['gone.txt'], 'deleted');
+    // Committed and removed, so nowhere a directory read can find it. Only the
+    // status map knows the path, which is why listing and status are one
+    // answer. A review that cannot show a deletion is missing one of the three
+    // things a change can do.
+    const { body } = await openDir('iii', 'src');
+    assert.deepEqual(named(body), ['f:gone.txt', 'f:keep.txt']);
+    assert.equal(entry(body, 'gone.txt')!.status, 'deleted');
   });
 
-  test('statuses come back per path', async () => {
+  test('a directory the change emptied is listed, and can be opened', async () => {
+    const ws = insertSession('emp');
+    initRepo(ws);
+    write(ws, 'doomed/a.txt', 'x\n');
+    write(ws, 'keep.txt', 'x\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    git(ws, 'rm', '-q', '-r', 'doomed');
+    git(ws, 'commit', '-q', '-m', 'drop it');
+    await orchestrator.app.inject({
+      method: 'PUT',
+      url: '/api/sessions/emp/review/base',
+      payload: { rev: 'HEAD~1' },
+    });
+
+    const { body } = await openDir('emp');
+    assert.equal(entry(body, 'doomed')!.isDir, true);
+    assert.equal(entry(body, 'doomed')!.changed, true);
+    const inside = await openDir('emp', 'doomed');
+    assert.deepEqual(named(inside.body), ['f:a.txt']);
+    assert.equal(entry(inside.body, 'a.txt')!.status, 'deleted');
+  });
+
+  test('statuses come back on the files they belong to', async () => {
     const ws = insertSession('fff');
     initRepo(ws);
     write(ws, 'tracked.txt', 'x\n');
@@ -375,21 +515,32 @@ describe('the tree endpoint', () => {
     write(ws, 'tracked.txt', 'changed\n');
     write(ws, 'fresh.txt', 'new\n');
 
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/fff/review/tree');
-    assert.equal(body.statuses['tracked.txt'], 'modified');
-    assert.equal(body.statuses['fresh.txt'], 'untracked');
+    const { body } = await openDir('fff');
+    assert.equal(entry(body, 'tracked.txt')!.status, 'modified');
+    assert.equal(entry(body, 'fresh.txt')!.status, 'untracked');
+  });
+
+  test('a directory the review does not offer is a 404', async () => {
+    const ws = insertSession('bad');
+    write(ws, 'src/a.txt', 'x\n');
+    for (const path of ['nosuch', '../..', 'src/a.txt', '.git']) {
+      const res = await orchestrator.app.inject({
+        url: `/api/sessions/bad/review/dir?path=${encodeURIComponent(path)}`,
+      });
+      assert.equal(res.statusCode, 404, path);
+    }
   });
 
   test('an unknown session is a 404, a deleted one too', async () => {
     insertSession('ggg');
     db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = ?").run('ggg');
-    assert.equal((await orchestrator.app.inject({ url: '/api/sessions/ggg/review/tree' })).statusCode, 404);
-    assert.equal((await orchestrator.app.inject({ url: '/api/sessions/nope/review/tree' })).statusCode, 404);
+    assert.equal((await orchestrator.app.inject({ url: '/api/sessions/ggg/review/dir' })).statusCode, 404);
+    assert.equal((await orchestrator.app.inject({ url: '/api/sessions/nope/review/dir' })).statusCode, 404);
   });
 
   test('a volume-backed session says what to do about it', async () => {
     insertVolumeSession('hhh');
-    const res = await orchestrator.app.inject({ url: '/api/sessions/hhh/review/tree' });
+    const res = await orchestrator.app.inject({ url: '/api/sessions/hhh/review/dir' });
     // 409, not 404: the session is real and the fix is one start.
     assert.equal(res.statusCode, 409);
     assert.match((res.json() as { error: string }).error, /Start the session once/);
@@ -478,10 +629,10 @@ describe('the file endpoint', () => {
 
   test('a file the tree leaves out is not served either', async () => {
     const ws = repoSession('eee');
-    write(ws, 'node_modules/pkg/index.js', 'x\n');
+    write(ws, 'logo.png', 'x\n');
     write(ws, 'REVIEW.md', '# Code Review\n');
     // The API serves what the browser was offered and nothing more.
-    for (const path of ['node_modules/pkg/index.js', 'REVIEW.md']) {
+    for (const path of ['logo.png', 'REVIEW.md']) {
       const res = await orchestrator.app.inject({
         url: `/api/sessions/eee/review/file?path=${encodeURIComponent(path)}`,
       });
@@ -733,10 +884,11 @@ describe('annotations', () => {
       { line: 5, comment: 'fifth', outdated: false },
     ]);
 
-    const tree = await get<ReviewTreeResponse>('/api/sessions/bbb/review/tree');
-    assert.deepEqual(tree.body.counts, { 'code.ts': 2 });
-    assert.equal(tree.body.hasReview, true);
-    assert.match(tree.body.started, /^\d{4}-\d{2}-\d{2}$/);
+    const listing = await openDir('bbb');
+    assert.equal(entry(listing.body, 'code.ts')!.comments, 2);
+    assert.equal(listing.body.commentCount, 2);
+    assert.equal(listing.body.hasReview, true);
+    assert.match(listing.body.started, /^\d{4}-\d{2}-\d{2}$/);
   });
 
   test('setting the same line twice replaces the comment', async () => {
@@ -767,8 +919,23 @@ describe('annotations', () => {
     const written = readFileSync(join(ws, 'REVIEW.md'), 'utf8');
     // The document stays valid with nothing in it.
     assert.ok(!written.includes('code.ts'));
-    const tree = await get<ReviewTreeResponse>('/api/sessions/ddd/review/tree');
-    assert.deepEqual(tree.body.counts, {});
+    const listing = await openDir('ddd');
+    assert.equal(listing.body.commentCount, 0);
+    assert.equal(entry(listing.body, 'code.ts')!.comments, undefined);
+  });
+
+  test('deleting a comment that is not there leaves no review behind', async () => {
+    const ws = commentable('lll');
+    const res = await orchestrator.app.inject({
+      method: 'DELETE',
+      url: '/api/sessions/lll/review/annotations?path=nosuch.txt&line=1',
+    });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual((res.json() as ReviewAnnotationsResponse).annotations, []);
+    // Nothing was changed, so nothing is written: a review the reviewer never
+    // started must not appear because of a delete that applied to nothing.
+    assert.equal(existsSync(join(ws, 'REVIEW.md')), false);
+    assert.equal((await openDir('lll')).body.hasReview, false);
   });
 
   test('a comment the agent wrote by hand is read, not overwritten', async () => {
@@ -811,13 +978,65 @@ describe('annotations', () => {
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 3 \(outdated\)/);
   });
 
-  test('a comment on a deleted file is marked outdated by the tree fetch', async () => {
+  test('a comment on a deleted file is marked outdated when the review is arrived at', async () => {
     const ws = commentable('hhh');
     await put('hhh', { path: 'code.ts', line: 3, comment: 'about three' });
     rmSync(join(ws, 'code.ts'));
 
-    await get<ReviewTreeResponse>('/api/sessions/hhh/review/tree');
+    // Opening a folder does not run drift — it never touches a file it is not
+    // listing — so an arrival is what checks every annotated file.
+    await openDir('hhh', '', false);
+    assert.ok(!readFileSync(join(ws, 'REVIEW.md'), 'utf8').includes('(outdated)'));
+
+    await openDir('hhh');
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 3 \(outdated\)/);
+  });
+
+  test('a comment write runs drift over the whole review', async () => {
+    const ws = commentable('drf');
+    await put('drf', { path: 'code.ts', line: 3, comment: 'about three' });
+    write(ws, 'other.ts', 'a\nb\n');
+    await put('drf', { path: 'other.ts', line: 1, comment: 'about a' });
+    write(ws, 'code.ts', 'completely\ndifferent\ncontent\n');
+
+    // The second file is the one being written; the first is the one that
+    // moved under it, and nothing else looks at it any more.
+    const { body } = await put('drf', { path: 'other.ts', line: 2, comment: 'about b' });
+    assert.deepEqual(
+      body.annotations.map((a) => a.outdated),
+      [false, false],
+    );
+    assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 3 \(outdated\)/);
+  });
+
+  test('a comment on a file that became binary is kept as it stands', async () => {
+    const ws = commentable('mmm');
+    await put('mmm', { path: 'code.ts', line: 3, comment: 'about three' });
+    // There is nothing readable to compare the comment against, which is not
+    // the same as the code it was about being gone.
+    writeFileSync(join(ws, 'code.ts'), Buffer.from([0x41, 0x00, 0x42]));
+
+    await openDir('mmm');
+    assert.ok(!readFileSync(join(ws, 'REVIEW.md'), 'utf8').includes('(outdated)'));
+
+    const { body } = await get<ReviewFileResponse>('/api/sessions/mmm/review/file?path=code.ts');
+    assert.equal(body.binary, true);
+    // The listing counts the comment, so the file view shows it: it is where
+    // the reviewer reads and deletes it.
+    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: false }]);
+  });
+
+  test('a comment on a file the change deleted comes back with it', async () => {
+    const ws = commentable('nnn');
+    await put('nnn', { path: 'code.ts', line: 3, comment: 'about three' });
+    rmSync(join(ws, 'code.ts'));
+
+    const listing = await openDir('nnn');
+    assert.equal(entry(listing.body, 'code.ts')!.comments, 1);
+
+    const { body } = await get<ReviewFileResponse>('/api/sessions/nnn/review/file?path=code.ts');
+    assert.equal(body.deleted, true);
+    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: true }]);
   });
 
   test('bad input is refused before REVIEW.md is touched', async () => {
@@ -860,7 +1079,8 @@ describe('annotations', () => {
 
   test('a comment on a path outside the root is a 404', async () => {
     const ws = commentable('jjj');
-    for (const path of ['../escape.txt', 'nosuch.ts', 'node_modules/x.js']) {
+    write(ws, 'logo.png', 'x\n');
+    for (const path of ['../escape.txt', 'nosuch.ts', 'logo.png']) {
       const res = await orchestrator.app.inject({
         method: 'PUT',
         url: '/api/sessions/jjj/review/annotations',
@@ -908,9 +1128,9 @@ describe('deleting the review', () => {
     assert.equal(res.statusCode, 204);
     assert.equal(existsSync(join(ws, 'REVIEW.md')), false);
 
-    const tree = await get<ReviewTreeResponse>('/api/sessions/aaa/review/tree');
-    assert.deepEqual(tree.body.counts, {});
-    assert.equal(tree.body.hasReview, false);
+    const listing = await openDir('aaa');
+    assert.equal(listing.body.commentCount, 0);
+    assert.equal(listing.body.hasReview, false);
   });
 
   test('deleting a review that is not there is not an error', async () => {
@@ -986,10 +1206,12 @@ describe('the base revision', () => {
     git(ws, 'checkout', '-q', 'feature');
 
     await setBase('bbb', 'main');
-    const { body } = await get<ReviewTreeResponse>('/api/sessions/bbb/review/tree');
+    const { body } = await openDir('bbb');
     assert.equal(body.base.rev, 'main');
-    assert.equal(body.statuses['mine.txt'], 'added');
-    assert.equal(body.statuses['theirs.txt'], undefined);
+    assert.equal(entry(body, 'mine.txt')!.status, 'added');
+    // A file that only exists on the base branch is on no disk here and git
+    // reports nothing about it, so the listing does not offer it.
+    assert.equal(entry(body, 'theirs.txt'), undefined);
   });
 
   test('a base changes what a file diff is against', async () => {
@@ -1009,8 +1231,7 @@ describe('the base revision', () => {
     const { body } = await setBase('ddd', null);
     assert.equal(body.rev, '');
     assert.deepEqual(body.repos.map((r) => r.baseCommit), ['']);
-    const tree = await get<ReviewTreeResponse>('/api/sessions/ddd/review/tree');
-    assert.deepEqual(tree.body.base, { rev: '' });
+    assert.deepEqual((await openDir('ddd')).body.base, { rev: '' });
   });
 
   test('a revision that resolves nowhere is refused by name', async () => {
@@ -1035,9 +1256,8 @@ describe('the base revision', () => {
     // Resolved separately, so they are different commits.
     assert.notEqual(body.repos[0]!.baseCommit, body.repos[1]!.baseCommit);
 
-    const tree = await get<ReviewTreeResponse>('/api/sessions/two/review/tree');
-    assert.equal(tree.body.statuses['repo-a/mine.txt'], 'added');
-    assert.equal(tree.body.statuses['repo-b/mine.txt'], 'added');
+    assert.equal(entry((await openDir('two', 'repo-a')).body, 'mine.txt')!.status, 'added');
+    assert.equal(entry((await openDir('two', 'repo-b')).body, 'mine.txt')!.status, 'added');
   });
 
   test('a repository the revision names nothing in falls back to its working tree', async () => {
@@ -1063,11 +1283,11 @@ describe('the base revision', () => {
       ],
     );
 
-    const tree = await get<ReviewTreeResponse>('/api/sessions/mix/review/tree');
-    assert.equal(tree.body.statuses['repo-b/b.txt'], 'modified');
-    // And the tree reports the same resolution, so the header can say where
-    // the revision landed.
-    assert.deepEqual(tree.body.repos.map((r) => r.baseCommit !== ''), [true, false]);
+    const listing = await openDir('mix', 'repo-b');
+    assert.equal(entry(listing.body, 'b.txt')!.status, 'modified');
+    // And every directory reports the same resolution, so the header can say
+    // where the revision landed.
+    assert.deepEqual(listing.body.repos.map((r) => r.baseCommit !== ''), [true, false]);
   });
 
   test('a workspace with no repository cannot have a base', async () => {
@@ -1095,19 +1315,19 @@ describe('freshness is the fetch', () => {
     assert.equal(res.statusCode, 404);
   });
 
-  test('a tree fetch sees what changed since the last one', async () => {
+  test('an arrival sees what changed since the last one', async () => {
     const ws = insertSession('ccc');
     initRepo(ws);
     write(ws, 'code.ts', 'one\ntwo\n');
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
 
-    const before = await get<ReviewTreeResponse>('/api/sessions/ccc/review/tree');
-    assert.equal(before.body.statuses['code.ts'], undefined);
+    const before = await openDir('ccc');
+    assert.equal(entry(before.body, 'code.ts')!.status, undefined);
 
     write(ws, 'code.ts', 'one\nTWO\n');
-    const after = await get<ReviewTreeResponse>('/api/sessions/ccc/review/tree');
-    assert.equal(after.body.statuses['code.ts'], 'modified');
+    const after = await openDir('ccc');
+    assert.equal(entry(after.body, 'code.ts')!.status, 'modified');
   });
 
   test('a file fetch sees an edit the agent made to it', async () => {
@@ -1116,25 +1336,27 @@ describe('freshness is the fetch', () => {
     write(ws, 'code.ts', 'one\ntwo\n');
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
-    await get<ReviewTreeResponse>('/api/sessions/ddd/review/tree');
+    await openDir('ddd');
 
     write(ws, 'code.ts', 'one\nTWO\n');
     const { body } = await get<ReviewFileResponse>('/api/sessions/ddd/review/file?path=code.ts');
     assert.equal(body.content, 'one\nTWO\n');
   });
 
-  test('reading a review does not hold off the reaper', async () => {
+  test('reading a review keeps the box it is read from alive', async () => {
     const ws = insertSession('bbb');
     write(ws, 'a.txt', 'x\n');
     db.prepare('UPDATE sessions SET last_active_at = 0 WHERE id = ?').run('bbb');
 
-    await get<ReviewTreeResponse>('/api/sessions/bbb/review/tree');
+    await openDir('bbb');
     await get<ReviewFileResponse>('/api/sessions/bbb/review/file?path=a.txt');
 
-    // Reviewing is not the agent working, so it must not keep a box alive.
+    // A review asks git about the workspace, and git runs in the session's own
+    // container, so reading one is use of the box. The reaper stopping it under
+    // the reader would take the next request's answer with it.
     const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('bbb') as {
       last_active_at: number;
     };
-    assert.equal(row.last_active_at, 0);
+    assert.ok(row.last_active_at > 0, 'reading a review should mark the session active');
   });
 });
