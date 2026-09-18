@@ -573,6 +573,25 @@ no longer holds the message it named rebuilds from scratch. The answer —
 update of the replay, so it knows whether to keep what it has before anything
 arrives to fold into it.
 
+Replayed history and a running turn arrive on one connection in one shape. The
+adapter serves a `session/load` while a prompt is still in flight and writes
+the transcript back as ordinary `session/update` notifications, so a turn
+streaming into the thread the browser is rebuilding is indistinguishable from
+the thread's own past: the anchor scan would drop the live chunks with the
+history in front of it, and a whole replay would fold the message being
+written into two pieces either side of an older one. What separates them is
+what the gateway has already seen. It forwards a turn's updates as they are
+written, so while that turn runs it holds the message and tool call ids the
+turn is speaking under, and during a replay an update naming one of those is
+the turn's rather than history. The turn's own updates keep going out live to
+the other browsers on the thread — a phone reading an answer has no reason to
+go quiet while a laptop reloads — and are set aside for the browser that is
+replaying until its history is complete, which is where the newest part of a
+thread belongs. The limit is content whose id first appears during the replay:
+the gateway has never seen it, so it cannot be told apart from history and is
+treated as history. The case this answers is the one a reconnect hits, a turn
+already streaming when the replay starts.
+
 A replay is folded in silence and published once. The notifications are the
 same ones live streaming uses, so publishing each one would hand the view
 every intermediate state of a conversation it is in the middle of re-reading:

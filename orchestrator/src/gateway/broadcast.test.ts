@@ -75,16 +75,25 @@ function named(sessionUpdate: string, text: string, messageId: string, thread = 
   };
 }
 
-/** The text of each user_message_chunk a browser received. */
-function userChunks(d: { sent: unknown[] }): string[] {
+/** A session/update about a tool call, which the adapter names by call id. */
+function call(sessionUpdate: string, title: string, toolCallId: string, thread = T1): unknown {
+  return { sessionId: thread, update: { sessionUpdate, toolCallId, title } };
+}
+
+/** The text of each chunk of one kind a browser received. */
+function chunks(d: { sent: unknown[] }, kind: string): string[] {
   return d.sent
-    .filter(
-      (p) =>
-        (p as { update?: { sessionUpdate?: string } }).update?.sessionUpdate ===
-        'user_message_chunk',
-    )
+    .filter((p) => (p as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === kind)
     .map((p) => (p as { update: { content: { text: string } } }).update.content.text);
 }
+
+/** The text of each user_message_chunk a browser received. */
+function userChunks(d: { sent: unknown[] }): string[] {
+  return chunks(d, 'user_message_chunk');
+}
+
+/** A prompt as the gateway forwards it, which is what opens a turn. */
+const PROMPT = { sessionId: T1, prompt: [{ type: 'text', text: 'run the tests' }] };
 
 test('an ordinary update reaches every browser watching its thread', () => {
   const b = new Broadcast('s1');
@@ -395,6 +404,151 @@ test('a resume leaves the other browser on the thread with the live stream', () 
   b.update(named('agent_message_chunk', 'live', 'm4'));
   assert.deepEqual(resuming.sent.at(-1), named('agent_message_chunk', 'live', 'm4'));
   assert.deepEqual(live.sent, [named('agent_message_chunk', 'live', 'm4')]);
+});
+
+test('a resume during a turn keeps the chunks that arrive while it scans', () => {
+  const b = new Broadcast('s1');
+  const resuming = fakeDownstream(1);
+
+  // A turn streaming while the browser is away. The gateway forwards it, so
+  // it knows m43 is the message the agent is writing.
+  b.beginPrompt(PROMPT);
+  b.update(named('agent_message_chunk', 'the answer so far', 'm43'));
+
+  b.add(resuming);
+  b.beginReplay(resuming, T1, { resumeFrom: 'm42' });
+  b.update(named('agent_message_chunk', 'history one', 'm41'));
+  b.update(named('agent_message_chunk', 'live a', 'm43'));
+  b.update(named('agent_message_chunk', 'the anchor', 'm42'));
+  b.update(named('agent_message_chunk', 'live b', 'm43'));
+  b.endReplay(resuming, T1);
+
+  // The tail of the transcript, and then the tail of the answer still being
+  // written. Sent as history, the live chunks would have gone into the pile
+  // held for the anchor and been dropped with it.
+  assert.deepEqual(resuming.sent, [
+    named('agent_message_chunk', 'the anchor', 'm42'),
+    named('agent_message_chunk', 'live a', 'm43'),
+    named('agent_message_chunk', 'live b', 'm43'),
+  ]);
+  assert.deepEqual(resuming.replays, [{ sessionId: T1, resumed: true }]);
+});
+
+test('a whole replay during a turn does not split the message being written', () => {
+  const b = new Broadcast('s1');
+  const reloading = fakeDownstream(1);
+
+  b.beginPrompt(PROMPT);
+  b.update(named('agent_message_chunk', 'the answer so far', 'm43'));
+
+  b.add(reloading);
+  b.beginReplay(reloading, T1);
+  b.update(named('agent_message_chunk', 'history one', 'm41'));
+  b.update(named('agent_message_chunk', 'live a', 'm43'));
+  b.update(named('agent_message_chunk', 'history two', 'm42'));
+  b.update(named('agent_message_chunk', 'live b', 'm43'));
+  b.endReplay(reloading, T1);
+
+  // In arrival order the thread would fold as m41, m43, m42, m43: the
+  // streaming message torn in two around a message older than it.
+  assert.deepEqual(reloading.sent, [
+    named('agent_message_chunk', 'history one', 'm41'),
+    named('agent_message_chunk', 'history two', 'm42'),
+    named('agent_message_chunk', 'live a', 'm43'),
+    named('agent_message_chunk', 'live b', 'm43'),
+  ]);
+});
+
+test('a browser that is not replaying keeps the turn while another rebuilds', () => {
+  const b = new Broadcast('s1');
+  const [phone, laptop] = [fakeDownstream(1), fakeDownstream(2)];
+  b.add(phone);
+
+  b.beginPrompt(PROMPT);
+  b.update(named('agent_message_chunk', 'first half', 'm1'));
+
+  // The laptop comes back on the thread the phone is reading and reloads it.
+  b.add(laptop);
+  b.beginReplay(laptop, T1);
+  b.update(named('user_message_chunk', 'from the transcript', 'm0'));
+  b.update(named('agent_message_chunk', 'second half', 'm1'));
+
+  // The phone is reading the answer as it is written; the laptop reloading
+  // the same thread is no reason for it to go quiet, and no reason for it to
+  // be shown the history the laptop asked for.
+  assert.deepEqual(chunks(phone, 'agent_message_chunk'), ['first half', 'second half']);
+  assert.deepEqual(userChunks(phone), ['run the tests']);
+  assert.deepEqual(laptop.sent, [named('user_message_chunk', 'from the transcript', 'm0')]);
+
+  b.endReplay(laptop, T1);
+  assert.deepEqual(laptop.sent.at(-1), named('agent_message_chunk', 'second half', 'm1'));
+});
+
+test('a resume with no turn running still finds its anchor', () => {
+  const b = new Broadcast('s1');
+  const resuming = fakeDownstream(1);
+  b.add(resuming);
+
+  // The last thing the gateway forwarded before the browser went away is the
+  // message the browser ends on, which is the one it resumes from. Nothing
+  // is running now, so nothing of this is the turn's.
+  b.beginPrompt(PROMPT);
+  b.update(named('agent_message_chunk', 'the answer', 'm2'));
+  b.endPrompt(PROMPT);
+
+  b.beginReplay(resuming, T1, { resumeFrom: 'm2' });
+  b.update(named('user_message_chunk', 'the first question', 'm1'));
+  b.update(named('agent_message_chunk', 'the answer', 'm2'));
+  b.update(named('user_message_chunk', 'and then this', 'm3'));
+  b.endReplay(resuming, T1);
+
+  assert.deepEqual(resuming.replays, [{ sessionId: T1, resumed: true }]);
+  assert.deepEqual(resuming.sent.slice(-2), [
+    named('agent_message_chunk', 'the answer', 'm2'),
+    named('user_message_chunk', 'and then this', 'm3'),
+  ]);
+});
+
+test('a tool call running through a replay is known by its call id', () => {
+  const b = new Broadcast('s1');
+  const reloading = fakeDownstream(1);
+
+  // A tool call carries no message id, so the call id is what says the
+  // update is the running turn's.
+  b.beginPrompt(PROMPT);
+  b.update(call('tool_call', 'npm test', 'c1'));
+
+  b.add(reloading);
+  b.beginReplay(reloading, T1);
+  b.update(named('agent_message_chunk', 'history', 'm1'));
+  b.update(call('tool_call_update', 'npm test: passed', 'c1'));
+  b.endReplay(reloading, T1);
+
+  assert.deepEqual(reloading.sent, [
+    named('agent_message_chunk', 'history', 'm1'),
+    call('tool_call_update', 'npm test: passed', 'c1'),
+  ]);
+});
+
+test('a borrowed replay sends the turn under the fork thread id too', () => {
+  const b = new Broadcast('s1');
+  const exploring = fakeDownstream(1, T2);
+
+  b.beginPrompt(PROMPT);
+  b.update(named('agent_message_chunk', 'still writing', 'm2'));
+
+  // The fork is pinned to its own thread, so everything it reads out of the
+  // source has to name the fork — what is still being written included.
+  b.add(exploring);
+  b.beginReplay(exploring, T1, { as: T2 });
+  b.update(named('agent_message_chunk', 'what was said before the fork', 'm1', T1));
+  b.update(named('agent_message_chunk', 'still writing', 'm2', T1));
+  b.endReplay(exploring, T1);
+
+  assert.deepEqual(exploring.sent, [
+    named('agent_message_chunk', 'what was said before the fork', 'm1', T2),
+    named('agent_message_chunk', 'still writing', 'm2', T2),
+  ]);
 });
 
 test('a borrowed replay is not a second answer to the load that asked', () => {
