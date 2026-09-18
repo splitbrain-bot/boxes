@@ -22,7 +22,7 @@ import {
   resolveInRoot,
   writeFileAtomic,
 } from './fs.ts';
-import { headCommit } from './git.ts';
+import { headCommit, type GitBox } from './git.ts';
 import {
   fileStatuses,
   NO_BASE,
@@ -32,7 +32,7 @@ import {
   type Base,
   type FileStatuses,
 } from './gitstatus.ts';
-import { discoverRepos, inRepo, type Repo, type RepoMap } from './repos.ts';
+import { discoverRepos, gitTarget, inRepo, type Repo, type RepoMap } from './repos.ts';
 import {
   annotationCounts,
   annotationsFor,
@@ -76,10 +76,22 @@ import {
  * It sits at `/workspace/REVIEW.md`, outside every repository, so it cannot be
  * committed by accident or show up in a repository's own status.
  *
- * Nothing here starts or touches a session container. That is the point of the
- * workspace being a directory: the natural moment to review is when the agent
- * is done and the box has idled out.
+ * Files are read and written here, on the workspace directory. Git is not: it
+ * runs in the session's own container, over a repository whose configuration
+ * the agent writes. So a question with git in it starts the box if it was
+ * stopped, and the box stays counted as in use while the review is open.
  */
+
+/** What the review needs of the sessions it is a view onto. */
+export interface ReviewSessions {
+  /** Where a session's files are, or null while it is still volume-backed. */
+  workspacePath(id: string): string | null;
+  /**
+   * The session's container, started if it was stopped, and the directory a
+   * command runs in inside it.
+   */
+  execTarget(id: string): Promise<{ containerId: string; workingDir: string }>;
+}
 
 /** Review operations over the sessions of one orchestrator. */
 export class ReviewService {
@@ -112,8 +124,7 @@ export class ReviewService {
 
   constructor(
     private readonly db: Db,
-    /** Where a session's files are, or null while it is still volume-backed. */
-    private readonly workspaceOf: (id: string) => string | null,
+    private readonly sessions: ReviewSessions,
   ) {}
 
   // --- the workspace and its repositories -----------------------------------
@@ -141,7 +152,7 @@ export class ReviewService {
    */
   private workspace(id: string): string {
     const row = this.row(id);
-    const path = this.workspaceOf(row.id);
+    const path = this.sessions.workspacePath(row.id);
     if (!path || !isDirectory(path)) {
       throw new HttpError(
         409,
@@ -152,16 +163,28 @@ export class ReviewService {
     return path;
   }
 
+  /**
+   * The session's container to run git in, started if it was stopped.
+   *
+   * Resolved for each request that asks git something, rather than remembered:
+   * a container can be stopped between two requests, or replaced by one, and
+   * either leaves a held id naming nothing.
+   */
+  private async box(id: string): Promise<GitBox> {
+    const target = await this.sessions.execTarget(id);
+    return { containerId: target.containerId, workspaceDir: target.workingDir };
+  }
+
   /** The repositories of a session's workspace, discovering them if none are held. */
-  private async repos(id: string): Promise<RepoMap> {
+  private async repos(box: GitBox, id: string): Promise<RepoMap> {
     const held = this.repoMaps.get(id);
     if (held) return held;
-    return this.rediscover(id);
+    return this.rediscover(box, id);
   }
 
   /** Walks the workspace again and keeps what it found. */
-  private async rediscover(id: string): Promise<RepoMap> {
-    const map = await discoverRepos(this.workspace(id));
+  private async rediscover(box: GitBox, id: string): Promise<RepoMap> {
+    const map = await discoverRepos(this.workspace(id), box);
     this.repoMaps.set(id, map);
     return map;
   }
@@ -197,13 +220,14 @@ export class ReviewService {
    */
   async tree(id: string): Promise<ReviewTreeResponse> {
     const workspace = this.workspace(id);
-    const map = await this.rediscover(id);
+    const box = await this.box(id);
+    const map = await this.rediscover(box, id);
     const rev = this.baseRev(id);
-    const bases = await resolveBases(map, rev);
+    const bases = await resolveBases(box, map, rev);
 
     const [listing, repos] = await Promise.all([
-      this.listing(map, bases),
-      this.describeRepos(map, bases),
+      this.listing(box, map, bases),
+      this.describeRepos(box, map, bases),
     ]);
 
     const review = await this.driftAll(id, workspace);
@@ -237,14 +261,15 @@ export class ReviewService {
    */
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
     const workspace = this.workspace(id);
-    const map = await this.repos(id);
+    const box = await this.box(id);
+    const map = await this.repos(box, id);
     const repo = map.repoFor(relPath);
-    const path = await this.resolveListed(workspace, id, relPath);
+    const path = await this.resolveListed(box, workspace, id, relPath);
     if (path === null) {
       return goneFile(relPath, repo, await this.annotationsOf(id, workspace, relPath));
     }
     const read = readTextFile(path);
-    const base = repo ? await this.baseIn(id, repo) : NO_BASE;
+    const base = repo ? await this.baseIn(box, id, repo) : NO_BASE;
 
     // Only the owning repository is asked, rather than the whole workspace:
     // one file's status is one repository's answer, and running `status` in
@@ -252,9 +277,9 @@ export class ReviewService {
     // repositories.
     const [diff, statuses] = await Promise.all([
       repo && !read.binary
-        ? fileDiff(repo.absolute, base, inRepo(repo, relPath), read.content)
+        ? fileDiff(gitTarget(box, repo.path), base, inRepo(repo, relPath), read.content)
         : Promise.resolve(null),
-      repo ? fileStatuses(repo.absolute, base) : Promise.resolve(null),
+      repo ? fileStatuses(gitTarget(box, repo.path), base) : Promise.resolve(null),
     ]);
 
     // A binary file and a file past the display cap are not what the comments
@@ -316,7 +341,7 @@ export class ReviewService {
     }
 
     const workspace = this.workspace(id);
-    const path = await this.resolveListed(workspace, id, relPath);
+    const path = await this.resolveListed(await this.box(id), workspace, id, relPath);
     if (path === null) {
       throw new HttpError(409, 'This file was deleted, so there is nothing to save.');
     }
@@ -357,7 +382,7 @@ export class ReviewService {
     const workspace = this.workspace(id);
     // The path has to name a file of the tree, not merely resolve inside it:
     // an annotation on something the tree never listed could never be shown.
-    const path = await this.resolveListed(workspace, id, relPath);
+    const path = await this.resolveListed(await this.box(id), workspace, id, relPath);
     if (path === null) {
       throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
     }
@@ -407,16 +432,17 @@ export class ReviewService {
     // The session is validated here as it is everywhere else, because the held
     // repository map would otherwise answer for a session that has none.
     this.workspace(id);
-    const map = await this.repos(id);
+    const box = await this.box(id);
+    const map = await this.repos(box, id);
     if (rev === null || rev.trim() === '') {
       this.db.prepare('UPDATE sessions SET review_base_rev = NULL WHERE id = ?').run(id);
-      return { rev: '', repos: await this.describeRepos(map, new Map()) };
+      return { rev: '', repos: await this.describeRepos(box, map, new Map()) };
     }
     const wanted = rev.trim();
     if (wanted.length > 200) throw new HttpError(400, 'rev is too long');
     if (!map.hasGit) throw new HttpError(409, 'This workspace holds no git repository');
 
-    const bases = await resolveBases(map, wanted);
+    const bases = await resolveBases(box, map, wanted);
     if (bases.size === 0) {
       throw new HttpError(400, `unknown revision: ${wanted}`);
     }
@@ -429,7 +455,7 @@ export class ReviewService {
     }
 
     this.db.prepare('UPDATE sessions SET review_base_rev = ? WHERE id = ?').run(wanted, id);
-    return { rev: wanted, repos: await this.describeRepos(map, bases) };
+    return { rev: wanted, repos: await this.describeRepos(box, map, bases) };
   }
 
   // --- the read-modify-write ------------------------------------------------
@@ -580,12 +606,16 @@ export class ReviewService {
    * a revision can name a branch in one repository and nothing at all in the
    * dependency checked out beside it.
    */
-  private async describeRepos(map: RepoMap, bases: Map<string, Base>): Promise<ReviewRepo[]> {
+  private async describeRepos(
+    box: GitBox,
+    map: RepoMap,
+    bases: Map<string, Base>,
+  ): Promise<ReviewRepo[]> {
     return Promise.all(
       map.repos.map(async (repo) => ({
         path: repo.path,
         name: repo.name,
-        head: await headCommit(repo.absolute),
+        head: await headCommit(gitTarget(box, repo.path)),
         baseCommit: bases.get(repo.path)?.commit ?? '',
       })),
     );
@@ -595,10 +625,10 @@ export class ReviewService {
    * What one repository is compared against, for a single-file request that
    * has no reason to resolve the base in any of the others.
    */
-  private async baseIn(id: string, repo: Repo): Promise<Base> {
+  private async baseIn(box: GitBox, id: string, repo: Repo): Promise<Base> {
     const rev = this.baseRev(id);
     if (rev === '') return NO_BASE;
-    const resolved = await resolveBase(repo.absolute, rev);
+    const resolved = await resolveBase(gitTarget(box, repo.path), rev);
     // Unknown here is not an error: this repository is compared against its
     // own working tree, the same soft failure `resolveBases` takes.
     return 'base' in resolved ? resolved.base : NO_BASE;
@@ -620,11 +650,12 @@ export class ReviewService {
    * the caller's to decide.
    */
   private async resolveListed(
+    box: GitBox,
     workspace: string,
     id: string,
     relPath: string,
   ): Promise<string | null> {
-    if (!(await this.listed(id)).has(relPath)) {
+    if (!(await this.listed(box, id)).has(relPath)) {
       throw new HttpError(404, 'File not found');
     }
     const resolved = resolveInRoot(workspace, relPath);
@@ -642,12 +673,12 @@ export class ReviewService {
    * The files a change deleted are in it, because the tree offers them: what
    * this set decides is whether the API serves what the browser was shown.
    */
-  private async listed(id: string): Promise<Set<string>> {
+  private async listed(box: GitBox, id: string): Promise<Set<string>> {
     const cached = this.treePaths.get(id);
     if (cached && Date.now() - cached.at < ReviewService.TREE_CACHE_MS) return cached.paths;
-    const map = await this.repos(id);
-    const bases = await resolveBases(map, this.baseRev(id));
-    return this.rememberPaths(id, (await this.listing(map, bases)).entries);
+    const map = await this.repos(box, id);
+    const bases = await resolveBases(box, map, this.baseRev(id));
+    return this.rememberPaths(id, (await this.listing(box, map, bases)).entries);
   }
 
   /**
@@ -660,10 +691,14 @@ export class ReviewService {
    * endpoint serves.
    */
   private async listing(
+    box: GitBox,
     map: RepoMap,
     bases: Map<string, Base>,
   ): Promise<{ entries: TreeEntry[]; statuses: FileStatuses; truncated: boolean }> {
-    const [tree, statuses] = await Promise.all([reviewTree(map), workspaceStatuses(map, bases)]);
+    const [tree, statuses] = await Promise.all([
+      reviewTree(map),
+      workspaceStatuses(box, map, bases),
+    ]);
     return {
       entries: withDeleted(tree.entries, deletedPaths(statuses)),
       statuses,

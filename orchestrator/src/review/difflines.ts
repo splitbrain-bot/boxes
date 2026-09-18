@@ -1,4 +1,4 @@
-import { git, gitOut } from './git.ts';
+import { git, gitOut, type GitTarget } from './git.ts';
 import { fileLines } from './fs.ts';
 import { baseRev, type Base } from './gitstatus.ts';
 
@@ -189,14 +189,14 @@ export function allLinesAdded(content: string): Record<number, LineChange> {
  * answers is needed only shows once the diff is in.
  */
 export async function fileDiff(
-  root: string,
+  target: GitTarget,
   base: Base,
   path: string,
   content: string,
 ): Promise<FileDiff> {
   const [diff, untracked] = await Promise.all([
-    git(root, ['diff', baseRev(base), `--unified=${DIFF_CONTEXT}`, '--', path]),
-    gitOut(root, ['ls-files', '--others', '--exclude-standard', '--', path]),
+    git(target, ['diff', baseRev(base), `--unified=${DIFF_CONTEXT}`, '--', path]),
+    gitOut(target, ['ls-files', '--others', '--exclude-standard', '--', path]),
   ]);
 
   if (diff.ok && diff.stdout.length > 0) return parseDiff(diff.stdout);

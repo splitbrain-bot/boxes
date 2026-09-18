@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
+import { setGitRunnerForTests, type GitBox, type GitRunner } from './git.ts';
 import { discoverRepos } from './repos.ts';
 import {
   buildTree,
@@ -16,7 +17,34 @@ import {
   type TreeEntry,
 } from './tree.ts';
 
-/** The file tree, ported from the Go implementation's tests. */
+/**
+ * The file tree, ported from the Go implementation's tests.
+ *
+ * The tree is a walk of the workspace and needs no git. What git it does reach
+ * is discovery, driven here through a runner that starts git on this machine
+ * over the test's own repositories rather than in a session container.
+ */
+
+/** A runner that starts git here, in the directory the target names. */
+const localGit: GitRunner = async (target, argv, env) => {
+  try {
+    const stdout = execFileSync(argv[0]!, argv.slice(1), {
+      cwd: target.dir,
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return { ok: true, stdout, stderr: '', code: 0 };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: string; stderr?: string };
+    return {
+      ok: false,
+      stdout: failed.stdout ?? '',
+      stderr: failed.stderr ?? '',
+      code: failed.status ?? null,
+    };
+  }
+};
 
 describe('buildTree', () => {
   test('flat files come back in order', () => {
@@ -163,12 +191,19 @@ describe('reviewTree', () => {
   let dir: string;
 
   beforeEach(() => {
+    setGitRunnerForTests(localGit);
     dir = mkdtempSync(join(tmpdir(), 'boxes-rtree-'));
   });
 
   afterEach(() => {
+    setGitRunnerForTests(null);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  /** The session box this workspace would be reviewed in. */
+  function box(): GitBox {
+    return { containerId: 'box-1', workspaceDir: dir };
+  }
 
   /** Runs git in a workspace-relative directory. */
   function git(rel: string, ...args: string[]): void {
@@ -192,7 +227,7 @@ describe('reviewTree', () => {
 
   /** The merged tree of the workspace, as a sorted path list. */
   async function paths(): Promise<string[]> {
-    const { entries } = await reviewTree(await discoverRepos(dir));
+    const { entries } = await reviewTree(await discoverRepos(dir, box()));
     return [...treePaths(entries)].toSorted();
   }
 
@@ -206,7 +241,7 @@ describe('reviewTree', () => {
     git('', 'add', 'tracked.ts', '.gitignore');
     git('', 'commit', '-q', '-m', 'init');
 
-    const { entries, truncated } = await reviewTree(await discoverRepos(dir));
+    const { entries, truncated } = await reviewTree(await discoverRepos(dir, box()));
     // Tracked, untracked and ignored alike: a file the project's rules hide
     // from git is still one a person may need to read. Only the workspace's
     // own REVIEW.md and git's metadata stay out.
@@ -237,7 +272,7 @@ describe('reviewTree', () => {
 
   test('an empty repository still answers, with an empty tree', async () => {
     repo('');
-    const { entries } = await reviewTree(await discoverRepos(dir));
+    const { entries } = await reviewTree(await discoverRepos(dir, box()));
     assert.deepEqual(entries as TreeEntry[], []);
   });
 
@@ -296,7 +331,7 @@ describe('reviewTree', () => {
     file('repo-a/src/x.ts');
     file('notes/todo.md');
 
-    const map = await discoverRepos(dir);
+    const map = await discoverRepos(dir, box());
     const entries = markRepoRoots((await reviewTree(map)).entries, map);
     const byName = new Map(entries.map((e) => [e.name, e]));
     assert.equal(byName.get('repo-a')?.repo, true);

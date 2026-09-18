@@ -81,9 +81,13 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
   const notifier = new Notifier(db, cfg);
   const agents = new AgentStore(db, cfg.DATA_DIR);
   const manager = new SessionManager(db, cfg, egress, notifier, agents);
-  // The review surface reaches the files through the manager, which is the one
-  // thing that knows whether a session is directory-backed yet.
-  const review = new ReviewService(db, (id) => manager.workspacePathOf(id));
+  // The review surface reaches the files and the box through the manager,
+  // which is the one thing that knows whether a session is directory-backed
+  // yet and how to get a container of it running.
+  const review = new ReviewService(db, {
+    workspacePath: (id) => manager.workspacePathOf(id),
+    execTarget: (id) => manager.execTarget(id),
+  });
 
   let proxyWarnings: string[] = [];
 
@@ -405,10 +409,10 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
   // --- Code review over a session's workspace ---------------------------------
 
   /**
-   * The review surface. None of these routes starts or touches a session
-   * container: the workspace is a directory this process can read, which is what
-   * makes reviewing a stopped session — the natural moment, once the agent is
-   * done — cost nothing.
+   * The review surface. Files come off the workspace directory this process
+   * can read; git runs in the session's own container, over repositories the
+   * agent controls. So a route that asks git something starts a stopped box,
+   * and reviewing keeps it running.
    *
    * The responses are batched so a client gets one round trip per screen:
    * the tree endpoint carries the whole left panel, the file endpoint the

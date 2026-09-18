@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, test } from 'vitest';
+import { afterEach, beforeEach, describe, test, vi } from 'vitest';
 import type {
   ReviewAnnotationsResponse,
   ReviewBaseResponse,
@@ -23,21 +23,63 @@ import type {
 import { buildApp, type Orchestrator } from '../app.ts';
 import { loadConfig, setConfigForTests } from '../config.ts';
 import { openDb, type Db } from '../db.ts';
+import { SessionManager } from '../sessions.ts';
+import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 import { treePaths } from './tree.ts';
 
 /**
  * The review routes over their real handlers, a real database and a real git
  * repository in a temp directory — no Docker anywhere.
  *
- * That is the payoff of workspaces being directories: what used to need a
- * container to read a file now needs a directory, so the API can be driven
- * end to end in a unit test.
+ * Files are read off the workspace directory, which is why the API can be
+ * driven end to end in a unit test at all. Git is the other half: the routes
+ * ask the session for a running container and address every invocation at a
+ * path inside it, so both of those are stubbed here — the box by a manager
+ * that hands out the session id, and git by a runner that starts it on this
+ * machine over the workspace the box would have held.
  *
  * The review is over the *workspace*, so most of what is worth pinning down
  * here is a workspace shape: two clones side by side, a clone beside a stray
- * directory, a repository inside a repository. Each of those used to turn the
- * whole review into a plain file browser with no git in it, or worse.
+ * directory, a repository inside a repository. Each of those turns the whole
+ * review into a plain file browser with no git in it when it goes wrong.
  */
+
+/** Invocations addressed at anything but a session's own workspace. */
+let misaddressed: GitTarget[] = [];
+
+/**
+ * A runner that starts git here, in the host directory that the container
+ * path names.
+ *
+ * The workspace is at `/workspace` inside a box, and the stubbed container id
+ * is the session's own, so the two together say which directory on this
+ * machine an invocation means. One addressed anywhere else is recorded and
+ * refused rather than run.
+ */
+const localGit: GitRunner = async (target, argv, env) => {
+  const inside = target.dir === '/workspace' || target.dir.startsWith('/workspace/');
+  if (!inside || !existsSync(workspace(target.containerId))) {
+    misaddressed.push(target);
+    return { ok: false, stdout: '', stderr: 'misaddressed', code: null };
+  }
+  try {
+    const stdout = execFileSync(argv[0]!, argv.slice(1), {
+      cwd: join(workspace(target.containerId), target.dir.slice('/workspace'.length)),
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return { ok: true, stdout, stderr: '', code: 0 };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: string; stderr?: string };
+    return {
+      ok: false,
+      stdout: failed.stdout ?? '',
+      stderr: failed.stderr ?? '',
+      code: failed.status ?? null,
+    };
+  }
+};
 
 let dir: string;
 let db: Db;
@@ -102,13 +144,26 @@ beforeEach(() => {
   setConfigForTests(cfg);
   db = openDb(dir);
   orchestrator = buildApp(cfg, db);
+  misaddressed = [];
+  // The box a review runs git in: no container is started here, so the
+  // session id stands in for one and the workspace is where it always is.
+  vi.spyOn(SessionManager.prototype, 'execTarget').mockImplementation(async (id: string) => ({
+    containerId: id,
+    workingDir: '/workspace',
+  }));
+  setGitRunnerForTests(localGit);
 });
 
 afterEach(async () => {
   await orchestrator.app.close();
   db.close();
+  setGitRunnerForTests(null);
+  vi.restoreAllMocks();
   setConfigForTests(null as never);
   rmSync(dir, { recursive: true, force: true });
+  // Every invocation the requests above made was addressed to the session's
+  // own container and to a path inside its workspace.
+  assert.deepEqual(misaddressed, []);
 });
 
 /** GET, parsed. */

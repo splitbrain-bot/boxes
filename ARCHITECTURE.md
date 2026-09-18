@@ -1351,13 +1351,21 @@ the session container. A named volume, mounted only into that container,
 would leave the orchestrator with no filesystem path to the agent's work at
 all, and reaching a file would mean a `docker exec`.
 
-The directory is what makes reviewing a session's code possible without an
-exec round trip per read, without booting a stopped container, and with git
-run as an ordinary child process. It grants the orchestrator no privilege it
-did not already have — it holds the Docker socket — but it does expose that
-process to hostile *content*, which is why the review layer keeps symlink
-containment and git hardening as maintained invariants, each in one file with
-a test.
+The directory is what lets the review read a session's files without an exec
+round trip per read. That reading is the orchestrator's own, and it is why the
+review layer keeps symlink containment as a maintained invariant, in one file
+with a test: the process holds the Docker socket, and the content it is reading
+belongs to the agent.
+
+Git is the exception, and it runs nowhere near this process. A repository's own
+configuration can name a program for git to run — a clean or smudge filter is
+enough, and no git option turns that off — so asking git about a workspace
+here would let the agent choose a command the orchestrator executes. Every git
+invocation is a `docker exec` in the session's own container instead, as the
+agent, which is the one place where running what the repository asks for is
+already the agent's own privilege rather than a boundary being crossed. The
+cost is that a review needs the box up, so opening one starts a stopped
+session.
 
 **The home followed it**, for a plainer reason: everything a session is should
 be in one place, and the biggest thing a session owns was the one thing Boxes
@@ -1711,13 +1719,15 @@ the agent controls:
   workspace — what changes is that a contained path may now be in any
   repository, or in none. The residual `realpath`/open race is documented where
   the check is, along with what closing it would cost.
-- Git hardening lives in `review/git.ts`. Repo-local config executes commands
-  on exactly the operations review runs — `core.fsmonitor` on status, external
-  diff drivers and `textconv` on diff. Every invocation takes its argv prefix
-  and environment from one builder there, and a test plants both configs in a
-  repository and asserts the hook never ran. The prefix is built per
-  invocation, so `safe.directory` is scoped to the repository being asked
-  rather than to one root.
+- Where git runs lives in `review/git.ts`, which is the one place a git command
+  line is built and the one place it is handed somewhere to run. It goes to the
+  session's container over `docker exec`, as the agent, against the workspace
+  path inside it. The flags that remain are there for the parsers rather than
+  for safety — unquoted paths, literal pathspecs, and the diff flags that keep
+  hunk output byte-compatible with the desktop tool — because a repository
+  that can run code in its own box has gained nothing. A test scans the
+  orchestrator and asserts no source file outside the tests can spawn a
+  process at all.
 
 ### The review view
 
@@ -2183,13 +2193,14 @@ files the desktop tool's own Go code wrote (`orchestrator/src/review/fixtures/`,
 with its own README on provenance), the same reviews being rebuilt from the same
 inputs and each file round-tripped. The invariants have tests that are the
 attacks: a symlink out of the workspace, a symlink through a directory, and a
-traversal all coming back as the same 404, and a repository-local
-`core.fsmonitor` and `textconv` planted in a real repository with an assertion
-that neither ever ran. The seven routes are driven over their real handlers, a
-real database and a real git repository in a temp directory — no Docker at all,
-which is what stage one bought for the tests as much as for the feature —
-covering root resolution, drift, concurrent writes and that none of them touches
-a session's activity timestamp.
+traversal all coming back as the same 404, and a scan of the orchestrator's own
+sources asserting that none of them can spawn a process, which is what keeps
+git in the box it belongs to. The seven routes are driven over their real
+handlers, a real database and a real git repository in a temp directory, with
+git itself supplied through the one seam it is started from, so the suite needs
+no Docker; every invocation is checked to be addressed to a session's container
+and a path inside its workspace. They cover root resolution, drift, concurrent
+writes and that none of them touches a session's activity timestamp.
 
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update

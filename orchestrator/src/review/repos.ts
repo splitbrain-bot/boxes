@@ -1,6 +1,6 @@
-import { readdirSync, realpathSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { topLevel } from './git.ts';
+import { isTopLevel, type GitBox, type GitTarget } from './git.ts';
 
 /**
  * Which repositories a workspace holds, and which of them owns a path.
@@ -30,10 +30,10 @@ export interface Repo {
    * workspace is itself the repository.
    */
   path: string;
-  /** Its absolute path on this process's filesystem. */
-  absolute: string;
   /** What to call it: its last path segment, or the workspace's own name. */
   name: string;
+  /** Where its git runs: the session's container, and its root inside it. */
+  git: GitTarget;
 }
 
 /**
@@ -137,6 +137,20 @@ export function inWorkspace(repo: Repo, path: string): string {
 }
 
 /**
+ * Where one repository's git runs, from where the repository sits.
+ *
+ * A workspace-relative path is all the map holds, and the container holds the
+ * whole workspace at one known place, so a repository root inside the box is
+ * the two joined. It is the only translation between the two namings.
+ */
+export function gitTarget(box: GitBox, repoPath: string): GitTarget {
+  return {
+    containerId: box.containerId,
+    dir: repoPath === '' ? box.workspaceDir : `${box.workspaceDir}/${repoPath}`,
+  };
+}
+
+/**
  * A workspace-relative path as its own repository names it.
  *
  * The caller has already established that the repository encloses the path —
@@ -149,20 +163,21 @@ export function inRepo(repo: Repo, path: string): string {
 /**
  * Finds every repository in a workspace.
  *
- * The walk prunes {@link PRUNED_DIRS} and never follows a symlink, and is
- * bounded by {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}.
+ * The walk reads the workspace directory on this process's filesystem, which
+ * is the same tree the box holds at `box.workspaceDir`. It prunes
+ * {@link PRUNED_DIRS}, never follows a symlink, and is bounded by
+ * {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}.
  *
  * A directory holding a `.git` entry — file *or* directory, so submodules and
  * linked worktrees count — is a candidate, and every candidate is confirmed by
- * asking git for its top level. The comparison is realpath to realpath:
- * `rev-parse --show-toplevel` resolves symlinks, so comparing its answer
- * against a raw path fails for any workspace whose path has a symlinked
- * component, and silently loses git for every session in that deployment.
+ * asking git in the box whether it is the top of a work tree. A `.git` that
+ * belongs to a repository above it is how a directory becomes a candidate and
+ * not a repository.
  */
-export async function discoverRepos(workspace: string): Promise<RepoMap> {
-  const candidates = candidateDirs(workspace);
+export async function discoverRepos(workspace: string, box: GitBox): Promise<RepoMap> {
+  const candidates = candidateDirs(workspace, box);
   const confirmed = await Promise.all(
-    candidates.map(async (candidate) => ((await isWorkTree(candidate.absolute)) ? candidate : null)),
+    candidates.map(async (candidate) => ((await isTopLevel(candidate.git)) ? candidate : null)),
   );
   return new RepoMap(workspace, confirmed.filter((repo) => repo !== null).slice(0, MAX_REPOS));
 }
@@ -174,7 +189,7 @@ export async function discoverRepos(workspace: string): Promise<RepoMap> {
  * unread: a repository the reviewer cloned sits near the top, and a dependency
  * tree is what fills the bottom.
  */
-function candidateDirs(workspace: string): Repo[] {
+function candidateDirs(workspace: string, box: GitBox): Repo[] {
   const found: Repo[] = [];
   let scanned = 0;
   let queue: Array<{ absolute: string; path: string }> = [{ absolute: workspace, path: '' }];
@@ -197,9 +212,9 @@ function candidateDirs(workspace: string): Repo[] {
         // repositories the reviewer can be looking at.
         if (entry.name === '.git' && (entry.isDirectory() || entry.isFile())) {
           found.push({
-            absolute: dir.absolute,
             path: dir.path,
             name: dir.path === '' ? workspaceName(workspace) : (dir.path.split('/').pop() ?? ''),
+            git: gitTarget(box, dir.path),
           });
         }
         // `isDirectory` is false for a link to one, so a link is never
@@ -216,23 +231,6 @@ function candidateDirs(workspace: string): Repo[] {
   }
 
   return found;
-}
-
-/**
- * Whether a directory really is the top of a git work tree.
- *
- * Both sides are resolved before they are compared, because git's answer
- * always is: a repository reached through a symlinked parent has a top level
- * that is not the path it was asked about, and it is the same directory.
- */
-async function isWorkTree(dir: string): Promise<boolean> {
-  const top = await topLevel(dir);
-  if (top === null) return false;
-  try {
-    return realpathSync(top) === realpathSync(dir);
-  } catch {
-    return false;
-  }
 }
 
 /** What to call a repository that is the workspace itself. */

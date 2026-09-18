@@ -808,13 +808,16 @@ export async function containerProcesses(containerId: string): Promise<Container
 export async function containerProcessesFromInside(
   containerId: string,
 ): Promise<ContainerProcess[]> {
-  const { output, exited } = await runExec(containerId, ['ps', '-eo', 'pid,ppid,args']);
-  const text = await readAll(output);
-  const code = await exited;
-  if (code !== 0) throw new Error(`ps in the container exited ${code ?? 'unknown'}: ${text.trim()}`);
+  const ps = ['ps', '-eo', 'pid,ppid,args'];
+  const { stdout, stderr, code } = await execInContainer(containerId, ps);
+  if (code !== 0) {
+    throw new Error(
+      `ps in the container exited ${code ?? 'unknown'}: ${`${stdout}${stderr}`.trim()}`,
+    );
+  }
 
   const processes: ContainerProcess[] = [];
-  for (const line of text.split('\n').slice(1)) {
+  for (const line of stdout.split('\n').slice(1)) {
     // Three fields, and the third keeps its spaces: `ps` pads the numbers on
     // the left, so what is wanted is the first two runs of digits and then
     // everything after them.
@@ -845,43 +848,106 @@ export async function killInContainer(
   pids: readonly number[],
 ): Promise<void> {
   if (pids.length === 0) return;
-  const { output, exited } = await runExec(containerId, [
+  const { stdout, stderr, code } = await execInContainer(containerId, [
     'kill',
     `-${signal}`,
     ...pids.map((pid) => String(pid)),
   ]);
-  const text = await readAll(output);
-  const code = await exited;
   if (code !== 0) {
-    log.debug('kill in container reported trouble', { signal, pids, code, error: text.trim() });
+    const error = `${stdout}${stderr}`.trim();
+    log.debug('kill in container reported trouble', { signal, pids, code, error });
   }
 }
 
-/** Everything a stream will produce, as one string. */
-async function readAll(stream: Readable): Promise<string> {
+/** How a short exec runs, and how much of what it writes is kept. */
+export interface ExecOptions {
+  /** The directory it runs in, as the container names it. */
+  workingDir?: string;
+  /** Variables set for it, on top of the container's own environment. */
+  env?: Record<string, string>;
+  /** How long it may run before it is signalled. Unbounded when absent. */
+  timeoutMs?: number;
+  /** How many bytes of each stream are kept. The rest is read and dropped. */
+  maxOutput?: number;
+}
+
+/** What a short exec wrote, and how it ended. */
+export interface ExecOutput {
+  stdout: string;
+  stderr: string;
+  /** Null when the exit code could not be read. */
+  code: number | null;
+}
+
+/**
+ * Runs one command in a container as the agent user and collects its output.
+ *
+ * The command travels as an argument vector, never as a line a shell has to
+ * take apart. `timeoutMs` is enforced inside the container, by `timeout`,
+ * because the daemon offers no way to signal a running exec: dropping the
+ * attached stream would leave the command running. The limit is rounded up to
+ * whole seconds, a command that survives the term signal is killed five
+ * seconds later, and one the limit stopped exits 124 like any other failure.
+ */
+export async function execInContainer(
+  containerId: string,
+  cmd: string[],
+  opts: ExecOptions = {},
+): Promise<ExecOutput> {
+  const { stdout, stderr, exited } = await runExec(containerId, cmd, opts);
+  const [out, err, code] = await Promise.all([
+    readAll(stdout, opts.maxOutput),
+    readAll(stderr, opts.maxOutput),
+    exited,
+  ]);
+  return { stdout: out, stderr: err, code };
+}
+
+/** Everything a stream will produce, as one string, up to a cap on its bytes. */
+async function readAll(stream: Readable, cap = Infinity): Promise<string> {
   const chunks: Buffer[] = [];
-  for await (const chunk of stream) chunks.push(Buffer.from(chunk as Buffer));
+  let size = 0;
+  for await (const chunk of stream) {
+    // Read to the end whatever the cap says, so the command is never left
+    // waiting on a stream nobody drains.
+    const buf = Buffer.from(chunk as Buffer);
+    if (size < cap) chunks.push(size + buf.length <= cap ? buf : buf.subarray(0, cap - size));
+    size += buf.length;
+  }
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** One short exec with its output demuxed into a single stream. */
+/** A command wrapped in the container's own `timeout`, when it is given a limit. */
+function withTimeout(cmd: string[], timeoutMs?: number): string[] {
+  if (timeoutMs === undefined) return cmd;
+  return ['timeout', '--kill-after=5s', `${Math.ceil(timeoutMs / 1000)}s`, ...cmd];
+}
+
+/** One short exec with its stdout and its stderr demuxed apart. */
 async function runExec(
   containerId: string,
   cmd: string[],
-): Promise<{ output: Readable; exited: Promise<number | null> }> {
+  opts: ExecOptions,
+): Promise<{ stdout: Readable; stderr: Readable; exited: Promise<number | null> }> {
   const exec = await docker().getContainer(containerId).exec({
-    Cmd: cmd,
+    Cmd: withTimeout(cmd, opts.timeoutMs),
     AttachStdin: false,
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
     User: sessionUser(),
+    WorkingDir: opts.workingDir,
+    Env: opts.env && Object.entries(opts.env).map(([name, value]) => `${name}=${value}`),
   });
   const stream = (await exec.start({ hijack: true, stdin: false })) as Duplex;
-  const output = new PassThrough();
-  docker().modem.demuxStream(stream, output, output);
-  const { exited } = execCompletion(stream, exec, () => output.end());
-  return { output, exited };
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  docker().modem.demuxStream(stream, stdout, stderr);
+  const { exited } = execCompletion(stream, exec, () => {
+    stdout.end();
+    stderr.end();
+  });
+  return { stdout, stderr, exited };
 }
 
 /**

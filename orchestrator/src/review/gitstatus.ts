@@ -1,5 +1,5 @@
-import { git, gitOut } from './git.ts';
-import { inWorkspace, type RepoMap } from './repos.ts';
+import { git, gitOut, type GitBox, type GitTarget } from './git.ts';
+import { gitTarget, inWorkspace, type RepoMap } from './repos.ts';
 import { REVIEW_FILE } from './tree.ts';
 
 /**
@@ -159,10 +159,10 @@ function classifyStatus(x: string, y: string): FileStatus | null {
  * answer a separate check would have given and is what turns the git features
  * off in the UI.
  */
-export async function fileStatuses(root: string, base: Base): Promise<FileStatuses | null> {
-  if (base.commit !== '') return statusesSince(root, base);
+export async function fileStatuses(target: GitTarget, base: Base): Promise<FileStatuses | null> {
+  if (base.commit !== '') return statusesSince(target, base);
 
-  const result = await git(root, ['status', '--porcelain', '-z', '-uall', '--no-renames']);
+  const result = await git(target, ['status', '--porcelain', '-z', '-uall', '--no-renames']);
   if (!result.ok) return null;
   return parsePorcelain(result.stdout);
 }
@@ -172,12 +172,12 @@ export async function fileStatuses(root: string, base: Base): Promise<FileStatus
  * uncommitted changes. Untracked files are listed as well, since they are part
  * of what is under review.
  */
-async function statusesSince(root: string, base: Base): Promise<FileStatuses | null> {
-  const named = await git(root, ['diff', '--name-status', '--no-renames', base.commit]);
+async function statusesSince(target: GitTarget, base: Base): Promise<FileStatuses | null> {
+  const named = await git(target, ['diff', '--name-status', '--no-renames', base.commit]);
   if (!named.ok) return null;
   const result = parseNameStatus(named.stdout);
 
-  const untracked = await gitOut(root, ['ls-files', '--others', '--exclude-standard']);
+  const untracked = await gitOut(target, ['ls-files', '--others', '--exclude-standard']);
   for (const path of parsePathList(untracked)) result[path] = 'untracked';
 
   return result;
@@ -192,17 +192,17 @@ async function statusesSince(root: string, base: Base): Promise<FileStatuses | n
  * back to the revision itself when the two have no common ancestor.
  */
 export async function resolveBase(
-  root: string,
+  target: GitTarget,
   rev: string,
 ): Promise<{ base: Base } | { error: string }> {
-  const isRepo = await git(root, ['rev-parse', '--git-dir']);
+  const isRepo = await git(target, ['rev-parse', '--git-dir']);
   if (!isRepo.ok) return { error: 'not a git repository' };
 
-  const verified = await git(root, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`]);
+  const verified = await git(target, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`]);
   if (!verified.ok) return { error: `unknown revision: ${rev}` };
   let commit = verified.stdout.trim();
 
-  const mergeBase = await git(root, ['merge-base', commit, 'HEAD']);
+  const mergeBase = await git(target, ['merge-base', commit, 'HEAD']);
   if (mergeBase.ok) {
     const found = mergeBase.stdout.trim();
     if (found !== '') commit = found;
@@ -229,12 +229,16 @@ export async function resolveBase(
  * file is inside one.
  */
 export async function workspaceStatuses(
+  box: GitBox,
   map: RepoMap,
   bases: Map<string, Base>,
 ): Promise<FileStatuses> {
   const perRepo = await Promise.all(
     map.repos.map(async (repo) => {
-      const statuses = await fileStatuses(repo.absolute, bases.get(repo.path) ?? NO_BASE);
+      const statuses = await fileStatuses(
+        gitTarget(box, repo.path),
+        bases.get(repo.path) ?? NO_BASE,
+      );
       const owned: FileStatuses = {};
       for (const [path, status] of Object.entries(statuses ?? {})) {
         const full = inWorkspace(repo, path);
@@ -257,11 +261,17 @@ export async function workspaceStatuses(
  * one repository on a branch and another that never heard of it is an ordinary
  * shape.
  */
-export async function resolveBases(map: RepoMap, rev: string): Promise<Map<string, Base>> {
+export async function resolveBases(
+  box: GitBox,
+  map: RepoMap,
+  rev: string,
+): Promise<Map<string, Base>> {
   const bases = new Map<string, Base>();
   if (rev === '') return bases;
   const resolved = await Promise.all(
-    map.repos.map(async (repo) => [repo.path, await resolveBase(repo.absolute, rev)] as const),
+    map.repos.map(
+      async (repo) => [repo.path, await resolveBase(gitTarget(box, repo.path), rev)] as const,
+    ),
   );
   for (const [path, result] of resolved) {
     if ('base' in result) bases.set(path, result.base);
