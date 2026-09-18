@@ -4,13 +4,11 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import { Readable } from 'node:stream';
 import type { Config } from '../config.ts';
 import {
-  appendAcpLog,
   clearSessionTurns,
   clearThreadInheritance,
   currentThread,
   getThread,
   insertThread,
-  pruneAcpLog,
   setThreadAcpId,
   setThreadMode,
   setThreadModel,
@@ -66,11 +64,14 @@ interface SessionConfigOption {
   options?: Array<{ value: string }>;
 }
 
+/** How much of one tapped ACP message a debug line carries. */
+const MAX_TAPPED_CHARS = 64_000;
+
 /**
  * A JSON.stringify replacer that keeps base64 media out of the debug log.
  *
  * An image or audio block carries its whole payload inline, and a screenshot
- * is a megabyte of base64 against a log that truncates at 64,000 characters.
+ * is a megabyte of base64 against a line that truncates at MAX_TAPPED_CHARS.
  * The mime type and the size are what a tapped log is read for.
  *
  * Keyed on the holder rather than the key name, which is why this is a
@@ -1659,16 +1660,12 @@ export class UpstreamSession {
 
   /** Records one message in the debug log. A failed write never breaks the flow. */
   private tap(direction: 'up' | 'down', method: string, params: unknown): void {
-    try {
-      appendAcpLog(
-        this.db,
-        this.sessionId,
-        direction,
-        JSON.stringify({ method, params }, withoutMediaPayloads),
-      );
-    } catch (err) {
-      this.slog.debug('acp_log write failed', { error: (err as Error).message });
-    }
+    if (!log.wants('debug')) return;
+    this.slog.debug('acp', {
+      direction,
+      method,
+      payload: JSON.stringify(params, withoutMediaPayloads).slice(0, MAX_TAPPED_CHARS),
+    });
   }
 
   /**
@@ -1735,11 +1732,4 @@ export class UpstreamSession {
   }
 
   /** Periodic housekeeping: keeps the debug log within its ring size. */
-  maintenance(): void {
-    try {
-      pruneAcpLog(this.db, this.sessionId);
-    } catch (err) {
-      this.slog.debug('acp_log prune failed', { error: (err as Error).message });
-    }
-  }
 }

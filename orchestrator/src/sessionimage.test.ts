@@ -7,7 +7,7 @@ import Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
-import { appendAcpLog, openDb, touchSession, type Db } from './db.ts';
+import { appendExecLog, openDb, touchSession, type Db } from './db.ts';
 import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 
@@ -700,13 +700,23 @@ describe('one operation per session at a time', () => {
     insertSession('a1', 'c1', 'sha256:one');
     /** Rows this session had after work landed mid-teardown. */
     let logged = -1;
-    // The teardown takes seconds, and the ACP tap and a finishing command are
-    // both still able to write during it.
+    // The teardown takes seconds, and a command finishing in the box is still
+    // able to write during it.
     fake.onRemove = () => {
-      appendAcpLog(db, 'a1', 'down', '{}');
+      appendExecLog(db, 'a1', {
+        thread_id: null,
+        command: 'echo late',
+        output: '',
+        exit_code: 0,
+        truncated: 0,
+        timed_out: 0,
+        started_at: 1,
+        finished_at: 2,
+        after_id: null,
+      });
       touchSession(db, 'a1');
       logged = (
-        db.prepare('SELECT COUNT(*) AS n FROM acp_log WHERE session_id = ?').get('a1') as {
+        db.prepare('SELECT COUNT(*) AS n FROM exec_log WHERE session_id = ?').get('a1') as {
           n: number;
         }
       ).n;

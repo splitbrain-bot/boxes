@@ -1083,7 +1083,7 @@ export class SessionManager {
     // Every table keyed by the session id, so a deleted session leaves nothing
     // behind: the row itself stays as a tombstone — see setStatus — and these
     // have no reader once it does.
-    for (const table of ['pending_requests', 'acp_log', 'exec_log', 'threads']) {
+    for (const table of ['pending_requests', 'exec_log', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
     }
     this.usage.forget(id);
@@ -1456,9 +1456,8 @@ export class SessionManager {
     this.upstreams.clear();
   }
 
-  /** Periodic housekeeping on every upstream, and a sweep of the idle ones. */
+  /** Periodic housekeeping: forgetting the upstreams that hold nothing. */
   maintenance(): void {
-    for (const up of this.upstreams.values()) up.maintenance();
     this.dropIdleUpstreams();
   }
 

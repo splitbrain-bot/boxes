@@ -217,21 +217,6 @@ export interface CreateSessionBody {
   agentSet?: string | null;
 }
 
-/** One tapped ACP message from the debug log. */
-export interface AcpLogEntry {
-  id: number;
-  direction: 'up' | 'down' | 'stderr';
-  ts: number;
-  payload: string;
-}
-
-/** A page of debug log entries. */
-export interface AcpLogPage {
-  entries: AcpLogEntry[];
-  /** Pass as the after parameter to poll for newer entries. */
-  cursor: number;
-}
-
 /**
  * Which copy of one image the deployment is running, and when it was built.
  *
@@ -282,6 +267,27 @@ export interface HealthResponse {
   pushSubscriptions: number;
   /** Which build of each of the deployment's own images is running. */
   images: DeploymentImages;
+}
+
+/**
+ * What the readiness probe answers, ready or not.
+ *
+ * The status code carries the same answer, so a probe that reads nothing but
+ * the code is served. This body is for a person looking at why.
+ */
+export interface ReadyResponse {
+  /** True only when every check below passed. */
+  ready: boolean;
+  version: string;
+  /** Each thing a session needs before it can be served, and whether it is there. */
+  checks: {
+    /** The database answered a query. */
+    database: boolean;
+    /** The proxy holds the egress policy this orchestrator composed. */
+    egress: boolean;
+    /** The Docker daemon answered. */
+    docker: boolean;
+  };
 }
 
 /** The deployment's VAPID public key, which a browser subscribes with. */

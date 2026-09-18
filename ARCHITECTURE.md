@@ -114,11 +114,21 @@ The orchestrator serves everything a browser needs:
 | `/` | Dashboard bundle, with a single-page fallback |
 | `/api/...` | REST |
 | `/ws/sessions/:id/acp` | ACP gateway |
-| `/healthz` | Version, session count, proxy warnings, whether a Claude token is configured, and which build of each image is running |
+| `/healthz` | Liveness, and what the deployment is: version, session count, proxy warnings, whether a Claude token is configured, and which build of each image is running. Always 200 while the process serves |
+| `/readyz` | Readiness: 200 only when the database answers, the egress policy is in sync and Docker is reachable, which is what creating or starting a session needs |
 
-A GET that matches no route falls back to the dashboard's `index.html`, so
+A GET that matches no other route serves the dashboard's `index.html`, so
 client-side routes survive a reload. Anything under `/api` or `/ws` gets a
 404 instead.
+
+The bundle is served compressed, and its assets carry a year-long immutable
+cache lifetime because their names are content hashes: a new build is a new
+name, so a cached one can never be stale. `index.html` is the file that names
+them, so it is never cached that way. The document carries a content security
+policy of its own, which is what stops agent-written markdown from fetching a
+remote image and turning the operator's browser into a way out of the box that
+the egress proxy never sees. Every response is logged as one structured line on
+stderr, where `docker logs` has it.
 
 The dashboard is the only frontend, and it is served from the orchestrator's
 own image. Two things follow:
@@ -146,7 +156,6 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
 | `POST /api/sessions/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
 | `POST /api/sessions/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
-| `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
 | `POST /api/sessions/:id/attachments?name=` | Stores one file, raw bytes, in the session's workspace |
 | `GET /api/sessions/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
 | `POST /api/sessions/:id/exec` | Runs one command in the container on the session's current thread, streaming its output |
@@ -2012,17 +2021,23 @@ applies migrations tracked by `user_version`.
 | `sessions` | One row per session: names, Docker object names, where its workspace and home are, status, which thread is the default, timestamps |
 | `threads` | One row per conversation: which session owns it, the adapter's id for it, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
-| `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session. An image or audio block's base64 payload is replaced by its size on the way in — a screenshot is a megabyte of it, the row is truncated at 64,000 characters anyway, and the bytes were never what the log is read for |
 | `exec_log` | Local commands and their output, each recording the thread it was typed in, ring-pruned to 200 rows per session across all of its threads |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
 | `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |
 | `agent_items` | The skills and slash commands of a set, keyed by set, kind and name |
 | `counters` | The subnet allocation counter |
 
-Two kinds of state deliberately stay out of the database. Secrets live only in
-the environment, in the session containers, and in the generated token file;
-`log.ts` redacts anything credential-shaped before it reaches stderr. Thread
-transcripts live in the session's home directory, read back by the adapter.
+Three kinds of state deliberately stay out of the database. Secrets live only
+in the environment, in the session containers, and in the generated secret
+files; `log.ts` redacts anything credential-shaped before it reaches stderr.
+Thread transcripts live in the session's home directory, read back by the
+adapter. And the tap of forwarded ACP messages is a log rather than a table:
+at `LOG_LEVEL=debug` each one is a line on stderr, where `docker logs` has it
+alongside everything else, with an image or audio block's base64 payload
+replaced by its size and the line truncated. At any other level the tap does
+not even serialize the message. A log nobody can read without the process's
+own output is a log in the wrong place, and writing one to disk on the hot
+path cost every session a synchronous write per message.
 
 Pending requests are the one place where the database and memory both matter.
 The row lets the dashboard show that something is waiting and survives a

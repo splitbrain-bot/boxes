@@ -46,6 +46,10 @@
     <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
     <title>Boxes</title>
+    <!-- The page's one inline script, and the reason its content security
+         policy carries a hash: the orchestrator names this script's SHA-256
+         in THEME_SCRIPT_HASH (orchestrator/src/app.ts), so a character
+         changed here has to be changed there too. -->
     <script>
       // Applied before first paint, so the page never flashes the wrong
       // scheme, and again on every change, so switching the phone between

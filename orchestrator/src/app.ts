@@ -1,10 +1,10 @@
+import compress from '@fastify/compress';
 import Fastify from 'fastify';
 import type { FastifyReply, RouteHandlerMethod } from 'fastify';
-import { createReadStream, readFileSync, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  AcpLogPage,
   AgentItemBody,
   CreateAgentSetBody,
   CreateSessionBody,
@@ -14,6 +14,7 @@ import type {
   HealthResponse,
   PushKeyResponse,
   PushSubscribeBody,
+  ReadyResponse,
   ReviewAnnotationBody,
   ReviewAnnotationsResponse,
   ReviewBaseBody,
@@ -29,10 +30,10 @@ import {
   countLiveSessions,
   countPushSubscriptions,
   deletePushSubscription,
-  listAcpLog,
   upsertPushSubscription,
   type Db,
 } from './db.ts';
+import * as dk from './docker.ts';
 import { EgressManager } from './egress.ts';
 import * as execs from './exec.ts';
 import { HttpError } from './http-error.ts';
@@ -53,6 +54,107 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 /** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
+
+/**
+ * The bundle directory whose filenames carry a content hash, which is Vite's
+ * `build.assetsDir`.
+ */
+const HASHED_ASSETS = '/assets/';
+
+/** How long a content-hashed asset may be held, in seconds. A year. */
+const ASSET_MAX_AGE = 31_536_000;
+
+/**
+ * How long one file of the bundle may be held.
+ *
+ * A name under the hashed-asset directory is derived from the bytes under it,
+ * so a build that changes a file changes its name and this copy can never be
+ * the wrong one. Every other name in the bundle — index.html above all, which
+ * is the file that says which assets are current — stays the same across
+ * builds and is therefore revalidated on every load.
+ */
+function cacheControlFor(path: string): string {
+  return path.startsWith(HASHED_ASSETS)
+    ? `public, max-age=${ASSET_MAX_AGE}, immutable`
+    : 'no-cache';
+}
+
+/**
+ * SHA-256 of the one inline script of index.html, base64.
+ *
+ * The theme switch that runs before first paint. It is the page's only inline
+ * script and it is stated here rather than allowed wholesale, so the policy
+ * still refuses every script it does not know. Editing that script means
+ * editing this.
+ */
+const THEME_SCRIPT_HASH = "'sha256-4AdoNi/wvSpHLY3qRCPU3bCPtiW7L8VuMIcRP0Slv5s='";
+
+/** A Host header worth putting in a header this process writes. */
+const SAFE_HOST = /^[A-Za-z0-9.\-[\]]+(:\d+)?$/;
+
+/**
+ * The content security policy the dashboard document is served under.
+ *
+ * The thread renders markdown the agent wrote, and a remote `<img>` in it
+ * would carry whatever it names out through the reader's browser instead of
+ * through the egress proxy. So every fetch the page can make is pinned to
+ * this origin: its own scripts and styles, images from here plus the `data:`
+ * and `blob:` URLs an attachment preview is built from, and the gateway
+ * socket on this same host.
+ *
+ * `'unsafe-inline'` for styles and not for scripts: the overlay primitives
+ * position themselves and the code pane colours every token through the style
+ * attribute, and a style attribute cannot be hashed.
+ *
+ * The socket is spelled out as well as covered by `'self'`, because not every
+ * browser reads `'self'` as including the ws and wss forms of its origin. A
+ * Host header that is not a plain host is dropped instead, which leaves the
+ * page working everywhere that does.
+ */
+function documentCsp(host: string | undefined): string {
+  const origin = host !== undefined && SAFE_HOST.test(host) ? host : null;
+  return [
+    "default-src 'none'",
+    `script-src 'self' ${THEME_SCRIPT_HASH}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    `connect-src 'self'${origin ? ` ws://${origin} wss://${origin}` : ''}`,
+    "manifest-src 'self'",
+    "worker-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+/**
+ * Smallest body that is compressed, in bytes. Below it the encoding headers
+ * cost more than the saving.
+ */
+const COMPRESS_THRESHOLD_BYTES = 1024;
+
+/** Whether the database answers a query, for the readiness probe. */
+function databaseAnswers(db: Db): boolean {
+  try {
+    db.prepare('SELECT 1').get();
+    return true;
+  } catch (err) {
+    log.warn('the database did not answer', { error: (err as Error).message });
+    return false;
+  }
+}
+
+/** Whether the Docker daemon answers, for the readiness probe. */
+async function dockerAnswers(): Promise<boolean> {
+  try {
+    await dk.docker().ping();
+    return true;
+  } catch (err) {
+    log.warn('the Docker daemon did not answer', { error: (err as Error).message });
+    return false;
+  }
+}
 
 /** What one orchestrator process hands its boot and its tests, wired together. */
 export interface Orchestrator {
@@ -104,6 +206,25 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
     (_req, body, done) => done(null, body),
   );
 
+  /**
+   * One line per response, which is the whole request log: Fastify's own
+   * logger is off and everything here goes through the structured one.
+   *
+   * The path is taken without its query string, which can carry a filename or
+   * a path the reader typed. A refusal is the caller's problem and a failure
+   * is the deployment's, so the two get different levels.
+   */
+  app.addHook('onResponse', async (req, reply) => {
+    const status = reply.statusCode;
+    const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+    log[level]('request', {
+      method: req.method,
+      path: req.url.split('?')[0],
+      status,
+      ms: Math.round(reply.elapsedTime),
+    });
+  });
+
   // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
   app.setErrorHandler((err, _req, reply) => {
@@ -121,6 +242,11 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
     return reply.code(500).send({ error: 'Internal error' });
   });
 
+  /**
+   * Liveness: this process is serving requests. Always 200 while it answers
+   * at all, so a probe reading the status code restarts nothing that is
+   * merely misconfigured. What is wrong with the deployment is in the body.
+   */
   app.get('/healthz', async (): Promise<HealthResponse> => {
     const sessions = countLiveSessions(db);
     return {
@@ -136,6 +262,31 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
       // stays green on a host whose Docker socket is not there.
       images: await deploymentImages(cfg),
     };
+  });
+
+  /**
+   * Readiness: whether this deployment can serve sessions, as a status code.
+   *
+   * Three things decide it, because a session cannot be created or started
+   * without all three: the database answers, the proxy holds the egress
+   * policy this orchestrator composed, and the Docker daemon is reachable. An
+   * egress policy that is not in sync counts because a session started
+   * against a stale one reaches hosts the deployment has stopped allowing.
+   *
+   * What /healthz also reports stays out of this. A missing Claude token is a
+   * deployment that serves sessions nobody has given a credential, and a
+   * proxy warning names one session's network rather than the instance — a
+   * probe that took the instance out of service for either would be answering
+   * about the wrong thing.
+   */
+  app.get('/readyz', async (_req, reply): Promise<ReadyResponse> => {
+    const checks = {
+      database: databaseAnswers(db),
+      egress: egress.status()?.inSync === true,
+      docker: await dockerAnswers(),
+    };
+    const ready = Object.values(checks).every(Boolean);
+    return reply.code(ready ? 200 : 503).send({ ready, version: VERSION, checks });
   });
 
   app.get('/api/sessions', async () => manager.list());
@@ -229,16 +380,6 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
     const body = req.body as { processId?: unknown } | undefined;
     const processId = typeof body?.processId === 'string' ? body.processId : undefined;
     return manager.stopBackgroundWork(id, threadId, processId);
-  });
-
-  app.get('/api/sessions/:id/log', async (req): Promise<AcpLogPage> => {
-    const { id } = req.params as { id: string };
-    const { after, limit } = req.query as { after?: string; limit?: string };
-    const afterId = Number(after ?? 0) || 0;
-    const max = Math.min(Math.max(Number(limit ?? 200) || 200, 1), 1000);
-    manager.mustGet(id);
-    const entries = listAcpLog(db, id, afterId, max);
-    return { entries, cursor: entries.at(-1)?.id ?? afterId };
   });
 
   /**
@@ -669,8 +810,12 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    * The path is resolved under the bundle directory and has to stay there, with
    * the separator in the prefix check so a sibling directory whose name merely
    * starts the same way is not inside it.
+   *
+   * Every file is streamed rather than read in one piece: the entry chunk is
+   * over a megabyte, and reading it synchronously would stop the event loop
+   * on every request for it.
    */
-  function sendBundle(reply: FastifyReply, path: string): FastifyReply {
+  function sendBundle(reply: FastifyReply, path: string, host: string | undefined): FastifyReply {
     const candidate = resolve(DASHBOARD_DIR, `.${normalize(path)}`);
     if (
       candidate.startsWith(`${DASHBOARD_DIR}/`) &&
@@ -681,21 +826,51 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
       const ext = candidate.slice(candidate.lastIndexOf('.'));
       return reply
         .type(CONTENT_TYPES[ext] ?? 'application/octet-stream')
-        .send(readFileSync(candidate));
+        .header('Cache-Control', cacheControlFor(path))
+        .send(createReadStream(candidate));
     }
     const index = join(DASHBOARD_DIR, 'index.html');
     if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
-    return reply.type('text/html; charset=utf-8').send(readFileSync(index));
+    return reply
+      .headers({
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': cacheControlFor('/index.html'),
+        'Content-Security-Policy': documentCsp(host),
+      })
+      .send(createReadStream(index));
   }
 
-  app.setNotFoundHandler((req, reply) => {
-    if (req.method !== 'GET') return reply.code(404).send({ error: 'Not found' });
-    const url = req.url.split('?')[0] ?? '/';
-    if (url.startsWith('/api') || url.startsWith('/ws')) {
-      return reply.code(404).send({ error: 'Not found' });
-    }
-    return sendBundle(reply, url);
+  /**
+   * The bundle, and the compression it is served with.
+   *
+   * The compression plugin wires itself into each route as that route is
+   * declared, so it is loaded first and the route below is declared from
+   * inside it. That is also why the bundle is a route rather than the
+   * not-found handler: a handler Fastify never announces as a route is a
+   * handler the plugin never sees.
+   *
+   * The entry chunk is over a megabyte of JavaScript and about a third of
+   * that gzipped. The plugin picks whichever encoding the browser offered and
+   * leaves a body it knows is already compressed — a PNG, a font — alone.
+   */
+  void app.register(async (bundle) => {
+    await bundle.register(compress, { global: true, threshold: COMPRESS_THRESHOLD_BYTES });
+    /**
+     * Every GET that is not the API or the gateway is the dashboard: a file
+     * of the bundle where the path names one, and index.html where it names a
+     * client-side route.
+     */
+    bundle.get('/*', async (req, reply) => {
+      const url = req.url.split('?')[0] ?? '/';
+      if (url.startsWith('/api') || url.startsWith('/ws')) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      return sendBundle(reply, url, req.headers.host);
+    });
   });
+
+  /** Anything the routes above did not match, which is never the dashboard. */
+  app.setNotFoundHandler(async (_req, reply) => reply.code(404).send({ error: 'Not found' }));
 
   return {
     app,

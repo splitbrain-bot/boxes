@@ -47,6 +47,17 @@ export function setLogLevel(level: Level): void {
   threshold = LEVELS[level];
 }
 
+/**
+ * Whether a line at this level would be written.
+ *
+ * For a caller that has to build something expensive to log it: the ACP tap
+ * serializes a whole protocol message, which is worth skipping when nothing
+ * will read it.
+ */
+export function wants(level: Level): boolean {
+  return LEVELS[level] >= threshold;
+}
+
 /** Writes one redacted JSON line, unless the level is below the threshold. */
 function emit(level: Level, msg: string, fields?: Record<string, unknown>): void {
   if (LEVELS[level] < threshold) return;
@@ -78,6 +89,7 @@ export type Logger = ReturnType<typeof levels>;
 /** Process-wide logger. */
 export const log = {
   ...levels(),
+  wants,
   /** Child logger that stamps every line with a session id. */
   session: (id: string): Logger => levels({ session: id }),
 };

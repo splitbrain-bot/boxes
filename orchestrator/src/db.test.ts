@@ -5,7 +5,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  appendAcpLog,
   appendExecLog,
   MIGRATIONS,
   openDb,
@@ -474,15 +473,13 @@ function execRecord(): Parameters<typeof appendExecLog>[2] {
 
 test('a deleted session takes no more writes', () => {
   // Deleting sets the tombstone before it clears the tables, so work still in
-  // flight — the ACP tap, a command that is just finishing, a touch — must
-  // not put rows back behind it.
+  // flight — a command that is just finishing, a touch — must not put rows
+  // back behind it.
   const db = openDb(dir);
   insertLiveSession(db, 's1');
-  appendAcpLog(db, 's1', 'down', '{"before":true}');
   assert.equal(appendExecLog(db, 's1', execRecord()) > 0, true);
 
   db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = 's1'").run();
-  appendAcpLog(db, 's1', 'down', '{"after":true}');
   assert.equal(appendExecLog(db, 's1', execRecord()), 0);
   touchSession(db, 's1');
 
@@ -492,7 +489,6 @@ test('a deleted session takes no more writes', () => {
         n: number;
       }
     ).n;
-  assert.equal(counts('acp_log'), 1);
   assert.equal(counts('exec_log'), 1);
   const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('s1') as {
     last_active_at: number;
@@ -501,11 +497,10 @@ test('a deleted session takes no more writes', () => {
   db.close();
 });
 
-test('a log row is still stored for a session that has no row at all', () => {
-  // The guard is the tombstone, not the row: a test or a caller logging
-  // against an id the sessions table never had is not what it is there for.
+test('a row is still stored for a session that has no row at all', () => {
+  // The guard is the tombstone, not the row: a caller recording against an id
+  // the sessions table never had is not what it is there for.
   const db = openDb(dir);
-  appendAcpLog(db, 'nowhere', 'down', '{}');
   assert.equal(appendExecLog(db, 'nowhere', execRecord()) > 0, true);
   db.close();
 });

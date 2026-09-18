@@ -685,6 +685,121 @@ test('a POST that matches no route is a 404 rather than the page', async () => {
   }
 });
 
+test('the hashed assets are cached for good and the page never is', async () => {
+  const bundle = writeBundle();
+  try {
+    // The name carries the content hash, so this copy can never be the wrong
+    // one: a changed file is a changed name.
+    const asset = await orchestrator.app.inject({ url: '/assets/index-abc.js' });
+    assert.match(asset.headers['cache-control'] as string, /immutable/);
+
+    // index.html is the file that says which assets are current, so a held
+    // copy would go on naming the ones it was built with.
+    const page = await orchestrator.app.inject({ url: '/sessions/abc123' });
+    assert.equal(page.headers['cache-control'], 'no-cache');
+    // And so is everything else that keeps its name across builds.
+    const worker = await orchestrator.app.inject({ url: '/sw.js' });
+    assert.equal(worker.headers['cache-control'], 'no-cache');
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
+test('the page is served under a policy that pins every fetch to this origin', async () => {
+  const bundle = writeBundle();
+  try {
+    const res = await orchestrator.app.inject({
+      url: '/',
+      headers: { host: 'boxes.example:8443' },
+    });
+    const csp = res.headers['content-security-policy'] as string;
+
+    // A remote image in markdown the agent wrote is the channel this closes.
+    assert.match(csp, /img-src 'self' data: blob:/);
+    assert.match(csp, /default-src 'none'/);
+    // The gateway socket is spelled out, on this host and no other.
+    assert.match(csp, /connect-src 'self' ws:\/\/boxes\.example:8443 wss:\/\/boxes\.example:8443/);
+    // The one inline script the page has is allowed by its hash, and nothing
+    // else inline is.
+    assert.match(csp, /script-src 'self' 'sha256-[A-Za-z0-9+/=]+'/);
+
+    // A Host header that is not a plain host never reaches the header.
+    const odd = await orchestrator.app.inject({
+      url: '/',
+      headers: { host: 'evil; script-src *' },
+    });
+    const oddCsp = odd.headers['content-security-policy'] as string;
+    assert.ok(!oddCsp.includes('script-src *'), 'the header is not writable from outside');
+    assert.match(oddCsp, /connect-src 'self';/);
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
+test('a bundle worth compressing is compressed', async () => {
+  const bundle = writeBundle();
+  try {
+    writeFileSync(join(bundle, 'assets', 'big-abc.js'), `// ${'x'.repeat(20_000)}\n`);
+    const res = await orchestrator.app.inject({
+      url: '/assets/big-abc.js',
+      headers: { 'accept-encoding': 'gzip' },
+    });
+    assert.equal(res.headers['content-encoding'], 'gzip');
+    assert.ok(res.rawPayload.length < 2000, `${res.rawPayload.length} bytes on the wire`);
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
+// --- Liveness, readiness and the request log ---------------------------------
+
+test('a deployment that cannot serve sessions is live but not ready', async () => {
+  // Nothing has pushed an egress policy here, so a session created now would
+  // get no egress at all.
+  const ready = await orchestrator.app.inject({ url: '/readyz' });
+  assert.equal(ready.statusCode, 503);
+  const body = ready.json() as { ready: boolean; checks: Record<string, boolean> };
+  assert.equal(body.ready, false);
+  // The database is the one of the three that is there.
+  assert.equal(body.checks['database'], true);
+  assert.equal(body.checks['egress'], false);
+
+  // Liveness is about this process serving, and it is: a probe reading the
+  // status code must not restart an orchestrator that is merely unconfigured.
+  const live = await orchestrator.app.inject({ url: '/healthz' });
+  assert.equal(live.statusCode, 200);
+});
+
+test('every response is logged with what was asked and what came back', async () => {
+  const lines: string[] = [];
+  const written = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await orchestrator.app.inject({ url: '/api/sessions?name=secret' });
+    await orchestrator.app.inject({ url: '/api/sessions/nope' });
+  } finally {
+    process.stderr.write = written;
+  }
+
+  const logged = lines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((line) => line['msg'] === 'request');
+
+  const ok = logged.find((line) => line['status'] === 200);
+  assert.equal(ok?.['method'], 'GET');
+  // The query string is left off: it carries what the reader typed.
+  assert.equal(ok?.['path'], '/api/sessions');
+  assert.equal(typeof ok?.['ms'], 'number');
+
+  // A refusal is the caller's problem rather than the deployment's, so it is
+  // a warning and not an error.
+  const refused = logged.find((line) => line['status'] === 404);
+  assert.equal(refused?.['level'], 'warn');
+});
+
 // --- Web Push registration --------------------------------------------------
 
 /** A subscription shaped the way the browser's own toJSON() produces one. */

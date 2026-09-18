@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Docker from 'dockerode';
 import { Duplex, Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../config.ts';
+import { setLogLevel } from '../log.ts';
 import { openDb, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
 import { EgressManager } from '../egress.ts';
@@ -143,6 +144,8 @@ function execStream(text: string): Readable {
 
 /** Whether the box this test is pretending to have is up. */
 let containerRunning = true;
+/** Every line the logger wrote during a test. */
+let written: string[] = [];
 
 function fakeDocker(adapter: FakeAdapter | (() => FakeAdapter)): void {
   const spawn = typeof adapter === 'function' ? adapter : () => adapter;
@@ -221,6 +224,11 @@ function seed(): void {
 }
 
 beforeEach(() => {
+  written = [];
+  vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+    written.push(String(chunk));
+    return true;
+  });
   dir = mkdtempSync(join(tmpdir(), 'boxes-upstream-'));
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
@@ -244,6 +252,8 @@ afterEach(() => {
   manager.closeAll();
   db.close();
   dk.setDockerForTests(null);
+  setLogLevel('info');
+  vi.restoreAllMocks();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1327,6 +1337,7 @@ test('a tapped image block is logged without its base64 payload', async () => {
   fakeDocker(adapter);
   const up = manager.upstream('s1');
   await up.ensureStarted();
+  setLogLevel('debug');
 
   const data = 'A'.repeat(100_000);
   adapter.notify('session/update', {
@@ -1345,23 +1356,46 @@ test('a tapped image block is logged without its base64 payload', async () => {
     },
   });
 
-  const tapped = (): string | undefined =>
-    (
-      db
-        .prepare("SELECT payload FROM acp_log WHERE payload LIKE '%tc-shot%' ORDER BY id DESC")
-        .get() as { payload?: string } | undefined
-    )?.payload;
+  // The line is JSON and the tapped message is a field in it, so what the
+  // reader sees is the decoded payload rather than the line's own escaping.
+  const tapped = (): string | undefined => {
+    const line = written.find((l) => l.includes('tc-shot'));
+    return line ? (JSON.parse(line) as { payload: string }).payload : undefined;
+  };
   await expect.poll(tapped).toBeDefined();
   const logged = tapped()!;
 
-  // The bytes are gone, their size is not, and the row is nowhere near the
-  // 64,000-character truncation that would otherwise have eaten it.
+  // The bytes are gone, their size is not, and the line is nowhere near the
+  // truncation that would otherwise have eaten it.
   assert.ok(!logged.includes(data.slice(0, 200)), 'the payload is not in the log');
   assert.ok(logged.includes('[100000 base64 chars omitted]'), 'its size is');
   assert.ok(logged.includes('image/png'), 'and so is its type');
-  assert.ok(logged.length < 2000, `the row stays small (${logged.length})`);
+  assert.ok(logged.length < 2000, `the line stays small (${logged.length})`);
   // The terminal output under the same key survived.
   assert.ok(logged.includes('ok 1\\nok 2'), "a terminal's output is untouched");
+  assert.ok(logged.includes('tool_call_update'), 'and the update it belongs to');
+});
+
+test('nothing is tapped unless the log level asks for it', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  // At the default level the tap does not even serialize the message.
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'tool_call_update', toolCallId: 'tc-quiet', status: 'completed' },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(
+    written.some((line) => line.includes('tc-quiet')),
+    false,
+  );
 });
 
 test('work the agent leaves running in the background holds the reaper off', async () => {

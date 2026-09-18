@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AcpLogEntry, SessionStatus } from '../../shared/types.ts';
+import type { SessionStatus } from '../../shared/types.ts';
 
 /**
  * SQLite persistence in WAL mode. The database holds session metadata only:
@@ -447,6 +447,12 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE sessions ADD COLUMN ws_token TEXT NOT NULL DEFAULT '';
   UPDATE sessions SET ws_token = lower(hex(randomblob(32)));
   `,
+  // The forwarded ACP messages go to stderr at debug level, where `docker
+  // logs` sees them, so the table that held them has no reader and no writer.
+  `
+  DROP INDEX IF EXISTS idx_acp_log_session;
+  DROP TABLE IF EXISTS acp_log;
+  `,
 ];
 
 /** An open database handle. */
@@ -531,7 +537,7 @@ export function nextSubnetIndex(db: Db): number {
  * name is interpolated because SQLite cannot bind an identifier; it is never
  * caller-supplied.
  */
-function pruneRing(db: Db, table: 'acp_log' | 'exec_log', sessionId: string, keep: number): void {
+function pruneRing(db: Db, table: 'exec_log', sessionId: string, keep: number): void {
   db.prepare(
     `DELETE FROM ${table}
      WHERE session_id = ?
@@ -539,36 +545,6 @@ function pruneRing(db: Db, table: 'acp_log' | 'exec_log', sessionId: string, kee
          (SELECT id FROM ${table} WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
          -1)`,
   ).run(sessionId, sessionId, keep);
-}
-
-/** Debug log rows kept per session. */
-const LOG_RING = 5000;
-
-/**
- * Records one tapped ACP message, truncating the payload at 64,000 characters.
- *
- * A session whose row says deleted is written nothing, the rule setStatus
- * keeps. The tap forwards messages from a connection that can still be
- * draining when the session is removed, and a row inserted then would outlive
- * the delete that cleared the table. The tombstone goes down before anything
- * else of a session does, so this one statement is the whole check.
- */
-export function appendAcpLog(
-  db: Db,
-  sessionId: string,
-  direction: 'up' | 'down' | 'stderr',
-  payload: string,
-): void {
-  db.prepare(
-    `INSERT INTO acp_log (session_id, direction, ts, payload)
-     SELECT ?, ?, ?, ?
-      WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND status = 'deleted')`,
-  ).run(sessionId, direction, Date.now(), payload.slice(0, 64_000), sessionId);
-}
-
-/** Drops all but the newest LOG_RING debug log entries of one session. */
-export function pruneAcpLog(db: Db, sessionId: string): void {
-  pruneRing(db, 'acp_log', sessionId, LOG_RING);
 }
 
 /** Local command runs kept per session. */
@@ -893,19 +869,6 @@ export function countLiveSessions(db: Db): number {
     .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
     .get() as { n: number };
   return row.n;
-}
-
-/**
- * A page of a session's ACP debug log: the entries after `afterId`, oldest
- * first, at most `limit` of them.
- */
-export function listAcpLog(db: Db, sessionId: string, afterId: number, limit: number): AcpLogEntry[] {
-  return db
-    .prepare(
-      `SELECT id, direction, ts, payload FROM acp_log
-       WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-    )
-    .all(sessionId, afterId, limit) as AcpLogEntry[];
 }
 
 /** How many browsers are subscribed. */
