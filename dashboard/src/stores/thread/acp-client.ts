@@ -1,3 +1,4 @@
+import { ACP_METHOD, ACP_SUBPROTOCOL } from '../../../../shared/acp.ts';
 import {
   BOXES_META,
   REPLAY_METHOD,
@@ -200,9 +201,9 @@ export class AcpClient {
     this.handlers.onState(this.attempt === 0 ? 'connecting' : 'reconnecting');
 
     // The token travels as a subprotocol entry because a browser cannot set
-    // an Authorization header on a WebSocket. The gateway selects acp.v1
-    // explicitly and reads the bearer entry as credentials.
-    const ws = new WebSocket(this.url, ['acp.v1', `bearer.${this.token}`]);
+    // an Authorization header on a WebSocket. The gateway selects the
+    // subprotocol explicitly and reads the bearer entry as credentials.
+    const ws = new WebSocket(this.url, [ACP_SUBPROTOCOL, `bearer.${this.token}`]);
     this.ws = ws;
 
     ws.onopen = () => {
@@ -250,12 +251,12 @@ export class AcpClient {
    */
   private async handshake(): Promise<void> {
     try {
-      await this.request('initialize', {
+      await this.request(ACP_METHOD.initialize, {
         protocolVersion: 1,
         clientCapabilities: {},
       });
 
-      const created = await this.request<NewSessionResponse>('session/new', {
+      const created = await this.request<NewSessionResponse>(ACP_METHOD.sessionNew, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -270,7 +271,7 @@ export class AcpClient {
       if (!resumeFrom) this.handlers.onReplay(false);
 
       const loaded = await this.request<LoadSessionResponse>(
-        'session/load',
+        ACP_METHOD.sessionLoad,
         loadParams(created.sessionId, resumeFrom),
       );
 
@@ -320,7 +321,7 @@ export class AcpClient {
       return;
     }
 
-    if (msg.method === 'session/update') {
+    if (msg.method === ACP_METHOD.sessionUpdate) {
       this.handlers.onUpdate(msg.params as SessionNotification);
       return;
     }
@@ -353,7 +354,7 @@ export class AcpClient {
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...body }));
     };
 
-    if (msg.method !== 'session/request_permission') {
+    if (msg.method !== ACP_METHOD.sessionRequestPermission) {
       reply({ error: { code: -32601, message: `Method not found: ${msg.method}` } });
       return;
     }

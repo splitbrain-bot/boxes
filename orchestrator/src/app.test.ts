@@ -1141,3 +1141,56 @@ test('a listed session carries its own WebSocket token', async () => {
     ],
   );
 });
+
+// --- request bodies over the real routes --------------------------------------
+//
+// Every route that takes a JSON body checks it before it acts, so a body that
+// is wrong is a 400 saying which field is wrong rather than a cast that
+// misbehaves further in.
+
+test('a body missing a required field is refused, and the answer names it', async () => {
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /^name: /);
+});
+
+test('a field of the wrong type is refused rather than read as one', async () => {
+  insertSession('abc123');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/threads/abc123-t1/done',
+    payload: { done: 'yes' },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /^done: /);
+
+  // And nothing was written on the way to the refusal.
+  const row = db.prepare("SELECT done FROM threads WHERE id = 'abc123-t1'").get() as {
+    done: number;
+  };
+  assert.equal(row.done, 0);
+});
+
+test('a body that leaves out an optional field is taken as it is', async () => {
+  await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/agent-sets/global',
+    payload: { name: 'Everywhere', agentsMd: 'House rules.' },
+  });
+
+  // An empty body names no field, so every field keeps what it had.
+  const res = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/agent-sets/global',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 200);
+  const set = res.json() as { name: string; agentsMd: string };
+  assert.equal(set.name, 'Everywhere');
+  assert.equal(set.agentsMd, 'House rules.');
+});

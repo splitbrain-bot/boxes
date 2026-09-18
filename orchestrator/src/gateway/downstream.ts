@@ -1,5 +1,6 @@
 import { agent as acpAgent, type AgentConnection, type Stream } from '@agentclientprotocol/sdk';
 import type { WebSocket } from 'ws';
+import { ACP_METHOD, ACP_SUBPROTOCOL } from '../../../shared/acp.ts';
 import { log } from '../log.ts';
 import type { SessionManager } from '../sessions.ts';
 import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
@@ -15,27 +16,24 @@ import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
 /** Pass-through parser, leaving params and their _meta untouched. */
 const raw = <T = unknown>(params: unknown): T => params as T;
 
-/** The subprotocol the server negotiates; the rest of the offer is credentials. */
-export const ACP_SUBPROTOCOL = 'acp.v1';
-
 /** Methods forwarded to the adapter verbatim, _meta intact. */
 const FORWARDED_REQUESTS = [
-  'session/load',
-  'session/prompt',
-  'session/list',
-  'session/set_mode',
-  'session/set_model',
-  'session/set_config_option',
-  'session/fork',
-  'session/resume',
-  'session/close',
-  'session/delete',
-  'session/select_provider',
-  'authenticate',
+  ACP_METHOD.sessionLoad,
+  ACP_METHOD.sessionPrompt,
+  ACP_METHOD.sessionList,
+  ACP_METHOD.sessionSetMode,
+  ACP_METHOD.sessionSetModel,
+  ACP_METHOD.sessionSetConfigOption,
+  ACP_METHOD.sessionFork,
+  ACP_METHOD.sessionResume,
+  ACP_METHOD.sessionClose,
+  ACP_METHOD.sessionDelete,
+  ACP_METHOD.sessionSelectProvider,
+  ACP_METHOD.authenticate,
 ] as const;
 
 /** Notifications forwarded to the adapter verbatim. */
-const FORWARDED_NOTIFICATIONS = ['session/cancel'] as const;
+const FORWARDED_NOTIFICATIONS = [ACP_METHOD.sessionCancel] as const;
 
 /** Source of handle ids, unique within the process. */
 let nextHandleId = 1;
@@ -63,7 +61,7 @@ export function checkUpgrade(
     .map((s) => s.trim())
     .filter(Boolean);
   if (!offered.includes(ACP_SUBPROTOCOL)) {
-    return { ok: false, reason: 'missing acp.v1 subprotocol' };
+    return { ok: false, reason: `missing ${ACP_SUBPROTOCOL} subprotocol` };
   }
   if (!sessionToken) return { ok: false, reason: 'no such session' };
   const expected = `bearer.${sessionToken}`;
@@ -217,7 +215,7 @@ export function attachDownstream(
   const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
     // Answered from the cached upstream response, so its _meta extensions
     // reach the browser intact.
-    .onRequest('initialize' as string, raw, async () => {
+    .onRequest(ACP_METHOD.initialize as string, raw, async () => {
       handle.lastActiveAt = Date.now();
       await up.ensureStarted();
       const cached = up.cachedInitialize;
@@ -229,7 +227,7 @@ export function attachDownstream(
     // id rather than starting a second conversation on every reconnect.
     // Which thread that is, is decided outside ACP, so the contract a client
     // speaks does not change.
-    .onRequest('session/new' as string, raw, async () => {
+    .onRequest(ACP_METHOD.sessionNew as string, raw, async () => {
       handle.lastActiveAt = Date.now();
       const acpThreadId = await pinned;
       slog.info('session/new answered with the pinned thread', { acpThreadId });
@@ -246,7 +244,7 @@ export function attachDownstream(
       // the moment the socket opens. A client rebuilds its whole thread from
       // the replay, so a question delivered before it lands is thrown away
       // with everything else that was on screen, and it is sent only once.
-      if (method === 'session/load') up.flushPendingTo(handle);
+      if (method === ACP_METHOD.sessionLoad) up.flushPendingTo(handle);
       // An empty answer is not an error: session/load delivers the replay as
       // session/update notifications rather than as its result.
       return result ?? {};

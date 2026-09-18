@@ -3,10 +3,11 @@ import type { IncomingMessage } from 'node:http';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
+import { ACP_SUBPROTOCOL } from '../../shared/acp.ts';
 import { buildApp } from './app.ts';
 import { config } from './config.ts';
 import { openDb, sessionsWithActiveTurns } from './db.ts';
-import { ACP_SUBPROTOCOL, checkUpgrade, attachDownstream } from './gateway/downstream.ts';
+import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { log, setLogLevel } from './log.ts';
 import { startImageRefresher, startProxyReconciler, startReaper } from './reaper.ts';
 
@@ -111,9 +112,9 @@ const MAX_WS_FRAME_BYTES = 16 * 1024 * 1024;
 const wss = new WebSocketServer({
   noServer: true,
   maxPayload: MAX_WS_FRAME_BYTES,
-  // The client offers ['acp.v1', 'bearer.<token>']. The bearer entry is
-  // credentials, not a protocol, so acp.v1 is negotiated explicitly rather
-  // than relying on the client to list it first.
+  // The client offers [ACP_SUBPROTOCOL, 'bearer.<token>']. The bearer entry
+  // is credentials, not a protocol, so the subprotocol is negotiated
+  // explicitly rather than relying on the client to list it first.
   handleProtocols: (protocols) =>
     protocols.has(ACP_SUBPROTOCOL) ? ACP_SUBPROTOCOL : false,
 });

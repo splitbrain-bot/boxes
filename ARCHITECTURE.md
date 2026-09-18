@@ -141,7 +141,14 @@ own image. Two things follow:
 
 `orchestrator/src/app.ts` defines the routes; `SessionManager` does the work.
 Request and response shapes live in `shared/types.ts`, which both the
-orchestrator handlers and the dashboard's `api.ts` import.
+orchestrator handlers and the dashboard's `api.ts` import. The ACP vocabulary
+both sides speak — the subprotocol, the method names, the update kinds — is
+`shared/acp.ts`, so a name is spelled once rather than in each package.
+
+Every route that takes a JSON body checks it against a schema in `bodies.ts`
+first, and a body that fails one is a 400 naming the field rather than a cast
+that misbehaves further in. Path and query parameters are read as they always
+were.
 
 | Method and path | Does |
 |---|---|
@@ -2085,8 +2092,9 @@ visible, and pauses while it is hidden.
 
 ## Configuration and secrets
 
-`config.ts` parses the environment once at boot with zod, so a misconfigured
-deployment fails at startup rather than at first use. Every setting has a
+`config.ts` parses the environment once at boot with zod — the same library
+the REST bodies are checked with — so a misconfigured deployment fails at
+startup rather than at first use. Every setting has a
 working default, which is why the stack runs with no `.env` at all.
 
 That file is the only place a default is written down, and the only place
@@ -2164,6 +2172,7 @@ image cannot be built from code that fails `tsc --noEmit`.
 orchestrator/src/
   index.ts              Boot, the WS upgrade, the background loops, shutdown
   app.ts                REST routes, the exec endpoint, the static bundle
+  bodies.ts             A schema per route that takes a JSON body, and the 400 a body that fails one gets
   http-error.ts         The one error that carries an HTTP status, thrown wherever a request is refused
   exec.ts               Local commands: limits, streaming, the exec log
   attachments.ts        Files a prompt carries, written into the session's own workspace
@@ -2243,6 +2252,7 @@ dashboard/
 
 shared/
   types.ts              REST shapes and the control-channel contract
+  acp.ts                The ACP subprotocol, method names and update kinds, spelled once
   task-notifications.ts How a background task reports in, read by both sides
 session-image/          The per-session container image, in four files
   Dockerfile            What a session has installed, and the uid it runs as

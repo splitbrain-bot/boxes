@@ -1,3 +1,5 @@
+import { UPDATE_KIND } from '../../../../shared/acp.ts';
+
 /**
  * The slice of the ACP schema the browser speaks, written out rather than
  * imported.
@@ -7,6 +9,10 @@
  * request bodies, and pulling a Node-shaped SDK into the bundle to name a
  * dozen object types would cost more than it explains. These match the
  * generated schema field for field.
+ *
+ * The names the wire uses come from `shared/acp.ts`, which is plain strings
+ * and is shared with the orchestrator; the shapes under them are written out
+ * here.
  */
 
 /** A displayable block: text, an image, a link or an embedded resource. */
@@ -123,15 +129,15 @@ interface ContentChunk {
 
 /** Everything the adapter can push through session/update. */
 export type SessionUpdate =
-  | (ContentChunk & { sessionUpdate: 'user_message_chunk' })
-  | (ContentChunk & { sessionUpdate: 'agent_message_chunk' })
-  | (ContentChunk & { sessionUpdate: 'agent_thought_chunk' })
-  | (ToolCall & { sessionUpdate: 'tool_call' })
-  | (ToolCallUpdate & { sessionUpdate: 'tool_call_update' })
-  | { sessionUpdate: 'plan'; entries?: PlanEntry[] }
-  | { sessionUpdate: 'current_mode_update'; currentModeId: string }
-  | { sessionUpdate: 'available_commands_update'; availableCommands?: AvailableCommand[] }
-  | { sessionUpdate: 'config_option_update'; configOptions?: SessionConfigOption[] }
+  | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.userMessageChunk })
+  | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentMessageChunk })
+  | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentThoughtChunk })
+  | (ToolCall & { sessionUpdate: typeof UPDATE_KIND.toolCall })
+  | (ToolCallUpdate & { sessionUpdate: typeof UPDATE_KIND.toolCallUpdate })
+  | { sessionUpdate: typeof UPDATE_KIND.plan; entries?: PlanEntry[] }
+  | { sessionUpdate: typeof UPDATE_KIND.currentMode; currentModeId: string }
+  | { sessionUpdate: typeof UPDATE_KIND.availableCommands; availableCommands?: AvailableCommand[] }
+  | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: SessionConfigOption[] }
   // Forward compatibility: an adapter may send a kind this build predates.
   | { sessionUpdate: string; [key: string]: unknown };
 

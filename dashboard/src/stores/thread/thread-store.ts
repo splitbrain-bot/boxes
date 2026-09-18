@@ -1,3 +1,4 @@
+import { ACP_METHOD, UPDATE_KIND } from '../../../../shared/acp.ts';
 import type { BackgroundProcess } from '../../../../shared/types.ts';
 import type {
   AvailableCommand,
@@ -482,7 +483,7 @@ export class ThreadStore {
     if (!part) {
       const touched = applyUpdate(this.model, {
         ...params.toolCall,
-        sessionUpdate: 'tool_call_update',
+        sessionUpdate: UPDATE_KIND.toolCallUpdate,
       });
       part = findTool(this.model, toolCallId);
       this.refreshMessages(touched);
@@ -533,7 +534,7 @@ export class ThreadStore {
 
     this.emit({ error: null });
     try {
-      await client.request('session/prompt', {
+      await client.request(ACP_METHOD.sessionPrompt, {
         sessionId,
         prompt: blocks,
       });
@@ -657,7 +658,7 @@ export class ThreadStore {
   /** Echoes a bang line into the thread as the user message it was typed as. */
   private appendExecCommand(execId: string, command: string): void {
     applyUpdate(this.model, {
-      sessionUpdate: 'user_message_chunk',
+      sessionUpdate: UPDATE_KIND.userMessageChunk,
       content: { type: 'text', text: `${BANG}${command}` },
       messageId: `${execId}-command`,
     });
@@ -699,7 +700,7 @@ export class ThreadStore {
     }
     this.refreshMessages(
       applyUpdate(this.model, {
-        sessionUpdate: 'agent_message_chunk',
+        sessionUpdate: UPDATE_KIND.agentMessageChunk,
         content: { type: 'text', text },
         messageId: execId,
       }),
@@ -711,7 +712,7 @@ export class ThreadStore {
     const client = this.client;
     const sessionId = client?.sessionId;
     if (!client || !sessionId) return;
-    client.notify('session/cancel', { sessionId });
+    client.notify(ACP_METHOD.sessionCancel, { sessionId });
     // The prompt request resolves on its own afterwards; this only stops the
     // view from claiming the agent is still talking, without waiting for the
     // gateway to say so — the turn being cancelled may be one another browser
@@ -734,7 +735,7 @@ export class ThreadStore {
       this.emit({ modes: this.model.modes });
     }
     try {
-      await client.request('session/set_mode', { sessionId, modeId });
+      await client.request(ACP_METHOD.sessionSetMode, { sessionId, modeId });
     } catch (err) {
       this.model.modes = before;
       this.emit({ modes: before, error: (err as Error).message });
@@ -756,7 +757,7 @@ export class ThreadStore {
     );
     this.emit({ configOptions: this.model.configOptions });
     try {
-      await client.request('session/set_config_option', { sessionId, configId, value });
+      await client.request(ACP_METHOD.sessionSetConfigOption, { sessionId, configId, value });
     } catch (err) {
       this.model.configOptions = before;
       this.emit({ configOptions: before, error: (err as Error).message });
@@ -812,7 +813,7 @@ export class ThreadStore {
     if (!client || !sessionId) return;
     this.reset();
     try {
-      await client.request('session/load', loadParams(sessionId));
+      await client.request(ACP_METHOD.sessionLoad, loadParams(sessionId));
     } finally {
       this.flushReplay();
       // reset() forgot which local commands are already in the transcript,

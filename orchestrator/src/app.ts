@@ -5,26 +5,31 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  AgentItemBody,
-  CreateAgentSetBody,
-  CreateSessionBody,
-  CreateThreadBody,
   ExecLogPage,
-  ExecRequest,
   HealthResponse,
   PushKeyResponse,
-  PushSubscribeBody,
   ReadyResponse,
-  ReviewAnnotationBody,
   ReviewAnnotationsResponse,
-  ReviewBaseBody,
-  ReviewFileBody,
   StoredAttachment,
-  ThreadDoneBody,
-  UpdateAgentSetBody,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
+import {
+  agentItemBody,
+  backgroundStopBody,
+  createAgentSetBody,
+  createSessionBody,
+  createThreadBody,
+  execBody,
+  parseBody,
+  pushSubscribeBody,
+  pushUnsubscribeBody,
+  reviewAnnotationBody,
+  reviewBaseBody,
+  reviewFileBody,
+  threadDoneBody,
+  updateAgentSetBody,
+} from './bodies.ts';
 import type { Config } from './config.ts';
 import {
   countLiveSessions,
@@ -292,7 +297,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
   app.get('/api/sessions', async () => manager.list());
 
   app.post('/api/sessions', async (req, reply) => {
-    const created = await manager.create(req.body as CreateSessionBody);
+    const created = await manager.create(parseBody(createSessionBody, req.body));
     return reply.code(201).send(created);
   });
 
@@ -335,7 +340,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    */
   app.post('/api/sessions/:id/threads', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const created = await manager.createThread(id, req.body as CreateThreadBody | undefined);
+    const created = await manager.createThread(id, parseBody(createThreadBody, req.body));
     return reply.code(201).send(created);
   });
 
@@ -358,8 +363,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    */
   app.post('/api/sessions/:id/threads/:threadId/done', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
-    const done = (req.body as ThreadDoneBody | undefined)?.done;
-    if (typeof done !== 'boolean') throw new HttpError(400, 'done must be true or false');
+    const { done } = parseBody(threadDoneBody, req.body);
     return manager.setThreadDone(id, threadId, done);
   });
 
@@ -377,8 +381,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    */
   app.post('/api/sessions/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
-    const body = req.body as { processId?: unknown } | undefined;
-    const processId = typeof body?.processId === 'string' ? body.processId : undefined;
+    const { processId } = parseBody(backgroundStopBody, req.body);
     return manager.stopBackgroundWork(id, threadId, processId);
   });
 
@@ -402,11 +405,11 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    */
   const runExec: RouteHandlerMethod = async (req, reply) => {
     const { id, threadId } = req.params as { id: string; threadId?: string };
-    const body = req.body as ExecRequest | undefined;
-    const command = body?.command?.trim();
+    const body = parseBody(execBody, req.body);
+    const command = body.command.trim();
     if (!command) throw new HttpError(400, 'command is required');
     if (command.length > 8000) throw new HttpError(400, 'command is too long');
-    const after = typeof body?.after === 'string' && body.after.length <= 200 ? body.after : null;
+    const after = typeof body.after === 'string' && body.after.length <= 200 ? body.after : null;
 
     const thread = manager.resolveThread(id, threadId);
     // Marks the session active on its own, so the box is held from here.
@@ -605,10 +608,8 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
     { bodyLimit: 2 * MAX_FILE_BYTES },
     async (req) => {
       const { id } = req.params as { id: string };
-      const body = req.body as ReviewFileBody | undefined;
-      if (!body?.path) throw new HttpError(400, 'path is required');
-      if (typeof body.content !== 'string') throw new HttpError(400, 'content is required');
-      return review.writeFile(id, body.path, body.content, String(body.hash ?? ''));
+      const body = parseBody(reviewFileBody, req.body);
+      return review.writeFile(id, body.path, body.content, body.hash ?? '');
     },
   );
 
@@ -619,14 +620,8 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    */
   app.put('/api/sessions/:id/review/annotations', async (req) => {
     const { id } = req.params as { id: string };
-    const body = req.body as ReviewAnnotationBody | undefined;
-    if (!body?.path) throw new HttpError(400, 'path is required');
-    const annotations = await review.setAnnotation(
-      id,
-      body.path,
-      Number(body.line),
-      String(body.comment ?? ''),
-    );
+    const body = parseBody(reviewAnnotationBody, req.body);
+    const annotations = await review.setAnnotation(id, body.path, body.line, body.comment);
     return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
   });
 
@@ -645,10 +640,8 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    */
   app.put('/api/sessions/:id/review/base', async (req) => {
     const { id } = req.params as { id: string };
-    const body = req.body as ReviewBaseBody | undefined;
-    const rev = body?.rev ?? null;
-    if (rev !== null && typeof rev !== 'string') throw new HttpError(400, 'rev must be a string');
-    return review.setBase(id, rev);
+    const { rev } = parseBody(reviewBaseBody, req.body);
+    return review.setBase(id, rev ?? null);
   });
 
   /** Deletes REVIEW.md — the "New review" button. The file is the review. */
@@ -673,8 +666,8 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
   app.get('/api/agent-sets', async () => agents.listSets());
 
   app.post('/api/agent-sets', async (req, reply) => {
-    const body = req.body as CreateAgentSetBody | undefined;
-    return reply.code(201).send(agents.createSet(body?.name as string));
+    const body = parseBody(createAgentSetBody, req.body);
+    return reply.code(201).send(agents.createSet(body.name));
   });
 
   app.get('/api/agent-sets/:setId', async (req) => {
@@ -684,7 +677,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
 
   app.patch('/api/agent-sets/:setId', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.updateSet(setId, (req.body ?? {}) as UpdateAgentSetBody);
+    return agents.updateSet(setId, parseBody(updateAgentSetBody, req.body));
   });
 
   app.delete('/api/agent-sets/:setId', async (req, reply) => {
@@ -696,7 +689,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
   /** Creates a skill or command, or replaces the one already under that name. */
   app.put('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.putItem(setId, req.body as AgentItemBody | undefined);
+    return agents.putItem(setId, parseBody(agentItemBody, req.body));
   });
 
   app.delete('/api/agent-sets/:setId/items', async (req) => {
@@ -772,11 +765,11 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    * authenticates the rest of `/api` decides who may add one.
    */
   app.post('/api/push/subscribe', async (req, reply) => {
-    const body = req.body as PushSubscribeBody | undefined;
-    const endpoint = validEndpoint(body?.endpoint);
-    const p256dh = validKey(body?.keys?.p256dh, 65, 'p256dh');
-    const auth = validKey(body?.keys?.auth, 16, 'auth');
-    const label = typeof body?.label === 'string' ? body.label.slice(0, 100) : null;
+    const body = parseBody(pushSubscribeBody, req.body);
+    const endpoint = validEndpoint(body.endpoint);
+    const p256dh = validKey(body.keys.p256dh, 65, 'p256dh');
+    const auth = validKey(body.keys.auth, 16, 'auth');
+    const label = typeof body.label === 'string' ? body.label.slice(0, 100) : null;
 
     upsertPushSubscription(db, endpoint, p256dh, auth, label);
     log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
@@ -785,9 +778,8 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
 
   /** Forgets a browser's subscription, on its own way out. */
   app.delete('/api/push/subscribe', async (req, reply) => {
-    const body = req.body as { endpoint?: unknown } | undefined;
-    if (typeof body?.endpoint !== 'string') throw new HttpError(400, 'endpoint is required');
-    deletePushSubscription(db, body.endpoint);
+    const { endpoint } = parseBody(pushUnsubscribeBody, req.body);
+    deletePushSubscription(db, endpoint);
     return reply.code(204).send();
   });
 

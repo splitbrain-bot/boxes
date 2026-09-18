@@ -28,6 +28,7 @@ import { Activity } from './activity.ts';
 import { BackgroundProbe, workToStop } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
+import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import { BOXES_META, type LoadMeta, type TurnStateParams } from '../../../shared/types.ts';
 
 /**
@@ -900,10 +901,10 @@ export class UpstreamSession {
 
     const stream = this.makeStream(exec);
     const app = acpClient({ name: `boxes-${this.sessionId}` })
-      .onNotification('session/update' as string, raw, ({ params }) => {
+      .onNotification(ACP_METHOD.sessionUpdate as string, raw, ({ params }) => {
         this.onSessionUpdate(params);
       })
-      .onRequest('session/request_permission' as string, raw, ({ params }) =>
+      .onRequest(ACP_METHOD.sessionRequestPermission as string, raw, ({ params }) =>
         this.onPermissionRequest(params),
       );
 
@@ -912,7 +913,7 @@ export class UpstreamSession {
 
     // Empty capabilities: no fs, no terminal, no elicitation, which confines
     // client-bound traffic to the two methods handled above.
-    this.initializeResponse = await conn.agent.request('initialize', {
+    this.initializeResponse = await conn.agent.request(ACP_METHOD.initialize, {
       protocolVersion: 1,
       clientCapabilities: {},
     });
@@ -979,7 +980,7 @@ export class UpstreamSession {
       // rebuilds the query for a conversation it no longer holds, which is
       // the other place these options are read.
       const res = (await this.whileReplaying(acpSessionId, () =>
-        conn.agent.request('session/load', {
+        conn.agent.request(ACP_METHOD.sessionLoad, {
           sessionId: acpSessionId,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
@@ -1032,7 +1033,7 @@ export class UpstreamSession {
     modeId: string = DEFAULT_MODE_ID,
     modelId: string | null = null,
   ): Promise<string> {
-    const method = from ? 'session/fork' : 'session/new';
+    const method = from ? ACP_METHOD.sessionFork : ACP_METHOD.sessionNew;
     const res = (await conn.agent.request(method, {
       ...(from ? { sessionId: from } : {}),
       cwd: dk.WORKSPACE_DIR,
@@ -1206,7 +1207,7 @@ export class UpstreamSession {
     if (!modes?.availableModes?.some((mode) => mode.id === modeId)) return;
     if (modes.currentModeId === modeId) return;
     try {
-      await conn.agent.request('session/set_mode', {
+      await conn.agent.request(ACP_METHOD.sessionSetMode, {
         sessionId: acpSessionId,
         modeId,
       });
@@ -1240,7 +1241,7 @@ export class UpstreamSession {
       pickModel(selector.options, DEFAULT_MODEL_ID);
     if (!value || value === selector.currentValue) return;
     try {
-      await conn.agent.request('session/set_config_option', {
+      await conn.agent.request(ACP_METHOD.sessionSetConfigOption, {
         sessionId: acpSessionId,
         configId: selector.id,
         value,
@@ -1282,7 +1283,7 @@ export class UpstreamSession {
       this.activity.observe(thread, update);
     }
     this.recordThreadInfo(params);
-    this.tap('up', 'session/update', params);
+    this.tap('up', ACP_METHOD.sessionUpdate, params);
     this.downstreams.update(params);
   }
 
@@ -1296,6 +1297,12 @@ export class UpstreamSession {
    * a plan is accepted, falling back to another model under load — and a
    * thread should come back in the mode it was in rather than the last one
    * somebody asked for.
+   *
+   * The three kinds below are the whole of what is recorded, and that is a
+   * different list from the kinds `activity.ts` reads as the agent at work
+   * and from the kinds the dashboard draws. A mode change is stored here and
+   * is not the agent doing anything; a message chunk is the agent working and
+   * is not stored, because the transcript is the adapter's.
    *
    * The row is found by the update's own ACP id rather than by which thread
    * is current, so an update that arrives while a switch is in flight lands
@@ -1323,7 +1330,7 @@ export class UpstreamSession {
       }
     )?.update;
     switch (update?.sessionUpdate) {
-      case 'session_info_update':
+      case UPDATE_KIND.sessionInfo:
         // Every field of a session_info_update is optional, so an update that
         // carries no title says nothing about it. An explicit null is the
         // adapter clearing it, which puts the thread back on its ordinal.
@@ -1334,12 +1341,12 @@ export class UpstreamSession {
           setThreadTitle(this.db, row.id, capName(update.title.trim()));
         }
         return;
-      case 'current_mode_update':
+      case UPDATE_KIND.currentMode:
         if (typeof update.currentModeId === 'string') {
           setThreadMode(this.db, row.id, update.currentModeId);
         }
         return;
-      case 'config_option_update': {
+      case UPDATE_KIND.configOption: {
         // Which of them is the model is the option's category, not its id:
         // the id is the adapter's own and this deployment names none of them.
         const model = update.configOptions?.find((option) => option.category === 'model');
@@ -1365,12 +1372,12 @@ export class UpstreamSession {
    */
   private onPermissionRequest(params: unknown): Promise<unknown> {
     this.touch();
-    this.tap('up', 'session/request_permission', params);
+    this.tap('up', ACP_METHOD.sessionRequestPermission, params);
 
     const thread = threadOf(params);
     const target = thread ? this.downstreams.byRecency(thread)[0] : undefined;
     if (target) {
-      return target.request('session/request_permission', params).catch((err) => {
+      return target.request(ACP_METHOD.sessionRequestPermission, params).catch((err) => {
         // The browser vanished mid-question: fall back to queueing so the
         // turn is not failed by a closed tab.
         this.slog.warn('permission forward failed; queueing', {
@@ -1388,7 +1395,7 @@ export class UpstreamSession {
       const entry = this.pending.add(
         this.sessionId,
         threadOf(params) ?? null,
-        'session/request_permission',
+        ACP_METHOD.sessionRequestPermission,
         params,
         { resolve, reject },
         this.cfg.PERMISSION_HOLD_MINUTES * 60_000,
@@ -1485,7 +1492,7 @@ export class UpstreamSession {
     for (const entry of this.pending.listForThread(this.sessionId, thread)) {
       const params = JSON.parse(entry.row.params) as unknown;
       handle
-        .request('session/request_permission', params)
+        .request(ACP_METHOD.sessionRequestPermission, params)
         .then((result) => {
           if (this.pending.settle(entry.row.id)) entry.resolve(result);
         })
@@ -1518,8 +1525,8 @@ export class UpstreamSession {
     // threads of one session share this connection, so nothing here may be
     // decided by which of them is the session's default.
     const thread = threadOf(params);
-    const isPrompt = method === 'session/prompt' && thread !== undefined;
-    const isLoad = method === 'session/load' && thread !== undefined && from !== undefined;
+    const isPrompt = method === ACP_METHOD.sessionPrompt && thread !== undefined;
+    const isLoad = method === ACP_METHOD.sessionLoad && thread !== undefined && from !== undefined;
 
     if (isPrompt) {
       // A fork's first prompt is where it stops borrowing: the adapter starts
@@ -1559,7 +1566,7 @@ export class UpstreamSession {
       // as well as from the adapter's own current_mode_update, because that
       // notification is the adapter's courtesy and this is the answer to the
       // request the user made.
-      if (method === 'session/set_mode' && thread !== undefined) {
+      if (method === ACP_METHOD.sessionSetMode && thread !== undefined) {
         const modeId = (params as { modeId?: unknown })?.modeId;
         const row = threadByAcpId(this.db, this.sessionId, thread);
         if (row && typeof modeId === 'string') setThreadMode(this.db, row.id, modeId);
@@ -1621,7 +1628,7 @@ export class UpstreamSession {
     this.downstreams.beginReplay(to, source.acp_session_id, { as: acpThreadId });
     try {
       await this.whileReplaying(source.acp_session_id, () =>
-        conn.agent.request('session/load', {
+        conn.agent.request(ACP_METHOD.sessionLoad, {
           sessionId: source.acp_session_id,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
@@ -1672,7 +1679,7 @@ export class UpstreamSession {
     // Only the cancelled thread's turn ends. Another thread of the same
     // session may still be mid-turn.
     const thread = threadOf(params);
-    if (method === 'session/cancel' && thread) {
+    if (method === ACP_METHOD.sessionCancel && thread) {
       this.setTurnActive(thread, false);
       // Whatever the agent was in the middle of saying, it is not saying it
       // any more. The tool calls it had open go with it.

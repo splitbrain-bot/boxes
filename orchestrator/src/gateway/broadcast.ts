@@ -1,3 +1,4 @@
+import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import {
   REPLAY_METHOD,
   TURN_STATE_METHOD,
@@ -148,7 +149,7 @@ export class Broadcast {
     if (
       !replaying &&
       (this.echoingPrompts.get(thread) ?? 0) > 0 &&
-      updateKind(params) === 'user_message_chunk'
+      updateKind(params) === UPDATE_KIND.userMessageChunk
     ) {
       return;
     }
@@ -186,7 +187,7 @@ export class Broadcast {
     for (const content of blocks) {
       this.deliver(this.byRecency(thread), {
         sessionId: thread,
-        update: { sessionUpdate: 'user_message_chunk', content },
+        update: { sessionUpdate: UPDATE_KIND.userMessageChunk, content },
       });
     }
   }
@@ -373,7 +374,7 @@ export class Broadcast {
 
   /** Sends one update to a set of browsers, surviving any one of them failing. */
   private deliver(targets: Iterable<DownstreamHandle>, params: unknown): void {
-    this.send(targets, 'session/update', params);
+    this.send(targets, ACP_METHOD.sessionUpdate, params);
   }
 
   /** Sends one notification to a set of browsers, surviving any one failing. */

@@ -1,3 +1,4 @@
+import { UPDATE_KIND, type UpdateKind } from '../../../../shared/acp.ts';
 import {
   blockText,
   imageFallbackText,
@@ -28,6 +29,9 @@ import {
  * the same model, which is what makes replay and live streaming the same code
  * path. Replay is just the adapter re-sending the history as notifications.
  */
+
+/** The member of the update union that carries one kind. */
+type UpdateOf<K extends UpdateKind> = Extract<SessionUpdate, { sessionUpdate: K }>;
 
 /** A run of assistant or user prose. */
 interface TextPart {
@@ -319,59 +323,56 @@ export function messageOfTool(model: ThreadModel, toolCallId: string): Message |
  */
 export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message | null {
   switch (update.sessionUpdate) {
-    case 'user_message_chunk': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'user_message_chunk' }>;
+    case UPDATE_KIND.userMessageChunk: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.userMessageChunk>;
       const message = messageFor(model, 'user', u.messageId);
       appendBlock(message, 'text', u.content);
       return message;
     }
-    case 'agent_message_chunk': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'agent_message_chunk' }>;
+    case UPDATE_KIND.agentMessageChunk: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.agentMessageChunk>;
       const message = messageFor(model, 'assistant', u.messageId);
       appendBlock(message, 'text', u.content);
       return message;
     }
-    case 'agent_thought_chunk': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'agent_thought_chunk' }>;
+    case UPDATE_KIND.agentThoughtChunk: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.agentThoughtChunk>;
       const message = messageFor(model, 'assistant', u.messageId);
       appendBlock(message, 'reasoning', u.content);
       return message;
     }
-    case 'tool_call': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'tool_call' }>;
+    case UPDATE_KIND.toolCall: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.toolCall>;
       // A re-announced call is an update, not a second card: an adapter may
       // resend one, and replay always does.
       return openTool(model, u, u.title);
     }
-    case 'tool_call_update': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>;
+    case UPDATE_KIND.toolCallUpdate: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.toolCallUpdate>;
       // Out of order: an update can arrive before the call it belongs to, and
       // dropping it would lose the tool's result. What it lacks is a title, so
       // the id stands in until the announcement arrives with one.
       return openTool(model, u, u.title ?? u.toolCallId);
     }
-    case 'plan': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'plan' }>;
+    case UPDATE_KIND.plan: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.plan>;
       model.plan = u.entries ?? [];
       return null;
     }
-    case 'available_commands_update': {
-      const u = update as Extract<
-        SessionUpdate,
-        { sessionUpdate: 'available_commands_update' }
-      >;
+    case UPDATE_KIND.availableCommands: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.availableCommands>;
       model.commands = u.availableCommands ?? [];
       return null;
     }
-    case 'config_option_update': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'config_option_update' }>;
+    case UPDATE_KIND.configOption: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.configOption>;
       // The adapter sends the whole set every time, so this replaces rather
       // than merges.
       model.configOptions = u.configOptions ?? [];
       return null;
     }
-    case 'current_mode_update': {
-      const u = update as Extract<SessionUpdate, { sessionUpdate: 'current_mode_update' }>;
+    case UPDATE_KIND.currentMode: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.currentMode>;
       if (model.modes) model.modes = { ...model.modes, currentModeId: u.currentModeId };
       return null;
     }
