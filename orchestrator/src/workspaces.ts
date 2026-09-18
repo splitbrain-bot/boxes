@@ -1,4 +1,4 @@
-import { chownSync, mkdirSync, readdirSync, rmSync, type Dirent } from 'node:fs';
+import { fchownSync, lchownSync, mkdirSync, readdirSync, rmSync, type Dirent } from 'node:fs';
 import { join, posix } from 'node:path';
 import { log } from './log.ts';
 
@@ -189,10 +189,32 @@ export function removeHome(dataDir: string, sessionId: string): void {
 export function chownToAgent(path: string): void {
   if (process.getuid?.() === owner.uid) return;
   try {
-    chownSync(path, owner.uid, owner.gid);
+    // On the named entry rather than through it: a link planted in a tree the
+    // agent writes must not hand its target away.
+    lchownSync(path, owner.uid, owner.gid);
   } catch (err) {
     log.warn('could not give a workspace path to the agent user', {
       path,
+      uid: owner.uid,
+      error: (err as Error).message,
+    });
+  }
+}
+
+/**
+ * Gives an open file to the session's agent user, by descriptor.
+ *
+ * The descriptor names the file that was opened, whatever the name it was
+ * opened under points at by now, which is what a write into a directory the
+ * agent owns needs. The uid rule and the logged failure are those of
+ * chownToAgent.
+ */
+export function chownFdToAgent(fd: number): void {
+  if (process.getuid?.() === owner.uid) return;
+  try {
+    fchownSync(fd, owner.uid, owner.gid);
+  } catch (err) {
+    log.warn('could not give a workspace file to the agent user', {
       uid: owner.uid,
       error: (err as Error).message,
     });

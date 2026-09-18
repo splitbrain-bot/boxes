@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import type { StoredAttachment } from '../../shared/types.ts';
+import { resolveInRoot } from './review/fs.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
@@ -150,30 +151,55 @@ function writeUnderFreeName(
 }
 
 /**
+ * One directory of the attachments chain, created if it is not there yet and
+ * handed to the agent. Returns where it really is.
+ *
+ * The workspace is a tree the agent writes, so a level of the chain can be a
+ * link when an upload arrives: creating through one would put the directory,
+ * the bytes and the chown outside the workspace. Every level is resolved
+ * under the workspace first, which refuses a link as the last component and a
+ * link anywhere above it, and is then created on its own rather than
+ * recursively.
+ */
+function containedDir(workspace: string, relative: string): string {
+  const resolved = resolveInRoot(workspace, relative, false);
+  if (!resolved.ok) {
+    throw new Error(
+      `cannot store an attachment: ${relative} is not a usable directory (${resolved.reason})`,
+    );
+  }
+  if (!existsSync(resolved.path)) {
+    mkdirSync(resolved.path, { mode: 0o755 });
+    chownToAgent(resolved.path);
+  }
+  return resolved.path;
+}
+
+/**
  * Writes one attachment into a workspace and hands back where it landed.
  *
  * The name is sanitised to a single path component before it is used, so
- * containment here is by construction rather than by a check: there is no
- * path to resolve and compare, because the client never supplies one.
+ * containment for it is by construction rather than by a check: there is no
+ * path to resolve and compare, because the client never supplies one. The
+ * directory it lands in is resolved under the workspace, because that part of
+ * the path is a tree the agent can rearrange.
  */
 export function storeAttachment(
   workspace: string,
   name: string,
   bytes: Buffer,
 ): StoredAttachment {
-  const boxes = join(workspace, '.boxes');
-  const dir = join(workspace, ATTACHMENTS_DIR);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o755 });
-    // Both levels, because either may be the one this call created.
-    chownToAgent(boxes);
-    chownToAgent(dir);
-  }
+  const boxes = containedDir(workspace, '.boxes');
+  const dir = containedDir(workspace, ATTACHMENTS_DIR);
 
   const ignore = join(boxes, '.gitignore');
-  if (!existsSync(ignore)) {
-    writeFileSync(ignore, GITIGNORE, { mode: 0o644 });
+  // Exclusive, so a link planted under this name is refused rather than
+  // followed, and a file already there is left as it is.
+  try {
+    writeFileSync(ignore, GITIGNORE, { mode: 0o644, flag: 'wx' });
     chownToAgent(ignore);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
 
   const target = writeUnderFreeName(dir, safeAttachmentName(name), bytes);

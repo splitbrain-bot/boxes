@@ -271,6 +271,9 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
     reply.raw.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-store',
+      // The body is whatever the command printed, so a browser must read it
+      // as the plain text it is declared to be and sniff nothing else out.
+      'X-Content-Type-Options': 'nosniff',
       // Nothing may buffer this: the point is that output appears as it is
       // produced.
       'X-Accel-Buffering': 'no',

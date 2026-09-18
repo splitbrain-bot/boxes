@@ -401,6 +401,8 @@ test('a command runs in the container and streams its output with a trailer', as
 
   assert.equal(res.statusCode, 200);
   assert.match(res.headers['content-type'] as string, /text\/plain/);
+  // The output is the agent's, so the declared type is the only one.
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
   assert.equal(res.body, 'hello\n\n[exit 0]\n');
   // The command travels as an argument to bash inside the container; nothing
   // is assembled into a host command line. The container is handed the wall

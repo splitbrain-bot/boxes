@@ -28,6 +28,17 @@ export interface InterceptorOptions {
   log: (msg: string, fields?: Record<string, unknown>) => void;
 }
 
+/**
+ * Whether an address is this machine talking to itself.
+ *
+ * Covers the forms a loopback connection is reported in: IPv4, IPv6, and the
+ * IPv4-mapped shape a dual-stack listener hands back.
+ */
+function isLoopback(address: string | undefined): boolean {
+  if (!address) return false;
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
 /** Headers the engine derives from the request URL, so a copy must not pin them. */
 const URL_LINKED_HEADERS = ['host', ':authority'];
 
@@ -198,6 +209,15 @@ export class Interceptor {
         },
       };
     };
+
+    // The front door is the only thing meant to reach the engine, and it
+    // connects over loopback. The engine's own listener takes every interface,
+    // and the proxy sits on every session network, so a box could otherwise
+    // reach it directly and skip the front door's rules about which hosts and
+    // which ports may be intercepted at all.
+    if (!isLoopback(req.remoteIpAddress)) {
+      return refuse('blocked-address', 'the interception engine is reachable from the proxy only');
+    }
 
     if (protocol !== 'https:' && credentialsForHost(host, policy).length > 0) {
       // In the clear a swap would put the real credential on the wire as

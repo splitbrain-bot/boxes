@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
@@ -12,13 +21,15 @@ import { safeAttachmentName, storeAttachment, ATTACHMENTS_DIR } from './attachme
  */
 
 let workspace: string;
+let outside: string;
 
 beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), 'boxes-attach-'));
+  outside = mkdtempSync(join(tmpdir(), 'boxes-attach-outside-'));
 });
 
 afterEach(() => {
-  rmSync(workspace, { recursive: true, force: true });
+  for (const d of [workspace, outside]) rmSync(d, { recursive: true, force: true });
 });
 
 test('an ordinary name is kept as it is', () => {
@@ -87,4 +98,24 @@ test('a second file of the same name is suffixed, not overwritten', () => {
   assert.equal(second.name, 'shot-2.png');
   assert.equal(readFileSync(join(workspace, first.path), 'utf8'), 'one');
   assert.equal(readFileSync(join(workspace, second.path), 'utf8'), 'two');
+});
+
+test('a link planted where the attachments directory goes is refused', () => {
+  // The workspace is a tree the agent writes, so it can put a link where the
+  // upload expects a directory. Following one would create directories, write
+  // the bytes and give ownership away outside the workspace.
+  symlinkSync(outside, join(workspace, '.boxes'));
+
+  assert.throws(() => storeAttachment(workspace, 'shot.png', Buffer.from('hello')));
+
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test('a link planted where the attachments leaf goes is refused', () => {
+  mkdirSync(join(workspace, '.boxes'));
+  symlinkSync(outside, join(workspace, ATTACHMENTS_DIR));
+
+  assert.throws(() => storeAttachment(workspace, 'shot.png', Buffer.from('hello')));
+
+  assert.equal(existsSync(join(outside, 'shot.png')), false);
 });

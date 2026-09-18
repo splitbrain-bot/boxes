@@ -136,28 +136,50 @@ const front = createForwardServer({
   log,
 });
 
+/** The push in flight, so no two of them are swapping the policy at once. */
+let pushes: Promise<void> = Promise.resolve();
+
+/**
+ * Runs one policy push once the push before it has finished, or failed.
+ *
+ * A push sets the policy, waits for the engine, and puts the previous policy
+ * back when the engine refuses the new one, while the control channel answers
+ * requests concurrently. Interleaved, one push's rollback would discard the
+ * policy another push had just applied and leave the status reporting it.
+ */
+function queuePush(work: () => Promise<void>): Promise<void> {
+  const next = pushes.then(work, work);
+  // A failure belongs to the push that asked, not to the pushes behind it.
+  pushes = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 /** The control channel, facing the orchestrator. */
 const control = createControlServer({
-  apply: async (pushed) => {
-    const previous = policy;
-    policy = pushed;
-    try {
-      await interceptor.apply();
-    } catch (err) {
-      // A policy the engine cannot run is rolled back whole, so no
-      // credential is left configured that nothing can swap in.
-      policy = previous;
-      await interceptor.apply().catch(() => undefined);
-      throw new Error(`could not apply policy: ${(err as Error).message}`);
-    }
-    applied = true;
-    log('applied policy', {
-      hash: policyHash(policy),
-      allowedHosts: policy.allowedHosts.length,
-      credentials: policy.credentials.map((c) => c.id),
-      intercepting: injectionPatterns(policy),
-    });
-  },
+  apply: (pushed) =>
+    queuePush(async () => {
+      const previous = policy;
+      policy = pushed;
+      try {
+        await interceptor.apply();
+      } catch (err) {
+        // A policy the engine cannot run is rolled back whole, so no
+        // credential is left configured that nothing can swap in.
+        policy = previous;
+        await interceptor.apply().catch(() => undefined);
+        throw new Error(`could not apply policy: ${(err as Error).message}`);
+      }
+      applied = true;
+      log('applied policy', {
+        hash: policyHash(policy),
+        allowedHosts: policy.allowedHosts.length,
+        credentials: policy.credentials.map((c) => c.id),
+        intercepting: injectionPatterns(policy),
+      });
+    }),
   status,
   log,
 });

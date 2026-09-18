@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
@@ -119,3 +127,22 @@ test('removing a home takes its content and no more', () => {
   assert.ok(existsSync(keep));
   assert.ok(existsSync(ws.homesRoot(dir)));
 });
+
+// Only root can give a file away, so a test user that is not root cannot see
+// what this does; the orchestrator runs as root in the deployment that needs
+// it.
+test.skipIf(process.getuid?.() !== 0)(
+  'giving a path away acts on the link, not on what it points at',
+  () => {
+    const target = join(outside, 'secret.txt');
+    writeFileSync(target, 'not the agent business');
+    const link = join(dir, 'escape');
+    symlinkSync(target, link);
+
+    ws.chownToAgent(link);
+
+    assert.equal(lstatSync(link).uid, ws.DEFAULT_SESSION_UID);
+    // The deployment's own file stays the deployment's.
+    assert.equal(statSync(target).uid, 0);
+  },
+);

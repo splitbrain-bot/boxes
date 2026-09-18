@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import { networkInterfaces } from 'node:os';
 import tls from 'node:tls';
 import { generateCACertificate } from 'mockttp';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -137,9 +138,13 @@ function githubPolicy(over: Partial<EgressPolicy> = {}): EgressPolicy {
 }
 
 /** Opens a tunnel through the engine to one host, as a session's client does. */
-function tunnelThroughEngine(port: number, authority: string): Promise<net.Socket> {
+function tunnelThroughEngine(
+  port: number,
+  authority: string,
+  host = '127.0.0.1',
+): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.connect({ host: '127.0.0.1', port }, () => {
+    const socket = net.connect({ host, port }, () => {
       socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
       socket.once('data', () => resolve(socket));
     });
@@ -153,8 +158,9 @@ async function throughEngine(
   headers: http.OutgoingHttpHeaders,
   host = 'api.github.com',
   path = '/user',
+  engineHost = '127.0.0.1',
 ): Promise<Answer> {
-  const socket = await tunnelThroughEngine(port, `${host}:443`);
+  const socket = await tunnelThroughEngine(port, `${host}:443`, engineHost);
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
@@ -233,6 +239,32 @@ describe('the interception engine', () => {
     expect(res.status).toBe(200);
     expect(received).toHaveLength(1);
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
+  }, 30_000);
+
+  it('refuses a caller that did not come through the front door', async () => {
+    // The engine's own listener takes every interface, and the proxy sits on
+    // every session network, so a box can open this port directly. Reaching it
+    // that way skips the front door's rules about which hosts and ports may be
+    // intercepted at all, so the engine refuses anything not from loopback.
+    const outward = Object.values(networkInterfaces())
+      .flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
+    if (!outward) return; // nothing but loopback here; nothing to prove
+
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await throughEngine(
+      interceptor.port()!,
+      { authorization: `Bearer ${PLACEHOLDER}` },
+      'api.github.com',
+      '/user',
+      outward,
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatch(/front door|reachable from the proxy only/);
+    expect(received).toHaveLength(0);
   }, 30_000);
 
   it('refuses a foreign credential here instead of forwarding it', async () => {

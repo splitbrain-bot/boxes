@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
-  chmodSync,
   closeSync,
+  constants,
+  fchmodSync,
   fstatSync,
   lstatSync,
   openSync,
@@ -13,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, resolve, sep } from 'node:path';
-import { chownToAgent } from '../workspaces.ts';
+import { chownFdToAgent } from '../workspaces.ts';
 
 /**
  * Contained reads and writes under one root, which for a review is the
@@ -211,12 +212,19 @@ export function fileLines(content: string): string[] {
  * take its executable bit off.
  */
 export function writeFileAtomic(path: string, content: string): void {
-  const tmp = `${path}.${process.pid}.${tmpWrites++}.tmp`;
+  const { fd, tmp } = openTemp(path);
   try {
-    writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o644 });
-    // After the write rather than through its mode, which the umask masks.
-    chmodSync(tmp, currentMode(path));
-    chownToAgent(tmp);
+    try {
+      writeFileSync(fd, content, { encoding: 'utf8' });
+      // Through the descriptor, so the mode and the owner land on the file
+      // that was opened rather than on whatever the name holds by now. The
+      // mode comes after the write rather than through the open, which the
+      // umask masks.
+      fchmodSync(fd, currentMode(path));
+      chownFdToAgent(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, path);
   } catch (err) {
     try {
@@ -233,6 +241,44 @@ export function writeFileAtomic(path: string, content: string): void {
  * names a temp file no other write can be holding.
  */
 let tmpWrites = 0;
+
+/** How many times one atomic write tries to get its temp name to itself. */
+const TMP_ATTEMPTS = 5;
+
+/** An open temp file, and the name it is open under. */
+interface TempFile {
+  fd: number;
+  tmp: string;
+}
+
+/**
+ * Creates the temp file an atomic write goes through, next to its target.
+ *
+ * The name is predictable and the directory is the agent's, so the agent can
+ * be holding it: a link planted there would otherwise take the write, the
+ * mode and the chown to whatever it points at. The open creates the file
+ * itself and follows nothing, so a name that is taken — by a link or by a
+ * leftover — is refused, removed, and tried again.
+ */
+function openTemp(path: string): TempFile {
+  const tmp = `${path}.${process.pid}.${tmpWrites++}.tmp`;
+  const flags =
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+  for (let attempt = 0; attempt < TMP_ATTEMPTS; attempt++) {
+    try {
+      return { fd: openSync(tmp, flags, 0o644), tmp };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' && code !== 'ELOOP') throw err;
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // gone on its own, or not a file this can clear
+      }
+    }
+  }
+  throw new Error(`could not get a clean temp file to write ${path}`);
+}
 
 /** The permissions a file already has, or the default for a new one. */
 function currentMode(path: string): number {

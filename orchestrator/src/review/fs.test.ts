@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -225,6 +226,23 @@ describe('writeFileAtomic', () => {
     writeFileAtomic(path, 'first, and longer\n');
     writeFileAtomic(path, 'second\n');
     assert.equal(readFileSync(path, 'utf8'), 'second\n');
+  });
+
+  test('a link planted at the temp name is not written through', () => {
+    const dir = join(root, 'planted');
+    mkdirSync(dir);
+    const path = join(dir, 'REVIEW.md');
+    // The directory belongs to the agent and the temp name is predictable, so
+    // this is the attack. The counter in the name is private to the module,
+    // so every name the write could pick is planted.
+    for (let n = 0; n < 64; n++) symlinkSync(secret, `${path}.${process.pid}.${n}.tmp`);
+
+    writeFileAtomic(path, '# Code Review\n');
+
+    // The bytes, the mode and the chown all belong to the new file.
+    assert.equal(readFileSync(secret, 'utf8'), 'the deployment gateway token');
+    assert.equal(readFileSync(path, 'utf8'), '# Code Review\n');
+    assert.equal(lstatSync(path).isSymbolicLink(), false);
   });
 
   test('a failed write leaves the previous version and no temp file', () => {
