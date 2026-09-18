@@ -449,18 +449,6 @@ export type ReviewFileStatus =
 /** What happened to a line of a file, relative to the base revision. */
 export type ReviewLineChange = 'added' | 'modified';
 
-/** One file or directory of the review tree. */
-export interface ReviewTreeEntry {
-  name: string;
-  /** Path relative to the workspace, slash-separated. */
-  path: string;
-  isDir: boolean;
-  /** Absent on files. */
-  children?: ReviewTreeEntry[];
-  /** True on the directory a repository is rooted at. Absent everywhere else. */
-  repo?: boolean;
-}
-
 /**
  * One repository the workspace holds.
  *
@@ -498,24 +486,62 @@ export interface ReviewBase {
   rev: string;
 }
 
-/** The whole left panel in one response. */
-export interface ReviewTreeResponse {
+/**
+ * One entry of a review directory: a file, or a folder of them.
+ *
+ * A file carries its own git status and its own comment count. A folder
+ * carries what its whole subtree holds, so a closed one still says there is
+ * something inside it to look at. The optional fields are absent rather than
+ * empty, because a directory of a thousand files goes to a phone.
+ */
+export interface ReviewDirEntry {
+  /** The entry's own name inside its directory. */
+  name: string;
+  /** Path relative to the workspace, slash-separated. */
+  path: string;
+  /** True for a folder. */
+  isDir: boolean;
+  /** A file's git status. Absent when it has none, and on a folder. */
+  status?: ReviewFileStatus;
+  /** How many comments a file has. Absent when it has none, and on a folder. */
+  comments?: number;
+  /** True on a folder whose subtree holds a changed file. Absent elsewhere. */
+  changed?: boolean;
+  /** True on a folder whose subtree holds a commented file. Absent elsewhere. */
+  commented?: boolean;
+  /** True on the folder a repository is rooted at. Absent elsewhere. */
+  repo?: boolean;
+}
+
+/**
+ * What a review is, apart from the files: which repositories the workspace
+ * holds, what they are compared against, and whether there is a review at all.
+ *
+ * Every directory answer carries them, so the first screen is one request and
+ * the header never waits on a second.
+ */
+export interface ReviewFacts {
   /** Every repository the workspace holds, sorted by path. */
   repos: ReviewRepo[];
   /** False when the workspace holds no repository at all. */
   hasGit: boolean;
-  entries: ReviewTreeEntry[];
-  /** True when the tree hit the entry cap and was cut short. */
-  truncated: boolean;
-  /** Git status per workspace-relative path. Empty without any repository. */
-  statuses: Record<string, ReviewFileStatus>;
-  /** How many comments each annotated file has. */
-  counts: Record<string, number>;
   base: ReviewBase;
   /** True when the workspace holds a REVIEW.md. */
   hasReview: boolean;
   /** The date the review was started, or '' when there is no review yet. */
   started: string;
+  /** How many comments the whole review holds, over every file. */
+  commentCount: number;
+}
+
+/** One directory of the review, and the facts the whole view needs. */
+export interface ReviewDirResponse extends ReviewFacts {
+  /** The directory listed, relative to the workspace. Empty for the root. */
+  path: string;
+  /** Its children: folders first, then files, each in name order. */
+  entries: ReviewDirEntry[];
+  /** True when this directory hit the entry cap and the rest were left out. */
+  truncated: boolean;
 }
 
 /** One comment on one line, as the API reports it. */

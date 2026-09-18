@@ -1,22 +1,27 @@
 import { create } from 'zustand';
 import type {
   ReviewAnnotation,
+  ReviewDirEntry,
+  ReviewDirResponse,
+  ReviewFacts,
   ReviewFileResponse,
-  ReviewTreeResponse,
 } from '../../../shared/types.ts';
 import { ApiError, api } from '../api.ts';
 import { tokenizeLines, type Token } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
 /**
- * The review view's whole state: the tree and the open file.
+ * The review view's whole state: the tree, folder by folder, and the open file.
  *
- * Freshness is the fetch, and there is no poll. Every review fetch reads the
- * filesystem on the spot — the tree endpoint runs `ls-files` and `status` per
- * request, the file endpoint reads the file, and drift recomputes on both — so
- * what matters is being fresh on arrival. Arrival is three moments: the view
- * mounting, a file closing back to the tree, and the tab becoming visible
- * again.
+ * The tree is fetched a directory at a time, so opening a folder is one small
+ * request and a workspace with a dependency tree in it costs nothing until
+ * somebody opens that. Each answer carries the review-wide facts with it, so
+ * the first screen is one request.
+ *
+ * Freshness is the fetch, and there is no poll. What matters is being fresh on
+ * arrival, and arrival is three moments: the view mounting, a file closing back
+ * to the tree, and the tab becoming visible again. Each of them calls
+ * {@link loadTree}, which is what tells the orchestrator to ask git again.
  *
  * The store is a singleton keyed by session id rather than one per mount, so
  * navigating between files does not lose the tree, and remounting the route
@@ -34,9 +39,17 @@ export interface OpenFile extends ReviewFileResponse {
 
 export interface ReviewState {
   sessionId: string | null;
-  tree: ReviewTreeResponse | null;
+  /**
+   * What the review is, apart from its files. Carried by every directory
+   * answer, so it is whatever the last one said.
+   */
+  facts: ReviewFacts | null;
+  /** Each loaded directory by its path; the workspace root is ''. */
+  dirs: Record<string, ReviewDirResponse>;
+  /** The folders standing open, by path. */
+  expanded: string[];
   file: OpenFile | null;
-  /** True while the tree is being fetched for the first time. */
+  /** True while the root of the tree is being fetched for the first time. */
   loadingTree: boolean;
   /** True while a file fetch is in flight. */
   loadingFile: boolean;
@@ -58,7 +71,9 @@ export interface ReviewState {
 
 const EMPTY: ReviewState = {
   sessionId: null,
-  tree: null,
+  facts: null,
+  dirs: {},
+  expanded: [],
   file: null,
   loadingTree: false,
   loadingFile: false,
@@ -114,23 +129,85 @@ export function open(sessionId: string): void {
 }
 
 /**
- * Fetches the tree, statuses and comment counts.
+ * Fetches one directory: its children, their statuses and their comment
+ * counts, and the review-wide facts around them.
  *
- * An answer for a session the store has since left is dropped: a slow tree
- * landing after the route moved on would paint another box's files.
+ * `fresh` says the browser has arrived rather than opened a folder, which is
+ * what makes the orchestrator ask git about the workspace again. An answer for
+ * a session the store has since left is dropped: a slow directory landing after
+ * the route moved on would paint another box's files.
  */
-export async function loadTree(): Promise<void> {
+export async function loadDir(path: string, fresh = false): Promise<void> {
   const { sessionId } = get();
   if (!sessionId) return;
-  set({ loadingTree: true });
+  if (path === '' && !get().dirs['']) set({ loadingTree: true });
   try {
-    const tree = await api.reviewTree(sessionId);
+    const dir = await api.reviewDir(sessionId, path, fresh);
     if (get().sessionId !== sessionId) return;
-    set({ tree, error: null, loadingTree: false });
+    const first = get().dirs[path] === undefined;
+    set({
+      dirs: { ...get().dirs, [path]: dir },
+      facts: factsOf(dir),
+      error: null,
+      loadingTree: false,
+    });
+    if (first) unwrap(dir);
   } catch (err) {
     if (get().sessionId !== sessionId) return;
     set({ error: (err as Error).message, loadingTree: false });
   }
+}
+
+/**
+ * Loads the root of the tree and every folder standing open, with git's answer
+ * for the workspace taken again.
+ *
+ * What the three arrivals call. The root asks for that fresh answer and the
+ * folders under it are slices of the one it leaves behind, so this is one run
+ * of git however many folders are open.
+ */
+export async function loadTree(): Promise<void> {
+  const open = get().expanded;
+  await loadDir('', true);
+  await Promise.all(open.map((path) => loadDir(path)));
+}
+
+/** The review-wide part of a directory answer. */
+function factsOf(dir: ReviewDirResponse): ReviewFacts {
+  const { repos, hasGit, base, hasReview, started, commentCount } = dir;
+  return { repos, hasGit, base, hasReview, started, commentCount };
+}
+
+/**
+ * Follows a chain of single-child folders open, loading each.
+ *
+ * A `src/main/java/com/…` prefix is noise rather than structure, and opening it
+ * saves four taps on a phone. Only on a directory's first answer, so a folder
+ * the reviewer closed stays closed when the tree is refetched.
+ */
+function unwrap(dir: ReviewDirResponse): void {
+  if (dir.entries.length !== 1) return;
+  const only = dir.entries[0]!;
+  if (!only.isDir || get().expanded.includes(only.path)) return;
+  set({ expanded: [...get().expanded, only.path] });
+  void loadDir(only.path);
+}
+
+/**
+ * Opens or closes one folder of the tree, fetching it the first time.
+ *
+ * A folder that has been loaded keeps what it holds when it is closed and
+ * opened again: what it says is as fresh as the last arrival, and asking again
+ * for every tap is the cost this view is built to avoid.
+ */
+export function toggleDir(path: string): void {
+  const { expanded, dirs } = get();
+  if (expanded.includes(path)) {
+    set({ expanded: expanded.filter((open) => open !== path) });
+    return;
+  }
+  set({ expanded: [...expanded, path] });
+  if (!dirs[path]) void loadDir(path);
 }
 
 /**
@@ -316,22 +393,68 @@ export async function newReview(): Promise<void> {
 }
 
 /**
- * Records a file's annotations, keeping the tree's badge in step.
+ * Records a file's annotations, keeping the tree's badges in step.
  *
  * The tree is not refetched for a comment: the count is the one thing that
- * changed, and a whole tree round trip for a badge is exactly the cost this
- * view is trying not to pay.
+ * changed, and a round trip per badge is exactly the cost this view is trying
+ * not to pay. The badge lives on the file's entry in the directory that lists
+ * it, so patching it means finding that directory.
  */
 function applyAnnotations(path: string, annotations: ReviewAnnotation[], delta: number): void {
-  const { file, tree } = get();
+  const { file, facts } = get();
   if (file && file.path === path) set({ file: { ...file, annotations } });
-  if (tree && delta !== 0) {
-    const counts = { ...tree.counts };
-    const next = (counts[path] ?? 0) + delta;
-    if (next > 0) counts[path] = next;
-    else delete counts[path];
-    set({ tree: { ...tree, counts, hasReview: Object.keys(counts).length > 0 || tree.hasReview } });
+  if (!facts || delta === 0) return;
+  const commentCount = Math.max(0, facts.commentCount + delta);
+  set({
+    facts: { ...facts, commentCount, hasReview: facts.hasReview || commentCount > 0 },
+    dirs: patchCounts(get().dirs, path, delta),
+  });
+}
+
+/**
+ * Moves a file's comment count where its directory holds it, and lights the
+ * folders on the way down to it.
+ *
+ * A folder's badge says its subtree holds a comment. It goes on as soon as one
+ * is written, and comes off again when the server answers for that folder on
+ * the next arrival — whether a subtree still holds a comment after a deletion
+ * is a question only the whole review can answer.
+ */
+function patchCounts(
+  dirs: Record<string, ReviewDirResponse>,
+  path: string,
+  delta: number,
+): Record<string, ReviewDirResponse> {
+  const next = { ...dirs };
+
+  /** Replaces one entry of one loaded directory, where both are there. */
+  const patch = (
+    dirPath: string,
+    entryPath: string,
+    change: (entry: ReviewDirEntry) => ReviewDirEntry,
+  ): void => {
+    const dir = next[dirPath];
+    if (!dir) return;
+    next[dirPath] = {
+      ...dir,
+      entries: dir.entries.map((entry) => (entry.path === entryPath ? change(entry) : entry)),
+    };
+  };
+
+  const parts = path.split('/');
+  patch(parts.slice(0, -1).join('/'), path, (entry) => ({
+    ...entry,
+    comments: Math.max(0, (entry.comments ?? 0) + delta),
+  }));
+  if (delta > 0) {
+    for (let i = 1; i < parts.length; i++) {
+      patch(parts.slice(0, i - 1).join('/'), parts.slice(0, i).join('/'), (entry) => ({
+        ...entry,
+        commented: true,
+      }));
+    }
   }
+  return next;
 }
 
 /** How much a file's comment count moved. */

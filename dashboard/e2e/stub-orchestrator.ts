@@ -14,7 +14,10 @@ import type {
   ReviewFileBody,
   ReviewFileResponse,
   ReviewRepo,
-  ReviewTreeResponse,
+  ReviewBase,
+  ReviewDirResponse,
+  ReviewDirEntry,
+  ReviewFileStatus,
   SessionDetail,
   SessionSummary,
   StoredAttachment,
@@ -123,14 +126,14 @@ export function stubSession(over: Partial<SessionDetail> = {}): SessionDetail {
 export interface StubReview {
   /** Files, by workspace-relative path, with their content. */
   files: Record<string, string>;
-  statuses: ReviewTreeResponse['statuses'];
+  statuses: Record<string, ReviewFileStatus>;
   /** Diff markers per file path. Absent means no change. */
   diffs: Record<string, ReviewFileResponse['diff']>;
   /** Comments per file path, by line. */
   annotations: Record<string, Record<number, ReviewAnnotation>>;
   /** The repositories the workspace holds, sorted by path. */
   repos: ReviewRepo[];
-  base: ReviewTreeResponse['base'];
+  base: ReviewBase;
   /** True once a comment has been written, as REVIEW.md existing. */
   hasReview: boolean;
   started: string;
@@ -520,7 +523,7 @@ export async function startStubOrchestrator(
     }
     if (exec && req.method === 'GET') return json(res, 200, { records: execLog });
 
-    const review = /^\/api\/sessions\/([^/]+)\/review(?:\/(tree|file|annotations|base))?$/.exec(
+    const review = /^\/api\/sessions\/([^/]+)\/review(?:\/(dir|file|annotations|base))?$/.exec(
       url,
     );
     if (review) {
@@ -654,31 +657,65 @@ function answerReview(
       .filter((repo) => repo.path === '' || path.startsWith(`${repo.path}/`))
       .sort((a, b) => b.path.length - a.path.length)[0] ?? null;
 
-  if (endpoint === 'tree' && req.method === 'GET') {
-    const body: ReviewTreeResponse = {
-      repos: review.repos,
-      hasGit: review.repos.length > 0,
-      // Files, plus the ones a status reports as deleted — they are on no
-      // disk, and the real service puts them back the same way.
-      entries: markStubRepos(
-        buildStubTree([
-          ...Object.keys(review.files),
-          ...Object.entries(review.statuses)
-            .filter(([path, status]) => status === 'deleted' && !review.files[path])
-            .map(([path]) => path),
-        ]),
-        review.repos,
+  if (endpoint === 'dir' && req.method === 'GET') {
+    const dir = query.get('path') ?? '';
+    // Files, plus the ones a status reports as deleted: they are on no disk,
+    // and the real service lists them in their own directory just the same.
+    const paths = [
+      ...Object.keys(review.files),
+      ...Object.entries(review.statuses)
+        .filter(([path, status]) => status === 'deleted' && !review.files[path])
+        .map(([path]) => path),
+    ];
+    const prefix = dir === '' ? '' : `${dir}/`;
+    const under = paths.filter((path) => path.startsWith(prefix));
+    if (dir !== '' && under.length === 0) return json(res, 404, { error: 'Not found' });
+
+    const commentsOn = (path: string): number =>
+      Object.keys(review.annotations[path] ?? {}).length;
+    const repoRoots = new Set(review.repos.map((repo) => repo.path));
+    const seen = new Map<string, ReviewDirEntry>();
+    for (const path of under) {
+      const rest = path.slice(prefix.length);
+      const cut = rest.indexOf('/');
+      if (cut === -1) {
+        seen.set(rest, {
+          name: rest,
+          path,
+          isDir: false,
+          ...(review.statuses[path] ? { status: review.statuses[path] } : {}),
+          ...(commentsOn(path) > 0 ? { comments: commentsOn(path) } : {}),
+        });
+        continue;
+      }
+      const name = rest.slice(0, cut);
+      const full = `${prefix}${name}`;
+      const held = paths.filter((p) => p.startsWith(`${full}/`));
+      seen.set(name, {
+        name,
+        path: full,
+        isDir: true,
+        ...(held.some((p) => review.statuses[p]) ? { changed: true } : {}),
+        ...(held.some((p) => commentsOn(p) > 0) ? { commented: true } : {}),
+        ...(repoRoots.has(full) ? { repo: true } : {}),
+      });
+    }
+
+    const body: ReviewDirResponse = {
+      path: dir,
+      entries: [...seen.values()].sort((a, b) =>
+        a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name),
       ),
       truncated: review.truncated,
-      statuses: review.statuses,
-      counts: Object.fromEntries(
-        Object.entries(review.annotations)
-          .map(([path, lines]) => [path, Object.keys(lines).length] as const)
-          .filter(([, count]) => count > 0),
-      ),
+      repos: review.repos,
+      hasGit: review.repos.length > 0,
       base: review.base,
       hasReview: review.hasReview,
       started: review.hasReview ? review.started : '',
+      commentCount: Object.values(review.annotations).reduce(
+        (total, lines) => total + Object.keys(lines).length,
+        0,
+      ),
     };
     return json(res, 200, body);
   }
@@ -814,61 +851,6 @@ function answerReview(
   return json(res, 404, { error: 'Not found' });
 }
 
-/** The same shape the orchestrator's tree builder produces, from a path list. */
-function buildStubTree(paths: string[]): ReviewTreeResponse['entries'] {
-  type Node = { entry: ReviewTreeResponse['entries'][number]; children: Map<string, Node> };
-  const root: Node = { entry: { name: '', path: '', isDir: true }, children: new Map() };
-
-  for (const path of paths.toSorted()) {
-    const parts = path.split('/');
-    let current = root;
-    parts.forEach((part, i) => {
-      const isLeaf = i === parts.length - 1;
-      let next = current.children.get(part);
-      if (!next) {
-        next = {
-          entry: {
-            name: part,
-            path: isLeaf ? path : parts.slice(0, i + 1).join('/'),
-            isDir: !isLeaf,
-          },
-          children: new Map(),
-        };
-        current.children.set(part, next);
-      }
-      current = next;
-    });
-  }
-
-  const collect = (node: Node): ReviewTreeResponse['entries'] =>
-    [...node.children.values()]
-      .map((child) => {
-        if (!child.entry.isDir) return child.entry;
-        return { ...child.entry, children: collect(child) };
-      })
-      .sort((a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name)));
-
-  return collect(root);
-}
-
-/** Marks the directories the repositories are rooted at, the way the API does. */
-function markStubRepos(
-  entries: ReviewTreeResponse['entries'],
-  repos: ReviewRepo[],
-): ReviewTreeResponse['entries'] {
-  const roots = new Set(repos.map((repo) => repo.path));
-  const mark = (level: ReviewTreeResponse['entries']): ReviewTreeResponse['entries'] =>
-    level.map((entry) =>
-      entry.isDir
-        ? {
-            ...entry,
-            ...(roots.has(entry.path) ? { repo: true } : {}),
-            children: mark(entry.children ?? []),
-          }
-        : entry,
-    );
-  return mark(entries);
-}
 
 /**
  * A file's hash, as the save guard compares them.

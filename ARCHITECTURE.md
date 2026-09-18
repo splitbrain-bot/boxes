@@ -162,7 +162,7 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `GET /api/sessions/:id/exec` | Commands already run on the session's current thread |
 | `POST /api/sessions/:id/threads/:threadId/exec` | The same, on the thread the path names |
 | `GET /api/sessions/:id/threads/:threadId/exec` | Commands already run on that thread |
-| `GET /api/sessions/:id/review/tree` | Tree, git status per path, comment counts, the workspace's repositories and the base — the whole left panel |
+| `GET /api/sessions/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
 | `GET /api/sessions/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
 | `PUT /api/sessions/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
 | `PUT /api/sessions/:id/review/annotations` | Creates or replaces one line's comment |
@@ -1669,24 +1669,32 @@ comparing its answer against a raw path silently loses git for every session of
 any deployment whose workspace path has a linked component. Pruning that list
 means a repository deliberately cloned into `vendor/` is not found, which is
 the right trade against an agent's `npm install`; the files in it are still
-listed, by whichever repository encloses them. The map is cached per session
-and rediscovered by the tree fetch.
+listed, by whichever repository encloses them. The map is part of the git
+snapshot below, retaken when a reader arrives.
 
-**The tree** is merged from each repository's `ls-files` with its own prefix
-prepended, a walk of the space no repository claims, and the files each
-repository's status reports as deleted. One filter runs over all of it: an
-entry contributed by repository `P` for path `p` is dropped when
-`repoFor(P + '/' + p) !== P`. That single rule makes the repositories a
-partition of the workspace rather than overlapping views of it — it is what
-stops an outer repository's `--others` reporting an inner work tree as one
-nameless `inner/` row, and what stops the duplicate once the inner repository
-contributes the same files. The merged list is sorted before the entry cap, so
-a truncated tree is deterministic rather than "whichever repository was read
-first". Inside a repository the tree lists what git lists, so the project's
-own ignore rules are the only ones applied and a committed `vendor/` or
-`dist/` shows; outside one, where nobody has said what is noise, every loose
-file shows. Binary files are left out either way, and the walk steps over a
-version control system's metadata.
+**The tree arrives a folder at a time.** Opening one is a single request that
+answers with its children: each file with its git status and how many comments
+it holds, each folder with whether its subtree holds a changed file and whether
+it holds a commented one. The folder marks are what make a collapsed branch
+usable as a list of where to look, and they are a prefix check over a map the
+server already has rather than anything the browser has to be given the whole
+of. A directory the change emptied still lists the files it removed, merged in
+from that same map, because a deleted file has no entry on disk to be found
+under.
+
+One read of the workspace is one `readdirSync` of one directory. Every file a
+person could read is listed wherever it sits: binaries are left out, and so is
+a version control system's own metadata and the review's own file at the root,
+and nothing else. A directory carries its own cap, so no single answer can be
+large, and says when it hit it.
+
+**Git's answer is taken once and shared.** The repositories, what they are
+compared against and the status of every path are one snapshot per review,
+retaken when the reader arrives rather than when a folder is opened. Git is a
+`docker exec` into the session's container, so a status per folder click would
+be a round trip per click; a snapshot makes opening a folder cost one directory
+read and nothing else. Writing a file or moving the base takes a fresh one,
+because both change what git would say.
 
 **One base expression, resolved per repository.** `main` means main-in-each,
 through the merge base with that repository's own HEAD. A repository the
@@ -1716,8 +1724,9 @@ executable bit off.
 That the agent may be writing the same file is expected rather than guarded
 against: the box runs while the review is open, and 412 plus "save anyway" is
 the whole mechanism. Editing needs no new containment — the path goes through
-the same tree check and the same `resolveInRoot` as a read, so `REVIEW.md`
-itself, an ignored file and a symlink out are all the same 404 they were.
+the same rule about what may be listed and the same `resolveInRoot` as a read,
+asked of the one path rather than looked up in a listing, so `REVIEW.md`
+itself, a binary and a symlink out are all the same 404 they were.
 
 **A review needs the box.** File content is read here, but git runs inside the
 session's own container, so any endpoint that asks git something starts a
@@ -1728,13 +1737,12 @@ free; what it buys is that a repository can only ever run its own code in its
 own box.
 
 **Freshness is the fetch.** There is no poll and no fingerprint endpoint. Every
-review fetch already reads the filesystem on the spot — the tree endpoint runs
-`ls-files` and `status` per request, the file endpoint reads the file, and
-drift recomputes on both — so what matters is being fresh *on arrival*, and
-arrival is three moments: the view mounting, a file closing back to the tree,
-and the tab becoming visible again. The last of those is skipped while a
-composer is open, a write is in flight, or the pane holds unsaved edits, which
-is the one piece of the poll's logic worth keeping. Edit mode is the case that
+review fetch reads the filesystem on the spot, and an arrival says so, which is
+what retakes git's snapshot and reruns drift — so what matters is being fresh
+*on arrival*, and arrival is three moments: the view mounting, a file closing
+back to the tree, and the tab becoming visible again. The last of those is
+skipped while a composer is open, a write is in flight, or the pane holds
+unsaved edits, which is the one piece of the poll's logic worth keeping. Edit mode is the case that
 matters most: switching apps and coming back is how a phone returns to a
 review, and a buffer is a whole file of work to lose to a refetch.
 
@@ -1755,8 +1763,9 @@ tens of thousands of directories.
 **Drift** ports from the desktop tool as-is: each annotation stores three lines
 of context above and below the annotated line, and a check compares the stored
 context against the current source, relocating on an exact match elsewhere and
-marking `(outdated)` when it is gone. It runs on a file fetch and, across every
-annotated file, on a tree fetch.
+marking `(outdated)` when it is gone. It runs on a file fetch, and across every
+annotated file when a reader arrives and after a comment is written. Opening a
+folder runs neither it nor git.
 
 **Two invariants, one file each**, because the orchestrator now reads a tree
 the agent controls:

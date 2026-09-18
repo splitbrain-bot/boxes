@@ -37,6 +37,7 @@ import {
   saveFile,
   setBase,
   setDirty,
+  toggleDir,
   useReview,
 } from '../stores/review.ts';
 
@@ -76,7 +77,8 @@ export function SessionReview() {
   const location = useLocation();
   const path = params.get('path');
 
-  const { tree, file, loadingTree, loadingFile, error, composing, saving } = useReview();
+  const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
+    useReview();
   const { sessions } = useSessions();
   const session = sessions.find((s) => s.id === id);
 
@@ -552,26 +554,26 @@ export function SessionReview() {
               {/* Which repository the open file belongs to, rather than a root
                   the review no longer has. A file no repository claims says
                   so, since that is why it has no statuses and no markers. */}
-              {file ? ` · ${whichRepo(file.repo, tree?.repos ?? [])}` : ''}
-              {tree && !tree.hasGit ? ' · no git' : ''}
+              {file ? ` · ${whichRepo(file.repo, facts?.repos ?? [])}` : ''}
+              {facts && !facts.hasGit ? ' · no git' : ''}
               {/* Which base is active belongs in the status line, the way the
                   desktop tool's does: it changes what every colour in the tree
                   and every marker in the gutter means. One expression resolves
                   separately in each repository, so where it landed is part of
                   what it means. */}
-              {tree?.base.rev
-                ? ` · vs ${tree.base.rev}${resolvedIn(tree.repos)}`
-                : tree?.hasGit
+              {facts?.base.rev
+                ? ` · vs ${facts.base.rev}${resolvedIn(facts.repos)}`
+                : facts?.hasGit
                   ? ' · vs working tree'
                   : ''}
             </span>
           </div>
 
           {/* Only where there is a repository to compare in. */}
-          {tree?.hasGit ? (
+          {facts?.hasGit ? (
             <BasePicker
-              base={tree.base}
-              repos={tree.repos}
+              base={facts.base}
+              repos={facts.repos}
               busy={saving}
               onSet={(rev) => void setBase(rev)}
             />
@@ -581,7 +583,7 @@ export function SessionReview() {
               a file of the project the agent is working on, so handing it over is
               one line of prompt rather than an export. Staged in the composer,
               not sent — the reviewer decides when to ask. */}
-          {tree && Object.keys(tree.counts).length > 0 ? (
+          {facts && facts.commentCount > 0 ? (
             <Button
               type="button"
               variant="outline"
@@ -599,7 +601,7 @@ export function SessionReview() {
             </Button>
           ) : null}
 
-          {tree?.hasReview ? (
+          {facts?.hasReview ? (
             <Button
               type="button"
               variant="ghost"
@@ -631,8 +633,14 @@ export function SessionReview() {
             file ? 'hidden' : 'w-full',
           )}
         >
-          {tree ? (
-            <ReviewTree tree={tree} activePath={file?.path ?? null} onOpen={openPath} />
+          {dirs[''] ? (
+            <ReviewTree
+              dirs={dirs}
+              expanded={expanded}
+              activePath={file?.path ?? null}
+              onOpen={openPath}
+              onToggle={toggleDir}
+            />
           ) : loadingTree ? (
             <p className="px-3 py-4 text-sm text-muted-foreground">Loading…</p>
           ) : error ? null : (

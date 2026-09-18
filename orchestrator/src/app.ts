@@ -555,22 +555,32 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    * agent controls. So a route that asks git something starts a stopped box,
    * and reviewing keeps it running.
    *
-   * The responses are batched so a client gets one round trip per screen:
-   * the tree endpoint carries the whole left panel, the file endpoint the
-   * whole file view.
+   * The responses are batched so a client gets one round trip per screen: the
+   * directory endpoint carries a folder and everything the left panel needs
+   * around it, the file endpoint the whole file view.
    *
    * A route that asks git something marks the session active, the same way a
    * local command does: running git in the box is use of the box, and the
    * reaper stopping one under an open review would only be followed by the
    * next request starting it again.
    *
-   * Every one reads the filesystem on the spot, so a fetch is the freshness
-   * and there is nothing to poll.
+   * Every one reads the filesystem on the spot and there is nothing to poll, so
+   * a fetch is the freshness. Git is the exception: its answer for the whole
+   * workspace is held for as long as a review is being browsed, and the browser
+   * asks for a new one when it arrives.
    */
 
-  app.get('/api/sessions/:id/review/tree', async (req) => {
+  /**
+   * One directory of the review, with the facts the whole view needs.
+   *
+   * `path` is workspace-relative and empty for the root. `fresh` is the browser
+   * saying it has arrived rather than opened a folder: it takes git's answer
+   * for the workspace again and runs the drift check.
+   */
+  app.get('/api/sessions/:id/review/dir', async (req) => {
     const { id } = req.params as { id: string };
-    return review.tree(id);
+    const { path, fresh } = req.query as { path?: string; fresh?: string };
+    return review.dir(id, path ?? '', fresh === '1');
   });
 
   app.get('/api/sessions/:id/review/file', async (req) => {

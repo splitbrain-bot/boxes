@@ -1,37 +1,36 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
 import type { RepoMap } from './repos.ts';
 
 /**
- * The file tree a review browses.
+ * The file tree a review browses, one directory at a time.
  *
- * A port of the desktop tool's `internal/filetree`, with one addition the
- * desktop tool does not need: an entry cap, because a Boxes workspace can hold
- * an agent's whole dependency tree, and a phone on a slow link is the client.
+ * Opening a folder is one `readdirSync` of that folder plus a scan of the two
+ * maps a review holds: git status per path, and comment count per path. So the
+ * cost of a folder is the size of that folder, and a dependency tree beside the
+ * code costs nothing until somebody opens it.
  *
- * `buildTree` is pure and takes a flat path list. `walkPaths` is the one
- * function here that touches the filesystem.
- *
- * The tree is every file under the workspace that a person could read,
- * whether git tracks it, ignores it, or has never seen it: one walk of the
- * whole workspace, stepping over version-control metadata and Boxes' own
- * scratch, leaving out binaries. Git contributes only what the walk cannot
- * find, which is a file the change deleted.
+ * What is listed is every file under the workspace that a person could read,
+ * whether git tracks it, ignores it, or has never seen it. The listing steps
+ * over version-control metadata and Boxes' own scratch and leaves out binaries.
+ * Git contributes only what a directory cannot show, which is a file the change
+ * deleted.
  */
 
 /** The annotation file, written at the workspace root. Not part of the review. */
 export const REVIEW_FILE = 'REVIEW.md';
 
 /**
- * Directory names the walk steps over, because they hold nothing a person
+ * Directory names the listing steps over, because they hold nothing a person
  * reviews: a version control system's own metadata, and Boxes' scratch inside
  * a workspace, which holds the files the user attached to a prompt.
  */
-const UNWALKED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
+const SKIPPED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
 
 /**
  * File extensions taken as binary, lowercased and with the dot. A file with
- * one of them is left out of the tree.
+ * one of them is left out of the listing.
  */
 const IGNORED_EXTS = new Set([
   '.exe',
@@ -48,29 +47,20 @@ const IGNORED_EXTS = new Set([
 ]);
 
 /**
- * How many entries a tree may hold before it is cut short.
+ * How many entries one directory may hold before the rest are left out.
  *
- * A truncated tree is still usable: the paths that made it in are browsable,
- * and the response says it was cut.
+ * A generated directory with more of them in it than this is one no phone can
+ * paint anyway, and the cap is per directory rather than over the whole
+ * workspace, so a huge folder costs the reviewer that folder and nothing else.
  */
-export const MAX_ENTRIES = 20_000;
+export const MAX_DIR_ENTRIES = 2000;
 
-/** One file or directory in the tree. */
-export interface TreeEntry {
+/** One child of a directory, as the filesystem reports it. */
+export interface DirChild {
+  /** Its own name inside the directory. */
   name: string;
-  /** Path relative to the workspace, slash-separated. */
-  path: string;
+  /** True for a directory. */
   isDir: boolean;
-  /** Absent for files. */
-  children?: TreeEntry[];
-  /** True on the directory a repository is rooted at. Absent everywhere else. */
-  repo?: boolean;
-}
-
-/** A built tree, and whether the entry cap cut it short. */
-export interface Tree {
-  entries: TreeEntry[];
-  truncated: boolean;
 }
 
 /**
@@ -83,185 +73,167 @@ function isBinary(path: string): boolean {
   return dot > 0 && IGNORED_EXTS.has(name.slice(dot).toLowerCase());
 }
 
-/** A node while a tree is being assembled. */
-interface Node {
-  entry: TreeEntry;
-  children: Map<string, Node>;
-}
-
-/** Builds a tree from a flat list of file paths, relative and slash-separated. */
-export function buildTree(paths: string[]): TreeEntry[] {
-  const root: Node = { entry: { name: '', path: '', isDir: true }, children: new Map() };
-
-  for (const path of paths) {
-    const parts = path.split('/');
-    let current = root;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i]!;
-      if (i === parts.length - 1) {
-        if (!current.children.has(part)) {
-          current.children.set(part, {
-            entry: { name: part, path, isDir: false },
-            children: new Map(),
-          });
-        }
-      } else {
-        let next = current.children.get(part);
-        if (!next) {
-          next = {
-            entry: { name: part, path: parts.slice(0, i + 1).join('/'), isDir: true },
-            children: new Map(),
-          };
-          current.children.set(part, next);
-        }
-        current = next;
-      }
-    }
-  }
-
-  return collect(root);
+/** Whether any segment of a path names a directory the listing steps over. */
+function inSkippedDir(path: string): boolean {
+  return path.split('/').some((segment) => SKIPPED_DIRS.has(segment));
 }
 
 /**
- * Turns assembled nodes into entries: directories first, then names in order,
- * and an empty directory dropped rather than shown.
+ * Whether the review lists a file at this workspace-relative path.
+ *
+ * The listing's own rule, asked about one path: not inside version-control
+ * metadata or Boxes' scratch, not the review's own file at the workspace root,
+ * and not a binary nobody can read. This is what the file endpoint serves by,
+ * so it offers exactly what a directory offered. Containment is fs.ts's and
+ * this says nothing about it.
  */
-function collect(node: Node): TreeEntry[] {
-  const result: TreeEntry[] = [];
-  for (const child of node.children.values()) {
-    if (child.entry.isDir) {
-      const children = collect(child);
-      if (children.length === 0) continue;
-      child.entry.children = children;
-    }
-    result.push(child.entry);
-  }
-  result.sort((a, b) => {
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-  });
-  return result;
+export function listedFile(relPath: string): boolean {
+  return !inSkippedDir(relPath) && relPath !== REVIEW_FILE && !isBinary(relPath);
 }
 
 /**
- * Walks a directory into a path list.
+ * Whether the review browses a directory at this workspace-relative path.
  *
- * Every file is listed whatever git thinks of it: a tracked one, an untracked
- * one and one the project's ignore rules cover are all things a person may
- * need to read. The walk steps over {@link UNWALKED_DIRS} and leaves out
- * binaries, and nothing else. `skipDir` is asked about every directory before
- * it is descended into, the root included, for a caller with a reason of its
- * own to stay out of one.
- *
- * Directories are read with `withFileTypes`, and a symlink is skipped rather
- * than followed: the tree is agent-controlled, and a link to `/` would
- * otherwise be walked. Reading the file it points at is fs.ts's decision, and
- * it refuses.
+ * The same rule without the file parts: a directory is not the review file,
+ * and its name is not read for an extension — `assets.zip` is a fine name for
+ * a folder.
  */
-export function walkPaths(
-  root: string,
-  cap: number = MAX_ENTRIES,
-  skipDir: (relDir: string) => boolean = () => false,
-): { paths: string[]; truncated: boolean } {
-  const paths: string[] = [];
-  let truncated = false;
+export function listedDir(relDir: string): boolean {
+  return !inSkippedDir(relDir);
+}
 
-  const walk = (absDir: string, relDir: string): void => {
-    if (truncated || skipDir(relDir)) return;
-    let entries;
-    try {
-      entries = readdirSync(absDir, { withFileTypes: true });
-    } catch {
-      return; // unreadable directory: skipped, not fatal
-    }
-    for (const entry of entries) {
-      if (paths.length >= cap) {
-        truncated = true;
-        return;
-      }
-      const name = entry.name;
+/**
+ * Reads one directory of the workspace into its children.
+ *
+ * Read with `withFileTypes`, and a symlink is neither listed nor followed: the
+ * tree is agent-controlled, and a link to `/` would otherwise be browsable.
+ * Reading the file it points at is fs.ts's decision, and it refuses. A
+ * directory that cannot be read lists nothing rather than failing.
+ */
+export function readDir(root: string, relDir: string): DirChild[] {
+  let entries;
+  try {
+    entries = readdirSync(relDir === '' ? root : join(root, relDir), { withFileTypes: true });
+  } catch {
+    return []; // unreadable directory: empty, not fatal
+  }
+
+  const children: DirChild[] = [];
+  for (const entry of entries) {
+    const name = entry.name;
+    if (entry.isDirectory()) {
+      if (SKIPPED_DIRS.has(name)) continue;
+      children.push({ name, isDir: true });
+    } else if (entry.isFile()) {
       // Only the one at the root: a REVIEW.md deeper in the tree is a file of
       // the project under review like any other.
       if (relDir === '' && name === REVIEW_FILE) continue;
-      const rel = relDir === '' ? name : `${relDir}/${name}`;
-
-      if (entry.isDirectory()) {
-        if (UNWALKED_DIRS.has(name)) continue;
-        walk(join(absDir, name), rel);
-      } else if (entry.isFile()) {
-        if (isBinary(rel)) continue;
-        paths.push(rel);
-      }
-      // Anything else — a symlink, a socket, a device — is not walked and not
-      // listed. Following one would leave the tree.
+      if (isBinary(name)) continue;
+      children.push({ name, isDir: false });
     }
-  };
-
-  walk(root, '');
-  return { paths, truncated };
-}
-
-/**
- * One workspace-relative tree: a walk of the whole workspace.
- *
- * The repositories play no part in what is listed. A walk finds every file
- * once, so nothing has to be merged or deduplicated, and a file inside a
- * repository shows whether or not the project's ignore rules cover it. The
- * map is here for where the workspace is.
- *
- * The list is sorted before the cap is applied, so a truncated tree is
- * deterministic.
- */
-export async function reviewTree(map: RepoMap): Promise<Tree> {
-  const walked = walkPaths(map.workspace, MAX_ENTRIES);
-  const paths = walked.paths.filter((path) => path !== REVIEW_FILE).sort();
-  const truncated = walked.truncated || paths.length > MAX_ENTRIES;
-  return {
-    entries: buildTree(truncated ? paths.slice(0, MAX_ENTRIES) : paths),
-    truncated,
-  };
-}
-
-/**
- * Marks the directories repositories are rooted at, in place.
- *
- * Separate from building the tree because {@link withDeleted} rebuilds it, and
- * a mark that had to survive a rebuild would have to be threaded through
- * `buildTree` — which is pure, takes paths, and is the better for knowing
- * nothing about repositories.
- */
-export function markRepoRoots(entries: TreeEntry[], map: RepoMap): TreeEntry[] {
-  for (const entry of entries) {
-    if (!entry.isDir) continue;
-    if (map.at(entry.path) !== null) entry.repo = true;
-    markRepoRoots(entry.children ?? [], map);
+    // Anything else — a symlink, a socket, a device — is not listed.
+    // Following one would leave the tree.
   }
-  return entries;
+  return children;
 }
 
 /**
- * Puts the files a change removed back into the tree.
+ * One directory of the review, as the API reports it.
  *
- * Neither `git ls-files` nor a walk can name a file that is no longer on disk,
- * so without this a deletion is the one kind of change a review cannot show —
- * and once it is committed, the file leaves the tree the moment it starts to
- * matter. The paths come from the status map, which reports a deletion whether
- * it is staged, unstaged or committed against the base.
+ * Merges three things into one list: the children on disk, the review's git
+ * statuses and its comment counts. A file carries its own status and its own
+ * count. A folder carries what its whole subtree holds — whether git reports
+ * something in it changed, and whether the review has a comment in it — which
+ * is a prefix scan of the two maps rather than a walk of the folder.
+ *
+ * A directory read can only name what is on disk, so a file the change deleted
+ * is merged in from the status map instead. That is also where a folder with
+ * nothing left in it comes from: the change emptied it, and the files it held
+ * are still part of what is under review.
+ *
+ * Folders come first, then files, each in name order.
  */
-export function withDeleted(entries: TreeEntry[], deleted: string[]): TreeEntry[] {
-  const paths = treePaths(entries);
-  const gone = deleted.filter(
-    (path) => !paths.has(path) && path !== REVIEW_FILE && !isBinary(path),
+export function dirEntries(
+  relDir: string,
+  children: DirChild[],
+  statuses: Record<string, ReviewFileStatus>,
+  counts: Map<string, number>,
+  map: RepoMap,
+): ReviewDirEntry[] {
+  const prefix = relDir === '' ? '' : `${relDir}/`;
+  const folders = new Map<string, ReviewDirEntry>();
+  const files = new Map<string, ReviewDirEntry>();
+
+  for (const child of children) {
+    const entry: ReviewDirEntry = {
+      name: child.name,
+      path: prefix + child.name,
+      isDir: child.isDir,
+    };
+    (child.isDir ? folders : files).set(child.name, entry);
+  }
+
+  for (const [path, status] of Object.entries(statuses)) {
+    const rest = under(prefix, path);
+    if (rest === null) continue;
+    const slash = rest.indexOf('/');
+    if (slash === -1) {
+      let file = files.get(rest);
+      if (!file) {
+        if (status !== 'deleted' || !listedFile(path)) continue;
+        file = { name: rest, path, isDir: false };
+        files.set(rest, file);
+      }
+      file.status = status;
+    } else {
+      const name = rest.slice(0, slash);
+      let folder = folders.get(name);
+      if (!folder) {
+        if (status !== 'deleted') continue;
+        folder = { name, path: prefix + name, isDir: true };
+        folders.set(name, folder);
+      }
+      folder.changed = true;
+    }
+  }
+
+  for (const [path, count] of counts) {
+    const rest = under(prefix, path);
+    if (rest === null) continue;
+    const slash = rest.indexOf('/');
+    if (slash === -1) {
+      const file = files.get(rest);
+      if (file) file.comments = count;
+    } else {
+      const folder = folders.get(rest.slice(0, slash));
+      if (folder) folder.commented = true;
+    }
+  }
+
+  for (const folder of folders.values()) {
+    if (map.at(folder.path) !== null) folder.repo = true;
+  }
+
+  return [...sorted(folders), ...sorted(files)];
+}
+
+/** What is left of a path under a directory prefix, or null when it is elsewhere. */
+function under(prefix: string, path: string): string | null {
+  if (prefix === '') return path;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+}
+
+/** The entries of one kind, in name order. */
+function sorted(entries: Map<string, ReviewDirEntry>): ReviewDirEntry[] {
+  return [...entries.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
-  if (gone.length === 0) return entries;
-  return buildTree([...paths, ...gone]);
 }
 
-/** Every file path in a tree, for validating a client-supplied path against it. */
-export function treePaths(entries: TreeEntry[], into: Set<string> = new Set()): Set<string> {
-  for (const entry of entries) {
-    if (entry.isDir) treePaths(entry.children ?? [], into);
-    else into.add(entry.path);
-  }
-  return into;
+/** Whether the change deleted a file somewhere under a directory. */
+export function holdsDeleted(statuses: Record<string, ReviewFileStatus>, relDir: string): boolean {
+  const prefix = `${relDir}/`;
+  return Object.entries(statuses).some(
+    ([path, status]) => status === 'deleted' && path.startsWith(prefix),
+  );
 }

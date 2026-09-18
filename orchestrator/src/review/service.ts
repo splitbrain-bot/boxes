@@ -2,10 +2,9 @@ import { join } from 'node:path';
 import type {
   ReviewAnnotation,
   ReviewBaseResponse,
+  ReviewDirResponse,
   ReviewFileResponse,
-  ReviewFileStatus,
   ReviewRepo,
-  ReviewTreeResponse,
 } from '../../../shared/types.ts';
 import type { Db, SessionRow } from '../db.ts';
 import { HttpError } from '../http-error.ts';
@@ -46,12 +45,14 @@ import {
   type Review,
 } from './store.ts';
 import {
-  markRepoRoots,
+  dirEntries,
+  holdsDeleted,
+  listedDir,
+  listedFile,
+  MAX_DIR_ENTRIES,
+  readDir,
   REVIEW_FILE,
-  reviewTree,
-  treePaths,
-  withDeleted,
-  type TreeEntry,
+  type DirChild,
 } from './tree.ts';
 
 /**
@@ -82,6 +83,23 @@ import {
  * stopped, and the box stays counted as in use while the review is open.
  */
 
+/**
+ * What one review last learned from git, held for as long as it is browsed.
+ *
+ * Taken for the whole workspace in one pass, because every directory answer is
+ * a slice of it and git runs a container away.
+ */
+interface GitSnapshot {
+  /** When it was taken, which is what its lifetime is measured from. */
+  at: number;
+  /** The repositories the workspace held, and which of them owns a path. */
+  map: RepoMap;
+  /** The same repositories as the API reports them. */
+  repos: ReviewRepo[];
+  /** The git status of every changed file in the workspace, by path. */
+  statuses: FileStatuses;
+}
+
 /** What the review needs of the sessions it is a view onto. */
 export interface ReviewSessions {
   /** Where a session's files are, or null while it is still volume-backed. */
@@ -104,26 +122,8 @@ export class ReviewService {
    */
   private readonly locks = new Map<string, Promise<unknown>>();
 
-  /**
-   * The paths a session's tree lists, briefly remembered.
-   *
-   * A path is validated against the tree rather than merely against the
-   * workspace, so the file endpoint serves exactly what the browser was
-   * offered and no binary or metadata the tree leaves out. Building the tree
-   * costs a walk of the workspace plus a status per repository, and opening a file almost
-   * always follows a tree fetch — so it is cached for a few seconds rather
-   * than rebuilt per request.
-   */
-  private readonly treePaths = new Map<string, { at: number; paths: Set<string> }>();
-
-  /**
-   * The repositories a session's workspace holds, as last discovered.
-   *
-   * Rediscovered by the tree fetch and reused by everything else. Fetches are
-   * the clock: `GET /review/tree` walks again, and a file open, a comment and
-   * a base change all reuse what it left.
-   */
-  private readonly repoMaps = new Map<string, RepoMap>();
+  /** What each open review last learned from git, by session id. */
+  private readonly snapshots = new Map<string, GitSnapshot>();
 
   constructor(
     private readonly db: Db,
@@ -132,8 +132,14 @@ export class ReviewService {
 
   // --- the workspace and its repositories -----------------------------------
 
-  /** How long a remembered tree path set is reused. */
-  private static readonly TREE_CACHE_MS = 3000;
+  /**
+   * How long a git snapshot is reused when nothing has asked for a new one.
+   *
+   * Long enough that browsing a tree — a burst of folder taps — runs git once,
+   * which is the point of holding one at all. The arrivals below are the
+   * mechanism; this is the backstop behind them.
+   */
+  private static readonly SNAPSHOT_MS = 60_000;
 
   /** The session row, or a 404 by the same rule every other endpoint uses. */
   private row(id: string): SessionRow {
@@ -178,18 +184,37 @@ export class ReviewService {
     return { containerId: target.containerId, workspaceDir: target.workingDir };
   }
 
-  /** The repositories of a session's workspace, discovering them if none are held. */
-  private async repos(box: GitBox, id: string): Promise<RepoMap> {
-    const held = this.repoMaps.get(id);
-    if (held) return held;
-    return this.rediscover(box, id);
+  /**
+   * What a review knows from git: which repositories the workspace holds, what
+   * each is compared against, and the status of every changed file in it.
+   *
+   * Taken once for the whole workspace and reused, because git runs in the
+   * session's container — a status per folder tap would be a `docker exec` per
+   * tap. A directory answer is a slice of the map it holds.
+   *
+   * A new one is taken when `fresh` says the browser has just arrived (the view
+   * mounting, a file closing back to the tree, the tab coming back), when a
+   * save or a base change has moved what git would say, and when
+   * {@link SNAPSHOT_MS} has passed.
+   */
+  private async snapshot(box: GitBox, id: string, fresh: boolean): Promise<GitSnapshot> {
+    const held = this.snapshots.get(id);
+    if (!fresh && held && Date.now() - held.at < ReviewService.SNAPSHOT_MS) return held;
+
+    const map = await discoverRepos(this.workspace(id), box);
+    const bases = await resolveBases(box, map, this.baseRev(id));
+    const [repos, statuses] = await Promise.all([
+      this.describeRepos(box, map, bases),
+      workspaceStatuses(box, map, bases),
+    ]);
+    const taken: GitSnapshot = { at: Date.now(), map, repos, statuses };
+    this.snapshots.set(id, taken);
+    return taken;
   }
 
-  /** Walks the workspace again and keeps what it found. */
-  private async rediscover(box: GitBox, id: string): Promise<RepoMap> {
-    const map = await discoverRepos(this.workspace(id), box);
-    this.repoMaps.set(id, map);
-    return map;
+  /** Drops a session's git snapshot, for a change that moves what git says. */
+  private invalidate(id: string): void {
+    this.snapshots.delete(id);
   }
 
   /**
@@ -211,44 +236,42 @@ export class ReviewService {
   // --- reading --------------------------------------------------------------
 
   /**
-   * The whole left panel: tree, statuses, comment counts, repositories and base.
+   * One directory of the review: its children, and the facts the whole view
+   * needs.
    *
-   * This is also the fetch that rediscovers the repositories, because it is the
-   * one request that is always made when a review is looked at.
+   * Listing and status are one answer rather than two requests, because a file
+   * the change deleted has no directory entry at all and can only come from the
+   * status map. The folder badges come from the same map, as a prefix scan.
    *
-   * Drift runs here across every annotated file, because this is the response
-   * that decides which files the tree marks as commented, and a stale
-   * `(outdated)` in it would be visible. It is bounded by the number of
-   * annotated files, which a review has tens of, not thousands.
+   * `fresh` is the browser saying it has arrived rather than opened a folder —
+   * the view mounting, a file closing back to the tree, the tab coming back. It
+   * takes git's answer again and runs the drift check over every annotated
+   * file. Opening a folder runs neither, so it costs one directory read.
    */
-  async tree(id: string): Promise<ReviewTreeResponse> {
+  async dir(id: string, relDir: string, fresh: boolean): Promise<ReviewDirResponse> {
     const workspace = this.workspace(id);
     const box = await this.box(id);
-    const map = await this.rediscover(box, id);
-    const rev = this.baseRev(id);
-    const bases = await resolveBases(box, map, rev);
+    const taken = await this.snapshot(box, id, fresh);
 
-    const [listing, repos] = await Promise.all([
-      this.listing(box, map, bases),
-      this.describeRepos(box, map, bases),
-    ]);
+    const review = fresh
+      ? await this.driftAll(id, workspace)
+      : await this.withLock(id, () => this.read(this.reviewPath(workspace)));
+    const counts = annotationCounts(review);
 
-    const review = await this.driftAll(id, workspace);
-    const entries = markRepoRoots(listing.entries, map);
-    // The paths this response offers, remembered for the file open that
-    // almost always follows it.
-    this.rememberPaths(id, entries);
+    const children = this.children(workspace, relDir, taken.statuses);
+    const listed = dirEntries(relDir, children, taken.statuses, counts, taken.map);
+    const truncated = listed.length > MAX_DIR_ENTRIES;
 
     return {
-      repos,
-      hasGit: map.hasGit,
-      entries,
-      truncated: listing.truncated,
-      statuses: listing.statuses,
-      counts: Object.fromEntries(annotationCounts(review)),
-      base: { rev },
+      path: relDir,
+      entries: truncated ? listed.slice(0, MAX_DIR_ENTRIES) : listed,
+      truncated,
+      repos: taken.repos,
+      hasGit: taken.map.hasGit,
+      base: { rev: this.baseRev(id) },
       hasReview: fileHash(this.reviewPath(workspace)) !== '',
       started: review.started,
+      commentCount: [...counts.values()].reduce((total, count) => total + count, 0),
     };
   }
 
@@ -265,9 +288,9 @@ export class ReviewService {
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
     const workspace = this.workspace(id);
     const box = await this.box(id);
-    const map = await this.repos(box, id);
+    const { map } = await this.snapshot(box, id, false);
     const repo = map.repoFor(relPath);
-    const path = await this.resolveListed(box, workspace, id, relPath);
+    const path = await this.resolveFile(box, id, workspace, relPath);
     if (path === null) {
       return goneFile(relPath, repo, await this.annotationsOf(id, workspace, relPath));
     }
@@ -344,7 +367,8 @@ export class ReviewService {
     }
 
     const workspace = this.workspace(id);
-    const path = await this.resolveListed(await this.box(id), workspace, id, relPath);
+    const box = await this.box(id);
+    const path = await this.resolveFile(box, id, workspace, relPath);
     if (path === null) {
       throw new HttpError(409, 'This file was deleted, so there is nothing to save.');
     }
@@ -365,6 +389,9 @@ export class ReviewService {
     }
 
     writeFileAtomic(path, content);
+    // The write moved this file's status, so what the snapshot says about the
+    // workspace is one file out of date.
+    this.invalidate(id);
     return this.file(id, relPath);
   }
 
@@ -383,17 +410,19 @@ export class ReviewService {
     if (text.length > 20_000) throw new HttpError(400, 'comment is too long');
 
     const workspace = this.workspace(id);
-    // The path has to name a file of the tree, not merely resolve inside it:
-    // an annotation on something the tree never listed could never be shown.
-    const path = await this.resolveListed(await this.box(id), workspace, id, relPath);
+    // The path has to name a file the review lists, not merely resolve inside
+    // the workspace: a comment on something no directory offers could never be
+    // shown.
+    const path = await this.resolveFile(await this.box(id), id, workspace, relPath);
     if (path === null) {
       throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
     }
     const source = fileLines(readTextFile(path).content);
 
-    return this.mutate(id, workspace, relPath, (review) => {
+    await this.mutate(id, workspace, relPath, (review) => {
       setAnnotation(review, relPath, line, text, source);
     });
+    return this.drifted(id, workspace, relPath);
   }
 
   /** Removes the comment on one line, and returns what is left for the file. */
@@ -402,9 +431,27 @@ export class ReviewService {
       throw new HttpError(400, 'line must be a positive integer');
     }
     const workspace = this.workspace(id);
-    return this.mutate(id, workspace, relPath, (review) => {
+    await this.mutate(id, workspace, relPath, (review) => {
       deleteAnnotation(review, relPath, line);
     });
+    return this.drifted(id, workspace, relPath);
+  }
+
+  /**
+   * Runs the drift check over the whole review and answers with one file's
+   * comments as they then stand.
+   *
+   * What a comment write ends with. It is one of the two places an `(outdated)`
+   * is decided — the three arrivals are the other — and the comments the
+   * reviewer is looking at are the ones that just moved.
+   */
+  private async drifted(
+    id: string,
+    workspace: string,
+    relPath: string,
+  ): Promise<ReviewAnnotation[]> {
+    const review = await this.driftAll(id, workspace);
+    return toAnnotations(annotationsFor(review, relPath));
   }
 
   /**
@@ -436,9 +483,11 @@ export class ReviewService {
     // repository map would otherwise answer for a session that has none.
     this.workspace(id);
     const box = await this.box(id);
-    const map = await this.repos(box, id);
+    const { map } = await this.snapshot(box, id, false);
     if (rev === null || rev.trim() === '') {
       this.db.prepare('UPDATE sessions SET review_base_rev = NULL WHERE id = ?').run(id);
+      // Every status the snapshot holds was an answer about the old base.
+      this.invalidate(id);
       return { rev: '', repos: await this.describeRepos(box, map, new Map()) };
     }
     const wanted = rev.trim();
@@ -458,6 +507,7 @@ export class ReviewService {
     }
 
     this.db.prepare('UPDATE sessions SET review_base_rev = ? WHERE id = ?').run(wanted, id);
+    this.invalidate(id);
     return { rev: wanted, repos: await this.describeRepos(box, map, bases) };
   }
 
@@ -640,92 +690,70 @@ export class ReviewService {
   // --- paths ----------------------------------------------------------------
 
   /**
-   * Resolves a client-supplied path, requiring that the tree lists it.
+   * Resolves a client-supplied path to a file the review offers.
    *
-   * `resolveInRoot` is the security boundary; this is the narrower rule that
-   * the API serves what the browser was shown. Containment is against
-   * `/workspace`, so a contained path may be in any repository it holds, or in
-   * none. Every refusal is the same 404, so an escape attempt learns nothing
-   * an unknown file would not have told it.
+   * Two rules. {@link listedFile} is the one a directory listing applies, so
+   * the API serves what the browser was offered and no binary or metadata a
+   * listing leaves out — asked of the one path, rather than by rebuilding a
+   * listing to look in. `resolveInRoot` is the security boundary, against
+   * `/workspace`, so a contained path may be in any repository it holds or in
+   * none. Every refusal is the same 404, so an escape attempt learns nothing an
+   * unknown file would not have told it.
    *
-   * Null is not a refusal: the tree lists the path and the working tree does
-   * not have it, which is a file the change deleted. What to say about one is
-   * the caller's to decide.
+   * Null is not a refusal: the working tree does not have the file and git
+   * reports it deleted, which is a change the review shows. What to say about
+   * one is the caller's to decide.
    */
-  private async resolveListed(
+  private async resolveFile(
     box: GitBox,
-    workspace: string,
     id: string,
+    workspace: string,
     relPath: string,
   ): Promise<string | null> {
-    if (!(await this.listed(box, id)).has(relPath)) {
-      throw new HttpError(404, 'File not found');
-    }
+    if (!listedFile(relPath)) throw new HttpError(404, 'File not found');
+
     const resolved = resolveInRoot(workspace, relPath);
     if (resolved.ok) {
       if (isDirectory(resolved.path)) throw new HttpError(404, 'File not found');
       return resolved.path;
     }
-    if (resolved.reason === 'missing') return null;
-    throw new HttpError(404, 'File not found');
+    if (resolved.reason !== 'missing') throw new HttpError(404, 'File not found');
+
+    // Nothing on disk. Only git can tell a file the change removed from a path
+    // that was never there, and only the first of those is part of the review.
+    const { statuses } = await this.snapshot(box, id, false);
+    if (statuses[relPath] !== 'deleted') throw new HttpError(404, 'File not found');
+    return null;
   }
 
   /**
-   * The path set of a session's tree, rebuilt when the cached one is stale.
+   * The children of one directory of the workspace, or a 404.
    *
-   * The files a change deleted are in it, because the tree offers them: what
-   * this set decides is whether the API serves what the browser was shown.
+   * A directory the change emptied is off disk, and the files it held are still
+   * part of what is under review — so the status map is what says it is there,
+   * and {@link dirEntries} is what puts them back. Anything else the workspace
+   * does not have is a path the review does not offer.
    */
-  private async listed(box: GitBox, id: string): Promise<Set<string>> {
-    const cached = this.treePaths.get(id);
-    if (cached && Date.now() - cached.at < ReviewService.TREE_CACHE_MS) return cached.paths;
-    const map = await this.repos(box, id);
-    const bases = await resolveBases(box, map, this.baseRev(id));
-    return this.rememberPaths(id, (await this.listing(box, map, bases)).entries);
+  private children(
+    workspace: string,
+    relDir: string,
+    statuses: FileStatuses,
+  ): DirChild[] {
+    if (relDir === '') return readDir(workspace, '');
+    if (!listedDir(relDir)) throw new HttpError(404, 'Directory not found');
+
+    const resolved = resolveInRoot(workspace, relDir);
+    if (resolved.ok) {
+      if (!isDirectory(resolved.path)) throw new HttpError(404, 'Directory not found');
+      return readDir(workspace, relDir);
+    }
+    if (resolved.reason === 'missing' && holdsDeleted(statuses, relDir)) return [];
+    throw new HttpError(404, 'Directory not found');
   }
 
-  /**
-   * The tree a review browses, with the files a change deleted put back into
-   * it, and the statuses that named them.
-   *
-   * Only the statuses know a deleted file's path, so the two are built
-   * together — and the tree endpoint and {@link listed} offer exactly the same
-   * entries, which is what makes a path the browser was shown one the file
-   * endpoint serves.
-   */
-  private async listing(
-    box: GitBox,
-    map: RepoMap,
-    bases: Map<string, Base>,
-  ): Promise<{ entries: TreeEntry[]; statuses: FileStatuses; truncated: boolean }> {
-    const [tree, statuses] = await Promise.all([
-      reviewTree(map),
-      workspaceStatuses(box, map, bases),
-    ]);
-    return {
-      entries: withDeleted(tree.entries, deletedPaths(statuses)),
-      statuses,
-      truncated: tree.truncated,
-    };
-  }
-
-  /**
-   * Remembers the paths one set of tree entries offers, and hands them back.
-   *
-   * Both the tree endpoint and {@link listed} end up holding the same entries,
-   * so whichever of them ran most recently is the one the next file request is
-   * validated against.
-   */
-  private rememberPaths(id: string, entries: TreeEntry[]): Set<string> {
-    const paths = treePaths(entries);
-    this.treePaths.set(id, { at: Date.now(), paths });
-    return paths;
-  }
-
-  /** Drops a session's remembered tree and repositories, for a delete. */
+  /** Drops what a session's review holds, for a delete. */
   forget(id: string): void {
-    this.treePaths.delete(id);
-    this.repoMaps.delete(id);
+    this.snapshots.delete(id);
     this.locks.delete(id);
   }
 }
@@ -780,13 +808,6 @@ function sourceLines(workspace: string, relPath: string): string[] | null | unde
   } catch {
     return null;
   }
-}
-
-/** The paths a status map reports as gone from the working tree. */
-function deletedPaths(statuses: Record<string, ReviewFileStatus>): string[] {
-  return Object.entries(statuses)
-    .filter(([, status]) => status === 'deleted')
-    .map(([path]) => path);
 }
 
 /** One file's annotations, as the API reports them: a list, in line order. */
