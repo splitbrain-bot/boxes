@@ -546,6 +546,23 @@ history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
 
+A reconnect says how much it already holds, so it is sent only the rest. The
+browser names the last message the adapter itself gave an id to, in `_meta` on
+its `session/load`; the gateway takes the adapter's whole replay as it always
+did and forwards from that message onward. A message id is the anchor because
+it names a boundary between updates rather than a place inside one, and the
+model is only the updates folded in order, so a fold that starts at a boundary
+and a fold of everything reach the same thread. The named message is re-sent
+rather than skipped, because a socket can drop halfway through one.
+
+Every way that can fail ends in the whole thread. A browser with nothing the
+adapter named asks for no resume; a thread that was re-minted under it is not
+resumed; a replay that never names the point is sent whole; and a browser that
+no longer holds the message it named rebuilds from scratch. The answer —
+`_boxes/replay`, resumed or not — always reaches the browser before the first
+update of the replay, so it knows whether to keep what it has before anything
+arrives to fold into it.
+
 A replay is folded in silence and published once. The notifications are the
 same ones live streaming uses, so publishing each one would hand the view
 every intermediate state of a conversation it is in the middle of re-reading:
@@ -860,7 +877,8 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   copy. Replay is exempt: there the adapter is reading back history the
   gateway never saw.
 - **A replay goes only to the browser that asked for it, and silences only its
-  own thread.** `session/load` is by definition a re-send of the whole thread,
+  own thread.** `session/load` is by definition a re-send of the whole thread
+  to the gateway, whatever part of it the browser is then sent,
   so broadcasting it rendered every other open tab's conversation twice — but
   a replay of one thread must not hold back another thread's live updates,
   which is the bug two open tabs hit first. A replay one thread *borrowed*

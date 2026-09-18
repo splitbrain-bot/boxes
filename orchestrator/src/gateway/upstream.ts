@@ -28,7 +28,7 @@ import { Activity } from './activity.ts';
 import { BackgroundProbe, workToStop } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
-import type { TurnStateParams } from '../../../shared/types.ts';
+import { BOXES_META, type LoadMeta, type TurnStateParams } from '../../../shared/types.ts';
 
 /**
  * One persistent ACP client per session, connected to the adapter inside the
@@ -215,6 +215,21 @@ export const THREAD_NOT_FOUND = 'Thread not found';
 /** True when the adapter reported a missing thread rather than a failure. */
 function isResourceNotFound(err: unknown): boolean {
   return (err as { code?: number } | null)?.code === RESOURCE_NOT_FOUND;
+}
+
+/**
+ * The message a browser asked a `session/load` to be picked up after, or
+ * undefined when it asked for the thread whole.
+ *
+ * It travels in `_meta`, which ACP reserves for extensions and this gateway
+ * already reads its own options from. Anything but a non-empty string is read
+ * as no resume point, so a client that sends something else gets the whole
+ * thread rather than an argument.
+ */
+function resumePointOf(params: unknown): string | undefined {
+  const meta = (params as { _meta?: Record<string, unknown> } | null)?._meta;
+  const asked = (meta?.[BOXES_META] as LoadMeta | undefined)?.resumeFrom;
+  return typeof asked === 'string' && asked ? asked : undefined;
 }
 
 /**
@@ -1530,7 +1545,10 @@ export class UpstreamSession {
       this.activity.begin(thread);
       this.downstreams.beginPrompt(params);
     }
-    if (isLoad) this.downstreams.beginReplay(from, thread);
+    // What the browser already holds, so the replay it is about to be sent
+    // can start there. The adapter cannot be asked to start partway, so the
+    // whole of it still arrives here and only the tail goes out.
+    if (isLoad) this.downstreams.beginReplay(from, thread, { resumeFrom: resumePointOf(params) });
 
     try {
       const result = isLoad
@@ -1546,10 +1564,16 @@ export class UpstreamSession {
         const row = threadByAcpId(this.db, this.sessionId, thread);
         if (row && typeof modeId === 'string') setThreadMode(this.db, row.id, modeId);
       }
-      // A fork's own replay is empty until it has been prompted, so the
-      // conversation it branched from is replayed in its place — after its
-      // own, which is the part that answers the request.
-      if (isLoad) await this.replayInherited(thread, from);
+      if (isLoad) {
+        // The adapter has sent all of its replay, so the browser can be told
+        // how that turned out — before a borrowed replay, and before the
+        // queued questions the downstream flushes when this answers.
+        this.downstreams.settleReplay(from, thread);
+        // A fork's own replay is empty until it has been prompted, so the
+        // conversation it branched from is replayed in its place — after its
+        // own, which is the part that answers the request.
+        await this.replayInherited(thread, from);
+      }
       return result;
     } finally {
       if (isPrompt) {
@@ -1594,7 +1618,7 @@ export class UpstreamSession {
     const conn = this.conn;
     if (!source?.acp_session_id || !conn) return;
 
-    this.downstreams.beginReplay(to, source.acp_session_id, acpThreadId);
+    this.downstreams.beginReplay(to, source.acp_session_id, { as: acpThreadId });
     try {
       await this.whileReplaying(source.acp_session_id, () =>
         conn.agent.request('session/load', {

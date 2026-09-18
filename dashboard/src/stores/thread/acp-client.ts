@@ -1,4 +1,11 @@
-import { TURN_STATE_METHOD, type TurnStateParams } from '../../../../shared/types.ts';
+import {
+  BOXES_META,
+  REPLAY_METHOD,
+  TURN_STATE_METHOD,
+  type LoadMeta,
+  type ReplayParams,
+  type TurnStateParams,
+} from '../../../../shared/types.ts';
 import type {
   LoadSessionResponse,
   NewSessionResponse,
@@ -54,10 +61,22 @@ export interface AcpClientHandlers {
    */
   onTurnState(state: ThreadTurnState): void;
   /**
-   * A fresh connection is about to replay the thread, so whatever the store
-   * holds is stale and must be thrown away.
+   * Where a replay can be picked up from: the id of the last message the
+   * store holds that a replay will name again, or null when it has nothing
+   * to resume from and needs the thread whole.
+   *
+   * Asked once per handshake, before the load that carries the answer.
    */
-  onResetThread(): void;
+  resumePoint(): string | null;
+  /**
+   * A replay is starting. `resumed` says the gateway is sending only what
+   * follows the resume point, so what the store holds still stands. False
+   * says the whole thread is coming and what the store holds is stale.
+   *
+   * It arrives before the first replayed update either way, which is what
+   * lets the store decide once and fold everything after it the same way.
+   */
+  onReplay(resumed: boolean): void;
 }
 
 /** A JSON-RPC message, in either direction. */
@@ -73,13 +92,29 @@ interface RpcMessage {
 /** Waits between reconnect attempts, in milliseconds, then holds at the last. */
 const BACKOFF_MS = [500, 1000, 2000, 5000, 10_000];
 
-/** What a session/load asks for: the thread, and the workspace it runs in. */
-export function loadParams(sessionId: string): {
+/**
+ * What a session/load asks for: the thread, the workspace it runs in, and
+ * where a replay of it can start.
+ *
+ * `resumeFrom` names the last message the caller holds. It travels in
+ * `_meta`, which ACP reserves for extensions, so the gateway reads it and the
+ * adapter behind it ignores it. Left out, the load asks for the thread whole.
+ */
+export function loadParams(
+  sessionId: string,
+  resumeFrom?: string | null,
+): {
   sessionId: string;
   cwd: string;
   mcpServers: never[];
+  _meta?: Record<string, LoadMeta>;
 } {
-  return { sessionId, cwd: '/workspace', mcpServers: [] };
+  return {
+    sessionId,
+    cwd: '/workspace',
+    mcpServers: [],
+    ...(resumeFrom ? { _meta: { [BOXES_META]: { resumeFrom } } } : {}),
+  };
 }
 
 /** An error carrying a JSON-RPC error payload. */
@@ -206,6 +241,12 @@ export class AcpClient {
    * thread a connection is on is decided outside ACP, so the answer names
    * that thread and says nothing else about it. The replay, the modes and the
    * config options all come from the session/load that follows.
+   *
+   * The load says how much of the thread the store already has, so a
+   * reconnect is sent the tail rather than the whole conversation again. Only
+   * when the thread is the one this connection was already on: an id that has
+   * changed is a conversation that was re-minted under this connection, and
+   * nothing the store holds belongs to it.
    */
   private async handshake(): Promise<void> {
     try {
@@ -218,14 +259,19 @@ export class AcpClient {
         cwd: '/workspace',
         mcpServers: [],
       });
+      const resumeFrom =
+        created.sessionId === this.acpSessionId ? this.handlers.resumePoint() : null;
       this.acpSessionId = created.sessionId;
 
-      // Whatever this connection knew is about to be re-sent from the top.
-      this.handlers.onResetThread();
+      // Nothing to resume from means the thread is coming whole whatever the
+      // gateway answers, so the store is told now rather than waiting to be
+      // told the only thing this can be. A load that does name a point waits:
+      // only the gateway knows whether the point was there.
+      if (!resumeFrom) this.handlers.onReplay(false);
 
       const loaded = await this.request<LoadSessionResponse>(
         'session/load',
-        loadParams(created.sessionId),
+        loadParams(created.sessionId, resumeFrom),
       );
 
       this.attempt = 0;
@@ -276,6 +322,14 @@ export class AcpClient {
 
     if (msg.method === 'session/update') {
       this.handlers.onUpdate(msg.params as SessionNotification);
+      return;
+    }
+
+    if (msg.method === REPLAY_METHOD) {
+      const params = msg.params as Partial<ReplayParams> | undefined;
+      // Anything but an explicit yes is read as the whole thread coming,
+      // which is the answer that costs nothing to be wrong about.
+      this.handlers.onReplay(params?.resumed === true);
       return;
     }
 

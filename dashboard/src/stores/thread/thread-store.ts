@@ -17,6 +17,7 @@ import {
   emptyModel,
   findTool,
   messageOfTool,
+  truncateFrom,
   type Message,
   type ThreadModel,
 } from './translate.ts';
@@ -162,6 +163,15 @@ export class ThreadStore {
    * assembling itself.
    */
   private replaying = false;
+  /**
+   * The message this store last asked a replay to be picked up after, or null
+   * when it asked for the thread whole.
+   *
+   * Held because the question and its answer are two messages: the load
+   * carries the point, and the gateway says in its own notification whether
+   * it could be honoured.
+   */
+  private resumeAnchor: string | null = null;
 
   constructor(private readonly deps: ThreadStoreDeps) {
     this.snapshot = INITIAL_SNAPSHOT;
@@ -279,7 +289,11 @@ export class ThreadStore {
         this.backgroundUpstream = state.background;
         this.emit();
       },
-      onResetThread: () => this.reset(),
+      resumePoint: () => {
+        this.resumeAnchor = this.lastNamedMessage();
+        return this.resumeAnchor;
+      },
+      onReplay: (resumed) => (resumed ? this.resume() : this.reset()),
     });
     this.client.start();
   }
@@ -292,10 +306,11 @@ export class ThreadStore {
   }
 
   /**
-   * Throws away the model because a replay is about to rebuild it.
+   * Throws away the model because a replay of the whole thread is about to
+   * rebuild it.
    *
-   * A reconnect repeats the handshake, and session/load re-sends the whole
-   * history as notifications. Keeping what was there would double it.
+   * The gateway says so before the first of that replay arrives. Keeping what
+   * was there would double every message in it.
    *
    * What the view is showing is left alone until the replay has been read:
    * the model is what is stale, and blanking a conversation somebody is
@@ -321,6 +336,65 @@ export class ThreadStore {
     // A snapshot with no patch: what the thread is doing is re-derived — the
     // turn claim is gone and so are the open questions — while the messages,
     // the plan and the commands stay as they were until the replay lands.
+    this.emit();
+  }
+
+  /**
+   * The last message the adapter named, which is where a replay can be picked
+   * up. Null when there is none, and then the thread has to come whole.
+   *
+   * The adapter's own id and no other: a message this model numbered itself —
+   * one that opens with a tool call — and the echo of a local command are
+   * names only this browser knows, and a replay never says them back.
+   */
+  private lastNamedMessage(): string | null {
+    for (let i = this.model.messages.length - 1; i >= 0; i--) {
+      const message = this.model.messages[i]!;
+      if (message.named && !isExecMessage(message)) return message.id;
+    }
+    return null;
+  }
+
+  /**
+   * Takes the thread back to the resume point, because the replay about to
+   * arrive starts there.
+   *
+   * The message the point names goes, and everything after it, to be built
+   * again from what arrives. What is in front of it stays: that is the part
+   * the gateway is not sending, and re-reading a conversation the reader
+   * already has is what a resume exists to avoid.
+   *
+   * Folding the tail onto what is left produces the same model as folding the
+   * whole thread would, because the model is nothing but the updates applied
+   * in order and this is a cut across that order.
+   *
+   * A point nothing answers to leaves no place to join the tail to, so the
+   * thread is thrown away and rebuilt from what comes.
+   */
+  private resume(): void {
+    const dropped = this.resumeAnchor ? truncateFrom(this.model, this.resumeAnchor) : [];
+    if (dropped.length === 0) {
+      this.reset();
+      return;
+    }
+    // Local runs are not part of the transcript and no replay brings them
+    // back. They are taken out whole and put back by loadExecHistory once the
+    // connection is ready, which is also what re-orders them around the
+    // messages arriving now.
+    this.model.messages = this.model.messages.filter((m) => !isExecMessage(m));
+    this.views = new Map();
+    this.replayedExec.clear();
+    this.execFences.clear();
+    // The questions this store was showing were asked over the connection
+    // that has gone, and nobody is listening for the answers. The gateway
+    // puts the ones still open back after the replay.
+    this.failOpenApprovals();
+    for (const { part } of this.model.tools.values()) delete part.approval;
+    // Whatever was said about the thread belonged to that connection too; the
+    // gateway says it again after this replay.
+    this.speakingUpstream = false;
+    this.backgroundUpstream = [];
+    this.replaying = true;
     this.emit();
   }
 

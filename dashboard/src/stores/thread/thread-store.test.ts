@@ -32,10 +32,31 @@ class FakeClient {
   constructor(readonly handlers: AcpClientHandlers) {}
 
   start(): void {
-    this.handlers.onResetThread();
+    this.load();
     this.handlers.onState('ready');
     this.handlers.onReady(this.modes, this.configOptions);
   }
+
+  /**
+   * A session/load, as the handshake and a reconnect run one: the store is
+   * asked how much it has, and the gateway answers whether the replay picks
+   * up there. `resumes` is that answer.
+   */
+  load(): void {
+    const from = this.handlers.resumePoint();
+    this.resumePoints.push(from);
+    this.handlers.onReplay(this.resumes && from !== null);
+  }
+
+  /** The replay is over, which is what publishes what it built. */
+  finish(): void {
+    this.handlers.onReady(this.modes, this.configOptions);
+  }
+
+  /** Whether the next load is answered as a resume rather than a full replay. */
+  resumes = false;
+  /** The resume point each load asked for, in order. */
+  readonly resumePoints: Array<string | null> = [];
 
   modes: SessionModeState | null = null;
   configOptions: SessionConfigOption[] = [];
@@ -223,7 +244,7 @@ test('a replay drops the turn state it was told before it', () => {
   // A reconnect: the gateway re-states the thread after the replay, so
   // holding the old answer over one would claim a turn nobody has confirmed
   // and a task nobody has said is still running.
-  client.handlers.onResetThread();
+  client.handlers.onReplay(false);
   assert.equal(store.getSnapshot().isRunning, false);
   assert.deepEqual(store.getSnapshot().background, []);
 });
@@ -333,8 +354,9 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   for (const u of script) push(client, u);
   assert.equal(store.getSnapshot().messages.length, 2);
 
-  // What a fresh connection does: reset, then replay the same history.
-  client.handlers.onResetThread();
+  // What a fresh connection with nothing to resume from does: the gateway
+  // says the thread is coming whole, and the same history follows.
+  client.handlers.onReplay(false);
   // The conversation somebody is reading is not blanked to do that: the model
   // is what went stale, and the socket dropping is not news about the thread.
   assert.equal(store.getSnapshot().messages.length, 2);
@@ -931,4 +953,182 @@ test("an update that replaces a call's content replaces its images with it", () 
     parts.map((p) => p.image).filter(Boolean),
     ['data:image/png;base64,BBBB'],
   );
+});
+
+
+/** One named message of a transcript, as the adapter replays it. */
+function said(
+  role: 'user' | 'agent',
+  messageId: string,
+  text: string,
+): SessionUpdate {
+  return {
+    sessionUpdate: `${role}_message_chunk`,
+    messageId,
+    content: { type: 'text', text },
+  } as SessionUpdate;
+}
+
+/** The whole conversation these resume tests replay. */
+const TRANSCRIPT: SessionUpdate[] = [
+  said('user', 'msg_1', 'the first question'),
+  said('agent', 'msg_2', 'the first answer'),
+  said('user', 'msg_3', 'and while you were away'),
+  said('agent', 'msg_4', 'this came back'),
+];
+
+/** Every message as its id, role and text, which is what a reader sees. */
+function shapeOf(store: ThreadStore): Array<[string, string, string]> {
+  return store.getSnapshot().messages.map((m) => [
+    m.id,
+    m.role,
+    partsOf(m)
+      .map((p) => p.text ?? '')
+      .join(''),
+  ]);
+}
+
+test('a reconnect resumes from the last message the adapter named', () => {
+  const { store, client } = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
+
+  client.resumes = true;
+  client.load();
+  // What the browser holds up to is what it names, so the gateway can send
+  // the rest and nothing before it.
+  assert.deepEqual(client.resumePoints, [null, 'msg_2']);
+
+  // The tail as the gateway sends it: the message named, then what followed.
+  for (const u of TRANSCRIPT.slice(1)) push(client, u);
+  client.finish();
+
+  assert.deepEqual(shapeOf(store), [
+    ['msg_1', 'user', 'the first question'],
+    ['msg_2', 'assistant', 'the first answer'],
+    ['msg_3', 'user', 'and while you were away'],
+    ['msg_4', 'assistant', 'this came back'],
+  ]);
+});
+
+test('a resumed thread reads the same as one replayed whole', () => {
+  const resumed = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(resumed.client, u);
+  resumed.client.resumes = true;
+  resumed.client.load();
+  for (const u of TRANSCRIPT.slice(1)) push(resumed.client, u);
+  resumed.client.finish();
+
+  const whole = makeStore();
+  for (const u of TRANSCRIPT) push(whole.client, u);
+
+  // The model is the updates applied in order, and a resume is a cut across
+  // that order rather than a different way of reading it.
+  assert.deepEqual(shapeOf(resumed.store), shapeOf(whole.store));
+});
+
+test('a resume the gateway cannot honour rebuilds the thread from the top', () => {
+  const { store, client } = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
+
+  // The gateway looked for the point and did not find it — the transcript was
+  // compacted under this browser — so it sends the whole thread instead.
+  client.resumes = false;
+  client.load();
+  for (const u of TRANSCRIPT) push(client, u);
+  client.finish();
+
+  assert.deepEqual(shapeOf(store), [
+    ['msg_1', 'user', 'the first question'],
+    ['msg_2', 'assistant', 'the first answer'],
+    ['msg_3', 'user', 'and while you were away'],
+    ['msg_4', 'assistant', 'this came back'],
+  ]);
+});
+
+test('a reconnect mid-turn takes in what was said while the socket was down', () => {
+  const { store, client } = makeStore();
+  push(client, said('user', 'msg_1', 'the first question'));
+  push(client, said('agent', 'msg_2', 'half an ans'));
+
+  client.resumes = true;
+  client.load();
+  // The transcript holds the whole of the message the socket dropped in the
+  // middle of, and the browser takes that message again rather than keeping
+  // the half it has.
+  push(client, said('agent', 'msg_2', 'half an answer, and the rest'));
+  push(client, said('agent', 'msg_3', 'then this'));
+  client.finish();
+
+  assert.deepEqual(shapeOf(store), [
+    ['msg_1', 'user', 'the first question'],
+    ['msg_2', 'assistant', 'half an answer, and the rest'],
+    ['msg_3', 'assistant', 'then this'],
+  ]);
+});
+
+test('nothing is published while a resumed replay is being read', () => {
+  const { store, client } = makeStore();
+  for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
+  const before = store.getSnapshot().messages;
+
+  client.resumes = true;
+  client.load();
+  // What is on screen stays on screen: the socket dropping is not news about
+  // the conversation, and the tail is published in one go at the end.
+  assert.equal(store.getSnapshot().messages, before);
+  for (const u of TRANSCRIPT.slice(1)) push(client, u);
+  assert.equal(store.getSnapshot().messages, before);
+
+  client.finish();
+  assert.equal(store.getSnapshot().messages.length, 4);
+});
+
+test('a resume names an adapter message rather than a local run', async () => {
+  const { store, client } = makeStore(undefined, {
+    runExec: async () => ({ exitCode: 0, truncated: false, timedOut: false }),
+  });
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  await store.runCommand('ls');
+  assert.equal(store.getSnapshot().messages.length, 3);
+
+  client.resumes = true;
+  client.load();
+
+  // A run's echo carries an id only this browser knows, so a replay would
+  // never say it back. The runs go out of the thread with the resume and the
+  // view asks for them again once the connection is ready.
+  assert.deepEqual(client.resumePoints.at(-1), 'msg_1');
+  push(client, said('agent', 'msg_1', 'the first answer'));
+  client.finish();
+  assert.deepEqual(shapeOf(store), [['msg_1', 'assistant', 'the first answer']]);
+});
+
+test('a resume gives up the questions the dead connection was showing', async () => {
+  const { store, client } = makeStore();
+  push(client, said('agent', 'msg_1', 'about to read a file'));
+  push(client, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 'toolu_1',
+    title: 'Read',
+    status: 'pending',
+  } as SessionUpdate);
+  push(client, said('agent', 'msg_2', 'and then this'));
+  const answer = client.handlers.onPermission({
+    sessionId: 'acp-1',
+    toolCall: { toolCallId: 'toolu_1' },
+    options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+  });
+  assert.equal(store.getSnapshot().awaiting, 'permission');
+
+  client.resumes = true;
+  client.load();
+  push(client, said('agent', 'msg_2', 'and then this'));
+  client.finish();
+
+  // Nobody is listening for the answer on the socket that has gone, and the
+  // gateway puts a question that is still open back after the replay.
+  assert.deepEqual(await answer, { outcome: { outcome: 'cancelled' } });
+  assert.equal(store.getSnapshot().awaiting, null);
+  const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool');
+  assert.equal(tool?.approval, undefined);
 });

@@ -1,6 +1,30 @@
-import { TURN_STATE_METHOD, type TurnStateParams } from '../../../shared/types.ts';
+import {
+  REPLAY_METHOD,
+  TURN_STATE_METHOD,
+  type ReplayParams,
+  type TurnStateParams,
+} from '../../../shared/types.ts';
 import { log } from '../log.ts';
 import type { DownstreamHandle } from './upstream.ts';
+
+/**
+ * What a browser asked its replay to be picked up from, and how far the
+ * replay has got towards it.
+ */
+interface ResumeState {
+  /** The adapter's id for the last message that browser holds. */
+  after: string;
+  /** True once an update naming that message has come past. */
+  found: boolean;
+  /**
+   * The updates held back while it has not.
+   *
+   * A resume point the replay never names cannot be honoured, and the
+   * browser is owed the thread whole rather than a tail with a hole in front
+   * of it. Holding them is what makes that answer available at the end.
+   */
+  held: unknown[];
+}
 
 /**
  * A browser one thread's replay is going to, and the thread id to put on what
@@ -9,6 +33,10 @@ import type { DownstreamHandle } from './upstream.ts';
 interface ReplayTarget {
   handle: DownstreamHandle;
   as?: string;
+  /** Set only when this replay is a resume — see beginReplay. */
+  resume?: ResumeState;
+  /** True once the browser has been told how its replay turned out. */
+  settled: boolean;
 }
 
 /**
@@ -128,9 +156,7 @@ export class Broadcast {
     // under the thread id it asked about — which is the source's own for an
     // ordinary replay, and the fork's for a borrowed one.
     if (replaying) {
-      for (const target of replaying) {
-        this.deliver([target.handle], target.as ? retag(params, target.as) : params);
-      }
+      for (const target of replaying) this.replayTo(target, thread, params);
       return;
     }
     // With nobody on this thread the update is dropped rather than broadcast,
@@ -218,14 +244,108 @@ export class Broadcast {
    * transcript of its own is shown the source's, and the browser reading it
    * is pinned to the fork, so an update naming the source would be dropped as
    * some other conversation's.
+   *
+   * `resumeFrom` names the last message that browser holds. Everything the
+   * replay says before that message is held back, so a reconnect costs the
+   * tail rather than the conversation — see {@link settleReplay} for what
+   * happens when the replay never names it.
    */
-  beginReplay(handle: DownstreamHandle, acpThreadId: string, as?: string): void {
+  beginReplay(
+    handle: DownstreamHandle,
+    acpThreadId: string,
+    opts: { as?: string; resumeFrom?: string } = {},
+  ): void {
     let targets = this.replayTargets.get(acpThreadId);
     if (!targets) {
       targets = new Set();
       this.replayTargets.set(acpThreadId, targets);
     }
-    targets.add({ handle, as });
+    const target: ReplayTarget = {
+      handle,
+      as: opts.as,
+      resume: opts.resumeFrom
+        ? { after: opts.resumeFrom, found: false, held: [] }
+        : undefined,
+      settled: false,
+    };
+    targets.add(target);
+    // A replay with no point to look for is whole from its first update, so
+    // the browser can be told now. One that has a point to look for is told
+    // when the point turns up, or at the end when it does not.
+    if (!opts.resumeFrom) this.announce(target, acpThreadId, false);
+  }
+
+  /**
+   * Sends one replayed update on, or holds it back while the browser is
+   * waiting for the point it asked to resume from.
+   *
+   * The update that names the point goes out with the tail rather than being
+   * held: the browser drops the message it names and takes it again from
+   * here, which is what makes the result the model a whole replay would have
+   * built.
+   */
+  private replayTo(target: ReplayTarget, acpThreadId: string, params: unknown): void {
+    const shaped = target.as ? retag(params, target.as) : params;
+    const resume = target.resume;
+    if (resume && !resume.found) {
+      if (messageOf(params) !== resume.after) {
+        resume.held.push(shaped);
+        return;
+      }
+      resume.found = true;
+      resume.held = [];
+      this.announce(target, acpThreadId, true);
+    }
+    this.deliver([target.handle], shaped);
+  }
+
+  /**
+   * Says how a thread's replay turned out, once the adapter has sent all of
+   * it.
+   *
+   * A resume point the replay never named is not honoured: the browser is
+   * told the thread is coming whole, and everything held back for it goes out
+   * behind that. Called before anything else the load leads to reaches that
+   * browser — a borrowed replay, or the questions flushed when the load
+   * answers — because a browser told to rebuild after those had arrived would
+   * throw them away.
+   */
+  settleReplay(handle: DownstreamHandle, acpThreadId: string): void {
+    const target = this.targetFor(handle, acpThreadId);
+    if (!target || target.settled) return;
+    this.announce(target, acpThreadId, false);
+    const resume = target.resume;
+    if (!resume) return;
+    const held = resume.held;
+    resume.found = true;
+    resume.held = [];
+    for (const params of held) this.deliver([target.handle], params);
+  }
+
+  /**
+   * Tells one browser how its replay turned out, once.
+   *
+   * A borrowed replay says nothing of its own: it is the second half of a
+   * load the browser has already been told about, and a second answer would
+   * have it throw away what the first one brought.
+   */
+  private announce(target: ReplayTarget, acpThreadId: string, resumed: boolean): void {
+    if (target.settled) return;
+    target.settled = true;
+    if (target.as) return;
+    const params: ReplayParams = { sessionId: acpThreadId, resumed };
+    this.send([target.handle], REPLAY_METHOD, params);
+  }
+
+  /** The replay one browser has open on a thread, or undefined for none. */
+  private targetFor(
+    handle: DownstreamHandle,
+    acpThreadId: string,
+  ): ReplayTarget | undefined {
+    for (const target of this.replayTargets.get(acpThreadId) ?? []) {
+      if (target.handle === handle) return target;
+    }
+    return undefined;
   }
 
   /**
@@ -237,6 +357,9 @@ export class Broadcast {
    * replaying when the first comes back.
    */
   endReplay(handle: DownstreamHandle, acpThreadId: string): void {
+    // A load that failed or was cut short still owes its browser the answer,
+    // and whatever was held back waiting for it.
+    this.settleReplay(handle, acpThreadId);
     const targets = this.replayTargets.get(acpThreadId);
     if (!targets) return;
     for (const target of targets) {
@@ -277,6 +400,12 @@ function retag(params: unknown, acpThreadId: string): unknown {
 export function threadOf(params: unknown): string | undefined {
   const sessionId = (params as { sessionId?: unknown })?.sessionId;
   return typeof sessionId === 'string' && sessionId ? sessionId : undefined;
+}
+
+/** The message a session/update belongs to, or undefined when it names none. */
+function messageOf(params: unknown): string | undefined {
+  const messageId = (params as { update?: { messageId?: unknown } })?.update?.messageId;
+  return typeof messageId === 'string' && messageId ? messageId : undefined;
 }
 
 /** The kind of a session/update notification, or undefined for anything else. */

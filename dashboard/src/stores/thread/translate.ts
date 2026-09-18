@@ -118,6 +118,14 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   parts: Part[];
+  /**
+   * True when the id is the adapter's own rather than one this model made up.
+   *
+   * A replay says an adapter's id again, which is what lets a reconnect ask
+   * for the thread from one message on. An id this model numbered itself
+   * names nothing the adapter would repeat.
+   */
+  named?: boolean;
 }
 
 /** Everything the thread view reads. */
@@ -172,7 +180,8 @@ export function resetIds(): void {
 
 /** A new empty message, in the given role. */
 function newMessage(role: Message['role'], id?: string | null): Message {
-  return { id: id ?? `m${nextId++}`, role, parts: [] };
+  if (id) return { id, role, parts: [], named: true };
+  return { id: `m${nextId++}`, role, parts: [] };
 }
 
 /**
@@ -268,6 +277,27 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
   }
 
   appendText(message, kind, text);
+}
+
+/**
+ * Drops the message an id names and everything after it, so a replay that
+ * starts there builds them again.
+ *
+ * Returns what went, which is empty when no message answers to the id — and
+ * then the model is left exactly as it was.
+ */
+export function truncateFrom(model: ThreadModel, messageId: string): Message[] {
+  const from = model.messages.findIndex((m) => m.id === messageId);
+  if (from < 0) return [];
+  const dropped = model.messages.splice(from);
+  // The index is what every tool lookup goes through, so a call in a message
+  // that has gone has to go with it.
+  for (const message of dropped) {
+    for (const part of message.parts) {
+      if (part.type === 'tool') model.tools.delete(part.toolCallId);
+    }
+  }
+  return dropped;
 }
 
 /** Finds a tool part anywhere in the thread. */

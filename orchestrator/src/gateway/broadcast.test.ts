@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { TURN_STATE_METHOD, type TurnStateParams } from '../../../shared/types.ts';
+import {
+  REPLAY_METHOD,
+  TURN_STATE_METHOD,
+  type ReplayParams,
+  type TurnStateParams,
+} from '../../../shared/types.ts';
 import { Broadcast } from './broadcast.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -19,12 +24,19 @@ function fakeDownstream(
   id: number,
   acpThreadId: string | null = T1,
   lastActiveAt = 0,
-): DownstreamHandle & { sent: unknown[]; turns: boolean[]; states: TurnStateParams[] } {
+): DownstreamHandle & {
+  sent: unknown[];
+  turns: boolean[];
+  states: TurnStateParams[];
+  replays: ReplayParams[];
+} {
   const sent: unknown[] = [];
   /** Every thread state this browser was told, in order. */
   const states: TurnStateParams[] = [];
   /** The prompt-open half of each, which most of these tests are about. */
   const turns: boolean[] = [];
+  /** How each replay this browser read was said to have turned out. */
+  const replays: ReplayParams[] = [];
   return {
     id,
     acpThreadId,
@@ -32,10 +44,15 @@ function fakeDownstream(
     sent,
     turns,
     states,
+    replays,
     notify: (method, params) => {
       if (method === TURN_STATE_METHOD) {
         states.push(params as TurnStateParams);
         turns.push((params as TurnStateParams).active);
+        return;
+      }
+      if (method === REPLAY_METHOD) {
+        replays.push(params as ReplayParams);
         return;
       }
       sent.push(params);
@@ -48,6 +65,14 @@ function fakeDownstream(
 /** A session/update notification, as the adapter sends it. */
 function update(sessionUpdate: string, text: string, thread = T1): unknown {
   return { sessionId: thread, update: { sessionUpdate, content: { type: 'text', text } } };
+}
+
+/** A session/update the adapter named a message on, which is what a resume points at. */
+function named(sessionUpdate: string, text: string, messageId: string, thread = T1): unknown {
+  return {
+    sessionId: thread,
+    update: { sessionUpdate, messageId, content: { type: 'text', text } },
+  };
 }
 
 /** The text of each user_message_chunk a browser received. */
@@ -273,7 +298,7 @@ test('a borrowed replay reaches the fork under its own thread id', () => {
   // browser is pinned to the fork, so what it is sent has to name the fork --
   // an update naming the source is some other conversation's as far as it is
   // concerned.
-  b.beginReplay(exploring, T1, T2);
+  b.beginReplay(exploring, T1, { as: T2 });
   b.update(update('user_message_chunk', 'old question', T1));
   b.update(update('agent_message_chunk', 'old answer', T1));
 
@@ -288,6 +313,125 @@ test('a borrowed replay reaches the fork under its own thread id', () => {
   b.update(update('agent_message_chunk', 'live', T1));
   assert.deepEqual(working.sent, [update('agent_message_chunk', 'live', T1)]);
   assert.equal(exploring.sent.length, 2);
+});
+
+test('a resume sends the message it names and everything after it', () => {
+  const b = new Broadcast('s1');
+  const resuming = fakeDownstream(1);
+  b.add(resuming);
+
+  // The browser holds the thread as far as m2, so that is where the replay
+  // it is being sent has to start.
+  b.beginReplay(resuming, T1, { resumeFrom: 'm2' });
+  b.update(named('user_message_chunk', 'the first question', 'm1'));
+  b.update(named('agent_message_chunk', 'the first answer', 'm2'));
+  b.update(named('user_message_chunk', 'and then this', 'm3'));
+  b.endReplay(resuming, T1);
+
+  // m2 goes out with the tail: the browser drops the message it named and
+  // takes it again, which is what makes the result the whole thread's model.
+  assert.deepEqual(resuming.sent, [
+    named('agent_message_chunk', 'the first answer', 'm2'),
+    named('user_message_chunk', 'and then this', 'm3'),
+  ]);
+  assert.deepEqual(resuming.replays, [{ sessionId: T1, resumed: true }]);
+});
+
+test('a resume point the replay never names is answered with the whole thread', () => {
+  const b = new Broadcast('s1');
+  const resuming = fakeDownstream(1);
+  b.add(resuming);
+
+  // What compaction leaves behind: the transcript no longer holds the message
+  // the browser ends on. A tail starting anywhere else would be a thread with
+  // a hole in it.
+  b.beginReplay(resuming, T1, { resumeFrom: 'm-compacted-away' });
+  b.update(named('user_message_chunk', 'the first question', 'm1'));
+  b.update(named('agent_message_chunk', 'the first answer', 'm2'));
+  assert.deepEqual(resuming.sent, [], 'nothing goes out while the point is still being looked for');
+
+  b.endReplay(resuming, T1);
+  assert.deepEqual(resuming.replays, [{ sessionId: T1, resumed: false }]);
+  assert.deepEqual(resuming.sent, [
+    named('user_message_chunk', 'the first question', 'm1'),
+    named('agent_message_chunk', 'the first answer', 'm2'),
+  ]);
+});
+
+test('the whole-thread answer comes before the thread does', () => {
+  const b = new Broadcast('s1');
+  const reattaching = fakeDownstream(1);
+  b.add(reattaching);
+  /** Everything this browser was told, in the order it was told it. */
+  const order: string[] = [];
+  const inner = reattaching.notify;
+  reattaching.notify = (method, params) => {
+    order.push(method === REPLAY_METHOD ? 'answer' : 'update');
+    inner(method, params);
+  };
+
+  b.beginReplay(reattaching, T1);
+  b.update(update('agent_message_chunk', 'history'));
+  // A browser rebuilding has to know before the first of it lands, or it
+  // throws away what it has just been sent along with what it held.
+  assert.deepEqual(order, ['answer', 'update']);
+});
+
+test('a resume leaves the other browser on the thread with the live stream', () => {
+  const b = new Broadcast('s1');
+  const [resuming, live] = [fakeDownstream(1), fakeDownstream(2)];
+  b.add(resuming);
+  b.add(live);
+
+  // A phone coming back on a thread a desktop is reading: the desktop already
+  // has this history and must not be sent it again.
+  b.beginReplay(resuming, T1, { resumeFrom: 'm2' });
+  b.update(named('agent_message_chunk', 'the first answer', 'm2'));
+  b.update(named('user_message_chunk', 'and then this', 'm3'));
+  b.endReplay(resuming, T1);
+  assert.equal(live.sent.length, 0);
+  assert.deepEqual(live.replays, []);
+
+  b.update(named('agent_message_chunk', 'live', 'm4'));
+  assert.deepEqual(resuming.sent.at(-1), named('agent_message_chunk', 'live', 'm4'));
+  assert.deepEqual(live.sent, [named('agent_message_chunk', 'live', 'm4')]);
+});
+
+test('a borrowed replay is not a second answer to the load that asked', () => {
+  const b = new Broadcast('s1');
+  const exploring = fakeDownstream(1, T2);
+  b.add(exploring);
+
+  // A fork: its own replay says nothing, and the source's is sent in its
+  // place. One load, so one answer — a second would have the browser throw
+  // away the history the first one brought.
+  b.beginReplay(exploring, T2);
+  b.settleReplay(exploring, T2);
+  b.beginReplay(exploring, T1, { as: T2 });
+  b.update(named('agent_message_chunk', 'what was said before the fork', 'm1', T1));
+  b.endReplay(exploring, T1);
+  b.endReplay(exploring, T2);
+
+  assert.deepEqual(exploring.replays, [{ sessionId: T2, resumed: false }]);
+  assert.deepEqual(exploring.sent, [
+    named('agent_message_chunk', 'what was said before the fork', 'm1', T2),
+  ]);
+});
+
+test('a browser that leaves mid-resume is not held anything', () => {
+  const b = new Broadcast('s1');
+  const [leaving, watching] = [fakeDownstream(1), fakeDownstream(2)];
+  b.add(leaving);
+  b.add(watching);
+
+  b.beginReplay(leaving, T1, { resumeFrom: 'm9' });
+  b.update(named('agent_message_chunk', 'history', 'm1'));
+  b.remove(leaving);
+
+  // Its replay went with it, so the thread is the watchers' again.
+  b.update(named('agent_message_chunk', 'live', 'm2'));
+  assert.deepEqual(watching.sent, [named('agent_message_chunk', 'live', 'm2')]);
+  assert.equal(leaving.sent.length, 0);
 });
 
 test('a browser that leaves mid-replay does not strand the others', () => {

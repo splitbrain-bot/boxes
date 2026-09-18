@@ -15,7 +15,7 @@ import { AgentStore } from '../agents.ts';
 import { SessionManager } from '../sessions.ts';
 import { processId } from './background.ts';
 import type { DownstreamHandle } from './upstream.ts';
-import type { TurnStateParams } from '../../../shared/types.ts';
+import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 
 // A turn is announced when the thread it ran on has gone quiet, not when the
 // prompt comes back — so these tests have to wait one out. Turned down to the
@@ -266,15 +266,26 @@ function thread(id: string): Record<string, unknown> {
 function fakeHandle(
   id: number,
   acpThreadId: string | null,
-): DownstreamHandle & { asked: unknown[]; told: unknown[]; closed: number } {
+): DownstreamHandle & {
+  asked: unknown[];
+  told: unknown[];
+  replays: ReplayParams[];
+  closed: number;
+} {
   return {
     id,
     acpThreadId,
     lastActiveAt: Date.now(),
     asked: [] as unknown[],
     told: [] as unknown[],
+    /** How each replay this browser read was said to have turned out. */
+    replays: [] as ReplayParams[],
     closed: 0,
-    notify(this: { told: unknown[] }, _method, params) {
+    notify(this: { told: unknown[]; replays: ReplayParams[] }, method, params) {
+      if (method === REPLAY_METHOD) {
+        this.replays.push(params as ReplayParams);
+        return;
+      }
       this.told.push(params);
     },
     request(this: { asked: unknown[] }, _method, params) {
@@ -1241,6 +1252,157 @@ function plainAdapter(): FakeAdapter {
     msg.method === 'initialize' ? { protocolVersion: 1, agentCapabilities: {} } : {},
   );
 }
+
+/** Every session/load the adapter was asked for, with the `_meta` it carried. */
+let loadMeta: unknown[] = [];
+
+/**
+ * An adapter that replays a thread as a run of named messages, which is what
+ * a resume needs: a browser names one of them, and the gateway has to find it
+ * in the stream.
+ */
+function transcriptAdapter(history: Record<string, Array<Record<string, unknown>>>): FakeAdapter {
+  loaded = [];
+  loadMeta = [];
+  const adapter: FakeAdapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
+    if (msg.method === 'session/load') {
+      const of = String(msg.params?.['sessionId']);
+      loaded.push(of);
+      loadMeta.push(msg.params?.['_meta']);
+      for (const update of history[of] ?? []) {
+        adapter.notify('session/update', { sessionId: of, update });
+      }
+      return {};
+    }
+    return {};
+  });
+  return adapter;
+}
+
+/** One named message of a transcript, as the adapter replays it. */
+function said(role: 'user' | 'agent', messageId: string, text: string): Record<string, unknown> {
+  return {
+    sessionUpdate: `${role}_message_chunk`,
+    messageId,
+    content: { type: 'text', text },
+  };
+}
+
+/** A three-message transcript on the thread these tests resume. */
+const TRANSCRIPT = [
+  said('user', 'm1', 'the first question'),
+  said('agent', 'm2', 'the first answer'),
+  said('user', 'm3', 'and while you were away'),
+];
+
+test('a browser that says how much it has is sent only the rest', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-kept',
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { boxes: { resumeFrom: 'm2' } },
+    },
+    reader,
+  );
+
+  // The phone on a bad link paid for the tail, not for the conversation. The
+  // message it named comes with the tail because it drops that one and takes
+  // it again, which is what makes the model the same either way.
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
+  // Passed on as it stands: `_meta` is ACP's extension slot, and an adapter
+  // ignores a key in it that it knows nothing about.
+  assert.deepEqual(loadMeta.at(-1), { boxes: { resumeFrom: 'm2' } });
+  assert.deepEqual(
+    reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
+    ['m2', 'm3'],
+  );
+});
+
+test('a resume point the transcript no longer holds is answered with all of it', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-kept',
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { boxes: { resumeFrom: 'm-compacted-away' } },
+    },
+    reader,
+  );
+
+  // A tail with a hole in front of it is worse than a slow replay, so the
+  // whole thread goes out instead — and the browser is told before any of it
+  // lands that it has to rebuild.
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
+  assert.deepEqual(
+    reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
+    ['m1', 'm2', 'm3'],
+  );
+});
+
+test('a browser that asks for no resume point is sent the thread whole', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    { sessionId: 'acp-kept', cwd: '/workspace', mcpServers: [] },
+    reader,
+  );
+
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
+  assert.equal(reader.told.length, 3);
+});
+
+test('a fork borrowing a transcript is told once that it is rebuilding', async () => {
+  fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
+  await manager.createThread('s1', { from: 't2' });
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-branch-1');
+  up.attach(reader);
+  reader.told.length = 0;
+
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-branch-1',
+      cwd: '/workspace',
+      mcpServers: [],
+      // A fork that has never been prompted replays nothing of its own, so
+      // whatever this browser holds came from the source and the point it
+      // names is not in the fork's own stream.
+      _meta: { boxes: { resumeFrom: 'm2' } },
+    },
+    reader,
+  );
+
+  // One load, one answer, and the borrowed history arrives behind it. A
+  // second answer would have the browser throw that history away.
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-branch-1', resumed: false }]);
+  assert.equal(reader.told.length, 1);
+});
 
 test('a turn that finishes with nobody watching is announced, naming the thread', async () => {
   fakeDocker(plainAdapter());
