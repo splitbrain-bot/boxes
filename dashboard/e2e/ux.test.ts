@@ -1,8 +1,7 @@
 import { afterAll, afterEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
@@ -10,13 +9,13 @@ import { reply, type GatewayScript } from './stub-gateway.ts';
  * against the real bundle in a real browser.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const SESSION = stubSession();
+const SESSION = DEFAULT_SESSION;
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
+/** Starts a deployment whose agent behaves as the script says. */
 async function start(script?: Partial<GatewayScript>): Promise<void> {
-  stub = await startStubOrchestrator(DIST, [SESSION], script);
+  stub = await startOrchestrator([{}], script);
 }
 
 afterEach(async () => {
@@ -133,7 +132,7 @@ test('a send that fails still leaves the composer focused', async () => {
 // 4 and 5 — !bang runs locally, and its output is visible.
 test('a !bang command runs in the container and never reaches the agent', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('should not happen') }] });
-  stub.execOutput = (command) => ({ output: `ran: ${command}\nhi\n`, exitCode: 0 });
+  stub.execOutput = (command: string) => ({ output: `ran: ${command}\nhi\n`, exitCode: 0 });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
   try {
@@ -182,17 +181,10 @@ test('a failing !bang command shows its exit code under the output', async () =>
 
 test('commands from a previous visit come back after the replay', async () => {
   await start();
-  stub.execLog.push({
-    id: 7,
-    sessionId: SESSION.id,
+  stub.logExec(SESSION.id, {
     command: 'git status',
     output: 'nothing to commit\n',
     exitCode: 0,
-    truncated: false,
-    timedOut: false,
-    startedAt: Date.now() - 60_000,
-    finishedAt: Date.now() - 59_000,
-    after: null,
   });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);

@@ -57,7 +57,12 @@ const VERSION = '1.0.0';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Dashboard bundle, copied into the image by the Dockerfile's build stage. */
+/**
+ * Dashboard bundle, copied into the image by the Dockerfile's build stage.
+ *
+ * A caller may name another one: the browser suite serves the bundle it just
+ * built, rather than putting a copy where the image would have.
+ */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
 
 /**
@@ -161,6 +166,12 @@ async function dockerAnswers(): Promise<boolean> {
   }
 }
 
+/** What a caller may put in place of a default when it builds the app. */
+export interface BuildOptions {
+  /** Where the dashboard bundle is, for a caller serving one it built itself. */
+  bundleDir?: string;
+}
+
 /** What one orchestrator process hands its boot and its tests, wired together. */
 export interface Orchestrator {
   app: ReturnType<typeof Fastify>;
@@ -179,7 +190,8 @@ export interface Orchestrator {
  * Boot lives in main(); this is separate so a test can drive the real routes
  * over a real database without a Docker socket or an open port.
  */
-export function buildApp(cfg: Config, db: Db): Orchestrator {
+export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestrator {
+  const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
   // Before anything creates a workspace directory or a container: everything
   // that writes files for the agent, or runs a process as it, reads this.
   setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
@@ -818,9 +830,9 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
    * on every request for it.
    */
   function sendBundle(reply: FastifyReply, path: string, host: string | undefined): FastifyReply {
-    const candidate = resolve(DASHBOARD_DIR, `.${normalize(path)}`);
+    const candidate = resolve(bundleDir, `.${normalize(path)}`);
     if (
-      candidate.startsWith(`${DASHBOARD_DIR}/`) &&
+      candidate.startsWith(`${bundleDir}/`) &&
       path !== '/' &&
       existsSync(candidate) &&
       statSync(candidate).isFile()
@@ -831,7 +843,7 @@ export function buildApp(cfg: Config, db: Db): Orchestrator {
         .header('Cache-Control', cacheControlFor(path))
         .send(createReadStream(candidate));
     }
-    const index = join(DASHBOARD_DIR, 'index.html');
+    const index = join(bundleDir, 'index.html');
     if (!existsSync(index)) return reply.code(404).send({ error: 'Dashboard not built' });
     return reply
       .headers({

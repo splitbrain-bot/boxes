@@ -1283,7 +1283,7 @@ request that arrives without the session cookie. The proxy answers it with a
 redirect to a login page, the browser is left with no manifest, and nothing
 else on the page is affected — the failure is a missing offer, not an error.
 `index.html` asks with `crossorigin="use-credentials"`, and `e2e/pwa.test.ts`
-puts the stub orchestrator behind a cookie check and asks Chrome itself,
+puts the deployment behind a cookie check and asks Chrome itself,
 over CDP, whether it would install what it found. That test needs a real
 profile: Chrome refuses to install from an incognito context, which every
 `newContext()` is, so `launchProfile` in `e2e/browser.ts` gives it one.
@@ -2221,7 +2221,7 @@ dashboard/
   public/               Served from the bundle root: the service worker, the manifest, the icons
   vite.config.ts        React, Tailwind, the dev proxy, both test projects
   components.json       Where the shadcn and assistant-ui CLIs install to
-  e2e/                  Browser tests, and the stub orchestrator and gateway
+  e2e/                  Browser tests over the real orchestrator, and the stub ACP gateway
   src/
     main.tsx            React mount and the routes
     globals.css         The whole design system: tokens and the @theme bridge
@@ -2313,10 +2313,15 @@ that, so `push.test.ts` reproduces the worked example in RFC 8291 byte for
 byte and verifies the VAPID assertion against the key it advertises.
 
 The dashboard also runs a browser suite. It builds the production bundle and
-serves it the way the orchestrator does, from a stub orchestrator and a stub
-ACP gateway that speaks the agent side from canned scripts — including its
-own several threads per session with each socket pinned to one by its upgrade
-path, so a fresh thread starting empty, a fork carrying the source's messages,
+serves it from the real orchestrator: the real routes, a real database in a
+temporary directory, a Docker that answers from memory, and workspaces with
+real git repositories in them. What the suite proves is therefore the same
+code a deployment runs, and a change to the API cannot pass here by being
+matched in a second implementation. Only the agent is stubbed, because there
+is no agent to talk to: a stub ACP gateway speaks that side from canned
+scripts, including its own several threads per session with each socket
+pinned to one by its upgrade path, so a fresh thread starting empty, a fork
+carrying the source's messages,
 a switch bringing the first thread's transcript back, and two tabs on two
 threads each keeping to their own conversation are asserted against a gateway
 that behaves like the real one.

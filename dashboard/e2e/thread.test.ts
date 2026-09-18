@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
@@ -14,8 +13,7 @@ import { reply, type GatewayScript } from './stub-gateway.ts';
  * session/cancel the way the real gateway does.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const SESSION = stubSession();
+const SESSION = DEFAULT_SESSION;
 
 /**
  * A real PNG, small enough to sit in the source: two bands and a diagonal, so
@@ -23,15 +21,15 @@ const SESSION = stubSession();
  */
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
-/** Starts a stub with the given gateway behaviour. */
+/** Starts a deployment whose agent behaves as the script says. */
 async function start(script?: Partial<GatewayScript>): Promise<void> {
-  stub = await startStubOrchestrator(DIST, [SESSION], script);
+  stub = await startOrchestrator([{}], script);
 }
 
 beforeEach(() => {
-  stub = undefined as unknown as StubOrchestrator;
+  stub = undefined as unknown as TestOrchestrator;
 });
 
 afterEach(async () => {
@@ -414,7 +412,7 @@ test('a turn held open for background work still hands the composer back', async
     await expect.poll(() => stub.backgroundStops.length).toBe(1);
     assert.deepEqual(stub.backgroundStops[0], {
       sessionId: SESSION.id,
-      threadId: SESSION.threads[0]!.id,
+      threadId: SESSION.threadId,
     });
 
     // And when the work is over, the bar goes with it — on the gateway's own

@@ -70,7 +70,6 @@ export interface PermissionScript {
 
 /** How the stub behaves, mutable between tests. */
 export interface GatewayScript {
-  token: string;
   modes: SessionModeState | null;
   /** The options the adapter offers, such as the model. */
   configOptions: SessionConfigOption[];
@@ -135,18 +134,29 @@ interface Rpc {
 
 const THREAD_ID = 'acp-thread-1';
 
+/** What the gateway has to know about a session to answer an upgrade. */
+export interface SessionLookup {
+  /**
+   * The bearer this session's upgrade has to present, or null for a session
+   * the deployment does not have.
+   */
+  token: (sessionId: string) => string | null;
+  /**
+   * The adapter's own id for the thread a path names, which is the mapping
+   * the real gateway does out of the threads table. A path naming no thread
+   * asks for the session's current one.
+   */
+  thread: (sessionId: string, threadId: string | null) => string | null;
+}
+
 /**
  * Attaches a stub gateway to an existing HTTP server at
  * `/ws/sessions/:id/acp` and `/ws/sessions/:id/threads/:threadId/acp`.
- *
- * `resolve` turns the Boxes thread id in the path into the adapter's own id
- * for it, which is the mapping the real gateway does out of the threads
- * table. A path naming no thread resolves to the session's default.
  */
 export function attachStubGateway(
   server: Server,
   script: GatewayScript,
-  resolve?: (sessionId: string, threadId: string | null) => string | null,
+  sessions: SessionLookup,
 ): StubGateway {
   const wss = new WebSocketServer({ noServer: true });
   /** Every attached socket, each recording the thread it is pinned to. */
@@ -233,11 +243,13 @@ export function attachStubGateway(
     const threadId = path[2] ?? null;
 
     // The same handshake check the real gateway makes: acp.v1 plus the
-    // bearer entry, both offered as subprotocols.
+    // bearer entry, both offered as subprotocols, and the bearer is the
+    // token of the session the path names rather than a deployment-wide one.
     const offered = String(req.headers['sec-websocket-protocol'] ?? '')
       .split(',')
       .map((s) => s.trim());
-    if (!offered.includes('acp.v1') || !offered.includes(`bearer.${script.token}`)) {
+    const token = sessions.token(sessionId);
+    if (!offered.includes('acp.v1') || token === null || !offered.includes(`bearer.${token}`)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -247,7 +259,7 @@ export function attachStubGateway(
     // fixed for its whole life, exactly as the real gateway pins it. A
     // session or thread nobody knows is refused here, before there is a
     // socket to answer on, rather than pinned to whatever is current.
-    const pinned = resolve ? resolve(sessionId, threadId) : current;
+    const pinned = sessions.thread(sessionId, threadId);
     if (pinned === null) {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();

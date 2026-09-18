@@ -1,13 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import type { Page } from 'playwright';
 import { closeBrowser, openPage, VIEWPORTS } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubReview,
-  stubSession,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The back button, which on a phone is the navigation control.
@@ -25,21 +19,21 @@ import {
  * places push, drill-downs pop, and modal surfaces are entries of their own.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const SESSION = 'a1b2c3d4';
+const SESSION = DEFAULT_SESSION.id;
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession({ id: SESSION })]);
+  stub = await startOrchestrator();
 });
 
 beforeEach(() => {
   // A fresh session and a fresh review per test: one of these deletes the
   // session for real, and another writes a comment that would change the next
   // test's counts.
-  stub.state.sessions = [stubSession({ id: SESSION })];
-  stub.state.reviews[SESSION] = stubReview();
+  stub.resetSessions();
+  stub.createSession();
+  stub.review(SESSION);
   stub.reviewCalls.length = 0;
 });
 
@@ -270,10 +264,7 @@ test('back closes the comment composer without closing the file under it', async
 });
 
 test('back cancels a confirmation instead of confirming it', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'to be kept', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'to be kept');
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
   try {
@@ -326,10 +317,7 @@ test('a deleted session is not what the entry left behind leads to', async () =>
 });
 
 test('the handoff prompt is staged once, not replayed by back and forward', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'please fix', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'please fix');
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}`);
   try {

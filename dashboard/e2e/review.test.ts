@@ -1,16 +1,11 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubReview,
-  stubSession,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { reviewWorkspace } from './workspace.ts';
 
 /**
  * The review pages in a real browser, against the real production bundle and
- * a stub orchestrator that keeps real review state.
+ * the real orchestrator, over a workspace with real git repositories in it.
  *
  * The path the tests walk is the one the feature exists for: browse the tree,
  * open a file, comment on a line, and hand the review to the agent. Both
@@ -22,19 +17,21 @@ import {
  * around, so it is the one the browser walks.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const SESSION = 'a1b2c3d4';
+const SESSION = DEFAULT_SESSION.id;
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession({ id: SESSION })]);
+  stub = await startOrchestrator();
 });
 
 beforeEach(() => {
-  // A fresh review per test: comments are written for real, and a leftover
-  // one would make the next test's counts wrong.
-  stub.state.reviews[SESSION] = stubReview();
+  // A fresh session and a fresh workspace per test: comments are written for
+  // real, one test reviews a session of another shape, and a leftover of
+  // either would make the next test's counts wrong.
+  stub.resetSessions();
+  stub.createSession();
+  stub.review(SESSION);
   stub.reviewCalls.length = 0;
 });
 
@@ -220,7 +217,7 @@ test('a line with no hunk behind it has no gutter button', async () => {
 test('a file the change deleted is listed, and says it is gone', async () => {
   // Listed by its status alone: it is on no disk and in no ls-files, which is
   // exactly why it used to fall out of the tree the moment it mattered.
-  stub.state.reviews[SESSION]!.statuses['app/src/old.ts'] = 'deleted';
+  stub.review(SESSION, reviewWorkspace({ deleted: ['app/src/old.ts'] }));
   const { page, errors, close } = await openPage(
     stub.url,
     `/sessions/${SESSION}/review?path=app%2Fsrc%2Fold.ts`,
@@ -292,7 +289,7 @@ test('commenting a line on a phone writes it through the API', async () => {
       sessionId: SESSION,
       body: { path: 'app/src/boot.ts', line: 2, comment: 'this TODO needs an owner' },
     });
-    expect(stub.state.reviews[SESSION]!.annotations['app/src/boot.ts']?.[2]?.comment).toBe(
+    expect((await stub.comments(SESSION, 'app/src/boot.ts'))[0]?.comment).toBe(
       'this TODO needs an owner',
     );
 
@@ -336,10 +333,7 @@ test('commenting a line on a desktop uses the inline composer', async () => {
 });
 
 test('a comment can be edited and deleted', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'first thoughts', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'first thoughts');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -367,7 +361,7 @@ test('a comment can be edited and deleted', async () => {
       .toBe(true);
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(false);
-    expect(stub.state.reviews[SESSION]!.annotations['app/src/app.ts']).toBeUndefined();
+    expect(await stub.comments(SESSION, 'app/src/app.ts')).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -375,10 +369,10 @@ test('a comment can be edited and deleted', async () => {
 });
 
 test('an outdated comment says the code moved', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    1: { line: 1, comment: 'about the old import', outdated: true },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 1, 'about the old import');
+  // The agent rewrote the file underneath it, so the lines the comment was
+  // written against are not there any more — which is what makes it outdated.
+  stub.write(SESSION, 'app/src/app.ts', 'import { start } from "./start";\n\nstart();\n');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -399,10 +393,7 @@ test('an outdated comment says the code moved', async () => {
 });
 
 test('handing the review to the agent stages a prompt, unsent', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'please fix', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'please fix');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -432,10 +423,7 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
 });
 
 test('a new review clears every comment, behind a confirmation', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'to be discarded', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'to be discarded');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -451,7 +439,7 @@ test('a new review clears every comment, behind a confirmation', async () => {
     await page.getByRole('button', { name: 'Delete the review' }).click();
 
     await expect.poll(() => page.getByText('to be discarded').isVisible()).toBe(false);
-    expect(stub.state.reviews[SESSION]!.hasReview).toBe(false);
+    expect(stub.hasReview(SESSION)).toBe(false);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -493,7 +481,7 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
     // The file of the workspace the agent is working in, which is the whole
     // point of the review living here.
     await expect
-      .poll(() => stub.state.reviews[SESSION]!.files['app/src/boot.ts'])
+      .poll(() => stub.read(SESSION, 'app/src/boot.ts'))
       .toContain('wireTheRouter();');
     // And saved is saved: nothing left to write.
     await expect
@@ -509,16 +497,11 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
 test('the line being read stays put across a switch into editing', async () => {
   // A comment high up, so the card between the rows is what moves everything
   // below it when edit mode folds it away.
-  stub.state.reviews[SESSION]!.annotations['long.ts'] = {
-    3: { line: 3, comment: 'a card tall enough to push the rest down', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.files['long.ts'] = Array.from(
-    { length: 400 },
-    (_, i) => `const line${i} = ${i};`,
-  ).join('\n');
-  stub.state.reviews[SESSION]!.repos = [
-    { path: '', name: 'workspace', head: 'a'.repeat(40), baseCommit: '' },
-  ];
+  stub.review(SESSION, {
+    files: { 'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n') },
+    repos: [''],
+  });
+  await stub.comment(SESSION, 'long.ts', 3, 'a card tall enough to push the rest down');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -578,21 +561,19 @@ test('a save the agent got in first is refused, and the choice is offered', asyn
 
     // The box is running while the review is open, which is allowed: the
     // agent writes the same file.
-    stub.state.reviews[SESSION]!.files['lib/index.ts'] = 'export const version = "9.9.9";\n';
+    stub.write(SESSION, 'lib/index.ts', 'export const version = "9.9.9";\n');
 
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect
       .poll(() => page.getByText('The agent changed this file while you were editing it.').isVisible())
       .toBe(true);
     // Refused rather than applied, and the buffer is still there to save.
-    expect(stub.state.reviews[SESSION]!.files['lib/index.ts']).toBe(
-      'export const version = "9.9.9";\n',
-    );
+    expect(stub.read(SESSION, 'lib/index.ts')).toBe('export const version = "9.9.9";\n');
     await shoot(page, 'review-edit-conflict-desktop');
 
     await page.getByRole('button', { name: 'Save anyway' }).click();
     await expect
-      .poll(() => stub.state.reviews[SESSION]!.files['lib/index.ts'])
+      .poll(() => stub.read(SESSION, 'lib/index.ts'))
       .toBe('export const version = "2.0.0";\n');
     expect(errors).toEqual([]);
   } finally {
@@ -622,9 +603,7 @@ test('walking away from unsaved edits asks first', async () => {
     await page.getByRole('button', { name: 'Discard the edits' }).click();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
     // Nothing was written, which is what discarding means.
-    expect(stub.state.reviews[SESSION]!.files['app/README.md']).toBe(
-      '# demo\n\nA project the agent cloned.\n',
-    );
+    expect(stub.read(SESSION, 'app/README.md')).toBe('# demo\n\nA project the agent cloned.\n');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -645,7 +624,7 @@ test('the rows and the editor over them wrap in the same places', async () => {
     'A line that ends in two spaces, which markdown reads as a break.  ',
   ];
   const lines = Array.from({ length: 25 }, (_, i) => shapes[i % shapes.length]!);
-  stub.state.reviews[SESSION]!.files['readme.md'] = `${lines.join('\n')}\n`;
+  stub.write(SESSION, 'readme.md', `${lines.join('\n')}\n`);
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -689,7 +668,7 @@ test('the rows and the editor over them wrap in the same places', async () => {
 });
 
 test('a file the pane cannot show whole cannot be edited', async () => {
-  stub.state.reviews[SESSION]!.statuses['app/gone.ts'] = 'deleted';
+  stub.review(SESSION, reviewWorkspace({ deleted: ['app/gone.ts'] }));
   const { page, errors, close } = await openPage(
     stub.url,
     `/sessions/${SESSION}/review?path=app%2Fgone.ts`,
@@ -729,7 +708,10 @@ test('the base picker sets a revision and says which one is active', async () =>
     // And the picker says where it landed in each repository, because one
     // expression resolves separately in every one of them.
     await page.getByRole('button', { name: /main/ }).click();
-    await expect.poll(() => page.getByText('00000000').isVisible()).toBe(true);
+    // The commit it resolved to in each repository, abbreviated. Which commit
+    // that is belongs to the repository the fixture made, so it is read by
+    // shape.
+    await expect.poll(() => page.getByText(/^[0-9a-f]{8}$/).first().isVisible()).toBe(true);
     await shoot(page, 'review-base-desktop');
     expect(errors).toEqual([]);
   } finally {
@@ -784,12 +766,7 @@ test('a revision that is not one anywhere is reported, not swallowed', async () 
 // --- degraded shapes --------------------------------------------------------
 
 test('a workspace with no repository still browses and comments', async () => {
-  stub.state.reviews[SESSION] = stubReview({
-    repos: [],
-    statuses: {},
-    diffs: {},
-    files: { 'notes.txt': 'just some notes\nnothing tracked\n' },
-  });
+  stub.review(SESSION, { files: { 'notes.txt': 'just some notes\nnothing tracked\n' }, repos: [] });
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -816,14 +793,10 @@ test('a workspace with no repository still browses and comments', async () => {
 });
 
 test('a session whose workspace cannot be read says what to do', async () => {
-  stub.state.reviews[SESSION] = stubReview({
-    fail: {
-      status: 409,
-      error:
-        'This session stores its workspace in a volume the orchestrator cannot read. ' +
-        'Start the session once to migrate it, then review it.',
-    },
-  });
+  // A session from before workspaces became directories, whose files are in a
+  // named volume this process has no way to read.
+  stub.resetSessions();
+  stub.createSession({ legacy: true });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
   try {
@@ -839,7 +812,7 @@ test('a session whose workspace cannot be read says what to do', async () => {
 });
 
 test('an empty workspace says so rather than showing nothing', async () => {
-  stub.state.reviews[SESSION] = stubReview({ files: {}, statuses: {}, diffs: {}, repos: [] });
+  stub.review(SESSION, { files: {}, repos: [] });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
   try {
@@ -854,14 +827,12 @@ test('an empty workspace says so rather than showing nothing', async () => {
 
 test('each file remembers how far it was read, and a new one starts at the top', async () => {
   // Long enough to scroll, which the small fixture files are not.
-  stub.state.reviews[SESSION] = stubReview({
+  stub.review(SESSION, {
     files: {
       'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
       'short.ts': 'const one = 1;\n',
     },
-    repos: [{ path: '', name: 'workspace', head: 'a'.repeat(40), baseCommit: '' }],
-    statuses: {},
-    diffs: {},
+    repos: [''],
   });
 
   const { page, errors, close } = await openPage(
@@ -898,13 +869,11 @@ test('each file remembers how far it was read, and a new one starts at the top',
 
 test('the review header gives way to reading the file, and returns', async () => {
   // Long enough to scroll, which the small fixture files are not.
-  stub.state.reviews[SESSION] = stubReview({
+  stub.review(SESSION, {
     files: {
       'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
     },
-    repos: [{ path: '', name: 'workspace', head: 'a'.repeat(40), baseCommit: '' }],
-    statuses: {},
-    diffs: {},
+    repos: [''],
   });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);

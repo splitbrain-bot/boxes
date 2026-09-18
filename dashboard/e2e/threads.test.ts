@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, openPage } from './browser.ts';
-import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply } from './stub-gateway.ts';
 
 /**
@@ -14,18 +13,17 @@ import { reply } from './stub-gateway.ts';
  * and two tabs on two threads each keep to their own.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const ID = 'a1b2c3d4';
+const ID = DEFAULT_SESSION.id;
 
 /** The `text-decoration-line` the browser computed for one element. */
 function decoration(target: import('playwright').Locator): Promise<string> {
   return target.evaluate((el) => getComputedStyle(el).textDecorationLine);
 }
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeEach(async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()], {
+  stub = await startOrchestrator([{}], {
     prompts: [{ match: () => true, updates: reply('First answer.') }],
   });
 });
@@ -156,9 +154,9 @@ test('two tabs on two threads each keep to their own conversation', async () => 
   await stub.close();
   // A prompt that never finishes, which is the thread you fork *because* it
   // is busy.
-  stub = await startStubOrchestrator(DIST, [stubSession()], {
+  stub = await startOrchestrator([{}], {
     prompts: [
-      { match: (t) => t === 'the long job', updates: reply('Working on it.'), hold: true },
+      { match: (t: string) => t === 'the long job', updates: reply('Working on it.'), hold: true },
       { match: () => true, updates: reply('A quick answer.') },
     ],
   });
@@ -209,7 +207,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
 
 test('forking is not offered when the adapter does not advertise it', async () => {
   await stub.close();
-  stub = await startStubOrchestrator(DIST, [stubSession({ canFork: false })]);
+  stub = await startOrchestrator([{ canFork: false }]);
 
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
@@ -224,7 +222,7 @@ test('forking is not offered when the adapter does not advertise it', async () =
 });
 
 test('a bang command is run against the thread it was typed in', async () => {
-  stub.execOutput = (command) => ({ output: `ran: ${command}\n`, exitCode: 0 });
+  stub.execOutput = (command: string) => ({ output: `ran: ${command}\n`, exitCode: 0 });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
   try {

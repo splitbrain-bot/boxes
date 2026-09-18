@@ -286,6 +286,20 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
 // --- resolving this process's own host-side paths ---------------------------
 
 /**
+ * The answer a test installed, or undefined to read the process's own.
+ *
+ * The real sources are files under `/proc`, which a test process cannot
+ * arrange, so there is no other way to stand where a containerised
+ * orchestrator stands.
+ */
+let selfIdForTests: string | null | undefined = undefined;
+
+/** Answers `selfContainerId` with `id`, or with the real sources for null. */
+export function setSelfContainerIdForTests(id: string | null | undefined): void {
+  selfIdForTests = id;
+}
+
+/**
  * This process's own container id, or null when it is not in a container.
  *
  * Three sources, because none of them holds everywhere. `/etc/hostname` is the
@@ -295,6 +309,7 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
  * under cgroup v1 and under v2 with a named hierarchy, and is `0::/` otherwise.
  */
 export function selfContainerId(): string | null {
+  if (selfIdForTests !== undefined) return selfIdForTests;
   const patterns: Array<[string, RegExp]> = [
     ['/proc/self/mountinfo', /\/containers\/([0-9a-f]{64})\//],
     ['/proc/self/cgroup', /(?:^|\/|docker-)([0-9a-f]{64})(?:\.scope)?$/m],

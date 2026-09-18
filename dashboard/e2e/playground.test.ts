@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startStubOrchestrator, type StubOrchestrator } from './stub-orchestrator.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The installed assistant-ui components, rendered over the canned store.
@@ -11,12 +10,10 @@ import { startStubOrchestrator, type StubOrchestrator } from './stub-orchestrato
  * unstyled and nothing on the console.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST);
+  stub = await startOrchestrator();
 });
 
 afterAll(async () => {
