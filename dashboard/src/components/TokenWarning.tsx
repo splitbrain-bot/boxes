@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import type { HarnessHealth } from '../../../shared/types.ts';
-import { cn } from '@/lib/utils';
+import { Notice } from '@/components/Notice';
 import { useSessions } from '../stores/sessions.ts';
 
 /**
@@ -20,14 +20,17 @@ export function TokenWarning({ className }: { className?: string }) {
   if (broken.length === 0) return null;
 
   return (
-    <div role="alert" className={cn('border-warn/40 bg-warn/10 text-sm', className)}>
+    <Notice tone="warn" className={className}>
       {broken.map((h) => (
         <p key={h.id}>
-          {reason(h)} <Link className="underline" to="/settings">Settings</Link> is where its
-          credential is entered.
+          {reason(h)}{' '}
+          <Link className="underline" to="/settings">
+            Settings
+          </Link>{' '}
+          is where its credential is entered.
         </p>
       ))}
-    </div>
+    </Notice>
   );
 }
 

@@ -5,18 +5,20 @@ import {
 } from '@assistant-ui/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import type { SessionDetail, ThreadSummary } from '../../../shared/types.ts';
+import type { ThreadSummary } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { BackgroundBar } from '@/components/BackgroundBar';
 import { Notice } from '@/components/Notice';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { api } from '../api.ts';
+import { api, ApiError } from '../api.ts';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useSession } from '@/hooks/use-session';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
 import { threadTitle, type TabState } from '@/lib/tab-title';
+import { refreshHealth } from '../stores/sessions.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
@@ -83,6 +85,40 @@ function blocksOf(message: AppendMessage): ContentBlock[] {
  * part of the connection's own URL, so two tabs on two threads of one box
  * each get their own conversation and neither sees the other's stream.
  */
+/** Why this view could not read its session, in the words it shows. */
+interface LoadError {
+  message: string;
+  detail: string;
+}
+
+/**
+ * What to say about a session that would not load.
+ *
+ * Only a 404 means the box is gone. An authenticating proxy in front of the
+ * deployment answers 401 or 403 once its cookie expires, and telling that
+ * reader their box was deleted is both wrong and alarming; everything else is
+ * the deployment being unreachable, which is a thing that passes.
+ */
+function describeLoadError(err: Error): LoadError {
+  const status = err instanceof ApiError ? err.status : 0;
+  if (status === 404) {
+    return {
+      message: err.message,
+      detail: 'It may have been deleted. Nothing can be sent to it from here.',
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      message: 'This deployment wants you to sign in again.',
+      detail: 'Reload the page to do that. The box itself is untouched.',
+    };
+  }
+  return {
+    message: err.message,
+    detail: 'The deployment could not be reached. The box itself may be fine.',
+  };
+}
+
 export function SessionThread() {
   const { id = '', threadId } = useParams();
   /**
@@ -96,24 +132,37 @@ export function SessionThread() {
    * re-stage it.
    */
   const [prefill, setPrefill] = useState<string | null>(null);
-  const [session, setSession] = useState<SessionDetail | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   /** The thread a fork just made, revealed as a link rather than opened. */
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
 
-  // The WS token comes from the session API, behind the deployment's auth.
+  /**
+   * This session, polled: the WS token the connection needs, the name in the
+   * header, the threads, and the mark on the one being read. It comes from
+   * the session API, behind the deployment's auth.
+   *
+   * Polled rather than read once, because a snapshot of arrival goes stale —
+   * a thread the agent titles at the end of its first turn would keep its
+   * ordinal until a reload.
+   */
+  const { session, error: readError, reload } = useSession(id);
+
+  /**
+   * Why there is nothing to show, or null.
+   *
+   * Only while the session has never been read: a poll that failed after one
+   * answered says the deployment is busy, not that the box is gone, and the
+   * conversation on screen is still worth reading.
+   */
+  const loadError: LoadError | null = session || !readError ? null : describeLoadError(readError);
+
+  // Whether the deployment holds a Claude token, which the warning below
+  // reads. A fact about the deployment rather than about this box, so it is
+  // asked for on arrival and not again.
   useEffect(() => {
-    let live = true;
-    api
-      .getSession(id)
-      .then((s) => live && setSession(s))
-      .catch((err: Error) => live && setLoadError(err.message));
-    return () => {
-      live = false;
-    };
-  }, [id]);
+    void refreshHealth();
+  }, []);
 
   // On arrival, and once: taking it clears it, and the guard is what makes a
   // second run — React mounting effects twice in development — harmless.
@@ -186,33 +235,25 @@ export function SessionThread() {
   /**
    * Marks this conversation done, or takes the mark off again.
    *
-   * The answer is the row as the orchestrator now has it, and only the mark
-   * is taken from it: the rest of the summary was read once on arrival and
-   * whatever it says about a running turn is older than this browser's own
-   * view of one.
+   * The mark is the orchestrator's to keep, so nothing is drawn from the
+   * answer: the session list is asked for again instead, and the header shows
+   * the mark when that row carries it.
    */
   const onSetDone = useCallback(
     (next: boolean) => {
       if (!thread) return;
       api
         .setThreadDone(id, thread.id, next)
-        .then((updated) =>
-          setSession((current) =>
-            current === null
-              ? current
-              : {
-                  ...current,
-                  threads: current.threads.map((t) =>
-                    t.id === updated.id ? { ...t, done: updated.done } : t,
-                  ),
-                },
-          ),
-        )
+        // The polled session is what the header reads, so the mark appears
+        // when that reading does. Asking for it now rather than waiting out
+        // the poll is what keeps the control answering under the finger that
+        // hit it.
+        .then(() => reload())
         // Nothing was marked, so nothing is drawn as marked. It goes where the
         // rest of this thread's trouble goes.
         .catch((err: Error) => store?.reportError(err.message));
     },
-    [id, thread, store],
+    [id, thread, store, reload],
   );
 
   /**
@@ -239,9 +280,8 @@ export function SessionThread() {
     [id, store],
   );
 
-  // Commands already run in this session, appended once the thread is up.
-  // ACP replay carries no timestamps, so they go after the transcript rather
-  // than interleaved into it.
+  // Commands already run in this thread, put back where they were typed once
+  // the replay is in.
   useEffect(() => {
     if (!store || state.connection !== 'ready') return;
     void store.loadExecHistory();
@@ -393,10 +433,8 @@ export function SessionThread() {
                   bookmark for a deleted box lands on. */}
               {loadError ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <p className="text-sm">{loadError}</p>
-                  <p className="text-sm text-muted-foreground">
-                    It may have been deleted. Nothing can be sent to it from here.
-                  </p>
+                  <p className="text-sm">{loadError.message}</p>
+                  <p className="text-sm text-muted-foreground">{loadError.detail}</p>
                   {/* The same step out as the header's, so a session that
                       turned out to be gone is left the same way any other is:
                       whatever sent the visitor here, not a list pushed over

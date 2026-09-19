@@ -1,16 +1,11 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubReview,
-  stubSession,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { reviewWorkspace } from './workspace.ts';
 
 /**
  * The review pages in a real browser, against the real production bundle and
- * a stub orchestrator that keeps real review state.
+ * the real orchestrator, over a workspace with real git repositories in it.
  *
  * The path the tests walk is the one the feature exists for: browse the tree,
  * open a file, comment on a line, and hand the review to the agent. Both
@@ -22,19 +17,21 @@ import {
  * around, so it is the one the browser walks.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const SESSION = 'a1b2c3d4';
+const SESSION = DEFAULT_SESSION.id;
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession({ id: SESSION })]);
+  stub = await startOrchestrator();
 });
 
 beforeEach(() => {
-  // A fresh review per test: comments are written for real, and a leftover
-  // one would make the next test's counts wrong.
-  stub.state.reviews[SESSION] = stubReview();
+  // A fresh session and a fresh workspace per test: comments are written for
+  // real, one test reviews a session of another shape, and a leftover of
+  // either would make the next test's counts wrong.
+  stub.resetSessions();
+  stub.createSession();
+  stub.review(SESSION);
   stub.reviewCalls.length = 0;
 });
 
@@ -220,7 +217,7 @@ test('a line with no hunk behind it has no gutter button', async () => {
 test('a file the change deleted is listed, and says it is gone', async () => {
   // Listed by its status alone: it is on no disk and in no ls-files, which is
   // exactly why it used to fall out of the tree the moment it mattered.
-  stub.state.reviews[SESSION]!.statuses['app/src/old.ts'] = 'deleted';
+  stub.review(SESSION, reviewWorkspace({ deleted: ['app/src/old.ts'] }));
   const { page, errors, close } = await openPage(
     stub.url,
     `/sessions/${SESSION}/review?path=app%2Fsrc%2Fold.ts`,
@@ -235,6 +232,45 @@ test('a file the change deleted is listed, and says it is gone', async () => {
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /old\.ts/ }).isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a file past the line limit is one plain block with nothing to tap', async () => {
+  // Long enough that a row per line is tens of thousands of elements, which is
+  // what freezes a phone — and one line of it changed, so the toolbar has
+  // something to count.
+  const body = Array.from({ length: 9000 }, (_, i) => `const line${i} = ${i};`).join('\n');
+  const workspace = reviewWorkspace();
+  workspace.files['app/long.ts'] = `const first = false;\n${body}\n`;
+  workspace.committed!['app/long.ts'] = `const first = true;\n${body}\n`;
+  stub.review(SESSION, workspace);
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2Flong.ts`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect
+      .poll(() => page.getByText('too long to review line by line').isVisible())
+      .toBe(true);
+    // The file is still there to read, as one block of text.
+    await expect.poll(() => page.getByText('const line8999 = 8999;').isVisible()).toBe(true);
+
+    // No row per line, so no gutter to tap, no line to comment on and no way
+    // into edit mode.
+    expect(await page.locator('[data-line]').count()).toBe(0);
+    expect(await page.getByLabel(/^Show the change at line/).count()).toBe(0);
+    expect(await page.getByLabel('Edit this file').count()).toBe(0);
+
+    // The change is still counted, because it is still a fact about the file.
+    // There is just no row to step to.
+    await expect.poll(() => page.getByLabel('1 change').isVisible()).toBe(true);
+    expect(await page.getByRole('button', { name: 'Next change' }).isDisabled()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -292,7 +328,7 @@ test('commenting a line on a phone writes it through the API', async () => {
       sessionId: SESSION,
       body: { path: 'app/src/boot.ts', line: 2, comment: 'this TODO needs an owner' },
     });
-    expect(stub.state.reviews[SESSION]!.annotations['app/src/boot.ts']?.[2]?.comment).toBe(
+    expect((await stub.comments(SESSION, 'app/src/boot.ts'))[0]?.comment).toBe(
       'this TODO needs an owner',
     );
 
@@ -336,10 +372,7 @@ test('commenting a line on a desktop uses the inline composer', async () => {
 });
 
 test('a comment can be edited and deleted', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'first thoughts', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'first thoughts');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -367,7 +400,7 @@ test('a comment can be edited and deleted', async () => {
       .toBe(true);
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(false);
-    expect(stub.state.reviews[SESSION]!.annotations['app/src/app.ts']).toBeUndefined();
+    expect(await stub.comments(SESSION, 'app/src/app.ts')).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -375,10 +408,10 @@ test('a comment can be edited and deleted', async () => {
 });
 
 test('an outdated comment says the code moved', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    1: { line: 1, comment: 'about the old import', outdated: true },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 1, 'about the old import');
+  // The agent rewrote the file underneath it, so the lines the comment was
+  // written against are not there any more — which is what makes it outdated.
+  stub.write(SESSION, 'app/src/app.ts', 'import { start } from "./start";\n\nstart();\n');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -399,10 +432,7 @@ test('an outdated comment says the code moved', async () => {
 });
 
 test('handing the review to the agent stages a prompt, unsent', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'please fix', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'please fix');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -432,10 +462,7 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
 });
 
 test('a new review clears every comment, behind a confirmation', async () => {
-  stub.state.reviews[SESSION]!.annotations['app/src/app.ts'] = {
-    2: { line: 2, comment: 'to be discarded', outdated: false },
-  };
-  stub.state.reviews[SESSION]!.hasReview = true;
+  await stub.comment(SESSION, 'app/src/app.ts', 2, 'to be discarded');
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -451,7 +478,244 @@ test('a new review clears every comment, behind a confirmation', async () => {
     await page.getByRole('button', { name: 'Delete the review' }).click();
 
     await expect.poll(() => page.getByText('to be discarded').isVisible()).toBe(false);
-    expect(stub.state.reviews[SESSION]!.hasReview).toBe(false);
+    expect(stub.hasReview(SESSION)).toBe(false);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// --- editing ----------------------------------------------------------------
+
+test('a line can be fixed in place, and the save reaches the workspace', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="2"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+
+    // The same rows, with a textarea over the code: the line numbers and the
+    // highlighting are the pane's own, not a second editor's.
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+    await expect.poll(() => page.locator('[data-line="2"]').isVisible()).toBe(true);
+    await shoot(page, 'review-edit-phone');
+
+    // Nothing to save until something is typed.
+    expect(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled()).toBe(true);
+
+    await editor.fill(
+      'export function boot(): void {\n  wireTheRouter();\n  console.log("up");\n}\n',
+    );
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+    await expect.poll(() => stub.reviewCalls.length).toBe(1);
+    expect(stub.reviewCalls[0]).toMatchObject({
+      method: 'PUT file',
+      sessionId: SESSION,
+      body: { path: 'app/src/boot.ts' },
+    });
+    // The file of the workspace the agent is working in, which is the whole
+    // point of the review living here.
+    await expect
+      .poll(() => stub.read(SESSION, 'app/src/boot.ts'))
+      .toContain('wireTheRouter();');
+    // And saved is saved: nothing left to write.
+    await expect
+      .poll(() => page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
+      .toBe(true);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the line being read stays put across a switch into editing', async () => {
+  // A comment high up, so the card between the rows is what moves everything
+  // below it when edit mode folds it away.
+  stub.review(SESSION, {
+    files: { 'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n') },
+    repos: [''],
+  });
+  await stub.comment(SESSION, 'long.ts', 3, 'a card tall enough to push the rest down');
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=long.ts`,
+  );
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('a card tall enough').isVisible()).toBe(true);
+
+    await pane.evaluate((el) => {
+      el.scrollTop = 2000;
+    });
+    /** The line at the top of the pane, which is what must not move. */
+    const topLine = (): Promise<number | null> =>
+      pane.evaluate((el) => {
+        for (const row of el.querySelectorAll<HTMLElement>('[data-line]')) {
+          if (row.offsetTop + row.offsetHeight > el.scrollTop) return Number(row.dataset.line);
+        }
+        return null;
+      });
+    const before = await topLine();
+    expect(before).toBeGreaterThan(1);
+
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    await expect
+      .poll(() => page.getByRole('textbox', { name: 'File contents' }).isVisible())
+      .toBe(true);
+    // The card folded away, so every pixel offset below it changed — and the
+    // reader is still looking at the line they were looking at.
+    expect(await topLine()).toBe(before);
+
+    // And back again, with the card between the rows once more.
+    await page.getByRole('button', { name: 'Stop editing and go back to commenting' }).click();
+    await expect.poll(() => page.getByText('a card tall enough').isVisible()).toBe(true);
+    expect(await topLine()).toBe(before);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a save the agent got in first is refused, and the choice is offered', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=lib%2Findex.ts`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+    await editor.fill('export const version = "2.0.0";\n');
+
+    // The box is running while the review is open, which is allowed: the
+    // agent writes the same file.
+    stub.write(SESSION, 'lib/index.ts', 'export const version = "9.9.9";\n');
+
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect
+      .poll(() => page.getByText('The agent changed this file while you were editing it.').isVisible())
+      .toBe(true);
+    // Refused rather than applied, and the buffer is still there to save.
+    expect(stub.read(SESSION, 'lib/index.ts')).toBe('export const version = "9.9.9";\n');
+    await shoot(page, 'review-edit-conflict-desktop');
+
+    await page.getByRole('button', { name: 'Save anyway' }).click();
+    await expect
+      .poll(() => stub.read(SESSION, 'lib/index.ts'))
+      .toBe('export const version = "2.0.0";\n');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('walking away from unsaved edits asks first', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2FREADME.md`,
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+    await editor.fill('# demo\n\nRewritten by hand.\n');
+
+    await page.getByRole('button', { name: 'Back to the file list' }).click();
+    await expect.poll(() => page.getByText('Leave without saving?').isVisible()).toBe(true);
+    // Cancelling leaves the buffer exactly where it was.
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect.poll(() => editor.inputValue()).toContain('Rewritten by hand.');
+
+    await page.getByRole('button', { name: 'Back to the file list' }).click();
+    await page.getByRole('button', { name: 'Discard the edits' }).click();
+    await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
+    // Nothing was written, which is what discarding means.
+    expect(stub.read(SESSION, 'app/README.md')).toBe('# demo\n\nA project the agent cloned.\n');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the rows and the editor over them wrap in the same places', async () => {
+  // The shapes that decide where a line breaks, and a file long enough for a
+  // disagreement about any of them to add up: what is typed lands where the
+  // caret is only while the rows behind the textarea wrap exactly as it does,
+  // and every line that wraps differently pushes everything below it further
+  // out of step.
+  const shapes = [
+    'The review starts with a file browser over the whole workspace, which is where reading one begins.',
+    'The format is the desktop [review](https://github.com/splitbrain/review/blob/main/README.md) tool of the same name.',
+    '\t\tconst deeplyIndented = somethingWithAPrettyLongNameIndeed(first, second, third, fourth);',
+    'const blob = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";',
+    'A line that ends in two spaces, which markdown reads as a break.  ',
+  ];
+  const lines = Array.from({ length: 25 }, (_, i) => shapes[i % shapes.length]!);
+  stub.write(SESSION, 'readme.md', `${lines.join('\n')}\n`);
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=readme.md`,
+  );
+  try {
+    await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    const editor = page.getByRole('textbox', { name: 'File contents' });
+    await expect.poll(() => editor.isVisible()).toBe(true);
+
+    // The whole invariant in one number: the textarea is exactly as tall as
+    // the rows it covers, so it cannot have wrapped the file into a different
+    // number of visual lines than they did.
+    const heights = await page.evaluate(() => {
+      const ta = document.querySelector('textarea') as HTMLTextAreaElement;
+      return { box: ta.clientHeight, content: ta.scrollHeight };
+    });
+    expect(heights.content).toBe(heights.box);
+
+    // And the behaviour that rests on it, taken at a line far enough down for
+    // any drift above to have shown up: type into the last visual row of a
+    // wrapped line, and the text lands in that line.
+    await page.locator('[data-slot="review-code-pane"]').evaluate((pane) => {
+      const target = pane.querySelector('[data-line="22"]') as HTMLElement;
+      pane.scrollTop = target.offsetTop - 120;
+    });
+    const row = (await page.locator('[data-line="22"]').boundingBox())!;
+    const code = (await page.locator('[data-line="22"] code').boundingBox())!;
+    expect(row.height).toBeGreaterThan(code.height / 2);
+    await page.mouse.click(code.x + 60, row.y + row.height - 8);
+    await page.keyboard.type('INSERTED');
+
+    const typed = (await editor.inputValue()).split('\n');
+    expect(typed[21]).toContain('INSERTED');
+    expect(typed[20]).not.toContain('INSERTED');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a file the pane cannot show whole cannot be edited', async () => {
+  stub.review(SESSION, reviewWorkspace({ deleted: ['app/gone.ts'] }));
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/sessions/${SESSION}/review?path=app%2Fgone.ts`,
+  );
+  try {
+    await expect.poll(() => page.getByText('This file was deleted').isVisible()).toBe(true);
+    // No control rather than one that refuses: there is nothing to edit.
+    expect(await page.getByRole('button', { name: 'Edit this file' }).count()).toBe(0);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -483,7 +747,10 @@ test('the base picker sets a revision and says which one is active', async () =>
     // And the picker says where it landed in each repository, because one
     // expression resolves separately in every one of them.
     await page.getByRole('button', { name: /main/ }).click();
-    await expect.poll(() => page.getByText('00000000').isVisible()).toBe(true);
+    // The commit it resolved to in each repository, abbreviated. Which commit
+    // that is belongs to the repository the fixture made, so it is read by
+    // shape.
+    await expect.poll(() => page.getByText(/^[0-9a-f]{8}$/).first().isVisible()).toBe(true);
     await shoot(page, 'review-base-desktop');
     expect(errors).toEqual([]);
   } finally {
@@ -538,12 +805,7 @@ test('a revision that is not one anywhere is reported, not swallowed', async () 
 // --- degraded shapes --------------------------------------------------------
 
 test('a workspace with no repository still browses and comments', async () => {
-  stub.state.reviews[SESSION] = stubReview({
-    repos: [],
-    statuses: {},
-    diffs: {},
-    files: { 'notes.txt': 'just some notes\nnothing tracked\n' },
-  });
+  stub.review(SESSION, { files: { 'notes.txt': 'just some notes\nnothing tracked\n' }, repos: [] });
 
   const { page, errors, close } = await openPage(
     stub.url,
@@ -570,14 +832,10 @@ test('a workspace with no repository still browses and comments', async () => {
 });
 
 test('a session whose workspace cannot be read says what to do', async () => {
-  stub.state.reviews[SESSION] = stubReview({
-    fail: {
-      status: 409,
-      error:
-        'This session stores its workspace in a volume the orchestrator cannot read. ' +
-        'Start the session once to migrate it, then review it.',
-    },
-  });
+  // A session from before workspaces became directories, whose files are in a
+  // named volume this process has no way to read.
+  stub.resetSessions();
+  stub.createSession({ legacy: true });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
   try {
@@ -593,7 +851,7 @@ test('a session whose workspace cannot be read says what to do', async () => {
 });
 
 test('an empty workspace says so rather than showing nothing', async () => {
-  stub.state.reviews[SESSION] = stubReview({ files: {}, statuses: {}, diffs: {}, repos: [] });
+  stub.review(SESSION, { files: {}, repos: [] });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
   try {
@@ -608,14 +866,12 @@ test('an empty workspace says so rather than showing nothing', async () => {
 
 test('each file remembers how far it was read, and a new one starts at the top', async () => {
   // Long enough to scroll, which the small fixture files are not.
-  stub.state.reviews[SESSION] = stubReview({
+  stub.review(SESSION, {
     files: {
       'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
       'short.ts': 'const one = 1;\n',
     },
-    repos: [{ path: '', name: 'workspace', head: 'a'.repeat(40), baseCommit: '' }],
-    statuses: {},
-    diffs: {},
+    repos: [''],
   });
 
   const { page, errors, close } = await openPage(
@@ -652,13 +908,11 @@ test('each file remembers how far it was read, and a new one starts at the top',
 
 test('the review header gives way to reading the file, and returns', async () => {
   // Long enough to scroll, which the small fixture files are not.
-  stub.state.reviews[SESSION] = stubReview({
+  stub.review(SESSION, {
     files: {
       'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
     },
-    repos: [{ path: '', name: 'workspace', head: 'a'.repeat(40), baseCommit: '' }],
-    statuses: {},
-    diffs: {},
+    repos: [''],
   });
 
   const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
@@ -709,11 +963,25 @@ test('the review header gives way to reading the file, and returns', async () =>
     // collapsed to nothing. Below md the only way to the file tree is the
     // button in this header, so switching files from here takes a flick up
     // first, the same flick as in a thread.
-    expect(await inReach()).toBe(false);
+    //
+    // Polled rather than read once: the decision is a state change and the
+    // collapse is a transition after it, so a single reading right after the
+    // decision is a reading of whichever frame the animation had got to.
+    await expect.poll(inReach).toBe(false);
 
     await read(-100, 2);
     await expect.poll(away).toBe(false);
-    expect(await inReach()).toBe(true);
+    await expect.poll(inReach).toBe(true);
+
+    // And it is back over the file list, after a file left while it was away.
+    // The phone's own back gesture leaves whether the header is in reach or
+    // not, and the pane the decision was read from goes with the file — so a
+    // header still away over the list would be a list with no way out of it.
+    await read(100, 4);
+    await expect.poll(away).toBe(true);
+    await page.goBack();
+    await expect.poll(away).toBe(false);
+    await expect.poll(inReach).toBe(true);
 
     expect(errors).toEqual([]);
   } finally {

@@ -1,5 +1,7 @@
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
+import { networkInterfaces } from 'node:os';
 import tls from 'node:tls';
 import { generateCACertificate } from 'mockttp';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -9,11 +11,12 @@ import { Interceptor } from './inject.ts';
 /**
  * The swap and the refusal, driven through the real interception engine.
  *
- * The engine's own upstream is pointed at a stand-in for the vetting tunnel,
- * so these tests need no network: what is under test is what the proxy adds —
- * that a placeholder becomes the real credential, that anything else is
- * refused here rather than forwarded, and that the certificate a session sees
- * is the deployment's.
+ * A session reaches a credential host over TLS, so that is how these tests
+ * reach the engine. The engine's own upstream is pointed at a stand-in for the
+ * vetting tunnel, so they need no network: what is under test is what the
+ * proxy adds — that a placeholder becomes the real credential, that anything
+ * else is refused here rather than forwarded, and that the certificate a
+ * session sees is the deployment's.
  */
 
 const PLACEHOLDER = 'ghp_PLACEHOLDERPLACEHOLDER';
@@ -24,8 +27,8 @@ let ca: { key: string; cert: string };
 /** Records what actually arrived upstream. */
 let received: Array<{ url: string; headers: http.IncomingHttpHeaders }> = [];
 
-/** A plain origin standing in for the host being protected. */
-let origin: http.Server;
+/** A TLS origin standing in for the host being protected. */
+let origin: https.Server;
 let originPort = 0;
 
 /**
@@ -38,34 +41,51 @@ let tunnelPort = 0;
 let interceptor: Interceptor;
 let policy: EgressPolicy;
 
-const listen = (server: http.Server): Promise<number> =>
+/** How many times the engine has reported that it started. */
+let starts = 0;
+
+/** The unwrapped TLS client, for the connections these tests make themselves. */
+const connectTls = tls.connect;
+
+/** An answer read back from the engine. */
+interface Answer {
+  status: number;
+  body: string;
+}
+
+const listen = (server: http.Server | https.Server): Promise<number> =>
   new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
   });
 
+/**
+ * Lets the engine reach the stand-in origin over TLS.
+ *
+ * The engine checks the certificate of the host it forwards to against the
+ * system trust store, which a test cannot add a CA to, and the stand-in origin
+ * serves a certificate of its own. Wrapping the TLS client is the way in: a
+ * connection that names no CA is the engine's and skips the check, while the
+ * connections these tests make call the unwrapped client above.
+ */
+function trustTheStandInOrigin(): void {
+  const relaxed = (options: tls.ConnectionOptions, onSecure?: () => void): tls.TLSSocket =>
+    connectTls(options.ca ? options : { ...options, rejectUnauthorized: false }, onSecure);
+  tls.connect = relaxed as typeof tls.connect;
+}
+
 beforeAll(async () => {
   ca = await generateCACertificate({ subject: { commonName: 'Boxes test CA' } });
+  trustTheStandInOrigin();
 
-  origin = http.createServer((req, res) => {
+  origin = https.createServer({ key: ca.key, cert: ca.cert }, (req, res) => {
     received.push({ url: req.url ?? '', headers: req.headers });
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('origin reached\n');
   });
   originPort = await listen(origin);
 
-  tunnel = http.createServer((req, res) => {
-    const url = new URL(req.url ?? '');
-    const upstream = http.request(
-      { host: '127.0.0.1', port: originPort, method: req.method, path: url.pathname, headers: req.headers },
-      (up) => {
-        res.writeHead(up.statusCode ?? 502, up.headers);
-        up.pipe(res);
-      },
-    );
-    upstream.on('error', () => res.destroy());
-    req.pipe(upstream);
-  });
   // The engine reaches its proxy by CONNECT, whatever the target scheme.
+  tunnel = http.createServer();
   tunnel.on('connect', (_req, client, head) => {
     const upstream = net.connect({ host: '127.0.0.1', port: originPort }, () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -82,7 +102,9 @@ beforeAll(async () => {
     policy: () => policy,
     upstreamProxyUrl: () => `http://127.0.0.1:${tunnelPort}`,
     denied: () => {},
-    log: () => {},
+    log: (msg) => {
+      if (msg === 'interception engine started') starts += 1;
+    },
   });
 }, 30_000);
 
@@ -94,6 +116,7 @@ afterAll(async () => {
   await interceptor.stop();
   origin.close();
   tunnel.close();
+  tls.connect = connectTls;
 });
 
 /** The policy under test, with one credential on one host. */
@@ -114,12 +137,57 @@ function githubPolicy(over: Partial<EgressPolicy> = {}): EgressPolicy {
   };
 }
 
+/** Opens a tunnel through the engine to one host, as a session's client does. */
+function tunnelThroughEngine(
+  port: number,
+  authority: string,
+  host = '127.0.0.1',
+): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host, port }, () => {
+      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+      socket.once('data', () => resolve(socket));
+    });
+    socket.on('error', reject);
+  });
+}
+
+/** Sends a request through the engine over TLS and reads the answer. */
+async function throughEngine(
+  port: number,
+  headers: http.OutgoingHttpHeaders,
+  host = 'api.github.com',
+  path = '/user',
+  engineHost = '127.0.0.1',
+): Promise<Answer> {
+  const socket = await tunnelThroughEngine(port, `${host}:443`, engineHost);
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        // With no agent, the request goes down this connection and closes it.
+        createConnection: () => connectTls({ socket, servername: host, ca: ca.cert }),
+        host,
+        path,
+        method: 'GET',
+        headers,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** Sends a plain proxy request straight at the engine and reads the answer. */
-function throughEngine(
+function plainThroughEngine(
   port: number,
   headers: http.OutgoingHttpHeaders,
   url = 'http://api.github.com/user',
-): Promise<{ status: number; body: string }> {
+): Promise<Answer> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       { host: '127.0.0.1', port, method: 'GET', path: url, headers: { host: 'api.github.com', ...headers } },
@@ -131,6 +199,17 @@ function throughEngine(
     );
     req.on('error', reject);
     req.end();
+  });
+}
+
+/** Whether anything still answers on a loopback port. */
+function listening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port }, () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on('error', () => resolve(false));
   });
 }
 
@@ -162,6 +241,32 @@ describe('the interception engine', () => {
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
   }, 30_000);
 
+  it('refuses a caller that did not come through the front door', async () => {
+    // The engine's own listener takes every interface, and the proxy sits on
+    // every session network, so a box can open this port directly. Reaching it
+    // that way skips the front door's rules about which hosts and ports may be
+    // intercepted at all, so the engine refuses anything not from loopback.
+    const outward = Object.values(networkInterfaces())
+      .flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
+    if (!outward) return; // nothing but loopback here; nothing to prove
+
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await throughEngine(
+      interceptor.port()!,
+      { authorization: `Bearer ${PLACEHOLDER}` },
+      'api.github.com',
+      '/user',
+      outward,
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatch(/front door|reachable from the proxy only/);
+    expect(received).toHaveLength(0);
+  }, 30_000);
+
   it('refuses a foreign credential here instead of forwarding it', async () => {
     policy = githubPolicy();
     await interceptor.apply();
@@ -186,14 +291,29 @@ describe('the interception engine', () => {
     expect(received[0]?.headers.authorization).toBeUndefined();
   }, 30_000);
 
+  it('refuses a credential host reached in the clear', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await plainThroughEngine(interceptor.port()!, {
+      authorization: `Bearer ${PLACEHOLDER}`,
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatch(/a credential host may only be reached over https/);
+    // Neither the placeholder nor the secret may travel as plaintext.
+    expect(received).toHaveLength(0);
+  }, 30_000);
+
   it('does not touch a host that has no credential configured', async () => {
     policy = githubPolicy();
     await interceptor.apply();
 
     const res = await throughEngine(
       interceptor.port()!,
-      { authorization: 'Bearer whatever', host: 'example.com' },
-      'http://example.com/',
+      { authorization: 'Bearer whatever' },
+      'example.com',
+      '/',
     );
 
     expect(res.status).toBe(200);
@@ -205,15 +325,8 @@ describe('the interception engine', () => {
     await interceptor.apply();
 
     // The shape of a real session: CONNECT, then TLS under the deployment CA.
-    const socket = await new Promise<net.Socket>((resolve, reject) => {
-      const s = net.connect({ host: '127.0.0.1', port: interceptor.port()! }, () => {
-        s.write('CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n\r\n');
-        s.once('data', () => resolve(s));
-      });
-      s.on('error', reject);
-    });
-
-    const secure = tls.connect({ socket, servername: 'api.github.com', ca: ca.cert });
+    const socket = await tunnelThroughEngine(interceptor.port()!, 'api.github.com:443');
+    const secure = connectTls({ socket, servername: 'api.github.com', ca: ca.cert });
     await new Promise<void>((resolve, reject) => {
       secure.once('secureConnect', () => resolve());
       secure.once('error', reject);
@@ -242,5 +355,29 @@ describe('the interception engine', () => {
     policy = githubPolicy({ credentials: [] });
     await interceptor.apply();
     expect(interceptor.port()).toBeNull();
+  }, 30_000);
+
+  it('runs overlapping applies one after another, with no port gap', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+    const before = interceptor.port();
+    expect(before).toBeGreaterThan(0);
+
+    // A changed CA is what makes an apply replace the running server.
+    const other = await generateCACertificate({ subject: { commonName: 'Boxes other CA' } });
+    policy = githubPolicy({ ca: other });
+    starts = 0;
+    const seen: Array<number | null> = [];
+    const sampler = setInterval(() => seen.push(interceptor.port()), 1);
+    await Promise.all([interceptor.apply(), interceptor.apply()]);
+    clearInterval(sampler);
+
+    // Two servers would mean one nobody can stop, and a gap would mean the
+    // front door tunnelling a credential host past the engine.
+    expect(starts).toBe(1);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).not.toContain(null);
+    expect(interceptor.port()).toBeGreaterThan(0);
+    expect(await listening(before!)).toBe(false);
   }, 30_000);
 });

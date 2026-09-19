@@ -360,7 +360,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
  * box awake. Labelled as well as coloured, because a dot with no label says
  * nothing to a screen reader.
  */
-export function threadDot(thread: ThreadSummary): { kind: BadgeKind; label: string } {
+function threadDot(thread: ThreadSummary): { kind: BadgeKind; label: string } {
   if (thread.pendingCount > 0) return { kind: 'waiting', label: 'waiting for approval' };
   if (thread.speaking) return { kind: 'turn', label: 'running a turn' };
   if (thread.backgroundBusy) return { kind: 'task', label: 'something still running' };

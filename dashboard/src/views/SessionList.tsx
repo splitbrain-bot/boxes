@@ -1,16 +1,23 @@
 import { KeyRound, Plus, SlidersHorizontal } from 'lucide-react';
+import { useEffect } from 'react';
 import { Link } from 'react-router';
 import { ImageFooter } from '@/components/ImageFooter';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { PushToggle } from '@/components/PushToggle';
 import { SessionCard } from '@/components/SessionCard';
 import { TokenWarning } from '@/components/TokenWarning';
 import { Button } from '@/components/ui/button';
-import { useSessions } from '../stores/sessions.ts';
+import { startPolling, useSessions } from '../stores/sessions.ts';
 
 /** The dashboard's home: every session as a card, and the card is the thread. */
 export function SessionList() {
   const { sessions, images, error, loading } = useSessions();
+
+  // The whole list is polled while this screen is up, and only while it is:
+  // every other view watches one session, and none of them needs the rest of
+  // the deployment fetched every few seconds.
+  useEffect(() => startPolling(), []);
 
   return (
     <div className="flex flex-col gap-3">
@@ -52,9 +59,7 @@ export function SessionList() {
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
-      {loading && sessions.length === 0 ? (
-        <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
-      ) : null}
+      {loading && sessions.length === 0 ? <Loading className="py-8 text-center" /> : null}
 
       {/* Only where the list is genuinely empty. A failed poll knows nothing
           about how many sessions there are, and saying there are none under

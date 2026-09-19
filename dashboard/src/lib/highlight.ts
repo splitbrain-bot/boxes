@@ -68,7 +68,7 @@ const GRAMMARS: Record<string, () => Promise<unknown>> = {
 };
 
 /** Whether a language has a grammar to load at all. */
-export function canHighlight(language: string): boolean {
+function canHighlight(language: string): boolean {
   return language in GRAMMARS;
 }
 
@@ -131,13 +131,35 @@ async function loadGrammar(language: string): Promise<void> {
  */
 const MAX_LINE = 2000;
 
-/** How many lines are worth tokenizing. Past this the pane renders plain. */
+/**
+ * How many lines a file may have before the review stops working line by
+ * line.
+ *
+ * Past this, tokenizing janks the tab for seconds and a row per line is tens
+ * of thousands of elements for a phone to lay out. Such a file is shown as
+ * one plain block instead, so the number is the pane's limit as well as the
+ * tokenizer's.
+ */
 const MAX_LINES = 8000;
 
 /**
+ * Whether a file is short enough to colour and to render one row per line.
+ *
+ * Counts no further than the limit, so rejecting a huge file costs nothing
+ * and allocates nothing.
+ */
+export function withinLineLimit(content: string): boolean {
+  let lines = 1;
+  for (let at = content.indexOf('\n'); at >= 0; at = content.indexOf('\n', at + 1)) {
+    if (++lines > MAX_LINES) return false;
+  }
+  return true;
+}
+
+/**
  * Tokenizes a file into one token list per line, or null when it should be
- * rendered plain — no grammar for the language, a pathological line, or a
- * failure in the grammar itself.
+ * rendered plain — no grammar for the language, a file past the line limit, a
+ * pathological line, or a failure in the grammar itself.
  *
  * Returning null rather than throwing is deliberate: highlighting is
  * decoration, and a file that cannot be coloured still has to be readable and
@@ -148,10 +170,8 @@ export async function tokenizeLines(
   language: string,
 ): Promise<Token[][] | null> {
   if (!canHighlight(language)) return null;
-
-  const lines = content.split('\n');
-  if (lines.length > MAX_LINES) return null;
-  if (lines.some((line) => line.length > MAX_LINE)) return null;
+  if (!withinLineLimit(content)) return null;
+  if (content.split('\n').some((line) => line.length > MAX_LINE)) return null;
 
   try {
     await loadGrammar(language);

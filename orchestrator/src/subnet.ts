@@ -40,15 +40,26 @@ export function formatIpv4(value: number): string {
 }
 
 /**
- * Returns the index-th /24 inside pool, wrapping when the pool runs out so a
- * long-lived deployment keeps allocating. Callers must ensure the returned
- * subnet is not already in use by a live network.
+ * The first free /24 inside pool, starting at the index-th and wrapping, or
+ * null when `taken` holds every one of them.
+ *
+ * Wrapping is what keeps a long-lived deployment allocating: the counter the
+ * index comes from only ever rises, while the subnets it named are given back
+ * as sessions are deleted. `taken` is what the wrap needs — a pool of 256
+ * slots would otherwise hand the 257th session the subnet the first is on.
  */
-export function allocateSubnet(pool: string, index: number): string {
+export function allocateSubnet(
+  pool: string,
+  index: number,
+  taken: ReadonlySet<string>,
+): string | null {
   const { base, prefix } = parseCidr(pool);
   if (prefix > 24) throw new Error(`Pool ${pool} is smaller than a /24`);
   const slots = 2 ** (24 - prefix);
-  const slot = ((index % slots) + slots) % slots;
-  const network = (base + slot * 256) >>> 0;
-  return `${formatIpv4(network)}/24`;
+  for (let step = 0; step < slots; step++) {
+    const slot = (((index + step) % slots) + slots) % slots;
+    const subnet = `${formatIpv4((base + slot * 256) >>> 0)}/24`;
+    if (!taken.has(subnet)) return subnet;
+  }
+  return null;
 }

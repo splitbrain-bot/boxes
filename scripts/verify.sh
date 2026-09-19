@@ -148,6 +148,8 @@ write_env() {
   cat > "$ENV_FILE" <<ENV
 EGRESS_ALLOWED_HOSTS=$1
 IDLE_STOP_MINUTES=60
+SESSION_IMAGE=boxes-session:latest
+SESSION_IMAGE_PULL_MINUTES=0
 ENV
 }
 write_env "$ALLOWLIST"
@@ -157,6 +159,8 @@ up() { BOXES_ENV="$ENV_FILE" HOST_PORT="$HOST_PORT" BIND_ADDR=127.0.0.1 "${COMPO
 
 SESSION_ID=""
 CONTAINER=""
+CFG_SESSION=""
+OVR_SESSION=""
 STACK_UP=0
 
 dump_logs() {
@@ -168,9 +172,11 @@ dump_logs() {
 }
 
 cleanup() {
-  local status=$?
-  [ -n "$SESSION_ID" ] && \
-    curl -sS -m 15 -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null 2>&1
+  local status=$? id
+  for id in "$SESSION_ID" "$CFG_SESSION" "$OVR_SESSION"; do
+    [ -n "$id" ] && [ "$id" != null ] && \
+      curl -sS -m 15 -X DELETE "$API_BASE/api/sessions/$id" >/dev/null 2>&1
+  done
   if [ "$STACK_UP" = 1 ]; then
     if [ "${KEEP_UP:-0}" = 1 ]; then
       grey "leaving the stack up on $API_BASE (KEEP_UP=1); take it down with: docker compose down"
@@ -437,6 +443,8 @@ api() {
   curl -sS -m 30 -X "$method" "$API_BASE$path" "${args[@]}"
 }
 
+# The global AGENTS.md belongs to the operator, so keep it and put it back.
+GLOBAL_AGENTS_MD=$(api GET /api/agent-sets/global | jq -r '.agentsMd // ""')
 api PATCH /api/agent-sets/global '{"agentsMd":"Verify: the house rules."}' >/dev/null
 api PUT /api/agent-sets/global/items \
   '{"kind":"command","name":"housecmd","content":"the global command"}' >/dev/null
@@ -519,7 +527,8 @@ else
 fi
 [ -n "${SET_ID:-}" ] && [ "$SET_ID" != null ] && \
   curl -sS -m 15 -X DELETE "$API_BASE/api/agent-sets/$SET_ID" >/dev/null 2>&1
-api PATCH /api/agent-sets/global '{"agentsMd":""}' >/dev/null
+api PATCH /api/agent-sets/global \
+  "$(jq -n --arg md "$GLOBAL_AGENTS_MD" '{agentsMd:$md}')" >/dev/null
 curl -sS -m 15 -X DELETE "$API_BASE/api/agent-sets/global/items?kind=command&name=housecmd" \
   >/dev/null 2>&1
 

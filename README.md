@@ -1,1158 +1,233 @@
 # Boxes
 
-Boxes runs AI coding-agent sessions in isolated Docker containers and gives you
-a mobile-friendly web UI to drive them. Each session is a long-lived container
-with its own workspace directory, its own internal network, and no route out
-except through a proxy that vets every destination.
+Boxes is a web-based orchestrator for AI coding agents, similar to Claude Code
+on the web.
 
-Agent turns keep running when your browser goes away. The orchestrator — not
-the browser — is the agent's client of record, so you can lock your phone
-mid-task and find the finished thread when you come back.
+It runs Claude Code and OpenAI Codex. A conversation runs on one of them,
+chosen when it is started, and one session can hold both on the same
+workspace. Boxes drives agents over the
+[Agent Client Protocol](https://agentclientprotocol.com/) (ACP).
 
-- **Isolated sessions.** One container, one network, one workspace per session.
-  Non-root, read-only rootfs, no capabilities, no host mounts, no published
-  ports.
-- **Vetted egress only.** Session networks are `internal`; the sole way out is
-  an egress proxy that rejects private addresses, pins the connection to a
-  vetted IP, and can be given a host allowlist.
-- **No credentials in the sandbox.** Sessions hold placeholder tokens. The
-  proxy swaps in the real ones on the wire, and refuses any other credential
-  to those hosts — so a leaked placeholder is worth nothing. The real ones are
-  entered on the dashboard's settings page and never leave the orchestrator.
-- **One service, one port.** The orchestrator serves the UI, the REST API and
-  the WebSocket gateway on `:3000`. No second origin, nothing to configure.
-- **Two agents, one checkout.** A conversation runs Claude Code or OpenAI
-  Codex, chosen when it is started, and one box can hold both on the same
-  workspace. Sessions speak the Agent Client Protocol (ACP).
+Each session runs in its own Docker container. A proxy wraps the credentials and
+can restrict network access. The credentials themselves are entered on the
+dashboard's settings page and never leave the orchestrator: a session holds
+placeholder tokens, and the proxy swaps in the real ones on the wire.
 
-`ARCHITECTURE.md` describes how it is built.
+Compared to Claude Code on the web, Boxes can run several threads on the same
+checked-out code base, which improves context management. It has a built-in
+line-based review tool, similar to
+[splitbrain/review](https://github.com/splitbrain/review) and allows direct editing of files. It is hackable, and
+you can adjust it to your preferences.
 
-## Requirements
+## Setup
 
-- Docker with Compose v2, on Linux or macOS
-- A credential for whichever agent you want to run: a Claude token from
-  `claude setup-token` (subscription-based, inference only), an OpenAI API key
-  for Codex, or both. They are entered in the dashboard rather than in a file
-- Node 22+ — only if you want to develop on Boxes itself
+Boxes needs Docker with Compose v2. The images are published on GHCR. Create a
+`compose.yaml`:
 
-## Install
+```yaml
+name: boxes
+
+services:
+  orchestrator:
+    image: ghcr.io/splitbrain/boxes/orchestrator:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - boxes-data:/data
+    depends_on:
+      - egress-proxy
+
+  egress-proxy:
+    image: ghcr.io/splitbrain/boxes/egress-proxy:latest
+    container_name: boxes-egress-proxy
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  boxes-data:
+```
+
+Then start it:
 
 ```sh
-git clone https://github.com/splitbrain/experiments.git boxes
-cd boxes
-
 docker compose up -d
 ```
 
-The session image is deliberately **not** part of `compose.yaml` — the
-orchestrator creates session containers at runtime, so it fetches that image
-itself: once at boot when it is missing, and again every
-`SESSION_IMAGE_PULL_MINUTES` so a moving tag moves here too. A session adopts
-what has arrived the next time it is started.
+Boxes is now available at <http://localhost:3000>. For a live deployment, put
+a reverse proxy in front of it and let the proxy handle authentication.
 
-To run one you built rather than one you pull, build it and turn the refresh
-off — there is no registry to pull a local tag from:
+No credential belongs in a file. Open the settings page and enter one for
+whichever agent you want to run; see [Settings](#settings). `.env.example` in
+the repository documents the deployment settings a `.env` next to the compose
+file may carry: ports, limits, the allowlist, where the data lives.
 
-```sh
-docker build -t boxes-session:latest session-image/
-echo SESSION_IMAGE_PULL_MINUTES=0 >> .env
-```
-
-Boxes is now on <http://localhost:3000>, bound to loopback because it ships
-with no authentication of its own. See
-[Behind a reverse proxy](#behind-a-reverse-proxy) before moving it.
-
-### Who a session runs as
-
-`SESSION_UID` and `SESSION_GID` are the uid and gid every session process runs
-as, and therefore the owner of every file in a workspace. They default to
-**1020** rather than 1000: 1000 is the `ubuntu` account the base image
-carries and what a host usually gives its first login user, and a service
-sharing a uid with a person is what a per-service uid exists to avoid.
-
-One thing has to agree with them: the session image builds its `agent` user on
-the same numbers, through `AGENT_UID` and `AGENT_GID` build args whose defaults
-match. A session's home is a named volume, and Docker ownership-initialises a
-new one from the image's own `/home/agent` — so an image built on a different
-uid leaves the agent unable to write its own home, and nothing outside the
-container can chown a named volume afterwards. The orchestrator reads the
-image's user back at boot and warns when the two have drifted.
-
-To run on some other uid, set both and build to match:
-
-```sh
-docker build --build-arg AGENT_UID=1000 --build-arg AGENT_GID=1000 \
-  -t boxes-session:latest session-image/
-echo SESSION_UID=1000 >> .env
-echo SESSION_GID=1000 >> .env
-```
-
-Sessions created before a change keep the old ownership, so changing this on a
-live deployment means recreating them.
-
-### The orchestrator does not need root
-
-It has needed it for one thing: giving each workspace directory away to the
-session uid, which only root can do. Set the orchestrator's own user to
-`SESSION_UID` and there is nothing to give away — `chownToAgent` returns
-immediately — so it can run as an ordinary user:
-
-```yaml
-services:
-  orchestrator:
-    user: "1020:1020"
-    group_add:
-      - "<the host's docker gid>"     # getent group docker | cut -d: -f3
-```
-
-`group_add` is what keeps the Docker socket reachable. Two caveats worth being
-clear about: the data directory has to be owned by that uid already
-(`chown -R 1020:1020` on it), and this is tidiness rather than containment —
-a process holding the Docker socket is root-equivalent on the host whatever
-uid it runs as, so the authentication in front of `/api` is still what matters.
-
-### Published images
-
-Every push to `main` builds the three images and pushes them to GHCR, so a
-deployment needs no checkout and no build:
-
-| Image | Is |
-|---|---|
-| `ghcr.io/splitbrain/boxes/orchestrator` | What `compose.yaml` builds from `orchestrator/Dockerfile` |
-| `ghcr.io/splitbrain/boxes/egress-proxy` | The same for `proxy/Dockerfile` |
-| `ghcr.io/splitbrain/boxes/session` | The session image, which is a service in no compose file |
-
-Each carries `latest` and an immutable `sha-<short>`. A deployment that wants
-to be rolled forward by something like watchtower follows `latest`; one that
-must not move under itself pins the sha.
-
-A deployment moved that way gives nobody the chance to note which build it
-landed on, so the session list says so in a footer: each image's digest,
-abbreviated the way Docker abbreviates an id, when it was built, and how much
-disk it takes. The full digest is in the line's `title`.
-
-A digest that came from a registry is the manifest digest, which is what a
-published tag is compared against; an image built out of a checkout has none,
-so its local config id stands in. The size is the daemon's own figure — every
-layer uncompressed, so it is larger than the download was, and a layer two of
-these images share is counted in both.
-
-The session image needs nothing special of the deployment: point
-`SESSION_IMAGE` at `latest` and the orchestrator keeps it current itself. What
-it must **not** have is an outside updater, because compose does not own those
-containers and recreating one loses the id the orchestrator tracks it by and
-the proxy attachment that is the session's only way out. Session containers
-therefore carry `com.centurylinklabs.watchtower.enable=false`, which watchtower
-and the tools that copy it honour.
-
-`.github/workflows/publish.yml` is the workflow, and the test suites gate it.
-A pull request runs the same suites and builds all three images without
-pushing any of them.
-
-A deployment fronted by watchtower can be told to pull rather than left to
-find out on its next poll. Set two things on the repository and the last job
-of every publishing run pings it:
-
-| Setting | Is |
-|---|---|
-| `WATCHTOWER_URL` (variable) | The update endpoint, such as `https://watchtower.example.net/v1/update` |
-| `WATCHTOWER_HTTP_API_TOKEN` (secret) | What watchtower was started with as `WATCHTOWER_HTTP_API_TOKEN` |
-
-Without the variable the job says there is nothing to notify and passes, so a
-fork publishing to its own namespace needs no changes. With it, a ping that is
-refused fails the run: the images are already published at that point, and a
-deployment that quietly stayed where it was is worth a red check.
-
-## Configure
-
-There is no required configuration — every setting has a working default. To
-change one, copy `.env.example` to `.env` and edit it. To keep the file out of
-the repo, point at it instead:
-
-```sh
-BOXES_ENV=~/.config/boxes.env docker compose up -d
-```
-
-**No credential belongs in that file.** The Claude token, the OpenAI key a
-Codex thread runs on, the GitHub token and the git identity are entered in the
-dashboard and kept in the database, because a credential has to be enterable
-without a restart and a subscription login has no static form at all. `.env`
-carries deployment settings only: ports, limits, the allowlist, where the data
-lives.
-
-### The settings page
+### Settings
 
 The key in the session list's header opens **Settings**, at `/settings`: one
-card per credential, and the identity every box commits as.
+card per credential, and the identity every session commits as.
 
 | | What it is | Without it |
 |---|---|---|
 | Claude | The token `claude setup-token` prints, `sk-ant-oat01-…` | A Claude Code thread fails at its first prompt |
 | OpenAI | An API key, `sk-…` | A Codex thread fails at its first prompt |
 | GitHub | A classic personal access token, `ghp_…` | git and gh reach GitHub unauthenticated, and a push is refused |
-| Git identity | The name and email a box commits as | Boxes commit as `boxes-bot <boxes-bot@users.noreply.github.com>` |
+| Git identity | The name and email a session commits as | Sessions commit as `boxes-bot <boxes-bot@users.noreply.github.com>` |
 
 A secret is write-only. It goes in, and what comes back out is its last four
-characters, whether it is working, and what it last failed with — enough to
-tell two tokens apart and not enough to be worth reading off a screen.
+characters, whether it is working, and what it last failed with.
 
-Entering one takes effect within the second: the egress policy is recomposed
-and pushed the moment it is stored. It reaches boxes that already exist,
-including ones created before any credential was set, because every box holds
-a placeholder for every credential whether or not that credential exists yet.
-Nothing is restarted and nothing is recreated.
+Entering one takes effect within the second, and it reaches sessions that
+already exist: every session holds a placeholder for every credential whether
+or not that credential exists yet, and the proxy is where the difference is
+made. Nothing is restarted.
 
-Until a credential is there the session list says so, one line per agent that
-cannot run a turn, naming this page. Boxes still start and the dashboard still
-works; only a turn fails, and the new-thread dialog offers that agent greyed
-out with the reason beside it rather than letting you get there.
+Until a credential is there, the session list says so, one line per agent that
+cannot run a turn. Sessions still start and the dashboard still works; only a
+turn fails, and the new-thread dialog offers that agent greyed out with the
+reason beside it.
 
-**Logging in rather than pasting.** An account is not a string anybody can
-type into a form, so the page also offers a login: it runs the harness's own
-CLI in a throwaway container, shows you the URL and the one-time code, takes
-the code back where the CLI asks for one pasted, and stores what it produced.
-The orchestrator is the only holder of that and the only thing that refreshes
-it, so nothing in a box can rotate a token out from under the deployment.
+**Logging in rather than pasting.** The page also offers a login: it runs the
+agent's own CLI in a throwaway container, shows you the URL and the one-time
+code, takes the code back where the CLI asks for one pasted, and stores what
+it produced. A Claude login ends in a token like the pasted one, good for a
+year; at expiry the page says so and asks for another. A ChatGPT login is
+stored and kept refreshed, but cannot be handed to a session yet, so a Codex
+thread still wants a pasted API key — the page says exactly that.
 
-A Claude login ends in a token like the pasted one, good for a year and not
-renewable — at expiry the page says so and asks for another. A ChatGPT login
-ends in something else: a document rather than a header value, for traffic that
-goes to a host the proxy deliberately does not intercept. Boxes stores it and
-keeps it refreshed, and cannot hand it to a box yet — so a Codex thread still
-wants a pasted API key, and the settings page says exactly that rather than
-leaving the agent greyed out for no visible reason.
+**There is no logging in inside a session.** The CLIs prefer a credential in
+their environment to their own stored login, and every session has one in its
+environment from the moment it is created.
 
-**There is no logging in inside a box.** The CLIs prefer a credential in their
-environment to their own stored login, and every box now has one in its
-environment from the moment it is created — so `claude /login` in a session
-container has nothing left to do. The settings page is the way in.
+**The data volume holds live credentials.** They are stored as-is in SQLite,
+because the orchestrator has to hand them to the proxy on every boot and
+there is nobody to ask for a passphrase. A backup of the volume is a backup of
+them, and the reverse proxy in front of the dashboard is a requirement rather
+than a suggestion.
 
-**The data volume now holds live credentials.** They are stored as-is in
-SQLite, with no encryption layer: the orchestrator has to hand them to the
-proxy on every boot, and there is nobody to ask for a passphrase. So a backup
-of that volume is a backup of your logins, and the reverse proxy in front of
-the dashboard is a requirement rather than a suggestion — see
-[Behind a reverse proxy](#behind-a-reverse-proxy).
+## Usage
 
-### Upgrading a deployment from before this
+### Session list
 
-There is no compatibility, and no migration. A deployment that had its
-credentials in the environment comes up with none: nothing is imported from
-`.env` or from the shell, and the tokens have to be entered on the settings
-page once. A box built before the upgrade also stops reading the record an
-older entrypoint left at `~/.claude/.boxes-managed`, so whatever that start
-installed stays in the box's home until the same path is installed again. What
-does carry over is the work: every session, every thread and every transcript
-comes back as it was, each thread on Claude Code and on the model it was last
-left on.
+The start page lists every session. A session is one container with a home
+directory and a workspace directory bind-mounted into it. It contains one or
+more threads, and a thread is one instance of the agent harness. Idle sessions are suspended, which stops their
+container.
 
-### Environment settings
+A session shows its name, its id, its disk usage and one or more status badges:
 
-| Variable | Default | What |
-|---|---|---|
-| `BIND_ADDR` | `127.0.0.1` | Interface the port is published on |
-| `HOST_PORT` | `3000` | Published port |
-| `WS_AUTH_TOKEN` | generated | Gateway bearer token; generated on first boot into `/data/ws-auth-token` and reused |
-| `SESSION_IMAGE` | `boxes-session:latest` | Image sessions run |
-| `SESSION_UID` | `1020` | uid session processes run as, and the owner of every workspace file. The session image must be built on it |
-| `SESSION_GID` | `1020` | gid to match |
-| `SESSION_IMAGE_PULL_MINUTES` | `60` | How often that image is pulled again; `0` never, for one built on the host |
-| `SESSION_IMAGE_PRUNE` | `true` | Remove a copy of the session image that a pull has superseded. Only images carrying its label, and only once nothing runs on one |
-| `SESSION_SUBNET_POOL` | `10.200.0.0/16` | Pool sessions get a `/24` from |
-| `SESSION_MEM_LIMIT` | `4g` | Per-session memory cap |
-| `SESSION_CPUS` | `2` | Per-session CPU cap |
-| `SESSION_PIDS_LIMIT` | `512` | Per-session pids cap |
-| `IDLE_STOP_MINUTES` | `30` | Idle time before a session container is stopped |
-| `BACKGROUND_POLL_SECONDS` | `20` | How often a box is asked whether work is still running in it |
-| `AGENT_QUIET_SECONDS` | `3` | Silence after which the agent counts as having stopped talking |
-| `AGENT_SETTLE_SECONDS` | `30` | Silence after which you are told the turn is over |
-| `MAX_ATTACHMENT_MB` | `25` | Largest single file a prompt may carry into a workspace |
-| `PERMISSION_FALLBACK` | `hold` | `hold` or `deny` for an unanswered permission request |
-| `PERMISSION_HOLD_MINUTES` | `120` | How long before that fallback applies |
-| `PUSH_SUBJECT` | project URL | Contact in the VAPID assertion Web Push carries |
-| `DATA_DIR` | `/data` | Database, generated token and session workspaces, inside the volume |
-| `HOST_DATA_DIR` | resolved | Host-side path of `DATA_DIR`, which a workspace bind mount has to name. Resolved at boot by inspecting the orchestrator's own container; set it only where that cannot work |
-| `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Proxy container the orchestrator attaches to session networks |
-| `EGRESS_ALLOWED_HOSTS` | — | Hosts sessions may reach; empty means every public host |
-
-Everything is parsed and validated at boot, so a bad value fails startup
-rather than surfacing later. `orchestrator/src/config.ts` is the full list, and
-it is deployment settings only: no credential and no git identity is read from
-the environment at all.
-
-## Run
-
-```sh
-docker compose up -d          # start
-docker compose logs -f        # follow
-docker compose down           # stop
-```
-
-Health check and verification:
-
-```sh
-curl localhost:3000/healthz
-API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
-```
-
-The smoke test needs no credentials: it creates throwaway sessions, asserts the
-isolation properties from inside a container, and cleans up. Run it after any
-change to networking, the proxy, or the session image. Hand it a credential
-in its environment and it seeds the store over the API first, then proves that
-no real credential is inside a session; where an allowlist is set, it proves
-that the allowlist bites.
-
-## Use
-
-Open <http://localhost:3000>.
-
-**Create a session.** Give it a name, and say what its first conversation
-runs: the agent, and under it the mode, the model and whatever else that agent
-offers. The session gets its own container, network and storage, and its
-workspace starts empty — tell the agent what to fetch into it. If the
-deployment has any agent sets beyond the global one, pick which of them this
-box gets.
-
-**Talk to the agent.** Tap a session card to open its thread. That is the whole
-interface: type, and the turn runs in the container. Close the tab or lock your
-phone whenever you like; reattaching replays the thread from the session's own
-history — including a turn that is still running, which comes back mid-flight
-rather than looking finished. Opening a stopped session starts it again.
-
-The tab's title is the box and the conversation, behind a symbol for what that
-thread is doing: `⟳` running a turn, `⚠` waiting for a permission decision,
-`?` waiting for an answer, `○` idle. Several boxes in several tabs is the
-normal way to use this, and the symbol is the part a narrow tab still shows.
-
-**Pick the agent per conversation.** Which harness runs a thread is settled
-when the thread is started and belongs to the thread rather than to the box —
-so one box can hold a Claude Code thread and a Codex thread on the same
-checkout, working the same files. **New thread** opens a dialog asking the
-same question the create form does: the agent, then its mode, its model and
-its effort. It opens on whatever you chose last for that agent, kept on the
-deployment so it is the same on every device, and it offers only the agents
-whose credential works — the others are greyed out and say why. A deployment
-that has never run an agent has nothing to offer but the choice of agent
-itself; the thread then starts on that agent's defaults and the agent's own
-answer fills the sliders in on its first turn. A thread's row and its header
-both say which agent it is, because that is what its settings mean.
-
-Codex's two sandboxed modes say they may be unavailable in this deployment.
-They run every command under a sandbox that needs a kernel facility a hardened
-container is unlikely to grant, and the adapter cannot know what the container
-it was started in allows — so they are offered with the caveat rather than
-hidden. The container is the boundary either way, which is why a fresh Codex
-thread starts in full access.
-
-**Watch it think.** A turn shows the agent's reasoning as a collapsed
-*Reasoning* line above what it does, streaming while it goes. The sliders in
-the thread's header hold everything the agent offers — its mode, its model,
-its effort level, and whatever else the adapter advertises. All of it is per
-conversation.
-
-**Watch work that reports back later.** A command left running in the
-background, a subagent, a monitor — none of them answers into the turn that
-started it. When one has something to say it wakes the agent, and the thread
-shows that as a row of its own rather than as a message from you: what
-happened, and what the task said. A monitor's event is there to read; a
-finished task's answer is folded under its summary and opens on a tap.
-
-**Work in two threads at once.** A session can hold several conversations on
-one workspace, listed under its card, each with its own link. **Fork** branches
-the one you are in, and the button offers to open it in a new tab — so you can
-ask the fork about what the original is doing without stopping it or losing
-your place. It opens on everything that was said up to the branch, and goes
-its own way from there. A fork asks nothing and stays on the agent that wrote
-the transcript, since only that agent can load it. It starts in the mode that
-reads rather than writes — `plan` under Claude Code, `read-only` under Codex —
-because it shares the original's checkout and two agents editing the same
-files at once is a mess neither can see; flip it under the header's sliders
-when that is what you want.
-
-**Mark a thread done.** The check in a thread's header says you are finished
-with that conversation, and the list draws it struck through — so a box that
-has gathered six of them shows at a glance which ones are still live. It is a
-note to you and nothing else: a thread marked done still opens, still runs,
-still answers, and the same button takes the mark off again.
-
-**Read the list at a glance.** Every thread row ends with how long ago that
-conversation last did anything — `12s`, `5h`, `14d` — so the one you were in
-is findable in a box that holds six, and a session nobody has touched in a
-fortnight says so without being opened. Every card says how much disk the box
-is taking — its workspace and its home together, `4.0 MB` or `2.4 GB` — which
-is where the box that has been fetching models all week shows up. The home is
-usually the larger half: a workspace holds a checkout, a home holds every
-toolchain cache and globally installed tool the agent ever reached for. Both are deliberately rough: the exact
-timestamp is on the details view, and the exact byte count is nobody's
-question. The size is measured in the background: a running box is re-measured
-at most every quarter of an hour, a stopped one is measured once and then left
-alone — nothing in it is changing — and a session created a moment ago shows
-none at all until the first measurement lands.
-
-**Attach a file.** The `+` under the composer takes anything — drop it on the
-thread or paste it, on a phone as much as on a desktop. Whatever it is, it is
-uploaded into that session's workspace under `.boxes/attachments/`, and the
-prompt tells the agent the path, the type and the size, so it opens a
-screenshot, a PDF or a CSV with the tools it already has. Nothing is carried
-in the message itself, so an attachment costs context only when the agent
-reaches for it. Images still show in the thread, served back from the
-workspace, and anything else reads as a chip you can tap — a PDF opens in a
-tab. The files stay there afterwards, and a `.gitignore` keeps them out of
-any repository you are working in.
-
-**Run a shell command with `!`.** A composer line starting with `!` runs as
-`bash -lc` in the session container and never reaches the model — no tokens
-spent, no chance of it being read as an instruction:
-
-```
-!npm test
-!git diff --stat
-```
-
-Output is printed as it arrives, as a code block ending with the exit code.
-Commands are capped at 120 seconds and 256 KiB of output.
-
-**Review the code.** **Review** on a session card, or the magnifier in a
-thread's header, opens the session's workspace as a review: browse the files,
-read one highlighted, and tap a line to leave a comment. Git statuses colour the
-tree and changed lines are marked in the gutter: tapping the code is how a
-comment starts, and tapping the gutter beside it shows that change as a diff —
-including the lines that were deleted, which the file itself cannot show. **Compare against** a branch, tag or commit to review a whole branch's
-work rather than only what is uncommitted.
-
-The review is over the whole workspace, not over one repository in it. A box
-that holds two clones side by side, a dependency checked out beside them, or a
-repository inside a repository browses as one tree, and each file is shown with
-the status and diff of the repository it is in — repository roots are
-marked so you can see where one stops and the next begins. Files that are in no
-repository show too, without the git parts. There is nothing to pick and
-nothing to switch between. **Compare against** takes one revision for the whole
-workspace and resolves it in each repository separately, so `main` means
-main-in-each; where it landed, and where it named nothing, is on the picker.
-
-Comments are written to a single `REVIEW.md` at the top of the workspace, with
-workspace-relative paths in it. That is the point of having this here rather
-than beside it: **Hand to agent** opens the thread with "Read REVIEW.md and
-address the comments in it." waiting in the composer — staged, not sent. It is
-the same one line however many repositories the box holds, and because the file
-sits above all of them it cannot be committed into one by accident. The agent
-can edit and delete it too, and a comment whose code has since moved follows
-it, or is marked as no longer matching.
-
-The format is the desktop [`review`](https://github.com/splitbrain/review)
-tool's, so a review reads the same in both.
-
-Reviewing needs no running container — the files are a directory on the
-orchestrator's data volume — so the natural moment, once the agent is done and
-the box has idled out, costs nothing. Nothing is polled while a review sits
-open: it refetches when you arrive, when you close a file back to the list, and
-when you come back to the tab. A session created before Boxes stored workspaces
-this way says so and asks you to start it once, which migrates it.
-
-**Configure the agent.** The sliders in the session list header open **Agent
-configuration**: an `AGENTS.md`, skills and slash commands, managed here rather
-than pasted into every box.
-
-They live in *sets*. The **Global** set goes into every box and cannot be
-deleted. Any other set is optional: a box names at most one when it is created,
-and the two are merged —
-
-| | How the two sets combine |
+| Badge | The session |
 |---|---|
-| `AGENTS.md` | Concatenated, global first, separated by a blank line |
-| Skills | Union by name; the named set's replaces the global one of the same name |
-| Slash commands | Same |
+| `up`, green | is running |
+| `stopped`, grey | is suspended |
+| `error`, red | failed |
+| `waiting for approval`, amber | needs a permission decision |
+| `running turn`, blue | is processing a prompt |
+| `still running`, dim blue | has a command or a subagent running |
+| `2 viewers`, grey | is open in that many browsers |
 
-— and the set's editor shows the result, so an override is never silent.
+Below them is the list of threads. Each row has a coloured dot, the thread's
+name, the agent that runs it and the time since it was last active.
 
-**The session image is a third layer, underneath both.** A skill the image
-ships — `playwright-cli`, for the browser, is the only one today — is installed
-into a box only when no set in its merged configuration claims that name. So
-the same rule runs all the way down: the more specific configuration wins, with
-the image least specific of all. Define a `playwright-cli` skill in a set and
-the box gets yours; delete it again and the image's comes back at the next
-start. The one thing the editor cannot show is that bottom layer, because it
-lives in the image rather than the database — so if a skill you did not write
-turns up in a box, this is where it came from.
-
-Inside the box, the merged set is installed into each agent's own
-configuration — both of them, always, because a box may hold threads of either
-and a set belongs to the box rather than to an agent:
-
-| | Claude Code | Codex |
-|---|---|---|
-| `AGENTS.md` | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
-| Skill | `~/.claude/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
-| Slash command | `~/.claude/commands/<name>.md` | `~/.codex/prompts/<name>.md` |
-
-The `AGENTS.md` lands as that agent's user-level memory, so it applies wherever
-in the box the agent is working. A skill needs YAML front matter naming and
-describing it or it is not loaded at all. A command is invoked as `/<name>` in
-the composer. Neither agent reads the other's directories, and a few kilobytes
-written twice is cheaper than a box that would have to know in advance which
-agent it will be asked for.
-
-What was installed is recorded in `~/.boxes/managed`, and the next start
-removes exactly those paths before installing again — so a skill deleted in the
-dashboard disappears from the box, while anything the agent itself put in its
-home is never touched.
-
-**An edit reaches a box the next time that box starts.** Nothing is pushed into
-a running one. Stop and start it, or create a new one.
-
-**Answer permission requests.** When the agent asks to do something requiring
-consent, the request goes to a browser watching the thread that asked. With
-nobody on that thread it is queued, you are notified, and it is delivered to
-the next browser to open it. Nothing is ever auto-approved.
-
-**Manage the session.** The ⓘ corner of a card opens its details and controls:
-start, stop, delete, the container and network names, and the WebSocket URL and
-bearer token for attaching your own ACP client. Deleting removes the storage
-too, so the agent's work and the thread history go with it.
-
-A session survives its container. Everything a box is made of comes from its
-row and its two directories, so if something removes the container — a stray
-`docker container prune`, which takes every *stopped* container and so every
-idle session, or a `docker system prune` that takes the network with it —
-starting the session again rebuilds both and picks up where it left off. The
-files were never in the container.
-
-Deleting is also the only way a session's disk goes away, and it goes
-completely: the workspace, the home, the container and the network. Both of
-those are directories on the Boxes data volume — `workspaces/<id>` and
-`homes/<id>` — so everything a session is made of is in one place, backed up by
-whatever backs that volume up, and counted in the size on its card.
-Should any of that fail halfway — a crash, a daemon that would not remove
-something — the orchestrator sweeps what was left the next minute, and every
-minute after, rather than leaving it on the host with nothing left to name it.
-The same sweep reclaims the copy of the session image a pull superseded; see
-`SESSION_IMAGE_PRUNE`.
-
-Idle sessions — no turn on any thread, no waiting request, no attached browser
-— are stopped after `IDLE_STOP_MINUTES`. They are never deleted. Work left
-running in the background counts as not idle: a command still going or a
-monitor still watching holds the stop off. The box is asked what is running in
-it rather than told, every `BACKGROUND_POLL_SECONDS`, so backgrounding a long
-build and closing the tab is safe, and a task that ends without reporting —
-killed, crashed or gone quiet — stops holding the box the moment it is
-gone.
-
-**Work still running says so.** A thread that has left something going says so
-above the composer, and names it: expand the bar and each command is there with
-how long it has been running. That is the difference between a thread that has
-finished and one that is waiting for you with a build still in it — and the
-composer is yours in both, because a turn the adapter is holding open for a
-background subagent is not an agent that is still talking. A card in the
-session list carries the same fact about the box as a whole.
-
-What is listed is that conversation's own work and nothing another one left
-behind: the agent announces a task when it starts one and again when it ends,
-and the bar is what it announced. In the session list the same fact is the
-bullet beside each thread — dim blue for the one still running something, which
-is the conversation holding the box awake. **Stop** names the task back to the
-agent that started it — that one, or everything the thread is running. It is a
-stop and not an interrupt, because a background command outlives the turn that
-started it by design and cancelling the conversation would leave it running.
-
-An agent that has been restarted since knows nothing about what it left
-running. The announcements live in the adapter process, so a box that was
-stopped and started, or an orchestrator that was deployed mid-build, comes
-back with empty bars and a build still compiling. The box itself is still read
-underneath — which is what keeps that build from being reaped — and the
-session card offers **Stop everything running in this box** for work no thread
-can name any more.
-
-**A long background command under Codex may not be long.** Codex has no
-"run this in the background" flag: its shell tool yields after a timeout and
-leaves the process running as something the model can poll back, and its
-source carries a default background timeout of 300 seconds. Whether that ends
-the process at the five-minute mark has not been measured here, so expect a
-Codex background bar to be a five-minute affair and a two-hour build to need
-the agent to detach it itself. Claude Code has no such limit. Nothing in Boxes
-changes either way.
-
-## Notifications
-
-A box that wants something tells you whenever **nobody is watching that
-thread**: a permission request has been queued, or a turn has finished and is
-waiting for you. A turn finishing in front of you is not announced — that is
-the screen you are already looking at. "Finished" means the agent has stopped
-talking rather than that a request came back, so a turn holding a background
-subagent open is announced when the agent goes quiet, and the
-notification says what is still running.
-
-**Web Push** is the one channel, and it reaches a browser with no tab open,
-which is the case the feature exists for: lock your phone mid-turn and the
-answer arrives on the lock screen. Tap *Notify me* on the session list to
-subscribe this browser. Nothing to configure — the deployment generates its
-own VAPID keypair into `/data/vapid-keys.json` on first use, and the tap is
-the whole setup.
-
-Two things it needs, both outside Boxes:
-
-- **HTTPS.** The Push API does not exist on a page served over plain HTTP,
-  `http://localhost` excepted. So push works on the loopback default and
-  behind a TLS [reverse proxy](#behind-a-reverse-proxy), and not at all on a
-  bare `http://192.168.x.x:3000` — the toggle says so rather than failing
-  quietly. Set `PUSH_SUBJECT` to your own `mailto:` or `https:` URL so a push
-  service with a problem has somebody to contact.
-- **Add to Home Screen, on iOS.** Safari gives a page the Push API only once
-  it has been installed. Share → Add to Home Screen, open it from there, then
-  subscribe. Android and desktop browsers need no install.
-
-Unsubscribing is the same toggle. A subscription the push service reports as
-finished — permission revoked, browser uninstalled, Safari expiring it on its
-own schedule — is dropped on the next attempt without anybody doing anything.
-
-## Behind a reverse proxy
-
-Boxes has no authentication, holds the Docker socket and now holds the
-deployment's credentials, so as shipped it binds to `127.0.0.1`. Anything
-beyond a single-user machine needs a reverse proxy in front — a requirement
-rather than a suggestion: the settings page enters live logins over `/api`, and
-anything that can reach that route can read back which accounts they are for
-and replace them — Caddy, nginx, Traefik, whatever you already run. Proxy to
-`127.0.0.1:3000`, or join the `boxes_default` network and use
-`orchestrator:3000` if the proxy is itself a container. Only widen `BIND_ADDR`
-once something else is doing the authenticating.
-
-Two rules:
-
-1. **Authenticate `/` and `/api`, and terminate TLS there.** Every route is
-   otherwise open, including the one that creates containers.
-2. **Do not put HTTP authentication in front of `/ws`.** Browsers cannot attach
-   Basic credentials to a WebSocket upgrade, so guarding it breaks every thread
-   view. It does not need guarding: the gateway authenticates the upgrade
-   itself against `WS_AUTH_TOKEN`.
-
-Also forward `Upgrade` and `Connection` on `/ws`, and give it a long read
-timeout — a turn can hold the socket open for minutes with nothing on it.
-
-## What a session can reach
-
-Two settings shape it, and both default to something safe.
-
-**The allowlist.** `EGRESS_ALLOWED_HOSTS` is a comma or whitespace separated
-list of exact hostnames and one-label wildcards:
-
-```
-EGRESS_ALLOWED_HOSTS=github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,api.openai.com,registry.npmjs.org
-```
-
-`*.example.com` matches `a.example.com`, but neither `example.com` nor
-`a.b.example.com`. An address literal matches only as a literal. Leave it unset
-and behaviour is what it has always been: any public host, private ranges still
-denied. The hosts of a credential you have stored are always reachable, so a
-narrow list can never sever inference or GitHub — and so are the hosts that
-credential's own tools need, which is how a Codex login and a token refresh
-keep working under a list that names neither.
-
-**Token translation.** It is always on, and a host becomes a translated host
-the moment its credential is entered on the settings page:
-
-| Credential | Translated | Reachable, never translated |
-|---|---|---|
-| Claude | `api.anthropic.com` | `console.anthropic.com`, `platform.claude.com`, `claude.ai` |
-| OpenAI | `api.openai.com` | `auth.openai.com`, `chatgpt.com` |
-| GitHub | `github.com`, `api.github.com`, `*.githubusercontent.com` | `codeload.github.com` |
-
-Leave a credential unstored and its host stays an ordinary tunnel. The
-placeholder a box holds for it is then worth nothing at all — the service is
-handed a bearer it has never issued and refuses it — which is the intended
-failure, and the thread dialog is what keeps you from getting there. A ChatGPT
-subscription is the same case for a different reason: what a login leaves is a
-document rather than a header value, so there is nothing for the proxy to swap
-and its hosts stay opaque.
-
-`chatgpt.com` is deliberately not intercepted. It carries the other kind of
-OpenAI credential, a subscription, and the two kinds reject each other's
-material — so leaving it alone is what lets a deployment's API key and a
-person's subscription live in the same box. Two further hosts Codex uses come
-with no credential and are a deployment's own choice under a narrow list:
-`files.openai.com`, which model attachments are fetched from, and
-`ab.chatgpt.com`, its telemetry. A list that omits them makes the proxy refuse
-both — expect them in its denial counters — and Codex carries on.
-
-Every box holds a placeholder for every credential this deployment can
-translate, whether or not that credential exists yet, and is given the
-deployment CA on the same terms. A container's environment is fixed when it is
-created, so a box built today has to work with a token entered tomorrow.
-
-For a translated host the session holds a placeholder of the same shape as the
-real token, and:
-
-```
-docker exec session-<id> env | grep -c sk-ant-oat01-...   # 0
-```
-
-The proxy terminates TLS for that host under a CA generated once for your
-deployment, swaps the placeholder for the real credential, and refuses any
-*other* credential outright — so "api.anthropic.com is allowlisted" no longer
-implies "any Anthropic account is reachable". Everything else stays an opaque
-tunnel the proxy cannot read.
-
-The real credentials live in the orchestrator's database and in the proxy's
-memory, and nowhere else — never in a session container, and never in a file
-outside the data volume. The proxy has no config file, no database and no CA
-on disk: it boots empty and is handed its policy over an authenticated channel
-on the compose network, which no session can route to. Restart it and the
-orchestrator's reconciler pushes again within a minute; enter a credential and
-the push happens at once rather than at the next tick.
-
-The CA certificate reaches each session as `BOXES_PROXY_CA`, written by the
-entrypoint to `~/.boxes/proxy-ca.crt`, with `NODE_EXTRA_CA_CERTS`,
-`SSL_CERT_FILE`, `GIT_SSL_CAINFO` and `CURL_CA_BUNDLE` pointing at it.
-
-### When a new tool fails TLS
-
-A tool that honours none of those variables fails TLS against *translated
-hosts only*, which is a confusing shape — everything else keeps working. The
-fix is to point that tool at the same file:
-
-| Tool | Variable | Notes |
-|---|---|---|
-| node, npm, anything on Node | `NODE_EXTRA_CA_CERTS` | Already set |
-| curl | `CURL_CA_BUNDLE` | Already set |
-| git | `GIT_SSL_CAINFO` | Already set |
-| gh, and most Go tools | `SSL_CERT_FILE` | Already set |
-| Python `requests` | `REQUESTS_CA_BUNDLE` | Add it, pointing at `$BOXES_PROXY_CA`'s file |
-| Python `httpx`, `aiohttp` | `SSL_CERT_FILE` | Already set |
-| Deno | `DENO_CERT` | Add it |
-| Rust `reqwest` (rustls) | `SSL_CERT_FILE` | Already set |
-
-Rotating the CA is deleting `egress-secrets.json` from the data volume and
-restarting; sessions created before that keep the old certificate and must be
-recreated.
-
-## When an agent needs a tool the image lacks
-
-`apt-get install` cannot work inside a session, and not by accident: the root
-filesystem is mounted read-only, the agent is not root, and every capability is
-dropped, so all three of the things that install needs are missing. Handing any
-of them back would hand them to every session, for the sake of the one that
-wanted a package.
-
-There are two ways in, and which one you want depends on whether the tool is
-this session's business or the deployment's. Before either, check whether the
-toolchain is already in the image.
-
-### Language toolchains
-
-The image carries Node, Python, Go, Rust and PHP, so a session can work in any
-of them without installing anything. Each is whatever its source ships, so ask
-the image itself for a version:
-
-| | From | Also |
-|---|---|---|
-| Node | NodeSource | npm; `NPM_CONFIG_PREFIX` is `~/.local` |
-| Python | Ubuntu | `python3-venv`, `pipx` |
-| Go | Ubuntu | `GOPATH` is `~/go`, cache `~/.cache/go-build` |
-| Rust | Ubuntu | `cargo`, `rustfmt`, `cargo-clippy`, `rust-src` |
-| PHP | Ubuntu | Composer, and the mbstring, xml, curl, zip, intl, sqlite3, gd and bcmath extensions |
-
-`build-essential`, `cmake`, `pkg-config` and `libssl-dev` are there too, so a
-crate or an extension with a native dependency builds. `uv` is installed as
-well, which is worth knowing under a read-only `/usr`: `uv tool install` and
-`uv python install` both write to the session's home, so a session can fetch a
-Python it does not have without any privilege at all.
-
-### Everything else in the image
-
-The tools an agent reaches for that are not a language — reading the PDF a
-ticket linked to, unpacking whatever a download turned out to be, converting a
-document, poking at a database file. A read-only `/usr` means a tool that is
-not here is one the agent has to build or do without mid-task, so the list
-leans generous:
-
-| | |
+| Dot | The thread |
 |---|---|
-| PDF | `pdftotext`, `pdftoppm`, `pdfinfo` and the rest of poppler; `qpdf`; `mutool`; `gs`; `ocrmypdf` with `tesseract` (English) |
-| Documents | `pandoc` |
-| Images, diagrams | `magick` (ImageMagick 7), `dot` and the rest of graphviz |
-| Archives | `unzip`, `zip`, `xz`, `zstd`, `7z`, `bzip2` |
-| Files, text | `file`, `tree`, `patch`, `fd`, `rg`, `jq`, `yq`, `shellcheck`, `less` |
-| Data | `sqlite3` |
-| Network, VCS | `curl`, `wget`, `git`, `git-lfs`, `gh`, `dig`, `nc` |
-
-Two notes that will otherwise cost someone an hour. `fd` is a symlink the
-image adds, because Debian and Ubuntu install fd-find as `fdfind` to avoid a
-name collision. And ImageMagick's shipped policy refuses PDF and PostScript
-input — that is its Ghostscript hardening, left alone here — so rasterise a
-PDF with `pdftoppm` or `mutool draw`, not `magick`.
-
-Between the toolchains and these, the image is a few gigabytes; most of the
-toolchain half is Rust and most of the tool half is pandoc. Worth knowing
-before a first pull on a slow link, and the reason a deployment that wants a
-leaner image is better off stripping what it does not need in a derived one
-than with this image as shipped.
-
-### Headless browser
-
-`@playwright/cli` and a Chromium build are in the image, so a session can drive
-a real browser: inspect a page, click and type in it, screenshot it, scrape it,
-or check the dev server it just started.
-
-**A CLI and a skill rather than an MCP server**, which is what Microsoft
-themselves recommend for coding agents, and the two share an implementation —
-so this gives up nothing on interaction. `playwright-cli snapshot` renders the
-page as an accessibility tree with a `[ref=eN]` handle on every element, and
-`click`, `type`, `select`, `hover` and the rest take those refs, so the agent
-never guesses a CSS selector:
-
-```yaml
-- heading "Sign in" [level=1] [ref=e2]
-- textbox "Email" [ref=e4]
-- button "Continue" [ref=e5]
-```
-
-```sh
-playwright-cli type e4 user@example.com
-playwright-cli click e5
-```
-
-The browser lives in a daemon between invocations, so those are three separate
-commands acting on one page, and each snapshot is written to a **file** with
-only the path printed — which is the point of the CLI over MCP: the tree does
-not land in the model's context unless the agent chooses to read it. Named
-sessions (`-s=name`), tabs, network inspection, console, cookies, storage,
-tracing, video and `run-code` for arbitrary Playwright snippets are all there;
-`playwright-cli --help` lists them.
-
-**Its skill comes from the package**, and the entrypoint runs
-`playwright-cli install --skills --global` on every start. That writes
-`~/.claude/skills/playwright-cli/` — a SKILL.md plus nine reference files
-maintained by the Playwright team — rather than into the workspace, which is a
-git checkout and none of the image's business. The entrypoint then copies it
-to `~/.agents/skills/playwright-cli/`, which is where Codex looks for skills
-and where the CLI does not put one. Re-running each start means the
-copy in the session's home follows the image instead of being frozen at whatever
-that volume was initialised with.
-
-It runs *after* the box's own agent configuration is installed, and defers to
-it: a `playwright-cli` skill in one of the deployment's sets is the one the box
-gets, and the image's copy is left out. See
-[Configure the agent](#use) — the image is the bottom layer of that merge.
-
-**Three settings the CLI cannot work out for itself**, shipped as
-`/usr/local/share/boxes/playwright-cli.config.json` and copied by the entrypoint
-to `~/.playwright/cli.config.json`, the CLI's documented global config, with the
-egress proxy added — that part is only known at runtime. A project's own
-`.playwright/cli.config.json` still overrides everything.
-
-- **`browserName: chromium`.** The CLI defaults to the `chrome` channel and
-  looks for real Google Chrome at `/opt/google/chrome/chrome`. Without this the
-  browser does not open at all.
-- **`chromiumSandbox: false`.** Chromium's own sandbox needs a user namespace,
-  and Docker's seccomp profile denies one to a container without
-  `CAP_SYS_ADMIN` — which this container deliberately does not have. Left on,
-  the browser dies at startup with `Chromium sandboxing failed`. Note this is
-  *not* the Playwright library's default, where it is already false. The
-  container is the sandbox instead: non-root, no capabilities, read-only
-  rootfs, no route out but the proxy.
-- **`ignoreDefaultArgs: ['--disable-dev-shm-usage']`.** `/dev/shm` is Docker's
-  default 64 MB, which Chromium exhausts on a substantial page and reports as
-  a closed target. Playwright's answer, which it passes on every Chromium it
-  launches, is that flag — and all the flag does is move the traffic to
-  `TMPDIR`, which here is the home volume and so a disk. The orchestrator
-  gives the container a 512 MB `/dev/shm` instead, and this hands the browser
-  back to it. It takes `ignoreDefaultArgs` rather than an `args` list because
-  the flag is Playwright's default rather than anything this config adds. A
-  deployment running this image under something other than this orchestrator
-  wants the flag, which means dropping this key.
-
-The proxy entry carries `NO_PROXY` as its bypass list, so a dev server started
-in the session is reachable while everything external still goes through the
-egress proxy.
-
-**TLS.** Chromium keeps its own trust store and reads none of the CA variables
-the rest of the image is pointed at, so the entrypoint imports the deployment
-CA into `~/.pki/nssdb` with `certutil`. Without it the hosts the proxy
-intercepts fail TLS in the browser and nowhere else.
-
-Two smaller things. `PLAYWRIGHT_BROWSERS_PATH` is `~/.cache/ms-playwright`, in
-the session's home and so writable, while the browsers themselves stay on the
-image at `/opt/playwright`, which is not. The entrypoint links the second into
-the first at every start, which is what lets a session both find the Chromium
-that is already here and install one that is not. So a project pinning its own
-Playwright just downloads the build its version wants, beside the links:
-
-```sh
-playwright install chromium
-```
-
-Use `playwright`, the image's own CLI on PATH, rather than `npx playwright`:
-npx never consults PATH, so it fetches a second copy of the tool first. On the
-revision the image already carries, that command finds the link and returns
-without downloading at all.
-
-The links are rewritten each start rather than baked into the home, because a
-home is copied out of the image once when its session is created and never
-refreshed — a baked link would name whichever revision that image carried and
-dangle as soon as the image was rebuilt onto a newer Playwright. A session that
-has downloaded a browser of its own keeps it: only links are swept.
-
-The alternative is to use the browser that is already here by name, at
-**`/usr/local/bin/chromium`** — a stable link to whatever revision the image
-installed, which is what a test suite can hardcode:
-
-```js
-chromium.launch({ executablePath: '/usr/local/bin/chromium' });
-```
-
-That needs no download and no egress, at the price of a Chromium a couple of
-Chrome majors from the one the library pins, which Playwright tolerates until
-it does not. Naming it with `executablePath` is what skips the revision check;
-`channel: 'chromium'` would go looking under `PLAYWRIGHT_BROWSERS_PATH` again.
-Either way, consider `ignoreDefaultArgs: ['--disable-dev-shm-usage']`.
-Playwright passes that flag on every Chromium launch, and it sends the
-browser's shared memory to `TMPDIR` — the home volume here, and so a disk.
-`/dev/shm` in a session is 512 MB rather than Docker's 64 MB default, which is
-the size the flag exists to work around, so turning it off puts that traffic
-back in memory. The browser CLI's own config already does this.
-
-And the CLI writes snapshots and screenshots to `.playwright-cli/` in the
-working directory, which in a session is the workspace — convenient, since the
-review surface then shows them, but worth a `.gitignore` entry in a repo the
-agent works on regularly. Set `outputDir` in the config to move it.
-
-Ask the agent to read a screenshot back and it is shown in the thread, tap to
-zoom it full-screen: a `Read` of an image file returns the image itself, and
-the chat renders one wherever it arrives — in a tool's result, or in what the
-agent says. So "screenshot the dev server and show me" is a thing to ask for
-from a phone.
-
-**Firefox and WebKit are one download away.** Their *binaries* are not in the
-image — that would roughly double the browser layer for something most
-sessions never open — but their system libraries are, which is the half a
-session cannot install for itself:
-
-```sh
-playwright install firefox webkit
-```
-
-That is the same route as the Chromium one above and it now ends in a browser
-that starts. Without the libraries in the image it did not: `apt-get` needs a
-root and a writable `/usr` that no session has, so the download reported
-success and the launch died on `libgtk-3.so.0` — or, for WebKit, on any of
-forty-odd gstreamer and flite objects — which reads as a broken image rather
-than as a missing package. The image build proves the route by walking it: it
-downloads both, launches each and deletes them again, so a version bump that
-breaks this stops the build rather than reaching a session.
-
-Libraries rather than binaries is also the half that keeps. A binary in the
-image would be pinned to the revision *this* image's Playwright wants, and a
-project pinning its own resolves a different one and downloads it regardless —
-the same reason `/usr/local/bin/chromium` exists. Library names carry no such
-revision.
-
-There is no display, so `--headed` does not work on its own — but Xvfb is
-here, pulled in by Playwright's own dependency list for Chromium rather than
-by anything this file asks for, and under it a headed run does work:
-
-```sh
-xvfb-run -a npx playwright test --headed
-```
-
-That matters for the one obvious way to make the image smaller.
-`playwright-cli install-browser chromium --only-shell` in a derived image
-drops the full browser and keeps just the headless shell, which is around 390
-MB of the roughly 660 MB the browsers occupy — and it is what `playwright-cli`
-launches, so nothing in the default path notices. What it costs is
-the headed run above, and it costs it quietly: `chrome-headless-shell` accepts
-`headless: false` without complaint and stays headless anyway, so a suite that
-asked for a head gets a screenshot that looks plausible and is not what it
-asked for. Worth taking if this deployment never wants a head, worth knowing
-about either way.
-
-A deployment that drives only Chromium drops the Firefox and WebKit
-libraries by deleting that block from its own copy of the Dockerfile — a
-derived image cannot take them back out, since an `apt-get purge` in a later
-layer removes the files without recovering the bytes. Xvfb comes in with
-Chromium's dependencies, so it survives that deletion.
-
-### The agent installs it itself
-
-`/home/agent` is a persistent volume, so anything the agent puts there survives
-restarts and image updates. The image points the user-level package managers at
-`/home/agent/.local` and puts `/home/agent/.local/bin` on `PATH`, so an agent
-can equip itself with no privilege at all:
-
-```sh
-npm install -g <pkg>            # prefix is ~/.local, not /usr/local
-pipx install <pkg>              # PEP 668 clean; binaries land in ~/.local/bin
-python3 -m venv ~/.local/venvs/<name>
-```
-
-`build-essential`, `python3` and `git` are already in the image, so packages
-that compile on install do compile. `~/.local/bin` is ahead of the system path
-for both a plain `docker exec` and a login shell.
-
-A `.deb` whose *contents* are all you need takes no root either —
-unpacking a `.deb` into the session's home is an ordinary file write:
-
-```sh
-apt-get download ripgrep                    # apt honours the proxy variables
-dpkg -x ripgrep_*.deb ~/.local              # binaries, libs, no maintainer scripts
-```
-
-The limits are worth knowing before you rely on it: `apt-get download` fetches
-the one package and not its dependencies (`apt-get install --print-uris -qq
-<pkg>` lists those URLs), maintainer scripts never run, and a package that
-expects to live under `/usr` may need `LD_LIBRARY_PATH=~/.local/usr/lib`. For a
-CLI binary it is usually enough; for anything with a postinst it is not.
-
-### The deployment bakes it in
-
-For a package the sessions on this deployment should have — a language
-runtime, a headless browser and its libraries, a database client — build an
-image on top of the published one and point `SESSION_IMAGE` at it. Root at
-build time, no root at runtime, and none of the container hardening changes:
-
-```dockerfile
-FROM ghcr.io/splitbrain/boxes/session:latest
-
-# Root here, and only here.
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      postgresql-client \
- && rm -rf /var/lib/apt/lists/*
-
-# Back to the agent, on the uid the deployment runs sessions as.
-USER 1020
-```
-
-Two rules a derived image has to keep:
-
-- **End on the agent user, not root.** The orchestrator runs the container as
-  `SESSION_UID` regardless, so a stray `USER root` does not get root — but it
-  does make the image's own uid wrong for the next rule.
-- **Do not change the uid.** A session's home is a named volume Docker
-  initialises from the image, owned by the uid the *image* was built on, and
-  nothing outside the container can chown it afterwards. Build with the same
-  `AGENT_UID`/`AGENT_GID` as `SESSION_UID`/`SESSION_GID`. The orchestrator
-  reads the image's user back at boot and warns when they have drifted.
-
-Set `SESSION_IMAGE_PULL_MINUTES=0` for an image built on the host, since there
-is no registry to pull it from.
-
-### What is deliberately not offered
-
-Neither Docker-in-Docker nor a mounted Docker socket. A session with the host's
-socket would have root-equivalent control of the host *and* of this deployment:
-it could read every other session's workspace and `egress-secrets.json` — the
-CA key and the placeholder map — which is what token translation exists to
-prevent. `--privileged` for a nested daemon is host root by another
-route, and would apply to every session rather than the one that asked. A
-session that genuinely needs to run containers wants either an opt-in
-`sysbox-runc` runtime on the host, or a facility where the orchestrator creates
-the container on the session's behalf from the same hardened template. Neither
-exists today.
-
-## Security model
-
-Isolation rests on two Docker primitives, with nothing touching the host
-firewall:
-
-- **Session networks are `internal`.** No NAT, no default route: no L3 path to
-  your LAN, the internet, or another session.
-- **The egress proxy is the only way out.** It checks the allowlist, resolves
-  the target, rejects the request if *any* resolved address is private, then
-  connects to that specific vetted address without re-resolving — which is what
-  closes DNS rebinding. Every connection it makes goes through that one check,
-  including the ones it makes on behalf of a translated host. If the proxy is
-  down, sessions have no egress at all.
-- **Credentials never enter the sandbox.** See
-  [What a session can reach](#what-a-session-can-reach).
-
-Session containers additionally run as a non-root user with `ReadonlyRootfs`,
-`CapDrop: ALL`, `no-new-privileges`, a tmpfs `/tmp`, and memory, CPU and pids
-limits.
-
-Known residual risks, accepted deliberately:
-
-- Host services bound to `0.0.0.0` stay reachable from inside a session at the
-  host's per-bridge IP; Docker's internal-network isolation filters forwarded
-  traffic only. Anything sensitive on the host must have its own auth.
-- The orchestrator holds the Docker socket, which is root-equivalent. It is
-  mitigated by a fixed container template that user input never reaches and by
-  never shell-executing user strings — but the auth you put in front of `/api`
-  is what keeps it yours.
-- `GET /api/sessions` returns `WS_AUTH_TOKEN`, behind that same auth.
-- A compromised proxy sees the credentials it injects. That is true of any
-  injecting proxy; what this one adds is that it leaves nothing at rest.
-- The deployment's credentials are on the data volume, stored as-is in SQLite
-  with no encryption layer — the orchestrator has to hand them to the proxy on
-  every boot, and there is nobody to ask for a passphrase. A backup of that
-  volume holds live logins, and anything that reaches `/api` can replace them.
-- A credential you have not stored is not translated, and the placeholder a box
-  holds for it is refused by the service rather than working unauthenticated.
-  A session can no longer log itself in either, so there is no path by which a
-  box comes to hold a credential of its own.
-- Sibling sessions share a deployment's placeholders, so they map to the same
-  real credentials. Per-session placeholders arrive with per-session
-  credentials.
-- Protocol behaviour depends on the adapter builds the session image pins —
-  `claude-agent-acp` and `codex-acp`, and the agent each of them drives.
-  Re-check capabilities, the async-task extension and WebSocket framing on
-  upgrade.
-
-## Development
-
-One toolchain across the repository: every package builds with Vite, tests with
-Vitest, and type-checks before its Docker bundle, so an image cannot be built
-from code that fails `tsc`.
-
-```sh
-cd orchestrator && npm run check && npm test
-cd proxy        && npm run check && npm test
-cd dashboard    && npm run check && npm test && npm run build
-```
-
-`npm run dev` in `dashboard/` serves the SPA with `/api`, `/healthz` and `/ws`
-proxied to an orchestrator on port 3000. The dashboard's tests run in two
-projects: `unit` for the framework-free stores, and `e2e`, which builds the
-production bundle and drives it in Chromium against stub backends.
-`/playground` renders every message part kind over a canned store, and the
-browser suite asserts that page.
-
-`scripts/live-test.sh` covers what only real inference can prove — a turn
-surviving the browser leaving, thread replay on reattach, a permission request
-held with nobody watching. It needs a real Claude token, which it seeds into
-the credential store over the API before it creates anything; the variable to
-pass it in is named in the script's own header. Give it an OpenAI key as well
-and it runs a Codex thread beside the Claude one in the same box.
-
-### Frontend conventions
-
-Tailwind utilities and shadcn/assistant-ui components only: no inline `style=`,
-no CSS-in-JS, and design tokens defined once in `src/globals.css` — including
-the `@theme inline` bridge, without which Tailwind silently drops every token
-utility. `.aui-md-bleed` is a hand-written rule rather than utilities because
-it needs container-query units and a negative margin computed from them: it
-lets a table or a code block in chat output escape the 44rem reading column
-out to the width of the thread and scroll horizontally beyond that. The rule
-under it withholds `content-visibility` from the messages that hold such a
-block, since paint containment would clip one back into the column.
-
-Components under `src/components/assistant-ui/` and `src/components/ui/` are
-installed by their official CLIs and committed. Our edits carry a comment
-saying so. Upgrade by re-running the CLI and reading the diff:
-
-```sh
-cd dashboard
-npx assistant-ui add thread --overwrite     # or: npx shadcn add <name> --overwrite
-npm run check && npm test
-```
-
-## Layout
-
-| Path | What |
+| Amber, pulsing | needs a permission decision |
+| Blue, pulsing | is processing a prompt |
+| Blue, dim | has a command or a subagent running |
+| Grey | is idle |
+
+The last used thread is bold, and clicking the session opens it. Clicking any
+other thread opens that one. A thread marked as done is struck through.
+
+### Agents and skills
+
+The agent configuration icon on the session list opens the agent sets. A set is
+an `AGENTS.md`, a number of skills and a number of slash commands. The global set
+applies to every session. A session can use one more set, chosen when the
+session is created and merged with the global one. A session picks up an edited
+set at its next start.
+
+### Managing sessions and threads
+
+`New thread` adds a thread to a session. A dialog asks which agent it runs and,
+where that agent has run here before, which mode, model and effort it starts
+in; the next dialog opens on what the last one chose. Creating a session asks
+the same for its first thread. `Fork` starts a new thread from the current
+one's history, on the same agent. All threads of a session use the same
+workspace.
+
+The session details, available from the info icon on the session list let's you start, suspend and delete a session. Deleting it removes the
+container, the network, the workspace and the home.
+
+### Thread view
+
+A thread is an individual conversation with an agent inside a session. A session has at least one thread, but you can open as many as you want. 
+
+A running turn continues when the browser disconnects, so you do not have to
+watch the agent work. Close the tab and come back when it is done.
+
+Under the session's name, a dot reports the state of the connection to the agent
+(connecting, connected, reconnecting, disconnected), and the agent the thread
+runs on is named beside it. The header has these controls:
+
+- The agent settings icon opens a dialog to set its mode, model, and effort level
+- The check mark marks the thread as done - this is just a visual marker (strike through in the session list), it has no other consequences
+- The branch icon [forks](#managing-sessions-and-threads) the thread.
+- The magnifier opens the [review tool](#review-tool).
+
+Everything you type into the input field goes to the agent. A line starting with
+`!` is the exception: it runs as a direct shell command in the container and never
+reaches the model. A line starting with `/` completes the agent's own slash
+commands.
+
+The `+` button uploads a file to `.boxes/attachments/` in the workspace and
+passes the path to the agent. Commands and subagents that keep running are
+listed above the input field.
+
+All threads of a session share one workspace. Two agents that edit the same
+files at the same time might conflict, so instruct them to avoid it, for example by
+working in separate git worktrees.
+
+### Review tool
+
+The review tool allows you to view, comment and edit the files in the agent's
+workspace. It is available from the session list and from the thread view's
+toolbar.
+
+The review tool provides a file browser for the workspace with git based change markers:
+
+| Mark | The file |
 |---|---|
-| `orchestrator/` | Node 22 + TypeScript: REST API, SQLite, Docker lifecycle, ACP gateway, idle reaper |
-| `dashboard/` | React SPA — session list and chat — built into the orchestrator image and served at `/` |
-| `proxy/` | The egress proxy: allowlist, address vetting and token translation — the security boundary |
-| `session-image/` | The per-session container image |
-| `shared/types.ts` | REST shapes imported by both orchestrator and dashboard |
-| `scripts/smoke-test.sh` | Security smoke test, no credentials needed |
-| `scripts/live-test.sh` | The checks that need a real credential and real inference |
-| `ARCHITECTURE.md` | How the system is put together |
+| `M`, amber | is modified |
+| `S`, blue | is staged |
+| `A`, green | is added |
+| `?`, green | is untracked |
+| `D`, red | is deleted |
+| `!`, red | is in conflict |
+
+Opening a file shows its syntax highlighted contents. git change info is marked in the line number gutter. Clicking the gutter shows the git diff
+hunk around that line.
+
+By default, the tool opens in review mode. Clicking a code line opens the comment field, and the
+comment appears as a card under its line, where it can be edited and deleted.
+
+The toolbar steps from change to change and from comment to comment, and it
+switches line wrapping on and off.
+
+The pen icon allows switching to edit mode, where the file can be edited directly. 
+
+The base picker decides what counts as a change. By default that is the working
+tree, so the marks cover uncommitted work. A revision such as `main` or `HEAD~3`
+is resolved in every repository of the workspace, and each comparison runs
+against the merge base of that revision and HEAD, which makes a whole branch one
+review.
+
+Review comments are stored in a `REVIEW.md` at the top of the workspace.
+
+`Hand to agent` opens the thread with a prefilled prompt instructing the agent to address the review. The `Start a new review` button deletes the review file and all its comments.

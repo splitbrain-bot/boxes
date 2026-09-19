@@ -30,6 +30,11 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // Stated rather than left to the default, because two other places name
+    // this directory: the orchestrator serves what is under it with an
+    // immutable cache lifetime, and the service worker keeps a copy of it.
+    // Both are safe only because every name in here carries a content hash.
+    assetsDir: 'assets',
   },
   test: {
     // One runner, two shapes of test. The unit project covers the

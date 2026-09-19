@@ -1,7 +1,8 @@
 import * as mockttp from 'mockttp';
 import type { CompletedRequest, Headers } from 'mockttp';
 import type { EgressPolicy } from '../../shared/types.ts';
-import { decideCredentials, injectionPatterns } from './policy.ts';
+import { PLAINTEXT_CREDENTIAL_REASON, type DenialCategory } from './forward.ts';
+import { credentialsForHost, decideCredentials, injectionPatterns } from './policy.ts';
 
 /**
  * The TLS interception engine, and the one place a real credential is written
@@ -21,10 +22,21 @@ export interface InterceptorOptions {
   policy: () => EgressPolicy;
   /** Loopback URL of the tunnel every upstream connection must go through. */
   upstreamProxyUrl: () => string;
-  /** Records a denial, by reason. */
-  denied: (reason: string) => void;
+  /** Records a denial, by category. */
+  denied: (category: DenialCategory) => void;
   /** Structured logging. */
   log: (msg: string, fields?: Record<string, unknown>) => void;
+}
+
+/**
+ * Whether an address is this machine talking to itself.
+ *
+ * Covers the forms a loopback connection is reported in: IPv4, IPv6, and the
+ * IPv4-mapped shape a dual-stack listener hands back.
+ */
+function isLoopback(address: string | undefined): boolean {
+  if (!address) return false;
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
 /** Headers the engine derives from the request URL, so a copy must not pin them. */
@@ -54,7 +66,21 @@ export class Interceptor {
   /** Fingerprint of the CA the running server was started with. */
   private runningCert: string | null = null;
 
+  /** The call in flight, so starts and stops never overlap. */
+  private queue: Promise<void> = Promise.resolve();
+
   constructor(private readonly opts: InterceptorOptions) {}
+
+  /** Runs work once everything queued before it has finished, or failed. */
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const next = this.queue.then(work, work);
+    // A failure belongs to the caller that asked, not to the calls behind it.
+    this.queue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
 
   /** Loopback port the front door hands intercepted connections to, if any. */
   port(): number | null {
@@ -68,18 +94,31 @@ export class Interceptor {
    * configures no credential decrypts nothing. A changed CA restarts it,
    * because the certificates it mints are derived from that key. A changed
    * credential needs neither, since the rule reads the policy per request.
+   *
+   * Calls run one after another, and a replacement listens before the server
+   * it replaces goes, so port() never reads null while a policy asks for
+   * interception.
    */
-  async apply(): Promise<void> {
+  apply(): Promise<void> {
+    return this.enqueue(() => this.applyNow());
+  }
+
+  /** Stops the engine, leaving nothing decrypting. */
+  stop(): Promise<void> {
+    return this.enqueue(() => this.stopNow());
+  }
+
+  /** The body of apply, run with no other call in flight. */
+  private async applyNow(): Promise<void> {
     const policy = this.opts.policy();
     const wanted = policy.ca !== null && policy.credentials.length > 0 ? policy.ca : null;
 
     if (wanted === null) {
-      await this.stop();
+      await this.stopNow();
       return;
     }
     if (this.server && this.runningCert === wanted.cert) return;
 
-    await this.stop();
     const server = mockttp.getLocal({
       https: { key: wanted.key, cert: wanted.cert },
       http2: true,
@@ -112,20 +151,27 @@ export class Interceptor {
       throw err;
     }
 
+    const previous = this.server;
     this.server = server;
     this.runningCert = wanted.cert;
+    if (previous) await this.stopServer(previous);
     this.opts.log('interception engine started', {
       port: server.port,
       hosts: injectionPatterns(policy),
     });
   }
 
-  /** Stops the engine, leaving nothing decrypting. */
-  async stop(): Promise<void> {
+  /** The body of stop, run with no other call in flight. */
+  private async stopNow(): Promise<void> {
     if (!this.server) return;
     const server = this.server;
     this.server = null;
     this.runningCert = null;
+    await this.stopServer(server);
+  }
+
+  /** Stops one server, logging rather than throwing when it will not go. */
+  private async stopServer(server: mockttp.Mockttp): Promise<void> {
     try {
       await server.stop();
     } catch (err) {
@@ -142,25 +188,48 @@ export class Interceptor {
   private decide(req: CompletedRequest): RequestDecision {
     const policy = this.opts.policy();
     let host: string;
+    let protocol = '';
     try {
-      host = new URL(req.url).hostname;
+      const url = new URL(req.url);
+      host = url.hostname;
+      protocol = url.protocol;
     } catch {
       host = req.destination?.hostname ?? '';
+    }
+
+    /** Answers the request here with a 403, and counts the denial. */
+    const refuse = (category: DenialCategory, reason: string): RequestDecision => {
+      this.opts.denied(category);
+      this.opts.log('denied intercepted request', { host, reason });
+      return {
+        response: {
+          statusCode: 403,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          body: `egress denied: ${reason}\n`,
+        },
+      };
+    };
+
+    // The front door is the only thing meant to reach the engine, and it
+    // connects over loopback. The engine's own listener takes every interface,
+    // and the proxy sits on every session network, so a box could otherwise
+    // reach it directly and skip the front door's rules about which hosts and
+    // which ports may be intercepted at all.
+    if (!isLoopback(req.remoteIpAddress)) {
+      return refuse('blocked-address', 'the interception engine is reachable from the proxy only');
+    }
+
+    if (protocol !== 'https:' && credentialsForHost(host, policy).length > 0) {
+      // In the clear a swap would put the real credential on the wire as
+      // plaintext, and forwarding unswapped would hand over the placeholder.
+      return refuse('plaintext-credential-host', PLAINTEXT_CREDENTIAL_REASON);
     }
 
     const verdict = decideCredentials(host, req.headers, policy);
     if (verdict.action === 'pass') return;
 
     if (verdict.action === 'deny') {
-      this.opts.denied(verdict.reason);
-      this.opts.log('denied intercepted request', { host, reason: verdict.reason });
-      return {
-        response: {
-          statusCode: 403,
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
-          body: `egress denied: ${verdict.reason}\n`,
-        },
-      };
+      return refuse('foreign-credential', verdict.reason);
     }
 
     // Replacing the header set wholesale is the callback's only option, so the

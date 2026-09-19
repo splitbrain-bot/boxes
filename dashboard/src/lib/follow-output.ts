@@ -1,3 +1,5 @@
+import { AT_BOTTOM } from './scroll-away.ts';
+
 /**
  * Whether a scroller is following its own output, decided from its positions
  * and the hands on it.
@@ -8,15 +10,6 @@
  */
 
 /**
- * How near the bottom counts as against it.
- *
- * The same distance `scroll-away.ts` calls pinned, for the same reason: a
- * scroller a few pixels short of its end is at its end as far as a reader is
- * concerned, and a turn's anchor leaves exactly that much rounding behind.
- */
-export const AT_BOTTOM = 8;
-
-/**
  * How long after a hand touches the scroller its scrolling is still that
  * hand's.
  *
@@ -25,7 +18,7 @@ export const AT_BOTTOM = 8;
  * the tail of one, short enough that the next thing to move the scroller by
  * itself is not blamed on a reader who has let go.
  */
-export const REACH = 400;
+const REACH = 400;
 
 /**
  * How recently a scroller has to have moved with its output to still count as
@@ -35,7 +28,7 @@ export const REACH = 400;
  * anything; it is being read. The difference matters to the disclosures,
  * which hold the position still for a reader and must not for a turn.
  */
-export const ACTIVE = 1000;
+const ACTIVE = 1000;
 
 export interface FollowState {
   /** Whether the scroller is keeping itself against the bottom. */

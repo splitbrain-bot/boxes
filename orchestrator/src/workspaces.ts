@@ -1,4 +1,12 @@
-import { chownSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  fchownSync,
+  lchownSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  type Dirent,
+} from 'node:fs';
 import { join, posix } from 'node:path';
 import { log } from './log.ts';
 
@@ -53,10 +61,10 @@ export function sessionOwner(): { readonly uid: number; readonly gid: number } {
 }
 
 /** Directory under DATA_DIR holding one directory per session workspace. */
-export const WORKSPACES_SUBDIR = 'workspaces';
+const WORKSPACES_SUBDIR = 'workspaces';
 
 /** Directory under DATA_DIR holding one directory per session home. */
-export const HOMES_SUBDIR = 'homes';
+const HOMES_SUBDIR = 'homes';
 
 /** The parent of every workspace directory. */
 export function workspacesRoot(dataDir: string): string {
@@ -140,6 +148,43 @@ export function createHome(dataDir: string, sessionId: string): string {
   return path;
 }
 
+/**
+ * Whether a path is there and is a directory.
+ *
+ * Asked before a session's workspace or home is bind-mounted. Docker creates
+ * a bind source it cannot find, empty and owned by root, so a box whose
+ * directory has gone starts and looks healthy while the agent cannot write to
+ * it. Nothing is created here: the answer is what turns that into a refusal
+ * naming what is missing.
+ */
+export function directoryExists(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
+}
+
+/**
+ * The session ids that have a workspace or a home directory on disk.
+ *
+ * Read from the two roots rather than from the database, which is what makes
+ * it an answer about what is there: a teardown that removed a session's
+ * Docker objects and then failed leaves these behind with nothing naming
+ * them. A root that does not exist yet contributes nothing.
+ */
+export function sessionDirectoryIds(dataDir: string): string[] {
+  const ids = new Set<string>();
+  for (const root of [workspacesRoot(dataDir), homesRoot(dataDir)]) {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) ids.add(entry.name);
+    }
+  }
+  return [...ids];
+}
+
 /** Removes a session's workspace directory and everything in it. */
 export function removeWorkspace(dataDir: string, sessionId: string): void {
   // recursive removal unlinks symlinks rather than following them, so a link
@@ -165,10 +210,32 @@ export function removeHome(dataDir: string, sessionId: string): void {
 export function chownToAgent(path: string): void {
   if (process.getuid?.() === owner.uid) return;
   try {
-    chownSync(path, owner.uid, owner.gid);
+    // On the named entry rather than through it: a link planted in a tree the
+    // agent writes must not hand its target away.
+    lchownSync(path, owner.uid, owner.gid);
   } catch (err) {
     log.warn('could not give a workspace path to the agent user', {
       path,
+      uid: owner.uid,
+      error: (err as Error).message,
+    });
+  }
+}
+
+/**
+ * Gives an open file to the session's agent user, by descriptor.
+ *
+ * The descriptor names the file that was opened, whatever the name it was
+ * opened under points at by now, which is what a write into a directory the
+ * agent owns needs. The uid rule and the logged failure are those of
+ * chownToAgent.
+ */
+export function chownFdToAgent(fd: number): void {
+  if (process.getuid?.() === owner.uid) return;
+  try {
+    fchownSync(fd, owner.uid, owner.gid);
+  } catch (err) {
+    log.warn('could not give a workspace file to the agent user', {
       uid: owner.uid,
       error: (err as Error).message,
     });

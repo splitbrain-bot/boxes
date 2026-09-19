@@ -1,11 +1,11 @@
 import { ArrowLeft, FilePlus2, Send } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
 import { Shelf } from '@/components/Shelf';
 import { BasePicker } from '@/components/review/BasePicker';
-import { CodePane } from '@/components/review/CodePane';
+import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
 import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
 import { HunkSheet } from '@/components/review/HunkSheet';
@@ -13,15 +13,18 @@ import { ReviewToolbar } from '@/components/review/ReviewToolbar';
 import { ReviewTree } from '@/components/review/ReviewTree';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { useCodeEdit } from '@/hooks/use-code-edit';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useScrollAway } from '@/hooks/use-scroll-away';
+import { useSession } from '@/hooks/use-session';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
+import { anchorAt, rowOffsets, scrollForAnchor, type ScrollAnchor } from '@/lib/anchor';
+import { withinLineLimit } from '@/lib/highlight';
 import { historyIndex } from '@/lib/history';
 import { stagePrompt } from '@/lib/staged-prompt';
 import { cn } from '@/lib/utils';
-import { useSessions } from '../stores/sessions.ts';
 import {
   closeFile,
   compose,
@@ -32,7 +35,10 @@ import {
   open as openReview,
   refreshOnReturn,
   saveComment,
+  saveFile,
   setBase,
+  setDirty,
+  toggleDir,
   useReview,
 } from '../stores/review.ts';
 
@@ -72,9 +78,11 @@ export function SessionReview() {
   const location = useLocation();
   const path = params.get('path');
 
-  const { tree, file, loadingTree, loadingFile, error, composing, saving } = useReview();
-  const { sessions } = useSessions();
-  const session = sessions.find((s) => s.id === id);
+  const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
+    useReview();
+  // This box, polled: its name for the header and its current thread for the
+  // way out. One session off the wire rather than the whole list.
+  const { session } = useSession(id);
 
   /**
    * Long lines wrap unless the reader turns it off.
@@ -87,11 +95,31 @@ export function SessionReview() {
    */
   const [wrap, setWrap] = useState(true);
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
-  /** A line to scroll to once, set by the prev/next toolbar. */
-  const [scrollTo, setScrollTo] = useState<number | null>(null);
+  /** The line the prev/next toolbar last asked for, or null. */
+  const [scrollTo, setScrollTo] = useState<ScrollTarget | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
   /** The comment a tap on a bin is asking to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  /** The buffer behind edit mode, and what to colour it with. */
+  const edit = useCodeEdit(file);
+  /**
+   * True once a save has been refused because the file moved under it, until
+   * the reviewer answers. What they are being asked is whose version wins, so
+   * the buffer is kept either way.
+   */
+  const [conflict, setConflict] = useState(false);
+  /**
+   * Something to do once the reviewer has agreed to lose what they typed, or
+   * null. Every way out of a file goes through this, because all of them end
+   * the edit.
+   */
+  const [leaving, setLeaving] = useState<{ go: () => void } | null>(null);
+  /** What they agreed to, waiting for the question to be out of the way. */
+  const agreed = useRef<(() => void) | null>(null);
+  /** The pane's scroller, for holding the reader's line across a mode switch. */
+  const paneRef = useRef<HTMLDivElement>(null);
+  /** An anchor taken before a switch, to be put back after it. */
+  const held = useRef<ScrollAnchor | null>(null);
   /**
    * The conversation this review was opened from, so leaving it goes back
    * there rather than to whichever thread the session has current — after a
@@ -137,7 +165,7 @@ export function SessionReview() {
   //
   // The mount is one of the three moments a review refetches; coming back to
   // the tab is the second, and closing a file back to the tree is the third.
-  // There is no poll, so nothing costs anything while this sits open.
+  // Nothing polls the workspace, so a review left open costs nothing.
   useEffect(() => {
     openReview(id);
     void loadTree();
@@ -157,6 +185,41 @@ export function SessionReview() {
   }, [path]);
 
   /**
+   * Runs something that ends the edit, asking first when that would lose work.
+   *
+   * Every way out of an open file is one of these: the mode toggle, another
+   * file from the tree, the step back to the list, and the way out of the
+   * review altogether. A comment is a sentence with a composer of its own; a
+   * buffer is a whole file of work with no undo behind it once it is gone, so
+   * it is worth the question.
+   */
+  const guard = useCallback(
+    (go: () => void) => {
+      if (edit.dirty) setLeaving({ go });
+      else go();
+    },
+    [edit.dirty],
+  );
+
+  /**
+   * Does what the reviewer agreed to, once the question is off the stack.
+   *
+   * A dialog is a history entry of its own, so that the phone's back gesture
+   * closes it rather than the screen behind it. Most of what is waiting here
+   * is a navigation, and one made while that entry is still on top would be
+   * spent on the dialog instead of the file. So the intent waits for the
+   * first location that is not the dialog's own — and where a dialog pushed
+   * no entry at all, that is this one, and it goes at once.
+   */
+  useEffect(() => {
+    const go = agreed.current;
+    if (!go || leaving !== null) return;
+    if ((location.state as { overlay?: boolean } | null)?.overlay) return;
+    agreed.current = null;
+    go();
+  }, [leaving, location]);
+
+  /**
    * Opens a file — a step of the stack on a phone, and not one on a pointer.
    *
    * Below md the file takes the screen from the tree, so it is somewhere the
@@ -168,17 +231,19 @@ export function SessionReview() {
    */
   const openPath = useCallback(
     (next: string) => {
-      setParams(
-        (current) => {
-          const params = new URLSearchParams(current);
-          params.set('path', next);
-          return params;
-        },
-        { replace: wide },
-      );
-      setScrollTo(null);
+      guard(() => {
+        setParams(
+          (current) => {
+            const params = new URLSearchParams(current);
+            params.set('path', next);
+            return params;
+          },
+          { replace: wide },
+        );
+        setScrollTo(null);
+      });
     },
-    [setParams, wide],
+    [guard, setParams, wide],
   );
 
   /**
@@ -191,20 +256,114 @@ export function SessionReview() {
    * search string is rewritten in place instead.
    */
   const closeOpenFile = useCallback(() => {
-    if (historyIndex() > up.entry) navigate(-1);
-    else
-      setParams(
-        (current) => {
-          const params = new URLSearchParams(current);
-          params.delete('path');
-          return params;
-        },
-        { replace: true },
-      );
-    // File → tree does not remount, so without this nothing would refetch and
-    // the tree would keep the statuses and counts it was painted with.
-    void loadTree();
-  }, [up.entry, navigate, setParams]);
+    guard(() => {
+      if (historyIndex() > up.entry) navigate(-1);
+      else
+        setParams(
+          (current) => {
+            const params = new URLSearchParams(current);
+            params.delete('path');
+            return params;
+          },
+          { replace: true },
+        );
+      // File → tree does not remount, so without this nothing would refetch and
+      // the tree would keep the statuses and counts it was painted with.
+      void loadTree();
+    });
+  }, [guard, up.entry, navigate, setParams]);
+
+  /**
+   * Switches between commenting and editing, holding the reader's line.
+   *
+   * The comment cards and the deletion markers between the rows fold away on
+   * the way into edit mode and come back on the way out, so without this the
+   * line somebody was looking at would be somewhere else afterwards — and the
+   * line they were looking at is the one they went in to fix. The anchor is
+   * taken here rather than in an effect because by the time the new mode has
+   * painted, the layout it was measured against is gone.
+   */
+  const switchMode = useCallback(
+    (next: boolean) => {
+      const element = paneRef.current;
+      held.current = element ? anchorAt(rowOffsets(element), element.scrollTop) : null;
+      if (next) {
+        // A composer standing open over the file belongs to the other mode.
+        compose(null);
+        edit.start();
+      } else {
+        setConflict(false);
+        edit.stop();
+      }
+    },
+    [edit],
+  );
+
+  const editing = edit.text !== null;
+  /**
+   * Whether the pane shows this file as one plain block rather than as rows.
+   *
+   * Past the line limit it does, so there is no line to step to, none to
+   * comment on and nothing to edit — see CodePane.
+   */
+  const tooLong = file !== null && !withinLineLimit(file.content);
+  /**
+   * Whether this file can be edited at all.
+   *
+   * What the pane cannot show a line at a time it must not write back: there
+   * is nothing to edit in a deleted file, nothing readable in a binary one,
+   * saving a truncated one would delete everything past where the read
+   * stopped, and a file past the line limit has no rows to edit.
+   */
+  const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
+
+  // Put the reader back on their line, before the new mode is painted.
+  useLayoutEffect(() => {
+    const element = paneRef.current;
+    const anchor = held.current;
+    held.current = null;
+    if (!element || !anchor) return;
+    const top = scrollForAnchor(rowOffsets(element), anchor);
+    if (top !== null) element.scrollTop = top;
+  }, [editing]);
+
+  /**
+   * Writes the buffer to the workspace.
+   *
+   * `force` is the answer to a refused save: the file moved under the edit,
+   * the reviewer has been told so, and they are saying their version is the
+   * one to keep.
+   */
+  const save = useCallback(
+    (force: boolean) => {
+      if (!file || edit.text === null) return;
+      void saveFile(file.path, edit.text, force ? null : file.hash).then((result) => {
+        setConflict(!result.ok && result.conflict);
+      });
+    },
+    [file, edit.text],
+  );
+
+  // Freshness is the store's, so it has to know there is unsaved work in the
+  // pane: a refetch on the way back to the tab would otherwise take it.
+  useEffect(() => {
+    setDirty(edit.dirty);
+  }, [edit.dirty]);
+  useEffect(() => () => setDirty(false), []);
+
+  /**
+   * Opening or closing the composer on a line, with an identity that never
+   * changes — the pane's rows are memoized against typing, and a fresh
+   * function each render would undo that.
+   */
+  const selectLine = useCallback((line: number) => {
+    compose(useReview.getState().composing === line ? null : line);
+  }, []);
+
+  const showHunk = useCallback(
+    (index: number) => setHunk(file?.diff.hunks[index] ?? null),
+    [file?.diff.hunks],
+  );
 
   /** Deletion markers by the line they sit after, for the pane. */
   const deletions = useMemo(
@@ -313,12 +472,15 @@ export function SessionReview() {
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
     if (lines.length === 0) return;
-    const from = scrollTo ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
+    const from = scrollTo?.line ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
     const next =
       direction === 1
         ? (lines.find((line) => line > from) ?? lines[0]!)
         : ([...lines].reverse().find((line) => line < from) ?? lines.at(-1)!);
-    setScrollTo(next);
+    // Every press is its own request, because a file with one change in it
+    // and a step that wrapped round both land on the line already showing —
+    // and the pane has to take the reader back to it either way.
+    setScrollTo((current) => ({ line: next, nonce: (current?.nonce ?? 0) + 1 }));
   };
 
   // The code pane is the scroller here, the same way the thread is in a
@@ -327,7 +489,13 @@ export function SessionReview() {
 
   // And the same header behaviour as the thread's, called the same way:
   // reading down a file puts the chrome away, a flick back up returns it.
-  const { away, container } = useScrollAway('[data-slot="review-code-pane"]');
+  const { away, container, reset } = useScrollAway('[data-slot="review-code-pane"]');
+
+  // The pane that put the header away goes with the file, and what follows it
+  // — the file list, or the next file — is read from its top. So the header
+  // comes back whenever the open file changes: there is no pane left to flick
+  // up, and below md the list's only way out is the button in that header.
+  useEffect(reset, [reset, path]);
 
   // No state symbol: a review is something being done rather than something
   // waiting. What it needs to say is which box, and which file of it.
@@ -337,7 +505,10 @@ export function SessionReview() {
 
   return (
     <div ref={container} className="flex h-dvh flex-col">
-      <Shelf away={away}>
+      {/* The header stands aside for reading, and stays put for editing: the
+          toolbar under it carries Save, and a phone with its keyboard up has
+          no room to go looking for a control that has scrolled away. */}
+      <Shelf away={away && !editing}>
         <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
           {/* One back button, one step out, wherever it is pressed.
               On a phone the stack is sessions → thread → file list → file, so
@@ -364,7 +535,20 @@ export function SessionReview() {
             </Button>
           ) : (
             <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
-              <a href={up.href} onClick={up.onClick} aria-label="Back to the thread">
+              <a
+                href={up.href}
+                onClick={(event) => {
+                  // Unsaved work is worth the question here too, and the link
+                  // has to be stopped before the step out rather than after.
+                  if (edit.dirty && plainClick(event)) {
+                    event.preventDefault();
+                    setLeaving({ go: up.go });
+                    return;
+                  }
+                  up.onClick(event);
+                }}
+                aria-label="Back to the thread"
+              >
                 <ArrowLeft className="size-4" />
               </a>
             </Button>
@@ -379,26 +563,26 @@ export function SessionReview() {
               {/* Which repository the open file belongs to, rather than a root
                   the review no longer has. A file no repository claims says
                   so, since that is why it has no statuses and no markers. */}
-              {file ? ` · ${whichRepo(file.repo, tree?.repos ?? [])}` : ''}
-              {tree && !tree.hasGit ? ' · no git' : ''}
+              {file ? ` · ${whichRepo(file.repo, facts?.repos ?? [])}` : ''}
+              {facts && !facts.hasGit ? ' · no git' : ''}
               {/* Which base is active belongs in the status line, the way the
                   desktop tool's does: it changes what every colour in the tree
                   and every marker in the gutter means. One expression resolves
                   separately in each repository, so where it landed is part of
                   what it means. */}
-              {tree?.base.rev
-                ? ` · vs ${tree.base.rev}${resolvedIn(tree.repos)}`
-                : tree?.hasGit
+              {facts?.base.rev
+                ? ` · vs ${facts.base.rev}${resolvedIn(facts.repos)}`
+                : facts?.hasGit
                   ? ' · vs working tree'
                   : ''}
             </span>
           </div>
 
           {/* Only where there is a repository to compare in. */}
-          {tree?.hasGit ? (
+          {facts?.hasGit ? (
             <BasePicker
-              base={tree.base}
-              repos={tree.repos}
+              base={facts.base}
+              repos={facts.repos}
               busy={saving}
               onSet={(rev) => void setBase(rev)}
             />
@@ -408,7 +592,7 @@ export function SessionReview() {
               a file of the project the agent is working on, so handing it over is
               one line of prompt rather than an export. Staged in the composer,
               not sent — the reviewer decides when to ask. */}
-          {tree && Object.keys(tree.counts).length > 0 ? (
+          {facts && facts.commentCount > 0 ? (
             <Button
               type="button"
               variant="outline"
@@ -417,7 +601,8 @@ export function SessionReview() {
               // Back to the conversation, not a second copy of it pushed on
               // top — and the prompt handed over beside the router rather
               // than in the entry's state, which back and forward replay.
-              onClick={handoff}
+              // Guarded, because this leaves the review like any other exit.
+              onClick={() => guard(handoff)}
               title="Open the thread with a prompt to address these comments"
             >
               <Send className="size-3.5" />
@@ -425,7 +610,7 @@ export function SessionReview() {
             </Button>
           ) : null}
 
-          {tree?.hasReview ? (
+          {facts?.hasReview ? (
             <Button
               type="button"
               variant="ghost"
@@ -457,12 +642,21 @@ export function SessionReview() {
             file ? 'hidden' : 'w-full',
           )}
         >
-          {tree ? (
-            <ReviewTree tree={tree} activePath={file?.path ?? null} onOpen={openPath} />
-          ) : (
-            <p className="px-3 py-4 text-sm text-muted-foreground">
-              {loadingTree ? 'Loading…' : 'Nothing to show.'}
-            </p>
+          {dirs[''] ? (
+            <ReviewTree
+              dirs={dirs}
+              expanded={expanded}
+              activePath={file?.path ?? null}
+              onOpen={openPath}
+              onToggle={toggleDir}
+            />
+          ) : loadingTree ? (
+            <p className="px-3 py-4 text-sm text-muted-foreground">Loading…</p>
+          ) : error ? null : (
+            // Only where the tree came back empty. A fetch that failed has the
+            // banner above to say so, and "nothing to show" under it reads as
+            // an answer about the workspace rather than about the failure.
+            <p className="px-3 py-4 text-sm text-muted-foreground">Nothing to show.</p>
           )}
         </aside>
 
@@ -472,10 +666,20 @@ export function SessionReview() {
               <ReviewToolbar
                 changeCount={changedLines.length}
                 commentCount={commentedLines.length}
+                // A file shown as one block has no rows, so the counts are
+                // still worth saying and there is nowhere to step to.
+                steppable={!tooLong}
                 wrap={wrap}
+                editable={editable}
+                editing={editing}
+                dirty={edit.dirty}
+                busy={saving}
                 onWrap={() => setWrap((w) => !w)}
                 onStepChange={(direction) => step(changedLines, direction)}
                 onStepComment={(direction) => step(commentedLines, direction)}
+                onEdit={() => (editing ? guard(() => switchMode(false)) : switchMode(true))}
+                onSave={() => save(false)}
+                onRevert={edit.revert}
               />
               {file.deleted ? (
                 <Empty>This file was deleted, so there is nothing left to read.</Empty>
@@ -485,13 +689,51 @@ export function SessionReview() {
                 <>
                   {file.truncated ? (
                     <Notice tone="warn" className="shrink-0 border-b px-3 py-1.5 text-xs">
-                      This file is larger than the display limit. Only the first part is shown.
+                      This file is larger than the display limit. Only the first part is shown, and
+                      it cannot be edited.
+                    </Notice>
+                  ) : null}
+                  {/* The agent works while the review is open, so a save can
+                      land on a file that has moved on. Both versions still
+                      exist at this point — theirs on disk, the reviewer's in
+                      the pane — so the choice is the reviewer's to make. */}
+                  {conflict ? (
+                    <Notice tone="warn" className="shrink-0 border-b px-3 py-1.5 text-xs">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span>The agent changed this file while you were editing it.</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={saving}
+                          onClick={() => save(true)}
+                        >
+                          Save anyway
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={saving}
+                          onClick={() => {
+                            // Asked plainly enough already, so no second
+                            // question — and the file is read again, because
+                            // what is on screen is no longer what is on disk.
+                            switchMode(false);
+                            void loadFile(file.path);
+                          }}
+                        >
+                          Drop my changes
+                        </Button>
+                      </span>
                     </Notice>
                   ) : null}
                   <CodePane
+                    scrollRef={paneRef}
                     path={file.path}
                     content={file.content}
-                    tokens={file.tokens}
+                    tokens={edit.tokens}
+                    tokensFor={edit.tokensFor}
                     diffLines={file.diff.lines}
                     deletions={deletions}
                     hunkByLine={hunkByLine}
@@ -499,8 +741,9 @@ export function SessionReview() {
                     composing={composing}
                     wrap={wrap}
                     scrollTo={scrollTo}
-                    onSelectLine={(line) => compose(composing === line ? null : line)}
-                    onShowHunk={(index) => setHunk(file.diff.hunks[index] ?? null)}
+                    edit={edit.text === null ? null : { text: edit.text, onChange: edit.change }}
+                    onSelectLine={selectLine}
+                    onShowHunk={showHunk}
                     renderUnderLine={underLine}
                   />
                 </>
@@ -522,7 +765,7 @@ export function SessionReview() {
 
       {/* Below md, writing a comment happens here rather than inline. */}
       <ComposerSheet
-        line={!wide && file ? composing : null}
+        line={!wide && file && !tooLong ? composing : null}
         initial={composing === null ? '' : (annotations.get(composing)?.comment ?? '')}
         busy={saving}
         onSave={(comment) => {
@@ -547,6 +790,25 @@ export function SessionReview() {
         />
       ) : null}
 
+      {leaving ? (
+        <ConfirmDialog
+          title="Leave without saving?"
+          description="The edits in this file are lost. The file on disk is untouched."
+          confirmLabel="Discard the edits"
+          danger
+          busy={saving}
+          onCancel={() => setLeaving(null)}
+          onConfirm={() => {
+            // Out of edit mode here, because that is what was agreed to; what
+            // to do next waits for the dialog's own history entry to go.
+            agreed.current = leaving.go;
+            edit.stop();
+            setConflict(false);
+            setLeaving(null);
+          }}
+        />
+      ) : null}
+
       {confirmNew ? (
         <ConfirmDialog
           title="Start a new review?"
@@ -562,6 +824,24 @@ export function SessionReview() {
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Whether a click is the plain one a link's own handler should answer.
+ *
+ * A modified click is the browser being asked for a tab or a window, which
+ * leaves this one where it is — and the buffer in it untouched, so there is
+ * nothing to ask about.
+ */
+function plainClick(event: React.MouseEvent): boolean {
+  return (
+    !event.defaultPrevented &&
+    event.button === 0 &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey
   );
 }
 

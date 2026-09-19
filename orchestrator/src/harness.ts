@@ -95,6 +95,12 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     sessionMeta: {
       claudeCode: {
         options: {
+          // A model named on every conversation, so that the adapter offers
+          // it. The adapter lists the models the account's plan covers, and
+          // Fable is billed against usage credits rather than the plan, so it
+          // is left out unless a conversation names it. Naming it does not
+          // select it: a fresh thread still starts on defaultConfig's model.
+          model: 'fable',
           thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
         },
       },

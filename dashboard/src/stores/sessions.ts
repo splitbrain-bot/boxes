@@ -8,8 +8,12 @@ import { api } from '../api.ts';
 import { pollWhileVisible } from '../lib/poll.ts';
 
 /**
- * The session list every view reads, together with the deployment facts a
- * view has to warn about, kept fresh by polling.
+ * The session list, together with the deployment facts a view has to warn
+ * about.
+ *
+ * The list screen polls the whole of it while it is up. A view watching one
+ * session reads that session for itself and takes only the deployment facts
+ * from here.
  *
  * A plain module-level store with a subscriber set: React reads it through
  * useSyncExternalStore, and nothing outside this file needs a hook to change
@@ -104,10 +108,34 @@ export async function refresh(): Promise<void> {
   });
 }
 
+/**
+ * Fetches the health probe alone.
+ *
+ * For a view that watches one session rather than the list: which harnesses
+ * can run is a fact about the deployment, so it is asked for once on arrival
+ * instead of riding along with a list that view never reads. A probe that did
+ * not answer leaves what is held, because a failed probe says nothing about a
+ * credential.
+ */
+export async function refreshHealth(): Promise<void> {
+  try {
+    const health = await api.health();
+    set({ harnesses: health.harnesses, images: health.images });
+  } catch {
+    // Nothing to say, so nothing is said.
+  }
+}
+
 /** Time between polls, in milliseconds. */
 const POLL_MS = 5000;
 
-/** Polls for as long as the tab is visible, and returns the teardown. */
+/**
+ * Polls for as long as the tab is visible, and returns the teardown.
+ *
+ * Started by the screen that shows the list, so a browser reading one
+ * conversation is not asking for every session in the deployment every few
+ * seconds.
+ */
 export function startPolling(): () => void {
   void refresh();
   return pollWhileVisible(() => void refresh(), POLL_MS);

@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
   lstatSync,
-  readFileSync,
+  openSync,
+  readSync,
   realpathSync,
   renameSync,
   statSync,
@@ -9,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, resolve, sep } from 'node:path';
-import { chownToAgent } from '../workspaces.ts';
+import { chownFdToAgent } from '../workspaces.ts';
 
 /**
  * Contained reads and writes under one root, which for a review is the
@@ -43,7 +48,7 @@ export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const MAX_REVIEW_BYTES = 8 * 1024 * 1024;
 
 /** Why a path was refused. Every reason is a 404 to the client. */
-export type PathRefusal = 'invalid' | 'outside' | 'symlink' | 'missing';
+type PathRefusal = 'invalid' | 'outside' | 'symlink' | 'missing';
 
 /** A resolved path, or the reason it was refused. */
 export type Resolved = { ok: true; path: string } | { ok: false; reason: PathRefusal };
@@ -142,8 +147,7 @@ export interface FileRead {
  * the tree legitimately lists files the viewer cannot show.
  */
 export function readTextFile(path: string, cap = MAX_FILE_BYTES): FileRead {
-  const size = statSync(path).size;
-  const buffer = readFileSync(path);
+  const { buffer, size } = readCapped(path, cap);
   const slice = buffer.length > cap ? buffer.subarray(0, cap) : buffer;
   if (slice.includes(0)) return { content: '', truncated: false, binary: true, size };
   return {
@@ -152,6 +156,39 @@ export function readTextFile(path: string, cap = MAX_FILE_BYTES): FileRead {
     binary: false,
     size,
   };
+}
+
+/** What one capped read got, and how large the file it came from is. */
+interface CappedRead {
+  buffer: Buffer;
+  /** The file's real size in bytes, whatever was returned. */
+  size: number;
+}
+
+/**
+ * At most `cap` bytes of a file, plus the one byte that tells a file ending at
+ * the cap from one going past it.
+ *
+ * Through a descriptor rather than with `readFileSync`, because the cap is
+ * only worth having if the bytes past it are never held: a workspace holds
+ * whatever the agent generated, and a hundred-megabyte log is an ordinary
+ * thing to tap in a file tree.
+ */
+function readCapped(path: string, cap: number): CappedRead {
+  const fd = openSync(path, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const buffer = Buffer.allocUnsafe(Math.min(size, cap) + 1);
+    let read = 0;
+    while (read < buffer.length) {
+      const got = readSync(fd, buffer, read, buffer.length - read, null);
+      if (got === 0) break;
+      read += got;
+    }
+    return { buffer: buffer.subarray(0, read), size };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** A file's lines, without terminators, for taking an annotation's context. */
@@ -169,12 +206,25 @@ export function fileLines(content: string): string[] {
  * sees a half-written document, and so a crash mid-write leaves the previous
  * version rather than a truncated one. The chown is what lets the agent edit
  * or delete what was written.
+ *
+ * A file that is already there keeps its permissions, because the rename
+ * replaces it whole: without this, saving a shell script from the review would
+ * take its executable bit off.
  */
 export function writeFileAtomic(path: string, content: string): void {
-  const tmp = `${path}.tmp`;
+  const { fd, tmp } = openTemp(path);
   try {
-    writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o644 });
-    chownToAgent(tmp);
+    try {
+      writeFileSync(fd, content, { encoding: 'utf8' });
+      // Through the descriptor, so the mode and the owner land on the file
+      // that was opened rather than on whatever the name holds by now. The
+      // mode comes after the write rather than through the open, which the
+      // umask masks.
+      fchmodSync(fd, currentMode(path));
+      chownFdToAgent(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, path);
   } catch (err) {
     try {
@@ -183,6 +233,59 @@ export function writeFileAtomic(path: string, content: string): void {
       // nothing to clean up
     }
     throw err;
+  }
+}
+
+/**
+ * How many atomic writes this process has started, which together with its pid
+ * names a temp file no other write can be holding.
+ */
+let tmpWrites = 0;
+
+/** How many times one atomic write tries to get its temp name to itself. */
+const TMP_ATTEMPTS = 5;
+
+/** An open temp file, and the name it is open under. */
+interface TempFile {
+  fd: number;
+  tmp: string;
+}
+
+/**
+ * Creates the temp file an atomic write goes through, next to its target.
+ *
+ * The name is predictable and the directory is the agent's, so the agent can
+ * be holding it: a link planted there would otherwise take the write, the
+ * mode and the chown to whatever it points at. The open creates the file
+ * itself and follows nothing, so a name that is taken — by a link or by a
+ * leftover — is refused, removed, and tried again.
+ */
+function openTemp(path: string): TempFile {
+  const tmp = `${path}.${process.pid}.${tmpWrites++}.tmp`;
+  const flags =
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+  for (let attempt = 0; attempt < TMP_ATTEMPTS; attempt++) {
+    try {
+      return { fd: openSync(tmp, flags, 0o644), tmp };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' && code !== 'ELOOP') throw err;
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // gone on its own, or not a file this can clear
+      }
+    }
+  }
+  throw new Error(`could not get a clean temp file to write ${path}`);
+}
+
+/** The permissions a file already has, or the default for a new one. */
+function currentMode(path: string): number {
+  try {
+    return statSync(path).mode & 0o777;
+  } catch {
+    return 0o644;
   }
 }
 
@@ -203,10 +306,15 @@ export function removeFile(path: string): boolean {
  * it before and after applying, so an edit the agent made in between is caught
  * instead of overwritten. What it is compared against is a previous value of
  * itself, so the algorithm matters only in being cheap and stable.
+ *
+ * At most {@link MAX_REVIEW_BYTES} are read, which is the whole of REVIEW.md
+ * and of every file the review will serve, and bounds what hashing a huge one
+ * costs.
  */
 export function fileHash(path: string): string {
   try {
-    return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 32);
+    const { buffer } = readCapped(path, MAX_REVIEW_BYTES);
+    return createHash('sha256').update(buffer).digest('hex').slice(0, 32);
   } catch {
     return '';
   }

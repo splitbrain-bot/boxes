@@ -111,6 +111,12 @@ export class SessionUsage {
   /** Sessions with a walk running or queued, so a poll cannot pile them up. */
   private readonly walking = new Set<string>();
   /**
+   * How many times each session has been forgotten. A walk carries the number
+   * it started under, so one that was measuring while the workspace changed
+   * is dropped rather than stored as the answer.
+   */
+  private readonly generations = new Map<string, number>();
+  /**
    * The walks, one after another.
    *
    * A list request asks about every session at once, and the walks all go to
@@ -161,6 +167,12 @@ export class SessionUsage {
    */
   forget(sessionId: string): void {
     this.measured.delete(sessionId);
+    this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
+  }
+
+  /** Whether the session changed under a walk, which makes its total history. */
+  private overtaken(sessionId: string, generation: number): boolean {
+    return (this.generations.get(sessionId) ?? 0) !== generation;
   }
 
   /** Whether there is any reason to walk this workspace again. */
@@ -191,9 +203,14 @@ export class SessionUsage {
     if (this.walking.has(sessionId)) return;
     this.walking.add(sessionId);
     this.queue = this.queue.then(async () => {
+      const generation = this.generations.get(sessionId) ?? 0;
       try {
         let bytes = 0;
         for (const path of paths) bytes += await this.measure(path);
+        // An upload landed while this was walking, so this total is of the
+        // workspace as it was before it. Dropped rather than stored with a
+        // fresh timestamp, which would freeze the old number in place.
+        if (this.overtaken(sessionId, generation)) return;
         // Recorded against the state the box was in when the walk was asked
         // for rather than the state it is in now, so a session stopped while
         // its settling walk was queued is walked again at its next read.
@@ -202,8 +219,12 @@ export class SessionUsage {
         // Hold the last answer, since a workspace that could not be read is
         // not one known to be empty, but record the attempt so a walk that
         // keeps failing is retried on the interval rather than per request.
-        const last = this.measured.get(sessionId);
-        this.measured.set(sessionId, { bytes: last?.bytes ?? null, at: this.now(), live });
+        // Not for a session that changed under the walk: that one is due a
+        // reading whatever this one found.
+        if (!this.overtaken(sessionId, generation)) {
+          const last = this.measured.get(sessionId);
+          this.measured.set(sessionId, { bytes: last?.bytes ?? null, at: this.now(), live });
+        }
         this.onTrouble(sessionId, err as Error);
       } finally {
         this.walking.delete(sessionId);

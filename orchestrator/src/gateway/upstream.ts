@@ -1,12 +1,10 @@
 import type { Config } from '../config.ts';
 import {
-  appendAcpLog,
   clearSessionTurns,
   clearThreadInheritance,
   currentThread,
   getThread,
   insertThread,
-  pruneAcpLog,
   setThreadMode,
   setThreadTitle,
   setThreadTurnActive,
@@ -23,15 +21,23 @@ import { DEFAULT_HARNESS, harness, HARNESS_IDS, type HarnessId } from '../harnes
 import { log, type Logger } from '../log.ts';
 import type { NotifyKind, Notifier } from '../notify.ts';
 import { Activity } from './activity.ts';
-import { AdapterConnection, inheritedSource, type AdapterHost } from './adapter.ts';
+import {
+  AdapterConnection,
+  inheritedSource,
+  THREAD_NOT_FOUND,
+  type AdapterHost,
+} from './adapter.ts';
 import { BackgroundProbe, workPids } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
-import type {
-  BackgroundProcess,
-  SessionConfigOption,
-  ThreadOptions,
-  TurnStateParams,
+import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
+import {
+  BOXES_META,
+  type BackgroundProcess,
+  type LoadMeta,
+  type SessionConfigOption,
+  type ThreadOptions,
+  type TurnStateParams,
 } from '../../../shared/types.ts';
 
 /**
@@ -55,11 +61,14 @@ import type {
  * has loaded.
  */
 
+/** How much of one tapped ACP message a debug line carries. */
+const MAX_TAPPED_CHARS = 64_000;
+
 /**
  * A JSON.stringify replacer that keeps base64 media out of the debug log.
  *
  * An image or audio block carries its whole payload inline, and a screenshot
- * is a megabyte of base64 against a log that truncates at 64,000 characters.
+ * is a megabyte of base64 against a line that truncates at MAX_TAPPED_CHARS.
  * The mime type and the size are what a tapped log is read for.
  *
  * Keyed on the holder rather than the key name, which is why this is a
@@ -87,8 +96,15 @@ export interface DownstreamHandle {
   lastActiveAt: number;
   /** Sends a notification to this browser. */
   notify(method: string, params: unknown): void;
-  /** Sends a request to this browser and awaits its answer. */
-  request(method: string, params: unknown): Promise<unknown>;
+  /**
+   * Sends a request to this browser and awaits its answer.
+   *
+   * `signal` withdraws the question once it has gone out, which is how a
+   * browser holding a copy of a question somebody else has answered is told
+   * to stop waiting. The promise still settles on that browser's own answer:
+   * a withdrawal asks it to stop, it does not end the exchange.
+   */
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
   /** Closes this browser's socket, which makes it reconnect from scratch. */
   close(): void;
 }
@@ -114,6 +130,23 @@ const TERM_GRACE_MS = 2_000;
 /** Why a thread cannot be forked yet; the API turns this into a 409. */
 export const NOTHING_TO_FORK = 'That thread has nothing to fork from yet';
 
+export { THREAD_NOT_FOUND };
+
+/**
+ * The message a browser asked a `session/load` to be picked up after, or
+ * undefined when it asked for the thread whole.
+ *
+ * It travels in `_meta`, which ACP reserves for extensions and this gateway
+ * already reads its own options from. Anything but a non-empty string is read
+ * as no resume point, so a client that sends something else gets the whole
+ * thread rather than an argument.
+ */
+function resumePointOf(params: unknown): string | undefined {
+  const meta = (params as { _meta?: Record<string, unknown> } | null)?._meta;
+  const asked = (meta?.[BOXES_META] as LoadMeta | undefined)?.resumeFrom;
+  return typeof asked === 'string' && asked ? asked : undefined;
+}
+
 /**
  * The block of text a prompt's attachments are named in. The dashboard writes
  * it for the model rather than the user typing it, so it is not something to
@@ -122,10 +155,20 @@ export const NOTHING_TO_FORK = 'That thread has nothing to fork from yet';
 const ATTACHMENTS_OPEN = '<attachments>';
 
 /**
- * How much of a prompt a name may be taken from. Long enough for a sentence,
- * and short enough to stay a name rather than the message it came out of.
+ * How long a thread's name may be, whoever wrote it. Long enough for a
+ * sentence, and short enough to stay a name rather than the message it came
+ * out of.
  */
 const MAX_PROMPT_NAME_LENGTH = 120;
+
+/**
+ * A name cut to {@link MAX_PROMPT_NAME_LENGTH}, with an ellipsis standing for
+ * what was cut. One already short enough comes back as it is.
+ */
+function capName(name: string): string {
+  if (name.length <= MAX_PROMPT_NAME_LENGTH) return name;
+  return `${name.slice(0, MAX_PROMPT_NAME_LENGTH - 1)}…`;
+}
 
 /**
  * What to call a thread from a prompt sent on it, or null when the prompt has
@@ -143,9 +186,7 @@ function nameFromPrompt(params: unknown): string | null {
     if (block.text.startsWith(ATTACHMENTS_OPEN)) continue;
     const line = block.text.split('\n').find((candidate) => candidate.trim() !== '');
     if (line === undefined) continue;
-    const name = line.trim().replace(/\s+/g, ' ');
-    if (name.length <= MAX_PROMPT_NAME_LENGTH) return name;
-    return `${name.slice(0, MAX_PROMPT_NAME_LENGTH - 1)}…`;
+    return capName(line.trim().replace(/\s+/g, ' '));
   }
   return null;
 }
@@ -167,6 +208,22 @@ export class UpstreamSession implements AdapterHost {
   private readonly resolving = new Map<string, Promise<string>>();
   /** The reading's own timer while a browser is watching; see pollWhileWatched. */
   private polling: ReturnType<typeof setInterval> | null = null;
+  /**
+   * When each thread last had an approval announced, by the adapter's own
+   * thread id and the empty string for a question naming no thread.
+   *
+   * A thread announces one approval per hold window. An agent asking in a
+   * loop would otherwise be a push to every subscribed browser per question,
+   * and a lock screen nobody can read is a notification that has stopped
+   * working.
+   */
+  private readonly announcedApprovals = new Map<string, number>();
+  /**
+   * KILL escalations armed and not yet fired. Held so a stop can cancel
+   * them: each names a container, and one that fires after the session has
+   * gone reads processes in a box that is not there.
+   */
+  private readonly escalations = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(
     readonly sessionId: string,
@@ -176,12 +233,12 @@ export class UpstreamSession implements AdapterHost {
     private readonly notifier: Notifier,
     private readonly onStatusChange: (status: SessionRow['status']) => void,
     /**
-     * Run, and awaited, just before the container is started: it writes out
-     * this session's agent configuration and rebuilds the container if Docker
-     * no longer has it.
+     * Run, and awaited, just before the container is started: it brings the
+     * session's container up to date, which is everything from writing out
+     * the agent configuration to rebuilding a box Docker no longer has.
      *
      * Opening a thread on a stopped box is the other way a container starts,
-     * so neither repair can live only in `SessionManager.start`. The
+     * so the repairs cannot live only in `SessionManager.start`. The
      * entrypoint installs whatever is on disk at that moment, so the
      * configuration has to be current here too — and a box something pruned
      * has to be made again here too, or opening a thread on one is a 404 from
@@ -416,6 +473,10 @@ export class UpstreamSession implements AdapterHost {
     for (const acpThreadId of acpThreadIds) {
       setThreadTurnActive(this.db, this.sessionId, acpThreadId, false);
       this.activity.reset(acpThreadId);
+      // The adapter that asked is gone, so no answer can reach it any more.
+      // Left queued, each question holds its session out of the reaper and
+      // shows a browser a question nobody can answer.
+      this.pending.failThread(this.sessionId, acpThreadId, 'The agent adapter exited');
     }
     this.downstreams.refreshThreadStates();
   }
@@ -437,10 +498,33 @@ export class UpstreamSession implements AdapterHost {
    * about counts too: not every task is a process of its own, and a monitor
    * the agent is holding open inside the CLI would otherwise be reaped with
    * the box it is watching.
+   *
+   * Null until the box has been read and no adapter has a task: the reaper
+   * holds a session it has no answer for, and a card shows it as nothing
+   * running.
    */
-  get backgroundActive(): boolean {
-    if (this.background.active) return true;
-    return [...this.connections.values()].some((conn) => conn.hasTasks);
+  get backgroundActive(): boolean | null {
+    if ([...this.connections.values()].some((conn) => conn.hasTasks)) return true;
+    return this.background.active;
+  }
+
+  /**
+   * Whether this upstream is holding nothing at all: no browser attached, no
+   * permission request waiting, no connection to an adapter, no start in
+   * flight and no stop armed.
+   *
+   * What lets the manager forget one it built only to answer a question about
+   * a box. Nothing is lost by that: the connections are what carry the
+   * conversations an adapter knows, and there are none.
+   */
+  get holdsNothing(): boolean {
+    return (
+      this.downstreams.size === 0 &&
+      [...this.connections.values()].every((conn) => conn.holdsNothing) &&
+      this.containerStarting === null &&
+      this.escalations.size === 0 &&
+      this.pending.countForSession(this.sessionId) === 0
+    );
   }
 
   /** Test seam: takes a reading now rather than when one goes stale. */
@@ -563,6 +647,7 @@ export class UpstreamSession implements AdapterHost {
    */
   private escalate(containerId: string): void {
     const timer = setTimeout(() => {
+      this.escalations.delete(timer);
       void (async () => {
         try {
           const left = workPids(
@@ -582,6 +667,7 @@ export class UpstreamSession implements AdapterHost {
       })();
     }, TERM_GRACE_MS);
     timer.unref?.();
+    this.escalations.add(timer);
   }
 
   /**
@@ -700,7 +786,7 @@ export class UpstreamSession implements AdapterHost {
       await this.ensureStarted();
       row = this.current;
     }
-    if (!row || row.session_id !== this.sessionId) throw new Error('Thread not found');
+    if (!row || row.session_id !== this.sessionId) throw new Error(THREAD_NOT_FOUND);
     const conn = this.connection(row.harness);
     if (row.acp_session_id && conn.holds(row.acp_session_id)) return row.acp_session_id;
     // Two tabs opening the same thread at once share one bring-up, so the
@@ -765,7 +851,10 @@ export class UpstreamSession implements AdapterHost {
 
   // --- threads --------------------------------------------------------------
 
-  /** The thread the gateway answers session/new with, or null before one exists. */
+  /**
+   * The session's default conversation: what a connection naming no thread is
+   * pinned to. Null before the session has one.
+   */
   get current(): ThreadRow | null {
     return currentThread(this.db, this.sessionId) ?? null;
   }
@@ -833,7 +922,7 @@ export class UpstreamSession implements AdapterHost {
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
     const source = getThread(this.db, sourceThreadId);
     if (!source || source.session_id !== this.sessionId) {
-      throw new Error('Thread not found');
+      throw new Error(THREAD_NOT_FOUND);
     }
     if (!source.acp_session_id) throw new Error(NOTHING_TO_FORK);
     const wanted = harness(source.harness);
@@ -872,7 +961,7 @@ export class UpstreamSession implements AdapterHost {
   switchThread(threadId: string): ThreadRow {
     const thread = getThread(this.db, threadId);
     if (!thread || thread.session_id !== this.sessionId) {
-      throw new Error('Thread not found');
+      throw new Error(THREAD_NOT_FOUND);
     }
     this.db
       .prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?')
@@ -893,13 +982,14 @@ export class UpstreamSession implements AdapterHost {
     this.touch();
     // Only what is happening now. A replay re-sends everything the thread
     // ever said, and a transcript arriving in a burst is not the agent
-    // talking. The cost is that a turn starting during somebody else's replay
-    // goes unobserved, which is a window of milliseconds.
+    // talking. Only that thread's own replay silences it, and the cost is a
+    // turn starting on a thread while it rebuilds, which is a window of
+    // milliseconds.
     const thread = threadOf(params);
     const update = (params as { update?: unknown })?.update;
     if (!replaying && thread) this.activity.observe(thread, update, harnessId);
-    this.recordThreadInfo(harnessId, params);
-    this.tap('up', 'session/update', params);
+    this.recordThreadInfo(harnessId, params, replaying);
+    this.tap('up', ACP_METHOD.sessionUpdate, params);
     this.downstreams.update(params);
     // After the update rather than before it, so a browser reading its
     // transcript and the bar above its composer agree about what has just
@@ -922,16 +1012,26 @@ export class UpstreamSession implements AdapterHost {
    * thread should come back as it ended up rather than as it was last asked to
    * be.
    *
+   * The three kinds below are the whole of what is recorded, and that is a
+   * different list from the kinds `activity.ts` reads as the agent at work
+   * and from the kinds the dashboard draws. A mode change is stored here and
+   * is not the agent doing anything; a message chunk is the agent working and
+   * is not stored, because the transcript is the adapter's.
+   *
    * The row is found by the update's own ACP id *and the harness it arrived
    * on*, so an update lands on the thread it is about whichever adapter is
    * talking and whatever is current.
+   *
+   * A replayed update does not count as the thread having been heard from:
+   * it is the transcript being read back, so opening a thread would otherwise
+   * move it to the top of the list for having been opened.
    */
-  private recordThreadInfo(harnessId: HarnessId, params: unknown): void {
+  private recordThreadInfo(harnessId: HarnessId, params: unknown, replaying: boolean): void {
     const acpSessionId = (params as { sessionId?: string })?.sessionId;
     if (!acpSessionId) return;
     const row = threadByAcpId(this.db, this.sessionId, harnessId, acpSessionId);
     if (!row) return;
-    touchThread(this.db, row.id);
+    if (!replaying) touchThread(this.db, row.id);
 
     const update = (
       params as {
@@ -944,21 +1044,23 @@ export class UpstreamSession implements AdapterHost {
       }
     )?.update;
     switch (update?.sessionUpdate) {
-      case 'session_info_update':
+      case UPDATE_KIND.sessionInfo:
         // Every field of a session_info_update is optional, so an update that
         // carries no title says nothing about it. An explicit null is the
         // adapter clearing it, which puts the thread back on its ordinal.
         if (update.title === null) setThreadTitle(this.db, row.id, null);
         else if (typeof update.title === 'string' && update.title.trim()) {
-          setThreadTitle(this.db, row.id, update.title.trim());
+          // Cut to the same length a prompt-derived name is, so no adapter's
+          // idea of a title can push a paragraph into the thread list.
+          setThreadTitle(this.db, row.id, capName(update.title.trim()));
         }
         return;
-      case 'current_mode_update':
+      case UPDATE_KIND.currentMode:
         if (typeof update.currentModeId === 'string') {
           setThreadMode(this.db, row.id, update.currentModeId);
         }
         return;
-      case 'config_option_update':
+      case UPDATE_KIND.configOption:
         if (Array.isArray(update.configOptions)) {
           this.connection(harnessId).recordConfigOptions(acpSessionId, update.configOptions);
         }
@@ -980,12 +1082,12 @@ export class UpstreamSession implements AdapterHost {
    */
   onPermission(params: unknown): Promise<unknown> {
     this.touch();
-    this.tap('up', 'session/request_permission', params);
+    this.tap('up', ACP_METHOD.sessionRequestPermission, params);
 
     const thread = threadOf(params);
     const target = thread ? this.downstreams.byRecency(thread)[0] : undefined;
     if (target) {
-      return target.request('session/request_permission', params).catch((err) => {
+      return target.request(ACP_METHOD.sessionRequestPermission, params).catch((err) => {
         // The browser vanished mid-question: fall back to queueing so the
         // turn is not failed by a closed tab.
         this.slog.warn('permission forward failed; queueing', {
@@ -1003,15 +1105,33 @@ export class UpstreamSession implements AdapterHost {
       const entry = this.pending.add(
         this.sessionId,
         threadOf(params) ?? null,
-        'session/request_permission',
+        ACP_METHOD.sessionRequestPermission,
         params,
         { resolve, reject },
         this.cfg.PERMISSION_HOLD_MINUTES * 60_000,
         (timedOut) => this.applyPermissionFallback(timedOut.row.id, params, resolve),
       );
       this.slog.info('permission request queued', { pendingId: entry.row.id });
-      this.announce('approval', threadOf(params) ?? null);
+      const thread = threadOf(params) ?? null;
+      if (this.mayAnnounceApproval(thread)) this.announce('approval', thread);
     });
+  }
+
+  /**
+   * Whether a thread may say it is waiting for a decision, and records that
+   * it has when it may.
+   *
+   * The window is the hold: the first question of a thread is worth waking
+   * somebody for, and the ones behind it are the same trip back to the same
+   * conversation. Whoever comes back finds all of them.
+   */
+  private mayAnnounceApproval(acpThreadId: string | null): boolean {
+    const key = acpThreadId ?? '';
+    const last = this.announcedApprovals.get(key) ?? 0;
+    const now = Date.now();
+    if (now - last < this.cfg.PERMISSION_HOLD_MINUTES * 60_000) return false;
+    this.announcedApprovals.set(key, now);
+    return true;
   }
 
   /**
@@ -1097,12 +1217,19 @@ export class UpstreamSession implements AdapterHost {
     this.downstreams.threadStateTo(handle);
     for (const entry of this.pending.listForThread(this.sessionId, thread)) {
       const params = JSON.parse(entry.row.params) as unknown;
+      // This browser's own copy of the question, withdrawn when another
+      // browser answers it first. Dropped as soon as this browser has
+      // answered, so its own answer does not withdraw itself.
+      const delivery = new AbortController();
+      entry.deliveries.add(delivery);
       handle
-        .request('session/request_permission', params)
+        .request(ACP_METHOD.sessionRequestPermission, params, delivery.signal)
         .then((result) => {
+          entry.deliveries.delete(delivery);
           if (this.pending.settle(entry.row.id)) entry.resolve(result);
         })
         .catch((err) => {
+          entry.deliveries.delete(delivery);
           this.slog.warn('pending permission delivery failed; leaving queued', {
             pendingId: entry.row.id,
             error: (err as Error).message,
@@ -1134,8 +1261,8 @@ export class UpstreamSession implements AdapterHost {
     // threads of one session share this gateway, so nothing here may be
     // decided by which of them is the session's default.
     const thread = threadOf(params);
-    const isPrompt = method === 'session/prompt' && thread !== undefined;
-    const isLoad = method === 'session/load' && thread !== undefined && from !== undefined;
+    const isPrompt = method === ACP_METHOD.sessionPrompt && thread !== undefined;
+    const isLoad = method === ACP_METHOD.sessionLoad && thread !== undefined && from !== undefined;
 
     if (isPrompt) {
       // A fork's first prompt is where it stops borrowing: the adapter starts
@@ -1161,18 +1288,21 @@ export class UpstreamSession implements AdapterHost {
       this.activity.begin(thread);
       this.downstreams.beginPrompt(params);
     }
-    if (isLoad) this.downstreams.beginReplay(from, thread);
+    // What the browser already holds, so the replay it is about to be sent
+    // can start there. The adapter cannot be asked to start partway, so the
+    // whole of it still arrives here and only the tail goes out.
+    if (isLoad) this.downstreams.beginReplay(from, thread, { resumeFrom: resumePointOf(params) });
 
     try {
       const result = isLoad
-        ? await conn.whileReplaying(() => conn.request(method, params))
+        ? await conn.whileReplaying(thread, () => conn.request(method, params))
         : await conn.request(method, params);
       // A mode the adapter accepted is this thread's from now on, including
       // across the restarts that lose the adapter's copy of it. Recorded here
       // as well as from the adapter's own current_mode_update, because that
       // notification is the adapter's courtesy and this is the answer to the
       // request the user made.
-      if (method === 'session/set_mode' && thread !== undefined) {
+      if (method === ACP_METHOD.sessionSetMode && thread !== undefined) {
         const modeId = (params as { modeId?: unknown })?.modeId;
         const row = conn.rowOf(thread);
         if (row && typeof modeId === 'string') setThreadMode(this.db, row.id, modeId);
@@ -1180,13 +1310,19 @@ export class UpstreamSession implements AdapterHost {
       // And a setting it accepted is recorded from its own answer, which
       // carries the whole list and the value it settled on. An adapter that
       // answers with nothing leaves the request itself as the record.
-      if (method === 'session/set_config_option' && thread !== undefined) {
+      if (method === ACP_METHOD.sessionSetConfigOption && thread !== undefined) {
         this.recordConfigChange(conn, thread, params, result);
       }
-      // A fork's own replay is empty until it has been prompted, so the
-      // conversation it branched from is replayed in its place — after its
-      // own, which is the part that answers the request.
-      if (isLoad) await this.replayInherited(conn, thread, from);
+      if (isLoad) {
+        // The adapter has sent all of its replay, so the browser can be told
+        // how that turned out — before a borrowed replay, and before the
+        // queued questions the downstream flushes when this answers.
+        this.downstreams.settleReplay(from, thread);
+        // A fork's own replay is empty until it has been prompted, so the
+        // conversation it branched from is replayed in its place — after its
+        // own, which is the part that answers the request.
+        await this.replayInherited(conn, thread, from);
+      }
       return result;
     } finally {
       if (isPrompt) {
@@ -1273,10 +1409,10 @@ export class UpstreamSession implements AdapterHost {
     const source = inheritedSource(this.db, this.sessionId, fork);
     if (!source?.acp_session_id) return;
 
-    this.downstreams.beginReplay(to, source.acp_session_id, acpThreadId);
+    this.downstreams.beginReplay(to, source.acp_session_id, { as: acpThreadId });
     try {
-      await conn.whileReplaying(() =>
-        conn.request('session/load', {
+      await conn.whileReplaying(source.acp_session_id, () =>
+        conn.request(ACP_METHOD.sessionLoad, {
           sessionId: source.acp_session_id,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
@@ -1306,7 +1442,7 @@ export class UpstreamSession implements AdapterHost {
     // Only the cancelled thread's turn ends. Another thread of the same
     // session may still be mid-turn.
     const thread = threadOf(params);
-    if (method === 'session/cancel' && thread) {
+    if (method === ACP_METHOD.sessionCancel && thread) {
       this.setTurnActive(thread, false);
       // Whatever the agent was in the middle of saying, it is not saying it
       // any more. The tool calls it had open go with it.
@@ -1316,18 +1452,14 @@ export class UpstreamSession implements AdapterHost {
     await conn.notify(method, params);
   }
 
-  /** Records one message in the debug log. A failed write never breaks the flow. */
+  /** Writes one message to the log at debug level, where `docker logs` sees it. */
   tap(direction: 'up' | 'down', method: string, params: unknown): void {
-    try {
-      appendAcpLog(
-        this.db,
-        this.sessionId,
-        direction,
-        JSON.stringify({ method, params }, withoutMediaPayloads),
-      );
-    } catch (err) {
-      this.slog.debug('acp_log write failed', { error: (err as Error).message });
-    }
+    if (!log.wants('debug')) return;
+    this.slog.debug('acp', {
+      direction,
+      method,
+      payload: JSON.stringify(params, withoutMediaPayloads).slice(0, MAX_TAPPED_CHARS),
+    });
   }
 
   // --- shutdown --------------------------------------------------------------
@@ -1335,12 +1467,19 @@ export class UpstreamSession implements AdapterHost {
   /** Stops every connection deliberately, which suppresses the reconnects. */
   stop(): void {
     this.stopPolling();
+    // Each one names a container this session may not have by the time it
+    // fires, and reads the box it named.
+    for (const timer of this.escalations) clearTimeout(timer);
+    this.escalations.clear();
     // The box is going away, and what was in it went with it. Said now rather
     // than at the next reading, so a card does not carry "still running" over
     // the moment its session was shut down.
     this.background.clear();
     for (const conn of this.connections.values()) conn.stop();
     this.clearThreadStates();
+    // A question this box's adapters asked cannot be answered any more, so
+    // the next one a fresh adapter asks is news again.
+    this.announcedApprovals.clear();
     this.pending.failSession(this.sessionId, 'Session stopped');
   }
 
@@ -1348,14 +1487,5 @@ export class UpstreamSession implements AdapterHost {
   close(): void {
     this.stop();
     this.downstreams.clear();
-  }
-
-  /** Periodic housekeeping: keeps the debug log within its ring size. */
-  maintenance(): void {
-    try {
-      pruneAcpLog(this.db, this.sessionId);
-    } catch (err) {
-      this.slog.debug('acp_log prune failed', { error: (err as Error).message });
-    }
   }
 }

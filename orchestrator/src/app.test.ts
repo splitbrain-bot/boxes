@@ -58,7 +58,9 @@ function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
         if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
         // The box-wide stop's two calls: a reading taken inside the container,
         // and the signal it aims at what the reading found.
-        const answers = opts.Cmd[0] === 'ps' ? insideBox : opts.Cmd[0] === 'bash' ? output : null;
+        // A local command runs under `timeout`, which is what tells it apart.
+        const answers =
+          opts.Cmd[0] === 'ps' ? insideBox : opts.Cmd[0] === 'timeout' ? output : null;
         return {
           start: async () => {
             const stream = new PassThrough();
@@ -74,7 +76,11 @@ function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
             // A `ps` or a `kill` the stop ran succeeded; anything else this fake
             // does not answer for failed.
             ExitCode:
-              opts.Cmd[0] === 'bash' ? exitCode : answers === null && opts.Cmd[0] !== 'kill' ? 1 : 0,
+              opts.Cmd[0] === 'timeout'
+                ? exitCode
+                : answers === null && opts.Cmd[0] !== 'kill'
+                  ? 1
+                  : 0,
           }),
         };
       },
@@ -99,10 +105,10 @@ function insertSession(id: string): void {
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
-       created_at, last_active_at)
+       ws_token, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?)`,
-  ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, now, now);
+       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?, ?)`,
+  ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 
@@ -120,7 +126,7 @@ beforeEach(() => {
   insideBox = '';
   killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
-  // Before config(), which generates and writes the WS token on first read.
+  // Before config(), which reads DATA_DIR once and keeps it for the process.
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
@@ -383,9 +389,10 @@ test('a link planted in the attachments directory serves nothing', async () => {
     payload: Buffer.from('x'),
   });
   // What an agent with a foothold in its own workspace would try: the
-  // orchestrator's own uid can read the database and the gateway token.
+  // orchestrator's own uid can read the database, and every session's gateway
+  // token is in it.
   const secret = join(dir, 'secret.txt');
-  writeFileSync(secret, 'ws-auth-token');
+  writeFileSync(secret, 'a gateway token');
   symlinkSync(secret, join(workspace, '.boxes/attachments/escape.png'));
 
   const res = await orchestrator.app.inject({
@@ -420,10 +427,20 @@ test('a command runs in the container and streams its output with a trailer', as
 
   assert.equal(res.statusCode, 200);
   assert.match(res.headers['content-type'] as string, /text\/plain/);
+  // The output is the agent's, so the declared type is the only one.
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
   assert.equal(res.body, 'hello\n\n[exit 0]\n');
   // The command travels as an argument to bash inside the container; nothing
-  // is assembled into a host command line.
-  assert.deepEqual(execs.at(-1), ['bash', '-lc', 'echo hello']);
+  // is assembled into a host command line. The container is handed the wall
+  // clock along with it.
+  assert.deepEqual(execs.at(-1), [
+    'timeout',
+    '--kill-after=5s',
+    '120s',
+    'bash',
+    '-lc',
+    'echo hello',
+  ]);
 });
 
 test('a non-zero exit is reported in the trailer', async () => {
@@ -445,7 +462,7 @@ test('a finished run is stored and listed', async () => {
   await orchestrator.app.inject({
     method: 'POST',
     url: '/api/sessions/abc123/exec',
-    payload: { command: 'git status' },
+    payload: { command: 'git status', after: 'msg_1' },
   });
 
   const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/exec' });
@@ -456,6 +473,8 @@ test('a finished run is stored and listed', async () => {
   assert.equal(records[0]!['output'], 'clean\n');
   assert.equal(records[0]!['exitCode'], 0);
   assert.equal(records[0]!['truncated'], false);
+  // Where it was typed comes back with it, for the replay to place it.
+  assert.equal(records[0]!['after'], 'msg_1');
 });
 
 test('running a command holds off the reaper', async () => {
@@ -689,6 +708,121 @@ test('a POST that matches no route is a 404 rather than the page', async () => {
   } finally {
     rmSync(bundle, { recursive: true, force: true });
   }
+});
+
+test('the hashed assets are cached for good and the page never is', async () => {
+  const bundle = writeBundle();
+  try {
+    // The name carries the content hash, so this copy can never be the wrong
+    // one: a changed file is a changed name.
+    const asset = await orchestrator.app.inject({ url: '/assets/index-abc.js' });
+    assert.match(asset.headers['cache-control'] as string, /immutable/);
+
+    // index.html is the file that says which assets are current, so a held
+    // copy would go on naming the ones it was built with.
+    const page = await orchestrator.app.inject({ url: '/sessions/abc123' });
+    assert.equal(page.headers['cache-control'], 'no-cache');
+    // And so is everything else that keeps its name across builds.
+    const worker = await orchestrator.app.inject({ url: '/sw.js' });
+    assert.equal(worker.headers['cache-control'], 'no-cache');
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
+test('the page is served under a policy that pins every fetch to this origin', async () => {
+  const bundle = writeBundle();
+  try {
+    const res = await orchestrator.app.inject({
+      url: '/',
+      headers: { host: 'boxes.example:8443' },
+    });
+    const csp = res.headers['content-security-policy'] as string;
+
+    // A remote image in markdown the agent wrote is the channel this closes.
+    assert.match(csp, /img-src 'self' data: blob:/);
+    assert.match(csp, /default-src 'none'/);
+    // The gateway socket is spelled out, on this host and no other.
+    assert.match(csp, /connect-src 'self' ws:\/\/boxes\.example:8443 wss:\/\/boxes\.example:8443/);
+    // The one inline script the page has is allowed by its hash, and nothing
+    // else inline is.
+    assert.match(csp, /script-src 'self' 'sha256-[A-Za-z0-9+/=]+'/);
+
+    // A Host header that is not a plain host never reaches the header.
+    const odd = await orchestrator.app.inject({
+      url: '/',
+      headers: { host: 'evil; script-src *' },
+    });
+    const oddCsp = odd.headers['content-security-policy'] as string;
+    assert.ok(!oddCsp.includes('script-src *'), 'the header is not writable from outside');
+    assert.match(oddCsp, /connect-src 'self';/);
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
+test('a bundle worth compressing is compressed', async () => {
+  const bundle = writeBundle();
+  try {
+    writeFileSync(join(bundle, 'assets', 'big-abc.js'), `// ${'x'.repeat(20_000)}\n`);
+    const res = await orchestrator.app.inject({
+      url: '/assets/big-abc.js',
+      headers: { 'accept-encoding': 'gzip' },
+    });
+    assert.equal(res.headers['content-encoding'], 'gzip');
+    assert.ok(res.rawPayload.length < 2000, `${res.rawPayload.length} bytes on the wire`);
+  } finally {
+    rmSync(bundle, { recursive: true, force: true });
+  }
+});
+
+// --- Liveness, readiness and the request log ---------------------------------
+
+test('a deployment that cannot serve sessions is live but not ready', async () => {
+  // Nothing has pushed an egress policy here, so a session created now would
+  // get no egress at all.
+  const ready = await orchestrator.app.inject({ url: '/readyz' });
+  assert.equal(ready.statusCode, 503);
+  const body = ready.json() as { ready: boolean; checks: Record<string, boolean> };
+  assert.equal(body.ready, false);
+  // The database is the one of the three that is there.
+  assert.equal(body.checks['database'], true);
+  assert.equal(body.checks['egress'], false);
+
+  // Liveness is about this process serving, and it is: a probe reading the
+  // status code must not restart an orchestrator that is merely unconfigured.
+  const live = await orchestrator.app.inject({ url: '/healthz' });
+  assert.equal(live.statusCode, 200);
+});
+
+test('every response is logged with what was asked and what came back', async () => {
+  const lines: string[] = [];
+  const written = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await orchestrator.app.inject({ url: '/api/sessions?name=secret' });
+    await orchestrator.app.inject({ url: '/api/sessions/nope' });
+  } finally {
+    process.stderr.write = written;
+  }
+
+  const logged = lines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((line) => line['msg'] === 'request');
+
+  const ok = logged.find((line) => line['status'] === 200);
+  assert.equal(ok?.['method'], 'GET');
+  // The query string is left off: it carries what the reader typed.
+  assert.equal(ok?.['path'], '/api/sessions');
+  assert.equal(typeof ok?.['ms'], 'number');
+
+  // A refusal is the caller's problem rather than the deployment's, so it is
+  // a warning and not an error.
+  const refused = logged.find((line) => line['status'] === 404);
+  assert.equal(refused?.['level'], 'warn');
 });
 
 // --- Web Push registration --------------------------------------------------
@@ -1056,6 +1190,77 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
     last_active_at: number;
   };
   assert.equal(after.last_active_at, before.last_active_at);
+});
+
+test('a listed session carries its own WebSocket token', async () => {
+  insertSession('abc123');
+  insertSession('def456');
+
+  const res = await orchestrator.app.inject({ url: '/api/sessions' });
+  const listed = res.json() as Array<{ id: string; wsToken: string }>;
+
+  // Each summary hands out the token of the session it is about, so a reader
+  // of one session never learns what opens the one beside it.
+  assert.deepEqual(
+    listed.map((s) => [s.id, s.wsToken]).sort(),
+    [
+      ['abc123', 'token-abc123'],
+      ['def456', 'token-def456'],
+    ],
+  );
+});
+
+// --- request bodies over the real routes --------------------------------------
+//
+// Every route that takes a JSON body checks it before it acts, so a body that
+// is wrong is a 400 saying which field is wrong rather than a cast that
+// misbehaves further in.
+
+test('a body missing a required field is refused, and the answer names it', async () => {
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /^name: /);
+});
+
+test('a field of the wrong type is refused rather than read as one', async () => {
+  insertSession('abc123');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/threads/abc123-t1/done',
+    payload: { done: 'yes' },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /^done: /);
+
+  // And nothing was written on the way to the refusal.
+  const row = db.prepare("SELECT done FROM threads WHERE id = 'abc123-t1'").get() as {
+    done: number;
+  };
+  assert.equal(row.done, 0);
+});
+
+test('a body that leaves out an optional field is taken as it is', async () => {
+  await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/agent-sets/global',
+    payload: { name: 'Everywhere', agentsMd: 'House rules.' },
+  });
+
+  // An empty body names no field, so every field keeps what it had.
+  const res = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/agent-sets/global',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 200);
+  const set = res.json() as { name: string; agentsMd: string };
+  assert.equal(set.name, 'Everywhere');
+  assert.equal(set.agentsMd, 'House rules.');
 });
 
 // --- credentials and settings over their real routes --------------------------

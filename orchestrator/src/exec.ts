@@ -13,10 +13,10 @@ import { log } from './log.ts';
  * container and never reaches a host command line.
  */
 
-/** Longest a command may run before it is killed, in milliseconds. */
+/** Longest a command may run before the container ends it, in milliseconds. */
 export const WALL_CLOCK_MS = 120_000;
 
-/** Most output a command may produce before the rest is dropped, in bytes. */
+/** Most output a command may put in the response before the rest is dropped, in bytes. */
 export const MAX_OUTPUT_BYTES = 256 * 1024;
 
 /** How a finished run ended. */
@@ -49,7 +49,7 @@ export interface ExecLimits {
  * `10xxxxxx`, so walking back over those from the cut lands on the start of
  * the character being dropped.
  */
-export function truncateToBytes(text: string, maxBytes: number): string {
+function truncateToBytes(text: string, maxBytes: number): string {
   if (maxBytes <= 0) return '';
   const buffer = Buffer.from(text, 'utf8');
   if (buffer.length <= maxBytes) return text;
@@ -61,9 +61,11 @@ export function truncateToBytes(text: string, maxBytes: number): string {
 /**
  * Runs one command, streaming its combined output to `onChunk`.
  *
- * Both limits are enforced here rather than left to the container: output
- * past the cap is dropped and the exec killed, so a `yes` cannot fill the
- * response, and the wall clock kills a command that never ends.
+ * The wall clock ends the command itself: it runs under `timeout` in the
+ * container, which kills it once the limit passes. The output cap ends the
+ * response, so a `yes` cannot fill it; the command behind it runs on until
+ * the wall clock ends it at the latest. Either limit drops the attached
+ * stream and reports no exit code.
  */
 export async function runCommand(
   target: ExecTarget,
@@ -74,13 +76,20 @@ export async function runCommand(
   const wallClockMs = limits.wallClockMs ?? WALL_CLOCK_MS;
   const maxOutputBytes = limits.maxOutputBytes ?? MAX_OUTPUT_BYTES;
 
-  const exec = await dk.runCommandExec(target.containerId, command, target.workingDir);
+  const exec = await dk.runCommandExec(
+    target.containerId,
+    command,
+    target.workingDir,
+    wallClockMs,
+  );
 
   let bytes = 0;
   let truncated = false;
   let timedOut = false;
   const captured: string[] = [];
 
+  // A backstop for a stream that goes quiet without the process ending; the
+  // command's own limit is the one the container enforces.
   const timer = setTimeout(() => {
     timedOut = true;
     exec.kill();
@@ -110,7 +119,13 @@ export async function runCommand(
   });
 
   clearTimeout(timer);
-  const exitCode = truncated || timedOut ? null : await exec.exited;
+  let exitCode = truncated || timedOut ? null : await exec.exited;
+  // 124 is what `timeout` exits with when it fires, which is how the run
+  // ended rather than what the command itself reported.
+  if (exitCode === 124) {
+    timedOut = true;
+    exitCode = null;
+  }
 
   return { output: captured.join(''), exitCode, truncated, timedOut };
 }
@@ -131,6 +146,10 @@ export function trailer(outcome: ExecOutcome): string {
  *
  * The thread is what the run is listed under. Null when the session had no
  * thread to log it against, which stores a row nobody is shown.
+ *
+ * `after` is where in the thread the command was typed: the id of the tool
+ * call or message the transcript ended with, as the browser saw it. It is
+ * stored as given, and a replay that cannot find it lists the run last.
  */
 export function record(
   db: Db,
@@ -139,6 +158,7 @@ export function record(
   command: string,
   outcome: ExecOutcome & { output: string },
   startedAt: number,
+  after: string | null,
 ): void {
   try {
     appendExecLog(db, sessionId, {
@@ -150,6 +170,7 @@ export function record(
       timed_out: outcome.timedOut ? 1 : 0,
       started_at: startedAt,
       finished_at: Date.now(),
+      after_id: after,
     });
   } catch (err) {
     log.session(sessionId).warn('exec_log write failed', { error: (err as Error).message });
@@ -168,6 +189,7 @@ function toRecord(row: ExecRow): ExecRecord {
     timedOut: row.timed_out === 1,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    after: row.after_id,
   };
 }
 

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test, vi } from 'vitest';
-import type { ReviewFileResponse, ReviewTreeResponse } from '../../../shared/types.ts';
+import type { ReviewDirResponse, ReviewFileResponse } from '../../../shared/types.ts';
 import {
   closeFile,
   deleteComment,
+  loadDir,
   loadFile,
   loadTree,
   newReview,
@@ -12,7 +13,10 @@ import {
   refresh,
   rememberScroll,
   saveComment,
+  saveFile,
   setBase,
+  setDirty,
+  toggleDir,
   useReview,
 } from './review.ts';
 
@@ -22,12 +26,18 @@ import {
  * Freshness is the fetch: there is no fingerprint and no timer, so an idle
  * review costs nothing. What has to hold instead is that the three moments
  * that do refetch — a mount, a file closing, the tab coming back — actually
- * ask, and that the one that fires unprompted does not fight a write or a
- * half-typed comment.
+ * ask for git's answer again, and that the one that fires unprompted does not
+ * fight a write or a half-typed comment.
+ *
+ * The tree arrives a directory at a time, so the other half is that opening a
+ * folder asks for that folder and nothing else.
  */
 
 /** Requests the stub answered, in order. */
 let requested: string[] = [];
+
+/** The bodies of the ones that carried a body, in the same order. */
+let bodies: string[] = [];
 
 /** The canned answers, by URL fragment. */
 let answers: Record<string, unknown>;
@@ -35,17 +45,23 @@ let answers: Record<string, unknown>;
 /** How the next matching request should fail, if at all. */
 let failWith: string | null = null;
 
-function tree(over: Partial<ReviewTreeResponse> = {}): ReviewTreeResponse {
+/** And with what status, for the refusals a caller can act on. */
+let failStatus = 500;
+
+function dir(over: Partial<ReviewDirResponse> = {}): ReviewDirResponse {
   return {
+    path: '',
+    entries: [
+      { name: 'src', path: 'src', isDir: true },
+      { name: 'a.ts', path: 'a.ts', isDir: false },
+    ],
+    truncated: false,
     repos: [{ path: '', name: 'workspace', head: 'abc', baseCommit: '' }],
     hasGit: true,
-    entries: [{ name: 'a.ts', path: 'a.ts', isDir: false }],
-    truncated: false,
-    statuses: {},
-    counts: {},
     base: { rev: '' },
     hasReview: false,
     started: '',
+    commentCount: 0,
     ...over,
   };
 }
@@ -55,6 +71,7 @@ function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
     path: 'a.ts',
     repo: '',
     content: 'one\ntwo\n',
+    hash: 'h1',
     truncated: false,
     binary: false,
     deleted: false,
@@ -72,17 +89,24 @@ function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
 
 beforeEach(() => {
   requested = [];
+  bodies = [];
   failWith = null;
+  failStatus = 500;
   answers = {
-    '/review/tree': tree(),
+    '/review/dir?path=src': dir({
+      path: 'src',
+      entries: [{ name: 'deep.ts', path: 'src/deep.ts', isDir: false }],
+    }),
+    '/review/dir': dir(),
     '/review/file': file(),
   };
 
-  vi.stubGlobal('fetch', async (url: string) => {
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
     requested.push(url);
+    if (typeof init?.body === 'string') bodies.push(init.body);
     if (failWith) {
       return new Response(JSON.stringify({ error: failWith }), {
-        status: 500,
+        status: failStatus,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -94,7 +118,7 @@ beforeEach(() => {
   });
 
   // A fresh store per test: it is a singleton keyed by session id.
-  useReview.setState({ sessionId: null, tree: null, file: null });
+  useReview.setState({ sessionId: null, facts: null, dirs: {}, expanded: [], file: null });
   open('abc123');
 });
 
@@ -102,19 +126,95 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** What the last request that carried a body sent. */
+function lastBody(): string {
+  return bodies.at(-1) ?? '';
+}
+
 /** Requests whose URL mentions a fragment. */
 function hits(fragment: string): number {
   return requested.filter((url) => url.includes(fragment)).length;
 }
 
-test('the tree loads and lands in the store', async () => {
+/** Lets the requests a synchronous call started land. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** One entry of one loaded directory, by the path it names. */
+function entryIn(dirPath: string, entryPath: string) {
+  return useReview.getState().dirs[dirPath]?.entries.find((e) => e.path === entryPath);
+}
+
+test('the root of the tree loads and lands in the store', async () => {
   await loadTree();
-  assert.equal(useReview.getState().tree?.entries.length, 1);
+  assert.equal(useReview.getState().dirs['']?.entries.length, 2);
+  // The facts come with it, so the header paints from the same request.
+  assert.equal(useReview.getState().facts?.hasGit, true);
   assert.equal(useReview.getState().error, null);
   assert.equal(useReview.getState().loadingTree, false);
 });
 
-test('a failed tree fetch reports itself and stops loading', async () => {
+test('an arrival asks for git again, and opening a folder does not', async () => {
+  await loadTree();
+  // What tells the orchestrator to run git over the workspace once more.
+  assert.match(requested.at(-1)!, /path=&fresh=1/);
+
+  toggleDir('src');
+  await settle();
+  assert.match(requested.at(-1)!, /path=src$/);
+});
+
+test('opening a folder asks for that folder and nothing else', async () => {
+  await loadTree();
+  const before = hits('/review/dir');
+
+  toggleDir('src');
+  await settle();
+
+  assert.equal(hits('/review/dir'), before + 1);
+  assert.deepEqual(useReview.getState().expanded, ['src']);
+  assert.equal(useReview.getState().dirs['src']?.entries.length, 1);
+});
+
+test('a folder that is closed and opened again is not refetched', async () => {
+  await loadTree();
+  toggleDir('src');
+  await settle();
+  const before = hits('/review/dir');
+
+  toggleDir('src');
+  assert.deepEqual(useReview.getState().expanded, []);
+  toggleDir('src');
+  await settle();
+
+  // What it holds is as fresh as the last arrival, and asking again for every
+  // tap is the cost this view is built to avoid.
+  assert.deepEqual(useReview.getState().expanded, ['src']);
+  assert.equal(hits('/review/dir'), before);
+});
+
+test('an arrival reloads the folders standing open', async () => {
+  await loadTree();
+  await loadDir('src');
+  useReview.setState({ expanded: ['src'] });
+  const before = hits('/review/dir');
+
+  await loadTree();
+  // The root and the one open folder: what is on screen comes back, and
+  // nothing that is not.
+  assert.equal(hits('/review/dir'), before + 2);
+});
+
+test('a chain of single-child folders opens itself', async () => {
+  answers['/review/dir'] = dir({ entries: [{ name: 'src', path: 'src', isDir: true }] });
+  await loadTree();
+  await settle();
+  // A `src/main/java/com/…` prefix is noise rather than structure.
+  assert.deepEqual(useReview.getState().expanded, ['src']);
+});
+
+test('a failed directory fetch reports itself and stops loading', async () => {
   failWith = 'workspace is gone';
   await loadTree();
   assert.equal(useReview.getState().error, 'workspace is gone');
@@ -135,20 +235,23 @@ test('closing a file leaves the tree loaded', async () => {
   await loadFile('a.ts');
   closeFile();
   assert.equal(useReview.getState().file, null);
-  assert.ok(useReview.getState().tree);
+  assert.ok(useReview.getState().dirs['']);
 });
 
 test('re-opening the same session keeps what is loaded', async () => {
   await loadTree();
   open('abc123');
   // Otherwise every remount of the route would refetch the whole tree.
-  assert.ok(useReview.getState().tree);
+  assert.ok(useReview.getState().dirs['']);
 });
 
 test('opening a different session discards the previous one', async () => {
   await loadTree();
+  await loadDir('src');
   open('other');
-  assert.equal(useReview.getState().tree, null);
+  assert.deepEqual(useReview.getState().dirs, {});
+  assert.deepEqual(useReview.getState().expanded, []);
+  assert.equal(useReview.getState().facts, null);
   assert.equal(useReview.getState().sessionId, 'other');
 });
 
@@ -169,14 +272,14 @@ test('a new session starts every file at the top again', () => {
 test('a refresh refetches the tree and the open file', async () => {
   await loadTree();
   await loadFile('a.ts');
-  const before = { tree: hits('/review/tree'), file: hits('/review/file') };
+  const before = { tree: hits('/review/dir'), file: hits('/review/file') };
 
   // What returning to the tab does. Every fetch reads the filesystem on the
   // spot, so this is the whole freshness mechanism — there is no fingerprint
   // to compare and nothing to decide.
   await refresh();
 
-  assert.equal(hits('/review/tree'), before.tree + 1);
+  assert.equal(hits('/review/dir'), before.tree + 1);
   assert.equal(hits('/review/file'), before.file + 1);
 });
 
@@ -185,7 +288,7 @@ test('a refresh with no file open asks only for the tree', async () => {
   const before = hits('/review/file');
   await refresh();
   assert.equal(hits('/review/file'), before);
-  assert.equal(hits('/review/tree'), 2);
+  assert.equal(hits('/review/dir'), 2);
 });
 
 test('there is no fingerprint request at all', async () => {
@@ -224,6 +327,17 @@ test('a refresh while a composer is open is skipped', async () => {
   // Refetching would drop what is being typed.
   assert.equal(requested.length, before);
   useReview.setState({ composing: null });
+});
+
+test('a refresh while the pane holds unsaved edits is skipped', async () => {
+  await loadTree();
+  setDirty(true);
+  const before = requested.length;
+  await refresh();
+  // Coming back to the tab is how a phone returns to a review, and an edit is
+  // a whole file of work to lose to it.
+  assert.equal(requested.length, before);
+  setDirty(false);
 });
 
 test('nothing is fetched before a session is set', async () => {
@@ -272,16 +386,17 @@ test('a failed comment rolls back and says why', async () => {
 test('the tree badge follows a comment without refetching the tree', async () => {
   await loadTree();
   await loadFile('a.ts');
-  const before = hits('/review/tree');
+  const before = hits('/review/dir');
 
   answers['/review/annotations'] = {
     path: 'a.ts',
     annotations: [{ line: 2, comment: 'x', outdated: false }],
   };
   await saveComment('a.ts', 2, 'x');
-  // A whole tree round trip for a badge is exactly the cost this view avoids.
-  assert.equal(hits('/review/tree'), before);
-  assert.deepEqual(useReview.getState().tree?.counts, { 'a.ts': 1 });
+  // A whole round trip for a badge is exactly the cost this view avoids.
+  assert.equal(hits('/review/dir'), before);
+  assert.equal(entryIn('', 'a.ts')?.comments, 1);
+  assert.equal(useReview.getState().facts?.commentCount, 1);
 });
 
 test('deleting the last comment clears the badge', async () => {
@@ -296,17 +411,24 @@ test('deleting the last comment clears the badge', async () => {
   answers['/review/annotations'] = { path: 'a.ts', annotations: [] };
   await deleteComment('a.ts', 2);
   assert.deepEqual(useReview.getState().file?.annotations, []);
-  assert.deepEqual(useReview.getState().tree?.counts, {});
+  assert.equal(entryIn('', 'a.ts')?.comments, 0);
+  assert.equal(useReview.getState().facts?.commentCount, 0);
 });
 
-test('a comment on a file that is not open still updates the tree', async () => {
+test('a comment deeper in the tree lights the folders above it', async () => {
   await loadTree();
+  await loadDir('src');
   answers['/review/annotations'] = {
-    path: 'other.ts',
+    path: 'src/deep.ts',
     annotations: [{ line: 1, comment: 'x', outdated: false }],
   };
-  await saveComment('other.ts', 1, 'x');
-  assert.deepEqual(useReview.getState().tree?.counts, { 'other.ts': 1 });
+  await saveComment('src/deep.ts', 1, 'x');
+
+  // The count sits in the directory that lists the file, and the folder above
+  // it says its subtree holds a comment — which is what makes a closed branch
+  // usable as a to-do list.
+  assert.equal(entryIn('src', 'src/deep.ts')?.comments, 1);
+  assert.equal(entryIn('', 'src')?.commented, true);
 });
 
 test('editing an existing comment replaces it rather than adding one', async () => {
@@ -335,13 +457,13 @@ test('a new review clears the comments and reloads the tree', async () => {
     annotations: [{ line: 2, comment: 'x', outdated: false }],
   };
   await saveComment('a.ts', 2, 'x');
-  const before = hits('/review/tree');
+  const before = hits('/review/dir');
 
   await newReview();
   assert.deepEqual(useReview.getState().file?.annotations, []);
   // The whole review is gone, so the counts have to come from the server
   // rather than be adjusted locally.
-  assert.equal(hits('/review/tree'), before + 1);
+  assert.equal(hits('/review/dir'), before + 1);
   assert.equal(requested.some((url) => url.includes('/review') && !url.includes('/review/')), true);
 });
 
@@ -350,7 +472,7 @@ test('a new review clears the comments and reloads the tree', async () => {
 test('setting a base refetches the tree and the open file', async () => {
   await loadTree();
   await loadFile('a.ts');
-  const before = { tree: hits('/review/tree'), file: hits('/review/file') };
+  const before = { tree: hits('/review/dir'), file: hits('/review/file') };
 
   answers['/review/base'] = {
     rev: 'main',
@@ -360,7 +482,7 @@ test('setting a base refetches the tree and the open file', async () => {
 
   // The base changes what a status and a diff mean, so both are answers to a
   // different question now and neither can be kept.
-  assert.equal(hits('/review/tree'), before.tree + 1);
+  assert.equal(hits('/review/dir'), before.tree + 1);
   assert.equal(hits('/review/file'), before.file + 1);
   assert.equal(useReview.getState().saving, false);
 });
@@ -375,14 +497,80 @@ test('clearing the base sends null', async () => {
 test('an unknown revision reports itself and changes nothing', async () => {
   await loadTree();
   await loadFile('a.ts');
-  const before = hits('/review/tree');
+  const before = hits('/review/dir');
   failWith = 'unknown revision: nope';
 
   await setBase('nope');
   assert.match(useReview.getState().error!, /unknown revision/);
   // Nothing is refetched, because nothing changed server-side.
-  assert.equal(hits('/review/tree'), before);
+  assert.equal(hits('/review/dir'), before);
   assert.equal(useReview.getState().saving, false);
+});
+
+// --- editing ----------------------------------------------------------------
+
+test('a save sends the hash the file was read at, and repaints from the answer', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/file'] = file({ content: 'one\nTWO\n', hash: 'h2', status: 'modified' });
+
+  const result = await saveFile('a.ts', 'one\nTWO\n', 'h1');
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(JSON.parse(lastBody()) as Record<string, unknown>, {
+    path: 'a.ts',
+    content: 'one\nTWO\n',
+    hash: 'h1',
+  });
+  // One round trip repaints the pane: content, diff, status and comments.
+  assert.equal(useReview.getState().file?.content, 'one\nTWO\n');
+  assert.equal(useReview.getState().file?.status, 'modified');
+  // And the tree follows, because an edit changes a file's colour in the list.
+  assert.equal(hits('/review/dir'), 2);
+});
+
+test('a file that moved under the edit comes back as a conflict, not an error', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  failWith = 'This file changed on disk while you were editing it.';
+  failStatus = 412;
+
+  const result = await saveFile('a.ts', 'mine\n', 'h1');
+
+  assert.deepEqual(result, { ok: false, conflict: true });
+  // The view explains this one, because it comes with a choice to make.
+  assert.equal(useReview.getState().error, null);
+  assert.equal(useReview.getState().saving, false);
+});
+
+test('any other refusal is a plain error, said in the error line', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  failWith = 'This file is binary, so it cannot be edited.';
+  failStatus = 409;
+
+  const result = await saveFile('a.ts', 'mine\n', 'h1');
+
+  assert.deepEqual(result, { ok: false, conflict: false });
+  assert.match(useReview.getState().error!, /binary/);
+});
+
+test('saving anyway reads what is on disk first, then writes over it', async () => {
+  await loadTree();
+  await loadFile('a.ts');
+  answers['/review/file'] = file({ content: 'the agent wrote this\n', hash: 'h9' });
+  const before = hits('/review/file');
+
+  await saveFile('a.ts', 'mine\n', null);
+
+  // Two calls: the read that asks what the hash is now, and the write against
+  // it — which is the reviewer overruling the refusal.
+  assert.equal(hits('/review/file'), before + 2);
+  assert.deepEqual(JSON.parse(lastBody()) as Record<string, unknown>, {
+    path: 'a.ts',
+    content: 'mine\n',
+    hash: 'h9',
+  });
 });
 
 test('an outdated comment is carried through as such', async () => {

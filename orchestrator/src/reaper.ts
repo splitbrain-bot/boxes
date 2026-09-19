@@ -1,6 +1,6 @@
 import type { Config } from './config.ts';
 import { refreshCredentials, type CredentialStore } from './credentials.ts';
-import { sessionsWithActiveTurns, type Db, type SessionRow } from './db.ts';
+import { sessionTurnActive, sessionsWithActiveTurns, type Db, type SessionRow } from './db.ts';
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
 import type { SessionManager } from './sessions.ts';
@@ -15,12 +15,24 @@ const TICK_MS = 60_000;
  * Runs `tick` every `everyMs` until the returned handle stops it, logging
  * whatever it throws rather than letting it reach an unhandled rejection.
  *
+ * One tick at a time: a tick that outlasts the interval skips the next one
+ * rather than overlapping it. Each tick re-asserts a state rather than
+ * reacting to an event, so the one in flight is already doing the work the
+ * skipped one would have done.
+ *
  * The timer is unreferenced, so a loop that is still scheduled never holds the
  * process open at shutdown.
  */
 function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop: () => void } {
+  let running = false;
   const timer = setInterval(() => {
-    void tick().catch((err: Error) => log.error(`${what} failed`, { error: err.message }));
+    if (running) return;
+    running = true;
+    void tick()
+      .catch((err: Error) => log.error(`${what} failed`, { error: err.message }))
+      .finally(() => {
+        running = false;
+      });
   }, everyMs);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };
@@ -63,11 +75,28 @@ export function startReaper(
       // A box with a command still running in it, or a monitor still watching
       // something, is not idle however quiet it has gone. Any of the
       // session's threads holds the box.
-      if (upstream.backgroundActive) continue;
+      // Null is a box that has not been read yet, which is not a box known
+      // to be empty: it is held for this tick, and the reading behind it
+      // lands before the next one.
+      if (upstream.backgroundActive !== false) continue;
       if (now - row.last_active_at < idleMs) continue;
 
+      // Asked again for this one session, immediately before it is stopped.
+      // The counts above are one reading of the whole deployment, and a
+      // sweep that stops many boxes takes ten seconds over each of them, so
+      // by here they are minutes old — long enough for a turn to have
+      // started on a box nobody is watching.
+      if (sessionTurnActive(db, row.id)) continue;
+      if (manager.pending.countForSession(row.id) > 0) continue;
+
       try {
-        await manager.stop(row.id);
+        // Never waits for the session's own queue: a box something else is
+        // already working on is not idle, whatever the counts above said, and
+        // this tick has other sessions to get to.
+        if (!(await manager.stopUnlessBusy(row.id))) {
+          log.session(row.id).info('not reaping a session that is busy; trying again next tick');
+          continue;
+        }
         log.session(row.id).info('reaped idle session', {
           idleMinutes: Math.round((now - row.last_active_at) / 60_000),
         });

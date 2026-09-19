@@ -30,15 +30,6 @@ const SYMBOL: Record<TabState, string> = {
   idle: '○',
 };
 
-/** What each state means, for the places that spell it out. */
-export const TAB_STATE_LABEL: Record<TabState, string> = {
-  permission: 'waiting for a permission decision',
-  question: 'waiting for an answer',
-  running: 'running a turn',
-  waiting: 'waiting for you, with work still running',
-  idle: 'idle',
-};
-
 /**
  * The title of a thread's tab: its state, the box, and which of the box's
  * conversations it is.

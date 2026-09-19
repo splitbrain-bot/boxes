@@ -106,6 +106,7 @@ test('the Claude entry says what the orchestrator does today', () => {
   assert.deepEqual(h.sessionMeta, {
     claudeCode: {
       options: {
+        model: 'fable',
         thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
       },
     },

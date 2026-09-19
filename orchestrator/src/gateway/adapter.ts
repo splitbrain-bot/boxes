@@ -14,14 +14,16 @@ import {
   type ThreadRow,
 } from '../db.ts';
 import * as dk from '../docker.ts';
-import type { Harness, HarnessId } from '../harness.ts';
+import { HARNESS_IDS, type Harness, type HarnessId } from '../harness.ts';
 import type { Logger } from '../log.ts';
+import { ACP_METHOD } from '../../../shared/acp.ts';
 import type {
   BackgroundProcess,
   SessionConfigOption,
   SessionModeState,
 } from '../../../shared/types.ts';
 import { TaskBoard } from './background.ts';
+import { threadOf } from './broadcast.ts';
 
 /**
  * One adapter process of one session: the exec, the ACP handshake, and the
@@ -81,6 +83,9 @@ const MAX_INHERIT_HOPS = 32;
 const CLIENT_CAPABILITIES = {
   _meta: { jetbrains: { air: { version: 1, capabilities: ['asyncTasks'] } } },
 } as const;
+
+/** A thread id that names none of the session's threads; the API turns this into a 404. */
+export const THREAD_NOT_FOUND = 'Thread not found';
 
 /** True when the adapter reported a missing thread rather than a failure. */
 export function isResourceNotFound(err: unknown): boolean {
@@ -191,8 +196,13 @@ export class AdapterConnection {
   private starting: Promise<void> | null = null;
   /** Guards against reconnect storms after a deliberate stop. */
   private stopping = false;
-  /** Loads in flight on *this* adapter, which is what says an update is history. */
-  private replaying = 0;
+  /**
+   * Loads in flight on *this* adapter, per thread, which is what says an
+   * update is history. Per thread because a replay is about one conversation:
+   * a turn starting on a second thread while this one rebuilds is the agent
+   * talking, and has to be seen as such.
+   */
+  private readonly replaying = new Map<string, number>();
   /**
    * The conversations this adapter process has been made to hold: every one it
    * has minted, and every one it has loaded back.
@@ -239,6 +249,15 @@ export class AdapterConnection {
   /** The initialize response to hand browsers, cached verbatim. */
   get cachedInitialize(): unknown {
     return this.initializeResponse;
+  }
+
+  /**
+   * Whether this connection is holding nothing: no process, no start in
+   * flight. What lets the session forget an upstream it built only to answer
+   * a question about a box.
+   */
+  get holdsNothing(): boolean {
+    return this.conn === null && this.exec === null && this.starting === null;
   }
 
   /**
@@ -358,9 +377,14 @@ export class AdapterConnection {
   private async start(): Promise<void> {
     this.stopping = false;
     const containerId = await this.host.ensureContainer();
+    // A repair that replaces the container stops this session's upstream,
+    // which is this one. Said again, so the flag it set cannot make the spawn
+    // below ignore its own exec exiting.
+    this.stopping = false;
 
     let lastError: unknown = null;
     for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
+      if (this.stopping) return;
       if (attempt > 0) {
         const wait = SPAWN_BACKOFF_MS[attempt - 1] ?? 8000;
         this.slog.warn('retrying adapter spawn', { attempt, waitMs: wait });
@@ -396,6 +420,13 @@ export class AdapterConnection {
         this.teardownConnection();
         continue;
       }
+      // The stop arrived while this was coming up, so what it brought up
+      // goes with it: the session was asked to be down, and the exec left
+      // behind would answer for a box nobody is holding.
+      if (this.stopping) {
+        this.teardownConnection();
+        return;
+      }
       this.host.onStatus('running');
       // A browser that stayed attached through a stop and start is still
       // watching, and the clock its bar goes away on was cleared with the
@@ -403,6 +434,10 @@ export class AdapterConnection {
       this.host.onUp();
       return;
     }
+    // A spawn retries for twelve seconds, which is long enough for the
+    // session to be stopped under it. What it would report then is about a
+    // box that is already down, so it gives up quietly instead.
+    if (this.stopping) return;
     // Only the session that needed *this* adapter is in error. A box whose
     // other connection is serving threads perfectly well is not.
     this.host.onStatus('error');
@@ -430,21 +465,26 @@ export class AdapterConnection {
       }
     });
 
-    void exec.exited.then((code) => this.handleExecExit(code));
+    // Only while this is still the connection's exec: one that was torn down
+    // and replaced reports its exit late, and acting on it would take the
+    // successor with it.
+    void exec.exited.then((code) => {
+      if (this.exec === exec) this.handleExecExit(code);
+    });
 
     const stream = this.makeStream(exec);
     const app = acpClient({ name: `boxes-${this.host.sessionId}` })
-      .onNotification('session/update' as string, raw, ({ params }) => {
-        this.host.onUpdate(this.harness.id, params, this.replaying > 0);
+      .onNotification(ACP_METHOD.sessionUpdate as string, raw, ({ params }) => {
+        this.host.onUpdate(this.harness.id, params, this.isReplaying(params));
       })
-      .onRequest('session/request_permission' as string, raw, ({ params }) =>
+      .onRequest(ACP_METHOD.sessionRequestPermission as string, raw, ({ params }) =>
         this.host.onPermission(params),
       );
 
     const conn = app.connect(stream);
     this.conn = conn;
 
-    this.initializeResponse = await conn.agent.request('initialize', {
+    this.initializeResponse = await conn.agent.request(ACP_METHOD.initialize, {
       protocolVersion: 1,
       clientCapabilities: CLIENT_CAPABILITIES,
     });
@@ -473,21 +513,23 @@ export class AdapterConnection {
       if (!replayed) await this.mintInto(current.id);
     }
 
-    const loaded = new Set(this.live);
     for (const acpThreadId of this.host.watchedThreads()) {
-      if (loaded.has(acpThreadId)) continue;
-      loaded.add(acpThreadId);
+      // What this adapter already holds: the current thread above, and a
+      // thread a second tab is watching as well.
+      if (this.live.has(acpThreadId)) continue;
       const row = threadByAcpId(this.host.db, this.host.sessionId, this.harness.id, acpThreadId);
-      // Another harness's conversation, or one this session does not have.
-      if (!row?.acp_session_id) continue;
+      // Another harness's conversation is that connection's to bring up.
+      if (!row && this.heldElsewhere(acpThreadId)) continue;
+      // No row under that id at all — the thread it named was re-minted, and
+      // the browsers on it are pinned to the id it lost.
       try {
-        if (await this.loadSession(row)) continue;
+        if (row?.acp_session_id && (await this.loadSession(row))) continue;
       } catch (err) {
         if (isAuthRequired(err)) throw err;
         // A fault on a thread that is merely being watched must not cost the
         // session its spawn; the browsers on it reconnect and resolve again.
         this.slog.warn('could not reload a watched thread', {
-          threadId: row.id,
+          threadId: row?.id ?? null,
           error: (err as Error).message,
         });
       }
@@ -496,6 +538,15 @@ export class AdapterConnection {
       // reconnects, and its handshake pins whatever the thread is now.
       this.host.dropWatchers(acpThreadId);
     }
+  }
+
+  /** Whether a conversation id belongs to a thread of some other harness. */
+  private heldElsewhere(acpThreadId: string): boolean {
+    return HARNESS_IDS.some(
+      (id) =>
+        id !== this.harness.id &&
+        threadByAcpId(this.host.db, this.host.sessionId, id, acpThreadId) !== undefined,
+    );
   }
 
   /**
@@ -533,7 +584,7 @@ export class AdapterConnection {
     // that is already here — and loading it again would replay the whole
     // conversation a second time to whoever is watching.
     const row = getThread(this.host.db, threadId);
-    if (!row) throw new Error('Thread not found');
+    if (!row) throw new Error(THREAD_NOT_FOUND);
     if (row.acp_session_id && this.live.has(row.acp_session_id)) return row.acp_session_id;
     if (row.acp_session_id && (await this.loadSession(row))) return row.acp_session_id;
     return this.mintInto(threadId);
@@ -592,7 +643,7 @@ export class AdapterConnection {
     modeId: string,
     config: Record<string, string>,
   ): Promise<string> {
-    const method = from ? 'session/fork' : 'session/new';
+    const method = from ? ACP_METHOD.sessionFork : ACP_METHOD.sessionNew;
     const res = (await this.request(method, {
       ...(from ? { sessionId: from } : {}),
       cwd: dk.WORKSPACE_DIR,
@@ -633,8 +684,8 @@ export class AdapterConnection {
       // The same `_meta` a fresh thread gets: a load is where the adapter
       // rebuilds the query for a conversation it no longer holds, which is the
       // other place these options are read.
-      const res = (await this.whileReplaying(() =>
-        this.request('session/load', {
+      const res = (await this.whileReplaying(acpSessionId, () =>
+        this.request(ACP_METHOD.sessionLoad, {
           sessionId: acpSessionId,
           cwd: dk.WORKSPACE_DIR,
           mcpServers: [],
@@ -692,7 +743,7 @@ export class AdapterConnection {
     if (!modes?.availableModes?.some((mode) => mode.id === modeId)) return;
     if (modes.currentModeId === modeId) return;
     try {
-      await this.request('session/set_mode', { sessionId: acpSessionId, modeId });
+      await this.request(ACP_METHOD.sessionSetMode, { sessionId: acpSessionId, modeId });
       this.slog.info('thread put in its mode', { acpSessionId, modeId });
     } catch (err) {
       // A thread in the adapter's own mode is still usable, so this never fails
@@ -727,7 +778,7 @@ export class AdapterConnection {
       const value = this.wantedValue(option, config[option.id]);
       if (value === null || value === option.currentValue) continue;
       try {
-        await this.request('session/set_config_option', {
+        await this.request(ACP_METHOD.sessionSetConfigOption, {
           sessionId: acpSessionId,
           configId: option.id,
           value,
@@ -852,22 +903,34 @@ export class AdapterConnection {
   }
 
   /**
-   * Runs a load with its replay marked as history rather than news.
+   * Runs a `session/load` with that thread's replay marked as history rather
+   * than news.
    *
    * Every load re-sends a conversation as ordinary notifications, which is what
    * makes replay and live streaming the same code path everywhere else — and
    * the one place that difference matters is background work, where a five-hour
-   * old tool call is not evidence of anything running now. The counter is per
-   * connection, so a load on one harness does not mask the other's live
-   * activity.
+   * old tool call is not evidence of anything running now.
+   *
+   * Counted per thread and per connection: a turn starting on a second thread
+   * while this one rebuilds is the agent talking, and a load on one harness
+   * says nothing about the other's. `acpThreadId` is the id the updates being
+   * replayed carry, which for a borrowed replay is the source's own.
    */
-  async whileReplaying<T>(load: () => Promise<T>): Promise<T> {
-    this.replaying += 1;
+  async whileReplaying<T>(acpThreadId: string, load: () => Promise<T>): Promise<T> {
+    this.replaying.set(acpThreadId, (this.replaying.get(acpThreadId) ?? 0) + 1);
     try {
       return await load();
     } finally {
-      this.replaying -= 1;
+      const left = (this.replaying.get(acpThreadId) ?? 1) - 1;
+      if (left > 0) this.replaying.set(acpThreadId, left);
+      else this.replaying.delete(acpThreadId);
     }
+  }
+
+  /** Whether an update is a thread's own transcript being read back. */
+  private isReplaying(params: unknown): boolean {
+    const thread = threadOf(params);
+    return thread !== undefined && this.replaying.has(thread);
   }
 
   /** Says once that this adapter has no account to run under. */
@@ -979,10 +1042,10 @@ export class AdapterConnection {
     } catch {
       return false;
     }
-    if (message.id !== undefined || message.method !== 'session/update') return false;
+    if (message.id !== undefined || message.method !== ACP_METHOD.sessionUpdate) return false;
     const kind = message.params?.update?.sessionUpdate;
     if (typeof kind !== 'string' || !EXTENSION_UPDATE.test(kind)) return false;
-    this.host.onUpdate(this.harness.id, message.params, this.replaying > 0);
+    this.host.onUpdate(this.harness.id, message.params, this.isReplaying(message.params));
     return true;
   }
 
@@ -1034,6 +1097,11 @@ export class AdapterConnection {
     // A fresh adapter holds none of them, so the next pin brings its thread
     // back up rather than trusting an id this process never heard.
     this.live.clear();
+    // The loads counted here belong to the connection going away. A count
+    // left behind reads as a replay that never ends, and everything its
+    // thread says afterwards is taken for history: no agent speaking, no
+    // turn settling, and a row that is never touched again.
+    this.replaying.clear();
     // And it knows nothing about what the old one had running: neither adapter
     // re-announces a dead process's tasks. What that process left running in
     // the box is the reading's to find and the session-level stop's to kill.

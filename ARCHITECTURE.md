@@ -6,7 +6,7 @@ process owns everything: the REST API, the web assets, the agent connections,
 the container lifecycle and the database.
 
 This document describes how the system is put together. [`README.md`](./README.md)
-covers running it and the risks that come with it.
+covers setting it up and using it.
 
 ## The property everything else serves
 
@@ -115,11 +115,21 @@ The orchestrator serves everything a browser needs:
 | `/` | Dashboard bundle, with a single-page fallback |
 | `/api/...` | REST |
 | `/ws/sessions/:id/acp` | ACP gateway |
-| `/healthz` | Version, session count, proxy warnings, which harnesses can run a turn and what the deployment holds a credential for, and which build of each image is running |
+| `/healthz` | Liveness, and what the deployment is: version, session count, proxy warnings, which harnesses can run a turn and what the deployment holds a credential for, and which build of each image is running. Always 200 while the process serves |
+| `/readyz` | Readiness: 200 only when the database answers, the egress policy is in sync and Docker is reachable, which is what creating or starting a session needs |
 
-A GET that matches no route falls back to the dashboard's `index.html`, so
+A GET that matches no other route serves the dashboard's `index.html`, so
 client-side routes survive a reload. Anything under `/api` or `/ws` gets a
 404 instead.
+
+The bundle is served compressed, and its assets carry a year-long immutable
+cache lifetime because their names are content hashes: a new build is a new
+name, so a cached one can never be stale. `index.html` is the file that names
+them, so it is never cached that way. The document carries a content security
+policy of its own, which is what stops agent-written markdown from fetching a
+remote image and turning the operator's browser into a way out of the box that
+the egress proxy never sees. Every response is logged as one structured line on
+stderr, where `docker logs` has it.
 
 The dashboard is the only frontend, and it is served from the orchestrator's
 own image. Two things follow:
@@ -132,7 +142,14 @@ own image. Two things follow:
 
 `orchestrator/src/app.ts` defines the routes; `SessionManager` does the work.
 Request and response shapes live in `shared/types.ts`, which both the
-orchestrator handlers and the dashboard's `api.ts` import.
+orchestrator handlers and the dashboard's `api.ts` import. The ACP vocabulary
+both sides speak — the subprotocol, the method names, the update kinds — is
+`shared/acp.ts`, so a name is spelled once rather than in each package.
+
+Every route that takes a JSON body checks it against a schema in `bodies.ts`
+first, and a body that fails one is a 400 naming the field rather than a cast
+that misbehaves further in. Path and query parameters are read as they always
+were.
 
 | Method and path | Does |
 |---|---|
@@ -146,15 +163,16 @@ orchestrator handlers and the dashboard's `api.ts` import.
 | `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `options` says which harness it runs and what it starts configured with, and `{"from":"<threadId>"}` forks that one instead — on its own harness, so `options` is then ignored |
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
 | `POST /api/sessions/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
-| `GET /api/sessions/:id/log?after=&limit=` | A page of tapped ACP messages |
+| `POST /api/sessions/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
 | `POST /api/sessions/:id/attachments?name=` | Stores one file, raw bytes, in the session's workspace |
 | `GET /api/sessions/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
 | `POST /api/sessions/:id/exec` | Runs one command in the container on the session's current thread, streaming its output |
 | `GET /api/sessions/:id/exec` | Commands already run on the session's current thread |
 | `POST /api/sessions/:id/threads/:threadId/exec` | The same, on the thread the path names |
 | `GET /api/sessions/:id/threads/:threadId/exec` | Commands already run on that thread |
-| `GET /api/sessions/:id/review/tree` | Tree, git status per path, comment counts, the workspace's repositories and the base — the whole left panel |
+| `GET /api/sessions/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
 | `GET /api/sessions/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
+| `PUT /api/sessions/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
 | `PUT /api/sessions/:id/review/annotations` | Creates or replaces one line's comment |
 | `DELETE /api/sessions/:id/review/annotations?path=&line=` | Deletes one comment |
 | `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it; answers with where it resolved in each repository |
@@ -196,17 +214,21 @@ A composer line starting with `!` is a local command: the dashboard
 intercepts it, so it never reaches the model, costs no tokens, and cannot be
 read as an instruction.
 
-`exec.ts` runs it as `bash -lc <command>` inside the session container, as the
-non-root `agent` user, in the container's existing isolation — internal
-network, read-only rootfs, capabilities dropped. No new privilege is
+`exec.ts` runs it as `timeout <limit> bash -lc <command>` inside the session
+container, as the non-root `agent` user, in the container's existing isolation
+— internal network, read-only rootfs, capabilities dropped. No new privilege is
 introduced, and nothing shell-executes on the host: the command travels as an
 argument to the container's own shell and never reaches a host command line.
 
 The response is chunked `text/plain` rather than JSON, so the browser can
 render the output as it arrives, and ends with a trailer line carrying the
-exit code and whether either limit was hit. Both limits are enforced by the
-orchestrator rather than trusted to the container: 120 seconds of wall clock
-and 256 KiB of output, after which the exec is killed. Finished runs go into
+exit code and whether either limit was hit. The two limits are held in
+different places, because they can be. The wall clock — 120 seconds — is the
+container's own, through the `timeout` the command is wrapped in: the daemon
+cannot signal a running exec, so a limit the orchestrator held alone would
+end the response and leave the command running. The output cap — 256 KiB —
+is the orchestrator's, and it ends the response rather than the command; what it
+belongs to is ended by the wall clock at the latest. Finished runs go into
 `exec_log` against the thread they were typed in, ring-pruned per session.
 
 The thread is part of the endpoint, the way it is part of a WebSocket path: a
@@ -220,9 +242,20 @@ shown rather than folded away behind a tool call that has to be opened first.
 The fence is grown past the longest run of backticks in the output, so output
 carrying a fence of its own cannot break out of the block.
 
-The browser appends stored runs *after* whatever the replay produced rather
-than interleaving them. ACP replay carries no timestamps, so where they belong
-in the transcript is not recoverable.
+ACP replay carries no timestamps, so where a stored run belongs in the
+transcript cannot be read off the replay. It is recorded instead: the browser
+sends, with the command, the id of what the transcript ended with when it was
+typed, and the run is stored with it. Assistant message ids and tool call ids
+are the adapter's own and come back unchanged on replay; the id of the user's
+own prompt does not, because the gateway echoes a prompt without one. So the
+anchor is the last tool call of the last assistant message, or that message's
+id when it has none, and on replay the run is put back right after it, behind
+any earlier run anchored there. A run whose anchor is not in the replay —
+a compaction, a fork, a command typed before the agent said anything — goes at
+the end, in the order it ran. The log is read when a thread comes whole. A
+resumed reconnect puts back the runs the browser already holds, output and
+all, and asks the server for nothing: a replay never carries a run, and the
+runs on screen are the runs that go back.
 
 ### Attachments
 
@@ -313,8 +346,7 @@ gateway answers any ACP client, and an ACP prompt may carry an image inline.
 One React app, served at `/`. The session list is the thread list: a thread is
 `/sessions/:id/threads/:threadId`, and `/sessions/:id` is whichever thread the
 session has current — so every older link and bookmark still works. The ops —
-start, stop, delete, the details, the connection fields for an external ACP
-client — live at `/sessions/:id/info`.
+start, stop, delete, the details — live at `/sessions/:id/info`.
 What the agent is configured with belongs to the deployment rather than to any
 one box, so it hangs off the list instead: `/agents` lists the sets and
 `/agents/:setId` edits one. The deployment's credentials hang off the same
@@ -494,8 +526,8 @@ The browser speaks plain ACP to the gateway, so it is a client like any other
 and the gateway stays client-agnostic. That is not only tidiness: this
 dashboard replaced a separate chat application served alongside it, and the
 gateway needed no protocol change to swap one for the other. An external ACP
-client still attaches to the same endpoint, with the URL and token from
-`/sessions/:id/info`.
+client still attaches to the same endpoint, with the path shape below and the
+`wsToken` the session's own summary carries.
 
 ```
 AcpClient    ⇄ …/threads/:threadId/acp  JSON-RPC over one WebSocket, one thread
@@ -544,6 +576,42 @@ code path: a reconnect repeats the handshake, `session/load` re-sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
+
+A reconnect says how much it already holds, so it is sent only the rest. The
+browser names the last message the adapter itself gave an id to, in `_meta` on
+its `session/load`; the gateway takes the adapter's whole replay as it always
+did and forwards from that message onward. A message id is the anchor because
+it names a boundary between updates rather than a place inside one, and the
+model is only the updates folded in order, so a fold that starts at a boundary
+and a fold of everything reach the same thread. The named message is re-sent
+rather than skipped, because a socket can drop halfway through one.
+
+Every way that can fail ends in the whole thread. A browser with nothing the
+adapter named asks for no resume; a thread that was re-minted under it is not
+resumed; a replay that never names the point is sent whole; and a browser that
+no longer holds the message it named rebuilds from scratch. The answer —
+`_boxes/replay`, resumed or not — always reaches the browser before the first
+update of the replay, so it knows whether to keep what it has before anything
+arrives to fold into it.
+
+Replayed history and a running turn arrive on one connection in one shape. The
+adapter serves a `session/load` while a prompt is still in flight and writes
+the transcript back as ordinary `session/update` notifications, so a turn
+streaming into the thread the browser is rebuilding is indistinguishable from
+the thread's own past: the anchor scan would drop the live chunks with the
+history in front of it, and a whole replay would fold the message being
+written into two pieces either side of an older one. What separates them is
+what the gateway has already seen. It forwards a turn's updates as they are
+written, so while that turn runs it holds the message and tool call ids the
+turn is speaking under, and during a replay an update naming one of those is
+the turn's rather than history. The turn's own updates keep going out live to
+the other browsers on the thread — a phone reading an answer has no reason to
+go quiet while a laptop reloads — and are set aside for the browser that is
+replaying until its history is complete, which is where the newest part of a
+thread belongs. The limit is content whose id first appears during the replay:
+the gateway has never seen it, so it cannot be told apart from history and is
+treated as history. The case this answers is the one a reconnect hits, a turn
+already streaming when the replay starts.
 
 A replay is folded in silence and published once. The notifications are the
 same ones live streaming uses, so publishing each one would hand the view
@@ -938,14 +1006,23 @@ thread the session has current. The short path is what an external ACP client
 and every link from before this existed use, so their contract does not change
 at all — only the dashboard learns the longer one. A path naming a thread that
 is not the session's is refused at the handshake, as a 404 before a WebSocket
-exists, the same way an unknown session is: a connection is pinned for its
-whole life, so there is no later point at which to find this out.
+exists: a connection is pinned for its whole life, so there is no later point
+at which to find this out.
 
 The upgrade is authenticated on the handshake. A browser cannot set an
 `Authorization` header on a WebSocket, so a client offers the token as a
 `bearer.<token>` subprotocol entry alongside `acp.v1`. The gateway compares it
-against `WS_AUTH_TOKEN` in constant time and selects `acp.v1` explicitly,
-rather than relying on the client to list it first.
+in constant time against the token of the session the path names, and selects
+`acp.v1` explicitly rather than relying on the client to list it first.
+
+Each session has its own token, minted when it is created and carried in its
+own summary, so a token that leaks reaches that one session rather than every
+session in the deployment. Authentication comes before disclosure: a session
+that does not exist is answered the same 401 as a wrong token, because `/ws`
+is the one endpoint the operator's proxy does not sit in front of, and a 404
+there would say which session ids are real to anyone who asked. The 404 above
+is for a thread, and it is reached only once the session's token has proved
+the caller may know.
 
 Which thread the connection is on is settled once, at attach, and needs the
 adapter first. Pinning is where a thread the spawn did not reach is brought
@@ -980,8 +1057,15 @@ Three methods are answered or reshaped rather than forwarded:
   sends none.
 
 Everything else in `FORWARDED_REQUESTS` and `FORWARDED_NOTIFICATIONS` goes
-upstream untouched, `_meta` included. Detaching removes the handle from the
-broadcast set and touches nothing else.
+upstream untouched, `_meta` included, once the pin has settled. A request
+naming a thread that is not this connection's pin is refused rather than
+forwarded: a connection is pinned in both directions, so it can neither be
+sent another thread's updates nor act on one. Detaching removes the handle
+from the broadcast set and touches nothing else.
+
+A browser that cannot keep up is disconnected rather than buffered without
+limit. Once what is queued for its socket passes a ceiling the gateway closes
+it, and the reconnect resumes from what it already had.
 
 ### Who each update goes to
 
@@ -1006,7 +1090,8 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   copy. Replay is exempt: there the adapter is reading back history the
   gateway never saw.
 - **A replay goes only to the browser that asked for it, and silences only its
-  own thread.** `session/load` is by definition a re-send of the whole thread,
+  own thread.** `session/load` is by definition a re-send of the whole thread
+  to the gateway, whatever part of it the browser is then sent,
   so broadcasting it rendered every other open tab's conversation twice — but
   a replay of one thread must not hold back another thread's live updates,
   which is the bug two open tabs hit first. A replay one thread *borrowed*
@@ -1143,7 +1228,9 @@ proceeding without consent.
 - With nobody on that thread, the request is stored in `pending_requests`
   against the thread's ACP id and a notification is pushed. The next browser
   to attach *to that thread* gets its queued requests delivered to it, and
-  only those.
+  only those. Every browser on the thread holds its own copy of the question,
+  and the first answer withdraws it from the rest, so a second device stops
+  waiting for something already decided rather than being quietly ignored.
 - After `PERMISSION_HOLD_MINUTES`, `PERMISSION_FALLBACK` decides. `hold` keeps
   waiting. `deny` answers with a reject option taken from the request's own
   options list, never an invented one, and cancels the request when none is
@@ -1359,9 +1446,12 @@ that is talking, `◍` for one that is waiting for you with work still running,
 Two events are worth interrupting somebody for: a permission request has been
 queued, and a turn has finished and is waiting for somebody. Both are
 announced from the gateway through `notify.ts`, and both are gated on the same
-condition — **no browser is watching that thread**. That is not a heuristic about attention, it is the
-same test that decides whether a permission request is queued in the first
-place, so the two agree about what "you are not here" means. A turn finishing
+condition — **no browser is watching that thread**. That is not a heuristic
+about attention, it is the same test that decides whether a permission request
+is queued in the first place, so the two agree about what "you are not here"
+means. An approval also carries a floor of one announcement per thread per
+hold window, so an agent asking in a loop cannot turn a lock screen into a
+notification feed. A turn finishing
 in front of you is the screen you are already looking at.
 
 The finished turn is announced when the agent goes quiet, not when the prompt
@@ -1404,7 +1494,11 @@ whatever authenticates `/api` is what decides who may register. An endpoint
 must be `https` and must name a host rather than an address literal, so the
 route cannot be used to aim the orchestrator at the LAN it can see. A
 subscription the push service answers with 404 or 410 is dropped on the spot:
-that is the ordinary end of one, not an error.
+that is the ordinary end of one, not an error. A subscription also records the
+key it was made under, and one made under any other key is dropped at the next
+fan-out rather than being retried for the life of the deployment: a rotated
+key makes every older subscription unusable, and the failure it answers with
+is neither of the two that mean "gone".
 
 Delivery needs two things Boxes cannot provide for itself. The Push API does
 not exist on a page served over plain HTTP (`http://localhost` excepted), so
@@ -1424,7 +1518,7 @@ request that arrives without the session cookie. The proxy answers it with a
 redirect to a login page, the browser is left with no manifest, and nothing
 else on the page is affected — the failure is a missing offer, not an error.
 `index.html` asks with `crossorigin="use-credentials"`, and `e2e/pwa.test.ts`
-puts the stub orchestrator behind a cookie check and asks Chrome itself,
+puts the deployment behind a cookie check and asks Chrome itself,
 over CDP, whether it would install what it found. That test needs a real
 profile: Chrome refuses to install from an incognito context, which every
 `newContext()` is, so `launchProfile` in `e2e/browser.ts` gives it one.
@@ -1480,7 +1574,9 @@ session's home is a named volume Docker ownership-initialises from the image
 and nothing outside the container can chown it afterwards; `ensureSessionImage`
 reads the image's own user back and warns when the two have drifted. Pointing
 the orchestrator's own user at `SESSION_UID` is what lets it drop root, since
-the workspace chown then has nothing to do.
+the workspace chown then has nothing to do. That is a deployment's own
+arrangement — a `user:` on the orchestrator service and a data directory
+owned by the same uid — rather than something the shipped compose does.
 
 It runs non-root with `ReadonlyRootfs`, `CapDrop: ALL`,
 `no-new-privileges`, a tmpfs `/tmp`, memory, CPU and pids limits, and
@@ -1500,14 +1596,17 @@ workspace directory and starts empty.
 | `creating` | The row exists, the Docker objects are being built |
 | `running` | The container is up |
 | `stopped` | Stopped deliberately, reaped, or found missing at boot |
-| `error` | Creation failed, or the adapter would not start |
+| `error` | Creation failed, the adapter would not start, or a directory the box is made of is gone |
 | `deleted` | Removed. Nothing moves a row out of this state |
 
 Deleting stops and removes the container, detaches the proxy, removes the
 network, the workspace directory, the home directory and the materialized agent
 configuration, and clears the session's pending requests and log rows. Nothing
 refers to any of it once the session is gone, so it goes with the session rather
-than being left orphaned.
+than being left orphaned. The tombstone is written first, under the session's
+own slot in the operation queue, and the writers that could still be in flight —
+the debug log, the exec log — refuse a row for a session that carries one, so a
+delete cannot be undone a moment later by work that had not finished.
 
 At boot, `reconcile` lists containers by the `boxes.session` label and aligns
 the stored rows with them: live containers are adopted, missing ones are marked
@@ -1535,6 +1634,31 @@ gateway's own path rather than through `start`. That last one is why the
 gateway's `beforeStart` seam is awaited and the row re-read after it — the
 repair may have changed the container id the caller is about to use.
 
+Every repair asks Docker a question and acts on the answer, which is only safe
+while one of them runs at a time. Three of those ways in can arrive at once,
+and the reaper is a fourth, so two starts could have one remove the container
+the other was about to use. **Each session has an operation queue**, one slot at
+a time, and every mutating operation takes it: create, start, stop, delete, the
+repairs, a local command, and the gateway's own seam. Reads never queue.
+
+Waiting is the answer for an ordinary request, because these are seconds rather
+than minutes and the one slow case — a first pull — is a spinner either way.
+Stop and delete are the exception: they mark whatever is in flight as
+pre-empted and take the slot behind it, so the work gives up at its next step
+rather than the stop waiting out a start it is about to undo. The reaper never
+waits at all; a busy session is skipped and tried again next tick. Re-entering
+is impossible by construction rather than by care: the queued method is a
+wrapper whose only job is to take the slot, and the work lives in an unqueued
+form that nothing inside a slot can call back into.
+
+**Shutdown drains.** SIGTERM stops the background loops, stops listening, and
+then gives running turns a bounded moment to reach a settle point before the
+adapters are torn down. A turn still going when that runs out is cut and said
+so in the log, but the common case — a deploy landing while somebody's agent is
+mid-answer — no longer ends the turn the instant the signal arrives. The grace
+is deliberately shorter than the container stop grace it sits inside, so the
+process finishes on its own terms rather than being killed part-way.
+
 ## Where a session's files live
 
 A session's workspace is a directory under the orchestrator's own data
@@ -1543,13 +1667,21 @@ the session container. A named volume, mounted only into that container,
 would leave the orchestrator with no filesystem path to the agent's work at
 all, and reaching a file would mean a `docker exec`.
 
-The directory is what makes reviewing a session's code possible without an
-exec round trip per read, without booting a stopped container, and with git
-run as an ordinary child process. It grants the orchestrator no privilege it
-did not already have — it holds the Docker socket — but it does expose that
-process to hostile *content*, which is why the review layer keeps symlink
-containment and git hardening as maintained invariants, each in one file with
-a test.
+The directory is what lets the review read a session's files without an exec
+round trip per read. That reading is the orchestrator's own, and it is why the
+review layer keeps symlink containment as a maintained invariant, in one file
+with a test: the process holds the Docker socket, and the content it is reading
+belongs to the agent.
+
+Git is the exception, and it runs nowhere near this process. A repository's own
+configuration can name a program for git to run — a clean or smudge filter is
+enough, and no git option turns that off — so asking git about a workspace
+here would let the agent choose a command the orchestrator executes. Every git
+invocation is a `docker exec` in the session's own container instead, as the
+agent, which is the one place where running what the repository asks for is
+already the agent's own privilege rather than a boundary being crossed. The
+cost is that a review needs the box up, so opening one starts a stopped
+session.
 
 **The home followed it**, for a plainer reason: everything a session is should
 be in one place, and the biggest thing a session owns was the one thing Boxes
@@ -1595,8 +1727,8 @@ path and mount that, so a failure to resolve it is fatal at boot.
 
 **Ownership.** A bind mount, unlike a named volume, is not
 ownership-initialised by Docker, so every path the orchestrator creates in a
-workspace is chowned to uid 1000 — the session image's `agent` user, named as
-a constant in `workspaces.ts`. That is what lets the agent write in its own
+workspace is chowned to `SESSION_UID` — the session image's `agent` user,
+1020 by default and named as a constant in `workspaces.ts`. That is what lets the agent write in its own
 workspace, and lets it edit or delete the `REVIEW.md` the review surface
 writes there. `workspaces/` itself is 0700: one session's files are not
 another's, and the only thing that reads across all of them is this process.
@@ -1690,12 +1822,12 @@ mounted into one are both refused; a removal that fails is a log line and the
 next sweep tries again. The workspace directory goes with them, being the size
 of all of it put together.
 
-One guard: if the sessions table is *entirely* empty — not one row, tombstones
-included — and the host is full of labelled objects, the sweep refuses and
-says so. That shape is likelier to be a data volume mounted from the wrong
-place than a genuine pile of orphans, and it is the one mistake here that
-nothing could recover. A deployment whose sessions have all been deleted still
-has its tombstones, so its failed teardowns are still swept.
+One guard: when the sessions the host carries outnumber the rows the database
+knows by a wide margin — an empty table beside a full host being the extreme of
+it — the sweep refuses and says so. That shape is likelier to be a data volume
+mounted from the wrong place than a genuine pile of orphans, and it is the one
+mistake here that nothing could recover. A deployment whose sessions have all
+been deleted still has its tombstones, so its failed teardowns are still swept.
 
 The same sweep removes login containers nothing is waiting on. A login runs a
 harness's CLI in a container of its own and removes it when the flow ends, but
@@ -1799,7 +1931,7 @@ under a per-session lock, with the file's hash checked between the read and the
 write. A moved hash means the agent edited the file mid-mutation, and the whole
 thing is re-read and re-applied once. A lost race costs one visible refresh
 rather than data, because every write re-serializes the whole parsed file. What
-is written is chowned to uid 1000, so the agent can edit or delete it.
+is written is chowned to `SESSION_UID`, so the agent can edit or delete it.
 
 **The workspace is the review.** A session's workspace is not one repository:
 the agent clones what it was pointed at, forks and clones a second thing to
@@ -1821,30 +1953,42 @@ A nested repository needs no special case — it is a longer prefix that wins �
 and a file no repository claims is shown without git, which is the old
 no-git-for-the-whole-session behaviour narrowed to the one file.
 
-**Discovery** walks the workspace pruning the same ignore list the tree uses,
-never following a symlink, bounded by a depth limit and a cap on directories
+**Discovery** walks the workspace pruning a list of its own — the dependency
+and build directories a repository is not expected to be found in — never
+following a symlink, bounded by a depth limit and a cap on directories
 scanned. A directory holding a `.git` entry — file *or* directory, so
 submodules and linked worktrees count — is a candidate, confirmed by comparing
 `rev-parse --show-toplevel` **realpath to realpath**: git resolves symlinks, so
 comparing its answer against a raw path silently loses git for every session of
-any deployment whose workspace path has a linked component. Pruning the ignore
-list means a repository deliberately cloned into `vendor/` is not found, which
-is the right trade against an agent's `npm install`. The map is cached per
-session and rediscovered by the tree fetch.
+any deployment whose workspace path has a linked component. Pruning that list
+means a repository deliberately cloned into `vendor/` is not found, which is
+the right trade against an agent's `npm install`; the files in it are still
+listed, by whichever repository encloses them. The map is part of the git
+snapshot below, retaken when a reader arrives.
 
-**The tree** is merged from each repository's `ls-files` with its own prefix
-prepended, a walk of the space no repository claims, and the files each
-repository's status reports as deleted. One filter runs over all of it: an
-entry contributed by repository `P` for path `p` is dropped when
-`repoFor(P + '/' + p) !== P`. That single rule makes the repositories a
-partition of the workspace rather than overlapping views of it — it is what
-stops an outer repository's `--others` reporting an inner work tree as one
-nameless `inner/` row, and what stops the duplicate once the inner repository
-contributes the same files. The merged list is sorted before the entry cap, so
-a truncated tree is deterministic rather than "whichever repository was read
-first". Ignored files stay hidden inside repositories and loose files all show
-outside them: inside one the project has said what is noise, outside one nobody
-has.
+**The tree arrives a folder at a time.** Opening one is a single request that
+answers with its children: each file with its git status and how many comments
+it holds, each folder with whether its subtree holds a changed file and whether
+it holds a commented one. The folder marks are what make a collapsed branch
+usable as a list of where to look, and they are a prefix check over a map the
+server already has rather than anything the browser has to be given the whole
+of. A directory the change emptied still lists the files it removed, merged in
+from that same map, because a deleted file has no entry on disk to be found
+under.
+
+One read of the workspace is one `readdirSync` of one directory. Every file a
+person could read is listed wherever it sits: binaries are left out, and so is
+a version control system's own metadata and the review's own file at the root,
+and nothing else. A directory carries its own cap, so no single answer can be
+large, and says when it hit it.
+
+**Git's answer is taken once and shared.** The repositories, what they are
+compared against and the status of every path are one snapshot per review,
+retaken when the reader arrives rather than when a folder is opened. Git is a
+`docker exec` into the session's container, so a status per folder click would
+be a round trip per click; a snapshot makes opening a folder cost one directory
+read and nothing else. Writing a file or moving the base takes a fresh one,
+because both change what git would say.
 
 **One base expression, resolved per repository.** `main` means main-in-each,
 through the merge base with that repository's own HEAD. A repository the
@@ -1858,19 +2002,44 @@ accidentally committed or show up in a repository's own status, and "address
 the comments in REVIEW.md" stays one line however many repositories there are.
 Its paths are workspace-relative (`repo-a/src/x.ts`).
 
-**Nothing here starts a container.** Reads and git both run in the
-orchestrator, so the natural moment to review — the agent is done, the box has
-idled out — costs nothing, and none of these endpoints touches a session's
-activity timestamp: polling a review must not hold off the reaper.
+**A file can be edited as well as commented on.** `PUT /review/file` takes the
+whole file and the hash it was read at, and answers with what the file endpoint
+would — so one round trip repaints the code, the diff, the status and the
+comments, which drift has already moved. Four files are refused rather than
+written: a deleted one, a binary one, a truncated one, because saving back
+a read that stopped at the 2 MiB cap would delete everything past it, and one
+past the line limit, because it has no rows to edit. A file
+that has moved past the hash is refused with **412**, which is the one refusal
+the reviewer can overrule — both versions still exist at that moment, theirs on
+disk and the reviewer's in the pane, so the choice is offered rather than
+taken. Writes go through the same `writeFileAtomic` as `REVIEW.md`, which now
+keeps an existing file's permissions so that saving a script does not take its
+executable bit off.
+
+That the agent may be writing the same file is expected rather than guarded
+against: the box runs while the review is open, and 412 plus "save anyway" is
+the whole mechanism. Editing needs no new containment — the path goes through
+the same rule about what may be listed and the same `resolveInRoot` as a read,
+asked of the one path rather than looked up in a listing, so `REVIEW.md`
+itself, a binary and a symlink out are all the same 404 they were.
+
+**A review needs the box.** File content is read here, but git runs inside the
+session's own container, so any endpoint that asks git something starts a
+stopped session and marks it active. Reviewing is use of the box, and the
+reaper stopping one under its reader would take the next request's answer with
+it. What this costs is the old property that reviewing an idled-out session was
+free; what it buys is that a repository can only ever run its own code in its
+own box.
 
 **Freshness is the fetch.** There is no poll and no fingerprint endpoint. Every
-review fetch already reads the filesystem on the spot — the tree endpoint runs
-`ls-files` and `status` per request, the file endpoint reads the file, and
-drift recomputes on both — so what matters is being fresh *on arrival*, and
-arrival is three moments: the view mounting, a file closing back to the tree,
-and the tab becoming visible again. The last of those is skipped while a
-composer is open or a write is in flight, which is the one piece of the poll's
-logic worth keeping.
+review fetch reads the filesystem on the spot, and an arrival says so, which is
+what retakes git's snapshot and reruns drift — so what matters is being fresh
+*on arrival*, and arrival is three moments: the view mounting, a file closing
+back to the tree, and the tab becoming visible again. The last of those is
+skipped while a composer is open, a write is in flight, or the pane holds
+unsaved edits, which is the one piece of the poll's logic worth keeping. Edit mode is the case that
+matters most: switching apps and coming back is how a phone returns to a
+review, and a buffer is a whole file of work to lose to a refetch.
 
 A poll would cost three git processes a round, roughly `1 + 2N` for N
 repositories every five seconds per open review. It would also keep a view
@@ -1889,8 +2058,9 @@ tens of thousands of directories.
 **Drift** ports from the desktop tool as-is: each annotation stores three lines
 of context above and below the annotated line, and a check compares the stored
 context against the current source, relocating on an exact match elsewhere and
-marking `(outdated)` when it is gone. It runs on a file fetch and, across every
-annotated file, on a tree fetch.
+marking `(outdated)` when it is gone. It runs on a file fetch, and across every
+annotated file when a reader arrives and after a comment is written. Opening a
+folder runs neither it nor git.
 
 **Two invariants, one file each**, because the orchestrator now reads a tree
 the agent controls:
@@ -1902,13 +2072,15 @@ the agent controls:
   workspace — what changes is that a contained path may now be in any
   repository, or in none. The residual `realpath`/open race is documented where
   the check is, along with what closing it would cost.
-- Git hardening lives in `review/git.ts`. Repo-local config executes commands
-  on exactly the operations review runs — `core.fsmonitor` on status, external
-  diff drivers and `textconv` on diff. Every invocation takes its argv prefix
-  and environment from one builder there, and a test plants both configs in a
-  repository and asserts the hook never ran. The prefix is built per
-  invocation, so `safe.directory` is scoped to the repository being asked
-  rather than to one root.
+- Where git runs lives in `review/git.ts`, which is the one place a git command
+  line is built and the one place it is handed somewhere to run. It goes to the
+  session's container over `docker exec`, as the agent, against the workspace
+  path inside it. The flags that remain are there for the parsers rather than
+  for safety — unquoted paths, literal pathspecs, and the diff flags that keep
+  hunk output byte-compatible with the desktop tool — because a repository
+  that can run code in its own box has gained nothing. A test scans the
+  orchestrator and asserts no source file outside the tests can spawn a
+  process at all.
 
 ### The review view
 
@@ -1956,12 +2128,70 @@ parallel UIs:
   code cell scrolling horizontally as one block, and a wrap toggle that starts
   on, because a phone is narrower than most source files. Every line being its
   own element is what makes it addressable at all.
+- **Editing is a mode of the same pane**, for the corrections that are quicker
+  to make than to describe. A transparent textarea floats over the code column
+  and the rows behind it do the highlighting, so the font, the gutter, the
+  colours and the line heights are the same ones in both modes.
+
+Edit mode is the pane's own rows rather than an editor component because of
+what switching has to cost: nothing. CodeMirror or Monaco would bring a second
+highlighter, a second gutter and its own line metrics, so the code would move
+under the reader on the way in — which is the opposite of what somebody
+switching modes wants, since the line they are looking at is the line they went
+in to fix. Five things follow from carrying the overlay:
+
+- **The gutter is one width for every row**, `calc(Nch + 2.75rem)` as a custom
+  property the rows and the overlay both read. Sizing each row to its own
+  content puts the rows past line 99 a few pixels wider, and the overlay has to
+  agree with the code cells to the pixel.
+- **The code cell is `min-w-0`** while wrapping, so it wraps at the pane's
+  width. A grid item is at least as wide as its longest unbreakable run unless
+  it is told otherwise, and `overflow-wrap: break-word` does not count as
+  breakable for that measurement — so one long URL made the cell wider than the
+  pane and that line wrapped later than the textarea over it did. Every line
+  that wraps differently pushes the ones below it another row out of step, so
+  the error grows down the file: near the top of a README the caret is right,
+  and by line 150 it is rows away from what is typed. The rows and the textarea
+  being the same height is the invariant, and a browser test asserts it against
+  a file of long links, deep indentation and unbreakable runs.
+- **The pane is 16px below `md`** and 13px from `md` up. Safari zooms the page
+  when a control smaller than 16px takes focus, and a zoom on the way into edit
+  mode is exactly the jump this is avoiding. The same size in both modes, so
+  switching moves nothing.
+- **Editing always wraps.** A textarea that scrolls sideways scrolls
+  independently of the rows behind it, and the two part company on the first
+  long line.
+- **The reader's line is held across the switch** (`lib/anchor.ts`). The
+  comment cards, the composer and the deletion markers fold away in edit mode,
+  because a textarea is one run of text and nothing can sit between its lines —
+  so the position is remembered as a line and an offset into it, taken before
+  the switch and put back after. A pixel offset means nothing once the rows
+  above it have changed height.
+
+Typing re-renders the whole file, so the rows are memoized and unchanged lines
+cost a comparison rather than a render. Re-tokenizing waits for a pause in the
+typing; until it lands, a line the tokens no longer describe is rendered plain
+rather than painted with the colours of what used to be there. The header stays
+put while editing, since the toolbar under it carries Save and a phone with its
+keyboard up has no room to go looking for a control that scrolled away.
+
+Every way out of an open file — the mode toggle, another file from the tree,
+the step back to the list, the way out of the review — asks first when there
+are unsaved edits, and what was agreed to then waits for the dialog's own
+history entry to be popped before it runs. A dialog is a step the back button
+can take back (see *Going back*), so a navigation made while it is still on top
+is spent on the dialog rather than on the file.
 
 Highlighting is client-side, with Shiki: the API ships plain text and the
 browser tokenizes it. Both themes are tokenized at once and travel as
 `--shiki-light`/`--shiki-dark` custom properties on each span, so a light/dark
 switch costs no re-tokenize. The engine is Shiki's JavaScript regex engine, so
-there is no wasm fetch, and grammars load per file type on demand. The whole
+there is no wasm fetch, and grammars load per file type on demand. The
+highlighter's line limit of 8,000 is the pane's too: past it a file is shown
+as one block of plain text under a notice, with no rows, so no gutter, no line
+comments, no stepping and no edit mode. Tens of thousands of rows are more
+than a phone lays out in time, and a file that long is not reviewed a line at
+a time anyway. The whole
 review route is lazily imported, so none of it — the pane, the tree, the sheet
 primitives, the engine, the grammars — is in the bundle a browser opening a
 conversation downloads.
@@ -2049,9 +2279,17 @@ TLS under the deployment CA and `decideCredentials` rules on the request:
 
 | The request carries | What happens |
 |---|---|
-| the deployment's placeholder | rewritten to carry the real credential |
-| any other credential | 403 from the proxy; nothing reaches the host |
-| no credential | forwarded unauthenticated, as it always was |
+| the placeholder, in a credential header | rewritten to carry the real credential |
+| any other value in a credential header | 403 from the proxy; nothing reaches the host |
+| nothing in a credential header | forwarded as it stands |
+
+A *credential header* is one the credential set names: `Authorization` for
+both of them, and `X-Api-Key` for Anthropic as well. Nothing else is read as a
+credential. A request that authenticates some other way — a session cookie is
+the case worth naming — is forwarded as it stands, which is what keeps logging
+in to a translated host from inside a session working. The refusal above is
+about the deployment's own credentials, not about every way to reach an
+account at that host.
 
 The swap is value-level: the placeholder is replaced wherever it appears in the
 credential header, which covers `Bearer <p>`, `token <p>`, a bare value, and
@@ -2110,6 +2348,10 @@ WebSocket token — regenerating them per boot would strand every running
 session, which holds the old certificate in its trust file. Rotation is
 deleting that file.
 
+The channel's port is named on both sides: `EGRESS_CONTROL_PORT` for the
+orchestrator and `CONTROL_PORT` for the proxy, 3129 by default in each. They
+are one port, so moving it means setting both.
+
 ## State, and where truth lives
 
 Docker is the runtime truth. SQLite holds metadata, and the two are reconciled
@@ -2123,7 +2365,6 @@ applies migrations tracked by `user_version`.
 | `sessions` | One row per session: names, Docker object names, where its workspace and home are, status, which thread is the default, timestamps |
 | `threads` | One row per conversation: which session owns it, which harness runs it, the adapter's id for it, the mode and the config map it is meant to be in, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
-| `acp_log` | A debug tap of forwarded messages, ring-pruned to 5000 rows per session. An image or audio block's base64 payload is replaced by its size on the way in — a screenshot is a megabyte of it, the row is truncated at 64,000 characters anyway, and the bytes were never what the log is read for |
 | `exec_log` | Local commands and their output, each recording the thread it was typed in, ring-pruned to 200 rows per session across all of its threads |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
 | `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |
@@ -2142,9 +2383,15 @@ suggestion. `log.ts` redacts anything credential-shaped before it reaches
 stderr, and no API route ever answers with a secret — only with an account, a
 status and a time.
 
-Thread transcripts are what stays out. They live in the session's home
-directory and are read back by the adapter, so Boxes stores no transcript of
-its own.
+Two kinds of state deliberately stay out. Thread transcripts live in the
+session's home directory and are read back by the adapter, so Boxes stores no
+transcript of its own. And the tap of forwarded ACP messages is a log rather
+than a table: at `LOG_LEVEL=debug` each one is a line on stderr, where
+`docker logs` has it alongside everything else, with an image or audio block's
+base64 payload replaced by its size and the line truncated. At any other level
+the tap does not even serialize the message. A log nobody can read without the
+process's own output is a log in the wrong place, and writing one to disk on
+the hot path cost every session a synchronous write per message.
 
 Pending requests are the one place where the database and memory both matter.
 The row lets the dashboard show that something is waiting and survives a
@@ -2155,19 +2402,22 @@ restart; the resolver that answers the request is in memory only, so
 
 | Loop | Interval | Does |
 |---|---|---|
-| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes. The turn count is derived from the threads; the rest stay session-scoped, because they are about the box rather than the conversation |
+| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes, and it never waits: a session with an operation already in flight is skipped and tried again next tick. The turn count is derived from the threads; the rest stay session-scoped, because they are about the box rather than the conversation |
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running session's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
-| Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size |
+| Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
 | Orphan sweep (`sessions.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with sessions that no longer exist. See below |
 | Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login whose access token is within the hour of expiring, or which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
 
-The dashboard polls `GET /api/sessions` every 5 seconds while its tab is
-visible, and pauses while it is hidden.
+The list screen polls `GET /api/sessions` every 5 seconds while it is up and
+its tab is visible. A view watching one box — its thread, its review, its info
+— polls that session alone at the same cadence, so a browser reading one
+conversation is not asking for every session in the deployment.
 
 ## Configuration and secrets
 
-`config.ts` parses the environment once at boot with zod, so a misconfigured
-deployment fails at startup rather than at first use. Every setting has a
+`config.ts` parses the environment once at boot with zod — the same library
+the REST bodies are checked with — so a misconfigured deployment fails at
+startup rather than at first use. Every setting has a
 working default, which is why the stack runs with no `.env` at all.
 
 That file is the only place a default is written down, and the only place
@@ -2175,8 +2425,14 @@ that knows which settings exist. `compose.yaml` hands the orchestrator an env
 file wholesale (`BOXES_ENV`, defaulting to `.env` and optional), so adding a
 setting means editing the schema and nothing else. It names no variable at all
 and sets no value: nothing about a credential is configuration any more, so
-there is nothing compose has to pass through from a shell. Where compose has
-to agree with a default — `/data`
+there is nothing compose has to pass through from a shell.
+
+`BIND_ADDR` and `HOST_PORT` are the two names compose reads for itself, each
+with its default written into the published port line. They are variable
+substitutions rather than settings of the orchestrator's, and compose
+resolves a substitution from `./.env` or the shell, never from a `BOXES_ENV`
+file. Setting either one there changes nothing. Where compose has to agree with a default
+— `/data`
 for the volume mount, `boxes-egress-proxy` for the container the orchestrator
 attaches to session networks — it agrees by using the same value, not by
 restating it as configuration, and the comment at each site says which
@@ -2191,11 +2447,9 @@ An empty value counts as unset. `SESSION_MEM_LIMIT=` in an env file arrives
 as an empty string, and failing the boot on a setting nobody set would be a
 poor way to read it.
 
-`WS_AUTH_TOKEN` is the exception, because a shipped default for a secret would
-be a published password. Left unset, `secret.ts` generates a token on first
-boot and writes it to `DATA_DIR/ws-auth-token` with mode 0600, so it survives
-restarts and rebuilds. Setting the variable wins, which is also how the token
-is rotated.
+Secrets are the exception, because a shipped default for one would be a
+published password. A session's gateway token is not configured at all: it is
+minted with the session and stored in its row.
 
 The same reasoning covers the egress material. `egress.ts` generates the CA,
 the placeholders and the control-channel bearer on first boot and stores them
@@ -2228,18 +2482,22 @@ sooner.
 
 ## Build-time pins
 
-Every agent and adapter version is pinned in `session-image/Dockerfile` rather
-than in configuration, so the running agents are the ones this commit names and
-no `.env` entry can change them.
+The agents, the ACP adapters and the browser CLI are pinned in
+`session-image/Dockerfile` rather than in configuration, so what runs in a
+session is what this commit names and no `.env` entry can change it. Claude
+Code, its adapter and the browser CLI are pinned to a major line rather than
+to an exact release, so a rebuild takes fixes on that line and a new major is
+an edit to that file; below 1.0 a caret pins the minor, which is where a
+package that young puts its breaking changes.
 
-Codex is pinned as a pair. `@openai/codex` on npm is a 13 KB launcher whose
-platform binary arrives as an optional dependency of 339 MB, so the global
-install is the one copy of it; `@agentclientprotocol/codex-acp` is installed
-with `--omit=optional`, which leaves the copy npm nests under the adapter as a
-launcher with no binary behind it, and `CODEX_PATH` in the image's environment
-points the adapter at the global one. One binary, both commands on `PATH`, both
-packages pinned exactly rather than one of them following a caret range — and
-the `codex` a person runs in a box is the build the adapter drives. The image
+Codex is pinned as a pair, and exactly. `@openai/codex` on npm is a 13 KB
+launcher whose platform binary arrives as an optional dependency of 339 MB, so
+the global install is the one copy of it; `@agentclientprotocol/codex-acp` is
+installed with `--omit=optional`, which leaves the copy npm nests under the
+adapter as a launcher with no binary behind it, and `CODEX_PATH` in the image's
+environment points the adapter at the global one. One binary, both commands on
+`PATH`, both packages at the release the pair was verified on — and the
+`codex` a person runs in a box is the build the adapter drives. The image
 asserts that, and that `codex --version` prints the pinned number, at build
 time.
 
@@ -2259,7 +2517,10 @@ image cannot be built from code that fails `tsc --noEmit`.
 orchestrator/src/
   index.ts              Boot, the WS upgrade, the background loops, shutdown
   app.ts                REST routes, the exec endpoint, the static bundle
+  bodies.ts             A schema per route that takes a JSON body, and the 400 a body that fails one gets
+  http-error.ts         The one error that carries an HTTP status, thrown wherever a request is refused
   exec.ts               Local commands: limits, streaming, the exec log
+  attachments.ts        Files a prompt carries, written into the session's own workspace
   config.ts             Environment parsing, and the translatable credential set
   harness.ts            The registry: one record per harness, and every value that varies between them
   credentials.ts        The credential store, and the refresh that keeps a login true
@@ -2282,7 +2543,7 @@ orchestrator/src/
     store.ts            REVIEW.md: parse, serialize, mutate, drift (pure)
     gitstatus.ts        Porcelain and name-status parsing, base resolution, the merged workspace layer
     difflines.ts        Unified diff to line markers, hunks and deletion markers (pure)
-    tree.ts             Per-repository ls-files plus a walk of what none of them claims, merged
+    tree.ts             One directory read, with git status and comment counts merged into it
     fs.ts               Contained reads and writes under the workspace: the symlink invariant
     git.ts              The one place a git process is spawned: fixed argv, scrubbed env
   subnet.ts             Per-session /24 allocation
@@ -2310,7 +2571,7 @@ dashboard/
   public/               Served from the bundle root: the service worker, the manifest, the icons
   vite.config.ts        React, Tailwind, the dev proxy, both test projects
   components.json       Where the shadcn and assistant-ui CLIs install to
-  e2e/                  Browser tests, and the stub orchestrator and gateway
+  e2e/                  Browser tests over the real orchestrator, and the stub ACP gateway
   src/
     main.tsx            React mount and the routes
     globals.css         The whole design system: tokens and the @theme bridge
@@ -2319,6 +2580,7 @@ dashboard/
       sessions.ts       Polled session list and health, read by useSyncExternalStore
       harnesses.ts      Which agents this deployment can run, what each last advertised, and the dialog's last choice
       push.ts           Web Push registration: the service worker, the subscription, the toggle's state
+      review.ts         The review view's whole state: the tree and the open file, fetched on arrival
       thread/
         acp-types.ts    The slice of the ACP schema the browser speaks
         acp-client.ts   JSON-RPC over the WebSocket, and the handshake
@@ -2333,7 +2595,8 @@ dashboard/
       history.ts        Where in the stack the browser is, which both of the above read
       staged-prompt.ts  A prompt handed from one view to another, consumed once, out of history's reach
       harness.ts        What only a reader needs about a harness: why one cannot run, and the caveat on a mode
-    views/              SessionList, SessionCreate, SessionThread, SessionInfo, AgentSets, Settings
+    views/              SessionList, SessionCreate, SessionThread, SessionInfo, SessionReview,
+                        AgentSets, AgentSetEditor, Settings, Playground, Shell
     components/
       ThreadOptions.tsx The agent, mode, model and effort block both dialogs ask with
       NewThreadDialog.tsx  That block, as what a card's "New thread" opens
@@ -2344,8 +2607,13 @@ dashboard/
 
 shared/
   types.ts              REST shapes and the control-channel contract
+  acp.ts                The ACP subprotocol, method names and update kinds, spelled once
   task-notifications.ts How a background task reports in, read by both sides
-session-image/          The per-session container image and its entrypoint
+session-image/          The per-session container image, in four files
+  Dockerfile            What a session has installed, and the uid it runs as
+  entrypoint.sh         Identity, the CA and the agent configuration install; then it holds the container open
+  playwright-cli.config.json  Browser defaults for a container with no Chrome and no sandbox
+  profile-image-path.sh Puts the image's PATH back after /etc/profile has replaced it
 scripts/                Security smoke test and credentialed live test
 ```
 
@@ -2374,13 +2642,15 @@ files the desktop tool's own Go code wrote (`orchestrator/src/review/fixtures/`,
 with its own README on provenance), the same reviews being rebuilt from the same
 inputs and each file round-tripped. The invariants have tests that are the
 attacks: a symlink out of the workspace, a symlink through a directory, and a
-traversal all coming back as the same 404, and a repository-local
-`core.fsmonitor` and `textconv` planted in a real repository with an assertion
-that neither ever ran. The seven routes are driven over their real handlers, a
-real database and a real git repository in a temp directory — no Docker at all,
-which is what stage one bought for the tests as much as for the feature —
-covering root resolution, drift, concurrent writes and that none of them touches
-a session's activity timestamp.
+traversal all coming back as the same 404, and a scan of the orchestrator's own
+sources asserting that none of them can spawn a process, which is what keeps
+git in the box it belongs to. The seven routes are driven over their real
+handlers, a real database and a real git repository in a temp directory, with
+git itself supplied through the one seam it is started from, so the suite needs
+no Docker; every invocation is checked to be addressed to a session's container
+and a path inside its workspace. They cover root resolution, drift, concurrent
+writes, and that reading a review marks the session active, since git now runs
+in the box.
 
 The second harness added suites of its own, each about one of the things it
 moved. `harness.test.ts` holds the registry to its own shape — every harness
@@ -2424,10 +2694,15 @@ that, so `push.test.ts` reproduces the worked example in RFC 8291 byte for
 byte and verifies the VAPID assertion against the key it advertises.
 
 The dashboard also runs a browser suite. It builds the production bundle and
-serves it the way the orchestrator does, from a stub orchestrator and a stub
-ACP gateway that speaks the agent side from canned scripts — including its
-own several threads per session with each socket pinned to one by its upgrade
-path, so a fresh thread starting empty, a fork carrying the source's messages,
+serves it from the real orchestrator: the real routes, a real database in a
+temporary directory, a Docker that answers from memory, and workspaces with
+real git repositories in them. What the suite proves is therefore the same
+code a deployment runs, and a change to the API cannot pass here by being
+matched in a second implementation. Only the agent is stubbed, because there
+is no agent to talk to: a stub ACP gateway speaks that side from canned
+scripts, including its own several threads per session with each socket
+pinned to one by its upgrade path, so a fresh thread starting empty, a fork
+carrying the source's messages,
 a switch bringing the first thread's transcript back, and two tabs on two
 threads each keeping to their own conversation are asserted against a gateway
 that behaves like the real one.

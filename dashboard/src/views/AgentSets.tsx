@@ -6,6 +6,7 @@ import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { useUp } from '@/hooks/use-up';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -130,9 +131,7 @@ export function AgentSets() {
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
-      {sets === null ? (
-        <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
-      ) : null}
+      {sets === null ? <Loading className="py-8 text-center" /> : null}
 
       {sets?.map((set) => (
         <Card key={set.id} className="flex flex-row items-center gap-3 p-4">

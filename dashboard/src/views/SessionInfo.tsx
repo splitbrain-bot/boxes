@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router';
+import { useNavigate, useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { CopyField } from '@/components/CopyField';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { sessionBadges } from '@/components/SessionCard';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -13,7 +13,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { pollWhileVisible } from '@/lib/poll';
 import { shortSize } from '@/lib/rough';
-import { wsUrlFor } from '@/lib/ws-url';
 import { refresh } from '../stores/sessions.ts';
 
 /** How often the detail view re-reads the session, while its tab is visible. */
@@ -37,20 +36,14 @@ function Meta({ label, value }: { label: string; value: string }) {
  * was opened from is still on the stack, whether it was the list or a thread
  * that opened it, so there is nothing to remember and nothing to get wrong.
  * Pushing the sender instead is how a back control ends up pointing the same
- * way as the browser's own.
- *
- * The thread named in the entry's state is the fallback for the case where
- * there is nothing to pop: a pasted link, a notification, a shortcut on a
- * home screen. It has to be the exact thread that was open, because a session
- * has several and whichever one is current is not the one being read.
+ * way as the browser's own. Where there is nothing to pop — a pasted link, a
+ * notification, a shortcut on a home screen — the session's current thread is
+ * the parent that replaces this entry.
  */
 export function SessionInfo() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
-  const from = useLocation().state as { threadId?: string } | null;
-  const up = useUp(
-    from?.threadId ? `/sessions/${id}/threads/${from.threadId}` : `/sessions/${id}`,
-  );
+  const up = useUp(`/sessions/${id}`);
 
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -112,11 +105,7 @@ export function SessionInfo() {
     return (
       <div className="flex flex-col gap-4">
         <BackLink up={up} label="Back" />
-        {error ? (
-          <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-        ) : (
-          <div className="text-sm text-muted-foreground">Loading…</div>
-        )}
+        {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : <Loading />}
       </div>
     );
   }
@@ -177,23 +166,6 @@ export function SessionInfo() {
               }
             />
           </dl>
-        </CardContent>
-      </Card>
-
-      {/* The dashboard needs none of this — it derives both from the page and
-          the session list. It is here for an external ACP client. */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Connect an external ACP client</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <p className="text-xs text-muted-foreground">
-            Any ACP client that speaks JSON-RPC over a WebSocket can attach to this session.
-            The token travels as a <code className="font-mono">bearer.&lt;token&gt;</code>{' '}
-            subprotocol entry, because a browser cannot set headers on a WebSocket.
-          </p>
-          <CopyField label="WebSocket URL" value={wsUrlFor(session.id)} />
-          <CopyField label="Bearer token" value={session.wsToken} masked />
         </CardContent>
       </Card>
 

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { generateCACertificate } from 'mockttp';
 import type {
@@ -11,6 +11,7 @@ import type {
 import { CREDENTIAL_SET, type Config } from './config.ts';
 import { deliverableSecret, type CredentialRow, type CredentialStore } from './credentials.ts';
 import { log } from './log.ts';
+import { writeSecretFile } from './secret.ts';
 
 /**
  * The orchestrator's half of token translation: what the proxy is told, and
@@ -108,12 +109,7 @@ export async function resolveEgressMaterial(
 
 /** Writes the material back, readable only by the orchestrator. */
 function writeMaterial(dataDir: string, material: EgressMaterial): void {
-  const path = join(dataDir, MATERIAL_FILE);
-  mkdirSync(dataDir, { recursive: true });
-  writeFileSync(path, `${JSON.stringify(material, null, 2)}\n`, { mode: 0o600 });
-  // writeFileSync applies the mode only when it creates the file, so a
-  // rewritten file keeps its old mode without this.
-  chmodSync(path, 0o600);
+  writeSecretFile(join(dataDir, MATERIAL_FILE), `${JSON.stringify(material, null, 2)}\n`);
 }
 
 /**
@@ -181,14 +177,6 @@ export async function pushPolicy(
   policy: EgressPolicy,
 ): Promise<EgressStatus> {
   return controlCall(cfg, material, 'POST', '/policy', policy);
-}
-
-/** Reads the proxy's current status without changing anything. */
-export async function readStatus(
-  cfg: Config,
-  material: EgressMaterial,
-): Promise<EgressStatus> {
-  return controlCall(cfg, material, 'GET', '/status');
 }
 
 /** One authenticated call on the control channel. */

@@ -93,7 +93,14 @@ test('output is streamed as it arrives and reported whole at the end', async () 
   assert.equal(result.truncated, false);
   assert.equal(result.timedOut, false);
   // The command travels as an argument, never as part of a host command line.
-  assert.deepEqual(commands[0], ['bash', '-lc', 'echo one; echo two']);
+  assert.deepEqual(commands[0], [
+    'timeout',
+    '--kill-after=5s',
+    '120s',
+    'bash',
+    '-lc',
+    'echo one; echo two',
+  ]);
 });
 
 test('stderr is merged into the same stream, in arrival order', async () => {
@@ -151,17 +158,33 @@ test('the default limits are the ones the endpoint documents', () => {
   assert.equal(MAX_OUTPUT_BYTES, 256 * 1024);
 });
 
-test('a command that never ends is killed by the wall clock', async () => {
+test('a command that never ends stops being waited on at the wall clock', async () => {
   fakeDocker({ writes: [frame(1, 'still here\n')], never: true });
 
   // Nothing ends this stream, so only the timer can. The limit is a
-  // parameter so the test drives the real kill path rather than waiting out
-  // the two-minute default.
+  // parameter so the test drives the real path rather than waiting out the
+  // two-minute default.
   const result = await runCommand(TARGET, 'sleep forever', () => {}, { wallClockMs: 100 });
 
   assert.equal(result.timedOut, true);
   assert.equal(result.exitCode, null);
   assert.equal(result.output, 'still here\n');
+  assert.match(trailer(result), /\[exit null timed out\]/);
+});
+
+test('the container is handed the wall clock and reports it as exit 124', async () => {
+  const { commands } = fakeDocker({ writes: [frame(1, 'started\n')], exitCode: 124 });
+
+  const result = await runCommand(TARGET, 'sleep 9999', () => {}, { wallClockMs: 1500 });
+
+  // The limit rides along with the command, rounded up to whole seconds,
+  // because the daemon cannot signal an exec that is already running.
+  assert.deepEqual(commands[0], ['timeout', '--kill-after=5s', '2s', 'bash', '-lc', 'sleep 9999']);
+  // 124 is how `timeout` says it fired, so the run timed out rather than
+  // ending with a status of its own.
+  assert.equal(result.timedOut, true);
+  assert.equal(result.exitCode, null);
+  assert.equal(result.output, 'started\n');
   assert.match(trailer(result), /\[exit null timed out\]/);
 });
 
@@ -183,6 +206,7 @@ test('records are stored and read back in the API shape', () => {
       'git status',
       { output: 'clean\n', exitCode: 0, truncated: false, timedOut: false },
       1000,
+      null,
     );
     record(
       db,
@@ -191,6 +215,7 @@ test('records are stored and read back in the API shape', () => {
       'yes',
       { output: 'y'.repeat(10), exitCode: null, truncated: true, timedOut: true },
       2000,
+      'toolu_1',
     );
     record(
       db,
@@ -199,6 +224,7 @@ test('records are stored and read back in the API shape', () => {
       'pwd',
       { output: '/workspace\n', exitCode: 0, truncated: false, timedOut: false },
       2500,
+      null,
     );
     record(
       db,
@@ -207,6 +233,7 @@ test('records are stored and read back in the API shape', () => {
       'ls',
       { output: '', exitCode: 0, truncated: false, timedOut: false },
       3000,
+      null,
     );
 
     const rows = history(db, 's1', 't1');
@@ -218,6 +245,8 @@ test('records are stored and read back in the API shape', () => {
     assert.equal(rows[1]!.truncated, true);
     assert.equal(rows[1]!.timedOut, true);
     assert.equal(rows[1]!.startedAt, 2000);
+    assert.equal(rows[0]!.after, null);
+    assert.equal(rows[1]!.after, 'toolu_1');
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

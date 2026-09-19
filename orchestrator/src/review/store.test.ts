@@ -322,6 +322,17 @@ describe('a comment survives a write and a read', () => {
     assert.equal(parseReview(written).data.get('a.go')?.get(2)?.comment, comment);
   });
 
+  test('a comment that leaves a code fence open keeps its context block', () => {
+    // The open fence is closed before the context block is written, so the
+    // block is read back as context rather than as more of the comment.
+    const review = emptyReview('2026-08-31');
+    setAnnotation(review, 'a.go', 3, 'like this:\n\n```go\nfoo()', lines('l1\nl2\nl3\nl4\nl5\n'));
+    const back = parseReview(serializeReview(review)).data.get('a.go')?.get(3);
+    assert.equal(back?.comment, 'like this:\n\n```go\nfoo()\n```');
+    assert.deepEqual(back?.context, ['l1', 'l2', 'l3', 'l4', 'l5']);
+    assert.equal(back?.contextFrom, 1);
+  });
+
   test('a context block says what it is, and keeps its language', () => {
     const review = emptyReview('2026-08-31');
     setAnnotation(review, 'a.go', 2, 'a note', lines('l1\nl2\nl3\n'));
@@ -553,6 +564,57 @@ describe('checkDrift', () => {
     const anns = annotated(1, ['b', 'c'], 5);
     checkDrift(anns, ['b', 'c', 'd']);
     assert.ok(!anns.has(-3));
+    // So the annotation stays where it was, with the context it was written
+    // against, rather than being moved somewhere impossible or dropped.
+    assert.equal(anns.size, 1);
+    assert.equal(anns.get(1)?.contextFrom, 5);
+  });
+
+  test('an annotation moving onto an occupied line is kept', () => {
+    // Both comments are about the same code, so both find line 8. The one
+    // that has to move must not overwrite the one already there.
+    const anns = new Map<number, Annotation>([
+      [5, { comment: 'moves', context: ['dup'], contextFrom: 5, outdated: false }],
+      [8, { comment: 'stays', context: ['dup'], contextFrom: 8, outdated: false }],
+    ]);
+    checkDrift(anns, ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h']);
+    assert.deepEqual(
+      [...anns.values()].map((ann) => ann.comment).toSorted(),
+      ['moves', 'stays'],
+    );
+  });
+
+  test('a chain of relocations keeps every annotation', () => {
+    // One line inserted at the top moves both comments down by one, so each
+    // lands on the line the other is leaving.
+    const anns = new Map<number, Annotation>([
+      [1, { comment: 'first', context: ['one'], contextFrom: 1, outdated: false }],
+      [2, { comment: 'second', context: ['two'], contextFrom: 2, outdated: false }],
+    ]);
+    assert.equal(checkDrift(anns, ['inserted', 'one', 'two']), true);
+    assert.equal(anns.size, 2);
+    assert.equal(anns.get(2)?.comment, 'first');
+    assert.equal(anns.get(3)?.comment, 'second');
+  });
+
+  test('a move blocked by one that stays put keeps every annotation', () => {
+    // 'third' still finds its context where it left it, so it holds line 3.
+    // That refuses 'second' the line it wants, which leaves it holding line 2
+    // and refuses 'first' in turn. Nothing moves, and all three survive.
+    const anns = new Map<number, Annotation>([
+      [1, { comment: 'first', context: ['aa'], contextFrom: 1, outdated: false }],
+      [2, { comment: 'second', context: ['bb'], contextFrom: 2, outdated: false }],
+      [3, { comment: 'third', context: ['bb'], contextFrom: 3, outdated: false }],
+    ]);
+    checkDrift(anns, ['w', 'aa', 'bb', 'cc']);
+    assert.deepEqual(
+      [...anns].map(([line, ann]) => [line, ann.comment]),
+      [
+        [1, 'first'],
+        [2, 'second'],
+        [3, 'third'],
+      ],
+    );
   });
 });
 

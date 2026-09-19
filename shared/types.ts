@@ -335,7 +335,8 @@ export interface SessionSummary {
   attachedCount: number;
   /**
    * Bearer token an ACP client authenticates the WebSocket upgrade with,
-   * carried in the subprotocol. One token covers the whole deployment.
+   * carried in the subprotocol. This session's own: it opens this session and
+   * no other one in the deployment.
    */
   wsToken: string;
   /** Every conversation this session owns, oldest first. */
@@ -461,21 +462,6 @@ export interface CreateSessionBody {
   thread?: ThreadOptions;
 }
 
-/** One tapped ACP message from the debug log. */
-export interface AcpLogEntry {
-  id: number;
-  direction: 'up' | 'down' | 'stderr';
-  ts: number;
-  payload: string;
-}
-
-/** A page of debug log entries. */
-export interface AcpLogPage {
-  entries: AcpLogEntry[];
-  /** Pass as the after parameter to poll for newer entries. */
-  cursor: number;
-}
-
 /**
  * Which copy of one image the deployment is running, and when it was built.
  *
@@ -532,6 +518,27 @@ export interface HealthResponse {
   images: DeploymentImages;
 }
 
+/**
+ * What the readiness probe answers, ready or not.
+ *
+ * The status code carries the same answer, so a probe that reads nothing but
+ * the code is served. This body is for a person looking at why.
+ */
+export interface ReadyResponse {
+  /** True only when every check below passed. */
+  ready: boolean;
+  version: string;
+  /** Each thing a session needs before it can be served, and whether it is there. */
+  checks: {
+    /** The database answered a query. */
+    database: boolean;
+    /** The proxy holds the egress policy this orchestrator composed. */
+    egress: boolean;
+    /** The Docker daemon answered. */
+    docker: boolean;
+  };
+}
+
 /** The deployment's VAPID public key, which a browser subscribes with. */
 export interface PushKeyResponse {
   /** Uncompressed P-256 point, base64url. Not a secret. */
@@ -573,6 +580,12 @@ export interface StoredAttachment {
 export interface ExecRequest {
   /** Run with `bash -lc`, inside the session's own isolation. */
   command: string;
+  /**
+   * What the thread ended with when the command was typed: the id of its last
+   * tool call, or of its last assistant message. Null when the agent had not
+   * said anything yet. A replay puts the run back right after it.
+   */
+  after?: string | null;
 }
 
 /** One finished local command, as the exec log stores it. */
@@ -590,6 +603,8 @@ export interface ExecRecord {
   timedOut: boolean;
   startedAt: number;
   finishedAt: number;
+  /** The tool call or message the run followed, or null when there was none. */
+  after: string | null;
 }
 
 /** A page of exec records for one session, oldest first. */
@@ -683,18 +698,6 @@ export type ReviewFileStatus =
 /** What happened to a line of a file, relative to the base revision. */
 export type ReviewLineChange = 'added' | 'modified';
 
-/** One file or directory of the review tree. */
-export interface ReviewTreeEntry {
-  name: string;
-  /** Path relative to the workspace, slash-separated. */
-  path: string;
-  isDir: boolean;
-  /** Absent on files. */
-  children?: ReviewTreeEntry[];
-  /** True on the directory a repository is rooted at. Absent everywhere else. */
-  repo?: boolean;
-}
-
 /**
  * One repository the workspace holds.
  *
@@ -732,24 +735,62 @@ export interface ReviewBase {
   rev: string;
 }
 
-/** The whole left panel in one response. */
-export interface ReviewTreeResponse {
+/**
+ * One entry of a review directory: a file, or a folder of them.
+ *
+ * A file carries its own git status and its own comment count. A folder
+ * carries what its whole subtree holds, so a closed one still says there is
+ * something inside it to look at. The optional fields are absent rather than
+ * empty, because a directory of a thousand files goes to a phone.
+ */
+export interface ReviewDirEntry {
+  /** The entry's own name inside its directory. */
+  name: string;
+  /** Path relative to the workspace, slash-separated. */
+  path: string;
+  /** True for a folder. */
+  isDir: boolean;
+  /** A file's git status. Absent when it has none, and on a folder. */
+  status?: ReviewFileStatus;
+  /** How many comments a file has. Absent when it has none, and on a folder. */
+  comments?: number;
+  /** True on a folder whose subtree holds a changed file. Absent elsewhere. */
+  changed?: boolean;
+  /** True on a folder whose subtree holds a commented file. Absent elsewhere. */
+  commented?: boolean;
+  /** True on the folder a repository is rooted at. Absent elsewhere. */
+  repo?: boolean;
+}
+
+/**
+ * What a review is, apart from the files: which repositories the workspace
+ * holds, what they are compared against, and whether there is a review at all.
+ *
+ * Every directory answer carries them, so the first screen is one request and
+ * the header never waits on a second.
+ */
+export interface ReviewFacts {
   /** Every repository the workspace holds, sorted by path. */
   repos: ReviewRepo[];
   /** False when the workspace holds no repository at all. */
   hasGit: boolean;
-  entries: ReviewTreeEntry[];
-  /** True when the tree hit the entry cap and was cut short. */
-  truncated: boolean;
-  /** Git status per workspace-relative path. Empty without any repository. */
-  statuses: Record<string, ReviewFileStatus>;
-  /** How many comments each annotated file has. */
-  counts: Record<string, number>;
   base: ReviewBase;
   /** True when the workspace holds a REVIEW.md. */
   hasReview: boolean;
   /** The date the review was started, or '' when there is no review yet. */
   started: string;
+  /** How many comments the whole review holds, over every file. */
+  commentCount: number;
+}
+
+/** One directory of the review, and the facts the whole view needs. */
+export interface ReviewDirResponse extends ReviewFacts {
+  /** The directory listed, relative to the workspace. Empty for the root. */
+  path: string;
+  /** Its children: folders first, then files, each in name order. */
+  entries: ReviewDirEntry[];
+  /** True when this directory hit the entry cap and the rest were left out. */
+  truncated: boolean;
 }
 
 /** One comment on one line, as the API reports it. */
@@ -798,6 +839,12 @@ export interface ReviewFileResponse {
   repo: string | null;
   /** Plain text; the browser tokenizes it. */
   content: string;
+  /**
+   * A hash of the file as it was read, which a save sends back so a write
+   * over an agent's edit is refused rather than made. Empty for a file that
+   * is not there.
+   */
+  hash: string;
   /** True when the file was longer than the cap and the rest was dropped. */
   truncated: boolean;
   /** True when the file holds a NUL byte, in which case content is empty. */
@@ -830,6 +877,18 @@ export interface ReviewAnnotationBody {
   path: string;
   line: number;
   comment: string;
+}
+
+/**
+ * Body of a save-file request.
+ *
+ * `hash` is what the browser last read, and the save is refused when the file
+ * on disk no longer matches it.
+ */
+export interface ReviewFileBody {
+  path: string;
+  content: string;
+  hash: string;
 }
 
 /** Body of a set-base request. Null clears the base back to the working tree. */
@@ -927,11 +986,12 @@ export interface AgentBundlePreview {
   overrides: Array<{ kind: AgentItemKind; name: string }>;
 }
 
-// --- the gateway's one ACP extension ----------------------------------------
+// --- the gateway's own ACP extensions ---------------------------------------
 
 /**
- * Notification the gateway sends a browser to say whether a prompt turn is
- * running on the thread it is watching.
+ * Notification the gateway sends a browser about the thread it is watching:
+ * whether a prompt turn is running, whether the agent is talking, and what it
+ * has left running in the background.
  *
  * ACP has no method for this: a client learns a turn is running by awaiting
  * the prompt it sent, which a browser that navigated away and came back never
@@ -963,4 +1023,50 @@ export interface TurnStateParams {
    * conversation left there.
    */
   background: BackgroundProcess[];
+}
+
+/**
+ * Notification the gateway sends a browser at the start of a replay it asked
+ * for, saying whether the replay was picked up where the browser said it
+ * could be.
+ *
+ * It arrives before any of the replayed updates, so a browser that is about
+ * to be sent the thread whole knows to drop what it holds before the first of
+ * it lands, and a browser that is being sent only a tail knows to keep what
+ * it holds. Nothing else in the stream tells the two apart.
+ *
+ * The underscore is ACP's extension prefix, and a notification takes no
+ * reply, so a client that has never heard of this ignores it.
+ */
+export const REPLAY_METHOD = '_boxes/replay';
+
+/** Params of a `_boxes/replay` notification. */
+export interface ReplayParams {
+  /** The adapter's own id for the thread being replayed. */
+  sessionId: string;
+  /**
+   * True when what follows is only what comes after the browser's resume
+   * point. False when it is the whole thread, which is the answer whenever
+   * the point was not asked for or could not be honoured.
+   */
+  resumed: boolean;
+}
+
+/**
+ * The `_meta` key a browser puts its own `session/load` options under.
+ *
+ * ACP reserves `_meta` for extensions, and the adapter reads its own key
+ * there, so a key of Boxes' own reaches the gateway without either side
+ * having to strip it.
+ */
+export const BOXES_META = 'boxes';
+
+/** What a browser may ask of a `session/load`, under `_meta.boxes`. */
+export interface LoadMeta {
+  /**
+   * The adapter's id for the last message the browser holds. The gateway
+   * sends only what the replay names after that message; absent, it sends
+   * the thread whole.
+   */
+  resumeFrom?: string;
 }

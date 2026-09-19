@@ -1,62 +1,42 @@
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubSession,
-  stubThread,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The dashboard's own routes, driven in a real browser against the real
- * production bundle served the way the orchestrator serves it.
+ * production bundle, served by the real orchestrator.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST, [
-    stubSession(),
-    stubSession({
+  stub = await startOrchestrator([
+    { threads: [{ lastActiveAt: Date.now() - 3 * 60_000 }], diskBytes: 348 * 1024 ** 2 },
+    {
       id: 'e5f6a7b8',
       name: 'flaky CI',
       status: 'stopped',
-      dockerState: 'exited',
-      pendingCount: 2,
-      turnActive: false,
-      attachedCount: 0,
+      containerRunning: false,
       // A box left alone for a fortnight, and one small enough to be a
       // checkout and nothing else: the two rough indicators at the other end
       // of their ranges from the box above.
-      threads: [stubThread({ lastActiveAt: Date.now() - 14 * 86_400_000 })],
+      threads: [{ pendingCount: 2, lastActiveAt: Date.now() - 14 * 86_400_000 }],
       diskBytes: 4_200_000,
-    }),
-    stubSession({
+    },
+    {
       id: '99887766',
       name: 'nightly bench',
-      status: 'running',
-      dockerState: 'running',
-      turnActive: true,
-      // What the badge goes by: a prompt being open upstream is not the same
-      // as the agent working, and the list says what the agent is doing.
-      speaking: true,
-      // And one that is not: a box whose agent has stopped with a build
-      // still running in it.
-      backgroundBusy: true,
-      // Which of its conversations that build belongs to is the row's own
-      // bullet, and the only place a list says which thread is holding the
-      // box awake.
+      // Which of its conversations is doing what is the row's own bullet,
+      // and the only place a list says which thread is holding the box awake:
+      // one with a build still running in it, and one the agent is talking
+      // on, which is what the session's own badge goes by.
       threads: [
-        stubThread({ backgroundBusy: true, lastActiveAt: Date.now() - 12_000 }),
-        stubThread({ id: 'th2', ordinal: 2, title: 'flaky retry logic', lastActiveAt: Date.now() - 5 * 3_600_000 }),
+        { turnActive: true, backgroundBusy: true, lastActiveAt: Date.now() - 12_000 },
+        { title: 'flaky retry logic', speaking: true, lastActiveAt: Date.now() - 5 * 3_600_000 },
       ],
       attachedCount: 1,
-      proxyAttached: false,
       diskBytes: 2.4 * 1024 ** 3,
-    }),
+    },
   ]);
 });
 
@@ -110,7 +90,6 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/sessions/a1b2c3d4/info', scheme);
     try {
       await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('Connect an external ACP client').isVisible()).toBe(true);
       await expect
         .poll(() => page.getByText('348 MB of workspace and home').isVisible())
         .toBe(true);
@@ -177,20 +156,26 @@ test('the session list says which build of each image is running', async () => {
     // The digest abbreviated the way Docker abbreviates an id, then the build
     // time and the size. The clock is asserted by shape rather than by value:
     // it is rendered in the browser's own timezone, which is the machine's.
-    const orchestrator = page.getByText(
-      /^orchestrator 1a2b3c4d5e6f · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 420 MB$/,
-    );
-    await expect.poll(() => orchestrator.isVisible()).toBe(true);
-    await expect.poll(() => page.getByText(/^proxy 9f8e7d6c5b4a · .* · 180 MB$/).isVisible())
+    //
+    // All three, including the orchestrator's own, which it reads off the
+    // container it is in: the fake daemon stands this process in one.
+    await expect
+      .poll(() =>
+        page
+          .getByText(/^orchestrator 1a2b3c4d5e6f · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 400 MB$/)
+          .isVisible(),
+      )
       .toBe(true);
+    const proxy = page.getByText(/^proxy 9f8e7d6c5b4a · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 180 MB$/);
+    await expect.poll(() => proxy.isVisible()).toBe(true);
     // In gigabytes, which is the size a session image is and the reason the
     // line carries one at all.
     await expect.poll(() => page.getByText(/^session 001122334455 · .* · 4.2 GB$/).isVisible())
       .toBe(true);
     // The whole digest is on hover: too long for the line, and the only form
     // worth pasting into a comparison.
-    expect(await orchestrator.getAttribute('title')).toBe(
-      'sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
+    expect(await proxy.getAttribute('title')).toBe(
+      'sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0',
     );
     expect(errors).toEqual([]);
   } finally {
@@ -203,15 +188,13 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
   // thread of it has a task, and so nothing in the thread's own bar can stop
   // what is running. After a respawn that is every orphaned build in the box,
   // because an adapter knows nothing about the shells the one before it left.
-  const orphaned = await startStubOrchestrator(DIST, [
-    stubSession({
-      id: 'orphan01',
-      name: 'orphaned build',
-      backgroundBusy: true,
-      threads: [stubThread({ backgroundBusy: false })],
-    }),
-  ]);
-  const { page, errors, close } = await openPage(orphaned.url, '/');
+  stub.createSession({
+    id: 'orphan01',
+    name: 'orphaned build',
+    backgroundBusy: true,
+    threads: [{ backgroundBusy: false }],
+  });
+  const { page, errors, close } = await openPage(stub.url, '/');
   try {
     const stop = page.getByRole('button', { name: 'Stop everything running in this box' });
     await expect.poll(() => stop.isVisible()).toBe(true);
@@ -220,7 +203,7 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
     // half-done.
     await stop.click();
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
-    await expect.poll(() => orphaned.boxStops).toEqual(['orphan01']);
+    await expect.poll(() => stub.boxStops).toEqual(['orphan01']);
 
     // And the offer goes when the box stops being busy, which is the next
     // reading rather than anything this browser decided.
@@ -228,7 +211,6 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
     expect(errors).toEqual([]);
   } finally {
     await close();
-    await orphaned.close();
   }
 });
 
@@ -256,6 +238,50 @@ test('the session list offers to notify this browser', async () => {
     const toggle = page.getByRole('button', { name: 'Notify me' });
     await expect.poll(() => toggle.isVisible()).toBe(true);
     expect(await toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+// --- the lifecycle ----------------------------------------------------------
+
+test('a box is created from the form and is on the list afterwards', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/new');
+  try {
+    await page.getByLabel('Name').fill('a brand new box');
+    await page.getByRole('button', { name: 'Create' }).click();
+
+    // Straight into the conversation of the box that was just made, which is
+    // the point of creating one.
+    await page.waitForURL(/\/sessions\/[0-9a-f]{8}$/);
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    await page.getByLabel('Back to sessions').click();
+    await expect.poll(() => page.getByText('a brand new box').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a stopped box is started from its info view, and stopped again', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/sessions/e5f6a7b8/info');
+  try {
+    // The box the fixture left down, which is why the control offered is the
+    // one that brings it up.
+    await expect.poll(() => page.getByText('stopped').isVisible()).toBe(true);
+    await expect.poll(() => page.getByRole('button', { name: 'Start' }).isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Start' }).click();
+
+    // The container really is running now: the view is redrawn from the
+    // session the orchestrator answers with, not from anything optimistic.
+    await expect.poll(() => page.getByRole('button', { name: 'Stop' }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('up', { exact: true }).isVisible()).toBe(true);
+
+    await page.getByRole('button', { name: 'Stop' }).click();
+    await expect.poll(() => page.getByRole('button', { name: 'Start' }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('stopped').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();

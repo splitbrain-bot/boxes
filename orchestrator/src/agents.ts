@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
 import {
   GLOBAL_AGENT_SET,
@@ -40,7 +40,7 @@ import { chownToAgent } from './workspaces.ts';
  */
 
 /** Where the merged sets are materialized, under DATA_DIR. */
-export const AGENTS_SUBDIR = 'agents';
+const AGENTS_SUBDIR = 'agents';
 
 /**
  * A name that is safe as a single path component and is what the agent will
@@ -52,13 +52,13 @@ const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_SET_NAME = 100;
 
 /** Longest an AGENTS.md or one item's content may be. */
-export const MAX_CONTENT = 100_000;
+const MAX_CONTENT = 100_000;
 
 /** Most items of one kind a single set may hold. */
 const MAX_ITEMS_PER_KIND = 100;
 
 /** The parent of every materialized set. */
-export function agentsRoot(dataDir: string): string {
+function agentsRoot(dataDir: string): string {
   return join(dataDir, AGENTS_SUBDIR);
 }
 
@@ -334,14 +334,17 @@ export class AgentStore {
    * The directory's own inode is kept and only its contents are replaced: a
    * running container has it bind-mounted, and swapping the directory would
    * leave that container mounted on an unlinked one.
+   *
+   * The bundle is written over what is there, and only then is what it does
+   * not have removed. This runs on every start of a session, including a
+   * command run against a box that is already up, and clearing first would
+   * leave that box with no configuration at all for as long as the write
+   * takes.
    */
   materialize(sessionId: string, setId: string | null): string {
     const dir = agentConfigPath(this.dataDir, sessionId);
     ensureAgentsRoot(this.dataDir);
     mkdirSync(dir, { recursive: true, mode: 0o755 });
-    for (const entry of readdirSync(dir)) {
-      rmSync(join(dir, entry), { recursive: true, force: true });
-    }
 
     const bundle = this.bundle(setId);
     const manifest: string[] = [];
@@ -368,9 +371,36 @@ export class AgentStore {
       }
     }
     this.write(dir, 'manifest', manifest.join('\n'));
+    this.prune(dir, [...manifest, 'manifest']);
 
     chownToAgent(dir);
     return dir;
+  }
+
+  /**
+   * Removes whatever an earlier bundle left in the directory and this one
+   * does not have, so a skill deleted here disappears from the box.
+   *
+   * Only the three places a layout names are looked at, once per harness:
+   * the instructions file, and the entries of the skills and commands
+   * directories, each of which is one skill or one command.
+   *
+   * @param dir The session's materialized directory.
+   * @param keep Every path this bundle wrote, relative to `dir`.
+   */
+  private prune(dir: string, keep: readonly string[]): void {
+    const wanted = new Set(keep);
+    for (const { layout } of Object.values(HARNESSES)) {
+      if (!wanted.has(layout.agentsMd)) rmSync(join(dir, layout.agentsMd), { force: true });
+      for (const rel of [layout.skills, layout.commands]) {
+        if (!existsSync(join(dir, rel))) continue;
+        for (const child of readdirSync(join(dir, rel))) {
+          if (wanted.has(`${rel}/${child}`)) continue;
+          rmSync(join(dir, rel, child), { recursive: true, force: true });
+        }
+      }
+    }
+    removeEmptyDirs(dir);
   }
 
   /** Writes one file under the materialized directory, agent-owned. */
@@ -389,6 +419,22 @@ export class AgentStore {
   /** Drops a session's materialized directory, when the session is deleted. */
   removeMaterialized(sessionId: string): void {
     rmSync(agentConfigPath(this.dataDir, sessionId), { recursive: true, force: true });
+  }
+}
+
+/**
+ * Removes every empty directory under `dir`, deepest first, leaving `dir`.
+ *
+ * A layout's directories nest, so the last skill of a harness leaving takes
+ * the directory it was in and the harness directory above it: a harness with
+ * nothing installed keeps nothing.
+ */
+function removeEmptyDirs(dir: string): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(dir, entry.name);
+    removeEmptyDirs(path);
+    if (readdirSync(path).length === 0) rmSync(path, { recursive: true, force: true });
   }
 }
 

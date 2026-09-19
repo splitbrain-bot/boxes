@@ -65,16 +65,17 @@ function usage(over: {
   now?: () => number;
 } = {}) {
   const walks: string[] = [];
+  const measure = over.measure ?? ((): Promise<number> => Promise.resolve(42));
   const cache = new SessionUsage({
     pathsOf: over.pathsOf ?? ((id) => [`/data/workspaces/${id}`]),
     ttlMs: 1000,
     now: over.now ?? (() => 0),
-    measure:
-      over.measure ??
-      ((path) => {
-        walks.push(path);
-        return Promise.resolve(42);
-      }),
+    // Recorded around whichever measurer the test supplied, so the walks are
+    // countable whether or not it brought its own sizes.
+    measure: (path) => {
+      walks.push(path);
+      return measure(path);
+    },
   });
   return { cache, walks };
 }
@@ -136,7 +137,7 @@ test('what a session is using is its workspace and its home, together', async ()
   // got — and the home, with the caches and the installed tools in it, is
   // usually the larger half of the answer.
   assert.equal(cache.bytes('s1', up), 1000);
-  assert.deepEqual(walks, []);
+  assert.deepEqual(walks, ['/data/workspaces/s1', '/data/homes/s1']);
 });
 
 test('a session whose home is still a volume is measured by its workspace alone', async () => {
@@ -375,4 +376,41 @@ test('a deleted session takes its measurement with it', async () => {
 
   cache.forget('s1');
   assert.equal(cache.bytes('s1', up), null);
+});
+
+test('a walk that was measuring while the workspace changed is not the answer', async () => {
+  // The upload lands mid-walk, so what the walk is about to store is the
+  // size before it. Stored with a fresh timestamp it would be the answer for
+  // the whole interval — and for a box that is down, for good, since nothing
+  // else makes one due.
+  let size = 42;
+  let walks = 0;
+  let land: () => void = () => {};
+  const { cache } = usage({
+    measure: () =>
+      new Promise<number>((resolve) => {
+        walks++;
+        land = () => resolve(size);
+      }),
+  });
+  /** Lets a queued walk reach the measurer above. */
+  const queued = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  cache.bytes('s1', down);
+  await queued();
+  const overtaken = cache.settled();
+  cache.forget('s1');
+  size = 99;
+  land();
+  await overtaken;
+
+  // Nothing was kept from the walk the upload overtook, so the next read has
+  // no answer yet and starts a walk of its own.
+  assert.equal(cache.bytes('s1', down), null);
+  await queued();
+  assert.equal(walks, 2);
+  const settling = cache.settled();
+  land();
+  await settling;
+  assert.equal(cache.bytes('s1', down), 99);
 });

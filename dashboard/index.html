@@ -41,15 +41,27 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Boxes" />
-    <meta name="theme-color" content="#18181b" />
+    <!-- One per scheme, so the browser chrome follows the phone's setting
+         instead of standing dark against a light page. -->
+    <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
     <title>Boxes</title>
+    <!-- The page's one inline script, and the reason its content security
+         policy carries a hash: the orchestrator names this script's SHA-256
+         in THEME_SCRIPT_HASH (orchestrator/src/app.ts), so a character
+         changed here has to be changed there too. -->
     <script>
       // Applied before first paint, so the page never flashes the wrong
-      // scheme. Tailwind's dark variant is the .dark class (globals.css).
+      // scheme, and again on every change, so switching the phone between
+      // light and dark does not need a reload. Tailwind's dark variant is the
+      // .dark class (globals.css).
       try {
-        if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-          document.documentElement.classList.add('dark');
-        }
+        var scheme = window.matchMedia('(prefers-color-scheme: dark)');
+        var apply = function () {
+          document.documentElement.classList.toggle('dark', scheme.matches);
+        };
+        apply();
+        scheme.addEventListener('change', apply);
       } catch (e) {
         /* matchMedia is absent in some embedded browsers */
       }

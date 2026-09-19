@@ -31,6 +31,7 @@ export function HunkSheet({
   hunk: ReviewDiffHunk | null;
   onClose: () => void;
 }) {
+  const lines = (hunk?.diff ?? '').split('\n');
   return (
     <Sheet open={hunk !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
       <SheetContent side="bottom" className="max-h-[70vh] gap-0">
@@ -44,9 +45,9 @@ export function HunkSheet({
         </SheetHeader>
         <div className="min-h-0 overflow-auto px-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
           <div className="min-w-full font-mono text-[13px] leading-[1.5]">
-            {(hunk?.diff ?? '').split('\n').map((line, i) =>
+            {lines.map((line, i) =>
               // A trailing empty line is the terminator, not a diff line.
-              i === (hunk?.diff ?? '').split('\n').length - 1 && line === '' ? null : (
+              i === lines.length - 1 && line === '' ? null : (
                 <div
                   key={i}
                   className={cn(

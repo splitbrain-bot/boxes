@@ -9,7 +9,7 @@
  */
 
 /** How near the top the header always stands. */
-export const AT_TOP = 48;
+const AT_TOP = 48;
 /**
  * How near the bottom counts as pinned to it.
  *
@@ -23,7 +23,7 @@ export const AT_TOP = 48;
  */
 export const AT_BOTTOM = 8;
 /** How far a downward run has to go before it gives way. */
-export const HIDE_AFTER = 32;
+const HIDE_AFTER = 32;
 /**
  * And how far back up before it returns.
  *
@@ -32,7 +32,7 @@ export const HIDE_AFTER = 32;
  * scroller settling after a smooth scroll drifts by a dozen pixels either
  * way. Any flick worth the name clears two dozen.
  */
-export const SHOW_AFTER = 24;
+const SHOW_AFTER = 24;
 /**
  * A single step longer than this is a jump rather than reading.
  *
@@ -43,7 +43,7 @@ export const SHOW_AFTER = 24;
  * hand on the glass arrives as a frame's worth at a time. Three hundred pixels
  * in a frame is faster than a fling and slower than any jump worth making.
  */
-export const JUMP = 320;
+const JUMP = 320;
 /**
  * How long a decision takes to settle, and small steps go unread for.
  *
@@ -59,12 +59,12 @@ export const JUMP = 320;
  * event, and a flick that changed nothing is exactly what this was supposed to
  * stop being.
  */
-export const SETTLE_MS = 300;
+const SETTLE_MS = 300;
 /** The most a settling scroller nudges itself by in one step. */
-export const NUDGE = 24;
+const NUDGE = 24;
 
 /** One scroll event, as much of it as the decision uses. */
-export interface ScrollAwaySample {
+interface ScrollAwaySample {
   /** Where the scroller is now. */
   top: number;
   /** How much of the content is still below the fold. */

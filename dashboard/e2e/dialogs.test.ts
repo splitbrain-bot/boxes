@@ -1,16 +1,6 @@
 import { afterAll, afterEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubCodexHarness,
-  stubCodexHarnessInfo,
-  stubHarness,
-  stubHarnessInfo,
-  stubSession,
-  stubThread,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { startOrchestrator, type SessionSpec, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The two dialogs that start a conversation, driven in a real browser.
@@ -26,16 +16,18 @@ import {
  * last answer comes back next time from wherever it was given.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
 const ID = 'a1b2c3d4';
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
-/** A deployment running both agents, which is what the dialogs are for. */
-async function twoHarnesses(sessions = [stubSession()]): Promise<void> {
-  stub = await startStubOrchestrator(DIST, sessions);
-  stub.state.harnesses = [stubHarness(), stubCodexHarness()];
-  stub.state.harnessInfo = [stubHarnessInfo(), stubCodexHarnessInfo()];
+/**
+ * A deployment running both agents, which is what the dialogs are for: a
+ * credential for each, and each adapter's catalogue for the dialog to read.
+ */
+async function twoHarnesses(sessions: SessionSpec[] = [{}]): Promise<void> {
+  stub = await startOrchestrator(sessions);
+  stub.state.openaiCredential = 'ok';
+  stub.state.catalogued = ['claude', 'codex'];
 }
 
 afterEach(async () => {
@@ -129,11 +121,7 @@ test('the new-session form creates the box and its first thread in one request',
 
 test('an agent with no credential is offered greyed out, with the reason', async () => {
   await twoHarnesses();
-  stub.state.harnesses = [stubHarness(), stubCodexHarness({ credential: null, runnable: false })];
-  stub.state.harnessInfo = [
-    stubHarnessInfo(),
-    stubCodexHarnessInfo({ credential: null, runnable: false }),
-  ];
+  stub.state.openaiCredential = null;
 
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
@@ -169,10 +157,10 @@ test('an agent with no credential is offered greyed out, with the reason', async
 });
 
 test('a deployment that has never run an agent offers the agent choice alone', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
+  stub = await startOrchestrator();
   // No adapter has ever answered here, so there is nothing cached to offer
   // and nothing is started to find out.
-  stub.state.harnessInfo = [stubHarnessInfo({ catalog: null })];
+  stub.state.catalogued = [];
 
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
@@ -210,7 +198,7 @@ test('the dialog opens on what the last one chose, from the deployment', async (
 
     // Stored against the harness rather than in this browser, so the next
     // dialog opens on it from any device.
-    await expect.poll(() => stub.state.settings.dialogs['claude']).toEqual({
+    await expect.poll(async () => (await stub.settings()).dialogs['claude']).toEqual({
       modeId: 'plan',
       // The model, because the registry has a default for it; not the
       // effort, which nobody touched — the catalogue's own value for one is
@@ -235,11 +223,7 @@ test('the dialog opens on what the last one chose, from the deployment', async (
 });
 
 test('a thread says which agent runs it, on its row and in its header', async () => {
-  await twoHarnesses([
-    stubSession({
-      threads: [stubThread(), stubThread({ id: 'th2', ordinal: 2, harness: 'codex' })],
-    }),
-  ]);
+  await twoHarnesses([{ threads: [{}, { id: 'th2', harness: 'codex' }] }]);
 
   const { page, errors, close } = await openPage(stub.url, '/');
   try {

@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import { closeBrowser, getBrowser, launchProfile } from './browser.ts';
-import { startStubOrchestrator, type StubOrchestrator } from './stub-orchestrator.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * Installing the dashboard: what a browser has to be able to fetch, and read,
@@ -12,18 +11,16 @@ import { startStubOrchestrator, type StubOrchestrator } from './stub-orchestrato
  * browser ever gets to read it depends on how the page asks for it, and the
  * answer only differs in the deployment shape the README requires — an
  * authenticating reverse proxy in front of an orchestrator that has no auth
- * of its own. So the stub is put behind one here.
+ * of its own. So the deployment is put behind one here.
  */
-
-const DIST = resolve(import.meta.dirname, '../dist');
 
 /** What the proxy in front of this deployment is imagined to check. */
 const COOKIE = 'boxes_proxy_session';
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
 beforeAll(async () => {
-  stub = await startStubOrchestrator(DIST);
+  stub = await startOrchestrator();
   stub.state.requireCookie = COOKIE;
 });
 

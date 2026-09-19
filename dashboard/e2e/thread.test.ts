@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startStubOrchestrator, stubSession, type StubOrchestrator } from './stub-orchestrator.ts';
-import type { GatewayScript } from './stub-gateway.ts';
+import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
  * The live thread against a stub gateway speaking the agent side of ACP.
@@ -14,15 +13,7 @@ import type { GatewayScript } from './stub-gateway.ts';
  * session/cancel the way the real gateway does.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
-const SESSION = stubSession();
-
-/** A streamed assistant reply, in the chunks an adapter would send it. */
-function reply(...texts: string[]): SessionUpdate[] {
-  return texts.map(
-    (text) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as SessionUpdate,
-  );
-}
+const SESSION = DEFAULT_SESSION;
 
 /**
  * A real PNG, small enough to sit in the source: two bands and a diagonal, so
@@ -30,15 +21,15 @@ function reply(...texts: string[]): SessionUpdate[] {
  */
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
 
-let stub: StubOrchestrator;
+let stub: TestOrchestrator;
 
-/** Starts a stub with the given gateway behaviour. */
+/** Starts a deployment whose agent behaves as the script says. */
 async function start(script?: Partial<GatewayScript>): Promise<void> {
-  stub = await startStubOrchestrator(DIST, [SESSION], script);
+  stub = await startOrchestrator([{}], script);
 }
 
 beforeEach(() => {
-  stub = undefined as unknown as StubOrchestrator;
+  stub = undefined as unknown as TestOrchestrator;
 });
 
 afterEach(async () => {
@@ -353,10 +344,15 @@ test('cancelling stops the run state', async () => {
     await expect.poll(() => cancel.isVisible()).toBe(true);
 
     await cancel.click();
+    // The cancel reaches the gateway as an ACP notification, and the turn it
+    // names ends there: nothing is released by hand, and the composer takes
+    // prompts again once the turn state says the thread is idle.
+    await expect
+      .poll(() => stub.gateway.notifications.some((n) => n.method === 'session/cancel'))
+      .toBe(true);
     await expect.poll(() => cancel.isVisible()).toBe(false);
     await expect.poll(() => page.getByLabel('Send message').isVisible()).toBe(true);
 
-    stub.gateway.release();
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -416,7 +412,7 @@ test('a turn held open for background work still hands the composer back', async
     await expect.poll(() => stub.backgroundStops.length).toBe(1);
     assert.deepEqual(stub.backgroundStops[0], {
       sessionId: SESSION.id,
-      threadId: SESSION.threads[0]!.id,
+      threadId: SESSION.threadId,
     });
 
     // And when the work is over, the bar goes with it — on the gateway's own
@@ -486,7 +482,7 @@ test('the bar names the work by kind, and offers no stop for a task that says it
     await expect.poll(() => stub.backgroundStops.length).toBe(1);
     assert.deepEqual(stub.backgroundStops[0], {
       sessionId: SESSION.id,
-      threadId: SESSION.threads[0]!.id,
+      threadId: SESSION.threadId,
       processId: 'bg-2',
     });
 
@@ -575,14 +571,14 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The header is the dashboard's, and the thread must not cover it: the
-    // back link, the mode switcher and the info link all have to be
+    // back link, the mode switcher and the review link all have to be
     // clickable, not painted over by a floating panel.
     const header = (await page.locator('header').boundingBox())!;
     const thread = (await page.locator('.aui-thread-root').boundingBox())!;
     expect(header.height).toBeGreaterThan(0);
     expect(thread.y).toBeGreaterThanOrEqual(header.y + header.height);
     await expect.poll(() => page.getByLabel('Back to sessions').isVisible()).toBe(true);
-    await expect.poll(() => page.getByLabel('Session details and controls').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel("Review this session's code").isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();

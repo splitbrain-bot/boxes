@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { AcpClient } from './acp-client.ts';
-import { ThreadStore, type ThreadSnapshot } from './thread-store.ts';
+import { INITIAL_SNAPSHOT, ThreadStore, type ThreadSnapshot } from './thread-store.ts';
 import { wsUrlFor } from '@/lib/ws-url';
 
 /**
@@ -51,21 +51,11 @@ export function useThread(
 
 const NOOP_SUBSCRIBE = (): (() => void) => () => {};
 
-/** The state a view shows before the store exists. */
-const INITIAL: ThreadSnapshot = {
-  messages: [],
-  isRunning: false,
-  background: [],
-  awaiting: null,
-  connection: 'connecting',
-  modes: null,
-  configOptions: [],
-  plan: null,
-  commands: [],
-  error: null,
-  // No store yet is the same to a reader as a store with nothing read into
-  // it: something is on its way and this is not it.
-  loading: true,
-};
-
-const getInitial = (): ThreadSnapshot => INITIAL;
+/**
+ * The state a view shows before the store exists.
+ *
+ * The store's own first snapshot: no store yet is the same to a reader as a
+ * store with nothing read into it — something is on its way and this is not
+ * it.
+ */
+const getInitial = (): ThreadSnapshot => INITIAL_SNAPSHOT;

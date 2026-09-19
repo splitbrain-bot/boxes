@@ -5,9 +5,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  appendExecLog,
   MIGRATIONS,
   openDb,
   readHarnessCatalog,
+  touchSession,
   upsertHarnessCatalog,
   type Db,
 } from './db.ts';
@@ -248,11 +250,10 @@ test('a deployment on the previous release upgrades cleanly', () => {
 
 test('threads from before the mode column upgrade to the deployment default', () => {
   const db = new Database(join(dir, 'boxes.db'));
-  // The version just before the migration that adds the two columns, named
-  // rather than derived from the length: a migration appended later must not
-  // silently move this case onto itself.
-  for (const sql of MIGRATIONS.slice(0, 10)) db.exec(sql);
-  db.pragma('user_version = 10');
+  // The schema as it stood before the migration that adds the two columns.
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN mode_id'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
@@ -378,15 +379,147 @@ test('threads from before the done column read as not done', () => {
   }
 });
 
+test('the exec log gains where each command was typed, and older rows have none', () => {
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
+  db.pragma('user_version = 16');
+  db.prepare(
+    `INSERT INTO exec_log (session_id, thread_id, command, output, exit_code, truncated,
+       timed_out, started_at, finished_at)
+     VALUES ('s1', 't1', 'git status', 'clean', 0, 0, 0, 1000, 2000)`,
+  ).run();
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    assert.ok(columns(upgraded, 'exec_log').includes('after_id'));
+    // A row from before was typed somewhere, but nothing recorded where. It
+    // is listed at the end, which is where every row used to go.
+    const row = upgraded.prepare('SELECT after_id FROM exec_log').get() as {
+      after_id: string | null;
+    };
+    assert.equal(row.after_id, null);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('sessions from before the token column each get one of their own', () => {
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN ws_token'));
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  for (const id of ['s1', 's2']) {
+    db.prepare(
+      `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+         network_name, subnet, ws_volume, home_volume, status, created_at, last_active_at)
+       VALUES (?, 'old session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+         ?, '10.200.0.0/24', '', '', 'running', 1000, 2000)`,
+    ).run(id, `sn-${id}`);
+  }
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    // A session that existed before this went on being reachable, so it needs
+    // a token now rather than at its next start.
+    const rows = upgraded
+      .prepare('SELECT id, ws_token FROM sessions ORDER BY id')
+      .all() as Array<{ id: string; ws_token: string }>;
+    assert.equal(rows.length, 2);
+    for (const row of rows) assert.match(row.ws_token, /^[0-9a-f]{64}$/);
+    // One each: the backfill is what keeps a leaked token from opening the
+    // session next to it.
+    assert.notEqual(rows[0]!.ws_token, rows[1]!.ws_token);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('a database written by a newer build is refused rather than opened', () => {
+  // A rollback puts this build on a schema it does not know: the columns a
+  // later migration changed are the ones every query here names, so opening
+  // it happily means failing at the first request instead of at boot.
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS) db.exec(sql);
+  db.pragma(`user_version = ${MIGRATIONS.length + 1}`);
+  db.close();
+
+  assert.throws(() => openDb(dir), {
+    message: new RegExp(`version ${MIGRATIONS.length + 1}.*knows ${MIGRATIONS.length}`, 's'),
+  });
+});
+
+/** A live session row, in the shape today's schema wants. */
+function insertLiveSession(db: Db, id: string): void {
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
+       ?, '10.200.0.0/24', '', '', 'running', NULL, 1000, 2000)`,
+  ).run(id, `sn-${id}`);
+}
+
+/** One stored command, in the shape the exec route records. */
+function execRecord(): Parameters<typeof appendExecLog>[2] {
+  return {
+    thread_id: null,
+    command: 'ls',
+    output: '',
+    exit_code: 0,
+    truncated: 0,
+    timed_out: 0,
+    started_at: 1000,
+    finished_at: 2000,
+    after_id: null,
+  };
+}
+
+test('a deleted session takes no more writes', () => {
+  // Deleting sets the tombstone before it clears the tables, so work still in
+  // flight — a command that is just finishing, a touch — must not put rows
+  // back behind it.
+  const db = openDb(dir);
+  insertLiveSession(db, 's1');
+  assert.equal(appendExecLog(db, 's1', execRecord()) > 0, true);
+
+  db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = 's1'").run();
+  assert.equal(appendExecLog(db, 's1', execRecord()), 0);
+  touchSession(db, 's1');
+
+  const counts = (table: string): number =>
+    (
+      db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE session_id = ?`).get('s1') as {
+        n: number;
+      }
+    ).n;
+  assert.equal(counts('exec_log'), 1);
+  const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('s1') as {
+    last_active_at: number;
+  };
+  assert.equal(row.last_active_at, 2000);
+  db.close();
+});
+
+test('a row is still stored for a session that has no row at all', () => {
+  // The guard is the tombstone, not the row: a caller recording against an id
+  // the sessions table never had is not what it is there for.
+  const db = openDb(dir);
+  assert.equal(appendExecLog(db, 'nowhere', execRecord()) > 0, true);
+  db.close();
+});
+
 /**
  * A deployment at the version before credentials, harnesses and the config map
  * — the last state anybody can be in — with one live session and one thread
  * that was left on a model.
  */
-function atVersion16(): void {
+function atLastRelease(): void {
   const db = new Database(join(dir, 'boxes.db'));
-  for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
-  db.pragma('user_version = 16');
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('CREATE TABLE credentials'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
   db.prepare(
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
@@ -409,7 +542,7 @@ function atVersion16(): void {
 }
 
 test('the credential and settings tables arrive empty on an existing deployment', () => {
-  atVersion16();
+  atLastRelease();
 
   const upgraded = openDb(dir);
   try {
@@ -451,7 +584,7 @@ test('the credential and settings tables arrive empty on an existing deployment'
 });
 
 test('a thread from before harnesses is Claude, on the model it was left on', () => {
-  atVersion16();
+  atLastRelease();
   const upgraded = openDb(dir);
   try {
     // Every thread there has ever been is Claude's, which is what the column

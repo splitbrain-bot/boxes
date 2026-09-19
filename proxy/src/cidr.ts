@@ -102,6 +102,29 @@ function hexGroup(text: string): number | null {
 }
 
 /**
+ * The IPv4 address an IPv6 address reaches, or null when it embeds none.
+ *
+ * Several IPv6 forms carry an IPv4 address inside them: v4-mapped
+ * (::ffff:a.b.c.d), v4-translated (::ffff:0:a.b.c.d), v4-compatible
+ * (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4 (2002::/16). Each is vetted as
+ * the IPv4 address it reaches, so none of them is a way past the IPv4 ranges.
+ */
+function embeddedV4(groups: readonly number[]): number | null {
+  const at = (i: number): number => groups[i] ?? 0;
+  const zeros = (upTo: number): boolean => groups.slice(0, upTo).every((g) => g === 0);
+  const low = (): number => (((at(6) << 16) | at(7)) >>> 0);
+
+  if (zeros(5) && at(5) === 0xffff) return low(); // ::ffff:a.b.c.d
+  if (zeros(4) && at(4) === 0xffff && at(5) === 0) return low(); // ::ffff:0:a.b.c.d
+  if (zeros(6) && (at(6) !== 0 || at(7) !== 0)) return low(); // ::a.b.c.d
+  // 64:ff9b::/96
+  const nat64 = at(0) === 0x64 && at(1) === 0xff9b;
+  if (nat64 && at(2) === 0 && at(3) === 0 && at(4) === 0 && at(5) === 0) return low();
+  if (at(0) === 0x2002) return (((at(1) << 16) | at(2)) >>> 0); // 2002::/16
+  return null;
+}
+
+/**
  * Whether an address is one an agent must not reach. Unparseable input counts
  * as blocked: this check fails closed.
  */
@@ -117,14 +140,8 @@ export function isBlockedAddress(address: string): boolean {
   const groups = parseV6(text);
   if (groups === null) return true;
 
-  // v4-mapped (::ffff:a.b.c.d) and v4-compatible (::a.b.c.d) forms are vetted
-  // as the IPv4 address they reach.
-  const isV4Mapped =
-    groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff;
-  const isV4Compat =
-    groups.slice(0, 6).every((g) => g === 0) && (groups[6] !== 0 || groups[7] !== 0);
-  if (isV4Mapped || isV4Compat) {
-    const embedded = (((groups[6] ?? 0) << 16) | (groups[7] ?? 0)) >>> 0;
+  const embedded = embeddedV4(groups);
+  if (embedded !== null) {
     return V4_BLOCKED.some(([base, prefix]) => inV4Range(embedded, base, prefix));
   }
 

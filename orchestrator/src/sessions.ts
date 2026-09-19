@@ -23,6 +23,7 @@ import {
   sessionsWithActiveTurns,
   setThreadDone,
   threadConfig,
+  takenSubnets,
   touchSession,
   type Db,
   type SessionRow,
@@ -35,10 +36,11 @@ import { HttpError } from './http-error.ts';
 import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
+import { generateWsToken } from './secret.ts';
 import { readSettings } from './settings.ts';
 import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
-import { NOTHING_TO_FORK, UpstreamSession } from './gateway/upstream.ts';
+import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamSession } from './gateway/upstream.ts';
 import { allocateSubnet } from './subnet.ts';
 
 /**
@@ -46,9 +48,35 @@ import { allocateSubnet } from './subnet.ts';
  * runtime truth; the sessions table is metadata.
  */
 
+/**
+ * How many times more sessions the host may hold than the database knows of
+ * before the orphan sweep refuses to run.
+ *
+ * The case worth catching is a database that does not belong to these files —
+ * a data volume mounted from the wrong place, or replaced — where the host is
+ * full of sessions and the table knows almost none of them. One session
+ * created against the wrong database must not disarm that, so the guard is a
+ * ratio rather than an empty table; an empty table falls under the same rule,
+ * because any stray at all outnumbers nothing.
+ */
+const STRAY_SESSION_RATIO = 3;
+
 /** Creates, starts, stops and describes sessions. */
 export class SessionManager {
   private readonly upstreams = new Map<string, UpstreamSession>();
+
+  /**
+   * One promise chain per session, so two operations that change the same box
+   * never overlap. Different sessions do not wait on each other, and a
+   * session's entry goes as soon as its chain drains.
+   */
+  private readonly slots = new Map<string, Promise<unknown>>();
+
+  /**
+   * Sessions a stop or a delete has overtaken. Whatever is queued or running
+   * for one gives itself up at its next step; see {@link giveUpIfPreempted}.
+   */
+  private readonly preempted = new Set<string>();
 
   /** Permission requests waiting for a browser, across all sessions. */
   readonly pending: PendingStore;
@@ -89,6 +117,60 @@ export class SessionManager {
   ) {
     this.pending = new PendingStore(db);
     this.hostDataDir = cfg.HOST_DATA_DIR || cfg.DATA_DIR;
+  }
+
+  // --- one operation per session at a time -----------------------------------
+  //
+  // Repairing a container is check-then-act: the daemon is asked what it has,
+  // and the answer is acted on a moment later. Three paths reach those
+  // repairs — start, a local command, and the gateway opening a thread on a
+  // stopped box — and the reaper stops sessions under all of them. Two of
+  // them at once would have one remove the container the other is about to
+  // exec into. So every operation that changes a session runs alone, in the
+  // order it arrived; reads are not queued.
+
+  /**
+   * Runs `fn` with the session to itself, after whatever is already queued
+   * for it.
+   *
+   * A plain promise chain rather than a mutex library: the queue is per
+   * session, and a rejection must not wedge it — hence the catch on the
+   * stored tail. A request for a busy session waits; it is not refused and
+   * there is no timeout that gives up on it.
+   *
+   * Nothing `fn` calls may take a slot for the same session again, or it
+   * would wait for itself forever. That is why each queued method here is a
+   * thin wrapper around a private form that takes no slot of its own: the
+   * repairs and the teardown call those, and only a public entry point ever
+   * calls this.
+   */
+  private withSlot<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.slots.get(id) ?? Promise.resolve();
+    const result = previous.then(fn, fn);
+    const tail: Promise<void> = result.then(
+      () => this.releaseSlot(id, tail),
+      () => this.releaseSlot(id, tail),
+    );
+    this.slots.set(id, tail);
+    return result;
+  }
+
+  /** Forgets a session's chain once nothing is left waiting on it. */
+  private releaseSlot(id: string, tail: Promise<void>): void {
+    if (this.slots.get(id) === tail) this.slots.delete(id);
+  }
+
+  /**
+   * Gives up the operation in flight when a stop or a delete has overtaken
+   * it.
+   *
+   * Checked between the steps of an operation rather than inside one: a
+   * container half created is worse than one step too many, and every step
+   * here is short.
+   */
+  private giveUpIfPreempted(id: string): void {
+    if (!this.preempted.has(id)) return;
+    throw new HttpError(409, 'This session was stopped while the request was in flight');
   }
 
   // --- workspaces -----------------------------------------------------------
@@ -287,21 +369,34 @@ export class SessionManager {
     // to no session at all, so none of the reasoning below reaches it.
     await this.sweepLoginContainers();
 
-    const live = new Set(this.allRows().map((row) => row.id));
     const containers = await dk.listSessionContainers();
     const networks = await dk.listSessionNetworks();
     const volumes = await dk.listSessionVolumes();
+    // The files are read separately, because a teardown removes the Docker
+    // objects first: a session it gave up on halfway has nothing left to find
+    // it by except the two directories it wrote.
+    const directories = ws.sessionDirectoryIds(this.cfg.DATA_DIR);
+    // Last, after everything it is matched against: create() inserts the row
+    // before it makes anything, so a session created while the readings
+    // above were running has its row by now, and its network, workspace and
+    // home are not orphans.
+    const live = new Set(this.allRows().map((row) => row.id));
     const orphaned = <T extends { sessionId: string }>(all: T[]): T[] =>
       all.filter((o) => !live.has(o.sessionId));
+    const strayContainers = orphaned(containers);
+    const strayNetworks = orphaned(networks);
+    const strayVolumes = orphaned(volumes);
+    const strayDirectories = directories.filter((id) => !live.has(id));
 
-    const strays = [...orphaned(containers), ...orphaned(networks), ...orphaned(volumes)];
-    const sessions = new Set(strays.map((o) => o.sessionId));
+    const strays = [...strayContainers, ...strayNetworks, ...strayVolumes];
+    const sessions = new Set([...strays.map((o) => o.sessionId), ...strayDirectories]);
     if (sessions.size === 0) return;
 
-    // An empty sessions table beside a host full of sessions is likelier to
-    // be a database these objects do not belong to than a genuine pile of
-    // orphans: a data volume mounted from the wrong place, or replaced,
-    // leaves exactly that, and sweeping would take every session's home.
+    // A host holding far more sessions than this database knows of is
+    // likelier to be a database these objects do not belong to than a genuine
+    // pile of orphans: a data volume mounted from the wrong place, or
+    // replaced, leaves exactly that, and sweeping would take every session's
+    // home.
     //
     // Deleted sessions are counted, tombstones and all, so a deployment whose
     // sessions have all been deleted still has rows and still gets its failed
@@ -309,28 +404,32 @@ export class SessionManager {
     const known = (
       this.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }
     ).n;
-    if (known === 0) {
-      log.warn('not sweeping: this database knows of no session, and the host is full of them', {
+    if (sessions.size > known * STRAY_SESSION_RATIO) {
+      log.warn('not sweeping: the host holds far more sessions than this database knows of', {
+        strays: sessions.size,
+        known,
+        ratio: STRAY_SESSION_RATIO,
         sessions: [...sessions],
-        containers: orphaned(containers).length,
-        networks: orphaned(networks).length,
-        volumes: orphaned(volumes).length,
+        containers: strayContainers.length,
+        networks: strayNetworks.length,
+        volumes: strayVolumes.length,
+        directories: strayDirectories.length,
       });
       return;
     }
 
     log.info('sweeping what is left of sessions that are gone', { sessions: [...sessions] });
-    for (const container of orphaned(containers)) {
+    for (const container of strayContainers) {
       await this.sweeping(container.sessionId, 'container', () =>
         dk.removeContainer(container.id),
       );
     }
-    for (const network of orphaned(networks)) {
+    for (const network of strayNetworks) {
       await this.sweeping(network.sessionId, 'network', () =>
         dk.removeNetwork(network.name, this.cfg),
       );
     }
-    for (const volume of orphaned(volumes)) {
+    for (const volume of strayVolumes) {
       await this.sweeping(volume.sessionId, 'volume', () => dk.removeVolume(volume.name));
     }
     // And the files, which are the size of all of the above put together.
@@ -542,7 +641,10 @@ export class SessionManager {
 
   /**
    * Replaces a session's container with a fresh one built from `row`, and
-   * returns the new container's id. The caller records it.
+   * returns the new container's id. The row names the new container and the
+   * workspace directory it binds before it is started, so a start that fails
+   * cannot leave the row naming the removed container or the mount it no
+   * longer has; the caller records whatever else changed with it.
    *
    * The old container is stopped before it is removed even where it is known
    * to be down already: both calls tolerate a container that is gone, and one
@@ -554,6 +656,9 @@ export class SessionManager {
       await dk.removeContainer(row.container_id);
     }
     const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
+    this.db
+      .prepare('UPDATE sessions SET container_id = ?, workspace_dir = ? WHERE id = ?')
+      .run(containerId, row.workspace_dir, row.id);
     await dk.startContainer(containerId);
     return containerId;
   }
@@ -634,14 +739,17 @@ export class SessionManager {
         this.notifier,
         (status) => this.setStatus(id, status),
         async () => {
-          const row = this.getRow(id);
-          if (!row || row.status === 'deleted') return;
-          this.agents.materialize(id, row.agent_set_id);
           // Opening a thread starts a stopped box without going through
-          // start(), so the one repair that decides whether there is a box at
-          // all has to happen here too. It leaves the row's container id
-          // current, which is what the caller reads next.
-          await this.restoreMissingContainer(row);
+          // start(), so the repairs have to happen here too — and under the
+          // same slot, or they would race a start, a local command or a stop.
+          // They leave the row's container id current, which is what the
+          // caller reads next; the row is read inside the slot, because a
+          // wait here can outlast what it says.
+          await this.withSlot(id, async () => {
+            const row = this.getRow(id);
+            if (!row || row.status === 'deleted') return;
+            await this.prepareContainer(row);
+          });
         },
       );
       this.upstreams.set(id, up);
@@ -688,7 +796,12 @@ export class SessionManager {
     // Server-generated: user input never reaches a Docker object name.
     const id = randomBytes(4).toString('hex');
     const now = Date.now();
-    const subnet = allocateSubnet(this.cfg.SESSION_SUBNET_POOL, nextSubnetIndex(this.db));
+    const subnet = allocateSubnet(
+      this.cfg.SESSION_SUBNET_POOL,
+      nextSubnetIndex(this.db),
+      takenSubnets(this.db),
+    );
+    if (!subnet) throw new HttpError(503, 'No free subnet in the pool');
     const row: SessionRow = {
       id,
       name,
@@ -712,6 +825,9 @@ export class SessionManager {
       status: 'creating',
       agent_set_id: agentSetId,
       current_thread_id: null,
+      // Its own from the start: what opens this session's WebSocket opens no
+      // other session.
+      ws_token: generateWsToken(),
       created_at: now,
       last_active_at: now,
     };
@@ -720,35 +836,17 @@ export class SessionManager {
       .prepare(
         `INSERT INTO sessions (id, name, profile, image, container_id,
            network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-           status, agent_set_id, current_thread_id, created_at, last_active_at)
+           status, agent_set_id, current_thread_id, ws_token, created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @home_dir,
-           @status, @agent_set_id, @current_thread_id, @created_at, @last_active_at)`,
+           @status, @agent_set_id, @current_thread_id, @ws_token, @created_at, @last_active_at)`,
       )
       .run(row);
 
     const slog = log.session(id);
     try {
-      await dk.createNetwork(row.network_name, subnet, id);
-      await dk.ensureProxyAttached(row.network_name, this.cfg);
-      ws.createWorkspace(this.cfg.DATA_DIR, id);
-      // Before the container, because it is one of its mounts.
-      this.agents.materialize(id, agentSetId);
-      // A bind mount covers what the image put in /home/agent rather than
-      // being seeded from it the way a named volume is, so seedHomeFromImage
-      // fills it. An empty home costs the agent's own `~/.local/bin` on the
-      // PATH of a login shell.
-      ws.createHome(this.cfg.DATA_DIR, id);
-      await dk.seedHomeFromImage(
-        ws.hostHomePath(this.hostDataDir, id),
-        row.image,
-        id,
-      );
-      const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
-      await dk.startContainer(containerId);
-      this.db
-        .prepare("UPDATE sessions SET container_id = ?, status = 'running' WHERE id = ?")
-        .run(containerId, id);
+      await this.withSlot(id, () => this.createResources(row));
+      this.setStatus(id, 'running');
       // The first conversation, as a row and nothing more. Nothing is minted
       // here: a thread with no adapter-side conversation is a state the
       // gateway already handles — it is what an adapter restart leaves behind —
@@ -771,28 +869,130 @@ export class SessionManager {
     return this.detail(id);
   }
 
+  /**
+   * Builds the network, the two directories and the container of a new
+   * session, and starts it.
+   *
+   * Split out of {@link create} so it can run under the session's slot: this
+   * is the half that touches Docker and the filesystem, and its order is the
+   * one that works — the network before the container that joins it, and both
+   * directories before the container that binds them.
+   */
+  private async createResources(row: SessionRow): Promise<void> {
+    const id = row.id;
+    await dk.createNetwork(row.network_name, row.subnet, id);
+    await dk.ensureProxyAttached(row.network_name, this.cfg);
+    ws.createWorkspace(this.cfg.DATA_DIR, id);
+    // Before the container, because it is one of its mounts.
+    this.agents.materialize(id, row.agent_set_id);
+    // A bind mount covers what the image put in /home/agent rather than
+    // being seeded from it the way a named volume is, so seedHomeFromImage
+    // fills it. An empty home costs the agent's own `~/.local/bin` on the
+    // PATH of a login shell.
+    ws.createHome(this.cfg.DATA_DIR, id);
+    await dk.seedHomeFromImage(ws.hostHomePath(this.hostDataDir, id), row.image, id);
+    const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
+    // Recorded before the start, so a start that fails leaves a row naming
+    // the container and the teardown removes it.
+    this.db.prepare('UPDATE sessions SET container_id = ? WHERE id = ?').run(containerId, id);
+    await dk.startContainer(containerId);
+  }
+
   // --- start / stop / delete ------------------------------------------------
 
-  /** Starts a stopped session's container and re-attaches the egress proxy. */
-  async start(id: string): Promise<SessionDetail> {
-    let row = this.mustGet(id);
-    if (!row.container_id) throw new HttpError(409, 'Session has no container');
+  /**
+   * Everything a session's container has to be brought up to date on before
+   * it is started, in the one order that is safe. Returns the row as it now
+   * stands, which is what names the container to start.
+   *
+   * Every repair is a no-op for a session that does not need it, and each is
+   * put off while the container is running, so a box mid-turn is never pulled
+   * out from under its adapter.
+   *
+   * Runs under the caller's slot and takes none of its own, which is what
+   * lets the three paths that start a box share it without any of them
+   * waiting for itself. A stop or a delete arriving meanwhile is honoured
+   * between the repairs rather than inside one.
+   */
+  private async prepareContainer(row: SessionRow): Promise<SessionRow> {
+    this.giveUpIfPreempted(row.id);
     // Rewritten on every start, so an edited set reaches the box here — the
     // entrypoint installs what this leaves behind, and nothing else does.
     // Before either step below, both of which may create a container that
     // binds the directory: the daemon would otherwise create it itself, empty
     // and owned by root.
     this.agents.materialize(row.id, row.agent_set_id);
-    row = await this.migrateWorkspace(row);
+    // Before anything binds the other two, for the same reason.
+    this.requireDirectories(row);
+    let current = await this.migrateWorkspace(row);
+    this.giveUpIfPreempted(row.id);
     // Before the two below, which both ask the daemon about a container that
     // may not be there: after this one, there is a container to ask about.
-    row = await this.restoreMissingContainer(row);
+    current = await this.restoreMissingContainer(current);
+    this.giveUpIfPreempted(row.id);
     // Before the mount check below: a roll recreates the container from
     // containerSpec, which already binds the agent configuration, so a
     // session that moves image comes back with the mount and the check that
     // follows finds nothing to do.
-    row = await this.rollOntoCurrentImage(row);
-    row = await this.ensureAgentConfigMount(row);
+    current = await this.rollOntoCurrentImage(current);
+    this.giveUpIfPreempted(row.id);
+    return this.ensureAgentConfigMount(current);
+  }
+
+  /**
+   * Refuses to go on when a session's bind sources are gone, naming what is
+   * missing, and marks the session as an error.
+   *
+   * Docker creates a bind source it cannot find, empty and owned by root. The
+   * box then starts and looks healthy while the agent cannot write a thing:
+   * every turn fails, and nothing says why. A crash during a delete, a backup
+   * restored in part, or a HOST_DATA_DIR that stopped being right all leave
+   * exactly this.
+   *
+   * Nothing is recreated here. The home holds the adapter's thread
+   * transcripts, so seeding a fresh one would erase every conversation while
+   * looking like a repair. Whoever restores the files is the one who can tell
+   * what happened.
+   *
+   * Only the halves the row says are directories are checked. A session from
+   * before either became one still mounts a named volume, which Docker keeps
+   * on its own.
+   */
+  private requireDirectories(row: SessionRow): void {
+    const missing: string[] = [];
+    const workspace = ws.workspacePath(this.cfg.DATA_DIR, row.id);
+    const home = ws.homePath(this.cfg.DATA_DIR, row.id);
+    if (row.workspace_dir && !ws.directoryExists(workspace)) {
+      missing.push(`its workspace directory (${workspace})`);
+    }
+    if (row.home_dir && !ws.directoryExists(home)) {
+      missing.push(`its home directory (${home})`);
+    }
+    if (missing.length === 0) return;
+
+    this.setStatus(row.id, 'error');
+    log.session(row.id).error('refusing to start a session whose files are gone', { missing });
+    throw new HttpError(
+      409,
+      `This session cannot start: ${missing.join(' and ')} cannot be found. ` +
+        'Restore the files from a backup, or delete the session.',
+    );
+  }
+
+  /**
+   * Starts a stopped session's container and re-attaches the egress proxy.
+   * Waits for whatever else the session is in the middle of.
+   */
+  async start(id: string): Promise<SessionDetail> {
+    return this.withSlot(id, () => this.startHeld(id));
+  }
+
+  /** The body of {@link start}, which runs under the session's slot. */
+  private async startHeld(id: string): Promise<SessionDetail> {
+    const stored = this.mustGet(id);
+    if (!stored.container_id) throw new HttpError(409, 'Session has no container');
+    const row = await this.prepareContainer(stored);
+    this.giveUpIfPreempted(id);
     await dk.startContainer(row.container_id!);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.setStatus(id, 'running');
@@ -810,9 +1010,10 @@ export class SessionManager {
    * here — a session container has a read-only rootfs and everything durable
    * lives in its two mounts — but it is not free of risk, so the order is
    * chosen to lose nothing at any step: copy first, recreate second, and drop
-   * the volume only once the new container has started. A crash anywhere
-   * before the row is updated leaves a volume-backed session that migrates
-   * again on the next attempt.
+   * the volume only once the new container has started. The row says which
+   * mount it has the moment the container that has it exists, so a crash
+   * cannot leave a running container on the directory beside a row that says
+   * volume, which is what copies the volume over the agent's own work.
    *
    * A running legacy session is left alone. Its container works, and it will
    * come through here at its next stop/start cycle.
@@ -833,13 +1034,10 @@ export class SessionManager {
     // own ownership with it, which a Docker-initialised volume gets right.
     ws.chownToAgent(directory);
 
-    const containerId = await this.recreateContainer(row);
-    this.db
-      .prepare(
-        `UPDATE sessions SET container_id = ?, workspace_dir = ?, ws_volume = ''
-          WHERE id = ?`,
-      )
-      .run(containerId, directory, row.id);
+    // The directory it is given is the one the new container binds, and
+    // recreateContainer records both together before the start.
+    await this.recreateContainer({ ...row, workspace_dir: directory });
+    this.db.prepare("UPDATE sessions SET ws_volume = '' WHERE id = ?").run(row.id);
 
     if (row.ws_volume) await dk.removeVolume(row.ws_volume);
     slog.info('workspace migrated', { directory });
@@ -868,30 +1066,76 @@ export class SessionManager {
     return this.mustGet(row.id);
   }
 
-  /** Stops the container and drops the upstream connection. */
+  /**
+   * Stops the container and drops the upstream connection.
+   *
+   * Overtakes what the session is in the middle of rather than queueing
+   * behind it: the flag and the upstream's own stop are both set before the
+   * slot is asked for, so the work in flight gives up at its next step and
+   * this gets the slot a step later rather than after a spawn's retries.
+   */
   async stop(id: string): Promise<SessionDetail> {
-    const row = this.mustGet(id);
+    this.preempted.add(id);
     this.upstreams.get(id)?.stop();
+    return this.withSlot(id, () => this.stopHeld(id));
+  }
+
+  /**
+   * Stops a session unless something else is already working on it, and says
+   * whether it did.
+   *
+   * For the reaper, which must never wait: a session with an operation in
+   * flight is somebody's, so it is left alone and looked at again on the next
+   * tick. The queue is read and taken in the same step, so nothing can slip
+   * in between.
+   */
+  async stopUnlessBusy(id: string): Promise<boolean> {
+    if (this.slots.has(id)) return false;
+    await this.stop(id);
+    return true;
+  }
+
+  /** The body of {@link stop}, which runs under the session's slot. */
+  private async stopHeld(id: string): Promise<SessionDetail> {
+    // Everything queued before this has given up by now, and what was queued
+    // behind it is not this stop's to abandon.
+    this.preempted.delete(id);
+    const row = this.mustGet(id);
     if (row.container_id) await dk.stopContainer(row.container_id);
     this.setStatus(id, 'stopped');
     log.session(id).info('session stopped');
     return this.detail(id);
   }
 
-  /** Deletes a session and everything it is made of, its volumes included. */
+  /**
+   * Deletes a session and everything it is made of, its volumes included.
+   * Overtakes what the session is in the middle of, the way a stop does.
+   */
   async remove(id: string): Promise<void> {
-    const row = this.mustGet(id);
+    this.preempted.add(id);
     this.upstreams.get(id)?.close();
+    return this.withSlot(id, () => this.removeHeld(id));
+  }
+
+  /** The body of {@link remove}, which runs under the session's slot. */
+  private async removeHeld(id: string): Promise<void> {
+    this.preempted.delete(id);
+    const row = this.mustGet(id);
+    // The tombstone goes down first, before a single row is deleted and while
+    // the slot is held. It is what every writer that can still be in flight
+    // checks — the ACP tap, a streaming command that is just finishing, a
+    // touch — so none of them can insert a row for a session that is going
+    // away, and setStatus itself will not move the row out again.
+    this.setStatus(id, 'deleted');
     this.upstreams.delete(id);
     await this.teardownResources(id);
     // Every table keyed by the session id, so a deleted session leaves nothing
     // behind: the row itself stays as a tombstone — see setStatus — and these
     // have no reader once it does.
-    for (const table of ['pending_requests', 'acp_log', 'exec_log', 'threads']) {
+    for (const table of ['pending_requests', 'exec_log', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
     }
     this.usage.forget(id);
-    this.setStatus(id, 'deleted');
     log.session(id).info('session deleted', { name: row.name });
   }
 
@@ -947,7 +1191,7 @@ export class SessionManager {
   // --- views ----------------------------------------------------------------
 
   /** The stored row for a live session, or a 404. */
-  private mustGet(id: string): SessionRow {
+  mustGet(id: string): SessionRow {
     const row = this.getRow(id);
     if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
     return row;
@@ -957,18 +1201,28 @@ export class SessionManager {
    * Where a local command should run for this session, starting the
    * container if it is stopped. The workspace root, which is where the
    * adapter runs too.
+   *
+   * Marks the session active, because everything that asks for this is about
+   * to work in the box: a `!bang` command, or a review running git in it.
    */
   async execTarget(id: string): Promise<{ containerId: string; workingDir: string }> {
-    let row = this.mustGet(id);
-    if (!row.container_id) throw new HttpError(409, 'Session has no container');
-    // A stopped container starts here too, and the entrypoint installs
-    // whatever is on disk when it does.
-    this.agents.materialize(row.id, row.agent_set_id);
-    // And one that is gone is made again, the same way start does it: a
-    // `!bang` command is as good a moment as any to find out that something
-    // pruned the box, and as good a moment to put it back.
-    row = await this.restoreMissingContainer(row);
+    return this.withSlot(id, () => this.execTargetHeld(id));
+  }
+
+  /** The body of {@link execTarget}, which runs under the session's slot. */
+  private async execTargetHeld(id: string): Promise<{ containerId: string; workingDir: string }> {
+    const stored = this.mustGet(id);
+    if (!stored.container_id) throw new HttpError(409, 'Session has no container');
+    // A `!bang` command starts a stopped container, so it is as good a moment
+    // as any to put the box right: the same repairs start() runs, in the same
+    // order.
+    const row = await this.prepareContainer(stored);
+    this.giveUpIfPreempted(id);
     await dk.startContainer(row.container_id!);
+    // Reaching into the box is use of the box, whoever is asking: a local
+    // command, or a review running git in it. Both hold the reaper off for as
+    // long as they go on asking.
+    this.touch(id);
     return { containerId: row.container_id!, workingDir: dk.WORKSPACE_DIR };
   }
 
@@ -1032,7 +1286,7 @@ export class SessionManager {
       backgroundBusy: upstream?.backgroundActive ?? false,
       pendingCount,
       attachedCount: upstream?.attachedCount ?? 0,
-      wsToken: this.cfg.WS_AUTH_TOKEN,
+      wsToken: row.ws_token,
       threads: listThreads(this.db, row.id).map((thread) =>
         toThreadSummary(
           thread,
@@ -1106,6 +1360,13 @@ export class SessionManager {
     return row !== undefined && row.session_id === sessionId;
   }
 
+  /** One of a session's threads, or a 404 when the session has no such thread. */
+  private mustGetThread(id: string, threadId: string): ThreadRow {
+    const row = getThread(this.db, threadId);
+    if (!row || row.session_id !== id) throw new HttpError(404, THREAD_NOT_FOUND);
+    return row;
+  }
+
   /**
    * The thread a request is about: the one it names, or the session's current
    * one when it names none — and null before the session has any thread at
@@ -1117,9 +1378,7 @@ export class SessionManager {
   resolveThread(id: string, threadId?: string): string | null {
     this.mustGet(id);
     if (threadId === undefined) return currentThread(this.db, id)?.id ?? null;
-    const row = getThread(this.db, threadId);
-    if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
-    return row.id;
+    return this.mustGetThread(id, threadId).id;
   }
 
   /**
@@ -1152,7 +1411,7 @@ export class SessionManager {
       );
     } catch (err) {
       const message = (err as Error).message;
-      if (message === 'Thread not found') throw new HttpError(404, message);
+      if (message === THREAD_NOT_FOUND) throw new HttpError(404, message);
       // A thread minted and never prompted has no adapter-side conversation
       // to branch from, which is the caller's timing rather than a fault.
       if (message === NOTHING_TO_FORK) throw new HttpError(409, message);
@@ -1170,8 +1429,7 @@ export class SessionManager {
    */
   selectThread(id: string, threadId: string): ThreadSummary {
     this.mustGet(id);
-    const row = getThread(this.db, threadId);
-    if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
+    this.mustGetThread(id, threadId);
     const up = this.upstream(id);
     return toThreadSummary(
       up.switchThread(threadId),
@@ -1191,8 +1449,7 @@ export class SessionManager {
    */
   setThreadDone(id: string, threadId: string, done: boolean): ThreadSummary {
     this.mustGet(id);
-    const row = getThread(this.db, threadId);
-    if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
+    const row = this.mustGetThread(id, threadId);
     setThreadDone(this.db, threadId, done);
     return toThreadSummary(
       { ...row, done: done ? 1 : 0 },
@@ -1216,8 +1473,7 @@ export class SessionManager {
     taskId?: string,
   ): Promise<{ stopped: number }> {
     this.mustGet(id);
-    const row = getThread(this.db, threadId);
-    if (!row || row.session_id !== id) throw new HttpError(404, 'Thread not found');
+    const row = this.mustGetThread(id, threadId);
     if (!row.acp_session_id) return { stopped: 0 };
     return { stopped: await this.upstream(id).stopBackgroundWork(row.acp_session_id, taskId) };
   }
@@ -1238,21 +1494,35 @@ export class SessionManager {
   // --- boot reconciliation --------------------------------------------------
 
   /**
-   * Aligns the stored rows with what Docker runs: adopts live
-   * containers, marks missing ones stopped, and re-attaches the egress proxy.
-   * Upstream connections are re-established on first use.
+   * Aligns the stored rows with what Docker runs: adopts live containers,
+   * marks missing ones stopped, fails a create that was interrupted, and
+   * re-attaches the egress proxy. Upstream connections are re-established on
+   * first use.
    */
   async reconcile(): Promise<void> {
     this.pending.clearStale();
+    // Helpers are left out: one that outlived its job is labelled with the
+    // session too, and adopting it would leave the row naming a copy script.
     const live = new Map(
-      (await dk.listSessionContainers()).map((c) => [c.sessionId, c]),
+      (await dk.listSessionContainers()).filter((c) => !c.helper).map((c) => [c.sessionId, c]),
     );
     for (const row of this.allRows()) {
+      // A turn cannot survive an orchestrator restart: the upstream
+      // connection that owned it is gone, on every thread of the session,
+      // whether or not its container is.
+      clearSessionTurns(this.db, row.id);
       const container = live.get(row.id);
       if (!container) {
         if (row.status === 'running') {
           log.session(row.id).warn('container missing at boot; marking stopped');
           this.setStatus(row.id, 'stopped');
+        } else if (row.status === 'creating') {
+          // create() fails a session it cannot finish, so a row still saying
+          // this has nobody left to finish it: the process that was creating
+          // it is gone. Nothing is deleted — the sweep takes what it left —
+          // but the row has to stop holding its subnet and refusing a start.
+          log.session(row.id).warn('create did not finish before the restart; marking error');
+          this.setStatus(row.id, 'error');
         }
         continue;
       }
@@ -1262,9 +1532,6 @@ export class SessionManager {
           .run(container.id, row.id);
       }
       this.setStatus(row.id, container.running ? 'running' : 'stopped');
-      // A turn cannot survive an orchestrator restart: the upstream
-      // connection that owned it is gone, on every thread of the session.
-      clearSessionTurns(this.db, row.id);
       await dk.ensureProxyAttached(row.network_name, this.cfg);
     }
     log.info('boot reconciliation complete', { sessions: this.allRows().length });
@@ -1290,9 +1557,31 @@ export class SessionManager {
     this.upstreams.clear();
   }
 
-  /** Periodic housekeeping on every upstream. */
+  /** Periodic housekeeping: forgetting the upstreams that hold nothing. */
   maintenance(): void {
-    for (const up of this.upstreams.values()) up.maintenance();
+    this.dropIdleUpstreams();
+  }
+
+  /**
+   * Forgets every upstream of a box that is down and holding nothing.
+   *
+   * The reaper asks each running session's upstream what is in its box, which
+   * builds one for every session nobody has opened, and nothing else lets go
+   * of them. An upstream with no browser attached, no request waiting and no
+   * connection to an adapter holds nothing a fresh one could not rebuild.
+   *
+   * Only for a session whose row says it is not running: while a box is up,
+   * the upstream carries the reading of what is running in it, and the reaper
+   * asks for that reading every tick. Dropping one would throw the reading
+   * away a minute after it was taken, and a box with no reading is held.
+   */
+  private dropIdleUpstreams(): void {
+    for (const [id, up] of this.upstreams) {
+      if (!up.holdsNothing) continue;
+      if (this.getRow(id)?.status === 'running') continue;
+      up.close();
+      this.upstreams.delete(id);
+    }
   }
 }
 

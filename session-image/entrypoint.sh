@@ -234,12 +234,16 @@ cli_config=/home/agent/.playwright/cli.config.json
 if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
   proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
   if [ -n "$proxy" ]; then
-    jq --arg server "$proxy" --arg bypass "${NO_PROXY:-}" \
-      '.browser.launchOptions.proxy = (if $bypass == "" then { server: $server }
-                                       else { server: $server, bypass: $bypass } end)' \
-      "$cli_base" > "$cli_config.tmp" \
-      && mv "$cli_config.tmp" "$cli_config" \
-      && log "wrote the browser CLI config, pointed at the egress proxy"
+    if jq --arg server "$proxy" --arg bypass "${NO_PROXY:-}" \
+         '.browser.launchOptions.proxy = (if $bypass == "" then { server: $server }
+                                          else { server: $server, bypass: $bypass } end)' \
+         "$cli_base" > "$cli_config.tmp" \
+       && mv "$cli_config.tmp" "$cli_config"; then
+      log "wrote the browser CLI config, pointed at the egress proxy"
+    else
+      rm -f "$cli_config.tmp"
+      log "warning: could not write the browser CLI config; the browser uses its own defaults"
+    fi
   else
     cp "$cli_base" "$cli_config" \
       && log "wrote the browser CLI config; no egress proxy is configured"
@@ -369,7 +373,7 @@ git config --global init.defaultBranch main
 git config --global advice.detachedHead false
 # /workspace is the agent's own volume. Marking it safe avoids git's
 # dubious-ownership refusal when uid mapping differs across volume restores.
-git config --global --add safe.directory '*'
+git config --global --replace-all safe.directory '*'
 
 # --- github auth ------------------------------------------------------------
 if [ -n "${GH_TOKEN:-}" ]; then

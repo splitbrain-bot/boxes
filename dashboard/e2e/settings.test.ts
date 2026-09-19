@@ -1,12 +1,6 @@
-import { afterAll, afterEach, expect, test } from 'vitest';
-import { resolve } from 'node:path';
+import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import {
-  startStubOrchestrator,
-  stubHarness,
-  stubSession,
-  type StubOrchestrator,
-} from './stub-orchestrator.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The settings page in a real browser.
@@ -17,9 +11,11 @@ import {
  * the next load shows.
  */
 
-const DIST = resolve(import.meta.dirname, '../dist');
+let stub: TestOrchestrator;
 
-let stub: StubOrchestrator;
+beforeEach(async () => {
+  stub = await startOrchestrator();
+});
 
 afterEach(async () => {
   await stub?.close();
@@ -31,7 +27,6 @@ afterAll(async () => {
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`the settings page renders in ${scheme}`, async () => {
-    stub = await startStubOrchestrator(DIST, [stubSession()]);
     const { page, errors, close } = await openPage(stub.url, '/settings', scheme);
     try {
       await expect.poll(() => page.getByText('Git identity').isVisible()).toBe(true);
@@ -45,9 +40,7 @@ for (const scheme of ['light', 'dark'] as const) {
 }
 
 test('a pasted credential is stored and comes back as its last four characters', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
-  stub.state.harnesses = [stubHarness({ credential: null, runnable: false })];
-  stub.state.credentials = [];
+  stub.state.claudeCredential = null;
 
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
@@ -62,13 +55,13 @@ test('a pasted credential is stored and comes back as its last four characters',
     await expect.poll(() => page.getByLabel('Claude secret').inputValue()).toBe('');
     expect(await page.content()).not.toContain('sk-ant-oat01-pastedtoken9876');
     // Stored as the deployment sees it, without the secret.
-    expect(stub.state.credentials.map((c) => [c.id, c.account])).toEqual([['claude', '9876']]);
+    expect((await stub.credentials()).find((c) => c.id === 'claude')?.account).toBe('9876');
 
     // And the warning the session list was showing goes with it.
     const list = await openPage(stub.url, '/');
     try {
       await expect.poll(() => list.page.getByText('refactor auth').isVisible()).toBe(true);
-      expect(await list.page.getByText(/No credential is set/).count()).toBe(0);
+      expect(await list.page.getByText(/No credential is set for Claude Code/).count()).toBe(0);
     } finally {
       await list.close();
     }
@@ -79,7 +72,6 @@ test('a pasted credential is stored and comes back as its last four characters',
 });
 
 test('a stored credential can be removed, and the warning comes back', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await expect.poll(() => page.getByText(/Ends 1234/).isVisible()).toBe(true);
@@ -88,7 +80,7 @@ test('a stored credential can be removed, and the warning comes back', async () 
     await page.getByRole('button', { name: 'Remove', exact: true }).last().click();
 
     await expect.poll(() => page.getByText('Not set.').first().isVisible()).toBe(true);
-    expect(stub.state.credentials).toEqual([]);
+    expect((await stub.credentials()).map((c) => c.id)).toEqual(['openai']);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -96,7 +88,6 @@ test('a stored credential can be removed, and the warning comes back', async () 
 });
 
 test('the git identity round-trips through the deployment', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await expect.poll(() => page.getByLabel('Name').inputValue()).toBe('boxes-bot');
@@ -108,8 +99,9 @@ test('the git identity round-trips through the deployment', async () => {
     // The button says so once there is nothing left to save, which is the
     // only confirmation this page gives.
     await expect.poll(() => page.getByRole('button', { name: 'Saved' }).isVisible()).toBe(true);
-    expect(stub.state.settings.gitName).toBe('Release bot');
-    expect(stub.state.settings.gitEmail).toBe('bot@example.com');
+    const saved = await stub.settings();
+    expect(saved.gitName).toBe('Release bot');
+    expect(saved.gitEmail).toBe('bot@example.com');
 
     // And it is what the next load shows, rather than only what this one holds.
     const again = await openPage(stub.url, '/settings');
@@ -124,8 +116,19 @@ test('the git identity round-trips through the deployment', async () => {
   }
 });
 
+test('the session list links to the settings page', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    await page.getByRole('link', { name: 'Settings' }).click();
+    await expect.poll(() => page.getByText('Git identity').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 /**
- * The two login flows, against the stub's scripted state machine.
+ * The two login flows, over the real login manager and a scripted CLI.
  *
  * What is worth proving is that the page follows a flow it does not drive:
  * the orchestrator runs the harness's own CLI in a container, and all the
@@ -134,12 +137,11 @@ test('the git identity round-trips through the deployment', async () => {
  */
 
 test('a Codex login shows the URL and the code, and the account arrives with it', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
-  stub.state.credentials = [];
-
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
+    await expect.poll(() => stub.logins.length).toBe(1);
+    stub.logins[0]!.print('Open https://auth.openai.com/codex/device and enter WDJB-MJHT\n');
 
     // What the CLI printed: a link to open somewhere else — often on another
     // device — and the one-time code to type into it.
@@ -153,11 +155,14 @@ test('a Codex login shows the URL and the code, and the account arrives with it'
 
     // The CLI finishes on its own, and the page notices on its next poll:
     // the flow goes, and the row it wrote takes its place.
-    stub.pushLoginState('openai', { state: 'done' });
+    stub.logins[0]!.exit(0);
     await expect.poll(() => page.getByText(/Signed in as agent@example.com/).isVisible())
       .toBe(true);
     await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(false);
-    expect(stub.state.credentials.map((c) => [c.id, c.method])).toEqual([['openai', 'oauth']]);
+    expect((await stub.credentials()).map((c) => [c.id, c.method])).toEqual([
+      ['claude', 'token'],
+      ['openai', 'oauth'],
+    ]);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -165,12 +170,14 @@ test('a Codex login shows the URL and the code, and the account arrives with it'
 });
 
 test('a Claude login takes the code back and stores what the CLI printed', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
-  stub.state.credentials = [];
+  stub.state.claudeCredential = null;
 
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await page.getByRole('button', { name: 'Log in to Claude' }).click();
+    await expect.poll(() => stub.logins.length).toBe(1);
+    const cli = stub.logins[0]!;
+    cli.print('Visit: https://claude.ai/oauth/code\nPaste code here if prompted > ');
 
     await expect.poll(() => page.getByText('https://claude.ai/oauth/code').isVisible()).toBe(true);
     const field = page.getByLabel('Claude login code');
@@ -181,11 +188,13 @@ test('a Claude login takes the code back and stores what the CLI printed', async
 
     // Which is what the CLI was blocked on: it goes to the login, and the
     // flow carries on from there.
-    await expect.poll(() => stub.logins[0]?.codes).toEqual(['AB12-CD34']);
+    await expect.poll(() => cli.input).toBe('AB12-CD34\n');
+    cli.print('\nYour token: sk-ant-oat01-minted-by-the-cli-9f2c\n');
     // A setup-token names no account, so the credential is known by its last
     // four characters like any other paste — and never by its value.
     await expect.poll(() => page.getByText(/Ends 9f2c/).isVisible()).toBe(true);
     expect(await page.content()).not.toContain('AB12-CD34');
+    expect(await page.content()).not.toContain('minted-by-the-cli');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -193,23 +202,21 @@ test('a Claude login takes the code back and stores what the CLI printed', async
 });
 
 test('a login that fails says why, and can be started again', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
-  stub.state.credentials = [];
-  stub.state.loginScripts['claude'] = {
-    steps: [
-      { state: 'starting' },
-      { state: 'failed', error: 'The login timed out after ten minutes.' },
-    ],
-  };
+  stub.state.claudeCredential = null;
 
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await page.getByRole('button', { name: 'Log in to Claude' }).click();
+    await expect.poll(() => stub.logins.length).toBe(1);
+    // The CLI gives up before it prints a token, which is what a login that
+    // timed out or was refused looks like from here.
+    stub.logins[0]!.print('Visit: https://claude.ai/oauth/code\nSomething went wrong.\n');
+    stub.logins[0]!.exit(1);
     await expect
-      .poll(() => page.getByText('The login timed out after ten minutes.').isVisible())
+      .poll(() => page.getByText(/printed no token before it ended/).isVisible())
       .toBe(true);
     // Nothing was stored, so the card still says what is missing.
-    expect(stub.state.credentials).toEqual([]);
+    expect((await stub.credentials()).map((c) => c.id)).toEqual(['openai']);
 
     await page.getByRole('button', { name: 'Try again' }).click();
     await expect.poll(() => stub.logins.length).toBe(2);
@@ -220,10 +227,11 @@ test('a login that fails says why, and can be started again', async () => {
 });
 
 test('a login can be given up on, and the container goes with it', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
+    await expect.poll(() => stub.logins.length).toBe(1);
+    stub.logins[0]!.print('Open https://auth.openai.com/codex/device and enter WDJB-MJHT\n');
     await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
 
     await page.getByRole('button', { name: 'Cancel' }).click();
@@ -240,19 +248,22 @@ test('a login can be given up on, and the container goes with it', async () => {
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`the login states render in ${scheme}`, async () => {
-    stub = await startStubOrchestrator(DIST, [stubSession()]);
-    stub.state.credentials = [];
+    stub.state.claudeCredential = null;
     const { page, errors, close } = await openPage(stub.url, '/settings', scheme);
     try {
       // The flow that shows a code, and the flow that asks for one: the two
       // shapes a login takes, both under the credential they belong to.
       await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
+      await expect.poll(() => stub.logins.length).toBe(1);
+      stub.logins[0]!.print('Open https://auth.openai.com/codex/device and enter WDJB-MJHT\n');
       await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
       await shoot(page, `settings-login-${scheme}`);
 
       // Starting another takes the first down, which is the one-at-a-time
       // rule seen from the page.
       await page.getByRole('button', { name: 'Log in to Claude' }).click();
+      await expect.poll(() => stub.logins.length).toBe(2);
+      stub.logins[1]!.print('Visit: https://claude.ai/oauth/code\nPaste code here if prompted > ');
       await expect.poll(() => page.getByLabel('Claude login code').isVisible()).toBe(true);
       expect(await page.getByText('WDJB-MJHT').count()).toBe(0);
       await shoot(page, `settings-login-code-${scheme}`);
@@ -262,15 +273,3 @@ for (const scheme of ['light', 'dark'] as const) {
     }
   });
 }
-
-test('the session list links to the settings page', async () => {
-  stub = await startStubOrchestrator(DIST, [stubSession()]);
-  const { page, errors, close } = await openPage(stub.url, '/');
-  try {
-    await page.getByRole('link', { name: 'Settings' }).click();
-    await expect.poll(() => page.getByText('Git identity').isVisible()).toBe(true);
-    expect(errors).toEqual([]);
-  } finally {
-    await close();
-  }
-});

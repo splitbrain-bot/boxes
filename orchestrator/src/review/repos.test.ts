@@ -4,8 +4,10 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
+import { setGitRunnerForTests, type GitBox, type GitRunner } from './git.ts';
 import {
   discoverRepos,
+  gitTarget,
   inRepo,
   inWorkspace,
   MAX_REPO_DEPTH,
@@ -17,19 +19,51 @@ import {
 /**
  * Discovery over real temporary repositories rather than a mocked git.
  *
- * Every shape here was a way the old single-root resolution lost git for a
- * whole session — two clones side by side, a stray directory beside one, a
- * clone a level deeper, a repository inside a repository, a symlinked
- * workspace path — so they are the cases worth paying a `git init` for.
+ * Every shape here is a way resolution can lose git for a whole session — two
+ * clones side by side, a stray directory beside one, a clone a level deeper, a
+ * repository inside a repository, a symlinked workspace path — so they are the
+ * cases worth paying a `git init` for.
+ *
+ * Discovery confirms a candidate by asking git, which the orchestrator does in
+ * the session's container. Here a runner starts it on this machine instead,
+ * over the test's own repositories.
  */
+
+/** A runner that starts git here, in the directory the target names. */
+const localGit: GitRunner = async (target, argv, env) => {
+  try {
+    const stdout = execFileSync(argv[0]!, argv.slice(1), {
+      cwd: target.dir,
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return { ok: true, stdout, stderr: '', code: 0 };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: string; stderr?: string };
+    return {
+      ok: false,
+      stdout: failed.stdout ?? '',
+      stderr: failed.stderr ?? '',
+      code: failed.status ?? null,
+    };
+  }
+};
+
+/** The session box a workspace would be reviewed in. */
+function box(workspaceDir: string): GitBox {
+  return { containerId: 'box-1', workspaceDir };
+}
 
 let dir: string;
 
 beforeEach(() => {
+  setGitRunnerForTests(localGit);
   dir = mkdtempSync(join(tmpdir(), 'boxes-repos-'));
 });
 
 afterEach(() => {
+  setGitRunnerForTests(null);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -50,7 +84,7 @@ function file(rel: string, content = 'x\n'): void {
 
 /** The discovered repositories as workspace-relative paths. */
 async function paths(workspace = dir): Promise<string[]> {
-  return (await discoverRepos(workspace)).repos.map((r) => r.path);
+  return (await discoverRepos(workspace, box(workspace))).repos.map((r) => r.path);
 }
 
 describe('discovery', () => {
@@ -91,7 +125,7 @@ describe('discovery', () => {
 
   test('a workspace with no repository has none, and says so', async () => {
     file('notes/todo.md');
-    const map = await discoverRepos(dir);
+    const map = await discoverRepos(dir, box(dir));
     assert.deepEqual(map.repos, []);
     assert.equal(map.hasGit, false);
   });
@@ -157,12 +191,10 @@ describe('discovery', () => {
     assert.deepEqual(await paths(), [atLimit]);
   });
 
-  test('the directory cap is a real number that bounds the walk', async () => {
+  test('the directory cap is a real number, and a small workspace is under it', async () => {
+    // Building 4000 directories per test run is not worth the seconds, so the
+    // cap itself is asserted and an ordinary workspace is walked whole.
     assert.equal(MAX_SCANNED_DIRS, 4000);
-    // Cheap proof the cap is wired to the walk rather than only declared: a
-    // repository behind more directories than the cap allows is not reached.
-    // (Building 4000 directories per test run is not worth the seconds, so
-    // the limit itself is asserted and the wiring is read at the call site.)
     for (let i = 0; i < 20; i++) mkdirSync(join(dir, `sib${i}`));
     repo('project');
     assert.deepEqual(await paths(), ['project']);
@@ -170,12 +202,12 @@ describe('discovery', () => {
 
   test('a repository reports its own name, and the workspace one takes the directory name', async () => {
     repo('');
-    const map = await discoverRepos(dir);
+    const map = await discoverRepos(dir, box(dir));
     assert.equal(map.repos[0]!.name, dir.split('/').pop());
 
     rmSync(join(dir, '.git'), { recursive: true, force: true });
     repo('repo-a');
-    const second = await discoverRepos(dir);
+    const second = await discoverRepos(dir, box(dir));
     assert.equal(second.repos[0]!.name, 'repo-a');
   });
 });
@@ -184,16 +216,29 @@ describe('repoFor', () => {
   /** A map over paths, without touching a filesystem. */
   function mapOf(...repoPaths: string[]): RepoMap {
     return new RepoMap(
-      '/workspace',
+      '/data/workspaces/aaa',
       repoPaths.map(
         (path): Repo => ({
           path,
-          absolute: path === '' ? '/workspace' : `/workspace/${path}`,
           name: path === '' ? 'workspace' : (path.split('/').pop() ?? ''),
+          git: gitTarget(box('/workspace'), path),
         }),
       ),
     );
   }
+
+  test('a repository is addressed by its path inside the container', () => {
+    // The host path the walk read is not what git is given: the box holds the
+    // same tree at its own place.
+    assert.deepEqual(mapOf('').repos[0]!.git, {
+      containerId: 'box-1',
+      dir: '/workspace',
+    });
+    assert.deepEqual(mapOf('repo-a/inner').repos[0]!.git, {
+      containerId: 'box-1',
+      dir: '/workspace/repo-a/inner',
+    });
+  });
 
   test('a file is claimed by the repository it is in', () => {
     const map = mapOf('repo-a', 'repo-b');

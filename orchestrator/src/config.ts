@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import type { CredentialId } from '../../shared/types.ts';
-import { resolveWsAuthToken } from './secret.ts';
 import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 
 /**
@@ -40,8 +39,14 @@ const schema = z.object({
    */
   HOST_DATA_DIR: z.string().default(''),
   PORT: z.coerce.number().int().positive().default(3000),
+  /**
+   * Lowest severity written to stderr. `debug` carries every forwarded ACP
+   * message, which is a lot of output for a busy deployment, so the default
+   * is one step above it.
+   */
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
-  SESSION_IMAGE: z.string().min(1).default('boxes-session:latest'),
+  SESSION_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/session:latest'),
   /**
    * uid and gid session containers run as, and so the owner of every file in
    * a workspace.
@@ -142,12 +147,6 @@ const schema = z.object({
    * request the orchestrator buffers in memory before writing it out.
    */
   MAX_ATTACHMENT_MB: z.coerce.number().int().positive().default(25),
-
-  /**
-   * Validated against the bearer.<token> WebSocket subprotocol. Unset means
-   * the orchestrator generates one and keeps it in the data volume.
-   */
-  WS_AUTH_TOKEN: z.string().default(''),
 
   PERMISSION_FALLBACK: z.enum(['hold', 'deny']).default('hold'),
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
@@ -263,7 +262,7 @@ export const CREDENTIAL_SET: readonly CredentialSpec[] = [
 ];
 
 /** Splits a comma or whitespace separated host list into patterns. */
-export function parseHostList(value: string): string[] {
+function parseHostList(value: string): string[] {
   return [
     ...new Set(
       value
@@ -316,7 +315,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     ...base,
-    WS_AUTH_TOKEN: resolveWsAuthToken(base.DATA_DIR, base.WS_AUTH_TOKEN),
     egressAllowedHosts: allowedHosts,
   };
 }

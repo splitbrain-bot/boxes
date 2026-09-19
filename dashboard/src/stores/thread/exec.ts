@@ -45,21 +45,22 @@ export interface ExecOutcome {
 /**
  * Runs one command and streams its output.
  *
- * `onChunk` is called with the output so far, so a caller can render it
- * growing; the promise resolves once the trailer has been read.
+ * `after` names what the thread ended with when the command was typed — the
+ * id of a tool call or message — and is stored with the run so a replay can
+ * put it back there. `onChunk` is called with the output so far, so a caller
+ * can render it growing; the promise resolves once the trailer has been read.
  */
 export async function runExec(
   sessionId: string,
   threadId: string | null,
   command: string,
+  after: string | null,
   onChunk: (outputSoFar: string) => void,
-  signal?: AbortSignal,
 ): Promise<ExecOutcome> {
   const res = await fetch(execUrl(sessionId, threadId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command }),
-    ...(signal ? { signal } : {}),
+    body: JSON.stringify({ command, after }),
   });
   if (!res.ok || !res.body) {
     const message = await res.text().catch(() => '');
@@ -102,10 +103,8 @@ function readTrailer(text: string): ExecOutcome {
 }
 
 /**
- * Every command already run in this thread.
- *
- * ACP replay carries no timestamps, so these are appended after the replayed
- * transcript rather than interleaved into it.
+ * Every command already run in this thread, oldest first, each naming what
+ * the transcript ended with when it was typed.
  */
 export async function listExec(sessionId: string, threadId: string | null): Promise<ExecRecord[]> {
   const res = await fetch(execUrl(sessionId, threadId));

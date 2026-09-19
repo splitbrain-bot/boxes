@@ -106,7 +106,9 @@ describe('isInjectionHost', () => {
     expect(isInjectionHost('api.github.com', policy({ ca: null }))).toBe(false);
     expect(isInjectionHost('api.github.com', policy({ credentials: [CLAUDE] }))).toBe(false);
   });
+});
 
+describe('credentialsForHost', () => {
   it('maps a host to only its own credentials', () => {
     expect(credentialsForHost('api.anthropic.com', policy()).map((c) => c.id)).toEqual(['claude']);
     expect(credentialsForHost('github.com', policy()).map((c) => c.id)).toEqual(['github']);

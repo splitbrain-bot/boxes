@@ -282,13 +282,27 @@ fi
 echo
 echo "== pids limit containment =="
 # PidsLimit must contain a fork bomb without affecting the host or the sibling
-# session. Bounded, so the test itself cannot hang.
-docker exec -u agent "$CONTAINER" sh -c \
-  ':(){ :|:& };: & sleep 5; kill %1 2>/dev/null' >/dev/null 2>&1
+# session. The bomb runs under bash, because the image's sh is dash and dash
+# rejects a function named ':'. Its children all stay in the process group of
+# the exec, so one kill ends the whole bomb and the session stays testable.
+docker exec -u agent "$CONTAINER" bash -c \
+  'bomb() { bomb | bomb & }; bomb & sleep 5; kill -9 0' >/dev/null 2>&1
 if docker exec -u agent "$SIBLING_CONTAINER" true >/dev/null 2>&1; then
   green "ok   (sibling unaffected):      fork bomb contained by pids-limit"; pass=$((pass+1))
 else
   red   "FAIL: sibling session affected by fork bomb"; fail=$((fail+1))
+fi
+
+# The bombed session itself must be usable again once the bomb is gone.
+recovered=0
+for _ in $(seq 1 15); do
+  if docker exec -u agent "$CONTAINER" true >/dev/null 2>&1; then recovered=1; break; fi
+  sleep 2
+done
+if [ "$recovered" -eq 1 ]; then
+  green "ok   (session survived):        the bombed session answers again"; pass=$((pass+1))
+else
+  red   "FAIL: the bombed session stays out of processes"; fail=$((fail+1))
 fi
 
 echo

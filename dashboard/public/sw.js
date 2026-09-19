@@ -2,24 +2,74 @@
  * The dashboard's service worker: the part of Boxes that runs when Boxes is
  * not open.
  *
- * A push arrives here whether or not a tab exists. Caching and offline
- * shells are deliberately absent: the dashboard is useless without the
- * orchestrator, and a stale cached bundle talking to a newer API is a class
- * of bug worth not having.
+ * A push arrives here whether or not a tab exists. Offline shells are
+ * deliberately absent: the dashboard is useless without the orchestrator, and
+ * a stale cached bundle talking to a newer API is a class of bug worth not
+ * having. So the document, every API call and every socket go to the network
+ * and nowhere else.
+ *
+ * The content-hashed assets are the one exception, and for the reason that
+ * rules out the rest: their names are derived from their bytes, so a build
+ * that changes one gives it a new name and index.html — which is never cached
+ * — is what asks for it. A cached copy under one of those names cannot be
+ * stale, because the stale version is a name nothing asks for any more.
  *
  * Served from the bundle root so its scope is the whole origin. It is plain
  * JavaScript rather than TypeScript because it is not part of the Vite graph:
  * nothing imports it, the browser fetches it by name.
  */
 
-/* global self, clients */
+/* global self, clients, caches */
+
+/** Where the content-hashed assets are kept. */
+const ASSET_CACHE = 'boxes-assets-v1';
+
+/** The bundle directory whose filenames carry a content hash. */
+const ASSET_PATH = '/assets/';
 
 /**
  * Take over as soon as a new copy is installed, rather than waiting for every
  * tab to close. A push handler is not something to leave on an old version.
  */
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(clients.claim()));
+self.addEventListener('activate', (event) =>
+  event.waitUntil(
+    (async () => {
+      // Anything under a cache name that is not the current one is nobody's.
+      const names = await caches.keys();
+      await Promise.all(names.filter((n) => n !== ASSET_CACHE).map((n) => caches.delete(n)));
+      await clients.claim();
+    })(),
+  ),
+);
+
+/**
+ * Serves a content-hashed asset from the cache, and puts it there on the
+ * first request for it.
+ *
+ * Only same-origin GETs under the hashed-asset directory. Everything else —
+ * the document, /api, /ws, the manifest, the icons, the worker itself — is
+ * left to the network by not answering for it at all.
+ */
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin || !url.pathname.startsWith(ASSET_PATH)) return;
+
+  event.respondWith(
+    (async () => {
+      const cache = await caches.open(ASSET_CACHE);
+      const hit = await cache.match(request);
+      if (hit) return hit;
+      const response = await fetch(request);
+      // Only a real answer is kept: a 404 or a 502 from a deploy in progress
+      // must not become the permanent answer for this name.
+      if (response.ok) await cache.put(request, response.clone());
+      return response;
+    })(),
+  );
+});
 
 /**
  * Shows one notification.
@@ -98,7 +148,12 @@ self.addEventListener('pushsubscriptionchange', (event) => {
       await fetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(subscription.toJSON()),
+        // Labelled the way the page labels it, so a subscription the browser
+        // rotated on its own is still recognisable in the deployment's list.
+        body: JSON.stringify({
+          ...subscription.toJSON(),
+          label: navigator.userAgent.slice(0, 100),
+        }),
       });
     })().catch(() => {
       // Nothing useful to do from here: the page re-subscribes on its next

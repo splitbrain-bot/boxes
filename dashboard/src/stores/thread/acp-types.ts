@@ -1,3 +1,5 @@
+import { UPDATE_KIND } from '../../../../shared/acp.ts';
+
 /**
  * The slice of the ACP schema the browser speaks, written out rather than
  * imported.
@@ -7,6 +9,10 @@
  * request bodies, and pulling a Node-shaped SDK into the bundle to name a
  * dozen object types would cost more than it explains. These match the
  * generated schema field for field.
+ *
+ * The names the wire uses come from `shared/acp.ts`, which is plain strings
+ * and is shared with the orchestrator; the shapes under them are written out
+ * here.
  */
 
 /** A displayable block: text, an image, a link or an embedded resource. */
@@ -46,7 +52,7 @@ export type ToolCallContent =
   | { type: 'terminal'; terminalId: string };
 
 /** A tool call the model asked for. */
-export interface ToolCall {
+interface ToolCall {
   toolCallId: string;
   title: string;
   name?: string | null;
@@ -62,7 +68,7 @@ export interface ToolCall {
 export type ToolCallUpdate = Partial<ToolCall> & { toolCallId: string };
 
 /** One mode the adapter can operate in. */
-export interface SessionMode {
+interface SessionMode {
   id: string;
   name: string;
   description?: string | null;
@@ -75,7 +81,7 @@ export interface SessionModeState {
 }
 
 /** One selectable value of a session configuration option. */
-export interface SessionConfigSelectOption {
+interface SessionConfigSelectOption {
   value: string;
   name: string;
   description?: string | null;
@@ -123,15 +129,15 @@ interface ContentChunk {
 
 /** Everything the adapter can push through session/update. */
 export type SessionUpdate =
-  | (ContentChunk & { sessionUpdate: 'user_message_chunk' })
-  | (ContentChunk & { sessionUpdate: 'agent_message_chunk' })
-  | (ContentChunk & { sessionUpdate: 'agent_thought_chunk' })
-  | (ToolCall & { sessionUpdate: 'tool_call' })
-  | (ToolCallUpdate & { sessionUpdate: 'tool_call_update' })
-  | { sessionUpdate: 'plan'; entries?: PlanEntry[] }
-  | { sessionUpdate: 'current_mode_update'; currentModeId: string }
-  | { sessionUpdate: 'available_commands_update'; availableCommands?: AvailableCommand[] }
-  | { sessionUpdate: 'config_option_update'; configOptions?: SessionConfigOption[] }
+  | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.userMessageChunk })
+  | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentMessageChunk })
+  | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentThoughtChunk })
+  | (ToolCall & { sessionUpdate: typeof UPDATE_KIND.toolCall })
+  | (ToolCallUpdate & { sessionUpdate: typeof UPDATE_KIND.toolCallUpdate })
+  | { sessionUpdate: typeof UPDATE_KIND.plan; entries?: PlanEntry[] }
+  | { sessionUpdate: typeof UPDATE_KIND.currentMode; currentModeId: string }
+  | { sessionUpdate: typeof UPDATE_KIND.availableCommands; availableCommands?: AvailableCommand[] }
+  | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: SessionConfigOption[] }
   // Forward compatibility: an adapter may send a kind this build predates.
   | { sessionUpdate: string; [key: string]: unknown };
 
@@ -167,11 +173,9 @@ export interface RequestPermissionResponse {
   outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
 }
 
-/** What session/new answers with. Modes are absent when the adapter has none. */
+/** What session/new answers with: the thread the connection is pinned to. */
 export interface NewSessionResponse {
   sessionId: string;
-  modes?: SessionModeState | null;
-  configOptions?: SessionConfigOption[] | null;
 }
 
 /** What session/load answers with. */
