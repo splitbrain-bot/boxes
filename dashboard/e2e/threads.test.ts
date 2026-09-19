@@ -72,7 +72,11 @@ test('a fork carries the source thread messages into the new one', async () => {
     await askOnce(page);
 
     await page.getByLabel('Back to sessions').click();
-    await page.getByRole('button', { name: 'Fork' }).click();
+    // Exact, because a name matches by substring and the thread header's own
+    // "Fork this thread" is still on the page for a moment after the list has
+    // taken the URL. That button forks without leaving the thread, so the one
+    // this test means is the card's, once the card is there.
+    await page.getByRole('button', { name: 'Fork', exact: true }).click();
     await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
