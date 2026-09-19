@@ -1,4 +1,4 @@
-import { PassThrough } from 'node:stream';
+import { Duplex, PassThrough } from 'node:stream';
 import * as dk from '../../orchestrator/src/docker.ts';
 
 /**
@@ -12,17 +12,43 @@ import * as dk from '../../orchestrator/src/docker.ts';
  * own tests replace it.
  *
  * Nothing here models Docker beyond what the routes read back: whether a
- * container runs, what image it was made from, what a command printed.
+ * container runs, what image it was made from, and — for a terminal — a shell
+ * that echoes and answers.
  */
+
+/** The prompt the fake shell draws, which is how a test knows it is there. */
+const PROMPT = 'agent@box:/workspace$ ';
+
+/**
+ * A pty that behaves enough like a shell to drive a terminal against.
+ *
+ * It echoes what is typed, the way a real one does, and answers a finished
+ * line with `answer`. That is the whole contract the browser end has: bytes
+ * in, bytes out, and a size it can be told.
+ */
+function fakeShell(answer: (line: string) => string): Duplex {
+  let line = '';
+  const shell = new Duplex({
+    read() {},
+    write(chunk: Buffer, _encoding, done) {
+      for (const char of chunk.toString('utf8')) {
+        if (char === '\r' || char === '\n') {
+          shell.push(`\r\n${answer(line)}\r\n${PROMPT}`);
+          line = '';
+          continue;
+        }
+        line += char;
+        shell.push(char);
+      }
+      done();
+    },
+  });
+  queueMicrotask(() => shell.push(PROMPT));
+  return shell;
+}
 
 /** The client the orchestrator reaches the daemon through. */
 type DockerClient = NonNullable<Parameters<typeof dk.setDockerForTests>[0]>;
-
-/** What one command run in a box printed, and how it ended. */
-interface CommandResult {
-  output: string;
-  exitCode: number;
-}
 
 /** A container the fake daemon has, and what the orchestrator reads off it. */
 interface FakeContainer {
@@ -43,8 +69,8 @@ interface FakeImage {
 
 /** The fake daemon, and the handles a test needs on it. */
 export interface FakeDocker {
-  /** What a local command prints and exits with. Replaced by a test. */
-  execOutput: (command: string) => CommandResult;
+  /** What the fake shell answers a typed line with. Replaced by a test. */
+  terminalAnswer: (line: string) => string;
   /** Puts a container the orchestrator will ask about into the daemon. */
   addContainer(id: string, running: boolean): void;
   /** Takes the fake client back out again. */
@@ -95,22 +121,13 @@ function notFound(what: string): Error & { statusCode: number } {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
 
-/** One frame of a demuxable Docker stream, on the stdout channel. */
-function frame(text: string): Buffer {
-  const payload = Buffer.from(text, 'utf8');
-  const header = Buffer.alloc(8);
-  header[0] = 1;
-  header.writeUInt32BE(payload.length, 4);
-  return Buffer.concat([header, payload]);
-}
-
 /**
  * Installs a Docker client that answers from memory, and returns the handles
  * a test drives it with.
  *
  * Container ids are derived from the session label every object Boxes creates
- * carries, so a container can be addressed by the session it belongs to — the
- * review's git runner and the exec fake both need that mapping.
+ * carries, so a container can be addressed by the session it belongs to,
+ * which is what the review's git runner needs.
  */
 export function installFakeDocker(sessionImage: string, selfContainerId?: string): FakeDocker {
   /** Containers by id, including the ones the orchestrator creates itself. */
@@ -119,16 +136,13 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
   containers.set(PROXY_CONTAINER, { image: PROXY_IMAGE.id, running: true });
   containers.set(SELF_CONTAINER, { image: ORCHESTRATOR_IMAGE.id, running: true });
 
+  let terminalAnswer: FakeDocker['terminalAnswer'] = (line) => `ran: ${line}`;
+
   const images = new Map<string, FakeImage>([
     [SESSION_IMAGE.id, SESSION_IMAGE],
     [PROXY_IMAGE.id, PROXY_IMAGE],
     [ORCHESTRATOR_IMAGE.id, ORCHESTRATOR_IMAGE],
   ]);
-
-  let execOutput: FakeDocker['execOutput'] = (command) => ({
-    output: `${command}\n`,
-    exitCode: 0,
-  });
 
   /** The container behind an id, or the daemon's own 404. */
   const must = (id: string): FakeContainer => {
@@ -163,24 +177,19 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
         Mounts: [{ Destination: dk.AGENT_CONFIG_DIR }, { Destination: dk.WORKSPACE_DIR }],
       };
     },
-    exec: async (opts: { Cmd: string[] }) => {
-      // A local command travels as an argument to bash under `timeout`; the
-      // command itself is the last word of it. Nothing else reaches here,
-      // because review runs git through its own injected runner.
-      const command = opts.Cmd[0] === 'timeout' ? (opts.Cmd.at(-1) ?? '') : '';
-      const result = execOutput(command);
-      return {
-        start: async () => {
-          const stream = new PassThrough();
-          queueMicrotask(() => {
-            if (result.output !== '') stream.write(frame(result.output));
-            stream.end();
-          });
-          return stream;
-        },
-        inspect: async () => ({ ExitCode: result.exitCode }),
-      };
-    },
+    // A terminal asks for a pty; every other exec the orchestrator runs by
+    // itself is a probe that produces nothing here, and review runs git
+    // through its own injected runner.
+    exec: async (opts: { Tty?: boolean }) => ({
+      start: async () => {
+        if (opts.Tty) return fakeShell((line) => terminalAnswer(line));
+        const stream = new PassThrough();
+        queueMicrotask(() => stream.end());
+        return stream;
+      },
+      inspect: async () => ({ ExitCode: 0 }),
+      resize: async () => undefined,
+    }),
   });
 
   /** One network's handle. The egress proxy is always on it. */
@@ -217,8 +226,8 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
       remove: async () => undefined,
     }),
     createContainer: async (spec: { name?: string; Labels?: Record<string, string> }) => {
-      // Named after the session it belongs to, so the review's git runner and
-      // the exec fake can find the workspace a container id stands for.
+      // Named after the session it belongs to, so the review's git runner can
+      // find the workspace a container id stands for.
       const session = spec.Labels?.[dk.LABEL] ?? '';
       const id = spec.name ?? `helper-${session}-${containers.size}`;
       containers.set(id, { image: SESSION_IMAGE.id, running: false });
@@ -235,11 +244,11 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
   dk.setSelfContainerIdForTests(selfContainerId);
 
   return {
-    get execOutput() {
-      return execOutput;
+    get terminalAnswer() {
+      return terminalAnswer;
     },
-    set execOutput(fn: FakeDocker['execOutput']) {
-      execOutput = fn;
+    set terminalAnswer(fn: FakeDocker['terminalAnswer']) {
+      terminalAnswer = fn;
     },
     addContainer: (id, running) => {
       containers.set(id, { image: SESSION_IMAGE.id, running });

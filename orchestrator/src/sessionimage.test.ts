@@ -7,7 +7,7 @@ import Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
-import { appendExecLog, openDb, touchSession, type Db } from './db.ts';
+import { openDb, touchSession, type Db } from './db.ts';
 import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 
@@ -294,12 +294,12 @@ describe('starting a session whose image has moved', () => {
     ]);
   });
 
-  it('moves a session onto the current image for a local command too', async () => {
+  it('moves a session onto the current image for a terminal too', async () => {
     insertSession('a1', 'c1', 'sha256:one');
     fake.images.set(IMAGE, 'sha256:two');
 
-    // A `!bang` command starts a stopped box without going through start(),
-    // and runs the same repairs it does.
+    // A terminal starts a stopped box without going through start(), and
+    // runs the same repairs it does.
     const target = await orchestrator.manager.execTarget('a1');
 
     assert.deepEqual(fake.removed, ['c1']);
@@ -423,11 +423,11 @@ describe('starting a session Docker has forgotten', () => {
     assert.deepEqual(fake.created, []);
   });
 
-  it('rebuilds for a local command too', async () => {
+  it('rebuilds for a terminal too', async () => {
     insertSession('a1', 'c1', 'sha256:one');
     fake.containers.delete('c1');
 
-    // Opening a thread and running a `!bang` command both start a stopped box
+    // Opening a thread and opening a terminal both start a stopped box
     // without going through start(), so the repair cannot live only there.
     const target = await orchestrator.manager.execTarget('a1');
 
@@ -698,35 +698,28 @@ describe('one operation per session at a time', () => {
 
   it('stops writing to a session the moment it is deleted', async () => {
     insertSession('a1', 'c1', 'sha256:one');
-    /** Rows this session had after work landed mid-teardown. */
-    let logged = -1;
-    // The teardown takes seconds, and a command finishing in the box is still
-    // able to write during it.
+    /** When the session was last marked active, read back mid-teardown. */
+    let active = -1;
+    // The teardown takes seconds, and a terminal still attached to the box is
+    // able to mark it active during it.
     fake.onRemove = () => {
-      appendExecLog(db, 'a1', {
-        thread_id: null,
-        command: 'echo late',
-        output: '',
-        exit_code: 0,
-        truncated: 0,
-        timed_out: 0,
-        started_at: 1,
-        finished_at: 2,
-        after_id: null,
-      });
       touchSession(db, 'a1');
-      logged = (
-        db.prepare('SELECT COUNT(*) AS n FROM exec_log WHERE session_id = ?').get('a1') as {
-          n: number;
+      active = (
+        db.prepare('SELECT last_active_at AS t FROM sessions WHERE id = ?').get('a1') as {
+          t: number;
         }
-      ).n;
+      ).t;
     };
+
+    const before = (
+      db.prepare('SELECT last_active_at AS t FROM sessions WHERE id = ?').get('a1') as { t: number }
+    ).t;
 
     await orchestrator.manager.remove('a1');
 
     // The tombstone goes down before anything else of the session does, so
     // there was never a moment when a write would have landed.
-    assert.equal(logged, 0);
+    assert.equal(active, before);
   });
 });
 

@@ -17,3 +17,14 @@ export function wsUrlFor(sessionId: string, threadId?: string | null): string {
     : `/ws/sessions/${sessionId}/acp`;
   return `${scheme}//${window.location.host}${path}`;
 }
+
+/**
+ * A session's terminal endpoint on the current origin.
+ *
+ * Names a box and never a thread: a terminal is the box seen directly, and
+ * every one opened on it attaches to the same shell.
+ */
+export function terminalUrlFor(sessionId: string): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${window.location.host}/ws/sessions/${sessionId}/terminal`;
+}
