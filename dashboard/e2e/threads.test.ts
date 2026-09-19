@@ -221,27 +221,6 @@ test('forking is not offered when the adapter does not advertise it', async () =
   }
 });
 
-test('a bang command is run against the thread it was typed in', async () => {
-  stub.execOutput = (command: string) => ({ output: `ran: ${command}\n`, exitCode: 0 });
-
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
-  try {
-    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
-    const input = page.getByLabel('Message input');
-    await input.fill('!echo hi');
-    await input.press('Control+Enter');
-
-    // The thread is part of the endpoint, so the run is logged where it was
-    // typed and no other conversation of this box replays it.
-    await expect.poll(() => stub.execCalls.length).toBe(1);
-    expect(stub.execCalls[0]).toEqual({ sessionId: ID, threadId: 'th1', command: 'echo hi' });
-    await expect.poll(() => page.getByText('ran: echo hi').isVisible()).toBe(true);
-    expect(errors).toEqual([]);
-  } finally {
-    await close();
-  }
-});
-
 test('marking a thread done crosses it out on the list, and the mark comes off again', async () => {
   const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
   try {

@@ -134,11 +134,10 @@ controls:
 - The check mark marks the thread as done - this is just a visual marker (strike through in the session list), it has no other consequences
 - The branch icon [forks](#managing-sessions-and-threads) the thread.
 - The magnifier opens the [review tool](#review-tool).
+- The terminal icon opens a [terminal](#terminal) in the box.
 
 Everything you type into the input field goes to the agent. A line starting with
-`!` is the exception: it runs as a direct shell command in the container and never
-reaches the model. A line starting with `/` completes the agent's own slash
-commands.
+`/` completes the agent's own slash commands.
 
 The `+` button uploads a file to `.boxes/attachments/` in the workspace and
 passes the path to the agent. Commands and subagents that keep running are
@@ -147,6 +146,23 @@ listed above the input field.
 All threads of a session share one workspace. Two agents that edit the same
 files at the same time might conflict, so instruct them to avoid it, for example by
 working in separate git worktrees.
+
+### Terminal
+
+The terminal icon in the thread header opens a shell in the session's
+container, as the same non-root user the agent runs as. It is the box seen
+directly rather than through the agent, so it costs no tokens and nothing you
+type is read as an instruction.
+
+The shell runs under tmux, and every terminal opened on a box attaches to the
+same session. Reload the page, or open it in a second tab, and you are back in
+the same shell with the same scrollback — and a build keeps running while
+nobody is watching.
+
+The box stays running for as long as a terminal is open on it, and goes back
+to the usual idle timeout once you close the tab. A box that has been stopped
+is started again when you open a terminal on it, which takes a few seconds.
+Stopping a box ends the shell: tmux runs inside the container.
 
 ### Review tool
 

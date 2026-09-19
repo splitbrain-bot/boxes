@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
@@ -1177,52 +1178,114 @@ export async function spawnAdapterExec(
   return { stdout, stderr, stdin: stream, exited, kill };
 }
 
-/** A one-off exec whose combined output is streamed back. */
-export interface CommandExec {
-  /** stdout and stderr, demuxed and merged in arrival order. */
-  output: Readable;
-  /** Resolves with the exit code once the stream ends, or null if unknown. */
+
+/**
+ * A pty inside a session container, as the terminal endpoint holds one.
+ *
+ * Tty is true, so Docker does no framing: the stream is the pty's bytes in
+ * both directions, and there is nothing to demux.
+ */
+export interface TerminalExec {
+  /** The pty, readable and writable. */
+  stream: Duplex;
+  /** Tells the pty how large the window onto it is. */
+  resize(cols: number, rows: number): Promise<void>;
+  /** Resolves when the stream ends, with the exit code if known. */
   exited: Promise<number | null>;
-  kill(): void;
+  /** Ends this terminal's shell and drops the stream. */
+  close(): Promise<void>;
+}
+
+/** The tmux session every terminal on a box shares, and which outlives them. */
+const SHARED_TMUX_SESSION = 'boxes';
+
+/**
+ * The shell one terminal connection runs.
+ *
+ * `client` is this connection's own tmux session, grouped with the shared one
+ * so both show the same windows. The shared session is created detached first
+ * and holds those windows once every client has gone, which is what lets a
+ * build carry on with nobody watching.
+ *
+ * Each connection gets a session of its own so that it can be ended by name.
+ * Docker offers no way to signal a running exec, so dropping the stream alone
+ * would leave the client attached for good. The windows outlive the kill,
+ * being linked to the shared session too.
+ *
+ * A box whose image predates tmux falls back to a plain login shell.
+ */
+function terminalShell(client: string): string {
+  return [
+    'if ! command -v tmux >/dev/null 2>&1; then exec bash -l; fi',
+    `tmux new-session -d -s ${SHARED_TMUX_SESSION} 2>/dev/null`,
+    `exec tmux new-session -s ${client} -t ${SHARED_TMUX_SESSION}`,
+  ].join('; ');
 }
 
 /**
- * Runs one command in a session container as the agent user.
+ * Opens a pty in a session container, running the shell a reader types into.
  *
- * The command travels as an argument to `bash -lc`, never as part of a
- * command line the host assembles, and it runs inside the container's
- * existing isolation: internal network, read-only rootfs, capabilities
- * dropped.
+ * The pty runs inside the container's existing isolation — internal network,
+ * read-only rootfs, capabilities dropped, non-root user — so this reaches no
+ * further than the agent in the same box already does. Nothing here
+ * shell-executes on the host: the command is an argument vector handed to the
+ * daemon and never reaches a host command line, and the only part of it this
+ * process composes is a name it generated itself.
  *
- * `wallClockMs` is how long the command may run for. It is enforced inside
- * the container, by `timeout`, because the daemon offers no way to signal a
- * running exec: dropping the attached stream leaves the command running. The
- * limit is rounded up to whole seconds, and a command that survives the term
- * signal is killed five seconds later.
+ * The size is what the browser reported, and it is set on the exec rather than
+ * afterwards so the shell's first prompt is already drawn to the right width.
  */
-export async function runCommandExec(
+export async function openTerminalExec(
   containerId: string,
-  command: string,
   workingDir: string,
-  wallClockMs: number,
-): Promise<CommandExec> {
-  const seconds = Math.ceil(wallClockMs / 1000);
+  cols: number,
+  rows: number,
+): Promise<TerminalExec> {
+  // A duplicate name is a session that refuses to start, and a counter
+  // starting again would collide with a client an earlier process left behind.
+  const client = `web-${randomBytes(4).toString('hex')}`;
+
   const exec = await docker().getContainer(containerId).exec({
-    Cmd: ['timeout', '--kill-after=5s', `${seconds}s`, 'bash', '-lc', command],
-    AttachStdin: false,
+    Cmd: ['bash', '-lc', terminalShell(client)],
+    AttachStdin: true,
     AttachStdout: true,
     AttachStderr: true,
-    Tty: false,
+    Tty: true,
     User: sessionUser(),
     WorkingDir: workingDir,
+    // Without this an editor, a pager and everything else that draws degrade
+    // to plain scrolling text.
+    Env: ['TERM=xterm-256color'],
+    ConsoleSize: [rows, cols],
   });
 
-  const stream = (await exec.start({ hijack: true, stdin: false })) as Duplex;
-  // One stream for the caller, which keeps the order the two were written
-  // in: a shell's stderr is part of its output.
-  const output = new PassThrough();
-  docker().modem.demuxStream(stream, output, output);
+  const stream = (await exec.start({ hijack: true, stdin: true })) as Duplex;
+  const { exited, kill } = execCompletion(stream, exec, () => {}, (err) =>
+    log.warn('terminal exec stream error', { error: err.message }),
+  );
 
-  const { exited, kill } = execCompletion(stream, exec, () => output.end());
-  return { output, exited, kill };
+  return {
+    stream,
+    // The daemon wants the size the way ioctl does, rows before columns. A
+    // resize against an exec that has ended is left at debug: the stream
+    // ending is what the caller acts on.
+    resize: async (nextCols, nextRows) => {
+      try {
+        await exec.resize({ h: nextRows, w: nextCols });
+      } catch (err) {
+        log.debug('terminal resize failed', { error: (err as Error).message });
+      }
+    },
+    exited,
+    close: async () => {
+      // The stream is dropped either way: a box that stopped under the
+      // terminal answers nothing, and has no client left to end.
+      try {
+        await execInContainer(containerId, ['tmux', 'kill-session', '-t', client]);
+      } catch (err) {
+        log.debug('could not end a terminal session', { error: (err as Error).message });
+      }
+      kill();
+    },
+  };
 }

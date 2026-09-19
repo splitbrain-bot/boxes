@@ -9,7 +9,10 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
+import { WebSocketServer } from 'ws';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type {
@@ -21,7 +24,6 @@ import type {
 import { buildApp, type Orchestrator } from '../../orchestrator/src/app.ts';
 import { loadConfig, setConfigForTests, type Config } from '../../orchestrator/src/config.ts';
 import {
-  appendExecLog,
   currentThread,
   getThread,
   listThreads,
@@ -30,9 +32,11 @@ import {
   type SessionRow,
   type ThreadRow,
 } from '../../orchestrator/src/db.ts';
+import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
 import { setLogLevel } from '../../orchestrator/src/log.ts';
 import type { SessionManager } from '../../orchestrator/src/sessions.ts';
 import * as ws from '../../orchestrator/src/workspaces.ts';
+import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { FAKE_SELF_CONTAINER, installFakeDocker, type FakeDocker } from './fake-docker.ts';
 import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
 import {
@@ -178,13 +182,6 @@ export interface TestOrchestrator {
   /** Files uploaded to the attachments endpoint, in order. */
   attachmentUploads: Array<{ sessionId: string; name: string; bytes: Buffer }>;
   /**
-   * Bodies posted to the exec endpoint, in order.
-   *
-   * `threadId` is null where the browser used the path that names no thread,
-   * which means whichever one the session has current.
-   */
-  execCalls: Array<{ sessionId: string; threadId: string | null; command: string }>;
-  /**
    * Every stop of background work the browser asked for, in order.
    *
    * `processId` is absent where the reader asked for all of a thread's work
@@ -193,8 +190,6 @@ export interface TestOrchestrator {
   backgroundStops: Array<{ sessionId: string; threadId: string; processId?: string }>;
   /** Every review mutation the browser made, in order. */
   reviewCalls: ReviewCall[];
-  /** Combined output the exec endpoint streams back, by command. */
-  execOutput: (command: string) => { output: string; exitCode: number };
   /** Adds a session, its directories, its threads and its container. */
   createSession(spec?: SessionSpec): void;
   /** Forgets every session, for a test that wants the deployment back. */
@@ -211,8 +206,10 @@ export interface TestOrchestrator {
   comment(sessionId: string, path: string, line: number, text: string): Promise<void>;
   /** The comments on one file, as the API reports them. */
   comments(sessionId: string, path: string): Promise<ReviewAnnotation[]>;
-  /** Stores one finished command, as a previous visit would have left it. */
-  logExec(sessionId: string, record: { command: string; output: string; exitCode: number }): void;
+  /** What a terminal in a box answers a typed line with. */
+  terminalAnswer: (line: string) => string;
+  /** How many terminals the orchestrator counts as open on one session. */
+  terminalsOpen(sessionId: string): number;
   /** Replaces the named agent sets, and fills in the global one. */
   agentSets(global: Omit<AgentSetSpec, 'id' | 'name'>, named: AgentSetSpec[]): Promise<void>;
   /** One agent set as the API reports it, for what a test wrote through the UI. */
@@ -518,12 +515,43 @@ function reviewCallOf(method: string, endpoint: string): string | null {
  * Both are hooks rather than routes, so every request still reaches the real
  * handler and nothing about the API is answered here.
  */
+/**
+ * Wires the real terminal endpoint onto the harness's server.
+ *
+ * The same upgrade check index.ts makes: the path names a box, and the token
+ * offered as a subprotocol entry is that box's own. Everything past the
+ * handshake is the orchestrator's own code, over the fake daemon's pty.
+ */
+function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
+  const wss = new WebSocketServer({
+    noServer: true,
+    handleProtocols: (protocols) =>
+      protocols.has(TERMINAL_SUBPROTOCOL) ? TERMINAL_SUBPROTOCOL : false,
+  });
+  app.app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const url = (req.url ?? '').split('?')[0] ?? '';
+    const path = /^\/ws\/sessions\/([^/]+)\/terminal$/.exec(url);
+    if (!path) return;
+    const sessionId = path[1]!;
+    const offered = String(req.headers['sec-websocket-protocol'] ?? '')
+      .split(',')
+      .map((entry) => entry.trim());
+    const token = sessionRow(db, sessionId)?.ws_token ?? null;
+    if (!offered.includes(TERMINAL_SUBPROTOCOL) || !token || !offered.includes(`bearer.${token}`)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => attachTerminal(ws, sessionId, app.manager));
+  });
+}
+
 function installHooks(
   app: Orchestrator,
   state: DeploymentState,
   calls: Pick<
     TestOrchestrator,
-    'attachmentUploads' | 'execCalls' | 'backgroundStops' | 'reviewCalls'
+    'attachmentUploads' | 'backgroundStops' | 'reviewCalls'
   >,
 ): void {
   app.app.addHook('onRequest', async (req: HookRequest, reply: HookReply) => {
@@ -541,16 +569,6 @@ function installHooks(
     if (req.headers[SETUP_HEADER] !== undefined) return;
     const path = req.url.split('?')[0] ?? '';
     const body = req.body as Record<string, unknown> | Buffer | undefined;
-
-    const exec = /^\/api\/sessions\/([^/]+)(?:\/threads\/([^/]+))?\/exec$/.exec(path);
-    if (exec && req.method === 'POST') {
-      calls.execCalls.push({
-        sessionId: exec[1]!,
-        threadId: exec[2] ?? null,
-        command: String((body as Record<string, unknown> | undefined)?.['command'] ?? ''),
-      });
-      return;
-    }
 
     const attachment = /^\/api\/sessions\/([^/]+)\/attachments$/.exec(path);
     if (attachment && req.method === 'POST' && Buffer.isBuffer(body)) {
@@ -659,7 +677,6 @@ export async function startOrchestrator(
   };
   const calls = {
     attachmentUploads: [] as TestOrchestrator['attachmentUploads'],
-    execCalls: [] as TestOrchestrator['execCalls'],
     backgroundStops: [] as TestOrchestrator['backgroundStops'],
     reviewCalls: [] as ReviewCall[],
   };
@@ -693,6 +710,12 @@ export async function startOrchestrator(
     },
   );
 
+  // The terminal is not stood in for: it is real orchestrator code down to
+  // the pty, and the fake daemon already answers with one. Only the upgrade
+  // has to be wired here, because index.ts is what does that in a deployment
+  // and this harness takes its place.
+  attachTerminalEndpoint(app, db);
+
   installHooks(app, state, calls);
 
   // As boot does, and for the same reason: a session's environment is built
@@ -722,11 +745,12 @@ export async function startOrchestrator(
     gateway,
     state,
     ...calls,
-    get execOutput() {
-      return docker.execOutput;
+    terminalsOpen: (sessionId) => app.manager.terminalCount(sessionId),
+    get terminalAnswer() {
+      return docker.terminalAnswer;
     },
-    set execOutput(fn: TestOrchestrator['execOutput']) {
-      docker.execOutput = fn;
+    set terminalAnswer(fn: TestOrchestrator['terminalAnswer']) {
+      docker.terminalAnswer = fn;
     },
     createSession: (spec = {}) => createSession(app, db, docker, upstreamFor, spec),
     resetSessions: () => {
@@ -738,7 +762,6 @@ export async function startOrchestrator(
       }
       db.prepare('DELETE FROM threads').run();
       db.prepare('DELETE FROM pending_requests').run();
-      db.prepare('DELETE FROM exec_log').run();
       db.prepare('DELETE FROM sessions').run();
     },
     review: (sessionId, spec = reviewWorkspace()) => buildWorkspace(workspaceOf(sessionId), spec),
@@ -758,20 +781,6 @@ export async function startOrchestrator(
         `/api/sessions/${sessionId}/review/file?path=${encodeURIComponent(path)}`,
       );
       return (res.json() as ReviewFileResponse).annotations;
-    },
-    logExec: (sessionId, record) => {
-      const now = Date.now();
-      appendExecLog(db, sessionId, {
-        thread_id: currentThread(db, sessionId)?.id ?? null,
-        command: record.command,
-        output: record.output,
-        exit_code: record.exitCode,
-        truncated: 0,
-        timed_out: 0,
-        started_at: now - 60_000,
-        finished_at: now - 59_000,
-        after_id: null,
-      });
     },
     agentSet: async (setId) => {
       const res = await setup('GET', `/api/agent-sets/${setId}`);

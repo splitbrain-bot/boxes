@@ -57,6 +57,15 @@ const AGENT_CMD = ['claude-agent-acp'];
  */
 const STRAY_SESSION_RATIO = 3;
 
+/**
+ * How often typing in a terminal writes the session's activity back, in
+ * milliseconds.
+ *
+ * The reaper reads activity in minutes, so writing a row per keystroke would
+ * record nothing it acts on any differently.
+ */
+const TOUCH_INTERVAL_MS = 60_000;
+
 /** Creates, starts, stops and describes sessions. */
 export class SessionManager {
   private readonly upstreams = new Map<string, UpstreamSession>();
@@ -73,6 +82,15 @@ export class SessionManager {
    * for one gives itself up at its next step; see {@link giveUpIfPreempted}.
    */
   private readonly preempted = new Set<string>();
+
+  /**
+   * How many terminals are open on each session, and when typing in one last
+   * marked it active.
+   *
+   * A session with a terminal open holds the reaper off the way an attached
+   * browser does. Entries go as the last terminal of a session closes.
+   */
+  private readonly terminals = new Map<string, { open: number; touchedAt: number }>();
 
   /** Permission requests waiting for a browser, across all sessions. */
   readonly pending: PendingStore;
@@ -1083,7 +1101,7 @@ export class SessionManager {
     // Every table keyed by the session id, so a deleted session leaves nothing
     // behind: the row itself stays as a tombstone — see setStatus — and these
     // have no reader once it does.
-    for (const table of ['pending_requests', 'exec_log', 'threads']) {
+    for (const table of ['pending_requests', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
     }
     this.usage.forget(id);
@@ -1154,7 +1172,7 @@ export class SessionManager {
    * adapter runs too.
    *
    * Marks the session active, because everything that asks for this is about
-   * to work in the box: a `!bang` command, or a review running git in it.
+   * to work in the box: a terminal opening a shell, or a review running git.
    */
   async execTarget(id: string): Promise<{ containerId: string; workingDir: string }> {
     return this.withSlot(id, () => this.execTargetHeld(id));
@@ -1164,22 +1182,62 @@ export class SessionManager {
   private async execTargetHeld(id: string): Promise<{ containerId: string; workingDir: string }> {
     const stored = this.mustGet(id);
     if (!stored.container_id) throw new HttpError(409, 'Session has no container');
-    // A `!bang` command starts a stopped container, so it is as good a moment
-    // as any to put the box right: the same repairs start() runs, in the same
+    // Reaching in starts a stopped container, so it is as good a moment as
+    // any to put the box right: the same repairs start() runs, in the same
     // order.
     const row = await this.prepareContainer(stored);
     this.giveUpIfPreempted(id);
     await dk.startContainer(row.container_id!);
-    // Reaching into the box is use of the box, whoever is asking: a local
-    // command, or a review running git in it. Both hold the reaper off for as
-    // long as they go on asking.
+    // Reaching into the box is use of the box, whoever is asking, and it
+    // holds the reaper off for as long as the asking goes on.
     this.touch(id);
     return { containerId: row.container_id!, workingDir: dk.WORKSPACE_DIR };
   }
 
-  /** Marks a session active, so running a command holds off the reaper. */
+  /** Marks a session active, so reaching into the box holds off the reaper. */
   touch(id: string): void {
     touchSession(this.db, id);
+  }
+
+  /**
+   * Marks a session active, at most once every {@link TOUCH_INTERVAL_MS}.
+   *
+   * What a terminal calls as its reader types.
+   */
+  touchThrottled(id: string): void {
+    const held = this.terminals.get(id);
+    const now = Date.now();
+    if (held && now - held.touchedAt < TOUCH_INTERVAL_MS) return;
+    if (held) held.touchedAt = now;
+    this.touch(id);
+  }
+
+  /**
+   * Counts one open terminal onto a session, and returns the handle that
+   * takes it off again.
+   *
+   * The count is what the reaper reads, so it has to go up before the box is
+   * started rather than once the shell is there: starting takes seconds, and
+   * a tick landing inside them must not stop the box being opened.
+   */
+  holdTerminal(id: string): () => void {
+    const held = this.terminals.get(id) ?? { open: 0, touchedAt: 0 };
+    held.open++;
+    this.terminals.set(id, held);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.terminals.get(id);
+      if (!current) return;
+      current.open--;
+      if (current.open <= 0) this.terminals.delete(id);
+    };
+  }
+
+  /** How many terminals are open on a session. */
+  terminalCount(id: string): number {
+    return this.terminals.get(id)?.open ?? 0;
   }
 
   /**

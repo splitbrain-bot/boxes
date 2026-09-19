@@ -5,7 +5,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  appendExecLog,
   MIGRATIONS,
   openDb,
   touchSession,
@@ -315,27 +314,25 @@ test('the agent tables arrive with a global set, and existing sessions select no
   }
 });
 
-test('the exec log gains a thread, and its session-wide rows are dropped', () => {
+test('a database that has an exec log loses it', () => {
+  // The `!bang` escape hatch the log served is gone, so an upgrade takes the
+  // table with it rather than leaving rows nothing reads.
   const db = new Database(join(dir, 'boxes.db'));
-  for (const sql of MIGRATIONS.slice(0, 14)) db.exec(sql);
-  db.pragma('user_version = 14');
+  for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
+  db.pragma('user_version = 16');
   db.prepare(
-    `INSERT INTO exec_log (session_id, command, output, exit_code, truncated,
+    `INSERT INTO exec_log (session_id, thread_id, command, output, exit_code, truncated,
        timed_out, started_at, finished_at)
-     VALUES ('s1', 'git status', 'clean', 0, 0, 0, 1000, 2000)`,
+     VALUES ('s1', 't1', 'git status', 'clean', 0, 0, 0, 1000, 2000)`,
   ).run();
   db.close();
 
   const upgraded = openDb(dir);
   try {
-    assert.ok(columns(upgraded, 'exec_log').includes('thread_id'));
-
-    // The stored rows name no thread, and nothing can tell which of a
-    // session's conversations each of them was typed in. Keeping them would
-    // mean showing every one of them in every thread, which is the behaviour
-    // the column is here to end.
-    const count = upgraded.prepare('SELECT COUNT(*) AS n FROM exec_log').get() as { n: number };
-    assert.equal(count.n, 0);
+    const table = upgraded
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'exec_log'")
+      .get();
+    assert.equal(table, undefined);
   } finally {
     upgraded.close();
   }
@@ -374,30 +371,6 @@ test('threads from before the done column read as not done', () => {
   }
 });
 
-test('the exec log gains where each command was typed, and older rows have none', () => {
-  const db = new Database(join(dir, 'boxes.db'));
-  for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
-  db.pragma('user_version = 16');
-  db.prepare(
-    `INSERT INTO exec_log (session_id, thread_id, command, output, exit_code, truncated,
-       timed_out, started_at, finished_at)
-     VALUES ('s1', 't1', 'git status', 'clean', 0, 0, 0, 1000, 2000)`,
-  ).run();
-  db.close();
-
-  const upgraded = openDb(dir);
-  try {
-    assert.ok(columns(upgraded, 'exec_log').includes('after_id'));
-    // A row from before was typed somewhere, but nothing recorded where. It
-    // is listed at the end, which is where every row used to go.
-    const row = upgraded.prepare('SELECT after_id FROM exec_log').get() as {
-      after_id: string | null;
-    };
-    assert.equal(row.after_id, null);
-  } finally {
-    upgraded.close();
-  }
-});
 
 test('sessions from before the token column each get one of their own', () => {
   const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN ws_token'));
@@ -456,40 +429,16 @@ function insertLiveSession(db: Db, id: string): void {
   ).run(id, `sn-${id}`);
 }
 
-/** One stored command, in the shape the exec route records. */
-function execRecord(): Parameters<typeof appendExecLog>[2] {
-  return {
-    thread_id: null,
-    command: 'ls',
-    output: '',
-    exit_code: 0,
-    truncated: 0,
-    timed_out: 0,
-    started_at: 1000,
-    finished_at: 2000,
-    after_id: null,
-  };
-}
-
 test('a deleted session takes no more writes', () => {
   // Deleting sets the tombstone before it clears the tables, so work still in
-  // flight — a command that is just finishing, a touch — must not put rows
-  // back behind it.
+  // flight — an upstream that is only now settling — must not stir the row
+  // behind it.
   const db = openDb(dir);
   insertLiveSession(db, 's1');
-  assert.equal(appendExecLog(db, 's1', execRecord()) > 0, true);
 
   db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = 's1'").run();
-  assert.equal(appendExecLog(db, 's1', execRecord()), 0);
   touchSession(db, 's1');
 
-  const counts = (table: string): number =>
-    (
-      db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE session_id = ?`).get('s1') as {
-        n: number;
-      }
-    ).n;
-  assert.equal(counts('exec_log'), 1);
   const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('s1') as {
     last_active_at: number;
   };
@@ -497,10 +446,3 @@ test('a deleted session takes no more writes', () => {
   db.close();
 });
 
-test('a row is still stored for a session that has no row at all', () => {
-  // The guard is the tombstone, not the row: a caller recording against an id
-  // the sessions table never had is not what it is there for.
-  const db = openDb(dir);
-  assert.equal(appendExecLog(db, 'nowhere', execRecord()) > 0, true);
-  db.close();
-});

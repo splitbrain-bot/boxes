@@ -43,11 +43,17 @@ RUN install -d -m 0755 /etc/apt/keyrings \
 # procps is not only for a person in a terminal: Boxes reads the box's own
 # process table to find what a conversation has left running in it, and the
 # stop button beside that list kills by a pid only `ps` in here can give it.
+#
+# tmux is what the dashboard's terminal attaches to, so a reader who closes
+# the tab and comes back finds the same shell with the same scrollback, and
+# a build carries on while nobody is watching. Its socket goes in /tmp, which
+# is a tmpfs, so a stopped box starts again with no session to attach to.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
       jq \
       procps \
+      tmux \
       build-essential \
       python3 \
       python3-venv \

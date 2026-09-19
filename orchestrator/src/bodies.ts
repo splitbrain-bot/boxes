@@ -62,12 +62,6 @@ export const backgroundStopBody = z.object({
   processId: z.string().optional(),
 });
 
-/** POST /api/sessions/:id/exec — the command to run, and where it was typed. */
-export const execBody = z.object({
-  command: z.string(),
-  after: z.string().nullable().optional(),
-});
-
 /**
  * PUT /api/sessions/:id/review/file — the whole file, and the hash it was read
  * at. An absent hash matches nothing, so the save is refused as a stale one.
