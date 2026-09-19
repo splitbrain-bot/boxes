@@ -244,7 +244,13 @@ async function main(): Promise<void> {
   // registry is unreachable should still come up and serve what it has. The
   // create path pulls again, and reports properly when there is nothing to
   // create a session from.
+  //
+  // The refresh is what makes a restart a way to pick up a tag that has moved,
+  // rather than waiting out the refresher's first tick. It is skipped where
+  // the refresh is off, which says the image is built on this host and no
+  // registry has it.
   try {
+    if (cfg.SESSION_IMAGE_PULL_MINUTES > 0) await manager.refreshSessionImage();
     await manager.ensureSessionImage();
   } catch (err) {
     log.warn('could not pull the session image at boot', {

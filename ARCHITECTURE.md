@@ -80,7 +80,7 @@ The orchestrator and the proxy are compose services. Session containers are
 created at runtime through the Docker API, so they appear in no compose file.
 
 That makes the session image the orchestrator's to keep, not compose's: it
-pulls `SESSION_IMAGE` when it is missing and again every
+pulls `SESSION_IMAGE` when it is missing, at every boot, and again every
 `SESSION_IMAGE_PULL_MINUTES`, and a session moves onto what arrived the next
 time it is *started* — never while it runs, where recreating the container
 would kill the adapter exec mid-turn. The copy the tag moved off is removed
