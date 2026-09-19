@@ -32,6 +32,7 @@ import {
   type SessionRow,
   type ThreadRow,
 } from '../../orchestrator/src/db.ts';
+import { checkUpgrade } from '../../orchestrator/src/gateway/downstream.ts';
 import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
 import { setLogLevel } from '../../orchestrator/src/log.ts';
 import type { SessionManager } from '../../orchestrator/src/sessions.ts';
@@ -518,9 +519,9 @@ function reviewCallOf(method: string, endpoint: string): string | null {
 /**
  * Wires the real terminal endpoint onto the harness's server.
  *
- * The same upgrade check index.ts makes: the path names a box, and the token
- * offered as a subprotocol entry is that box's own. Everything past the
- * handshake is the orchestrator's own code, over the fake daemon's pty.
+ * The check is the orchestrator's own, called the way index.ts calls it, so a
+ * handshake this suite accepts is one a deployment accepts too. Everything
+ * past it is the orchestrator's own code, over the fake daemon's pty.
  */
 function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
   const wss = new WebSocketServer({
@@ -533,11 +534,8 @@ function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
     const path = /^\/ws\/sessions\/([^/]+)\/terminal$/.exec(url);
     if (!path) return;
     const sessionId = path[1]!;
-    const offered = String(req.headers['sec-websocket-protocol'] ?? '')
-      .split(',')
-      .map((entry) => entry.trim());
     const token = sessionRow(db, sessionId)?.ws_token ?? null;
-    if (!offered.includes(TERMINAL_SUBPROTOCOL) || !token || !offered.includes(`bearer.${token}`)) {
+    if (!checkUpgrade(req.headers['sec-websocket-protocol'], token, TERMINAL_SUBPROTOCOL).ok) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
