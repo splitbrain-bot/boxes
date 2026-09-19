@@ -123,10 +123,11 @@ export function startReaper(
  * SESSION_IMAGE_PULL_MINUTES, and returns a handle that stops it. Returns a
  * no-op handle when the setting is 0.
  *
- * This is the whole of "keep the session image current": the pull puts the
- * new image on the host, and each session moves onto it the next time it is
- * started. Nothing running is disturbed, and a failed pull is a log line —
- * the image already here still works.
+ * How the session image stays current while the orchestrator runs, boot
+ * having pulled it once already: the pull puts the new image on the host, and
+ * each session moves onto it the next time it is started. Nothing running is
+ * disturbed, and a failed pull is a log line — the image already here still
+ * works.
  */
 export function startImageRefresher(
   cfg: Config,
