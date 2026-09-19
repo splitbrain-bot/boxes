@@ -82,6 +82,19 @@ test('the terminal is opened from the thread and steps back to it', async () => 
   }
 });
 
+test('the terminal is opened from the session list', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    await page.getByRole('link', { name: 'Terminal' }).click();
+    await page.waitForURL(`**/sessions/${ID}/terminal`);
+    await expect.poll(() => screen(page)).toContain('agent@box');
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a terminal holds the box, and closing the page lets it go', async () => {
   // The reaper reads this count, so it is what stands between a build running
   // in a terminal and the container being stopped under it.

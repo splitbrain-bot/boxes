@@ -5,7 +5,7 @@ import {
   type Stream,
 } from '@agentclientprotocol/sdk';
 import type { WebSocket } from 'ws';
-import { ACP_METHOD, ACP_SUBPROTOCOL } from '../../../shared/acp.ts';
+import { ACP_METHOD } from '../../../shared/acp.ts';
 import { log } from '../log.ts';
 import type { SessionManager } from '../sessions.ts';
 import { threadOf } from './broadcast.ts';
@@ -60,9 +60,14 @@ let nextHandleId = 1;
  * saying why when it refuses.
  *
  * A browser cannot set an Authorization header on a WebSocket, so a client
- * offers the token as a bearer.<token> subprotocol entry alongside acp.v1.
- * The gateway checks it here, on the upgrade itself. Which subprotocol is
- * negotiated is decided by the server's own `handleProtocols`.
+ * offers the token as a bearer.<token> subprotocol entry alongside the name
+ * of the protocol it speaks. The gateway checks both here, on the upgrade
+ * itself. Which subprotocol is negotiated is decided by the server's own
+ * `handleProtocols`.
+ *
+ * `subprotocol` is the name the endpoint being connected to answers to, and
+ * the caller names it because every endpoint checks its upgrades here while
+ * each speaks a protocol of its own.
  *
  * `sessionToken` is the token of the session being connected to, so a token
  * reaches that session alone. An id no live session holds has none, which is
@@ -72,13 +77,14 @@ let nextHandleId = 1;
 export function checkUpgrade(
   protocolHeader: string | undefined,
   sessionToken: string | null,
+  subprotocol: string,
 ): { ok: true } | { ok: false; reason: string } {
   const offered = (protocolHeader ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  if (!offered.includes(ACP_SUBPROTOCOL)) {
-    return { ok: false, reason: `missing ${ACP_SUBPROTOCOL} subprotocol` };
+  if (!offered.includes(subprotocol)) {
+    return { ok: false, reason: `missing ${subprotocol} subprotocol` };
   }
   if (!sessionToken) return { ok: false, reason: 'no such session' };
   const expected = `bearer.${sessionToken}`;

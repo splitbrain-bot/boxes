@@ -170,11 +170,15 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   // there, or one that is deleted, has no token, and the upgrade is then
   // refused the way a wrong token is: the handshake never says which sessions
   // exist. Both endpoints are the same box seen two ways, so both are opened
-  // by the same token.
+  // by the same token, and each is offered the name of its own protocol.
   const row = manager.getRow(sessionId);
   const live = row && row.status !== 'deleted' ? row : null;
 
-  const check = checkUpgrade(req.headers['sec-websocket-protocol'], live?.ws_token ?? null);
+  const check = checkUpgrade(
+    req.headers['sec-websocket-protocol'],
+    live?.ws_token ?? null,
+    terminal ? TERMINAL_SUBPROTOCOL : ACP_SUBPROTOCOL,
+  );
   if (!check.ok) {
     log.warn('rejected WS upgrade', { sessionId, reason: check.reason });
     // The handshake fails before a WebSocket exists, so the refusal is an
