@@ -22,7 +22,11 @@ Two consequences shape the rest of the design:
 - The agent connection outlives any browser, so a long-lived process has to own
   it and be able to rebuild it without losing the thread.
 - Thread history is replayed by the adapter's own `session/load` from the
-  session's home, so the orchestrator stores no transcript of its own.
+  session's home, so the orchestrator stores no transcript of its own. What it
+  keeps is a bounded log per thread, in memory, of what it has forwarded — the
+  adapter's replay read once when a thread is brought up, and everything said
+  live since — and a browser opening a thread is sent that log rather than a
+  fresh replay.
 
 A session owns several *threads* — ACP calls one conversation a session, and
 this document calls it a thread to keep it apart from a Boxes session. The
@@ -551,46 +555,64 @@ parse is left as the text it is, because showing the XML is a better failure
 than dropping what a task said.
 
 `translate.ts` being pure is what makes replay and live streaming the same
-code path: a reconnect repeats the handshake, `session/load` re-sends the
+code path: a reconnect repeats the handshake, `session/load` sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
 
+**What a browser is sent on `session/load` is the gateway's own log of the
+thread, not a replay from the adapter.** The gateway asks the adapter to
+replay a thread exactly once, when it brings the thread up — at spawn for the
+threads being watched, or the first time somebody opens one the spawn left
+alone — and reads that replay into a per-thread log (`thread-log.ts`) that
+nobody is sent. From then on every update it forwards live on that thread is
+appended to the same log, the gateway's own prompt echoes included, so the
+log is what a browser watching the thread throughout would have received. A
+browser's `session/load` is answered from it without a round trip: the
+adapter's modes and options as they stood when the thread was brought up,
+kept current from the `current_mode_update` and `config_option_update`
+notifications that change them.
+
+The reason is that the adapter's replay and a running turn arrive on one
+connection in one shape. The adapter serves a `session/load` while a prompt is
+in flight and writes the transcript back as ordinary `session/update`
+notifications, interleaved with whatever the turn is saying, and nothing on
+either says which it is. There is no way to route that mixture to a browser
+correctly: trim it at the message the browser holds and the turn's new
+messages are dropped with the history in front of them; send it whole and the
+message being written is folded into two pieces either side of an older one.
+So the replay is never routed to a browser at all. It is read only when the
+thread is otherwise silent — a thread just brought up on a fresh adapter has
+nothing running on it, and nothing can be sent on it until the load answers —
+and a reconnect mid-turn is served from memory, with the rest of the turn in
+it and the adapter not asked.
+
 A reconnect says how much it already holds, so it is sent only the rest. The
 browser names the last message the adapter itself gave an id to, in `_meta` on
-its `session/load`; the gateway takes the adapter's whole replay as it always
-did and forwards from that message onward. A message id is the anchor because
-it names a boundary between updates rather than a place inside one, and the
-model is only the updates folded in order, so a fold that starts at a boundary
-and a fold of everything reach the same thread. The named message is re-sent
-rather than skipped, because a socket can drop halfway through one.
+its `session/load`, and is sent the log from that message onward. A message id
+is the anchor because it names a boundary between updates rather than a place
+inside one, and the model is only the updates folded in order, so a fold that
+starts at a boundary and a fold of everything reach the same thread. The named
+message is re-sent rather than skipped, because a socket can drop halfway
+through one.
 
-Every way that can fail ends in the whole thread. A browser with nothing the
+Every way that can fail ends in the whole log. A browser with nothing the
 adapter named asks for no resume; a thread that was re-minted under it is not
-resumed; a replay that never names the point is sent whole; and a browser that
-no longer holds the message it named rebuilds from scratch. The answer —
+resumed; a message the log no longer holds means the log whole; and a browser
+that no longer holds the message it named rebuilds from scratch. The answer —
 `_boxes/replay`, resumed or not — always reaches the browser before the first
-update of the replay, so it knows whether to keep what it has before anything
-arrives to fold into it.
+update, so it knows whether to keep what it has before anything arrives to
+fold into it.
 
-Replayed history and a running turn arrive on one connection in one shape. The
-adapter serves a `session/load` while a prompt is still in flight and writes
-the transcript back as ordinary `session/update` notifications, so a turn
-streaming into the thread the browser is rebuilding is indistinguishable from
-the thread's own past: the anchor scan would drop the live chunks with the
-history in front of it, and a whole replay would fold the message being
-written into two pieces either side of an older one. What separates them is
-what the gateway has already seen. It forwards a turn's updates as they are
-written, so while that turn runs it holds the message and tool call ids the
-turn is speaking under, and during a replay an update naming one of those is
-the turn's rather than history. The turn's own updates keep going out live to
-the other browsers on the thread — a phone reading an answer has no reason to
-go quiet while a laptop reloads — and are set aside for the browser that is
-replaying until its history is complete, which is where the newest part of a
-thread belongs. The limit is content whose id first appears during the replay:
-the gateway has never seen it, so it cannot be told apart from history and is
-treated as history. The case this answers is the one a reconnect hits, a turn
-already streaming when the replay starts.
+The log is bounded, at a few megabytes per thread, and drops its oldest
+message when it grows past that — chunks, tool calls and all, so the cut never
+leaves a message starting mid-sentence or a result without its call. What
+goes is the top of the thread, which opens at its bottom: scrollback nobody
+reaches. A browser that already held it keeps it; a fresh tab on a thread
+whose traffic passed the cap opens on the last few megabytes, and the head
+comes back the next time the orchestrator restarts and reads the transcript
+in again. A thread the adapter turns out not to hold any more loses its log
+along with its conversation.
 
 A replay is folded in silence and published once. The notifications are the
 same ones live streaming uses, so publishing each one would hand the view
@@ -893,7 +915,7 @@ it, and the reconnect resumes from what it already had.
 ### Who each update goes to
 
 `broadcast.ts` decides. Sending every update to every browser is almost
-right, and wrong in three places that only appear with more than one attached —
+right, and wrong in two places that only appear with more than one attached —
 a phone and a desktop watching the same session, or two tabs on two threads of
 one box.
 
@@ -910,17 +932,17 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   echo it live, so without this the browser that sent it shows nothing until
   its next reload. While the gateway is echoing *that thread*, an adapter that
   *does* echo is suppressed, so either kind of adapter produces exactly one
-  copy. Replay is exempt: there the adapter is reading back history the
-  gateway never saw.
-- **A replay goes only to the browser that asked for it, and silences only its
-  own thread.** `session/load` is by definition a re-send of the whole thread
-  to the gateway, whatever part of it the browser is then sent,
-  so broadcasting it rendered every other open tab's conversation twice — but
-  a replay of one thread must not hold back another thread's live updates,
-  which is the bug two open tabs hit first. A replay one thread *borrowed*
-  from another is re-tagged as the borrower's on the way out, because the
-  browser reading it is pinned to the borrower — see *Several threads per
-  session*.
+  copy. A transcript being read into the log is exempt: there the adapter is
+  reading back history the gateway never saw, and nobody is sent it anyway.
+- **The adapter's replay reaches no browser; a browser opening a thread is
+  sent the log.** A `session/load` the gateway itself issues fills the log of
+  the one thread it names and is delivered to nobody — the tab already on
+  that thread has the thread — and another thread's live updates go on as
+  before, which is the bug two open tabs hit first. A browser's own
+  `session/load` never reaches the adapter: it is answered from the log,
+  whole or from the message the browser named. A fork's log starts as a copy
+  of its source's, re-tagged as the fork's, because the browser reading it is
+  pinned to the fork — see *Several threads per session*.
 
 ### Several threads per session
 
@@ -982,32 +1004,25 @@ Forking is offered only when the adapter advertised
 already caches verbatim. The capability is marked unstable in the ACP schema,
 so an adapter that drops it costs the dashboard a button rather than a build.
 
-**A fork borrows the transcript it branched from until it has one of its
-own.** The adapter branches the conversation in full — the fork knows
-everything the source said — but it writes the fork no transcript until the
-fork is first prompted, so `session/load` on a fresh one replays nothing and
-it would open on a blank screen claiming to know a conversation the reader
-cannot see. So `threads.inherits_from` records the source, and a load of a
-thread that has it replays the *source's* history, re-tagged as this thread's,
-after the fork's own load has come back empty. A fork of a fork follows the
-chain: the middle thread has no transcript either, so what both of them came
-from is what gets replayed.
+**A fork's log starts as a copy of its source's.** The adapter branches the
+conversation in full — the fork knows everything the source said — but it
+writes the fork no transcript until the fork is first prompted, so a fork has
+nothing of its own to be read in and would open on a blank screen claiming to
+know a conversation the reader cannot see. So when a fork is minted, the
+source's log is copied into it, every update re-tagged as the fork's, and
+from there the fork's log grows with what is said on the fork. A source no
+browser has opened on this adapter is brought up first, so there is a log to
+copy. Until the fork's first prompt the adapter cannot load it back, so
+`threads.inherits_from` records the source: a fork that had not been prompted
+before a respawn is branched again rather than started empty, because
+carrying that context is the only reason it exists, and its log is copied
+again from the source's. A fork of a fork follows the chain to the first
+thread up it with a transcript of its own.
 
-That first prompt is where the borrowing stops, and the column is cleared
-there rather than later: the adapter starts a transcript for the fork at that
-moment, and it opens with everything the source had said — so from then on
-the fork replays itself, and replaying the source as well would say all of it
-twice. The same column is what re-forks a thread the adapter has forgotten: a
-fork that had not been prompted before a respawn is branched again rather than
-started empty, because carrying that context is the only reason it exists.
-
-The borrowed replay is one browser's, exactly as its own would be, and it
-holds back the source's live updates for its length the same way. A replay of
-a thread cannot be told apart from what that thread is saying right now, and
-this is the one place where two threads are the same conversation — so a
-source mid-turn can lose a moment of its stream to a fork being opened. It
-comes back on that browser's next load, and a source that cannot be replayed
-at all costs the fork its history and nothing else.
+That first prompt is where the column is cleared: the adapter starts a
+transcript for the fork at that moment, opening with everything the source
+had said, so from then on a respawn loads the fork back like any other thread
+and reads that transcript into its log.
 
 A running turn and a waiting permission request belong to the thread, not the
 session. `threads.turn_active` records the first, and the session's answer is
@@ -2342,8 +2357,10 @@ in the box.
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update
 routing with two browsers attached — including two on *two* threads, where an
-update for one must not reach the other, a replay of one must not silence the
-other's live updates, and an update nobody is watching is dropped — the exec
+update for one must not reach the other, reading one in must not silence the
+other's live updates, and an update nobody is watching is dropped — the
+per-thread log a browser opens a thread from, and what it drops past its cap,
+the exec
 limits, the schema migrations that turned one thread per session into several
 and then moved the running turn onto them, the spawn path against a stand-in
 adapter — a forgotten thread costing the session only that thread, a turn

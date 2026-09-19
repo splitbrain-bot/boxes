@@ -777,14 +777,13 @@ export interface TurnStateParams {
 }
 
 /**
- * Notification the gateway sends a browser at the start of a replay it asked
- * for, saying whether the replay was picked up where the browser said it
- * could be.
+ * Notification the gateway sends a browser when it opens a thread, saying
+ * whether what follows was picked up where the browser said it could be.
  *
- * It arrives before any of the replayed updates, so a browser that is about
- * to be sent the thread whole knows to drop what it holds before the first of
- * it lands, and a browser that is being sent only a tail knows to keep what
- * it holds. Nothing else in the stream tells the two apart.
+ * It arrives before any of the updates, so a browser that is about to be
+ * sent the thread whole knows to drop what it holds before the first of them
+ * lands, and a browser that is being sent only a tail knows to keep what it
+ * holds. Nothing else in the stream tells the two apart.
  *
  * The underscore is ACP's extension prefix, and a notification takes no
  * reply, so a client that has never heard of this ignores it.
@@ -793,12 +792,12 @@ export const REPLAY_METHOD = '_boxes/replay';
 
 /** Params of a `_boxes/replay` notification. */
 export interface ReplayParams {
-  /** The adapter's own id for the thread being replayed. */
+  /** The adapter's own id for the thread being opened. */
   sessionId: string;
   /**
-   * True when what follows is only what comes after the browser's resume
-   * point. False when it is the whole thread, which is the answer whenever
-   * the point was not asked for or could not be honoured.
+   * True when what follows starts at the browser's resume point. False when
+   * it is the whole thread, which is the answer whenever the point was not
+   * asked for or the gateway no longer holds the message it names.
    */
   resumed: boolean;
 }
@@ -816,8 +815,8 @@ export const BOXES_META = 'boxes';
 export interface LoadMeta {
   /**
    * The adapter's id for the last message the browser holds. The gateway
-   * sends only what the replay names after that message; absent, it sends
-   * the thread whole.
+   * sends the thread from that message onward; absent, it sends the thread
+   * whole.
    */
   resumeFrom?: string;
 }

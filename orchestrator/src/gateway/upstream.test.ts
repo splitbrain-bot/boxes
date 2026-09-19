@@ -1198,9 +1198,9 @@ test('a fork with no transcript of its own is shown the one it came from', async
     reader,
   );
 
-  // Its own load replays nothing, so the source's is sent in its place --
-  // re-tagged as this thread's, because that is the conversation the browser
-  // reading it is pinned to.
+  // The fork's log began as a copy of the source's, re-tagged as this
+  // thread's, because that is the conversation the browser reading it is
+  // pinned to. Nothing is asked of the adapter to open it.
   assert.deepEqual(reader.told, [
     {
       sessionId: 'acp-branch-1',
@@ -1210,8 +1210,20 @@ test('a fork with no transcript of its own is shown the one it came from', async
       },
     },
   ]);
-  assert.deepEqual(loaded, ['acp-branch-1', 'acp-kept']);
+  assert.deepEqual(loaded, []);
   assert.equal(thread(created.id)['inherits_from'], 't2');
+});
+
+test('forking a thread no browser has opened loads it first, for the fork to copy', async () => {
+  fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  loaded.length = 0;
+
+  // t2 is not the session's default and nobody is watching it, so the spawn
+  // left it alone. Its conversation is what the fork is about to carry.
+  await manager.createThread('s1', { from: 't2' });
+  assert.deepEqual(loaded, ['acp-kept']);
 });
 
 test('a fork stops borrowing the moment it is prompted', async () => {
@@ -1233,12 +1245,16 @@ test('a fork stops borrowing the moment it is prompted', async () => {
     reader,
   );
 
-  // The adapter writes the fork a transcript at its first prompt, and that
-  // transcript opens with everything the source had said. Replaying the
-  // source as well would say all of it twice.
+  // The adapter writes the fork a transcript at its first prompt, so from
+  // here a restart loads the fork itself rather than branching the source
+  // again. What the browser is sent does not change: the conversation the
+  // fork carries, and then what was said on the fork.
   assert.equal(thread(created.id)['inherits_from'], null);
-  assert.deepEqual(loaded, ['acp-branch-1']);
-  assert.deepEqual(reader.told, []);
+  assert.deepEqual(loaded, []);
+  assert.deepEqual(
+    reader.told.map((p) => (p as { update: { content: { text: string } } }).update.content.text),
+    ['what was said before the fork', 'and now something of my own'],
+  );
 });
 
 test('a fork the adapter has forgotten is branched again rather than started empty', async () => {
@@ -1307,24 +1323,19 @@ function plainAdapter(): FakeAdapter {
   );
 }
 
-/** Every session/load the adapter was asked for, with the `_meta` it carried. */
-let loadMeta: unknown[] = [];
-
 /**
  * An adapter that replays a thread as a run of named messages, which is what
  * a resume needs: a browser names one of them, and the gateway has to find it
- * in the stream.
+ * in the log the replay filled.
  */
 function transcriptAdapter(history: Record<string, Array<Record<string, unknown>>>): FakeAdapter {
   loaded = [];
-  loadMeta = [];
   const adapter: FakeAdapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     if (msg.method === 'session/load') {
       const of = String(msg.params?.['sessionId']);
       loaded.push(of);
-      loadMeta.push(msg.params?.['_meta']);
       for (const update of history[of] ?? []) {
         adapter.notify('session/update', { sessionId: of, update });
       }
@@ -1374,9 +1385,9 @@ test('a browser that says how much it has is sent only the rest', async () => {
   // message it named comes with the tail because it drops that one and takes
   // it again, which is what makes the model the same either way.
   assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
-  // Passed on as it stands: `_meta` is ACP's extension slot, and an adapter
-  // ignores a key in it that it knows nothing about.
-  assert.deepEqual(loadMeta.at(-1), { boxes: { resumeFrom: 'm2' } });
+  // Answered from the log the spawn filled. The adapter was asked for the
+  // thread once, on the way up, and not again for this browser.
+  assert.deepEqual(loaded, ['acp-gone', 'acp-kept']);
   assert.deepEqual(
     reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
     ['m2', 'm3'],
@@ -1430,6 +1441,86 @@ test('a browser that asks for no resume point is sent the thread whole', async (
   assert.equal(reader.told.length, 3);
 });
 
+test('a browser reconnecting mid-turn is sent the rest of the turn as well', async () => {
+  const adapter = transcriptAdapter({ 'acp-kept': TRANSCRIPT });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+  reader.told.length = 0;
+
+  // The agent is mid-answer when the browser's socket drops: a message the
+  // transcript does not have yet, streamed while nobody was there.
+  up.detach(reader);
+  adapter.notify('session/update', {
+    sessionId: 'acp-kept',
+    update: said('agent', 'm4', 'the answer being written'),
+  });
+  await expect.poll(() => up.speakingThreads).toEqual(['acp-kept']);
+
+  // Back, holding the thread as far as m2. The adapter is not asked to
+  // replay it: the log has the turn's chunk along with the transcript, and
+  // a replay arriving now would be mixed into whatever the turn says next.
+  up.attach(reader);
+  await up.forwardRequest(
+    'session/load',
+    {
+      sessionId: 'acp-kept',
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { boxes: { resumeFrom: 'm2' } },
+    },
+    reader,
+  );
+
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
+  assert.deepEqual(
+    reader.told
+      .map((p) => (p as { update?: { messageId?: string } }).update?.messageId)
+      .filter(Boolean),
+    ['m2', 'm3', 'm4'],
+  );
+  assert.deepEqual(loaded, ['acp-gone', 'acp-kept']);
+});
+
+test("a browser's load answers with the thread's modes and options", async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/load') {
+      return {
+        modes: { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
+        configOptions: [{ id: 'model', category: 'model', currentValue: 'opus' }],
+      };
+    }
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-gone');
+  up.attach(reader);
+  await up.ensureStarted();
+
+  // The adapter has since put the thread in another mode, and said so.
+  adapter.notify('session/update', {
+    sessionId: 'acp-gone',
+    update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' },
+  });
+  await expect.poll(() => thread('t1')['mode_id']).toBe('plan');
+
+  // What the adapter answered when the gateway loaded the thread, kept
+  // current: the browser's own load never reaches the adapter.
+  const answer = await up.forwardRequest(
+    'session/load',
+    { sessionId: 'acp-gone', cwd: '/workspace', mcpServers: [] },
+    reader,
+  );
+  assert.deepEqual(answer, {
+    modes: { currentModeId: 'plan', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
+    configOptions: [{ id: 'model', category: 'model', currentValue: 'opus' }],
+  });
+});
+
 test('a fork borrowing a transcript is told once that it is rebuilding', async () => {
   fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
   await manager.createThread('s1', { from: 't2' });
@@ -1444,16 +1535,14 @@ test('a fork borrowing a transcript is told once that it is rebuilding', async (
       sessionId: 'acp-branch-1',
       cwd: '/workspace',
       mcpServers: [],
-      // A fork that has never been prompted replays nothing of its own, so
-      // whatever this browser holds came from the source and the point it
-      // names is not in the fork's own stream.
+      // A message the fork's log does not hold: the point cannot be honoured,
+      // and the thread comes whole.
       _meta: { boxes: { resumeFrom: 'm2' } },
     },
     reader,
   );
 
-  // One load, one answer, and the borrowed history arrives behind it. A
-  // second answer would have the browser throw that history away.
+  // One answer, and the conversation the fork carries arrives behind it.
   assert.deepEqual(reader.replays, [{ sessionId: 'acp-branch-1', resumed: false }]);
   assert.equal(reader.told.length, 1);
 });
