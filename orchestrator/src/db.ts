@@ -152,29 +152,6 @@ export interface ThreadRow {
   last_active_at: number;
 }
 
-/** One finished local command, as stored. */
-export interface ExecRow {
-  id: number;
-  session_id: string;
-  /**
-   * The thread the command was typed in, and null when the session had no
-   * thread to log it against. Such a row is listed by nobody.
-   */
-  thread_id: string | null;
-  command: string;
-  output: string;
-  exit_code: number | null;
-  truncated: number;
-  timed_out: number;
-  started_at: number;
-  finished_at: number;
-  /**
-   * The id of the tool call or message the thread ended with when the command
-   * was typed, or null when there was none or the browser did not say.
-   */
-  after_id: string | null;
-}
-
 /** A permission request the adapter is still blocked on. */
 export interface PendingRequestRow {
   id: number;
@@ -491,6 +468,12 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE push_subscriptions ADD COLUMN vapid_key TEXT;
   `,
+  // The `!bang` escape hatch is gone and a terminal into the box has taken
+  // its place, so the log of local commands has no reader and no writer.
+  `
+  DROP INDEX IF EXISTS idx_exec_log_session;
+  DROP TABLE IF EXISTS exec_log;
+  `,
   // Credentials move out of the environment and into the database, so that a
   // token can be entered from the settings page and reach the proxy without a
   // restart — and so that a login, which has no static form at all, has
@@ -620,80 +603,6 @@ export function nextSubnetIndex(db: Db): number {
     )
     .get() as { value: number } | undefined;
   return row?.value ?? 0;
-}
-
-/**
- * Drops all but the newest `keep` rows of one session from a log table.
- *
- * Both logs are per-session rings, and the trim is the same statement over a
- * different table: keep nothing older than the row `keep` places back from the
- * newest, and keep everything when the session has fewer than that. The table
- * name is interpolated because SQLite cannot bind an identifier; it is never
- * caller-supplied.
- */
-function pruneRing(db: Db, table: 'exec_log', sessionId: string, keep: number): void {
-  db.prepare(
-    `DELETE FROM ${table}
-     WHERE session_id = ?
-       AND id <= COALESCE(
-         (SELECT id FROM ${table} WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?),
-         -1)`,
-  ).run(sessionId, sessionId, keep);
-}
-
-/** Local command runs kept per session. */
-const EXEC_RING = 200;
-
-/**
- * Records one finished local command and returns its stored row id.
- *
- * A session whose row says deleted is written nothing and gets 0 back, the
- * rule setStatus keeps. A command streams its output for up to two minutes
- * and is stored when it ends, which is long enough for the session to have
- * been removed under it — and a row inserted then would outlive the delete
- * that cleared the table.
- */
-export function appendExecLog(
-  db: Db,
-  sessionId: string,
-  record: Omit<ExecRow, 'id' | 'session_id'>,
-): number {
-  const info = db
-    .prepare(
-      `INSERT INTO exec_log
-         (session_id, thread_id, command, output, exit_code, truncated, timed_out,
-          started_at, finished_at, after_id)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND status = 'deleted')`,
-    )
-    .run(
-      sessionId,
-      record.thread_id,
-      record.command,
-      record.output,
-      record.exit_code,
-      record.truncated,
-      record.timed_out,
-      record.started_at,
-      record.finished_at,
-      record.after_id,
-      sessionId,
-    );
-  if (info.changes === 0) return 0;
-  pruneRing(db, 'exec_log', sessionId, EXEC_RING);
-  return Number(info.lastInsertRowid);
-}
-
-/**
- * Every stored command run in one thread, oldest first.
- *
- * The session is part of the lookup as well as the thread, so a thread id
- * from another session matches nothing rather than reaching into it.
- */
-export function listExecLog(db: Db, sessionId: string, threadId: string): ExecRow[] {
-  return db
-    .prepare('SELECT * FROM exec_log WHERE session_id = ? AND thread_id = ? ORDER BY id ASC')
-    .all(sessionId, threadId) as ExecRow[];
 }
 
 /**

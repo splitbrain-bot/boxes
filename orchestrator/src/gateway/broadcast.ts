@@ -6,91 +6,41 @@ import {
   type TurnStateParams,
 } from '../../../shared/types.ts';
 import { log } from '../log.ts';
+import { ThreadLog, type AdapterOptions } from './thread-log.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
 /**
- * What a browser asked its replay to be picked up from, and how far the
- * replay has got towards it.
- */
-interface ResumeState {
-  /** The adapter's id for the last message that browser holds. */
-  after: string;
-  /** True once an update naming that message has come past. */
-  found: boolean;
-  /**
-   * The updates held back while it has not.
-   *
-   * A resume point the replay never names cannot be honoured, and the
-   * browser is owed the thread whole rather than a tail with a hole in front
-   * of it. Holding them is what makes that answer available at the end.
-   */
-  held: unknown[];
-}
-
-/**
- * A browser one thread's replay is going to, and the thread id to put on what
- * it is sent. `as` is set only when the replay is borrowed — see beginReplay.
- */
-interface ReplayTarget {
-  handle: DownstreamHandle;
-  as?: string;
-  /** Set only when this replay is a resume — see beginReplay. */
-  resume?: ResumeState;
-  /** True once the browser has been told how its replay turned out. */
-  settled: boolean;
-  /**
-   * What the running turn said while this replay was going on, in arrival
-   * order, waiting for the replay to end — see {@link Broadcast.settleReplay}.
-   */
-  turnTail: unknown[];
-}
-
-/**
- * Who each adapter update goes to.
+ * Who each adapter update goes to, and what a browser is sent when it opens
+ * a thread.
  *
- * Broadcasting everything to everyone is wrong in three places, all of which
+ * Broadcasting everything to everyone is wrong in two places, both of which
  * need more than one browser attached to show up: a phone and a desktop on
  * one session, or two tabs on two threads of one box.
  *
  * Every rule here is scoped to a thread, because every rule is about one
  * conversation. A connection is pinned to a thread and an update carries the
- * thread it is about, so routing is a lookup rather than a guess: a replay of
- * one thread leaves another thread's live updates alone, and a prompt echoed
- * on one thread is not suppressed on another.
+ * thread it is about, so routing is a lookup rather than a guess: a prompt
+ * echoed on one thread is not suppressed on another, and a thread being read
+ * into its log leaves another thread's live updates alone.
  */
 export class Broadcast {
   private readonly downstreams = new Set<DownstreamHandle>();
   /**
-   * Browsers a session/load is replaying to right now, by the thread being
-   * replayed. While a thread has any, its history goes only to them: a replay
-   * is by definition a re-send of history, so broadcasting it would duplicate
-   * that thread into every other tab watching it. What a running turn says is
-   * routed on its own, by {@link update}.
-   */
-  private readonly replayTargets = new Map<string, Set<ReplayTarget>>();
-  /**
    * How many prompts the gateway is forwarding and has echoed itself, per
    * thread. While a thread's count is above zero the gateway, not the
    * adapter, is the authority on what the user just said on it, so an adapter
-   * that echoes the prompt back does not produce a second copy — and a turn
-   * is running on that thread, which is what {@link turnContent} is kept for.
+   * that echoes the prompt back does not produce a second copy.
    */
   private readonly promptsInFlight = new Map<string, number>();
   /**
-   * What the turn running on a thread has streamed: the adapter's ids for the
-   * messages and the tool calls the gateway has forwarded live, by thread.
+   * What each thread the adapter holds has said, by the adapter's id for it.
    *
-   * A replay and the turn running underneath it come down one connection as
-   * the same kind of notification, with nothing on either saying which it is.
-   * An id in here has been seen streaming, so an update naming it is the
-   * turn's and everything else is the adapter reading history back.
-   *
-   * Content whose id first appears during a replay is not in here and cannot
-   * be told apart from history, so it is treated as history. The case this
-   * answers is a turn already streaming when the replay starts, which is the
-   * one a reconnect mid-turn hits.
+   * A browser opening a thread is sent this and nothing else — see
+   * {@link open}. The adapter's own replay never reaches a browser: it is
+   * read once into the log, when the thread is brought up, and a browser's
+   * `session/load` is answered from here without asking the adapter again.
    */
-  private readonly turnContent = new Map<string, Set<string>>();
+  private readonly logs = new Map<string, ThreadLog>();
 
   /**
    * @param stateOf Everything a browser is told about a thread. The gateway
@@ -139,104 +89,114 @@ export class Broadcast {
     this.downstreams.add(handle);
   }
 
-  /** Drops a browser, including from a replay it will never finish reading. */
+  /** Drops a browser. */
   remove(handle: DownstreamHandle): void {
     this.downstreams.delete(handle);
-    for (const [thread, targets] of this.replayTargets) {
-      for (const target of targets) {
-        if (target.handle === handle) targets.delete(target);
-      }
-      if (targets.size === 0) this.replayTargets.delete(thread);
-    }
   }
 
   clear(): void {
     this.downstreams.clear();
-    this.replayTargets.clear();
     this.promptsInFlight.clear();
-    this.turnContent.clear();
+    this.logs.clear();
   }
 
-  /** Routes one adapter update to the browsers watching the thread it is about. */
+  /**
+   * Routes one adapter update: into its thread's log, and on to the browsers
+   * watching that thread.
+   */
   update(params: unknown): void {
     const thread = threadOf(params);
     // An update that names no thread cannot be routed. Broadcasting it to
     // everyone is what this class exists to stop.
     if (!thread) return;
-
-    const replaying = this.replayTargets.get(thread);
-    // Either nothing is being replayed on this thread, or this is the running
-    // turn speaking through a replay of it.
-    const live = !replaying || this.isTurnContent(thread, params);
+    const history = this.logs.get(thread);
+    // The transcript being read back into the log. Nobody is sent it:
+    // whoever opens the thread is sent the log instead, once it is whole.
+    if (history?.filling) {
+      history.append(params);
+      return;
+    }
     // A prompt the gateway has already echoed on this thread: whatever the
     // adapter says the user said is the same thing, and sending it again
-    // would double it. Replayed history is exempt, because there the adapter
-    // is saying back what the gateway never saw.
-    if (live && this.isPrompting(thread) && updateKind(params) === UPDATE_KIND.userMessageChunk) {
+    // would double it.
+    if (this.isPrompting(thread) && updateKind(params) === UPDATE_KIND.userMessageChunk) {
       return;
     }
-    if (replaying) {
-      // A replay goes to the browsers reading it and to nobody else, each
-      // under the thread id it asked about — which is the source's own for an
-      // ordinary replay, and the fork's for a borrowed one.
-      if (!live) {
-        for (const target of replaying) this.replayTo(target, thread, params);
-        return;
-      }
-      // The turn does not stop for a reload. Everyone else on the thread gets
-      // it as it is written, and the browsers rebuilding get it behind the
-      // history they asked for, which is where it belongs.
-      this.deliver(this.watchersOutsideReplay(thread, replaying), params);
-      for (const target of replaying) {
-        target.turnTail.push(target.as ? retag(params, target.as) : params);
-      }
-      return;
-    }
-    // Noted after the echo suppression rather than before it, so a prompt the
-    // adapter reads back out of the transcript is history to a browser that
-    // was not there for it.
-    this.rememberTurnContent(thread, params);
-    // With nobody on this thread the update is dropped rather than broadcast,
-    // which is what stops a background thread's stream reaching the wrong tab.
+    history?.append(params);
+    // With nobody on this thread the update is delivered to no one rather
+    // than broadcast, which is what stops a background thread's stream
+    // reaching the wrong tab. It is logged all the same: the reconnect the
+    // log is for is a browser that was away while the turn ran.
     this.deliver(this.byRecency(thread), params);
   }
 
-  /** Browsers watching a thread that are not reading a replay of it. */
-  private watchersOutsideReplay(
-    acpThreadId: string,
-    replaying: Iterable<ReplayTarget>,
-  ): DownstreamHandle[] {
-    const reading = new Set<DownstreamHandle>();
-    for (const target of replaying) reading.add(target.handle);
-    return this.byRecency(acpThreadId).filter((d) => !reading.has(d));
+  /**
+   * Starts reading a thread's transcript into a fresh log. Until
+   * {@link endFill}, the thread's updates are logged and sent to nobody.
+   *
+   * Fresh rather than added to, because the transcript is the whole of what
+   * the thread has said: whatever an earlier log of it held, the adapter is
+   * about to say again.
+   */
+  beginFill(acpThreadId: string): void {
+    const history = new ThreadLog();
+    history.filling = true;
+    this.logs.set(acpThreadId, history);
   }
 
-  /** Whether an update is part of the turn running on its thread. */
-  private isTurnContent(acpThreadId: string, params: unknown): boolean {
-    const seen = this.turnContent.get(acpThreadId);
-    if (!seen) return false;
-    const message = messageOf(params);
-    if (message !== undefined && seen.has(message)) return true;
-    const toolCall = toolCallOf(params);
-    return toolCall !== undefined && seen.has(toolCall);
+  /** The transcript has all been read; the thread's updates are live again. */
+  endFill(acpThreadId: string, options: AdapterOptions): void {
+    const history = this.logs.get(acpThreadId);
+    if (!history) return;
+    history.filling = false;
+    history.options = options;
+  }
+
+  /** Forgets a thread's log, because the adapter turned out not to hold it. */
+  dropLog(acpThreadId: string): void {
+    this.logs.delete(acpThreadId);
   }
 
   /**
-   * Notes what the turn running on a thread has just said, so a replay can be
-   * told apart from it later.
+   * Opens a log for a thread the adapter has just minted.
    *
-   * Both ids, because an adapter names a message on the chunks of one and a
-   * tool call on everything about a call. Kept whether or not a browser was
-   * there to receive it: the reconnect this is for is a browser that was away
-   * while the turn ran.
+   * `from` names the thread it was forked from, whose log becomes the start
+   * of this one: the fork carries that conversation, and until it is first
+   * prompted the adapter has no transcript of its own to say so.
    */
-  private rememberTurnContent(acpThreadId: string, params: unknown): void {
-    const seen = this.turnContent.get(acpThreadId);
-    if (!seen) return;
-    const message = messageOf(params);
-    if (message !== undefined) seen.add(message);
-    const toolCall = toolCallOf(params);
-    if (toolCall !== undefined) seen.add(toolCall);
+  openLog(acpThreadId: string, options: AdapterOptions, from?: string): void {
+    const history = new ThreadLog();
+    history.options = options;
+    const source = from ? this.logs.get(from) : undefined;
+    if (source) history.copyFrom(source, acpThreadId);
+    this.logs.set(acpThreadId, history);
+  }
+
+  /**
+   * Sends one browser a thread, and returns the answer to the `session/load`
+   * it asked with.
+   *
+   * `anchor` is the last message the browser holds, when it has one. The
+   * browser is told first whether it is being sent a tail to fold onto what
+   * it has or the thread whole to replace it — `_boxes/replay` — because
+   * nothing in the updates that follow tells the two apart, and a browser
+   * that finds out afterwards has to throw away what it was just sent.
+   *
+   * A thread with no log is one the adapter never brought up here, and is
+   * sent as empty rather than refused: the browser asked to open a thread,
+   * and what there is of it is nothing.
+   */
+  open(handle: DownstreamHandle, acpThreadId: string, anchor?: string): AdapterOptions {
+    const history = this.logs.get(acpThreadId);
+    const opening = history?.opening(anchor) ?? {
+      resumed: false,
+      updates: [],
+      options: { modes: null, configOptions: [] },
+    };
+    const params: ReplayParams = { sessionId: acpThreadId, resumed: opening.resumed };
+    this.send([handle], REPLAY_METHOD, params);
+    for (const update of opening.updates) this.deliver([handle], update);
+    return opening.options;
   }
 
   /**
@@ -246,7 +206,8 @@ export class Broadcast {
    * The adapter is not required to echo a prompt live — it only has to replay
    * it later — so without this the browser that sent it sees nothing until
    * its next reload, and a second device on the same thread sees nothing at
-   * all.
+   * all. The echo is logged like anything else a watcher is sent, so a
+   * browser opening the thread later sees the prompt where it was made.
    */
   beginPrompt(params: unknown): void {
     const thread = threadOf(params);
@@ -255,17 +216,16 @@ export class Broadcast {
     this.promptsInFlight.set(thread, before + 1);
     // The first prompt on a thread is what starts its turn; a second one
     // arriving while that runs does not start a second turn.
-    if (before === 0) {
-      this.turnContent.set(thread, new Set());
-      this.threadState(thread);
-    }
+    if (before === 0) this.threadState(thread);
     const blocks = (params as { prompt?: unknown })?.prompt;
     if (!Array.isArray(blocks)) return;
     for (const content of blocks) {
-      this.deliver(this.byRecency(thread), {
+      const echo = {
         sessionId: thread,
         update: { sessionUpdate: UPDATE_KIND.userMessageChunk, content },
-      });
+      };
+      this.logs.get(thread)?.append(echo);
+      this.deliver(this.byRecency(thread), echo);
     }
   }
 
@@ -279,8 +239,6 @@ export class Broadcast {
       return;
     }
     this.promptsInFlight.delete(thread);
-    // The turn is over, so nothing it said is live any more.
-    this.turnContent.delete(thread);
     this.threadState(thread);
   }
 
@@ -301,7 +259,7 @@ export class Broadcast {
     this.send(this.byRecency(acpThreadId), TURN_STATE_METHOD, this.stateOf(acpThreadId));
   }
 
-  /** The same, to one browser: what a fresh connection is told after its replay. */
+  /** The same, to one browser: what a fresh connection is told after it opens a thread. */
   threadStateTo(handle: DownstreamHandle): void {
     if (!handle.acpThreadId) return;
     this.send([handle], TURN_STATE_METHOD, this.stateOf(handle.acpThreadId));
@@ -313,150 +271,6 @@ export class Broadcast {
    */
   refreshThreadStates(): void {
     for (const thread of this.watchedThreads) this.threadState(thread);
-  }
-
-  /**
-   * Starts routing one thread's updates to one browser only, for the length
-   * of its replay. Another thread's updates are untouched, which is what lets
-   * a second tab keep streaming while this one rebuilds.
-   *
-   * `as` re-tags what is replayed with another thread's id: a fork with no
-   * transcript of its own is shown the source's, and the browser reading it
-   * is pinned to the fork, so an update naming the source would be dropped as
-   * some other conversation's.
-   *
-   * `resumeFrom` names the last message that browser holds. Everything the
-   * replay says before that message is held back, so a reconnect costs the
-   * tail rather than the conversation — see {@link settleReplay} for what
-   * happens when the replay never names it.
-   */
-  beginReplay(
-    handle: DownstreamHandle,
-    acpThreadId: string,
-    opts: { as?: string; resumeFrom?: string } = {},
-  ): void {
-    let targets = this.replayTargets.get(acpThreadId);
-    if (!targets) {
-      targets = new Set();
-      this.replayTargets.set(acpThreadId, targets);
-    }
-    const target: ReplayTarget = {
-      handle,
-      as: opts.as,
-      resume: opts.resumeFrom
-        ? { after: opts.resumeFrom, found: false, held: [] }
-        : undefined,
-      settled: false,
-      turnTail: [],
-    };
-    targets.add(target);
-    // A replay with no point to look for is whole from its first update, so
-    // the browser can be told now. One that has a point to look for is told
-    // when the point turns up, or at the end when it does not.
-    if (!opts.resumeFrom) this.announce(target, acpThreadId, false);
-  }
-
-  /**
-   * Sends one replayed update on, or holds it back while the browser is
-   * waiting for the point it asked to resume from.
-   *
-   * The update that names the point goes out with the tail rather than being
-   * held: the browser drops the message it names and takes it again from
-   * here, which is what makes the result the model a whole replay would have
-   * built.
-   */
-  private replayTo(target: ReplayTarget, acpThreadId: string, params: unknown): void {
-    const shaped = target.as ? retag(params, target.as) : params;
-    const resume = target.resume;
-    if (resume && !resume.found) {
-      if (messageOf(params) !== resume.after) {
-        resume.held.push(shaped);
-        return;
-      }
-      resume.found = true;
-      resume.held = [];
-      this.announce(target, acpThreadId, true);
-    }
-    this.deliver([target.handle], shaped);
-  }
-
-  /**
-   * Says how a thread's replay turned out, once the adapter has sent all of
-   * it, and hands over what the running turn said meanwhile.
-   *
-   * A resume point the replay never named is not honoured: the browser is
-   * told the thread is coming whole, and everything held back for it goes out
-   * behind that. Called before anything else the load leads to reaches that
-   * browser — a borrowed replay, or the questions flushed when the load
-   * answers — because a browser told to rebuild after those had arrived would
-   * throw them away.
-   *
-   * The turn's own updates go out last, behind the history: what is still
-   * being written is the newest part of the thread.
-   */
-  settleReplay(handle: DownstreamHandle, acpThreadId: string): void {
-    const target = this.targetFor(handle, acpThreadId);
-    if (!target) return;
-    this.announce(target, acpThreadId, false);
-    const resume = target.resume;
-    if (resume && !resume.found) {
-      const held = resume.held;
-      resume.found = true;
-      resume.held = [];
-      for (const params of held) this.deliver([target.handle], params);
-    }
-    const tail = target.turnTail;
-    target.turnTail = [];
-    for (const params of tail) this.deliver([target.handle], params);
-  }
-
-  /**
-   * Tells one browser how its replay turned out, once.
-   *
-   * A borrowed replay says nothing of its own: it is the second half of a
-   * load the browser has already been told about, and a second answer would
-   * have it throw away what the first one brought.
-   */
-  private announce(target: ReplayTarget, acpThreadId: string, resumed: boolean): void {
-    if (target.settled) return;
-    target.settled = true;
-    if (target.as) return;
-    const params: ReplayParams = { sessionId: acpThreadId, resumed };
-    this.send([target.handle], REPLAY_METHOD, params);
-  }
-
-  /** The replay one browser has open on a thread, or undefined for none. */
-  private targetFor(
-    handle: DownstreamHandle,
-    acpThreadId: string,
-  ): ReplayTarget | undefined {
-    for (const target of this.replayTargets.get(acpThreadId) ?? []) {
-      if (target.handle === handle) return target;
-    }
-    return undefined;
-  }
-
-  /**
-   * Ends one of those, returning the thread to its watchers once the last one
-   * is over.
-   *
-   * One target rather than every target of that browser: a browser with two
-   * loads open on one thread ends them one at a time, and the second is still
-   * replaying when the first comes back.
-   */
-  endReplay(handle: DownstreamHandle, acpThreadId: string): void {
-    // A load that failed or was cut short still owes its browser the answer,
-    // and whatever was held back waiting for it.
-    this.settleReplay(handle, acpThreadId);
-    const targets = this.replayTargets.get(acpThreadId);
-    if (!targets) return;
-    for (const target of targets) {
-      if (target.handle === handle) {
-        targets.delete(target);
-        break;
-      }
-    }
-    if (targets.size === 0) this.replayTargets.delete(acpThreadId);
   }
 
   /** Sends one update to a set of browsers, surviving any one of them failing. */
@@ -479,27 +293,10 @@ export class Broadcast {
   }
 }
 
-/** The same update, said to be about another thread. */
-function retag(params: unknown, acpThreadId: string): unknown {
-  return { ...(params as Record<string, unknown>), sessionId: acpThreadId };
-}
-
 /** The ACP thread a message is about, or undefined when it names none. */
 export function threadOf(params: unknown): string | undefined {
   const sessionId = (params as { sessionId?: unknown })?.sessionId;
   return typeof sessionId === 'string' && sessionId ? sessionId : undefined;
-}
-
-/** The message a session/update belongs to, or undefined when it names none. */
-function messageOf(params: unknown): string | undefined {
-  const messageId = (params as { update?: { messageId?: unknown } })?.update?.messageId;
-  return typeof messageId === 'string' && messageId ? messageId : undefined;
-}
-
-/** The tool call a session/update is about, or undefined when it names none. */
-function toolCallOf(params: unknown): string | undefined {
-  const toolCallId = (params as { update?: { toolCallId?: unknown } })?.update?.toolCallId;
-  return typeof toolCallId === 'string' && toolCallId ? toolCallId : undefined;
 }
 
 /** The kind of a session/update notification, or undefined for anything else. */

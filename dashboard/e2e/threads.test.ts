@@ -85,7 +85,11 @@ test('a fork carries the source thread messages into the new one', async () => {
     await askOnce(page);
 
     await page.getByLabel('Back to sessions').click();
-    await page.getByRole('button', { name: 'Fork' }).click();
+    // Exact, because a name matches by substring and the thread header's own
+    // "Fork this thread" is still on the page for a moment after the list has
+    // taken the URL. That button forks without leaving the thread, so the one
+    // this test means is the card's, once the card is there.
+    await page.getByRole('button', { name: 'Fork', exact: true }).click();
     await page.waitForURL(`**/sessions/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -228,27 +232,6 @@ test('forking is not offered when the adapter does not advertise it', async () =
       true,
     );
     expect(await page.getByRole('button', { name: 'Fork' }).count()).toBe(0);
-    expect(errors).toEqual([]);
-  } finally {
-    await close();
-  }
-});
-
-test('a bang command is run against the thread it was typed in', async () => {
-  stub.execOutput = (command: string) => ({ output: `ran: ${command}\n`, exitCode: 0 });
-
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
-  try {
-    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
-    const input = page.getByLabel('Message input');
-    await input.fill('!echo hi');
-    await input.press('Control+Enter');
-
-    // The thread is part of the endpoint, so the run is logged where it was
-    // typed and no other conversation of this box replays it.
-    await expect.poll(() => stub.execCalls.length).toBe(1);
-    expect(stub.execCalls[0]).toEqual({ sessionId: ID, threadId: 'th1', command: 'echo hi' });
-    await expect.poll(() => page.getByText('ran: echo hi').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();

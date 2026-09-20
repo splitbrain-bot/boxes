@@ -23,13 +23,14 @@ import type { NotifyKind, Notifier } from '../notify.ts';
 import { Activity } from './activity.ts';
 import {
   AdapterConnection,
-  inheritedSource,
+  NOTHING_TO_FORK,
   THREAD_NOT_FOUND,
   type AdapterHost,
 } from './adapter.ts';
 import { BackgroundProbe, workPids } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
+import type { AdapterOptions } from './thread-log.ts';
 import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import {
   BOXES_META,
@@ -127,10 +128,7 @@ const ALL_HARNESSES = HARNESS_IDS.map((id) => harness(id));
  */
 const TERM_GRACE_MS = 2_000;
 
-/** Why a thread cannot be forked yet; the API turns this into a 409. */
-export const NOTHING_TO_FORK = 'That thread has nothing to fork from yet';
-
-export { THREAD_NOT_FOUND };
+export { NOTHING_TO_FORK, THREAD_NOT_FOUND };
 
 /**
  * The message a browser asked a `session/load` to be picked up after, or
@@ -447,6 +445,29 @@ export class UpstreamSession implements AdapterHost {
   /** Every conversation a browser is watching, for a connection coming back up. */
   watchedThreads(): readonly string[] {
     return this.downstreams.watchedThreads;
+  }
+
+  /**
+   * The log hooks a connection reaches the broadcast through.
+   *
+   * A thread's log belongs to the session rather than to the process that
+   * filled it: a browser opening the thread is served from it, and it has to
+   * outlive the adapter restarts that rebuild the conversation behind it.
+   */
+  openLog(acpThreadId: string, options: AdapterOptions, from?: string): void {
+    this.downstreams.openLog(acpThreadId, options, from);
+  }
+
+  beginFill(acpThreadId: string): void {
+    this.downstreams.beginFill(acpThreadId);
+  }
+
+  endFill(acpThreadId: string, options: AdapterOptions): void {
+    this.downstreams.endFill(acpThreadId, options);
+  }
+
+  dropLog(acpThreadId: string): void {
+    this.downstreams.dropLog(acpThreadId);
   }
 
   /** A connection is up and serving, so the reading's own clock runs again. */
@@ -928,6 +949,9 @@ export class UpstreamSession implements AdapterHost {
     const wanted = harness(source.harness);
     const conn = this.connection(wanted.id);
     await conn.ensureStarted();
+    // The fork's log starts as a copy of the source's, so the source has to
+    // have one: brought up here if no browser has opened it on this adapter.
+    if (!(await conn.hold(source))) throw new Error(NOTHING_TO_FORK);
     const config = threadConfig(source);
     const acpSessionId = await conn.mintAcpThread(
       source.acp_session_id,
@@ -1265,10 +1289,9 @@ export class UpstreamSession implements AdapterHost {
     const isLoad = method === ACP_METHOD.sessionLoad && thread !== undefined && from !== undefined;
 
     if (isPrompt) {
-      // A fork's first prompt is where it stops borrowing: the adapter starts
-      // a transcript for it here, and that transcript opens with everything
-      // the source had said, so replaying the source as well would say all of
-      // it twice.
+      // A fork's first prompt is where the adapter starts a transcript for
+      // it, opening with everything the source had said. From here a restart
+      // loads the fork back rather than branching its source again.
       const row = conn.rowOf(thread);
       if (row?.inherits_from) clearThreadInheritance(this.db, row.id);
       // A thread nobody has named yet is called after the prompt going out,
@@ -1288,15 +1311,15 @@ export class UpstreamSession implements AdapterHost {
       this.activity.begin(thread);
       this.downstreams.beginPrompt(params);
     }
-    // What the browser already holds, so the replay it is about to be sent
-    // can start there. The adapter cannot be asked to start partway, so the
-    // whole of it still arrives here and only the tail goes out.
-    if (isLoad) this.downstreams.beginReplay(from, thread, { resumeFrom: resumePointOf(params) });
+    // A browser opening a thread is sent the gateway's own log of it, from
+    // the last message it says it holds, and the adapter is not asked. The
+    // thread was brought up — transcript read, log filled — when this browser
+    // was pinned to it, and asking the adapter to replay it now would mix
+    // that replay into whatever the thread is saying live.
+    if (isLoad) return this.downstreams.open(from, thread, resumePointOf(params));
 
     try {
-      const result = isLoad
-        ? await conn.whileReplaying(thread, () => conn.request(method, params))
-        : await conn.request(method, params);
+      const result = await conn.request(method, params);
       // A mode the adapter accepted is this thread's from now on, including
       // across the restarts that lose the adapter's copy of it. Recorded here
       // as well as from the adapter's own current_mode_update, because that
@@ -1313,16 +1336,6 @@ export class UpstreamSession implements AdapterHost {
       if (method === ACP_METHOD.sessionSetConfigOption && thread !== undefined) {
         this.recordConfigChange(conn, thread, params, result);
       }
-      if (isLoad) {
-        // The adapter has sent all of its replay, so the browser can be told
-        // how that turned out — before a borrowed replay, and before the
-        // queued questions the downstream flushes when this answers.
-        this.downstreams.settleReplay(from, thread);
-        // A fork's own replay is empty until it has been prompted, so the
-        // conversation it branched from is replayed in its place — after its
-        // own, which is the part that answers the request.
-        await this.replayInherited(conn, thread, from);
-      }
       return result;
     } finally {
       if (isPrompt) {
@@ -1336,7 +1349,6 @@ export class UpstreamSession implements AdapterHost {
         // come back at all. The moment worth telling somebody about is the
         // agent going quiet, and activity.ts is what finds it.
       }
-      if (isLoad) this.downstreams.endReplay(from, thread);
     }
   }
 
@@ -1375,63 +1387,6 @@ export class UpstreamSession implements AdapterHost {
    */
   private setTurnActive(acpThreadId: string, active: boolean): void {
     setThreadTurnActive(this.db, this.sessionId, acpThreadId, active);
-  }
-
-  /**
-   * Shows a fork the conversation it was branched from, when it has none of
-   * its own yet.
-   *
-   * A fork holds the source's context from the moment it is minted, but the
-   * adapter writes it a transcript only when it is first prompted — so
-   * loading it replays nothing, and it opens on a blank screen claiming to
-   * know what was said somewhere the reader cannot see. What is sent instead
-   * is the source's own replay, re-tagged as this thread's: the same history
-   * the fork is carrying, said back to the browser reading it.
-   *
-   * It goes to the one browser that asked, exactly as that browser's own
-   * replay does, and the source's live updates are held back for its length
-   * the same way — a replay of a thread cannot be told apart from what it is
-   * saying right now, and this is the one place where two threads are the
-   * same conversation.
-   *
-   * A source that cannot be replayed costs the browser the history and
-   * nothing else: it asked to load a thread, and the thread is loaded. The
-   * source is on the same adapter by construction — a fork stays on its
-   * source's harness — so the same connection replays it.
-   */
-  private async replayInherited(
-    conn: AdapterConnection,
-    acpThreadId: string,
-    to: DownstreamHandle,
-  ): Promise<void> {
-    const fork = conn.rowOf(acpThreadId);
-    if (!fork?.inherits_from) return;
-    const source = inheritedSource(this.db, this.sessionId, fork);
-    if (!source?.acp_session_id) return;
-
-    this.downstreams.beginReplay(to, source.acp_session_id, { as: acpThreadId });
-    try {
-      await conn.whileReplaying(source.acp_session_id, () =>
-        conn.request(ACP_METHOD.sessionLoad, {
-          sessionId: source.acp_session_id,
-          cwd: dk.WORKSPACE_DIR,
-          mcpServers: [],
-          ...conn.meta(),
-        }),
-      );
-      this.slog.info('replayed a fork from the thread it came from', {
-        threadId: fork.id,
-        from: source.id,
-      });
-    } catch (err) {
-      this.slog.warn('could not replay the thread a fork came from', {
-        threadId: fork.id,
-        from: source.id,
-        error: (err as Error).message,
-      });
-    } finally {
-      this.downstreams.endReplay(to, source.acp_session_id);
-    }
   }
 
   /** Forwards a browser notification to the adapter its thread is on. */

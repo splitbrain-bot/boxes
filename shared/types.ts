@@ -576,42 +576,6 @@ export interface StoredAttachment {
   size: number;
 }
 
-/** Body of a request to run a local command in the session container. */
-export interface ExecRequest {
-  /** Run with `bash -lc`, inside the session's own isolation. */
-  command: string;
-  /**
-   * What the thread ended with when the command was typed: the id of its last
-   * tool call, or of its last assistant message. Null when the agent had not
-   * said anything yet. A replay puts the run back right after it.
-   */
-  after?: string | null;
-}
-
-/** One finished local command, as the exec log stores it. */
-export interface ExecRecord {
-  id: number;
-  sessionId: string;
-  command: string;
-  /** Combined stdout and stderr, truncated at the output limit. */
-  output: string;
-  /** Null when the command was killed before reporting one. */
-  exitCode: number | null;
-  /** True when output hit the size limit and the rest was dropped. */
-  truncated: boolean;
-  /** True when the command hit the wall-clock limit and was killed. */
-  timedOut: boolean;
-  startedAt: number;
-  finishedAt: number;
-  /** The tool call or message the run followed, or null when there was none. */
-  after: string | null;
-}
-
-/** A page of exec records for one session, oldest first. */
-export interface ExecLogPage {
-  records: ExecRecord[];
-}
-
 // --- egress policy: the orchestrator -> proxy control channel ---------------
 
 /**
@@ -1026,14 +990,13 @@ export interface TurnStateParams {
 }
 
 /**
- * Notification the gateway sends a browser at the start of a replay it asked
- * for, saying whether the replay was picked up where the browser said it
- * could be.
+ * Notification the gateway sends a browser when it opens a thread, saying
+ * whether what follows was picked up where the browser said it could be.
  *
- * It arrives before any of the replayed updates, so a browser that is about
- * to be sent the thread whole knows to drop what it holds before the first of
- * it lands, and a browser that is being sent only a tail knows to keep what
- * it holds. Nothing else in the stream tells the two apart.
+ * It arrives before any of the updates, so a browser that is about to be
+ * sent the thread whole knows to drop what it holds before the first of them
+ * lands, and a browser that is being sent only a tail knows to keep what it
+ * holds. Nothing else in the stream tells the two apart.
  *
  * The underscore is ACP's extension prefix, and a notification takes no
  * reply, so a client that has never heard of this ignores it.
@@ -1042,12 +1005,12 @@ export const REPLAY_METHOD = '_boxes/replay';
 
 /** Params of a `_boxes/replay` notification. */
 export interface ReplayParams {
-  /** The adapter's own id for the thread being replayed. */
+  /** The adapter's own id for the thread being opened. */
   sessionId: string;
   /**
-   * True when what follows is only what comes after the browser's resume
-   * point. False when it is the whole thread, which is the answer whenever
-   * the point was not asked for or could not be honoured.
+   * True when what follows starts at the browser's resume point. False when
+   * it is the whole thread, which is the answer whenever the point was not
+   * asked for or the gateway no longer holds the message it names.
    */
   resumed: boolean;
 }
@@ -1065,8 +1028,8 @@ export const BOXES_META = 'boxes';
 export interface LoadMeta {
   /**
    * The adapter's id for the last message the browser holds. The gateway
-   * sends only what the replay names after that message; absent, it sends
-   * the thread whole.
+   * sends the thread from that message onward; absent, it sends the thread
+   * whole.
    */
   resumeFrom?: string;
 }

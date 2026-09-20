@@ -36,6 +36,9 @@ const SessionList = lazy(async () => ({
 const SessionReview = lazy(async () => ({
   default: (await import('./views/SessionReview.tsx')).SessionReview,
 }));
+const SessionTerminal = lazy(async () => ({
+  default: (await import('./views/SessionTerminal.tsx')).SessionTerminal,
+}));
 const SessionThread = lazy(async () => ({
   default: (await import('./views/SessionThread.tsx')).SessionThread,
 }));
@@ -81,6 +84,25 @@ function App() {
                 }
               >
                 <SessionReview />
+              </Suspense>
+            }
+          />
+          {/* A shell in the box, which owns the viewport for the same reason
+              the review does: a terminal in a reading column is not a
+              terminal. It names no thread — the box is one box however many
+              conversations it holds, and every terminal on it is the same
+              shell. */}
+          <Route
+            path="/sessions/:id/terminal"
+            element={
+              <Suspense
+                fallback={
+                  <Loading className="flex h-dvh items-center justify-center">
+                    Loading the terminal…
+                  </Loading>
+                }
+              >
+                <SessionTerminal />
               </Suspense>
             }
           />

@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { ACP_SUBPROTOCOL } from '../../shared/acp.ts';
+import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { buildApp } from './app.ts';
 import { config } from './config.ts';
 import { openDb, sessionsWithActiveTurns } from './db.ts';
 import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
+import { attachTerminal } from './gateway/terminal.ts';
 import { log, setLogLevel } from './log.ts';
 import {
   startCredentialRefresh,
@@ -133,32 +135,74 @@ const wss = new WebSocketServer({
 const WS_PATH =
   /^\/ws\/sessions\/([A-Za-z0-9_-]{1,64})(?:\/threads\/([A-Za-z0-9_-]{1,64}))?\/acp$/;
 
+/**
+ * A terminal server of its own, because the two endpoints negotiate different
+ * subprotocols and `handleProtocols` is answered before the path is in hand.
+ */
+const terminals = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols) =>
+    protocols.has(TERMINAL_SUBPROTOCOL) ? TERMINAL_SUBPROTOCOL : false,
+});
+
+/** The upgrade path a terminal connects on. It names a box, never a thread. */
+const TERMINAL_PATH = /^\/ws\/sessions\/([A-Za-z0-9_-]{1,64})\/terminal$/;
+
+/**
+ * How many terminals one session may have open at once.
+ *
+ * Each one is a pty and a tmux client in a container whose processes are
+ * already capped, and they all show the same shell. More than a handful is a
+ * browser reconnecting in a loop.
+ */
+const MAX_TERMINALS_PER_SESSION = 4;
+
 app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   const url = req.url ?? '';
-  const match = WS_PATH.exec(url.split('?')[0] ?? '');
-  if (!match) {
+  const path = url.split('?')[0] ?? '';
+  const match = WS_PATH.exec(path);
+  const terminal = match ? null : TERMINAL_PATH.exec(path);
+  if (!match && !terminal) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     socket.destroy();
     return;
   }
-  const sessionId = match[1]!;
-  const threadId = match[2] ?? null;
+  const sessionId = (match ?? terminal!)[1]!;
+  const threadId = match?.[2] ?? null;
 
   // The upgrade is checked against the token of the session the path names,
   // so a token opens that session and no other one. A session that is not
   // there, or one that is deleted, has no token, and the upgrade is then
   // refused the way a wrong token is: the handshake never says which sessions
-  // exist.
+  // exist. Both endpoints are the same box seen two ways, so both are opened
+  // by the same token, and each is offered the name of its own protocol.
   const row = manager.getRow(sessionId);
   const live = row && row.status !== 'deleted' ? row : null;
 
-  const check = checkUpgrade(req.headers['sec-websocket-protocol'], live?.ws_token ?? null);
+  const check = checkUpgrade(
+    req.headers['sec-websocket-protocol'],
+    live?.ws_token ?? null,
+    terminal ? TERMINAL_SUBPROTOCOL : ACP_SUBPROTOCOL,
+  );
   if (!check.ok) {
     log.warn('rejected WS upgrade', { sessionId, reason: check.reason });
     // The handshake fails before a WebSocket exists, so the refusal is an
     // HTTP status rather than a close code.
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
+    return;
+  }
+
+  if (terminal) {
+    if (manager.terminalCount(sessionId) >= MAX_TERMINALS_PER_SESSION) {
+      log.warn('rejected a terminal upgrade for a session that has enough', { sessionId });
+      socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    terminals.handleUpgrade(req, socket, head, (ws) => {
+      attachTerminal(ws, sessionId, manager);
+    });
     return;
   }
 
@@ -205,7 +249,13 @@ async function main(): Promise<void> {
   // registry is unreachable should still come up and serve what it has. The
   // create path pulls again, and reports properly when there is nothing to
   // create a session from.
+  //
+  // The refresh is what makes a restart a way to pick up a tag that has moved,
+  // rather than waiting out the refresher's first tick. It is skipped where
+  // the refresh is off, which says the image is built on this host and no
+  // registry has it.
   try {
+    if (cfg.SESSION_IMAGE_PULL_MINUTES > 0) await manager.refreshSessionImage();
     await manager.ensureSessionImage();
   } catch (err) {
     log.warn('could not pull the session image at boot', {

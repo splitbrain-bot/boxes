@@ -22,7 +22,6 @@ import { refreshHealth } from '../stores/sessions.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
-import { bangCommand } from '../stores/thread/exec.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
 import { harnessLabel } from '@/lib/harness';
@@ -280,28 +279,9 @@ export function SessionThread() {
     [id, store],
   );
 
-  // Commands already run in this thread, put back where they were typed once
-  // the replay is in.
-  useEffect(() => {
-    if (!store || state.connection !== 'ready') return;
-    void store.loadExecHistory();
-  }, [store, state.connection]);
-
   const onNew = useCallback(
     async (message: AppendMessage) => {
       if (!store) return;
-      const text = textOf(message);
-      const attachments = message.attachments ?? [];
-      // A !bang line is intercepted here and never reaches the adapter, so
-      // it costs no tokens and cannot be read as an instruction. It runs a
-      // command rather than saying anything, so an attachment on one has
-      // nothing to attach to and the line is sent as the prompt it looks
-      // like instead.
-      const command = attachments.length === 0 ? bangCommand(text) : null;
-      if (command) {
-        await store.runCommand(command);
-        return;
-      }
       await store.send(blocksOf(message));
     },
     [store],

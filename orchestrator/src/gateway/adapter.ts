@@ -24,6 +24,7 @@ import type {
 } from '../../../shared/types.ts';
 import { TaskBoard } from './background.ts';
 import { threadOf } from './broadcast.ts';
+import type { AdapterOptions } from './thread-log.ts';
 
 /**
  * One adapter process of one session: the exec, the ACP handshake, and the
@@ -87,6 +88,9 @@ const CLIENT_CAPABILITIES = {
 /** A thread id that names none of the session's threads; the API turns this into a 404. */
 export const THREAD_NOT_FOUND = 'Thread not found';
 
+/** Why a thread cannot be forked yet; the API turns this into a 409. */
+export const NOTHING_TO_FORK = 'That thread has nothing to fork from yet';
+
 /** True when the adapter reported a missing thread rather than a failure. */
 export function isResourceNotFound(err: unknown): boolean {
   return (err as { code?: number } | null)?.code === RESOURCE_NOT_FOUND;
@@ -125,12 +129,12 @@ export function pickModel(
 }
 
 /**
- * The nearest thread whose transcript a fork can borrow, or null when there is
- * none to ask.
+ * The nearest thread a fork can be branched from again, or null when there is
+ * none: the first up its chain that has a transcript of its own.
  *
  * A fork of a fork inherits through the middle one: that thread has no
  * transcript either, so following the chain is what makes the second branch
- * show the conversation both of them came from.
+ * carry the conversation both of them came from.
  */
 export function inheritedSource(
   db: Db,
@@ -146,6 +150,20 @@ export function inheritedSource(
     if (row.acp_session_id && !row.inherits_from) return row;
   }
   return null;
+}
+
+/**
+ * What a browser opening the thread is handed of the adapter's answer to a
+ * `session/new`, `session/fork` or `session/load`: the modes it offers and
+ * the options it lets a client set. Absent ones read as none.
+ */
+function optionsOf(
+  res: {
+    modes?: SessionModeState | null;
+    configOptions?: SessionConfigOption[] | null;
+  } | null,
+): AdapterOptions {
+  return { modes: res?.modes ?? null, configOptions: res?.configOptions ?? [] };
 }
 
 /**
@@ -182,6 +200,17 @@ export interface AdapterHost {
   onThreadsLost(acpThreadIds: readonly string[]): void;
   /** Closes the browsers pinned to one conversation, so each reconnects. */
   dropWatchers(acpThreadId: string): void;
+  /**
+   * Opens a log for a conversation this adapter has just minted. `from` names
+   * the one it was forked from, whose log the new one starts as a copy of.
+   */
+  openLog(acpThreadId: string, options: AdapterOptions, from?: string): void;
+  /** A transcript is about to be read into this conversation's log. */
+  beginFill(acpThreadId: string): void;
+  /** The transcript has all arrived, so the thread is live again. */
+  endFill(acpThreadId: string, options: AdapterOptions): void;
+  /** Forgets a conversation's log, the adapter not holding it after all. */
+  dropLog(acpThreadId: string): void;
   /** The connection is up and carrying threads. */
   onUp(): void;
   /** It is up and working, or it failed every attempt and the session is in error. */
@@ -612,6 +641,7 @@ export class AdapterConnection {
     let branched: string | null = null;
     if (source?.acp_session_id) {
       try {
+        if (!(await this.hold(source))) throw new Error(NOTHING_TO_FORK);
         branched = await this.mintAcpThread(source.acp_session_id, modeId, config);
       } catch (err) {
         if (isAuthRequired(err)) throw err;
@@ -630,6 +660,20 @@ export class AdapterConnection {
       forkedFrom: branched ? source?.id : null,
     });
     return acpSessionId;
+  }
+
+  /**
+   * Makes sure this adapter holds one of the session's threads, log and all.
+   * False when the adapter no longer has its transcript.
+   *
+   * What a fork needs of its source: the conversation it is about to copy. A
+   * thread a browser has opened on this adapter is already held; one that has
+   * only ever been looked at from the list is loaded here first.
+   */
+  async hold(thread: ThreadRow): Promise<boolean> {
+    if (!thread.acp_session_id) return false;
+    if (this.live.has(thread.acp_session_id)) return true;
+    return this.loadSession(thread);
   }
 
   /**
@@ -656,6 +700,7 @@ export class AdapterConnection {
     };
     if (!res?.sessionId) throw new Error(`${method} returned no sessionId`);
     this.live.add(res.sessionId);
+    this.host.openLog(res.sessionId, optionsOf(res), from ?? undefined);
     this.noteCatalog(res);
     this.slog.info('acp session created', { method, acpSessionId: res.sessionId, from });
     await this.applyMode(res.sessionId, res.modes ?? null, modeId);
@@ -664,8 +709,15 @@ export class AdapterConnection {
   }
 
   /**
-   * Replays a stored thread. Returns false when the adapter no longer holds it,
-   * which tells the caller to start a fresh one.
+   * Loads a stored thread, reading its transcript into the thread's log.
+   * Returns false when the adapter no longer holds it, which tells the caller
+   * to start a fresh one.
+   *
+   * This is the one place the adapter's replay is asked for, and it runs on a
+   * thread nothing else can reach yet — one this adapter has just been spawned
+   * under, or one no browser is pinned to — so what the adapter says meanwhile
+   * is the transcript and only the transcript. Everything a browser is later
+   * sent of this thread comes from the log it fills.
    *
    * A missing thread is a legitimate state: the agent SDK writes a transcript
    * only once a prompt has run, so an id minted by session/new and never
@@ -680,6 +732,7 @@ export class AdapterConnection {
    */
   private async loadSession(thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;
+    this.host.beginFill(acpSessionId);
     try {
       // The same `_meta` a fresh thread gets: a load is where the adapter
       // rebuilds the query for a conversation it no longer holds, which is the
@@ -695,6 +748,7 @@ export class AdapterConnection {
         modes?: SessionModeState | null;
         configOptions?: SessionConfigOption[] | null;
       } | null;
+      this.host.endFill(acpSessionId, optionsOf(res));
       this.live.add(acpSessionId);
       this.noteCatalog(res ?? {});
       this.slog.info('acp session loaded', { threadId: thread.id, acpSessionId });
@@ -709,6 +763,7 @@ export class AdapterConnection {
       await this.applyConfig(acpSessionId, res?.configOptions ?? null, threadConfig(thread));
       return true;
     } catch (err) {
+      this.host.dropLog(acpSessionId);
       if (!isResourceNotFound(err)) throw err;
       this.live.delete(acpSessionId);
       this.slog.warn('stored thread is gone; starting a fresh one', {

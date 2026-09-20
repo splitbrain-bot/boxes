@@ -1,4 +1,11 @@
-import { ArrowLeft, CircleCheck, FileSearch, GitBranch, SlidersHorizontal } from 'lucide-react';
+import {
+  ArrowLeft,
+  CircleCheck,
+  FileSearch,
+  GitBranch,
+  SlidersHorizontal,
+  SquareTerminal,
+} from 'lucide-react';
 import { Link } from 'react-router';
 import type { HarnessId } from '../../../shared/types.ts';
 import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
@@ -249,6 +256,19 @@ export function ThreadHeader({
           title="Review this session's code"
         >
           <FileSearch />
+        </Link>
+      </Button>
+
+      {/* The box seen directly, rather than through the agent. No thread in
+          the link: a terminal belongs to the box, and every one opened on it
+          is the same shell. */}
+      <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
+        <Link
+          to={`/sessions/${sessionId}/terminal`}
+          aria-label="Open a terminal in this box"
+          title="Open a terminal in this box"
+        >
+          <SquareTerminal />
         </Link>
       </Button>
     </header>

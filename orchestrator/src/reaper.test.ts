@@ -76,6 +76,10 @@ async function tick(
     onStop?: (id: string) => void;
     /** The count asked for again just before a session is stopped. */
     pendingNow?: (id: string) => number;
+    /** Terminals open on the box, which is somebody working in it directly. */
+    terminals?: number;
+    /** The terminal count asked for again just before a session is stopped. */
+    terminalsNow?: (id: string) => number;
     /** Sessions with an operation of their own in flight, which never wait. */
     busy?: Set<string>;
   } = {},
@@ -91,6 +95,7 @@ async function tick(
       attachedCount: over.attachedCount ?? 0,
       backgroundActive: over.backgroundActive === undefined ? false : over.backgroundActive,
     }),
+    terminalCount: (id: string) => over.terminalsNow?.(id) ?? over.terminals ?? 0,
     stopUnlessBusy: (id: string) => {
       if (over.busy?.has(id)) return Promise.resolve(false);
       stopped.push(id);
@@ -134,6 +139,14 @@ test('a permission request waiting for an answer holds the box', async () => {
 test('a browser still attached holds the box', async () => {
   insertSession('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ attachedCount: 1 }), []);
+});
+
+test('a terminal open on the box holds it, however quiet the shell has gone', async () => {
+  // The case the activity clock cannot see: a build that prints nothing for
+  // an hour, with somebody watching it. Stopping the box would take the
+  // shell, its scrollback and the build with it.
+  insertSession('s1', IDLE_MINUTES + 1);
+  assert.deepEqual(await tick({ terminals: 1 }), []);
 });
 
 test('work left running in the background holds the box', async () => {
@@ -181,6 +194,22 @@ test('a permission request that arrives mid-sweep holds its box', async () => {
   assert.deepEqual(stopped, ['s1']);
 });
 
+test('a terminal opened mid-sweep holds its box', async () => {
+  // The same window a permission request arriving mid-sweep falls into: the
+  // counts are one reading of the whole deployment, and stopping many boxes
+  // takes long enough for somebody to have opened a shell in one of them.
+  insertSession('s1', IDLE_MINUTES + 1);
+  insertSession('s2', IDLE_MINUTES + 1);
+  const opened = new Set<string>();
+  assert.deepEqual(
+    await tick({
+      onStop: (id) => opened.add(id === 's1' ? 's2' : 's1'),
+      terminalsNow: (id) => (opened.has(id) ? 1 : 0),
+    }),
+    ['s1'],
+  );
+});
+
 test('a tick still running when the next one is due is not joined by it', async () => {
   // Every tick re-asserts the same thing, and stopping many boxes takes
   // longer than the interval. Two of them at once sweep each other's
@@ -197,6 +226,7 @@ test('a tick still running when the next one is due is not joined by it', async 
       countForSession: () => 0,
     },
     upstream: () => ({ attachedCount: 0, backgroundActive: false }),
+    terminalCount: () => 0,
     stopUnlessBusy: () => Promise.resolve(true),
     maintenance: () => undefined,
     sweepOrphans: () => {

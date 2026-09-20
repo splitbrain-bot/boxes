@@ -23,7 +23,11 @@ Two consequences shape the rest of the design:
 - The agent connection outlives any browser, so a long-lived process has to own
   it and be able to rebuild it without losing the thread.
 - Thread history is replayed by the adapter's own `session/load` from the
-  session's home, so the orchestrator stores no transcript of its own.
+  session's home, so the orchestrator stores no transcript of its own. What it
+  keeps is a bounded log per thread, in memory, of what it has forwarded — the
+  adapter's replay read once when a thread is brought up, and everything said
+  live since — and a browser opening a thread is sent that log rather than a
+  fresh replay.
 
 A session owns several *threads* — ACP calls one conversation a session, and
 this document calls it a thread to keep it apart from a Boxes session. The
@@ -77,7 +81,7 @@ The orchestrator and the proxy are compose services. Session containers are
 created at runtime through the Docker API, so they appear in no compose file.
 
 That makes the session image the orchestrator's to keep, not compose's: it
-pulls `SESSION_IMAGE` when it is missing and again every
+pulls `SESSION_IMAGE` when it is missing, at every boot, and again every
 `SESSION_IMAGE_PULL_MINUTES`, and a session moves onto what arrived the next
 time it is *started* — never while it runs, where recreating the container
 would kill the adapter exec mid-turn. The copy the tag moved off is removed
@@ -115,6 +119,7 @@ The orchestrator serves everything a browser needs:
 | `/` | Dashboard bundle, with a single-page fallback |
 | `/api/...` | REST |
 | `/ws/sessions/:id/acp` | ACP gateway |
+| `/ws/sessions/:id/terminal` | A shell in the session's container |
 | `/healthz` | Liveness, and what the deployment is: version, session count, proxy warnings, which harnesses can run a turn and what the deployment holds a credential for, and which build of each image is running. Always 200 while the process serves |
 | `/readyz` | Readiness: 200 only when the database answers, the egress policy is in sync and Docker is reachable, which is what creating or starting a session needs |
 
@@ -166,10 +171,6 @@ were.
 | `POST /api/sessions/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
 | `POST /api/sessions/:id/attachments?name=` | Stores one file, raw bytes, in the session's workspace |
 | `GET /api/sessions/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
-| `POST /api/sessions/:id/exec` | Runs one command in the container on the session's current thread, streaming its output |
-| `GET /api/sessions/:id/exec` | Commands already run on the session's current thread |
-| `POST /api/sessions/:id/threads/:threadId/exec` | The same, on the thread the path names |
-| `GET /api/sessions/:id/threads/:threadId/exec` | Commands already run on that thread |
 | `GET /api/sessions/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
 | `GET /api/sessions/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
 | `PUT /api/sessions/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
@@ -208,54 +209,57 @@ both directions: it must *not* be behind HTTP authentication, because a
 browser cannot attach Basic credentials to a WebSocket upgrade, and it does
 not need to be, because the gateway authenticates the upgrade itself.
 
-### Local commands
+### The terminal
 
-A composer line starting with `!` is a local command: the dashboard
-intercepts it, so it never reaches the model, costs no tokens, and cannot be
-read as an instruction.
+`/ws/sessions/:id/terminal` is a shell in the session's container, drawn in
+the browser by xterm.js at `/sessions/:id/terminal`. Binary frames are the
+pty's bytes in both directions; text frames are control from the browser,
+which is a window size and nothing else so far.
 
-`exec.ts` runs it as `timeout <limit> bash -lc <command>` inside the session
-container, as the non-root `agent` user, in the container's existing isolation
-— internal network, read-only rootfs, capabilities dropped. No new privilege is
-introduced, and nothing shell-executes on the host: the command travels as an
-argument to the container's own shell and never reaches a host command line.
+It is the same box the agent works in, reached directly. `openTerminalExec`
+runs the shell as the non-root `agent` user, with `Tty` set so the daemon does
+no framing, in the container's existing isolation — internal network,
+read-only rootfs, capabilities dropped. No new privilege is introduced: anyone
+holding the session's token can already ask the agent to run anything, and
+nothing shell-executes on the host — the command is an argument vector handed
+to the daemon, and the only part of it the orchestrator composes is a name it
+generated itself.
 
-The response is chunked `text/plain` rather than JSON, so the browser can
-render the output as it arrives, and ends with a trailer line carrying the
-exit code and whether either limit was hit. The two limits are held in
-different places, because they can be. The wall clock — 120 seconds — is the
-container's own, through the `timeout` the command is wrapped in: the daemon
-cannot signal a running exec, so a limit the orchestrator held alone would
-end the response and leave the command running. The output cap — 256 KiB —
-is the orchestrator's, and it ends the response rather than the command; what it
-belongs to is ended by the wall clock at the latest. Finished runs go into
-`exec_log` against the thread they were typed in, ring-pruned per session.
+tmux is what makes the shell outlive the page. A box has one shared session,
+`boxes`, created detached on first use; each connection then starts a session
+of its own grouped with it, so every terminal shows the same windows. Two tabs
+are the same shell, a reload comes back to the same scrollback, and the shared
+session holds the windows when every client has gone — which is what lets a
+build carry on with nobody watching. The server lives in the container and its
+socket is in `/tmp`, which is a tmpfs, so a box that stops takes the shell with
+it. An image from before tmux gets a plain login shell, which is all of this
+except surviving the tab.
 
-The thread is part of the endpoint, the way it is part of a WebSocket path: a
-route that names one is that conversation, and one that names none means
-whichever thread the session has current. A thread is therefore shown its own
-commands and nobody else's.
+A session per connection is what makes one closable. Docker offers no way to
+signal a running exec, and dropping the stream would leave the tmux client
+attached for good — one more with every tab anybody closed. So a closing
+terminal runs `tmux kill-session` against its own session and then drops the
+stream. The windows survive, being linked to the shared session too, and no
+other terminal on the box is touched.
 
-The browser writes the output straight into the thread as a code block, which
-grows as the chunks arrive. Output is what the command was run for, so it is
-shown rather than folded away behind a tool call that has to be opened first.
-The fence is grown past the longest run of backticks in the output, so output
-carrying a fence of its own cannot break out of the block.
+The upgrade is the one the ACP gateway makes, against the same per-session
+token: the path names a box and never a thread, because a terminal belongs to
+the box rather than to a conversation. A box that is stopped is started for
+it, which takes seconds, so bytes typed before the prompt appears are held and
+replayed into the pty rather than dropped.
 
-ACP replay carries no timestamps, so where a stored run belongs in the
-transcript cannot be read off the replay. It is recorded instead: the browser
-sends, with the command, the id of what the transcript ended with when it was
-typed, and the run is stored with it. Assistant message ids and tool call ids
-are the adapter's own and come back unchanged on replay; the id of the user's
-own prompt does not, because the gateway echoes a prompt without one. So the
-anchor is the last tool call of the last assistant message, or that message's
-id when it has none, and on replay the run is put back right after it, behind
-any earlier run anchored there. A run whose anchor is not in the replay —
-a compaction, a fork, a command typed before the agent said anything — goes at
-the end, in the order it ran. The log is read when a thread comes whole. A
-resumed reconnect puts back the runs the browser already holds, output and
-all, and asks the server for nothing: a replay never carries a run, and the
-runs on screen are the runs that go back.
+An open terminal holds the idle reaper off the way an attached browser does —
+a build can run for an hour without printing a line, and stopping the
+container under it would take the shell and the build with it. That makes a
+browser that has gone without saying so expensive, so the server pings every
+30 seconds and drops a socket that misses two. Typing marks the session
+active, at most once a minute, so closing the tab leaves the box its usual
+idle window rather than the next tick.
+
+Back pressure is applied to the pty rather than to the browser. Past a
+megabyte of unsent bytes the stream is paused and resumed on drain, which is
+what holds up the writer in the container: a terminal producing faster than it
+is drawn is ordinary, unlike a browser falling behind on ACP, which is closed.
 
 ### Attachments
 
@@ -423,8 +427,8 @@ than things in the way.
 
 Three things are not reading, and the hook (`use-scroll-away.ts`) declines to
 read them as such. A view against the bottom of its scroller is following its
-own output — a thread streaming a reply, or writing what a `!bang` command
-returned — and stays there for the whole of it, so nothing decides down there.
+own output — a thread streaming a reply — and stays there for the whole of
+it, so nothing decides down there.
 That question is asked of the scroller rather than of the app on purpose: the
 thread's `isRunning` clears while the last chunks are still landing, measured
 rather than guessed, so a header that trusted it moved on its own at the end
@@ -572,46 +576,64 @@ parse is left as the text it is, because showing the XML is a better failure
 than dropping what a task said.
 
 `translate.ts` being pure is what makes replay and live streaming the same
-code path: a reconnect repeats the handshake, `session/load` re-sends the
+code path: a reconnect repeats the handshake, `session/load` sends the
 history as ordinary notifications, and folding them rebuilds the thread. An
 update kind this build predates is kept and rendered as nothing, so a newer
 adapter cannot break an older dashboard.
 
+**What a browser is sent on `session/load` is the gateway's own log of the
+thread, not a replay from the adapter.** The gateway asks the adapter to
+replay a thread exactly once, when it brings the thread up — at spawn for the
+threads being watched, or the first time somebody opens one the spawn left
+alone — and reads that replay into a per-thread log (`thread-log.ts`) that
+nobody is sent. From then on every update it forwards live on that thread is
+appended to the same log, the gateway's own prompt echoes included, so the
+log is what a browser watching the thread throughout would have received. A
+browser's `session/load` is answered from it without a round trip: the
+adapter's modes and options as they stood when the thread was brought up,
+kept current from the `current_mode_update` and `config_option_update`
+notifications that change them.
+
+The reason is that the adapter's replay and a running turn arrive on one
+connection in one shape. The adapter serves a `session/load` while a prompt is
+in flight and writes the transcript back as ordinary `session/update`
+notifications, interleaved with whatever the turn is saying, and nothing on
+either says which it is. There is no way to route that mixture to a browser
+correctly: trim it at the message the browser holds and the turn's new
+messages are dropped with the history in front of them; send it whole and the
+message being written is folded into two pieces either side of an older one.
+So the replay is never routed to a browser at all. It is read only when the
+thread is otherwise silent — a thread just brought up on a fresh adapter has
+nothing running on it, and nothing can be sent on it until the load answers —
+and a reconnect mid-turn is served from memory, with the rest of the turn in
+it and the adapter not asked.
+
 A reconnect says how much it already holds, so it is sent only the rest. The
 browser names the last message the adapter itself gave an id to, in `_meta` on
-its `session/load`; the gateway takes the adapter's whole replay as it always
-did and forwards from that message onward. A message id is the anchor because
-it names a boundary between updates rather than a place inside one, and the
-model is only the updates folded in order, so a fold that starts at a boundary
-and a fold of everything reach the same thread. The named message is re-sent
-rather than skipped, because a socket can drop halfway through one.
+its `session/load`, and is sent the log from that message onward. A message id
+is the anchor because it names a boundary between updates rather than a place
+inside one, and the model is only the updates folded in order, so a fold that
+starts at a boundary and a fold of everything reach the same thread. The named
+message is re-sent rather than skipped, because a socket can drop halfway
+through one.
 
-Every way that can fail ends in the whole thread. A browser with nothing the
+Every way that can fail ends in the whole log. A browser with nothing the
 adapter named asks for no resume; a thread that was re-minted under it is not
-resumed; a replay that never names the point is sent whole; and a browser that
-no longer holds the message it named rebuilds from scratch. The answer —
+resumed; a message the log no longer holds means the log whole; and a browser
+that no longer holds the message it named rebuilds from scratch. The answer —
 `_boxes/replay`, resumed or not — always reaches the browser before the first
-update of the replay, so it knows whether to keep what it has before anything
-arrives to fold into it.
+update, so it knows whether to keep what it has before anything arrives to
+fold into it.
 
-Replayed history and a running turn arrive on one connection in one shape. The
-adapter serves a `session/load` while a prompt is still in flight and writes
-the transcript back as ordinary `session/update` notifications, so a turn
-streaming into the thread the browser is rebuilding is indistinguishable from
-the thread's own past: the anchor scan would drop the live chunks with the
-history in front of it, and a whole replay would fold the message being
-written into two pieces either side of an older one. What separates them is
-what the gateway has already seen. It forwards a turn's updates as they are
-written, so while that turn runs it holds the message and tool call ids the
-turn is speaking under, and during a replay an update naming one of those is
-the turn's rather than history. The turn's own updates keep going out live to
-the other browsers on the thread — a phone reading an answer has no reason to
-go quiet while a laptop reloads — and are set aside for the browser that is
-replaying until its history is complete, which is where the newest part of a
-thread belongs. The limit is content whose id first appears during the replay:
-the gateway has never seen it, so it cannot be told apart from history and is
-treated as history. The case this answers is the one a reconnect hits, a turn
-already streaming when the replay starts.
+The log is bounded, at a few megabytes per thread, and drops its oldest
+message when it grows past that — chunks, tool calls and all, so the cut never
+leaves a message starting mid-sentence or a result without its call. What
+goes is the top of the thread, which opens at its bottom: scrollback nobody
+reaches. A browser that already held it keeps it; a fresh tab on a thread
+whose traffic passed the cap opens on the last few megabytes, and the head
+comes back the next time the orchestrator restarts and reads the transcript
+in again. A thread the adapter turns out not to hold any more loses its log
+along with its conversation.
 
 A replay is folded in silence and published once. The notifications are the
 same ones live streaming uses, so publishing each one would hand the view
@@ -1070,7 +1092,7 @@ it, and the reconnect resumes from what it already had.
 ### Who each update goes to
 
 `broadcast.ts` decides. Sending every update to every browser is almost
-right, and wrong in three places that only appear with more than one attached —
+right, and wrong in two places that only appear with more than one attached —
 a phone and a desktop watching the same session, or two tabs on two threads of
 one box.
 
@@ -1087,17 +1109,17 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   echo it live, so without this the browser that sent it shows nothing until
   its next reload. While the gateway is echoing *that thread*, an adapter that
   *does* echo is suppressed, so either kind of adapter produces exactly one
-  copy. Replay is exempt: there the adapter is reading back history the
-  gateway never saw.
-- **A replay goes only to the browser that asked for it, and silences only its
-  own thread.** `session/load` is by definition a re-send of the whole thread
-  to the gateway, whatever part of it the browser is then sent,
-  so broadcasting it rendered every other open tab's conversation twice — but
-  a replay of one thread must not hold back another thread's live updates,
-  which is the bug two open tabs hit first. A replay one thread *borrowed*
-  from another is re-tagged as the borrower's on the way out, because the
-  browser reading it is pinned to the borrower — see *Several threads per
-  session*.
+  copy. A transcript being read into the log is exempt: there the adapter is
+  reading back history the gateway never saw, and nobody is sent it anyway.
+- **The adapter's replay reaches no browser; a browser opening a thread is
+  sent the log.** A `session/load` the gateway itself issues fills the log of
+  the one thread it names and is delivered to nobody — the tab already on
+  that thread has the thread — and another thread's live updates go on as
+  before, which is the bug two open tabs hit first. A browser's own
+  `session/load` never reaches the adapter: it is answered from the log,
+  whole or from the message the browser named. A fork's log starts as a copy
+  of its source's, re-tagged as the fork's, because the browser reading it is
+  pinned to the fork — see *Several threads per session*.
 
 ### Several threads per session
 
@@ -1163,32 +1185,25 @@ already caches verbatim — per thread, since the answer is per adapter and a bo
 may be running two. The capability is marked unstable in the ACP schema, so an
 adapter that drops it costs the dashboard a button rather than a build.
 
-**A fork borrows the transcript it branched from until it has one of its
-own.** The adapter branches the conversation in full — the fork knows
-everything the source said — but it writes the fork no transcript until the
-fork is first prompted, so `session/load` on a fresh one replays nothing and
-it would open on a blank screen claiming to know a conversation the reader
-cannot see. So `threads.inherits_from` records the source, and a load of a
-thread that has it replays the *source's* history, re-tagged as this thread's,
-after the fork's own load has come back empty. A fork of a fork follows the
-chain: the middle thread has no transcript either, so what both of them came
-from is what gets replayed.
+**A fork's log starts as a copy of its source's.** The adapter branches the
+conversation in full — the fork knows everything the source said — but it
+writes the fork no transcript until the fork is first prompted, so a fork has
+nothing of its own to be read in and would open on a blank screen claiming to
+know a conversation the reader cannot see. So when a fork is minted, the
+source's log is copied into it, every update re-tagged as the fork's, and
+from there the fork's log grows with what is said on the fork. A source no
+browser has opened on this adapter is brought up first, so there is a log to
+copy. Until the fork's first prompt the adapter cannot load it back, so
+`threads.inherits_from` records the source: a fork that had not been prompted
+before a respawn is branched again rather than started empty, because
+carrying that context is the only reason it exists, and its log is copied
+again from the source's. A fork of a fork follows the chain to the first
+thread up it with a transcript of its own.
 
-That first prompt is where the borrowing stops, and the column is cleared
-there rather than later: the adapter starts a transcript for the fork at that
-moment, and it opens with everything the source had said — so from then on
-the fork replays itself, and replaying the source as well would say all of it
-twice. The same column is what re-forks a thread the adapter has forgotten: a
-fork that had not been prompted before a respawn is branched again rather than
-started empty, because carrying that context is the only reason it exists.
-
-The borrowed replay is one browser's, exactly as its own would be, and it
-holds back the source's live updates for its length the same way. A replay of
-a thread cannot be told apart from what that thread is saying right now, and
-this is the one place where two threads are the same conversation — so a
-source mid-turn can lose a moment of its stream to a fork being opened. It
-comes back on that browser's next load, and a source that cannot be replayed
-at all costs the fork its history and nothing else.
+That first prompt is where the column is cleared: the adapter starts a
+transcript for the fork at that moment, opening with everything the source
+had said, so from then on a respawn loads the fork back like any other thread
+and reads that transcript into its log.
 
 A running turn and a waiting permission request belong to the thread, not the
 session. `threads.turn_active` records the first, and the session's answer is
@@ -1208,10 +1223,9 @@ It is not a delete and not an archive — both of those change what the thread
 can do, and this changes what a row looks like.
 
 Deleting a thread is not implemented, though the adapter supports
-`session/delete`. The debug log stays session-scoped: it taps one adapter
-connection, which belongs to the box rather than to a conversation. `!bang`
-command history does not — a command is typed into a thread, and it is
-replayed there and nowhere else.
+`session/delete`. The debug log and the terminal stay session-scoped: the
+first taps one adapter connection and the second opens one shell, and both
+belong to the box rather than to a conversation.
 
 ### Permission requests
 
@@ -1315,8 +1329,8 @@ are the agent processes, `claude` under `claude-agent-acp` and `codex
 app-server` under `codex-acp`; anything matching a harness's
 `residentProcesses`, which is where a long-lived helper of either agent goes;
 and the `ps` that took the reading. Everything else — a shell under an agent, a
-build orphaned to PID 1 by an adapter that died, a `!bang` exec somebody is
-still waiting on — is work and holds the box. Under Codex's sandboxed modes a
+build orphaned to PID 1 by an adapter that died, the shell behind an open
+terminal — is work and holds the box. Under Codex's sandboxed modes a
 command sits three wrappers down, and every one of those wrappers is that
 command's own and correctly reads as work. The rule has to know both harnesses'
 tokens: left with one it silently reads the other harness's box as empty, and
@@ -2365,7 +2379,6 @@ applies migrations tracked by `user_version`.
 | `sessions` | One row per session: names, Docker object names, where its workspace and home are, status, which thread is the default, timestamps |
 | `threads` | One row per conversation: which session owns it, which harness runs it, the adapter's id for it, the mode and the config map it is meant to be in, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
-| `exec_log` | Local commands and their output, each recording the thread it was typed in, ring-pruned to 200 rows per session across all of its threads |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
 | `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |
 | `agent_items` | The skills and slash commands of a set, keyed by set, kind and name |
@@ -2516,10 +2529,9 @@ image cannot be built from code that fails `tsc --noEmit`.
 ```
 orchestrator/src/
   index.ts              Boot, the WS upgrade, the background loops, shutdown
-  app.ts                REST routes, the exec endpoint, the static bundle
+  app.ts                REST routes and the static bundle
   bodies.ts             A schema per route that takes a JSON body, and the 400 a body that fails one gets
   http-error.ts         The one error that carries an HTTP status, thrown wherever a request is refused
-  exec.ts               Local commands: limits, streaming, the exec log
   attachments.ts        Files a prompt carries, written into the session's own workspace
   config.ts             Environment parsing, and the translatable credential set
   harness.ts            The registry: one record per harness, and every value that varies between them
@@ -2557,6 +2569,7 @@ orchestrator/src/
     downstream.ts       One ACP agent connection per browser, pinned to one thread
     broadcast.ts        Which browsers each adapter update goes to, routed by thread
     pending.ts          Permission requests waiting for an answer
+    terminal.ts         One pty per terminal connection, and how long it holds the box
 
 proxy/src/
   main.ts               The three listeners, the in-memory policy, the denial tally
@@ -2585,9 +2598,8 @@ dashboard/
         acp-types.ts    The slice of the ACP schema the browser speaks
         acp-client.ts   JSON-RPC over the WebSocket, and the handshake
         translate.ts    session/update notifications → a message model (pure)
-        thread-store.ts The live thread: messages, modes, models, approvals, exec
+        thread-store.ts The live thread: messages, modes, models, approvals
         convert.ts      That model in the shape the runtime reads
-        exec.ts         !bang commands against the exec endpoint
     hooks/              What the views share: the header stepping aside, a thread following its own output
       use-up.ts         Leaving a view by popping what it pushed, never by pushing its parent
       use-history-overlay.ts  A dialog as a history entry, so back closes it and not the screen behind it
@@ -2595,8 +2607,10 @@ dashboard/
       history.ts        Where in the stack the browser is, which both of the above read
       staged-prompt.ts  A prompt handed from one view to another, consumed once, out of history's reach
       harness.ts        What only a reader needs about a harness: why one cannot run, and the caveat on a mode
-    views/              SessionList, SessionCreate, SessionThread, SessionInfo, SessionReview,
-                        AgentSets, AgentSetEditor, Settings, Playground, Shell
+      terminal-socket.ts  The browser's end of a terminal: bytes out, bytes in, a size
+    views/              SessionList, SessionCreate, SessionThread, SessionInfo,
+                        SessionReview, SessionTerminal, AgentSets, AgentSetEditor,
+                        Settings, Playground, Shell
     components/
       ThreadOptions.tsx The agent, mode, model and effort block both dialogs ask with
       NewThreadDialog.tsx  That block, as what a card's "New thread" opens
@@ -2608,6 +2622,7 @@ dashboard/
 shared/
   types.ts              REST shapes and the control-channel contract
   acp.ts                The ACP subprotocol, method names and update kinds, spelled once
+  terminal.ts           The terminal subprotocol and its one control message
   task-notifications.ts How a background task reports in, read by both sides
 session-image/          The per-session container image, in four files
   Dockerfile            What a session has installed, and the uid it runs as
@@ -2677,8 +2692,10 @@ resident processes.
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update
 routing with two browsers attached — including two on *two* threads, where an
-update for one must not reach the other, a replay of one must not silence the
-other's live updates, and an update nobody is watching is dropped — the exec
+update for one must not reach the other, reading one in must not silence the
+other's live updates, and an update nobody is watching is dropped — the
+per-thread log a browser opens a thread from, and what it drops past its cap,
+the exec
 limits, the schema migrations that turned one thread per session into several
 and then moved the running turn onto them, the spawn path against a stand-in
 adapter — a forgotten thread costing the session only that thread, a turn

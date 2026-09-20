@@ -41,8 +41,9 @@ function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop:
 /**
  * Starts the idle reaper and returns a handle that stops it. Every minute it
  * stops each session that has no running turn, no waiting permission request,
- * no attached browser, no background task still believed to be running, and no
- * activity for IDLE_STOP_MINUTES. It never deletes a session.
+ * no attached browser, no open terminal, no background task still believed to
+ * be running, and no activity for IDLE_STOP_MINUTES. It never deletes a
+ * session.
  *
  * It does delete what a session left: the same tick sweeps the containers,
  * networks, volumes and workspace directories labelled with sessions that no
@@ -72,6 +73,9 @@ export function startReaper(
       if ((pendingCounts.get(row.id) ?? 0) > 0) continue;
       const upstream = manager.upstream(row.id);
       if (upstream.attachedCount > 0) continue;
+      // Somebody is in the box, however quiet the shell has gone: a build can
+      // run for an hour without printing a line.
+      if (manager.terminalCount(row.id) > 0) continue;
       // A box with a command still running in it, or a monitor still watching
       // something, is not idle however quiet it has gone. Any of the
       // session's threads holds the box.
@@ -88,6 +92,7 @@ export function startReaper(
       // started on a box nobody is watching.
       if (sessionTurnActive(db, row.id)) continue;
       if (manager.pending.countForSession(row.id) > 0) continue;
+      if (manager.terminalCount(row.id) > 0) continue;
 
       try {
         // Never waits for the session's own queue: a box something else is
@@ -119,10 +124,11 @@ export function startReaper(
  * SESSION_IMAGE_PULL_MINUTES, and returns a handle that stops it. Returns a
  * no-op handle when the setting is 0.
  *
- * This is the whole of "keep the session image current": the pull puts the
- * new image on the host, and each session moves onto it the next time it is
- * started. Nothing running is disturbed, and a failed pull is a log line —
- * the image already here still works.
+ * How the session image stays current while the orchestrator runs, boot
+ * having pulled it once already: the pull puts the new image on the host, and
+ * each session moves onto it the next time it is started. Nothing running is
+ * disturbed, and a failed pull is a log line — the image already here still
+ * works.
  */
 export function startImageRefresher(
   cfg: Config,

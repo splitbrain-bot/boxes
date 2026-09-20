@@ -12,7 +12,6 @@ import type {
   SessionNotification,
 } from './acp-types.ts';
 import { AcpClient, loadParams, type ConnectionState } from './acp-client.ts';
-import { BANG, listExec, runExec } from './exec.ts';
 import {
   applyUpdate,
   emptyModel,
@@ -110,43 +109,17 @@ interface OpenApproval {
   resolve: (response: RequestPermissionResponse) => void;
 }
 
-/**
- * One local command as the store draws it, kept for as long as it is part of
- * the thread.
- *
- * Held rather than only rendered, because a resume takes the runs out of the
- * model so they can go back around whatever the replay brings. This is what
- * goes back.
- */
-interface ExecRun {
-  /** The id of the messages this run is drawn as, unique within the store. */
-  id: string;
-  /** The line that was typed, without its bang. */
-  command: string;
-  /** The output so far, which grows while the command runs. */
-  output: string;
-  /** The exit line under the output, absent while the run is going. */
-  trailer?: string;
-  /** What the transcript ended with when the command was typed, or null. */
-  after: string | null;
-}
-
 /** How the store reaches the outside world; swapped wholesale in tests. */
 export interface ThreadStoreDeps {
   /** Builds the client. Present so a test can supply a fake. */
   createClient: (handlers: ConstructorParameters<typeof AcpClient>[2]) => AcpClient;
-  /** The Boxes session id, which the exec endpoint is scoped to. */
+  /** The Boxes session id this thread belongs to. */
   sessionId: string;
   /**
    * The thread within it, and null on the route that means whichever thread
-   * the session has current. Local commands are logged per thread, so this is
-   * what decides which of them this thread is shown.
+   * the session has current.
    */
   threadId: string | null;
-  /** Runs a local command, streaming its output. Swapped in tests. */
-  runExec?: typeof runExec;
-  /** Lists the commands already run in this thread. Swapped in tests. */
-  listExec?: typeof listExec;
 }
 
 /** The live thread for one Boxes session. */
@@ -171,22 +144,6 @@ export class ThreadStore {
   private speakingUpstream = false;
   private backgroundUpstream: readonly BackgroundProcess[] = [];
   private nextApprovalId = 1;
-  private nextExecId = 1;
-  /**
-   * Every local run drawn in this thread, in the order they were drawn.
-   *
-   * Kept so a resume can put them back without reading the exec log again: a
-   * replay never brings a run back, and this store already holds every one of
-   * them. It is also what stops a second load doubling them.
-   */
-  private readonly runs = new Map<string, ExecRun>();
-  /**
-   * True while the runs to put back are the ones already held rather than the
-   * ones the server would list. A resume sets it, and the next load spends it.
-   */
-  private restoreRuns = false;
-  /** Per run: how much of its output has been read for backticks, and the longest run found. */
-  private readonly execFences = new Map<string, { scanned: number; longest: number }>();
   /**
    * True from the moment a connection says it is about to replay until the
    * replay has been read.
@@ -365,12 +322,6 @@ export class ThreadStore {
     this.model.modes = modes;
     this.model.configOptions = configOptions;
     this.views = new Map();
-    // The runs go with the model: a thread coming whole is a thread whose
-    // runs are read from the log again, which is also how this browser hears
-    // about the ones another tab made.
-    this.runs.clear();
-    this.restoreRuns = false;
-    this.execFences.clear();
     // Whatever was said about the thread belonged to the connection that is
     // being replaced. The gateway says it again after this replay — including
     // what is still running in the background, which is the only way this
@@ -389,14 +340,14 @@ export class ThreadStore {
    * The last message the adapter named, which is where a replay can be picked
    * up. Null when there is none, and then the thread has to come whole.
    *
-   * The adapter's own id and no other: a message this model numbered itself —
-   * one that opens with a tool call — and the echo of a local command are
-   * names only this browser knows, and a replay never says them back.
+   * The adapter's own id and no other: a message this model numbered itself,
+   * one that opens with a tool call, carries a name only this browser knows,
+   * and a replay never says it back.
    */
   private lastNamedMessage(): string | null {
     for (let i = this.model.messages.length - 1; i >= 0; i--) {
       const message = this.model.messages[i]!;
-      if (message.named && !isExecMessage(message)) return message.id;
+      if (message.named) return message.id;
     }
     return null;
   }
@@ -423,15 +374,6 @@ export class ThreadStore {
       this.reset();
       return;
     }
-    // Local runs are not part of the transcript and no replay brings them
-    // back. They are taken out whole and put back from what this store holds
-    // once the connection is ready, which is also what re-orders them around
-    // the messages arriving now. Nothing is asked of the server: the runs
-    // that were on screen are the runs that go back.
-    this.model.messages = this.model.messages.filter((m) => !isExecMessage(m));
-    this.views = new Map();
-    this.restoreRuns = true;
-    this.execFences.clear();
     // The questions this store was showing were asked over the connection
     // that has gone, and nobody is listening for the answers. The gateway
     // puts the ones still open back after the replay.
@@ -623,196 +565,6 @@ export class ThreadStore {
     }
   }
 
-  /**
-   * Runs a `!bang` command in the session container.
-   *
-   * It never reaches the model: the command is echoed as the user message it
-   * was typed as, and its output is written straight into the thread as a
-   * code block. Output is what the user asked for, so it is shown rather
-   * than folded away behind a tool call that has to be opened.
-   */
-  async runCommand(command: string): Promise<void> {
-    const after = this.lastAnchor();
-    const execId = `${EXEC_ID}${this.nextExecId++}`;
-    this.runs.set(execId, { id: execId, command, output: '', after });
-    this.appendExecCommand(execId, command);
-    let output = '';
-    this.setExecOutput(execId, output);
-
-    const exec = this.deps.runExec ?? runExec;
-    try {
-      const outcome = await exec(
-        this.deps.sessionId,
-        this.deps.threadId,
-        command,
-        after,
-        (soFar) => {
-          output = soFar;
-          this.setExecOutput(execId, output);
-        },
-      );
-      this.setExecOutput(execId, output, trailerOf(outcome));
-    } catch (err) {
-      this.setExecOutput(execId, output, (err as Error).message);
-    }
-  }
-
-  /**
-   * Puts the commands already run in this thread back where they were typed.
-   *
-   * After a resume the runs are the ones this store holds, and nothing is
-   * asked of the server: the replay brought the transcript back, and the runs
-   * that came out of it go back around it whole, with their output. Otherwise
-   * the thread's exec log is read, and every run in it this thread is not
-   * already showing is drawn.
-   */
-  async loadExecHistory(): Promise<void> {
-    if (this.restoreRuns) {
-      this.restoreRuns = false;
-      for (const run of this.runs.values()) this.placeRun(run);
-      return;
-    }
-    const list = this.deps.listExec ?? listExec;
-    let records;
-    try {
-      records = await list(this.deps.sessionId, this.deps.threadId);
-    } catch {
-      return;
-    }
-    for (const record of records) {
-      const execId = `${EXEC_ID}log-${record.id}`;
-      if (this.runs.has(execId)) continue;
-      const run: ExecRun = {
-        id: execId,
-        command: record.command,
-        output: record.output,
-        trailer: trailerOf(record),
-        after: record.after,
-      };
-      this.runs.set(execId, run);
-      this.placeRun(run);
-    }
-  }
-
-  /**
-   * Draws one run into the thread, right after the message it names.
-   *
-   * It goes in behind any earlier run placed there too, so runs that followed
-   * the same message keep their order. A run that names nothing, or names
-   * something the replay did not bring back, goes at the end.
-   */
-  private placeRun(run: ExecRun): void {
-    const slot = this.slotAfter(run.after);
-    this.appendExecCommand(run.id, run.command);
-    this.setExecOutput(run.id, run.output, run.trailer);
-    if (slot !== null) {
-      const pair = this.model.messages.splice(-2, 2);
-      this.model.messages.splice(slot, 0, ...pair);
-      this.refreshMessages(null);
-    }
-  }
-
-  /**
-   * What the transcript ends with right now, as something a replay will name
-   * again: the last tool call of the last assistant message, or that
-   * message's id when it has no tool call. Null before the agent has said
-   * anything.
-   *
-   * A tool call is preferred because a message that opens with one gets no
-   * id from the adapter. The user's own prompts are echoed without one too,
-   * which is why they cannot serve. Earlier runs are skipped: they are not
-   * part of the transcript and a replay does not bring them back.
-   */
-  private lastAnchor(): string | null {
-    for (let i = this.model.messages.length - 1; i >= 0; i--) {
-      const message = this.model.messages[i]!;
-      if (message.role !== 'assistant' || isExecMessage(message)) continue;
-      for (let j = message.parts.length - 1; j >= 0; j--) {
-        const part = message.parts[j]!;
-        if (part.type === 'tool') return part.toolCallId;
-      }
-      return message.id;
-    }
-    return null;
-  }
-
-  /**
-   * Where a replayed run belongs: just past the message the anchor names —
-   * by its id, or by a tool call in it — and past every run already put
-   * there. Null when nothing in the model answers to the anchor.
-   */
-  private slotAfter(anchor: string | null): number | null {
-    if (!anchor) return null;
-    const messages = this.model.messages;
-    let slot = messages.findIndex(
-      (m) => m.id === anchor || m.parts.some((p) => p.type === 'tool' && p.toolCallId === anchor),
-    );
-    if (slot < 0) return null;
-    slot++;
-    while (slot < messages.length && isExecMessage(messages[slot]!)) slot++;
-    return slot;
-  }
-
-  /** Echoes a bang line into the thread as the user message it was typed as. */
-  private appendExecCommand(execId: string, command: string): void {
-    applyUpdate(this.model, {
-      sessionUpdate: UPDATE_KIND.userMessageChunk,
-      content: { type: 'text', text: `${BANG}${command}` },
-      messageId: `${execId}-command`,
-    });
-  }
-
-  /**
-   * The longest run of backticks a run's output has held so far, which is what
-   * the fence around it has to beat.
-   *
-   * Each chunk arrives as the whole output so far, so only the part that has
-   * not been read yet is scanned; a run of backticks lying across that edge is
-   * measured whole by stepping back over it first. Without this the fence is
-   * recomputed over everything on every chunk, which is quadratic in the
-   * output of a command like a test run.
-   */
-  private longestFence(execId: string, output: string): number {
-    const seen = this.execFences.get(execId) ?? { scanned: 0, longest: 0 };
-    let from = Math.min(seen.scanned, output.length);
-    while (from > 0 && output[from - 1] === '`') from--;
-    for (const run of output.slice(from).matchAll(/`+/g)) {
-      if (run[0].length > seen.longest) seen.longest = run[0].length;
-    }
-    seen.scanned = output.length;
-    this.execFences.set(execId, seen);
-    return seen.longest;
-  }
-
-  /**
-   * Writes a shell run's output into the thread as a code block, replacing
-   * whatever was there so the block can grow while the command runs.
-   *
-   * The run this store holds is written too, so what goes back after a resume
-   * is the output as it stands rather than the output as it started.
-   */
-  private setExecOutput(execId: string, output: string, trailer?: string): void {
-    const run = this.runs.get(execId);
-    if (run) {
-      run.output = output;
-      run.trailer = trailer;
-    }
-    const text = execBlock(output, this.longestFence(execId, output), trailer);
-    const existing = this.model.messages.find((m) => m.id === execId);
-    if (existing) {
-      existing.parts = [{ type: 'text', text }];
-      this.refreshMessages(existing);
-      return;
-    }
-    this.refreshMessages(
-      applyUpdate(this.model, {
-        sessionUpdate: UPDATE_KIND.agentMessageChunk,
-        content: { type: 'text', text },
-        messageId: execId,
-      }),
-    );
-  }
-
   /** Cancels the running turn. The prompt request resolves on its own after. */
   cancel(): void {
     const client = this.client;
@@ -926,47 +678,8 @@ export class ThreadStore {
     } finally {
       this.restoreApprovals();
       this.flushReplay();
-      // reset() forgot which local commands are already in the transcript,
-      // and the view asks for them again only when a connection reports
-      // ready, which this is not. Without this every !bang run is gone from
-      // the thread until the next reconnect.
-      void this.loadExecHistory();
     }
   }
-}
-
-/** What the ids of a local command's echo and output start with. */
-const EXEC_ID = 'bang-';
-
-/** Whether a message is a local command's echo or output rather than the agent's. */
-function isExecMessage(message: Message): boolean {
-  return message.id.startsWith(EXEC_ID);
-}
-
-/**
- * A shell run's output as a fenced code block, with its exit line under it.
- *
- * The fence is grown past the longest run of backticks in the body, so output
- * that contains a fence of its own cannot break out of the block.
- */
-function execBlock(output: string, longestRun: number, trailer?: string): string {
-  const body = [output.replace(/\n+$/, ''), trailer].filter(Boolean).join('\n');
-  const inTrailer = Math.max(0, ...[...(trailer ?? '').matchAll(/`+/g)].map((m) => m[0].length));
-  const fence = '`'.repeat(Math.max(3, Math.max(longestRun, inTrailer) + 1));
-  return `${fence}console\n${body}\n${fence}`;
-}
-
-/** The exit line shown under a finished run's output. */
-function trailerOf(outcome: {
-  exitCode: number | null;
-  truncated: boolean;
-  timedOut: boolean;
-}): string {
-  const notes = [
-    outcome.timedOut ? 'timed out' : '',
-    outcome.truncated ? 'output truncated' : '',
-  ].filter(Boolean);
-  return [`[exit ${outcome.exitCode ?? 'killed'}]`, ...notes].join(' · ');
 }
 
 /**

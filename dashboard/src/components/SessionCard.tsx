@@ -1,4 +1,12 @@
-import { FileSearch, GitBranch, HardDrive, Info, Plus, Square } from 'lucide-react';
+import {
+  FileSearch,
+  GitBranch,
+  HardDrive,
+  Info,
+  Plus,
+  Square,
+  SquareTerminal,
+} from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { SessionSummary, ThreadSummary } from '../../../shared/types.ts';
@@ -265,6 +273,16 @@ export function SessionCard({ session }: { session: SessionSummary }) {
           >
             <FileSearch className="size-3.5" />
             Review
+          </Link>
+          {/* The box seen directly, rather than through the agent. Names no
+              thread: a terminal belongs to the box, and every one opened on
+              it is the same shell. */}
+          <Link
+            to={`/sessions/${session.id}/terminal`}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground no-underline hover:bg-accent hover:text-accent-foreground"
+          >
+            <SquareTerminal className="size-3.5" />
+            Terminal
           </Link>
           {/* Forking needs a thread to fork and that thread's own adapter to
               have advertised the capability, which is unstable in the ACP

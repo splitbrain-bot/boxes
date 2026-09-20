@@ -21,8 +21,10 @@ import type { LoginExecSpec } from './login.ts';
 import * as ws from './workspaces.ts';
 
 /**
- * The exec endpoint over its real routes, real database and real session
- * lookup, with only the Docker socket faked.
+ * Installs a fake Docker client that answers everything the routes touch.
+ *
+ * Every exec here is a probe the manager runs while it prepares a box — the
+ * repository check, the process list — and each produces nothing.
  */
 
 /** One frame of a demuxable Docker stream. */
@@ -44,8 +46,7 @@ let insideBox = '';
 let killedInBox: string[][] = [];
 
 /** Installs a fake Docker client that answers everything the routes touch. */
-function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
-  const execs: string[][] = [];
+function fakeDocker(): void {
   const modem = new Docker({ socketPath: '/var/run/docker.sock' }).modem;
 
   dk.setDockerForTests({
@@ -54,13 +55,10 @@ function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
       start: async () => undefined,
       inspect: async () => ({ State: { Running: true } }),
       exec: async (opts: { Cmd: string[] }) => {
-        execs.push(opts.Cmd);
         if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
         // The box-wide stop's two calls: a reading taken inside the container,
         // and the signal it aims at what the reading found.
-        // A local command runs under `timeout`, which is what tells it apart.
-        const answers =
-          opts.Cmd[0] === 'ps' ? insideBox : opts.Cmd[0] === 'timeout' ? output : null;
+        const answers = opts.Cmd[0] === 'ps' ? insideBox : null;
         return {
           start: async () => {
             const stream = new PassThrough();
@@ -75,19 +73,12 @@ function fakeDocker(output: string, exitCode = 0): { execs: string[][] } {
           inspect: async () => ({
             // A `ps` or a `kill` the stop ran succeeded; anything else this fake
             // does not answer for failed.
-            ExitCode:
-              opts.Cmd[0] === 'timeout'
-                ? exitCode
-                : answers === null && opts.Cmd[0] !== 'kill'
-                  ? 1
-                  : 0,
+            ExitCode: answers === null && opts.Cmd[0] !== 'kill' ? 1 : 0,
           }),
         };
       },
     }),
   } as unknown as Docker);
-
-  return { execs };
 }
 
 let dir: string;
@@ -143,10 +134,7 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/**
- * A directory-backed session: what an attachment needs, and what the exec
- * routes above do not — those reach the container, this reaches the disk.
- */
+/** A directory-backed session, which is what an attachment needs. */
 function insertWorkspaceSession(id: string): string {
   insertSession(id);
   // config() is memoised for the process, so the app's DATA_DIR is whatever
@@ -413,208 +401,6 @@ test('an attachment that was never stored is a 404', async () => {
   insertWorkspaceSession('abc123');
   const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/attachments/nope.png' });
   assert.equal(res.statusCode, 404);
-});
-
-test('a command runs in the container and streams its output with a trailer', async () => {
-  insertSession('abc123');
-  const { execs } = fakeDocker('hello\n');
-
-  const res = await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'echo hello' },
-  });
-
-  assert.equal(res.statusCode, 200);
-  assert.match(res.headers['content-type'] as string, /text\/plain/);
-  // The output is the agent's, so the declared type is the only one.
-  assert.equal(res.headers['x-content-type-options'], 'nosniff');
-  assert.equal(res.body, 'hello\n\n[exit 0]\n');
-  // The command travels as an argument to bash inside the container; nothing
-  // is assembled into a host command line. The container is handed the wall
-  // clock along with it.
-  assert.deepEqual(execs.at(-1), [
-    'timeout',
-    '--kill-after=5s',
-    '120s',
-    'bash',
-    '-lc',
-    'echo hello',
-  ]);
-});
-
-test('a non-zero exit is reported in the trailer', async () => {
-  insertSession('abc123');
-  fakeDocker('bash: nope: command not found\n', 127);
-
-  const res = await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'nope' },
-  });
-  assert.match(res.body, /\[exit 127\]/);
-});
-
-test('a finished run is stored and listed', async () => {
-  insertSession('abc123');
-  fakeDocker('clean\n');
-
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'git status', after: 'msg_1' },
-  });
-
-  const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/exec' });
-  assert.equal(res.statusCode, 200);
-  const { records } = res.json() as { records: Array<Record<string, unknown>> };
-  assert.equal(records.length, 1);
-  assert.equal(records[0]!['command'], 'git status');
-  assert.equal(records[0]!['output'], 'clean\n');
-  assert.equal(records[0]!['exitCode'], 0);
-  assert.equal(records[0]!['truncated'], false);
-  // Where it was typed comes back with it, for the replay to place it.
-  assert.equal(records[0]!['after'], 'msg_1');
-});
-
-test('running a command holds off the reaper', async () => {
-  insertSession('abc123');
-  fakeDocker('ok\n');
-  db.prepare('UPDATE sessions SET last_active_at = 0 WHERE id = ?').run('abc123');
-
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'true' },
-  });
-
-  const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('abc123') as {
-    last_active_at: number;
-  };
-  assert.ok(row.last_active_at > 0);
-});
-
-test('an empty command is rejected before anything runs', async () => {
-  insertSession('abc123');
-  const { execs } = fakeDocker('');
-
-  for (const payload of [{ command: '' }, { command: '   ' }, {}]) {
-    const res = await orchestrator.app.inject({
-      method: 'POST',
-      url: '/api/sessions/abc123/exec',
-      payload,
-    });
-    assert.equal(res.statusCode, 400);
-  }
-  assert.deepEqual(execs, []);
-});
-
-test('an absurdly long command is rejected', async () => {
-  insertSession('abc123');
-  fakeDocker('');
-  const res = await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'x'.repeat(9000) },
-  });
-  assert.equal(res.statusCode, 400);
-});
-
-test('an unknown session is a 404 on both exec routes', async () => {
-  fakeDocker('');
-  const post = await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/nosuch/exec',
-    payload: { command: 'ls' },
-  });
-  assert.equal(post.statusCode, 404);
-
-  const get = await orchestrator.app.inject({ url: '/api/sessions/nosuch/exec' });
-  assert.equal(get.statusCode, 404);
-});
-
-test('a deleted session is a 404 too', async () => {
-  insertSession('gone');
-  db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = ?").run('gone');
-  fakeDocker('');
-
-  const res = await orchestrator.app.inject({ url: '/api/sessions/gone/exec' });
-  assert.equal(res.statusCode, 404);
-});
-
-test('a session with no container cannot run a command', async () => {
-  insertSession('abc123');
-  db.prepare('UPDATE sessions SET container_id = NULL WHERE id = ?').run('abc123');
-  fakeDocker('');
-
-  const res = await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'ls' },
-  });
-  assert.equal(res.statusCode, 409);
-});
-
-test('one thread cannot see another thread commands', async () => {
-  insertSession('abc123');
-  insertThread('abc123', 'abc123-t2', 2);
-  fakeDocker('mine\n');
-
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/threads/abc123-t1/exec',
-    payload: { command: 'whoami' },
-  });
-
-  const own = await orchestrator.app.inject({
-    url: '/api/sessions/abc123/threads/abc123-t1/exec',
-  });
-  assert.equal((own.json() as { records: unknown[] }).records.length, 1);
-
-  const other = await orchestrator.app.inject({
-    url: '/api/sessions/abc123/threads/abc123-t2/exec',
-  });
-  assert.deepEqual((other.json() as { records: unknown[] }).records, []);
-});
-
-test('a path naming no thread means the session current one', async () => {
-  insertSession('abc123');
-  fakeDocker('mine\n');
-
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'whoami' },
-  });
-
-  const res = await orchestrator.app.inject({
-    url: '/api/sessions/abc123/threads/abc123-t1/exec',
-  });
-  assert.equal((res.json() as { records: unknown[] }).records.length, 1);
-});
-
-test('a thread of another session is a 404 rather than a way into it', async () => {
-  insertSession('aaa');
-  insertSession('bbb');
-  fakeDocker('');
-
-  const res = await orchestrator.app.inject({ url: '/api/sessions/aaa/threads/bbb-t1/exec' });
-  assert.equal(res.statusCode, 404);
-});
-
-test('one session cannot see another session commands', async () => {
-  insertSession('aaa');
-  insertSession('bbb');
-  fakeDocker('mine\n');
-
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/aaa/exec',
-    payload: { command: 'whoami' },
-  });
-
-  const res = await orchestrator.app.inject({ url: '/api/sessions/bbb/exec' });
-  assert.deepEqual((res.json() as { records: unknown[] }).records, []);
 });
 
 /**
@@ -1036,23 +822,19 @@ test('creating a session against an unknown set is refused before anything is bu
   assert.equal(rows.n, 0);
 });
 
-test('starting a container for a command writes the current configuration first', async () => {
-  // Opening a thread and running a command both start a stopped box without
+test('starting a container to reach into writes the current configuration first', async () => {
+  // Opening a thread and opening a terminal both start a stopped box without
   // going through /start, and the entrypoint installs whatever is on disk at
   // that moment — so the box must not be started against a stale set.
   insertSession('abc123');
-  fakeDocker('hi\n');
+  fakeDocker();
   await orchestrator.app.inject({
     method: 'PUT',
     url: '/api/agent-sets/global/items',
     payload: { kind: 'command', name: 'ship', content: 'Open a PR.' },
   });
 
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/sessions/abc123/exec',
-    payload: { command: 'echo hi' },
-  });
+  await orchestrator.manager.execTarget('abc123');
 
   // config() caches process-wide, so the data directory in force is the
   // orchestrator's own rather than this test's fresh one.
@@ -1101,7 +883,7 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
   // The floor's own stop, for work no conversation can name: after an adapter
   // restart the bars are empty and the box is still compiling something.
   insertSession('abc123');
-  fakeDocker('');
+  fakeDocker();
   insideBox = [
     '  PID  PPID COMMAND',
     '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',

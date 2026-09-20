@@ -1,12 +1,11 @@
 import compress from '@fastify/compress';
 import Fastify from 'fastify';
-import type { FastifyReply, RouteHandlerMethod } from 'fastify';
+import type { FastifyReply } from 'fastify';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   CredentialSummary,
-  ExecLogPage,
   HarnessHealth,
   HarnessInfo,
   HealthResponse,
@@ -25,7 +24,6 @@ import {
   createAgentSetBody,
   createSessionBody,
   createThreadBody,
-  execBody,
   loginCodeBody,
   parseBody,
   patchSettingsBody,
@@ -55,7 +53,6 @@ import {
 } from './db.ts';
 import * as dk from './docker.ts';
 import { EgressManager } from './egress.ts';
-import * as execs from './exec.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
@@ -68,7 +65,7 @@ import { SessionManager } from './sessions.ts';
 import { patchSettings, readSettings } from './settings.ts';
 import { setSessionOwner } from './workspaces.ts';
 
-/** The HTTP surface: the REST API, the exec endpoint and the static bundle. */
+/** The HTTP surface: the REST API and the static bundle. */
 
 /** Version reported by the health endpoint. */
 const VERSION = '1.0.0';
@@ -519,66 +516,6 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Runs a local command in the session container and streams its combined
-   * output back as it arrives.
-   *
-   * The response is chunked text rather than JSON so the browser can render
-   * the output growing; the last line is a trailer carrying the exit code and
-   * whether either limit was hit. Both limits live in exec.ts: 120 seconds of
-   * wall clock, which the container holds itself, and 256 KiB of output,
-   * which ends the response rather than the command.
-   *
-   * The command runs inside the session's own isolation, as the non-root agent
-   * user, and never reaches a command line on the host.
-   *
-   * It is logged against the thread it was typed in, which the path names —
-   * or, on the short path, whichever thread the session has current — and
-   * with the id the browser says the transcript ended on, so a replay can
-   * put it back where it was typed.
-   */
-  const runExec: RouteHandlerMethod = async (req, reply) => {
-    const { id, threadId } = req.params as { id: string; threadId?: string };
-    const body = parseBody(execBody, req.body);
-    const command = body.command.trim();
-    if (!command) throw new HttpError(400, 'command is required');
-    if (command.length > 8000) throw new HttpError(400, 'command is too long');
-    const after = typeof body.after === 'string' && body.after.length <= 200 ? body.after : null;
-
-    const thread = manager.resolveThread(id, threadId);
-    // Marks the session active on its own, so the box is held from here.
-    const target = await manager.execTarget(id);
-    const startedAt = Date.now();
-
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-store',
-      // The body is whatever the command printed, so a browser must read it
-      // as the plain text it is declared to be and sniff nothing else out.
-      'X-Content-Type-Options': 'nosniff',
-      // Nothing may buffer this: the point is that output appears as it is
-      // produced.
-      'X-Accel-Buffering': 'no',
-    });
-
-    // The head is on the wire, so a failure from here on cannot become an
-    // error status: it ends the stream with a trailer that says so instead.
-    try {
-      const outcome = await execs.runCommand(target, command, (chunk) => {
-        reply.raw.write(chunk);
-      });
-      reply.raw.end(execs.trailer(outcome));
-      execs.record(db, id, thread, command, outcome, startedAt, after);
-    } catch (err) {
-      log.session(id).warn('exec failed', { error: (err as Error).message });
-      reply.raw.end(`\n[exec failed: ${(err as Error).message}]\n`);
-    }
-    manager.touch(id);
-    return reply;
-  };
-  app.post('/api/sessions/:id/exec', runExec);
-  app.post('/api/sessions/:id/threads/:threadId/exec', runExec);
-
-  /**
    * Stores one file the user attached to a prompt, in the session's own
    * workspace.
    *
@@ -668,20 +605,6 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     });
     return createReadStream(resolved.path);
   });
-
-  /**
-   * Every command already run in one thread.
-   *
-   * The browser appends these after the adapter's replay: ACP replay carries no
-   * timestamps, so where they belong in the transcript is not recoverable.
-   */
-  const listExec: RouteHandlerMethod = async (req): Promise<ExecLogPage> => {
-    const { id, threadId } = req.params as { id: string; threadId?: string };
-    const thread = manager.resolveThread(id, threadId);
-    return { records: thread ? execs.history(db, id, thread) : [] };
-  };
-  app.get('/api/sessions/:id/exec', listExec);
-  app.get('/api/sessions/:id/threads/:threadId/exec', listExec);
 
   // --- Code review over a session's workspace ---------------------------------
 
