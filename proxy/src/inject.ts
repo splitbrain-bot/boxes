@@ -151,7 +151,8 @@ export class Interceptor {
       // The same answer `forward.ts` gives an upgrade on a host that is not
       // intercepted, so the proxy has one position on protocol upgrades
       // rather than two. A client that wanted one falls back to HTTPS, where
-      // the swap works: Codex opens its transport this way and does.
+      // the swap works. Codex would, with a warning in the thread each time,
+      // so the session image configures it not to try.
       await server.forAnyWebSocket().thenRejectConnection(501, 'protocol upgrades are not forwarded');
 
       await server.on('tls-client-error', (failure) => {

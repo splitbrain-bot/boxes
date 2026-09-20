@@ -2318,13 +2318,16 @@ after sending it. It is the same answer the front door gives an upgrade on a
 host it is only tunnelling, so the proxy has one position on upgrades rather
 than two.
 
-Codex opens its transport with one, against
-`wss://api.openai.com/v1/responses`, and falls back to HTTPS when it is
-refused — which is swapped and works. It says so in the thread each time, a
-warning of its own that nothing here can silence: it retries the upgrade a
-few times first, so a Codex turn starts a moment later than it would
-otherwise. Supporting the upgrade means swapping a credential into it, which
-needs an interceptor that can rewrite an upgrade's headers.
+Codex's built-in provider opens its transport with one, against
+`wss://api.openai.com/v1/responses`, retries a few times, and only then falls
+back to HTTPS — with a warning in the thread that nothing in the proxy can
+silence. So the session image tells it not to try: `/etc/codex/config.toml`,
+the lowest of Codex's configuration layers, names a copy of the built-in
+provider without WebSocket support, and Codex goes straight to HTTPS, which
+is swapped and works. The built-in provider itself cannot be changed, which
+is why it is a copy. Supporting the upgrade instead means swapping a
+credential into it, which needs an interceptor that can rewrite an upgrade's
+headers.
 
 Everything else stays an opaque tunnel that never reaches the engine, so
 interception is bounded by policy rather than by trust in the engine. And every

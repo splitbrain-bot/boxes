@@ -282,8 +282,8 @@ describe('the interception engine', () => {
     // placeholder to the far end. Refused here instead, and with a status of
     // its own: without a rule the engine answers its own "no rules matched",
     // which is the same refusal by accident and reads as a broken
-    // deployment. Codex opens its transport this way and falls back to
-    // HTTPS, where the swap works.
+    // deployment. A client that wanted one falls back to HTTPS, where the
+    // swap works.
     policy = githubPolicy();
     await interceptor.apply();
 
