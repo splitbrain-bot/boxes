@@ -223,6 +223,41 @@ test('a box holding both adapters and doing nothing is idle', () => {
   assert.deepEqual(reading.work, []);
 });
 
+test('a box numbered by the host rather than by itself is still idle', () => {
+  // What `docker top` prints, which is the reading the badge and the reaper
+  // are built on: the host's pids, where the box's init is a five-digit
+  // number, its hold hangs off that, and nothing is 1 at all. Read for the
+  // number 1 instead of for what these are running, the init and the hold
+  // both count as work and every box is busy from the moment it starts.
+  const reading = readBox(
+    table(
+      [175384, 175359, '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
+      [175415, 175384, 'sleep infinity'],
+      [175441, 175359, 'node /usr/local/bin/claude-agent-acp'],
+      [175478, 175441, CLAUDE_AGENT],
+    ),
+    BOTH,
+  );
+  assert.equal(reading.busy, false);
+  assert.deepEqual(reading.work, []);
+});
+
+test('a shell in a host-numbered box is still the only work in it', () => {
+  const reading = readBox(
+    table(
+      [175384, 175359, '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
+      [175415, 175384, 'sleep infinity'],
+      [175441, 175359, 'node /usr/local/bin/claude-agent-acp'],
+      [175478, 175441, CLAUDE_AGENT],
+      [175600, 175478, shell('npm run build')],
+    ),
+    BOTH,
+  );
+  assert.equal(reading.busy, true);
+  assert.equal(reading.work.length, 1);
+  assert.match(reading.work[0] ?? '', /npm run build/);
+});
+
 test('a shell under either agent is work, and both are named', () => {
   const reading = readBox(
     table(

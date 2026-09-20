@@ -230,13 +230,28 @@ const READING_ITSELF = /^(?:\S*\/)?ps(?:\s|$)/;
 const ENTRYPOINT_HOLD = 'sleep infinity';
 
 /**
+ * What a box is held open by: its init, or the entrypoint where it has none.
+ *
+ * Matched on the command rather than found at PID 1, because the reading does
+ * not always speak the box's own numbers. `docker top` reports the host's
+ * pids, where the box's init is some five-digit number and nothing is 1 at
+ * all, and a rule looking for 1 then finds neither the init nor the hold
+ * below it — so both read as work, and every box is busy from the moment it
+ * starts. The inside reading does number them from 1, and this matches in
+ * either.
+ */
+const BOX_INIT = /^(?:\S*\/)?(?:docker-init|tini)(?:\s|$)|entrypoint\.sh(?:\s|$)/;
+
+/**
  * Whether one process is the box itself rather than work being done in it.
  *
  * Resident is a short list, and everything not on it is work:
  *
- * - PID 1, and the `sleep infinity` the entrypoint holds the box open with —
- *   that is `exec`ed, so it is PID 1 itself where there is no init, and init's
- *   own child where there is;
+ * - the box's init, and the `sleep infinity` the entrypoint holds it open
+ *   with — that is `exec`ed, so it is the init itself where there is none,
+ *   and the init's own child where there is. Both are found by what they are
+ *   running rather than by their number, which the reading does not always
+ *   state in the box's own terms;
  * - every adapter, found by its harness's `processToken`;
  * - every adapter's direct children, which are the agent processes: `claude`
  *   under `claude-agent-acp`, `codex app-server` under `codex-acp`;
@@ -260,14 +275,42 @@ function isResident(
   process: ContainerProcess,
   adapters: ReadonlySet<number>,
   harnesses: readonly Harness[],
+  inits: ReadonlySet<number>,
 ): boolean {
-  if (process.pid === 1) return true;
-  if (process.ppid === 1 && process.command.trim() === ENTRYPOINT_HOLD) return true;
+  if (inits.has(process.pid)) return true;
+  if (inits.has(process.ppid) && process.command.trim() === ENTRYPOINT_HOLD) return true;
   if (adapters.has(process.pid)) return true;
   if (adapters.has(process.ppid)) return true;
   if (READING_ITSELF.test(process.command.trim())) return true;
   return harnesses.some((h) =>
     h.residentProcesses.some((pattern) => pattern.test(process.command)),
+  );
+}
+
+/**
+ * Whatever is holding the box open, by what it is running.
+ *
+ * The init where there is one, and the `sleep infinity` itself where there is
+ * not: the entrypoint `exec`s that, so with no init above it the hold is the
+ * root of the tree rather than a child of anything. A root is one whose
+ * parent is not in the reading, which is the same test in either numbering —
+ * the box's own init answers to 0, and the host's to a shim that is not a
+ * process of this box.
+ *
+ * A set because nothing here needs it to be one process, and a reading that
+ * shows none leaves the hold reading as work: a box held awake rather than
+ * one suspended with a build still in it.
+ */
+function initPids(processes: readonly ContainerProcess[]): Set<number> {
+  const listed = new Set(processes.map((p) => p.pid));
+  return new Set(
+    processes
+      .filter((p) => {
+        const command = p.command.trim();
+        if (BOX_INIT.test(command)) return true;
+        return command === ENTRYPOINT_HOLD && !listed.has(p.ppid);
+      })
+      .map((p) => p.pid),
   );
 }
 
@@ -325,8 +368,9 @@ export function readBox(
   harnesses: readonly Harness[],
 ): BoxReading {
   const adapters = adapterPids(processes, harnesses);
+  const inits = initPids(processes);
   const work = processes
-    .filter((p) => !isResident(p, adapters, harnesses))
+    .filter((p) => !isResident(p, adapters, harnesses, inits))
     .map((p) => p.command.trim());
   return { busy: work.length > 0, work };
 }
@@ -347,8 +391,9 @@ export function workPids(
   harnesses: readonly Harness[],
 ): number[] {
   const adapters = adapterPids(processes, harnesses);
+  const inits = initPids(processes);
   const byPid = new Map(processes.map((p) => [p.pid, p]));
-  /** How far under PID 1 a process sits; anything that loops counts as shallow. */
+  /** How far under the root a process sits; anything that loops is shallow. */
   const depth = (start: ContainerProcess): number => {
     const seen = new Set<number>();
     let at: ContainerProcess | undefined = start;
@@ -361,7 +406,7 @@ export function workPids(
     return steps;
   };
   return processes
-    .filter((p) => !isResident(p, adapters, harnesses))
+    .filter((p) => !isResident(p, adapters, harnesses, inits))
     .map((p) => ({ pid: p.pid, depth: depth(p) }))
     .sort((a, b) => b.depth - a.depth)
     .map((p) => p.pid);
