@@ -177,9 +177,10 @@ export function CredentialLogin({
             Open this link, then paste the code it gives you back here.
           </p>
           <LoginLink url={state.url} />
-          {/* What the CLI said about the last code it would not take. Shown
-              here rather than ending the login, because the CLI asks again:
-              without it a refused code looks like a button that did nothing. */}
+          {/* The CLI's own words about the last code it would not take, shown
+              here rather than ending the login, because it asks again:
+              without this a refused code looks like a button that did
+              nothing. */}
           {state.error ? (
             <Notice tone="warn" className="rounded-md border px-3 py-2 text-xs">
               {state.error}

@@ -4,6 +4,7 @@ import type { CredentialId, LoginState } from '../../shared/types.ts';
 import { parseAuthDocument, type CredentialStore } from './credentials.ts';
 import * as dk from './docker.ts';
 import { HttpError } from './http-error.ts';
+import { Screen } from './screen.ts';
 import { log } from './log.ts';
 
 /**
@@ -60,37 +61,21 @@ const CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device';
  */
 const CLAUDE_TOKEN = /sk-ant-[A-Za-z0-9_-]{20,}/;
 
-/**
- * The prompt `claude setup-token` blocks on, matched loosely.
- *
- * The UI places each word of it by column rather than spacing them, so the
- * stripped text reads `Pastecodehereifprompted>` with nothing between the
- * words. The whitespace is optional here for that reason: what matters is
- * that the CLI is blocked on the prompt rather than still drawing, and that
- * is the same prompt however the terminal was told to lay it out.
- */
-const CLAUDE_CODE_PROMPT = /paste\s*code\s*here/i;
+/** The prompt `claude setup-token` blocks on, read off its screen. */
+const CLAUDE_CODE_PROMPT = /paste code here/i;
 
 /**
- * The CLI's own complaint about a code it would not take, matched loosely for
- * the same reason as the prompt: it is laid out by column.
+ * The CLI's own complaint about a code it would not take.
  *
- * A refusal is not the end of the login. The CLI redraws its prompt and waits
- * again, so this is shown beside the input rather than failing the flow.
+ * A refusal is not the end of the login: the CLI draws its prompt again and
+ * waits, so this is shown beside the input rather than failing the flow. Its
+ * own sentence is what the reader is shown, because the screen it is read off
+ * has every character the CLI put there.
  */
-const CLAUDE_CODE_REFUSED = /oauth\s*error/i;
+const CLAUDE_CODE_REFUSED = /OAuth error:?\s*([^\n]+)/i;
 
-/**
- * What a reader is told when the CLI will not take a code.
- *
- * The CLI's own sentence is not passed on: it is laid out by column, so the
- * stripped text has lost its spaces and some of its letters, and a mangled
- * message reads as a fault in Boxes rather than in the code. The raw text
- * goes to the log instead, where it can be read in full.
- */
-const CODE_REFUSED =
-  'That code was refused. A code can be used once and expires quickly, so open ' +
-  'the link again and paste a fresh one.';
+/** What the CLI shows in place of its prompt once it has refused a code. */
+const RETRY_PROMPT = /press enter to retry/i;
 
 /**
  * How long to wait between writing a code and writing the return that enters
@@ -198,12 +183,10 @@ interface Flow {
   exec: LoginExec | null;
   /** Set once the state is `done` or `failed`; nothing moves it afterwards. */
   settled: boolean;
-  /** How much output had been read when this flow last took a code. */
-  codeSentAt: number;
-  /** How much output has been read at all, for the watermark above. */
-  seen: number;
-  /** Whether this code's refusal has been logged, so it is logged once. */
-  refusalLogged: boolean;
+  /** Why the last code was refused, until another one is sent. */
+  refusal: string | null;
+  /** Whether the retry the CLI is waiting on has been pressed already. */
+  retrying: boolean;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -256,9 +239,8 @@ export class LoginManager {
       containerId: null,
       exec: null,
       settled: false,
-      codeSentAt: 0,
-      seen: 0,
-      refusalLogged: false,
+      refusal: null,
+      retrying: false,
       timer: null,
     };
     flow.timer = setTimeout(() => {
@@ -306,12 +288,11 @@ export class LoginManager {
     if (!waiting || !flow.exec?.stdin) {
       throw new HttpError(409, 'this login is not waiting for a code');
     }
-    // Anything the CLI said before this is about an earlier code, so the
-    // refusal shown beside the input is only ever the current one's. Cleared
-    // here rather than when the next output arrives: the reader has just
-    // answered the complaint, and it should go as they do so.
-    flow.codeSentAt = flow.seen;
-    flow.refusalLogged = false;
+    // The complaint on screen is about the code before this one, and the CLI
+    // takes it back once this one is entered. Cleared here rather than when
+    // that happens: the reader has just answered it, and it should go as they
+    // do so.
+    flow.refusal = null;
     if (flow.state.state === 'awaiting_code' && flow.state.error !== null) {
       this.settle(flow, { state: 'awaiting_code', url: flow.state.url, error: null });
     }
@@ -468,13 +449,20 @@ export class LoginManager {
 
     let url: string | null = null;
     let token: string | null = null;
-    const output = await readOutput(exec.output, (text) => {
+    /**
+     * Whether the CLI has asked for a code yet.
+     *
+     * Once, and then it stays: the prompt is drawn over — by a refusal, which
+     * replaces it with what to press to get it back — and a screen shows only
+     * what is on it. A flow that read the prompt's absence as the CLI no
+     * longer wanting a code would take the input away mid-login.
+     */
+    let prompted = false;
+    const output = await readScreen(exec.output, (text) => {
       if (flow.settled) return;
       // What the CLI has drawn so far. At debug level because it is the only
-      // way to see what a login actually said: the UI is a terminal one, and
-      // what reaches here is whatever the scans below could make of it.
+      // way to see what a login actually said.
       log.debug('claude login output', { text: tail(text) });
-      flow.seen = text.length;
       url ??= visitUrlIn(text);
       token ??= CLAUDE_TOKEN.exec(text)?.[0] ?? null;
       if (token) {
@@ -488,16 +476,29 @@ export class LoginManager {
       if (!url) return;
       // The prompt is what says the CLI is blocked rather than still
       // printing, which is the difference the page draws an input for.
-      if (CLAUDE_CODE_PROMPT.test(text)) {
-        // Only what the CLI said since the last code went in: a refusal it
-        // printed for an earlier one has been answered already.
-        const since = text.slice(flow.codeSentAt);
-        const refused = flow.codeSentAt > 0 && CLAUDE_CODE_REFUSED.test(since);
-        if (refused && !flow.refusalLogged) {
-          flow.refusalLogged = true;
-          log.warn('the CLI refused a login code', { output: tail(since) });
+      prompted ||= CLAUDE_CODE_PROMPT.test(text);
+      if (prompted) {
+        // Kept on the flow rather than read off the screen each time: the
+        // retry below takes the CLI's complaint off the screen, and the
+        // reader still has to be told why the code they sent was refused.
+        // It goes when they send another one.
+        const reason = CLAUDE_CODE_REFUSED.exec(text)?.[1]?.trim() ?? null;
+        if (reason !== null && flow.refusal === null) {
+          flow.refusal = reason;
+          log.warn('the CLI refused a login code', { reason });
         }
-        this.settle(flow, { state: 'awaiting_code', url, error: refused ? CODE_REFUSED : null });
+        // A refusal replaces the prompt with what to press to bring it back,
+        // and the CLI reads nothing else until it has been pressed: a code
+        // sent to this screen is thrown away, and the reader would have to
+        // send the same one twice. Pressing it here leaves the prompt ready
+        // for the next code instead.
+        if (RETRY_PROMPT.test(text) && !flow.retrying) {
+          flow.retrying = true;
+          exec.stdin?.write('\r');
+        } else if (!RETRY_PROMPT.test(text)) {
+          flow.retrying = false;
+        }
+        this.settle(flow, { state: 'awaiting_code', url, error: flow.refusal });
         return;
       }
       this.settle(flow, { state: 'awaiting_browser', url, code: null });
@@ -582,6 +583,30 @@ export class LoginManager {
  * Scanning the accumulated text costs nothing at these sizes and cannot miss a
  * match that straddles a read.
  */
+/**
+ * Reads a redrawing CLI's terminal, answering with what is on its screen.
+ *
+ * The screen after every chunk rather than only at the end: what the flow is
+ * looking for may be drawn and then drawn over — the URL and the prompt both
+ * are — so each is read the first time it appears.
+ */
+
+async function readScreen(
+  output: Readable,
+  onText: (text: string) => void,
+): Promise<string> {
+  const screen = new Screen();
+  try {
+    for await (const chunk of output) {
+      screen.write(String(chunk));
+      onText(screen.text);
+    }
+  } catch (err) {
+    log.debug('a login stream ended abruptly', { error: (err as Error).message });
+  }
+  return screen.text;
+}
+
 async function readOutput(
   output: Readable,
   onText: (text: string) => void,

@@ -321,37 +321,31 @@ test('a code the CLI refuses is shown, and the login stays open for another', as
   const loginId = logins.start('claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
-  cli.print('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
+  cli.print('Visit: https://claude.ai/oauth/authorize\r\nPaste code here if prompted > ');
   await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
 
   logins.submitCode('claude', loginId, 'the-wrong-one');
-  // The CLI's own complaint, laid out by column the way it writes it, and the
-  // prompt drawn again underneath: it is asking for another code, not ending.
-  cli.print(
-    `\r${ESC}[2GOAuth${ESC}[8Gerror:${ESC}[15GInvalid${ESC}[23Gcode.` +
-      `\r\nPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`,
-  );
+  // The CLI's own complaint, with the prompt drawn again underneath: it is
+  // asking for another code rather than ending.
+  const complaint = 'Invalid code. Please make sure the full code was copied.';
+  cli.print(`\r\nOAuth error: ${complaint}\r\nPaste code here if prompted > `);
   await until('the refusal to be read', () => {
     const state = logins.state('claude', loginId);
     return state.state === 'awaiting_code' && state.error !== null;
   });
   const refused = logins.state('claude', loginId);
   assert.equal(refused.state, 'awaiting_code');
-  // Boxes' own sentence rather than the CLI's, which the column layout has
-  // stripped of its spaces and some of its letters.
-  assert.match(
-    refused.state === 'awaiting_code' ? (refused.error ?? '') : '',
-    /refused.*expires quickly/i,
-  );
+  // The CLI's own words, whole: the screen it is read off kept every
+  // character it drew.
+  assert.equal(refused.state === 'awaiting_code' ? refused.error : null, complaint);
 
-  // The next code is not answered by the last one's refusal.
+  // Sending another code takes the answered complaint off the page at once,
+  // rather than leaving the last code's refusal standing over this one.
   logins.submitCode('claude', loginId, 'the-right-one');
-  await until('the refusal to be dropped', () => {
-    const state = logins.state('claude', loginId);
-    return state.state === 'awaiting_code' && state.error === null;
-  });
+  const answered = logins.state('claude', loginId);
+  assert.equal(answered.state === 'awaiting_code' ? answered.error : 'x', null);
 
-  cli.print('\nsk-ant-oat01-abcdefghijklmnop1234\n');
+  cli.print('\r\nsk-ant-oat01-abcdefghijklmnop1234\r\n');
   await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
   assert.equal(store.get('claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
 });
