@@ -12,6 +12,24 @@ import type { HarnessHealth, HarnessId, SessionModeState } from '../../../shared
  */
 
 /**
+ * Whether the settings page offers the Codex login.
+ *
+ * It is implemented and it works: the orchestrator runs `codex login
+ * --device-auth`, stores the document it writes and keeps it refreshed. What
+ * it produces cannot run a turn, though. A subscription is a document rather
+ * than a string, and the traffic it authenticates goes to a host the proxy
+ * deliberately does not intercept, so a box is handed nothing and the
+ * harness stays unrunnable — an account asked for and a credential that does
+ * not work given back.
+ *
+ * The card offers the API key alone until a box can be given an `auth.json`
+ * of its own, which is PLAN.md section 3, verify step 10. Turning this on is
+ * what that change ends with: the flow and the tests that drive it are still
+ * here.
+ */
+export const CODEX_LOGIN_OFFERED = false;
+
+/**
  * Codex modes whose sandbox a hardened container is likely to refuse.
  *
  * Both run every command under bubblewrap, which needs unprivileged user

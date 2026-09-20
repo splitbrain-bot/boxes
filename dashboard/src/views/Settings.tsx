@@ -18,6 +18,7 @@ import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useUp } from '@/hooks/use-up';
+import { CODEX_LOGIN_OFFERED } from '@/lib/harness';
 import { shortAge } from '@/lib/rough';
 import { useSessions } from '../stores/sessions.ts';
 
@@ -83,7 +84,7 @@ const KINDS: CredentialKind[] = [
     blurb: 'What a Codex thread runs on. Without it, a turn fails at the first prompt.',
     hint: 'sk-…, an OpenAI API key',
     method: 'api_key',
-    canLogin: true,
+    canLogin: CODEX_LOGIN_OFFERED,
   },
   {
     id: 'github',

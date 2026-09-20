@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { CODEX_LOGIN_OFFERED } from '../src/lib/harness.ts';
 
 /**
  * The settings page in a real browser.
@@ -136,7 +137,17 @@ test('the session list links to the settings page', async () => {
  * by itself; Claude prints a URL and blocks until the code is pasted back.
  */
 
-test('a Codex login shows the URL and the code, and the account arrives with it', async () => {
+/**
+ * The Codex login's own shape: a URL and a one-time code, finishing by
+ * itself, where Claude's blocks for a code pasted back.
+ *
+ * Only these drive it, and the page does not offer it while a subscription
+ * cannot be handed to a box. They come back when it does rather than being
+ * deleted and written again.
+ */
+const codexLogin = test.skipIf(!CODEX_LOGIN_OFFERED);
+
+codexLogin('a Codex login shows the URL and the code, and the account with it', async () => {
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
@@ -228,7 +239,7 @@ test('a login that fails says why, and can be started again', async () => {
   }
 });
 
-test('a login can be given up on, and the container goes with it', async () => {
+codexLogin('a login can be given up on, and the container goes with it', async () => {
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
     await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
@@ -249,7 +260,7 @@ test('a login can be given up on, and the container goes with it', async () => {
 });
 
 for (const scheme of ['light', 'dark'] as const) {
-  test(`the login states render in ${scheme}`, async () => {
+  codexLogin(`the login states render in ${scheme}`, async () => {
     stub.state.claudeCredential = null;
     const { page, errors, close } = await openPage(stub.url, '/settings', scheme);
     try {
