@@ -63,6 +63,15 @@ export function CredentialLogin({
   const [error, setError] = useState<string | null>(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
+  /**
+   * A code has gone to the CLI and it has not answered yet.
+   *
+   * The request carrying it is answered as soon as the code is written to the
+   * CLI's terminal, which is seconds before the CLI has exchanged it. Without
+   * this the form comes back empty and idle-looking meanwhile, and a reader
+   * who cannot tell sends a code that can only be used once a second time.
+   */
+  const [checking, setChecking] = useState(false);
 
   // Nothing moves after either of these, so the polling stops rather than
   // asking a finished login the same question every second.
@@ -93,6 +102,13 @@ export function CredentialLogin({
     };
   }, [credential, loginId, settled]);
 
+  // A refusal is the CLI answering, so the form comes back for another code.
+  // Every other ending takes the whole flow with it.
+  useEffect(() => {
+    if (state.state !== 'awaiting_code' || state.error === null) return;
+    setChecking(false);
+  }, [state]);
+
   // The credential exists now, so the page reads it back rather than being
   // told about it here: what a row says about an account — its name, when it
   // expires — is the store's answer and not this flow's.
@@ -122,6 +138,7 @@ export function CredentialLogin({
     try {
       await api.submitLoginCode(credential, loginId, code.trim());
       setCode('');
+      setChecking(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -160,22 +177,40 @@ export function CredentialLogin({
             Open this link, then paste the code it gives you back here.
           </p>
           <LoginLink url={state.url} />
-          <form className="flex flex-col gap-2 sm:flex-row" onSubmit={(e) => void submit(e)}>
-            <Label className="sr-only" htmlFor={`login-code-${credential}`}>
-              {`${label} login code`}
-            </Label>
-            <Input
-              id={`login-code-${credential}`}
-              autoComplete="off"
-              className="font-mono"
-              placeholder="The code from that page"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
-            <Button type="submit" disabled={busy || code.trim() === ''}>
-              Send code
-            </Button>
-          </form>
+          {/* What the CLI said about the last code it would not take. Shown
+              here rather than ending the login, because the CLI asks again:
+              without it a refused code looks like a button that did nothing. */}
+          {state.error ? (
+            <Notice tone="warn" className="rounded-md border px-3 py-2 text-xs">
+              {state.error}
+            </Notice>
+          ) : null}
+          {/* The form gives way while the CLI works. Exchanging a code takes
+              seconds, and a form standing there empty invites a second send of
+              a code that can only be used once. */}
+          {checking ? (
+            <p className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Spinner label="Checking the code" />
+              Checking the code.
+            </p>
+          ) : (
+            <form className="flex flex-col gap-2 sm:flex-row" onSubmit={(e) => void submit(e)}>
+              <Label className="sr-only" htmlFor={`login-code-${credential}`}>
+                {`${label} login code`}
+              </Label>
+              <Input
+                id={`login-code-${credential}`}
+                autoComplete="off"
+                className="font-mono"
+                placeholder="The code from that page"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+              <Button type="submit" disabled={busy || code.trim() === ''}>
+                Send code
+              </Button>
+            </form>
+          )}
         </>
       ) : null}
 

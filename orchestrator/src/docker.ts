@@ -811,7 +811,12 @@ export async function spawnLoginExec(
     WorkingDir: '/home/agent',
   });
 
-  const stream = (await exec.start({ hijack: true, stdin: tty })) as Duplex;
+  // Tty on the start request as well as the creation: that is the one the
+  // daemon reads to decide whether to frame the output, and without it a
+  // terminal exec arrives framed. The eight-byte headers then reach whatever
+  // reads this — breaking a token one lands inside, and taking the text after
+  // one whose length byte reads as an escape.
+  const stream = (await exec.start({ hijack: true, stdin: tty, Tty: tty })) as Duplex;
   const output = new PassThrough();
   if (tty) {
     // A terminal wraps at its own width, and a login URL is longer than the

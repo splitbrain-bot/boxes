@@ -43,6 +43,9 @@ class FakeExec implements LoginExec {
   readonly stdin: PassThrough | null;
   /** Everything the flow wrote back to the CLI. */
   input = '';
+  /** The same, kept as the separate writes it arrived in: the UI reads one
+      chunk as one keypress, so how it was split is part of what was sent. */
+  chunks: string[] = [];
   killed = false;
   readonly exited: Promise<number | null>;
   private settle: (code: number | null) => void = () => {};
@@ -51,6 +54,7 @@ class FakeExec implements LoginExec {
     this.stdin = spec.tty ? new PassThrough() : null;
     this.stdin?.on('data', (chunk: Buffer) => {
       this.input += chunk.toString('utf8');
+      this.chunks.push(chunk.toString('utf8'));
     });
     this.exited = new Promise((resolve) => {
       this.settle = resolve;
@@ -245,8 +249,10 @@ test('the Claude flow takes a code back and stores the token it prints', async (
   await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
 
   logins.submitCode('claude', loginId, '  the-code-from-the-page  ');
-  await until('the code to reach the CLI', () => cli.input !== '');
-  assert.equal(cli.input, 'the-code-from-the-page\n');
+  await until('the code to be entered', () => cli.input.endsWith('\r'));
+  // A carriage return, which is what the Enter key sends: the UI reads its
+  // terminal raw, and a newline is typed rather than entered.
+  assert.equal(cli.input, 'the-code-from-the-page\r');
 
   cli.print('\nsk-ant-oat01-abcdefghijklmnop1234\n');
   await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
@@ -262,6 +268,22 @@ test('the Claude flow takes a code back and stores the token it prints', async (
   await until('the container to be removed', () => fake.removed.length === 1);
 });
 
+test('the prompt is recognised when the UI lays it out by column', async () => {
+  const loginId = logins.start('claude');
+  await until('the CLI to be running', () => fake.execs.length === 1);
+  const cli = fake.execs[0]!;
+  cli.print('Visit: https://claude.ai/oauth/authorize?code=true\n');
+  await until('the URL', () => logins.state('claude', loginId).state === 'awaiting_browser');
+
+  // What the CLI actually writes: each word placed at a column of its own,
+  // which leaves the stripped text with no spaces in it at all.
+  cli.print(
+    `${ESC}[2GPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`,
+  );
+  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
+  assert.equal(logins.state('claude', loginId).state, 'awaiting_code');
+});
+
 test('a code sent before the prompt is drawn still reaches the CLI', async () => {
   const loginId = logins.start('claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
@@ -272,8 +294,66 @@ test('a code sent before the prompt is drawn still reaches the CLI', async () =>
   // Whether the prompt has been drawn is a race about terminal output; the
   // stream takes the answer either way.
   logins.submitCode('claude', loginId, 'early');
-  await until('the code to be written', () => cli.input !== '');
-  assert.equal(cli.input, 'early\n');
+  await until('the code to be entered', () => cli.input.endsWith('\r'));
+  assert.equal(cli.input, 'early\r');
+});
+
+test('the return that enters a code is a keypress of its own', async () => {
+  const loginId = logins.start('claude');
+  await until('the CLI to be running', () => fake.execs.length === 1);
+  const cli = fake.execs[0]!;
+  cli.print('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
+  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
+
+  // The length of a real one. A short code hides this: it arrives in a chunk
+  // small enough that the UI reads the return in it as the key either way.
+  const code = 'a'.repeat(92);
+  logins.submitCode('claude', loginId, code);
+  await until('the code to be entered', () => cli.input.endsWith('\r'));
+
+  // The code is typed and the return enters it, as two writes with a pause
+  // between them: sent together the UI takes the return for part of what was
+  // typed, and the code is never entered.
+  assert.deepEqual(cli.chunks, [code, '\r']);
+});
+
+test('a code the CLI refuses is shown, and the login stays open for another', async () => {
+  const loginId = logins.start('claude');
+  await until('the CLI to be running', () => fake.execs.length === 1);
+  const cli = fake.execs[0]!;
+  cli.print('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
+  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
+
+  logins.submitCode('claude', loginId, 'the-wrong-one');
+  // The CLI's own complaint, laid out by column the way it writes it, and the
+  // prompt drawn again underneath: it is asking for another code, not ending.
+  cli.print(
+    `\r${ESC}[2GOAuth${ESC}[8Gerror:${ESC}[15GInvalid${ESC}[23Gcode.` +
+      `\r\nPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`,
+  );
+  await until('the refusal to be read', () => {
+    const state = logins.state('claude', loginId);
+    return state.state === 'awaiting_code' && state.error !== null;
+  });
+  const refused = logins.state('claude', loginId);
+  assert.equal(refused.state, 'awaiting_code');
+  // Boxes' own sentence rather than the CLI's, which the column layout has
+  // stripped of its spaces and some of its letters.
+  assert.match(
+    refused.state === 'awaiting_code' ? (refused.error ?? '') : '',
+    /refused.*expires quickly/i,
+  );
+
+  // The next code is not answered by the last one's refusal.
+  logins.submitCode('claude', loginId, 'the-right-one');
+  await until('the refusal to be dropped', () => {
+    const state = logins.state('claude', loginId);
+    return state.state === 'awaiting_code' && state.error === null;
+  });
+
+  cli.print('\nsk-ant-oat01-abcdefghijklmnop1234\n');
+  await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
+  assert.equal(store.get('claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
 });
 
 test('a login that never finishes fails, and takes its container with it', async () => {

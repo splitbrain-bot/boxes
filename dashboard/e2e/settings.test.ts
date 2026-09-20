@@ -188,7 +188,9 @@ test('a Claude login takes the code back and stores what the CLI printed', async
 
     // Which is what the CLI was blocked on: it goes to the login, and the
     // flow carries on from there.
-    await expect.poll(() => cli.input).toBe('AB12-CD34\n');
+    // A carriage return: the Enter key's own byte, which is what the raw
+    // terminal the CLI's UI reads needs to see.
+    await expect.poll(() => cli.input).toBe('AB12-CD34\r');
     cli.print('\nYour token: sk-ant-oat01-minted-by-the-cli-9f2c\n');
     // A setup-token names no account, so the credential is known by its last
     // four characters like any other paste — and never by its value.

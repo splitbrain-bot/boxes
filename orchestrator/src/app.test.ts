@@ -1240,8 +1240,10 @@ test("a code is posted back into Claude's flow, and refused where none is wanted
     payload: { code: 'from-the-page' },
   });
   assert.equal(posted.statusCode, 204);
-  await untilTrue('the code to reach the CLI', () => cli.input !== '');
-  assert.equal(cli.input, 'from-the-page\n');
+  await untilTrue('the code to be entered', () => cli.input.endsWith('\r'));
+  // A carriage return: the Enter key's own byte, which is what the raw
+  // terminal the UI reads needs to see.
+  assert.equal(cli.input, 'from-the-page\r');
 
   const missing = await orchestrator.app.inject({
     method: 'POST',

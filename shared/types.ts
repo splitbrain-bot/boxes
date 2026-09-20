@@ -189,8 +189,12 @@ export type LoginState =
   | { state: 'starting' }
   /** The CLI is waiting for a browser. `code` is Codex's one-time code, where there is one. */
   | { state: 'awaiting_browser'; url: string; code: string | null }
-  /** The CLI is blocked on a code the page has to paste back. */
-  | { state: 'awaiting_code'; url: string }
+  /**
+   * The CLI is blocked on a code the page has to paste back. `error` is what
+   * it said about the last code it refused, so a rejection is visible rather
+   * than looking like nothing happened; null until one is refused.
+   */
+  | { state: 'awaiting_code'; url: string; error: string | null }
   | { state: 'done' }
   | { state: 'failed'; error: string };
 

@@ -49,11 +49,62 @@ const CLAUDE_CONFIG_DIR = '/home/agent/.claude';
  */
 const CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device';
 
-/** What a Claude one-year token looks like, which is how it is recognised. */
-const CLAUDE_TOKEN = /sk-ant-oat01-[A-Za-z0-9_-]{8,}/;
+/**
+ * What a Claude one-year token looks like, which is how it is recognised.
+ *
+ * The prefix is `sk-ant-` and no more of it than that. The mint names its own
+ * kind after it — `oat01` was the one this read for — and a login that goes
+ * on printing a token this cannot see is a login that hangs on a success,
+ * which is worse than one that takes a token of a kind it has not met. The
+ * length is what keeps it off anything else on the screen.
+ */
+const CLAUDE_TOKEN = /sk-ant-[A-Za-z0-9_-]{20,}/;
 
-/** The prompt `claude setup-token` blocks on, matched loosely. */
-const CLAUDE_CODE_PROMPT = /paste code here/i;
+/**
+ * The prompt `claude setup-token` blocks on, matched loosely.
+ *
+ * The UI places each word of it by column rather than spacing them, so the
+ * stripped text reads `Pastecodehereifprompted>` with nothing between the
+ * words. The whitespace is optional here for that reason: what matters is
+ * that the CLI is blocked on the prompt rather than still drawing, and that
+ * is the same prompt however the terminal was told to lay it out.
+ */
+const CLAUDE_CODE_PROMPT = /paste\s*code\s*here/i;
+
+/**
+ * The CLI's own complaint about a code it would not take, matched loosely for
+ * the same reason as the prompt: it is laid out by column.
+ *
+ * A refusal is not the end of the login. The CLI redraws its prompt and waits
+ * again, so this is shown beside the input rather than failing the flow.
+ */
+const CLAUDE_CODE_REFUSED = /oauth\s*error/i;
+
+/**
+ * What a reader is told when the CLI will not take a code.
+ *
+ * The CLI's own sentence is not passed on: it is laid out by column, so the
+ * stripped text has lost its spaces and some of its letters, and a mangled
+ * message reads as a fault in Boxes rather than in the code. The raw text
+ * goes to the log instead, where it can be read in full.
+ */
+const CODE_REFUSED =
+  'That code was refused. A code can be used once and expires quickly, so open ' +
+  'the link again and paste a fresh one.';
+
+/**
+ * How long to wait between writing a code and writing the return that enters
+ * it, in milliseconds.
+ *
+ * The UI reads a chunk of stdin as one keypress, so the return has to arrive
+ * as input of its own. Two writes are not enough on their own — back to back
+ * they reach the terminal together and the return is read as part of what was
+ * typed — and a pause is what separates them. Measured rather than reasoned:
+ * a code of a real length is never entered without one and always entered
+ * with this much. Nobody waits on it, since the exchange after it takes
+ * seconds.
+ */
+const ENTER_DELAY_MS = 150;
 
 /** How long a Claude token is good for. The CLI says a year and cannot refresh. */
 const CLAUDE_TOKEN_DAYS = 365;
@@ -147,6 +198,12 @@ interface Flow {
   exec: LoginExec | null;
   /** Set once the state is `done` or `failed`; nothing moves it afterwards. */
   settled: boolean;
+  /** How much output had been read when this flow last took a code. */
+  codeSentAt: number;
+  /** How much output has been read at all, for the watermark above. */
+  seen: number;
+  /** Whether this code's refusal has been logged, so it is logged once. */
+  refusalLogged: boolean;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -199,6 +256,9 @@ export class LoginManager {
       containerId: null,
       exec: null,
       settled: false,
+      codeSentAt: 0,
+      seen: 0,
+      refusalLogged: false,
       timer: null,
     };
     flow.timer = setTimeout(() => {
@@ -226,6 +286,17 @@ export class LoginManager {
    * there. A flow with nothing to write to — Codex's, which reads no stdin at
    * all, or one that has not started its CLI yet — is a flow that has no
    * question outstanding, and says so.
+   *
+   * Ended with a carriage return, because that is the byte a terminal sends
+   * for the Enter key. The UI reading this one puts it in raw mode, where no
+   * line discipline turns a newline into that return: a code ended with one
+   * is typed into the field and left sitting there unsubmitted.
+   *
+   * The return is written on its own. The UI reads a chunk of stdin as one
+   * keypress, so a return in the same chunk as the code is part of what was
+   * typed rather than the key that enters it — which a short code hides,
+   * arriving in a chunk small enough to be read as a key either way, and a
+   * real one does not.
    */
   submitCode(credentialId: CredentialId, loginId: string, code: string): void {
     const flow = this.flow(credentialId, loginId);
@@ -235,7 +306,23 @@ export class LoginManager {
     if (!waiting || !flow.exec?.stdin) {
       throw new HttpError(409, 'this login is not waiting for a code');
     }
-    flow.exec.stdin.write(`${trimmed}\n`);
+    // Anything the CLI said before this is about an earlier code, so the
+    // refusal shown beside the input is only ever the current one's. Cleared
+    // here rather than when the next output arrives: the reader has just
+    // answered the complaint, and it should go as they do so.
+    flow.codeSentAt = flow.seen;
+    flow.refusalLogged = false;
+    if (flow.state.state === 'awaiting_code' && flow.state.error !== null) {
+      this.settle(flow, { state: 'awaiting_code', url: flow.state.url, error: null });
+    }
+    const stdin = flow.exec.stdin;
+    stdin.write(trimmed);
+    const enter = setTimeout(() => {
+      // The flow may have ended while this waited, taking the stream with it.
+      if (flow.settled || !stdin.writable) return;
+      stdin.write('\r');
+    }, ENTER_DELAY_MS);
+    enter.unref?.();
   }
 
   /** Gives up on a login and takes its container with it. */
@@ -383,6 +470,11 @@ export class LoginManager {
     let token: string | null = null;
     const output = await readOutput(exec.output, (text) => {
       if (flow.settled) return;
+      // What the CLI has drawn so far. At debug level because it is the only
+      // way to see what a login actually said: the UI is a terminal one, and
+      // what reaches here is whatever the scans below could make of it.
+      log.debug('claude login output', { text: tail(text) });
+      flow.seen = text.length;
       url ??= visitUrlIn(text);
       token ??= CLAUDE_TOKEN.exec(text)?.[0] ?? null;
       if (token) {
@@ -397,7 +489,15 @@ export class LoginManager {
       // The prompt is what says the CLI is blocked rather than still
       // printing, which is the difference the page draws an input for.
       if (CLAUDE_CODE_PROMPT.test(text)) {
-        this.settle(flow, { state: 'awaiting_code', url });
+        // Only what the CLI said since the last code went in: a refusal it
+        // printed for an earlier one has been answered already.
+        const since = text.slice(flow.codeSentAt);
+        const refused = flow.codeSentAt > 0 && CLAUDE_CODE_REFUSED.test(since);
+        if (refused && !flow.refusalLogged) {
+          flow.refusalLogged = true;
+          log.warn('the CLI refused a login code', { output: tail(since) });
+        }
+        this.settle(flow, { state: 'awaiting_code', url, error: refused ? CODE_REFUSED : null });
         return;
       }
       this.settle(flow, { state: 'awaiting_browser', url, code: null });
