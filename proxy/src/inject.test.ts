@@ -182,6 +182,41 @@ async function throughEngine(
   });
 }
 
+
+/**
+ * Asks the engine to upgrade a connection, and answers with the status it
+ * refused with. A rejection arrives as a response rather than as an upgrade,
+ * so the status line is the whole of what this needs.
+ */
+async function upgradeThroughEngine(
+  port: number,
+  host = 'api.github.com',
+  path = '/v1/responses',
+): Promise<Answer> {
+  const socket = await tunnelThroughEngine(port, `${host}:443`, '127.0.0.1');
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      createConnection: () => connectTls({ socket, servername: host, ca: ca.cert }),
+      host,
+      path,
+      method: 'GET',
+      headers: {
+        connection: 'Upgrade',
+        upgrade: 'websocket',
+        'sec-websocket-version': '13',
+        'sec-websocket-key': 'uay0UrT0EHqIs+QoxwgNtQ==',
+      },
+    });
+    req.on('response', (res) => {
+      res.resume();
+      resolve({ status: res.statusCode ?? 0, body: res.statusMessage ?? '' });
+    });
+    req.on('upgrade', () => resolve({ status: 101, body: '' }));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** Sends a plain proxy request straight at the engine and reads the answer. */
 function plainThroughEngine(
   port: number,
@@ -239,6 +274,26 @@ describe('the interception engine', () => {
     expect(res.status).toBe(200);
     expect(received).toHaveLength(1);
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
+  }, 30_000);
+
+  it('refuses a protocol upgrade rather than forwarding it unswapped', async () => {
+    // The swap is a header rewrite and the engine's websocket passthrough
+    // cannot do one, so a forwarded upgrade would carry the box's
+    // placeholder to the far end. Refused here instead, and with a status of
+    // its own: without a rule the engine answers its own "no rules matched",
+    // which is the same refusal by accident and reads as a broken
+    // deployment. Codex opens its transport this way and falls back to
+    // HTTPS, where the swap works.
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await upgradeThroughEngine(interceptor.port()!);
+
+    expect(res.status).toBe(501);
+    // On the status line, which is what a rejected upgrade carries.
+    expect(res.body).toContain('protocol upgrades are not forwarded');
+    // Nothing reached the far end: the placeholder did not leave the box.
+    expect(received).toHaveLength(0);
   }, 30_000);
 
   it('refuses a caller that did not come through the front door', async () => {

@@ -137,6 +137,23 @@ export class Interceptor {
           proxyConfig: { proxyUrl: this.opts.upstreamProxyUrl() },
         });
 
+      // An upgrade on an intercepted host is refused, deliberately.
+      //
+      // The swap cannot follow a request there: the engine's websocket
+      // passthrough rewrites the host, the path, the query and the protocol,
+      // and no header at all, so a forwarded upgrade would carry the box's
+      // placeholder to the far end and be refused there as a bad credential —
+      // after sending it, which is worse than not sending it. Without a rule
+      // of its own the engine answers an upgrade with its own "no rules
+      // matched", which is the same refusal by accident and reads as a fault
+      // in the deployment.
+      //
+      // The same answer `forward.ts` gives an upgrade on a host that is not
+      // intercepted, so the proxy has one position on protocol upgrades
+      // rather than two. A client that wanted one falls back to HTTPS, where
+      // the swap works: Codex opens its transport this way and does.
+      await server.forAnyWebSocket().thenRejectConnection(501, 'protocol upgrades are not forwarded');
+
       await server.on('tls-client-error', (failure) => {
         // The shape of a tool that ignores the CA env vars: it reaches an
         // intercepted host and refuses the certificate.

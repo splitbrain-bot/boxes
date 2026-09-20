@@ -2310,6 +2310,22 @@ credential header, which covers `Bearer <p>`, `token <p>`, a bare value, and
 the HTTP Basic pair git's credential helper produces — one mechanism instead of
 a rule per tool.
 
+A protocol upgrade on a translated host is refused with `501`, because the
+swap cannot follow a request there: the engine rewrites the host, the path,
+the query and the protocol of an upgrade, and no header, so a forwarded one
+would carry the placeholder to the far end and be refused as a bad credential
+after sending it. It is the same answer the front door gives an upgrade on a
+host it is only tunnelling, so the proxy has one position on upgrades rather
+than two.
+
+Codex opens its transport with one, against
+`wss://api.openai.com/v1/responses`, and falls back to HTTPS when it is
+refused — which is swapped and works. It says so in the thread each time, a
+warning of its own that nothing here can silence: it retries the upgrade a
+few times first, so a Codex turn starts a moment later than it would
+otherwise. Supporting the upgrade means swapping a credential into it, which
+needs an interceptor that can rewrite an upgrade's headers.
+
 Everything else stays an opaque tunnel that never reaches the engine, so
 interception is bounded by policy rather than by trust in the engine. And every
 request the engine forwards leaves through the upstream tunnel, so the vetting
