@@ -205,6 +205,12 @@ RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
  && npm cache clean --force
 ENV CODEX_PATH=/usr/local/bin/codex
 
+# Codex's system-level configuration, read below every file an agent writes.
+# It points Codex at a provider without the WebSocket transport, because the
+# egress proxy refuses that upgrade and Codex would otherwise warn about the
+# fallback in every thread. Read the file -- it explains the rest.
+COPY codex-config.toml /etc/codex/config.toml
+
 # The browser an agent drives, and the tool it drives it with.
 #
 # @playwright/cli is Microsoft's own CLI for coding agents: a snapshot command

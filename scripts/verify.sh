@@ -399,6 +399,8 @@ matches "B7c" "a fresh Codex thread starts in full access" '^agent-full-access$'
   sx printenv INITIAL_AGENT_MODE
 matches "B7d" "Codex's own state directory exists before it starts" '^ok$' \
   sxs 'test -d "$CODEX_HOME" && echo ok'
+matches "B7f" "Codex is told to skip the WebSocket transport" '^ok$' \
+  sxs 'grep -q "^supports_websockets = false" /etc/codex/config.toml && echo ok'
 if [ -n "$REAL_OPENAI" ]; then
   lacks "B7e" "that value is not the deployment's own key" "^$(printf '%s' "$REAL_OPENAI" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" \
     sx printenv CODEX_API_KEY
