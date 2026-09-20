@@ -30,14 +30,19 @@ import type { HarnessHealth, HarnessId, SessionModeState } from '../../../shared
 export const CODEX_LOGIN_OFFERED = false;
 
 /**
- * Codex modes whose sandbox a hardened container is likely to refuse.
+ * Codex modes whose sandbox a box refuses.
  *
- * Both run every command under bubblewrap, which needs unprivileged user
- * namespaces that a box with `CapDrop: ALL` and Docker's default seccomp
- * profile very likely does not grant (PLAN.md section 3, verify step 3). The
- * adapter advertises them regardless — it cannot know what the container it
- * was started in allows — so the picker offers them and says so, rather than
- * hiding a mode that may well work on somebody's deployment.
+ * Both run every command under bubblewrap, which needs an unprivileged user
+ * namespace, and a box cannot make one: `CapDrop: ALL` takes `CAP_SYS_ADMIN`
+ * with the rest, so `unshare -U` and `bwrap` are refused even on a host
+ * whose kernel allows them. It is the container template that does it, and
+ * that answers to no setting.
+ *
+ * The caveat is still worded as a doubt rather than a refusal. The adapter
+ * advertises these modes whatever the box allows — it cannot know what it
+ * was started in — and a template that grows an option, or a Codex that
+ * stops needing bubblewrap, should leave this reading as too careful rather
+ * than as wrong. So the picker offers them with the caveat beside them.
  */
 const SANDBOXED_CODEX_MODES: ReadonlySet<string> = new Set(['read-only', 'agent']);
 

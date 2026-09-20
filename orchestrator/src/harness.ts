@@ -132,9 +132,18 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     /**
      * `agent-full-access` rather than the adapter's own `agent` default: the
      * other two modes run each command under bubblewrap, which needs
-     * unprivileged user namespaces the session container is unlikely to grant.
-     * The container is the boundary here, which is what Codex's own docs say
-     * to do when the sandbox cannot start. Verify step 3 settles it.
+     * unprivileged user namespaces a box does not have. `unshare -U` and
+     * `bwrap` are both refused in one, and Codex says so itself before it
+     * runs anything.
+     *
+     * The capability rather than the kernel: a host that allows unprivileged
+     * user namespaces still has boxes that cannot make one, because
+     * `CapDrop: ['ALL']` takes `CAP_SYS_ADMIN` with everything else. That is
+     * fixed in the container template and answers to no setting, so it is
+     * every deployment's answer and not one host's.
+     *
+     * The container is the boundary here instead, which is what Codex's own
+     * docs say to do when the sandbox cannot start.
      */
     defaultModeId: 'agent-full-access',
     /**
