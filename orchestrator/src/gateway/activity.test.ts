@@ -74,13 +74,13 @@ function toolCall(toolCallId: string, over: Record<string, unknown> = {}): unkno
 
 test('the agent is talking while it says things, and stops when it stops', () => {
   const { a, pass, changes } = activity();
-  a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'hi' } }));
+  a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'hi' } }), 'claude');
   assert.equal(a.speaking('t1'), true);
   assert.deepEqual(changes, [['t1', true]]);
 
   // Still going: every chunk restarts the clock on its silence.
   pass(QUIET - 1);
-  a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'there' } }));
+  a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'there' } }), 'claude');
   pass(QUIET - 1);
   assert.equal(a.speaking('t1'), true);
 
@@ -94,12 +94,12 @@ test('the agent is talking while it says things, and stops when it stops', () =>
 
 test('a tool call the agent is waiting on is not silence', () => {
   const { a, pass } = activity();
-  a.observe('t1', toolCall('call_1'));
+  a.observe('t1', toolCall('call_1'), 'claude');
   // Two minutes of a test suite running, which says nothing at all.
   for (let i = 0; i < 40; i++) pass(QUIET);
   assert.equal(a.speaking('t1'), true);
 
-  a.observe('t1', update('tool_call_update', { toolCallId: 'call_1', status: 'completed' }));
+  a.observe('t1', update('tool_call_update', { toolCallId: 'call_1', status: 'completed' }), 'claude');
   pass(QUIET);
   assert.equal(a.speaking('t1'), false);
 });
@@ -107,19 +107,51 @@ test('a tool call the agent is waiting on is not silence', () => {
 test('a call that runs in the background is not the agent working', () => {
   const { a, pass } = activity();
   // Announcing it is: the agent just made the call. Waiting for it is not.
-  a.observe('t1', toolCall('call_1', { rawInput: { command: 'npm run build', run_in_background: true } }));
+  a.observe('t1', toolCall('call_1', { rawInput: { command: 'npm run build', run_in_background: true } }), 'claude');
   assert.equal(a.speaking('t1'), true);
   pass(QUIET);
   assert.equal(a.speaking('t1'), false);
 
-  a.observe('t1', toolCall('call_2', { _meta: { claudeCode: { toolName: 'Monitor' } } }));
+  a.observe('t1', toolCall('call_2', { _meta: { claudeCode: { toolName: 'Monitor' } } }), 'claude');
   pass(QUIET);
   assert.equal(a.speaking('t1'), false);
 });
 
+test("the adapter's own marker is what says a Codex call was backgrounded", () => {
+  // Codex has no `run_in_background` flag and puts no tool name on a call, so
+  // the marker both adapters add to the call's own update is the only thing
+  // that can say one. Without reading it, a Codex thread would sit "speaking"
+  // for as long as a backgrounded command ran.
+  const { a, pass } = activity();
+  a.observe(
+    't1',
+    update('tool_call', {
+      toolCallId: 'call_1',
+      status: 'in_progress',
+      kind: 'execute',
+      content: [{ type: 'terminal', terminalId: 'term_1' }],
+      _meta: { jetbrains: { air: { asyncTasks: { backgrounded: true } } } },
+    }),
+    'codex',
+  );
+  assert.equal(a.speaking('t1'), true);
+  pass(QUIET);
+  assert.equal(a.speaking('t1'), false);
+
+  // And a Codex call that is *not* backgrounded is one the agent is waiting
+  // on, whatever its silence says.
+  a.observe(
+    't1',
+    update('tool_call', { toolCallId: 'call_2', status: 'in_progress', kind: 'execute' }),
+    'codex',
+  );
+  for (let i = 0; i < 10; i++) pass(QUIET);
+  assert.equal(a.speaking('t1'), true);
+});
+
 test('a turn is settled once, a while after it has actually stopped', () => {
   const { a, pass, settled } = activity();
-  a.observe('t1', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(QUIET);
   // Quiet, but not for long enough to tell anybody who is not looking.
   assert.deepEqual(settled, []);
@@ -133,11 +165,11 @@ test('a turn is settled once, a while after it has actually stopped', () => {
 
 test('a thread that starts talking again is not announced as finished', () => {
   const { a, pass, settled } = activity();
-  a.observe('t1', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(QUIET);
   // The pause between two tool calls, or the harness waking the agent with a
   // task's report: either way the turn is not over.
-  a.observe('t1', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(SETTLE);
   assert.deepEqual(settled, []);
 });
@@ -153,16 +185,16 @@ test('an update that is not the agent talking is not read as one', () => {
   const { a } = activity();
   // The user setting a mode, and the adapter listing its commands at
   // startup: things about the thread, not from the agent.
-  a.observe('t1', update('current_mode_update', { currentModeId: 'plan' }));
-  a.observe('t1', update('available_commands_update', { availableCommands: [] }));
+  a.observe('t1', update('current_mode_update', { currentModeId: 'plan' }), 'claude');
+  a.observe('t1', update('available_commands_update', { availableCommands: [] }), 'claude');
   assert.equal(a.speaking('t1'), false);
 });
 
 test('threads are answered for separately', () => {
   const { a, pass, changes } = activity();
-  a.observe('t1', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(QUIET - 1);
-  a.observe('t2', update('agent_message_chunk'));
+  a.observe('t2', update('agent_message_chunk'), 'claude');
   pass(1);
 
   assert.equal(a.speaking('t1'), false);
@@ -177,7 +209,7 @@ test('threads are answered for separately', () => {
 
 test('a cancelled thread stops talking and announces nothing afterwards', () => {
   const { a, pass, changes, settled } = activity();
-  a.observe('t1', toolCall('call_1'));
+  a.observe('t1', toolCall('call_1'), 'claude');
   a.reset('t1');
   assert.equal(a.speaking('t1'), false);
   pass(SETTLE * 2);
@@ -188,8 +220,8 @@ test('a cancelled thread stops talking and announces nothing afterwards', () => 
 
 test('an adapter that has gone takes every thread with it', () => {
   const { a, pass, settled } = activity();
-  a.observe('t1', update('agent_message_chunk'));
-  a.observe('t2', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
+  a.observe('t2', update('agent_message_chunk'), 'claude');
   a.clear();
   assert.deepEqual(a.speakingThreads, []);
   pass(SETTLE * 2);
@@ -208,10 +240,10 @@ function cycleEnd(over: Record<string, unknown> = {}): unknown {
 
 test('the adapter saying the cycle is over is taken at its word', () => {
   const { a, changes, settled, pass } = activity();
-  a.observe('t1', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
   // No timer runs out: the agent said so itself, which is what this adapter's
   // cost-bearing usage_update is (see the file's own header).
-  a.observe('t1', cycleEnd());
+  a.observe('t1', cycleEnd(), 'claude');
   assert.equal(a.speaking('t1'), false);
   assert.deepEqual(changes, [
     ['t1', true],
@@ -226,34 +258,34 @@ test('the adapter saying the cycle is over is taken at its word', () => {
 
 test('a running total is not the end of anything', () => {
   const { a } = activity();
-  a.observe('t1', update('agent_message_chunk'));
+  a.observe('t1', update('agent_message_chunk'), 'claude');
   // The same update kind, sent as a message streams: tokens and a window, no
   // cost. Reading this one as an ending would end every turn at its first
   // paragraph.
-  a.observe('t1', update('usage_update', { used: 12_000, size: 200_000 }));
+  a.observe('t1', update('usage_update', { used: 12_000, size: 200_000 }), 'claude');
   assert.equal(a.speaking('t1'), true);
 });
 
 test('a cycle that ends with a call still open ends anyway', () => {
   const { a } = activity();
-  a.observe('t1', toolCall('call_1'));
+  a.observe('t1', toolCall('call_1'), 'claude');
   // A cancelled turn: the call never completes, and waiting on it would leave
   // the thread speaking for good.
-  a.observe('t1', cycleEnd());
+  a.observe('t1', cycleEnd(), 'claude');
   assert.equal(a.speaking('t1'), false);
 });
 
 test('the harness waking the agent starts it talking again, and ends again', () => {
   const { a, pass, changes, settled } = activity();
-  a.observe('t1', update('agent_message_chunk'));
-  a.observe('t1', cycleEnd());
+  a.observe('t1', update('agent_message_chunk'), 'claude');
+  a.observe('t1', cycleEnd(), 'claude');
   pass(SETTLE);
   assert.deepEqual(settled, ['t1']);
 
   // A task reports in. No prompt is open, and the agent works and stops.
-  a.observe('t1', update('user_message_chunk'));
+  a.observe('t1', update('user_message_chunk'), 'claude');
   assert.equal(a.speaking('t1'), true);
-  a.observe('t1', cycleEnd({ _meta: { '_claude/origin': 'task-notification' } }));
+  a.observe('t1', cycleEnd({ _meta: { '_claude/origin': 'task-notification' } }), 'claude');
   assert.equal(a.speaking('t1'), false);
   pass(SETTLE);
   assert.deepEqual(settled, ['t1', 't1']);

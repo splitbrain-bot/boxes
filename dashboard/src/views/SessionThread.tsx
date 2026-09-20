@@ -18,13 +18,15 @@ import { useSession } from '@/hooks/use-session';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
 import { threadTitle, type TabState } from '@/lib/tab-title';
-import { refreshHealth, useSessions } from '../stores/sessions.ts';
+import { refreshHealth } from '../stores/sessions.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
+import { harnessLabel } from '@/lib/harness';
 import { threadName } from '@/lib/threads';
+import { useSessions } from '../stores/sessions.ts';
 import { buildEnvelope, formatBytes, type AttachmentEntry } from '@/lib/attachments';
 import { Shelf } from '@/components/Shelf';
 import { ThreadLoading } from '@/components/ThreadLoading';
@@ -133,7 +135,6 @@ export function SessionThread() {
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
-  const { claudeTokenConfigured } = useSessions();
 
   /**
    * This session, polled: the WS token the connection needs, the name in the
@@ -180,6 +181,10 @@ export function SessionThread() {
   const threads = session?.threads ?? [];
   const thread = threads.find((t) => t.id === (threadId ?? session?.currentThreadId));
   const threadLabel = thread ? threadName(thread) : null;
+  // What this thread's agent is called. The polled health list rather than a
+  // call of its own: a header needs the label and nothing else, and the list
+  // is being kept fresh for the warning under it either way.
+  const { harnesses } = useSessions();
 
   /**
    * What this tab is doing, for its title.
@@ -338,13 +343,19 @@ export function SessionThread() {
                 up={up}
                 name={session?.name ?? id}
                 threadLabel={threadLabel}
+                // Off the health probe the app polls anyway: a header wants
+                // the name of the agent and the caveat its modes carry, and
+                // both are in the harness list the session store already
+                // holds.
+                harness={thread?.harness ?? null}
+                harnessLabel={harnessLabel(harnesses, thread?.harness)}
                 // Nothing is connecting while the session itself could not be
                 // read, and a dot that pulses forever says the opposite.
                 connection={loadError ? 'closed' : state.connection}
                 modes={state.modes}
                 configOptions={state.configOptions}
                 done={thread?.done === true}
-                canFork={session?.canFork === true && thread !== undefined}
+                canFork={thread?.canFork === true}
                 forking={forking}
                 onFork={onFork}
                 // Nothing to mark until the session has been read and said
@@ -357,7 +368,7 @@ export function SessionThread() {
                 }
               />
             </Shelf>
-            {claudeTokenConfigured ? null : <TokenWarning className="border-b px-4 py-2" />}
+            <TokenWarning className="border-b px-4 py-2" />
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
                 {/* It opens on this conversation: the gateway replays what

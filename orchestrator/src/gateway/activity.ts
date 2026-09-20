@@ -1,5 +1,6 @@
 import { UPDATE_KIND } from '../../../shared/acp.ts';
-import { startsBackgroundWork } from './background.ts';
+import { harness, type HarnessId } from '../harness.ts';
+import { startsBackgroundWork, type ToolCallUpdate } from './background.ts';
 
 /**
  * Whether the agent is producing output on a thread, now.
@@ -14,15 +15,18 @@ import { startsBackgroundWork } from './background.ts';
  * its own alike.
  *
  * It is not promised: the adapter sends it only when the backend reported
- * usage, and no other adapter promises anything of the sort. So silence is
- * the fallback — an update says the agent is working, and silence, once it
- * has lasted `quietMs`, says it has stopped.
+ * usage, and no other adapter promises anything of the sort — `codex-acp`
+ * sends none, so a Codex thread is decided by the timers below and never by
+ * the marker. So silence is the fallback — an update says the agent is
+ * working, and silence, once it has lasted `quietMs`, says it has stopped.
  *
  * The one exception is a tool call the agent is waiting on. An `npm test`
  * that runs for two minutes emits nothing while it runs, so a thread with an
  * open call stays speaking however quiet it goes. A call that backgrounds its
  * work is the opposite and is not counted, which is why this and
- * `background.ts` share the predicate that decides which those are.
+ * `background.ts` share the predicate that decides which those are — the
+ * adapters' own `backgrounded` marker first, which is the only one of its
+ * answers that speaks for a Codex call.
  *
  * Two thresholds, because the two readers want opposite things. The UI flips
  * at `quietMs`, where an early flip only shows a send button while the model
@@ -136,17 +140,18 @@ export class Activity {
    * that has already happened, and reading one would show a working agent for
    * as long as the replay takes. The caller holds that line, the same one it
    * holds for `background.ts`.
+   *
+   * `harnessId` is whose adapter the update came off, which decides what a
+   * tool name means: the calls that background their own work are one
+   * harness's names and not the other's.
    */
-  observe(acpThreadId: string, update: unknown): void {
+  observe(acpThreadId: string, update: unknown, harnessId: HarnessId): void {
     if (!update || typeof update !== 'object') return;
-    const u = update as {
+    const u = update as ToolCallUpdate & {
       sessionUpdate?: string;
       toolCallId?: string;
       status?: string;
-      name?: string;
-      rawInput?: unknown;
       cost?: unknown;
-      _meta?: { claudeCode?: { toolName?: string } };
     };
     // The end of a processing cycle, said outright. Whatever was open is
     // over: a turn does not end with the agent still waiting on a call, and a
@@ -161,7 +166,7 @@ export class Activity {
       u.sessionUpdate === UPDATE_KIND.toolCall ||
       u.sessionUpdate === UPDATE_KIND.toolCallUpdate
     ) {
-      this.track(acpThreadId, u);
+      this.track(acpThreadId, u, harnessId);
     }
     this.mark(acpThreadId);
   }
@@ -176,17 +181,13 @@ export class Activity {
    */
   private track(
     acpThreadId: string,
-    call: {
-      toolCallId?: string;
-      status?: string;
-      name?: string;
-      rawInput?: unknown;
-      _meta?: { claudeCode?: { toolName?: string } };
-    },
+    call: ToolCallUpdate & { toolCallId?: string; status?: string },
+    harnessId: HarnessId,
   ): void {
     if (!call.toolCallId) return;
     const state = this.state(acpThreadId);
-    if (FINISHED.has(call.status ?? '') || startsBackgroundWork(call)) {
+    const alwaysBackground = harness(harnessId).alwaysBackground;
+    if (FINISHED.has(call.status ?? '') || startsBackgroundWork(call, alwaysBackground)) {
       state.open.delete(call.toolCallId);
       return;
     }

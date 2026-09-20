@@ -44,49 +44,72 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
-# --- the agent's own tool directory -----------------------------------------
-# npm's prefix has to exist before `npm install -g` will use it, and a home
-# filled from an image that predates this directory does not have it: a home is
-# copied out of the image when its session is created and never refreshed.
+# --- directories an agent needs to find already there ------------------------
+# npm's prefix has to exist before `npm install -g` will use it, and Codex
+# treats a CODEX_HOME naming a missing directory as an error rather than
+# creating it. The image carries both, but a home filled from an image that
+# predates either does not have it: a home is copied out of the image when its
+# session is created and never refreshed.
 if ! mkdir -p /home/agent/.local/bin; then
   log "WARNING: could not create /home/agent/.local/bin; installing tools will fail"
+fi
+if ! mkdir -p "${CODEX_HOME:-/home/agent/.codex}"; then
+  log "WARNING: could not create ${CODEX_HOME:-/home/agent/.codex}; Codex will not start"
 fi
 
 # --- agent configuration ----------------------------------------------------
 # The orchestrator materializes this box's merged AGENTS.md, skills and slash
 # commands into a read-only bind at /boxes/agent, laid out exactly as they have
-# to appear under ~/.claude. Only the copy happens here. The orchestrator does
-# have a path to ~/.claude now that a home is a directory of its own, but a
-# box's home is the box's to write: doing it out here would race with the agent
-# that is living in it.
+# to appear in the home. Only the copy happens here. The orchestrator does have
+# a path to the home now that it is a directory of its own, but a box's home is
+# the box's to write: doing it out here would race with the agent that is
+# living in it.
+#
+# Every path is relative to $HOME rather than to one agent's configuration
+# directory, because a box may hold threads of either harness and each reads a
+# layout of its own -- .claude for Claude Code, .codex and .agents for Codex.
+# The orchestrator writes both and this installs whatever it wrote.
 #
 # The manifest is what makes the install reversible: it names every path put
-# there, a copy of it is left behind in ~/.claude/.boxes-managed, and the next
-# start removes exactly those before installing again. So a skill deleted in
-# the dashboard disappears from the box, while anything the agent itself put in
-# ~/.claude is never touched.
+# there, a copy of it is left behind in ~/.boxes/managed, and the next start
+# removes exactly those before installing again. So a skill deleted in the
+# dashboard disappears from the box, while anything the agent itself put in its
+# home is never touched.
 AGENT_SRC=/boxes/agent
-CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-/home/agent/.claude}"
-MANAGED="$CLAUDE_DIR/.boxes-managed"
+HOME_DIR="${HOME:-/home/agent}"
+MANAGED="$HOME_DIR/.boxes/managed"
 
-# A manifest line has to be one relative path under CLAUDE_DIR and nothing
-# else. The file is written by the orchestrator, but it decides what gets
-# deleted, so it is checked rather than trusted.
+# A manifest line has to be one relative path in one of the layouts above and
+# nothing else. The file is written by the orchestrator, but it decides what
+# gets deleted and its root is now the whole home, so it is checked rather than
+# trusted -- against a list written here rather than one the manifest carries,
+# which would be the same thing as trusting it.
+#
+# Two components at least, and a known prefix: a line reading `.claude` or
+# `.ssh` names a directory that is not this mechanism's to remove, and is
+# refused rather than quietly turned into a recursive delete.
 safe_rel() {
   case "$1" in
     ''|/*|*..*|*'
 '*) return 1 ;;
   esac
-  return 0
+  case "$1" in
+    */?*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    .claude/CLAUDE.md|.codex/AGENTS.md) return 0 ;;
+    .claude/skills/?*|.claude/commands/?*) return 0 ;;
+    .codex/prompts/?*|.agents/skills/?*) return 0 ;;
+  esac
+  return 1
 }
 
 install_agent_config() {
-  mkdir -p "$CLAUDE_DIR" || { log "WARNING: could not create $CLAUDE_DIR"; return; }
-
   if [ -f "$MANAGED" ]; then
     while IFS= read -r rel; do
       safe_rel "$rel" || continue
-      rm -rf -- "$CLAUDE_DIR/$rel"
+      rm -rf -- "$HOME_DIR/$rel"
     done < "$MANAGED"
     rm -f "$MANAGED"
   fi
@@ -96,23 +119,26 @@ install_agent_config() {
     return
   fi
 
+  mkdir -p "$(dirname -- "$MANAGED")" \
+    || { log "WARNING: could not create $(dirname -- "$MANAGED")"; return; }
+
   installed=0
   while IFS= read -r rel; do
     safe_rel "$rel" || continue
     [ -e "$AGENT_SRC/$rel" ] || continue
-    mkdir -p "$CLAUDE_DIR/$(dirname -- "$rel")"
+    mkdir -p "$HOME_DIR/$(dirname -- "$rel")"
     # cp -R onto an existing directory would nest inside it rather than
     # replace it, so the destination goes first. A managed name wins over
     # anything already sitting under it.
-    rm -rf -- "$CLAUDE_DIR/$rel"
-    if cp -R -- "$AGENT_SRC/$rel" "$CLAUDE_DIR/$rel"; then
+    rm -rf -- "$HOME_DIR/$rel"
+    if cp -R -- "$AGENT_SRC/$rel" "$HOME_DIR/$rel"; then
       printf '%s\n' "$rel" >> "$MANAGED"
       installed=$((installed + 1))
     else
       log "WARNING: could not install $rel"
     fi
   done < "$AGENT_SRC/manifest"
-  log "installed $installed agent configuration entries into $CLAUDE_DIR"
+  log "installed $installed agent configuration entries into $HOME_DIR"
 }
 
 install_agent_config
@@ -283,6 +309,29 @@ SKILL_NOTES
   log "appended this image's browser notes to the playwright-cli skill"
 }
 
+# The same skill, where the other harness looks for it. The CLI writes one copy
+# and knows only ~/.claude/skills; Codex reads ~/.agents/skills and nothing
+# under ~/.claude, so the box gets the browser instructions in one thread and
+# not the other unless the copy is made here. After the notes are appended, so
+# that both copies carry them.
+copy_skill_to_agents() {
+  src=/home/agent/.claude/skills/playwright-cli
+  dst=/home/agent/.agents/skills/playwright-cli
+  [ -d "$src" ] || return 0
+  mkdir -p /home/agent/.agents/skills || {
+    log "WARNING: could not create ~/.agents/skills; Codex will not see the browser skill"
+    return 0
+  }
+  # The destination goes first, for the reason install_agent_config gives:
+  # cp -R onto a directory that is already there nests inside it.
+  rm -rf -- "$dst"
+  if cp -R -- "$src" "$dst"; then
+    log "copied the playwright-cli skill into ~/.agents/skills"
+  else
+    log "WARNING: could not copy the playwright-cli skill into ~/.agents/skills"
+  fi
+}
+
 # And its skill, which the CLI installs itself. --global puts it in
 # ~/.claude/skills rather than in the workspace, which is a git checkout that
 # is none of our business. Re-run every start so the copy in the session's home
@@ -297,13 +346,17 @@ SKILL_NOTES
 # specific configuration wins -- with the image as the least specific layer of
 # all. The image's copy fills the name in only while nothing has claimed it,
 # and install_agent_config replaces it the moment something does.
+#
+# One layout is enough to ask: the orchestrator writes a configured skill into
+# every harness's, so a set claiming this name claims it everywhere.
 if [ -f "$AGENT_SRC/manifest" ] \
-   && grep -qxF 'skills/playwright-cli' "$AGENT_SRC/manifest"; then
+   && grep -qxF '.claude/skills/playwright-cli' "$AGENT_SRC/manifest"; then
   log "the playwright-cli skill is configured for this box; leaving the image's copy out"
 elif command -v playwright-cli >/dev/null 2>&1; then
   if playwright-cli install --skills --global >/dev/null 2>&1; then
     log "installed the image's playwright-cli skill"
     append_browser_notes
+    copy_skill_to_agents
   else
     log "WARNING: could not install the playwright-cli skill"
   fi

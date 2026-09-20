@@ -98,10 +98,10 @@ function workspace(id: string): string {
 function insertSession(id: string): string {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir,
        review_base_rev, status, current_thread_id, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', '', ?, ?, NULL, 'running', NULL, ?, ?)`,
   ).run(id, `sn-${id}`, `home-${id}`, workspace(id), now, now);
   const path = workspace(id);
@@ -113,10 +113,10 @@ function insertSession(id: string): string {
 function insertVolumeSession(id: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir,
        review_base_rev, status, current_thread_id, created_at, last_active_at)
-     VALUES (?, 'legacy', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES (?, 'legacy', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', ?, ?, NULL, NULL, 'stopped', NULL, ?, ?)`,
   ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, now, now);
 }

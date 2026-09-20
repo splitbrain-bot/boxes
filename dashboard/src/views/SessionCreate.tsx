@@ -4,6 +4,7 @@ import type { AgentSetSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/sessions.ts';
 import { Notice } from '@/components/Notice';
+import { ThreadOptions, useThreadOptions } from '@/components/ThreadOptions';
 import { useUp } from '@/hooks/use-up';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,6 +37,14 @@ export function SessionCreate() {
    */
   const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
   const [agentSet, setAgentSet] = useState(NO_SET);
+  /**
+   * What the box's first conversation runs.
+   *
+   * A box is made to be worked in, so it is made with a thread in it, and the
+   * agent that thread runs is chosen here rather than in a second dialog on
+   * the way in. One request creates both.
+   */
+  const thread = useThreadOptions();
 
   useEffect(() => {
     void (async () => {
@@ -57,7 +66,11 @@ export function SessionCreate() {
       const created = await api.createSession({
         name: name.trim(),
         agentSet: agentSet === NO_SET ? null : agentSet,
+        ...(thread.value ? { thread: thread.value } : {}),
       });
+      // Remembered after the box exists rather than before: what is stored is
+      // what a thread was actually started as.
+      thread.remember();
       await refresh();
       // The form's entry is spent on the thread it made rather than left
       // under it: the box exists now, and back onto a form that would make a
@@ -111,6 +124,14 @@ export function SessionCreate() {
         </div>
       ) : null}
 
+      {/* The first thread's agent and its settings, the same block the
+          new-thread dialog uses — a box and its first conversation are one
+          act, and asking twice for one of them would be two. */}
+      <div className="flex flex-col gap-2">
+        <span className="text-sm font-medium">First thread</span>
+        <ThreadOptions state={thread} />
+      </div>
+
       {error ? (
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
@@ -119,7 +140,11 @@ export function SessionCreate() {
         <Button type="button" variant="outline" onClick={up.go} disabled={busy}>
           Cancel
         </Button>
-        <Button type="submit" disabled={busy || !name.trim()}>
+        {/* Held until the harness list has answered, for the same reason the
+            dialog holds its own: a create sent before then would put the
+            box's first thread on the orchestrator's default agent rather than
+            on the one this form is showing. */}
+        <Button type="submit" disabled={busy || !name.trim() || !thread.ready}>
           {busy ? 'Creating…' : 'Create'}
         </Button>
       </div>

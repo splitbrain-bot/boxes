@@ -42,6 +42,9 @@ const SessionTerminal = lazy(async () => ({
 const SessionThread = lazy(async () => ({
   default: (await import('./views/SessionThread.tsx')).SessionThread,
 }));
+const Settings = lazy(async () => ({
+  default: (await import('./views/Settings.tsx')).Settings,
+}));
 const Shell = lazy(async () => ({
   default: (await import('./views/Shell.tsx')).Shell,
 }));
@@ -113,6 +116,9 @@ function App() {
                 deployment rather than to any one box. */}
             <Route path="/agents" element={<AgentSets />} />
             <Route path="/agents/:setId" element={<AgentSetEditor />} />
+            {/* The credentials every box runs on, and the identity it commits
+                as: deployment-wide for the same reason. */}
+            <Route path="/settings" element={<Settings />} />
             <Route path="/sessions/:id/info" element={<SessionInfo />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

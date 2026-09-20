@@ -1,4 +1,5 @@
 import { UPDATE_KIND } from '../../../shared/acp.ts';
+import type { SessionConfigOption, SessionModeState } from '../../../shared/types.ts';
 
 /**
  * How many bytes of one thread's log are kept, counted on the notifications
@@ -12,29 +13,11 @@ import { UPDATE_KIND } from '../../../shared/acp.ts';
  */
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
-/** The modes an adapter advertises for a thread, and the one it is in. */
-export interface SessionModeState {
-  currentModeId: string;
-  availableModes: Array<{ id: string }>;
-}
-
 /**
- * One thing about a thread the adapter lets a client set, and its current
- * value. `category` says what the option is for, which is how the model
- * selector is found without depending on the adapter's own id for it.
+ * What the adapter advertises about a thread, besides the messages: the modes
+ * it offers and the options it lets a client set.
  */
-export interface SessionConfigOption {
-  id: string;
-  category?: string | null;
-  currentValue?: string;
-  options?: Array<{ value: string }>;
-}
-
-/**
- * What a browser is handed when it opens a thread, besides the messages:
- * the modes the adapter offers and the options it lets a client set.
- */
-export interface ThreadOptions {
+export interface AdapterOptions {
   modes: SessionModeState | null;
   configOptions: SessionConfigOption[];
 }
@@ -46,7 +29,7 @@ export interface Opening {
   /** The notifications to send, in order. */
   updates: unknown[];
   /** The answer to the browser's own `session/load`. */
-  options: ThreadOptions;
+  options: AdapterOptions;
 }
 
 /** One logged notification, with the size it has on the wire. */
@@ -81,7 +64,7 @@ export class ThreadLog {
    */
   filling = false;
   /** The adapter's answer for this thread; see the class comment. */
-  options: ThreadOptions = { modes: null, configOptions: [] };
+  options: AdapterOptions = { modes: null, configOptions: [] };
 
   constructor(private readonly cap = MAX_LOG_BYTES) {}
 

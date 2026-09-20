@@ -92,4 +92,11 @@ export const log = {
   wants,
   /** Child logger that stamps every line with a session id. */
   session: (id: string): Logger => levels({ session: id }),
+  /**
+   * Child logger stamping whatever the caller is distinguishing lines by.
+   *
+   * One session runs an adapter per harness, so a session id alone no longer
+   * says which process a line came from.
+   */
+  tagged: (fields: Record<string, unknown>): Logger => levels(fields),
 };

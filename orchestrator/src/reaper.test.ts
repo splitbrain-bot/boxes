@@ -39,10 +39,10 @@ afterEach(() => {
 function insertSession(id: string, idleMinutes: number): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
        status, current_thread_id, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', ?,
+     VALUES (?, 'test', 'DEFAULT', 'img', ?,
        ?, '10.200.0.0/24', '', ?, ?, ?, 'running', NULL, ?, ?)`,
   ).run(
     id,

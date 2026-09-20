@@ -161,4 +161,16 @@ export class PendingStore {
       entry.reject(new Error(reason));
     }
   }
+
+  /**
+   * Rejects every queued request of one thread, for an adapter that has gone
+   * with the thread still asking. Its other threads, and the box's other
+   * adapter, keep their questions.
+   */
+  failThread(sessionId: string, acpSessionId: string, reason: string): void {
+    for (const entry of this.listForThread(sessionId, acpSessionId)) {
+      this.settle(entry.row.id);
+      entry.reject(new Error(reason));
+    }
+  }
 }

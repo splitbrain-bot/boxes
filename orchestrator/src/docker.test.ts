@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import Docker from 'dockerode';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadConfig } from './config.ts';
+import { loadConfig, type Config } from './config.ts';
+import { CredentialStore, type CredentialId } from './credentials.ts';
+import { openDb, type Db } from './db.ts';
 import { EgressManager } from './egress.ts';
 import {
   containerProcesses,
+  createLoginContainer,
   containerProcessesFromInside,
   createContainer,
+  credentialEnv,
   killInContainer,
   resetPsFormatForTests,
   seedHomeFromImage,
@@ -18,6 +22,7 @@ import {
   setDockerForTests,
   type CreateContainerSpec,
 } from './docker.ts';
+import { readSettings } from './settings.ts';
 
 /**
  * The environment of a session container, which is the only place a session's
@@ -27,10 +32,14 @@ import {
 
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
 const GH_TOKEN = 'ghp_therealgithubtoken';
+const OPENAI_KEY = 'sk-therealopenaiapikey';
 
 let dirs: string[] = [];
+let dbs: Db[] = [];
 
 afterEach(() => {
+  for (const d of dbs) d.close();
+  dbs = [];
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
   dirs = [];
 });
@@ -41,13 +50,33 @@ function dataDir(): string {
   return dir;
 }
 
-/** The env of one session, as a map, for a given deployment environment. */
-async function envFor(over: Record<string, string>): Promise<Record<string, string>> {
+/**
+ * A deployment: a config, a credential store holding whatever was passed, and
+ * a prepared egress manager over both.
+ */
+async function deployment(
+  secrets: Partial<Record<CredentialId, string>> = {},
+  over: Record<string, string> = {},
+): Promise<{ cfg: Config; db: Db; egress: EgressManager }> {
   const cfg = loadConfig({ DATA_DIR: dataDir(), ...over });
-  const egress = new EgressManager(cfg);
+  const db = openDb(cfg.DATA_DIR);
+  dbs.push(db);
+  const credentials = new CredentialStore(db, () => {});
+  for (const [id, secret] of Object.entries(secrets)) {
+    credentials.put(id as CredentialId, 'token', secret);
+  }
+  const egress = new EgressManager(cfg, credentials);
   await egress.prepare();
+  return { cfg, db, egress };
+}
 
-  const profile = cfg.profiles['DEFAULT']!;
+/** The env of one session, as a map, for a given deployment. */
+async function envFor(
+  secrets: Partial<Record<CredentialId, string>> = {},
+  over: Record<string, string> = {},
+): Promise<Record<string, string>> {
+  const { cfg, db, egress } = await deployment(secrets, over);
+  const settings = readSettings(db);
   const spec: CreateContainerSpec = {
     sessionId: 'abcd1234',
     image: cfg.SESSION_IMAGE,
@@ -56,12 +85,8 @@ async function envFor(over: Record<string, string>): Promise<Record<string, stri
     workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
     agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
     homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
-    profile,
-    egress: {
-      claudeOauthToken: egress.sessionValue('claude', profile.claudeOauthToken),
-      ghToken: egress.sessionValue('github', profile.ghToken),
-      caCertificate: egress.caCertificate(),
-    },
+    env: credentialEnv((id) => egress.placeholderFor(id), settings),
+    caCertificate: egress.caCertificate(),
   };
 
   return Object.fromEntries(
@@ -74,10 +99,7 @@ async function envFor(over: Record<string, string>): Promise<Record<string, stri
 
 describe('sessionEnv', () => {
   it('carries placeholders, and no real credential anywhere in it', async () => {
-    const env = await envFor({
-      PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_TOKEN,
-      PROFILE_DEFAULT_GH_TOKEN: GH_TOKEN,
-    });
+    const env = await envFor({ claude: CLAUDE_TOKEN, github: GH_TOKEN });
 
     expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toMatch(/^sk-ant-oat01-/);
     expect(env['GH_TOKEN']).toMatch(/^ghp_/);
@@ -89,40 +111,68 @@ describe('sessionEnv', () => {
     expect(everything).not.toContain(GH_TOKEN);
   }, 30_000);
 
-  it('points every client at the CA the proxy intercepts with', async () => {
-    const env = await envFor({ PROFILE_DEFAULT_GH_TOKEN: GH_TOKEN });
+  it('carries every harness placeholder even where nothing is configured', async () => {
+    const env = await envFor();
+
+    // A container's environment is fixed when it is created, so a box made
+    // before the first credential has to hold the placeholder that a token
+    // entered tomorrow will make good. This is the whole of what ended
+    // logging in inside a box.
+    expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toMatch(/^sk-ant-oat01-/);
+    expect(env['GH_TOKEN']).toMatch(/^ghp_/);
+    expect(env['CODEX_API_KEY']).toMatch(/^sk-/);
+    // And what each harness needs beside its credential, from the registry.
+    expect(env['CLAUDE_CONFIG_DIR']).toBe('/home/agent/.claude');
+    expect(env['CODEX_HOME']).toBe('/home/agent/.codex');
+  }, 30_000);
+
+  it('carries what Codex needs to log itself in from the environment', async () => {
+    // The Codex app-server reads no key from its environment; `codex-acp` is
+    // what reads CODEX_API_KEY, and it only does so when DEFAULT_AUTH_REQUEST
+    // tells it to log in with the api-key method on the first session call.
+    // The value has to reach the box as the JSON the adapter parses.
+    const env = await envFor({ openai: OPENAI_KEY });
+
+    expect(env['CODEX_API_KEY']).toMatch(/^sk-/);
+    expect(env['CODEX_API_KEY']).not.toBe(OPENAI_KEY);
+    expect(env['DEFAULT_AUTH_REQUEST']).toBe('{"methodId":"api-key"}');
+    expect(JSON.parse(env['DEFAULT_AUTH_REQUEST']!)).toEqual({ methodId: 'api-key' });
+    // A fresh Codex thread starts where the registry says, and the browser
+    // method is hidden because nothing in a box can open one.
+    expect(env['INITIAL_AGENT_MODE']).toBe('agent-full-access');
+    expect(env['NO_BROWSER']).toBe('1');
+  }, 30_000);
+
+  it('points every client at the CA, whether or not anything is intercepted', async () => {
     const path = '/home/agent/.boxes/proxy-ca.crt';
-
-    expect(env['BOXES_PROXY_CA']).toContain('BEGIN CERTIFICATE');
-    expect(env['NODE_EXTRA_CA_CERTS']).toBe(path);
-    expect(env['SSL_CERT_FILE']).toBe(path);
-    expect(env['GIT_SSL_CAINFO']).toBe(path);
-    expect(env['CURL_CA_BUNDLE']).toBe(path);
+    for (const env of [await envFor({ github: GH_TOKEN }), await envFor()]) {
+      expect(env['BOXES_PROXY_CA']).toContain('BEGIN CERTIFICATE');
+      expect(env['NODE_EXTRA_CA_CERTS']).toBe(path);
+      expect(env['SSL_CERT_FILE']).toBe(path);
+      expect(env['GIT_SSL_CAINFO']).toBe(path);
+      expect(env['CURL_CA_BUNDLE']).toBe(path);
+      // Codex reads this one before SSL_CERT_FILE.
+      expect(env['CODEX_CA_CERTIFICATE']).toBe(path);
+    }
   }, 30_000);
 
-  it('adds no CA trust when the deployment intercepts nothing', async () => {
-    const env = await envFor({});
-
-    expect(env['BOXES_PROXY_CA']).toBeUndefined();
-    expect(env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
-    expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined();
-    // Egress itself is unchanged: the proxy is still the only way out.
+  it('still routes every client through the proxy', async () => {
+    const env = await envFor();
     expect(env['HTTPS_PROXY']).toBe('http://proxy:3128');
+    expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
   }, 30_000);
 
-  it('still carries the git identity, which is not a credential', async () => {
-    const env = await envFor({ PROFILE_DEFAULT_GIT_NAME: 'boxes-bot' });
+  it('carries the git identity from the settings, which is not a credential', async () => {
+    const env = await envFor();
     expect(env['GIT_NAME']).toBe('boxes-bot');
+    expect(env['GIT_EMAIL']).toBe('boxes-bot@users.noreply.github.com');
   }, 30_000);
 });
 
 describe('the container template', () => {
   /** Captures what createContainer would ask the daemon for. */
   async function capture(): Promise<Record<string, unknown>> {
-    const cfg = loadConfig({ DATA_DIR: dataDir() });
-    const egress = new EgressManager(cfg);
-    await egress.prepare();
-    const profile = cfg.profiles['DEFAULT']!;
+    const { cfg } = await deployment();
 
     let opts: Record<string, unknown> = {};
     setDockerForTests({
@@ -141,12 +191,8 @@ describe('the container template', () => {
           workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
           agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
           homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
-          profile,
-          egress: {
-            claudeOauthToken: '',
-            ghToken: '',
-            caCertificate: '',
-          },
+          env: {},
+          caCertificate: '',
         },
         cfg,
       );
@@ -247,6 +293,59 @@ describe('the container template', () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
     assert.equal(host['ShmSize'], 512 * 1024 * 1024);
+  }, 30_000);
+});
+
+describe('the login container', () => {
+  /** What createLoginContainer would ask the daemon for. */
+  async function capture(): Promise<Record<string, unknown>> {
+    let opts: Record<string, unknown> = {};
+    setDockerForTests({
+      createContainer: async (o: Record<string, unknown>) => {
+        opts = o;
+        return { id: 'login1' };
+      },
+    } as unknown as Docker);
+    try {
+      await createLoginContainer({ image: 'boxes-session:latest', credentialId: 'openai' });
+    } finally {
+      setDockerForTests(null);
+    }
+    return opts;
+  }
+
+  it('is nobody\'s box: no bind, no credential, and a home it can write', async () => {
+    const opts = await capture();
+    const host = opts['HostConfig'] as Record<string, unknown>;
+
+    // Nothing of a session is here. No workspace, no agent configuration, no
+    // placeholder for the proxy to swap — the CLI inside is authenticating a
+    // person to their own service, and there is no deployment secret in the
+    // container for an egress policy to protect.
+    assert.equal(host['Binds'], undefined);
+    assert.deepEqual(opts['Env'], []);
+    // The rootfs is read-only, and both CLIs write their state under $HOME.
+    const tmpfs = host['Tmpfs'] as Record<string, string>;
+    assert.match(tmpfs['/home/agent'] ?? '', /rw/);
+    assert.equal(host['ReadonlyRootfs'], true);
+    assert.deepEqual(host['CapDrop'], ['ALL']);
+    assert.equal(host['Privileged'], false);
+    assert.equal(opts['User'], '1020:1020');
+  }, 30_000);
+
+  it('sits on the default bridge, which is the point of it', async () => {
+    const opts = await capture();
+    // The one container Boxes creates with a route out of its own: the login
+    // hosts are the service's, not the deployment's, and it lives for minutes.
+    assert.equal((opts['HostConfig'] as Record<string, unknown>)['NetworkMode'], 'bridge');
+  }, 30_000);
+
+  it('carries the credential it is for, so a crash mid-flow can be swept', async () => {
+    const opts = await capture();
+    const labels = opts['Labels'] as Record<string, string>;
+    assert.equal(labels['boxes.login'], 'openai');
+    // It is not a session, so nothing that reads the session label finds it.
+    assert.equal(labels['boxes.session'], undefined);
   }, 30_000);
 });
 

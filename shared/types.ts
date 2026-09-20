@@ -14,28 +14,251 @@ export type SessionStatus =
 export type DockerState = 'running' | 'exited' | 'missing' | 'unknown';
 
 /**
+ * Which agent harness a box can run.
+ *
+ * Declared here rather than only in the orchestrator's registry because the
+ * dashboard reads it off the health probe; `orchestrator/src/harness.ts`
+ * re-exports it, and is still the one place a harness is described.
+ */
+export type HarnessId = 'claude' | 'codex';
+
+/**
+ * A credential the deployment holds, by the service it authenticates to.
+ *
+ * Same reasoning as HarnessId: the settings page names these, so they are
+ * part of the API. `orchestrator/src/credentials.ts` owns the store and
+ * re-exports the three types below.
+ */
+export type CredentialId = 'claude' | 'openai' | 'github';
+
+/**
+ * How a credential was obtained, which decides what the secret is: a token
+ * pasted from `claude setup-token`, an API key, or the whole JSON document a
+ * CLI wrote when somebody logged in.
+ */
+export type CredentialMethod = 'token' | 'api_key' | 'oauth';
+
+/** Whether a stored credential is believed to work. */
+export type CredentialStatus = 'ok' | 'expired' | 'failing';
+
+/**
+ * One stored credential, as everything outside the orchestrator sees it.
+ *
+ * Never the secret. `account` is what a person recognises the credential by:
+ * the last four characters of a pasted secret, or the account name where a
+ * login reported one.
+ */
+export interface CredentialSummary {
+  id: CredentialId;
+  method: CredentialMethod;
+  account: string | null;
+  status: CredentialStatus;
+  lastError: string | null;
+  /** When the secret stops working, in epoch milliseconds, or null for a static one. */
+  expiresAt: number | null;
+  /** When it was last refreshed, in epoch milliseconds, or null if it never has been. */
+  refreshedAt: number | null;
+  updatedAt: number;
+}
+
+/** What one harness needs before a thread on it can run, and whether it has it. */
+export interface HarnessHealth {
+  id: HarnessId;
+  /** What the dashboard calls it. */
+  label: string;
+  /** Null when no credential is stored for this harness. */
+  credential: CredentialSummary | null;
+  /** True when a thread of this harness can run a turn right now. */
+  runnable: boolean;
+}
+
+/**
+ * The modes an adapter advertises for a thread, and the one it is in.
+ *
+ * An ACP shape rather than one of ours: the gateway reads it off every
+ * `session/new`, `session/load` and `session/fork` answer, and it is here so
+ * the dialog that offers the modes and the gateway that applies them agree
+ * about what one is.
+ */
+export interface SessionModeState {
+  currentModeId: string;
+  availableModes: Array<{ id: string; name?: string; description?: string | null }>;
+}
+
+/**
+ * One thing about a thread the adapter lets a client set, and its current
+ * value.
+ *
+ * `category` says what the option is for, which is how the model selector is
+ * found without depending on the adapter's own id for it — and how the option
+ * that merely echoes the mode is kept out of a thread's config map, since the
+ * mode travels through `session/set_mode` alone.
+ */
+export interface SessionConfigOption {
+  id: string;
+  name?: string;
+  /** What the adapter says the option does, where it says anything. */
+  description?: string | null;
+  /**
+   * `select` carries an options list; another kind carries none. Absent means
+   * a select, which is what both adapters send for everything they offer.
+   */
+  type?: string;
+  category?: string | null;
+  currentValue?: string;
+  options?: Array<{ value: string; name?: string; description?: string | null }>;
+}
+
+/**
+ * What one harness's adapter last advertised, cached against the harness.
+ *
+ * A dialog cannot ask an adapter what it offers, because the thread it would
+ * ask about does not exist yet — and starting a box to find out would cost a
+ * container per dialog. So what an adapter answered the last time one ran is
+ * kept, and the dialog offers that. The adapter corrects it on the thread's
+ * first answer.
+ */
+export interface HarnessCatalog {
+  /** The modes of the last answer, or null when it carried none. */
+  modes: SessionModeState | null;
+  /** The config options of the last answer; empty when it carried none. */
+  configOptions: SessionConfigOption[];
+  /** When the answer arrived, in epoch milliseconds. */
+  seenAt: number;
+}
+
+/**
+ * One harness as the dialogs see it: what the registry says, what its adapter
+ * last advertised, and whether it can run right now.
+ */
+export interface HarnessInfo extends HarnessHealth {
+  /** Mode a fresh thread of this harness is put in. */
+  defaultModeId: string;
+  /** Mode a fork of one starts in instead. */
+  forkModeId: string;
+  /** Config option values a fresh thread starts with, by option id. */
+  defaultConfig: Record<string, string>;
+  /** Null on a deployment that has never run this harness's adapter. */
+  catalog: HarnessCatalog | null;
+}
+
+/**
+ * What a thread dialog last chose for one harness, so the next box starts on
+ * the same settings from any device.
+ *
+ * Written by the dashboard and read back by it; the orchestrator only stores
+ * it. Nothing fills it before the dialogs exist.
+ */
+export interface ThreadDialogDefaults {
+  modeId?: string;
+  config?: Record<string, string>;
+}
+
+/**
+ * The deployment's plain settings: everything that is configuration rather
+ * than a secret, and so lives beside the credentials instead of in them.
+ *
+ * The git identity is what every box commits as. It used to come from the
+ * environment, and only did so because the credentials did.
+ */
+export interface Settings {
+  gitName: string;
+  gitEmail: string;
+  /** Keyed by harness id; see ThreadDialogDefaults. */
+  dialogs: Record<string, ThreadDialogDefaults>;
+}
+
+/** Body of a request to store a credential by pasting its secret. */
+export interface PutCredentialBody {
+  method: CredentialMethod;
+  secret: string;
+}
+
+/**
+ * Where a login has got to, as the settings page polls it.
+ *
+ * A credential that is an account rather than a string is obtained by running
+ * the harness's own CLI in a throwaway container, and the two CLIs want
+ * different things from the person at the browser. Codex prints a URL and a
+ * one-time code and then polls on its own, so the page shows both and waits;
+ * Claude prints a URL and then blocks on a prompt, so the page shows the URL,
+ * takes the code the page it opened gave back, and posts it in. Both end the
+ * same way, and a login that ended badly says why in a sentence worth showing.
+ */
+export type LoginState =
+  | { state: 'starting' }
+  /** The CLI is waiting for a browser. `code` is Codex's one-time code, where there is one. */
+  | { state: 'awaiting_browser'; url: string; code: string | null }
+  /**
+   * The CLI is blocked on a code the page has to paste back. `error` is what
+   * it said about the last code it refused, so a rejection is visible rather
+   * than looking like nothing happened; null until one is refused.
+   */
+  | { state: 'awaiting_code'; url: string; error: string | null }
+  | { state: 'done' }
+  | { state: 'failed'; error: string };
+
+/** What starting a login answers with: the id every later call names. */
+export interface StartLoginResponse {
+  loginId: string;
+}
+
+/** Body of the paste-back: the code the login page gave the person. */
+export interface LoginCodeBody {
+  code: string;
+}
+
+/**
  * One thing a conversation has left running in its box.
  *
- * Read from the processes alive in the container: nothing reports when a
- * command finishes.
+ * What the harness's adapter announced as an async task: both adapters send a
+ * spawn when a task starts and a state update when it ends, and a task that
+ * nobody hears the end of is dropped when its adapter process goes. Nothing is
+ * read off the process table here — a task's id is the adapter's own, and it is
+ * what a stop names.
  */
 export interface BackgroundProcess {
-  /**
-   * Stable for as long as the process lives, and what a stop names.
-   *
-   * Derived from the command line rather than the pid: the host and the box
-   * number processes separately, so the pid here is not one the box accepts.
-   */
+  /** The adapter's asyncTaskId, which is what a stop names. */
   id: string;
-  /** The command the agent ran, as far as the host reports it. */
+  /** `name` from the spawn: the command for a shell, a description otherwise. */
   command: string;
-  /** When it started, in epoch milliseconds, or null where `ps` does not say. */
-  startedAt: number | null;
+  /** `shell`, `workflow`, `monitor` or `task` from Claude; `shell` from Codex. */
+  kind: string;
+  /** `canStop` from the spawn. Both adapters send true today. */
+  stoppable: boolean;
+  /** When the spawn arrived, in epoch milliseconds. */
+  startedAt: number;
 }
 
 /** One conversation of a session, as the API reports it. */
 export interface ThreadSummary {
   id: string;
+  /**
+   * Which agent runs this conversation. A property of the thread rather than
+   * of the box: one checkout with two agents working on it is the point.
+   */
+  harness: HarnessId;
+  /**
+   * The mode the thread is meant to be in, or null for its harness's default.
+   * What the adapter is in right now arrives over ACP; this is what a respawn
+   * puts it back into.
+   */
+  modeId: string | null;
+  /**
+   * Everything else the thread is configured with, by the adapter's own id for
+   * each option: the model, an effort level, whatever else it offers. The
+   * option that echoes the mode is never in here — see `modeId`.
+   */
+  config: Record<string, string>;
+  /**
+   * True when this thread's adapter advertised `sessionCapabilities.fork`.
+   *
+   * Per thread rather than per session, because a box may hold threads of two
+   * harnesses and the answer comes from each adapter's own `initialize`. The
+   * capability is unstable in the ACP schema, so an adapter may omit it, and
+   * false is also what a thread whose adapter has not been reached reports.
+   */
+  canFork: boolean;
   /**
    * The adapter's own id for the thread, or null while the adapter has
    * forgotten it. A thread minted and never prompted does not survive the
@@ -129,12 +352,6 @@ export interface SessionSummary {
    */
   currentThreadId: string | null;
   /**
-   * True when the adapter advertised `sessionCapabilities.fork`. The
-   * capability is unstable in the ACP schema, so an adapter may omit it.
-   * False is also what an adapter that has not been reached yet reports.
-   */
-  canFork: boolean;
-  /**
    * The agent set selected when this session was created, or null for the
    * global set alone. Null is also what a session whose set has since been
    * deleted reports.
@@ -191,6 +408,21 @@ export interface SessionDetail extends SessionSummary {
   proxyAttached: boolean;
 }
 
+/**
+ * What a new thread is to run and be configured with.
+ *
+ * Every field but the harness is optional, and an absent one means the
+ * harness's own default: a client that knows nothing about modes or models
+ * still creates a usable thread by naming an agent.
+ */
+export interface ThreadOptions {
+  harness: HarnessId;
+  /** Registry default when absent. */
+  modeId?: string;
+  /** The harness's `defaultConfig` when absent. */
+  config?: Record<string, string>;
+}
+
 /** Body of a request to add a thread to a session. */
 export interface CreateThreadBody {
   /**
@@ -198,6 +430,12 @@ export interface CreateThreadBody {
    * fresh, empty thread on the same workspace.
    */
   from?: string;
+  /**
+   * What the new thread runs. Ignored when `from` is set: a transcript can
+   * only be loaded by the adapter that wrote it, so a fork stays on its
+   * source's harness. Absent means Claude on its defaults.
+   */
+  options?: ThreadOptions;
 }
 
 /** Body of a request to mark a thread done, or to take the mark off again. */
@@ -208,6 +446,11 @@ export interface ThreadDoneBody {
 /** Body of a create-session request. */
 export interface CreateSessionBody {
   name: string;
+  /**
+   * Ignored. Every box runs on the one set of credentials the settings page
+   * manages, so there is no profile to name; the field is kept so a client
+   * from before that still creates a box rather than a 400.
+   */
   profile?: string;
   /**
    * Id of the agent set whose AGENTS.md, skills and commands are merged over
@@ -215,6 +458,12 @@ export interface CreateSessionBody {
    * all mean "the global set alone" — it is applied either way.
    */
   agentSet?: string | null;
+  /**
+   * What the box's first conversation runs. A box is made to be worked in, so
+   * it is made with a thread in it, and the dialog that names the box names
+   * the agent in the same request. Absent means Claude on its defaults.
+   */
+  thread?: ThreadOptions;
 }
 
 /**
@@ -259,10 +508,14 @@ export interface HealthResponse {
   /** Egress policy state, or null before the first push has been attempted. */
   egress: EgressHealth | null;
   /**
-   * True when the deployment holds a Claude token. False means no session can
-   * run a turn unless somebody logs in inside it.
+   * Every harness this deployment can run, and whether each of them has a
+   * credential that works. A harness that is not runnable is one whose
+   * threads fail at their first turn, which is why the dashboard says so
+   * before anybody prompts one.
    */
-  claudeTokenConfigured: boolean;
+  harnesses: HarnessHealth[];
+  /** Every stored credential, GitHub included. Never the secrets. */
+  credentials: CredentialSummary[];
   /** How many browsers are registered for Web Push. */
   pushSubscriptions: number;
   /** Which build of each of the deployment's own images is running. */

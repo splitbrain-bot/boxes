@@ -181,6 +181,30 @@ RUN npm install -g --prefix /usr/local \
       @agentclientprotocol/claude-agent-acp@^0.78.0 \
  && npm cache clean --force
 
+# The second harness: the Codex CLI and the adapter that drives it, pinned here
+# for the reason the pair above are.
+#
+# Two packages, one binary, and the flags are what keeps it to one. `@openai/
+# codex` on npm is a 13 KB launcher whose actual binary arrives as an optional
+# platform dependency -- @openai/codex-linux-x64, 339 MB -- so the global
+# install is where that copy lives. The adapter depends on `@openai/codex` over
+# a caret range, and a global install nests a copy of it under the adapter;
+# --omit=optional leaves that nested copy as the launcher alone, with no second
+# 339 MB binary behind it, and CODEX_PATH below points the adapter at the
+# global one instead.
+#
+# What that buys over linking the nested binary out: both versions are pinned
+# exactly rather than one of them following a range, and the `codex` a person
+# types in the box is the same build the adapter is driving. The identity check
+# further down is what proves it, and what would catch npm resolving the
+# optional dependency differently than this expects.
+ARG CODEX_VERSION=0.154.0
+RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
+ && npm install -g --prefix /usr/local --omit=optional \
+      @agentclientprotocol/codex-acp@1.11.0 \
+ && npm cache clean --force
+ENV CODEX_PATH=/usr/local/bin/codex
+
 # The browser an agent drives, and the tool it drives it with.
 #
 # @playwright/cli is Microsoft's own CLI for coding agents: a snapshot command
@@ -348,9 +372,15 @@ RUN groupadd -g "${AGENT_GID}" agent \
 # LANG likewise: the node image carried the locales package and this base does
 # not, and a session that ran in the C locale would mangle any non-ASCII path
 # or diff it touched. C.UTF-8 is built into glibc, so it needs no package.
+#
+# CODEX_HOME is the same kind of statement as CLAUDE_CONFIG_DIR: it is where
+# Codex keeps its configuration, its login and its rollouts, and naming it
+# outright is what makes a shell in the box and the adapter agree on one
+# directory on the home volume rather than each resolving its own.
 ENV HOME=/home/agent \
     LANG=C.UTF-8 \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
+    CODEX_HOME=/home/agent/.codex \
     TERM=dumb \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
@@ -405,8 +435,14 @@ RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 # /boxes/agent is where the orchestrator binds this session's merged agent
 # configuration, read-only. Created here rather than left to the daemon so the
 # mount point exists on a read-only rootfs.
-RUN mkdir -p /workspace /home/agent/.local/bin /boxes/agent \
- && chown agent:agent /workspace /home/agent /home/agent/.local /home/agent/.local/bin
+#
+# CODEX_HOME is here because Codex refuses to start against a directory that is
+# not there rather than creating it, and the check below wants a `codex` that
+# runs. The entrypoint creates it too, for the home that was filled from an
+# image older than this line.
+RUN mkdir -p /workspace /home/agent/.local/bin /home/agent/.codex /boxes/agent \
+ && chown agent:agent /workspace /home/agent /home/agent/.local /home/agent/.local/bin \
+      /home/agent/.codex
 
 # Numeric rather than `agent`, so the uid is readable from the image itself.
 USER ${AGENT_UID}
@@ -420,6 +456,14 @@ WORKDIR /workspace
 # /etc/profile, or an adapter that ended up in a session's home instead of on
 # the image -- none of which shows up until a session is running. Runs as the
 # user it is checking, so it needs no privileges of its own.
+#
+# `codex --version` is the one line here that runs a tool rather than locating
+# it, because locating it proves nothing: the CLI on PATH is a launcher, and
+# the --omit=optional above is one npm resolution away from leaving it with no
+# platform binary to launch. Asking the version is what makes the binary run,
+# and matching the pin is what catches a range having been followed instead.
+# A match rather than an equality, because the CLI prints its own name beside
+# the number.
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
@@ -427,6 +471,9 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && test -w /home/agent/.local/bin \
  && test "$(npm config get prefix)" = "/home/agent/.local" \
  && test "$(command -v claude-agent-acp)" = "/usr/local/bin/claude-agent-acp" \
+ && test "$(command -v codex-acp)" = "/usr/local/bin/codex-acp" \
+ && test "$(command -v codex)" = "/usr/local/bin/codex" \
+ && codex --version | grep -qF "${CODEX_VERSION}" \
  && ps -eo pid,ppid,args >/dev/null \
  && bash -lc 'set -eu; . /etc/boxes/image-path; IFS=:; for d in $BOXES_IMAGE_PATH; do \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \

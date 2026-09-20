@@ -1,4 +1,4 @@
-import { Plus, SlidersHorizontal } from 'lucide-react';
+import { KeyRound, Plus, SlidersHorizontal } from 'lucide-react';
 import { useEffect } from 'react';
 import { Link } from 'react-router';
 import { ImageFooter } from '@/components/ImageFooter';
@@ -12,7 +12,7 @@ import { startPolling, useSessions } from '../stores/sessions.ts';
 
 /** The dashboard's home: every session as a card, and the card is the thread. */
 export function SessionList() {
-  const { sessions, claudeTokenConfigured, images, error, loading } = useSessions();
+  const { sessions, images, error, loading } = useSessions();
 
   // The whole list is polled while this screen is up, and only while it is:
   // every other view watches one session, and none of them needs the rest of
@@ -35,6 +35,15 @@ export function SessionList() {
               <SlidersHorizontal />
             </Link>
           </Button>
+          {/* The credentials every box runs on, and the identity it commits
+              as. Deployment-wide for the same reason, and beside the agent
+              configuration because the two are the whole of what is set up
+              once rather than per box. */}
+          <Button asChild size="sm" variant="ghost" aria-label="Settings">
+            <Link to="/settings">
+              <KeyRound />
+            </Link>
+          </Button>
           <Button asChild size="sm">
             <Link to="/new">
               <Plus />
@@ -44,7 +53,7 @@ export function SessionList() {
         </div>
       </div>
 
-      {claudeTokenConfigured ? null : <TokenWarning className="rounded-md border px-3 py-2" />}
+      <TokenWarning className="rounded-md border px-3 py-2" />
 
       {error ? (
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>

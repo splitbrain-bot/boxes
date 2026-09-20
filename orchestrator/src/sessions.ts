@@ -3,22 +3,26 @@ import {
   GLOBAL_AGENT_SET,
   type CreateSessionBody,
   type CreateThreadBody,
+  type HarnessId,
   type SessionDetail,
   type SessionSummary,
+  type ThreadOptions,
   type ThreadSummary,
 } from '../../shared/types.ts';
 import { AgentStore, ensureAgentsRoot, hostAgentConfigPath } from './agents.ts';
-import type { Config, SessionProfile } from './config.ts';
+import type { Config } from './config.ts';
 import type { EgressManager } from './egress.ts';
 import {
   clearSessionTurns,
   currentThread,
   getThread,
+  insertThread,
   listThreads,
   nextSubnetIndex,
   sessionTurnActive,
   sessionsWithActiveTurns,
   setThreadDone,
+  threadConfig,
   takenSubnets,
   touchSession,
   type Db,
@@ -27,10 +31,13 @@ import {
 } from './db.ts';
 import { SessionUsage, SESSION_SIZE_TTL_MS } from './diskusage.ts';
 import * as dk from './docker.ts';
+import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
+import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
 import { generateWsToken } from './secret.ts';
+import { readSettings } from './settings.ts';
 import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamSession } from './gateway/upstream.ts';
@@ -40,9 +47,6 @@ import { allocateSubnet } from './subnet.ts';
  * Session lifecycle and the owner of every UpstreamSession. Docker is the
  * runtime truth; the sessions table is metadata.
  */
-
-/** argv for the pinned ACP adapter inside the session container. */
-const AGENT_CMD = ['claude-agent-acp'];
 
 /**
  * How many times more sessions the host may hold than the database knows of
@@ -379,6 +383,10 @@ export class SessionManager {
    * still mounted into one, is refused. Containers go first.
    */
   async sweepOrphans(): Promise<void> {
+    // First, and whatever the rest of this decides: a login container belongs
+    // to no session at all, so none of the reasoning below reaches it.
+    await this.sweepLoginContainers();
+
     const containers = await dk.listSessionContainers();
     const networks = await dk.listSessionNetworks();
     const volumes = await dk.listSessionVolumes();
@@ -452,6 +460,46 @@ export class SessionManager {
       await this.sweeping(sessionId, 'home', () =>
         Promise.resolve(ws.removeHome(this.cfg.DATA_DIR, sessionId)),
       );
+    }
+  }
+
+  /**
+   * Removes login containers that nothing is waiting on.
+   *
+   * A login runs the harness's own CLI in a container of its own and removes
+   * it when the flow ends, but a flow only ends while the orchestrator is
+   * alive to end it: a restart mid-login leaves a container holding a tmpfs
+   * home with half a credential in it, on the default bridge, forever.
+   *
+   * Age is the whole rule, because a login container has no other owner to
+   * ask about. The cutoff is longer than the ten minutes a flow is allowed to
+   * take, so a person still in a browser is never swept out from under. A
+   * container whose creation time cannot be read is treated as old, which is
+   * the safe direction: the thing it might interrupt lives for minutes.
+   */
+  private async sweepLoginContainers(): Promise<void> {
+    const cutoff = Date.now() - LOGIN_CONTAINER_MAX_AGE_MS;
+    let containers: Awaited<ReturnType<typeof dk.listLoginContainers>>;
+    try {
+      containers = await dk.listLoginContainers();
+    } catch (err) {
+      log.warn('could not list login containers', { error: (err as Error).message });
+      return;
+    }
+    for (const container of containers) {
+      if (container.createdAt > cutoff) continue;
+      try {
+        await dk.removeContainer(container.id);
+        log.info('swept an abandoned login container', {
+          credential: container.credentialId,
+          container: container.id,
+        });
+      } catch (err) {
+        log.warn('could not sweep an abandoned login container', {
+          container: container.id,
+          error: (err as Error).message,
+        });
+      }
     }
   }
 
@@ -625,10 +673,7 @@ export class SessionManager {
       await dk.stopContainer(row.container_id);
       await dk.removeContainer(row.container_id);
     }
-    const containerId = await dk.createContainer(
-      this.containerSpec(row, this.profileFor(row)),
-      this.cfg,
-    );
+    const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
     this.db
       .prepare('UPDATE sessions SET container_id = ?, workspace_dir = ? WHERE id = ?')
       .run(containerId, row.workspace_dir, row.id);
@@ -665,13 +710,19 @@ export class SessionManager {
 
   /**
    * Everything createContainer needs about a session, built from its stored
-   * row and the deployment's current credentials.
+   * row and what the deployment currently holds.
    *
    * One place rather than two, because a session's container is created twice:
    * once at create, and once more when a volume-backed workspace migrates to a
    * directory and the container has to be recreated with the new mount.
+   *
+   * What goes in for the credentials is a placeholder apiece, and the same
+   * ones for every box: a box created before a credential was entered holds
+   * what a box created after it holds, and the proxy is where the difference
+   * is made. So nothing here has to be rebuilt when a credential arrives.
    */
-  private containerSpec(row: SessionRow, profile: SessionProfile): dk.CreateContainerSpec {
+  private containerSpec(row: SessionRow): dk.CreateContainerSpec {
+    const settings = readSettings(this.db);
     return {
       sessionId: row.id,
       image: row.image,
@@ -686,28 +737,12 @@ export class SessionManager {
       homeSource: row.home_dir
         ? ws.hostHomePath(this.hostDataDir, row.id)
         : row.home_volume,
-      profile,
-      egress: {
-        claudeOauthToken: this.egress.sessionValue('claude', profile.claudeOauthToken),
-        ghToken: this.egress.sessionValue('github', profile.ghToken),
-        caCertificate: this.egress.caCertificate(),
-      },
+      env: dk.credentialEnv((id) => this.egress.placeholderFor(id), {
+        gitName: settings.gitName,
+        gitEmail: settings.gitEmail,
+      }),
+      caCertificate: this.egress.caCertificate(),
     };
-  }
-
-  /**
-   * The profile a session was created with, or the default when the deployment
-   * has since dropped it. A session that outlived its profile must still start.
-   */
-  private profileFor(row: SessionRow): SessionProfile {
-    const profile = this.cfg.profiles[row.profile];
-    if (profile) return profile;
-    const fallback = this.cfg.profiles['DEFAULT'];
-    if (!fallback) throw new HttpError(500, `Unknown profile: ${row.profile}`);
-    log.session(row.id).warn('profile is gone; falling back to DEFAULT', {
-      profile: row.profile,
-    });
-    return fallback;
   }
 
   /** The persistent upstream for a session, created on first use. */
@@ -751,10 +786,6 @@ export class SessionManager {
     if (!name) throw new HttpError(400, 'name is required');
     if (name.length > 100) throw new HttpError(400, 'name must be 100 characters or fewer');
 
-    const profileName = body.profile?.trim() || 'DEFAULT';
-    const profile = this.cfg.profiles[profileName];
-    if (!profile) throw new HttpError(400, `Unknown profile: ${profileName}`);
-
     // The global set is applied whatever this says, so naming it is the same
     // as naming nothing and is stored as nothing.
     const requested = body.agentSet?.trim() ?? '';
@@ -762,6 +793,11 @@ export class SessionManager {
     if (agentSetId && !this.agents.has(agentSetId)) {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
+
+    // What the box's first conversation is, settled before anything is
+    // allocated so a request naming an agent nobody has does not build a box on
+    // its way to a 400.
+    const thread = threadOptions(body.thread);
 
     // Before anything is allocated, and after the checks above: a request
     // naming a set that is not there should not pull an image on its way to a
@@ -787,9 +823,11 @@ export class SessionManager {
     const row: SessionRow = {
       id,
       name,
-      profile: profileName,
+      // Every session is DEFAULT. The column is what a deployment with named
+      // credential profiles would key on, and there is no such thing: one
+      // global set of credentials is what the settings page manages.
+      profile: 'DEFAULT',
       image: this.cfg.SESSION_IMAGE,
-      agent_cmd: JSON.stringify(AGENT_CMD),
       container_id: null,
       network_name: dk.names.network(id),
       subnet,
@@ -814,10 +852,10 @@ export class SessionManager {
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+        `INSERT INTO sessions (id, name, profile, image, container_id,
            network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
            status, agent_set_id, current_thread_id, ws_token, created_at, last_active_at)
-         VALUES (@id, @name, @profile, @image, @agent_cmd, @container_id,
+         VALUES (@id, @name, @profile, @image, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @home_dir,
            @status, @agent_set_id, @current_thread_id, @ws_token, @created_at, @last_active_at)`,
       )
@@ -825,9 +863,20 @@ export class SessionManager {
 
     const slog = log.session(id);
     try {
-      await this.withSlot(id, () => this.createResources(row, profile));
+      await this.withSlot(id, () => this.createResources(row));
       this.setStatus(id, 'running');
-      slog.info('session created', { name });
+      // The first conversation, as a row and nothing more. Nothing is minted
+      // here: a thread with no adapter-side conversation is a state the
+      // gateway already handles — it is what an adapter restart leaves behind —
+      // and the first browser to open the box brings it up. So creating a box
+      // costs no adapter spawn, and a box can be created for a harness whose
+      // credential has not been entered yet.
+      insertThread(this.db, id, {
+        harness: thread.harness,
+        modeId: thread.modeId ?? null,
+        config: thread.config ?? { ...harness(thread.harness).defaultConfig },
+      });
+      slog.info('session created', { name, harness: thread.harness });
     } catch (err) {
       slog.error('session create failed; tearing down', { error: (err as Error).message });
       await this.teardownResources(id);
@@ -847,7 +896,7 @@ export class SessionManager {
    * one that works — the network before the container that joins it, and both
    * directories before the container that binds them.
    */
-  private async createResources(row: SessionRow, profile: SessionProfile): Promise<void> {
+  private async createResources(row: SessionRow): Promise<void> {
     const id = row.id;
     await dk.createNetwork(row.network_name, row.subnet, id);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
@@ -860,7 +909,7 @@ export class SessionManager {
     // PATH of a login shell.
     ws.createHome(this.cfg.DATA_DIR, id);
     await dk.seedHomeFromImage(ws.hostHomePath(this.hostDataDir, id), row.image, id);
-    const containerId = await dk.createContainer(this.containerSpec(row, profile), this.cfg);
+    const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
     // Recorded before the start, so a start that fails leaves a row naming
     // the container and the teardown removes it.
     this.db.prepare('UPDATE sessions SET container_id = ? WHERE id = ?').run(containerId, id);
@@ -1297,12 +1346,19 @@ export class SessionManager {
       attachedCount: upstream?.attachedCount ?? 0,
       wsToken: row.ws_token,
       threads: listThreads(this.db, row.id).map((thread) =>
-        toThreadSummary(thread, pendingByThread, speaking, working),
+        toThreadSummary(
+          thread,
+          pendingByThread,
+          speaking,
+          working,
+          // Forking is per thread, because the answer is per adapter: a box
+          // may hold two, and each says for itself whether it can branch a
+          // conversation. An adapter that has not been reached is absent from
+          // the set, which is the honest answer rather than an assumed one.
+          upstream?.forkableHarnesses ?? new Set<HarnessId>(),
+        ),
       ),
       currentThreadId: row.current_thread_id,
-      // False until the adapter has been reached and has advertised it. The
-      // capability is unstable, so an absent one is taken at face value.
-      canFork: upstream?.canFork ?? false,
       agentSetId: row.agent_set_id,
       agentSetName: this.agents.nameOf(row.agent_set_id),
       // What was last measured, and null until there is a measurement.
@@ -1346,7 +1402,10 @@ export class SessionManager {
   threads(id: string): ThreadSummary[] {
     this.mustGet(id);
     const pendingByThread = this.pending.countsByThread(id);
-    return listThreads(this.db, id).map((thread) => toThreadSummary(thread, pendingByThread));
+    const forkable = this.upstreams.get(id)?.forkableHarnesses ?? new Set<HarnessId>();
+    return listThreads(this.db, id).map((thread) =>
+      toThreadSummary(thread, pendingByThread, new Set(), new Set(), forkable),
+    );
   }
 
   /**
@@ -1381,18 +1440,33 @@ export class SessionManager {
   }
 
   /**
-   * Adds a conversation to a session and makes it current: empty by default,
-   * or carrying another thread's context when `from` names one.
+   * Adds a conversation to a session and makes it current: on the agent and
+   * settings the body names, or carrying another thread's context when `from`
+   * names one.
    *
-   * Both need the adapter, because only the adapter can mint a thread.
+   * A fork needs the adapter, because only the adapter can branch a
+   * transcript. A fresh thread does not: its row is written first and its
+   * conversation minted after, so a harness whose credential nobody has
+   * entered still gets a thread — the dialog is what keeps a person from
+   * asking for one, and the API is not a gate.
    */
   async createThread(id: string, body: CreateThreadBody | undefined): Promise<ThreadSummary> {
     this.mustGet(id);
     const from = body?.from?.trim();
+    // A fork's options are its source's: only the adapter that wrote a
+    // transcript can load it, so a fork stays on that harness whatever the
+    // request says.
+    const options = from ? undefined : threadOptions(body?.options);
     const up = this.upstream(id);
     try {
-      const row = from ? await up.forkThread(from) : await up.newThread();
-      return toThreadSummary(row, this.pending.countsByThread(id));
+      const row = from ? await up.forkThread(from) : await up.newThread(options);
+      return toThreadSummary(
+        row,
+        this.pending.countsByThread(id),
+        new Set(),
+        new Set(),
+        up.forkableHarnesses,
+      );
     } catch (err) {
       const message = (err as Error).message;
       if (message === THREAD_NOT_FOUND) throw new HttpError(404, message);
@@ -1414,7 +1488,14 @@ export class SessionManager {
   selectThread(id: string, threadId: string): ThreadSummary {
     this.mustGet(id);
     this.mustGetThread(id, threadId);
-    return toThreadSummary(this.upstream(id).switchThread(threadId));
+    const up = this.upstream(id);
+    return toThreadSummary(
+      up.switchThread(threadId),
+      new Map(),
+      new Set(),
+      new Set(),
+      up.forkableHarnesses,
+    );
   }
 
   /**
@@ -1428,24 +1509,44 @@ export class SessionManager {
     this.mustGet(id);
     const row = this.mustGetThread(id, threadId);
     setThreadDone(this.db, threadId, done);
-    return toThreadSummary({ ...row, done: done ? 1 : 0 }, this.pending.countsByThread(id));
+    return toThreadSummary(
+      { ...row, done: done ? 1 : 0 },
+      this.pending.countsByThread(id),
+      new Set(),
+      new Set(),
+      this.upstreams.get(id)?.forkableHarnesses ?? new Set<HarnessId>(),
+    );
   }
 
   /**
-   * Stops one thing that conversation left running, or all of it.
+   * Stops one task that conversation left running, or every task it has.
    *
-   * A thread the adapter has no conversation for cannot have left anything in
-   * the box: work is a process under an agent process, and it has none.
+   * A thread the adapter has no conversation for cannot have announced a task:
+   * a task is named by the adapter's own id for the conversation it is on, and
+   * this thread has none.
    */
   async stopBackgroundWork(
     id: string,
     threadId: string,
-    processId?: string,
+    taskId?: string,
   ): Promise<{ stopped: number }> {
     this.mustGet(id);
     const row = this.mustGetThread(id, threadId);
     if (!row.acp_session_id) return { stopped: 0 };
-    return { stopped: await this.upstream(id).stopBackgroundWork(row.acp_session_id, processId) };
+    return { stopped: await this.upstream(id).stopBackgroundWork(row.acp_session_id, taskId) };
+  }
+
+  /**
+   * Kills everything running in a box, whether or not a conversation claims it.
+   *
+   * The answer to a box that is busy with work no thread has a task for, which
+   * is what every adapter restart leaves behind: the tasks went with the
+   * process that announced them, and a signal is the only thing that reaches
+   * the build they left running.
+   */
+  async stopBoxWork(id: string): Promise<{ stopped: number }> {
+    this.mustGet(id);
+    return { stopped: await this.upstream(id).stopBoxWork() };
   }
 
   // --- boot reconciliation --------------------------------------------------
@@ -1554,10 +1655,12 @@ function toThreadSummary(
   pendingByThread: Map<string, number> = new Map(),
   speaking: ReadonlySet<string> = new Set(),
   working: ReadonlySet<string> = new Set(),
+  forkable: ReadonlySet<HarnessId> = new Set(),
 ): ThreadSummary {
   const acp = row.acp_session_id;
   return {
     id: row.id,
+    harness: row.harness,
     acpSessionId: acp,
     title: row.title,
     ordinal: row.ordinal,
@@ -1568,9 +1671,42 @@ function toThreadSummary(
     speaking: acp ? speaking.has(acp) : false,
     backgroundBusy: acp ? working.has(acp) : false,
     pendingCount: acp ? (pendingByThread.get(acp) ?? 0) : 0,
+    modeId: row.mode_id,
+    config: threadConfig(row),
+    // Whether this thread's own adapter advertised the fork capability, and
+    // false while it has not been reached.
+    canFork: forkable.has(row.harness),
     done: row.done === 1,
     createdAt: row.created_at,
     lastActiveAt: row.last_active_at,
   };
 }
 
+
+/**
+ * What a request asked a thread to be, checked.
+ *
+ * An absent body is Claude on its defaults, which is what every client from
+ * before harnesses existed means and what the dashboard sends until somebody
+ * chooses otherwise. An unknown harness is a 400 rather than a thread on the
+ * wrong agent, and a config map is taken as it comes: which options a harness
+ * offers is the adapter's to say, and one it does not know is refused by the
+ * adapter and logged rather than fatal.
+ */
+function threadOptions(options: ThreadOptions | undefined): ThreadOptions {
+  const wanted = options?.harness ?? DEFAULT_HARNESS;
+  try {
+    harness(wanted);
+  } catch {
+    throw new HttpError(400, `Unknown harness: ${String(wanted)}`);
+  }
+  const config: Record<string, string> = {};
+  for (const [key, value] of Object.entries(options?.config ?? {})) {
+    if (typeof value === 'string') config[key] = value;
+  }
+  return {
+    harness: wanted,
+    ...(options?.modeId ? { modeId: options.modeId } : {}),
+    ...(options?.config ? { config } : {}),
+  };
+}

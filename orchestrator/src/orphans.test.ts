@@ -27,6 +27,8 @@ import * as ws from './workspaces.ts';
 /** The daemon this suite pretends to talk to. */
 interface Fake {
   containers: Map<string, { sessionId: string; running: boolean }>;
+  /** Login containers, which belong to a credential rather than to a session. */
+  logins: Map<string, { credentialId: string; createdAt: number }>;
   networks: Map<string, string>;
   volumes: Map<string, string>;
   /** Names of objects the sweep removed, in the order it removed them. */
@@ -42,12 +44,21 @@ function install(fake: Fake): void {
     if (fake.stuck.has(name)) throw Object.assign(new Error('in use'), { statusCode: 409 });
   };
   dk.setDockerForTests({
-    listContainers: async () =>
-      [...fake.containers].map(([id, c]) => ({
+    listContainers: async () => [
+      ...[...fake.containers].map(([id, c]) => ({
         Id: id,
         State: c.running ? 'running' : 'exited',
         Labels: { [dk.LABEL]: c.sessionId },
       })),
+      // The daemon answers one listing; each caller's own label filter is
+      // what picks its own containers out of it.
+      ...[...fake.logins].map(([id, l]) => ({
+        Id: id,
+        State: 'running',
+        Created: Math.round(l.createdAt / 1000),
+        Labels: { [dk.LOGIN_LABEL]: l.credentialId },
+      })),
+    ],
     listNetworks: async () =>
       [...fake.networks].map(([name, sessionId]) => ({
         Name: name,
@@ -67,6 +78,7 @@ function install(fake: Fake): void {
         refuse(id);
         fake.removed.push(id);
         fake.containers.delete(id);
+        fake.logins.delete(id);
       },
     }),
     getNetwork: (name: string) => ({
@@ -96,10 +108,10 @@ let fake: Fake;
 function insertSession(id: string, status = 'stopped'): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
        status, current_thread_id, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', ?,
+     VALUES (?, 'test', 'DEFAULT', 'img', ?,
        ?, '10.200.0.0/24', '', ?, ?, ?, ?, NULL, ?, ?)`,
   ).run(
     id,
@@ -139,6 +151,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-orphans-'));
   fake = {
     containers: new Map(),
+    logins: new Map(),
     networks: new Map(),
     volumes: new Map(),
     removed: [],
@@ -247,6 +260,36 @@ describe('sweeping objects no session owns', () => {
     await orchestrator.manager.sweepOrphans();
 
     assert.deepEqual(fake.removed, []);
+  });
+
+  it('takes an abandoned login container, and leaves one still in use', async () => {
+    // A login runs the harness's own CLI in a container of its own and removes
+    // it when the flow ends — but only while the orchestrator is alive to end
+    // it. A restart mid-login leaves one holding half a credential in a tmpfs
+    // home, on the default bridge, that nothing else would ever look for.
+    insertSession('keep');
+    const now = Date.now();
+    fake.logins.set('login-old', { credentialId: 'openai', createdAt: now - 20 * 60_000 });
+    fake.logins.set('login-fresh', { credentialId: 'claude', createdAt: now - 60_000 });
+
+    await orchestrator.manager.sweepOrphans();
+
+    // Age is the whole rule, and the cutoff is longer than a flow is allowed
+    // to take, so a person still in a browser is never swept out from under.
+    assert.deepEqual(fake.removed, ['login-old']);
+    assert.ok(fake.logins.has('login-fresh'));
+  });
+
+  it('sweeps login containers even where the sessions table is empty', async () => {
+    // The guard below is about session objects a foreign database would take;
+    // a login container belongs to no session and is nobody else's either.
+    fake.logins.set('login-old', { credentialId: 'openai', createdAt: Date.now() - 20 * 60_000 });
+    insertObjects('orphan-by-accident');
+
+    await orchestrator.manager.sweepOrphans();
+
+    assert.deepEqual(fake.removed, ['login-old']);
+    assert.ok(existsSync(workspaceOf('orphan-by-accident')));
   });
 
   it('refuses to sweep for a database that knows of no session at all', async () => {

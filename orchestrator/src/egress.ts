@@ -8,7 +8,8 @@ import type {
   EgressPolicy,
   EgressStatus,
 } from '../../shared/types.ts';
-import type { Config } from './config.ts';
+import { CREDENTIAL_SET, type Config } from './config.ts';
+import { deliverableSecret, type CredentialRow, type CredentialStore } from './credentials.ts';
 import { log } from './log.ts';
 import { writeSecretFile } from './secret.ts';
 
@@ -16,10 +17,10 @@ import { writeSecretFile } from './secret.ts';
  * The orchestrator's half of token translation: what the proxy is told, and
  * the key material that has to outlive a restart.
  *
- * Real credentials come from the environment and never leave this process
- * except over the control channel, into the proxy's memory. A session is given
- * a placeholder in their place, so nothing inside a session container is worth
- * stealing.
+ * Real credentials come from the credential store and never leave this
+ * process except over the control channel, into the proxy's memory. A session
+ * is given a placeholder in their place, so nothing inside a session container
+ * is worth stealing.
  *
  * Two pieces of material must survive a restart, because running sessions hold
  * them in their environment and trust store: the CA the proxy mints
@@ -112,12 +113,33 @@ function writeMaterial(dataDir: string, material: EgressMaterial): void {
 }
 
 /**
- * Builds the policy the proxy runs, from the environment and the stored
- * material. It is static per deployment: composed once at boot and re-pushed
- * unchanged, because nothing about it varies per session.
+ * Builds the policy the proxy runs, from the deployment's settings, the
+ * stored material and whatever the credential store currently holds.
+ *
+ * Composed again on every sync rather than once at boot, because the store
+ * changes while the process runs: a credential entered on the settings page
+ * has to be live within the second, not at the next tick.
+ *
+ * The CA travels unconditionally. A box is given it when it is created and
+ * holds it for as long as it lives, so a policy that withheld it until the
+ * first credential existed would leave every box created before that failing
+ * TLS on every intercepted host afterwards. A host is still only intercepted
+ * while its credential is stored, which is the credentials list below.
  */
-export function composePolicy(cfg: Config, material: EgressMaterial): EgressPolicy {
-  const credentials: EgressCredential[] = cfg.egressCredentials.map((spec) => {
+export function composePolicy(
+  cfg: Config,
+  material: EgressMaterial,
+  stored: readonly CredentialRow[],
+): EgressPolicy {
+  // What a box can be given rather than what is stored: a subscription
+  // obtained by logging in is a document rather than a header value, and the
+  // traffic it authenticates does not pass through the swap at all. See
+  // deliverableSecret() for the whole of why. A credential with nothing
+  // deliverable leaves its hosts unintercepted, exactly as an absent one does.
+  const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
+  const configured = CREDENTIAL_SET.filter((spec) => (secrets.get(spec.id) ?? '') !== '');
+
+  const credentials: EgressCredential[] = configured.map((spec) => {
     const placeholder = material.placeholders[spec.id];
     if (!placeholder) {
       throw new Error(`no placeholder was generated for the ${spec.id} credential`);
@@ -127,14 +149,14 @@ export function composePolicy(cfg: Config, material: EgressMaterial): EgressPoli
       hosts: [...spec.hosts],
       headers: [...spec.headers],
       placeholder,
-      secret: spec.secret,
+      secret: secrets.get(spec.id) ?? '',
     };
   });
 
   // A configured credential's own hosts are implied by the proxy; the hosts
   // its tools merely need are added here, so a narrow allowlist cannot break
   // an OAuth refresh or a tarball download.
-  const implied = cfg.egressCredentials.flatMap((spec) => [...spec.alsoAllow]);
+  const implied = configured.flatMap((spec) => [...spec.alsoAllow]);
   const allowedHosts =
     cfg.egressAllowedHosts.length === 0
       ? []
@@ -142,7 +164,7 @@ export function composePolicy(cfg: Config, material: EgressMaterial): EgressPoli
 
   return {
     allowedHosts,
-    ca: credentials.length > 0 ? material.ca : null,
+    ca: material.ca,
     credentials,
   };
 }
@@ -201,26 +223,37 @@ export class EgressManager {
   private composed: EgressPolicy | null = null;
   private health: EgressHealth | null = null;
 
-  constructor(private readonly cfg: Config) {}
+  constructor(
+    private readonly cfg: Config,
+    /**
+     * Where the secrets come from. The manager reads it on every compose and
+     * writes to it never; the store calls sync() when it changes.
+     */
+    private readonly credentials: CredentialStore,
+  ) {}
 
   /** Loads the material and composes the policy, without talking to the proxy. */
   async prepare(): Promise<void> {
-    this.material = await resolveEgressMaterial(this.cfg.DATA_DIR, this.cfg.egressCredentials);
-    this.composed = composePolicy(this.cfg, this.material);
+    // The whole set rather than the configured part of it: a box holds a
+    // placeholder for every credential this deployment could ever translate,
+    // because its environment is fixed when it is created and a credential
+    // entered afterwards has to reach it.
+    this.material = await resolveEgressMaterial(this.cfg.DATA_DIR, CREDENTIAL_SET);
+    this.composed = composePolicy(this.cfg, this.material, this.credentials.list());
   }
 
   /** The CA certificate a session is given to trust. Public, never the key. */
   caCertificate(): string {
-    const { material, composed } = this.prepared();
-    return composed.ca ? material.ca.cert : '';
+    return this.prepared().material.ca.cert;
   }
 
   /**
    * The prepared state, or a refusal.
    *
-   * Every caller here decides what a session container will hold. An
-   * unprepared manager that fell back to the real credential would put it
-   * inside the sandbox, so this refuses instead.
+   * Every caller here decides what a session container will hold, and an
+   * unprepared manager holds neither the placeholders nor the CA. Answering
+   * with nothing would build a box that can never authenticate and never
+   * trust an intercepted host, and say so nowhere, so this refuses instead.
    */
   private prepared(): { material: EgressMaterial; composed: EgressPolicy } {
     if (!this.material || !this.composed) {
@@ -230,19 +263,21 @@ export class EgressManager {
   }
 
   /**
-   * What a session is given in place of a credential: the placeholder when
-   * this deployment translates that credential, and the value itself when it
-   * does not.
+   * What a box holds in place of a credential.
    *
-   * The swap is keyed on the secret matching, not just on the credential being
-   * configured, so a profile carrying some other token is handed its own value
-   * rather than a placeholder the proxy would refuse to translate.
+   * Never a real value, and never conditional on the credential existing: the
+   * placeholder is per deployment and is generated before its secret is, so a
+   * box created today works with a token entered tomorrow. A placeholder for
+   * a credential that is not configured leaves the box as a bearer to a host
+   * nobody intercepts and is refused by the service, which is the intended
+   * failure — the dashboard is what keeps a person from getting there.
+   *
+   * A credential this deployment cannot translate at all has no placeholder,
+   * and the empty string is what then drops the variable from the box's
+   * environment rather than setting it to nothing.
    */
-  sessionValue(id: string, real: string): string {
-    if (real === '') return '';
-    const { composed } = this.prepared();
-    const credential = composed.credentials.find((c) => c.id === id);
-    return credential?.secret === real ? credential.placeholder : real;
+  placeholderFor(id: string): string {
+    return this.prepared().material.placeholders[id] ?? '';
   }
 
   /** The last thing the proxy reported, for /healthz. */
@@ -250,10 +285,19 @@ export class EgressManager {
     return this.health;
   }
 
-  /** Pushes the composed policy and records what came back. */
+  /**
+   * Recomposes the policy from the store and pushes it, recording what came
+   * back.
+   *
+   * The recompose is what makes a credential live: this runs on the store's
+   * every write as well as on the reconciler's tick, and the tick is then
+   * only the retry for a proxy that was not listening.
+   */
   async sync(): Promise<void> {
-    if (!this.material || !this.composed) await this.prepare();
-    const { material, composed } = this.prepared();
+    if (!this.material) await this.prepare();
+    const material = this.prepared().material;
+    const composed = composePolicy(this.cfg, material, this.credentials.list());
+    this.composed = composed;
 
     try {
       const status = await pushPolicy(this.cfg, material, composed);

@@ -12,10 +12,11 @@ covers setting it up and using it.
 
 **A running agent turn continues when the browser disconnects.**
 
-The orchestrator, not the browser, is the ACP client of record. It holds one
-persistent stdio connection per session to the `claude-agent-acp` adapter
-inside the session container. Browsers attach and detach as views, and nothing
-a browser does reaches the adapter except the messages the gateway forwards.
+The orchestrator, not the browser, is the ACP client of record. It holds a
+persistent stdio connection to each ACP adapter in the session container — one
+per harness a thread of that session runs. Browsers attach and detach as
+views, and nothing a browser does reaches an adapter except the messages the
+gateway forwards.
 
 Two consequences shape the rest of the design:
 
@@ -65,8 +66,8 @@ connection is pinned to one thread, so two of them can be watched at once; see
           │               │                       │
    ┌──────▼───────┐ ┌─────▼────────┐              │
    │ session-a1b2 │ │ session-c3d4 │◄─────────────┘
-   │ net sn-a1b2  │ │ net sn-c3d4  │  claude-agent-acp runs as a
-   │ (internal)   │ │ (internal)   │  long-lived exec, not as PID 1
+   │ net sn-a1b2  │ │ net sn-c3d4  │  each harness's adapter runs
+   │ (internal)   │ │ (internal)   │  as a long-lived exec, not PID 1
    └──────────────┘ └──────────────┘
 ```
 
@@ -74,7 +75,7 @@ connection is pinned to one thread, so two of them can be watched at once; see
 |---|---|---|
 | orchestrator | `orchestrator/Dockerfile` | Serves every route, owns the sessions, holds the Docker socket |
 | egress proxy | `proxy/Dockerfile` | The only route out of a session network, and where credentials are put on the wire |
-| session container | `session-image/Dockerfile` | Runs the agent and the ACP adapter, one container per session |
+| session container | `session-image/Dockerfile` | Runs the agents and their ACP adapters, one container per session |
 
 The orchestrator and the proxy are compose services. Session containers are
 created at runtime through the Docker API, so they appear in no compose file.
@@ -119,7 +120,7 @@ The orchestrator serves everything a browser needs:
 | `/api/...` | REST |
 | `/ws/sessions/:id/acp` | ACP gateway |
 | `/ws/sessions/:id/terminal` | A shell in the session's container |
-| `/healthz` | Liveness, and what the deployment is: version, session count, proxy warnings, whether a Claude token is configured, and which build of each image is running. Always 200 while the process serves |
+| `/healthz` | Liveness, and what the deployment is: version, session count, proxy warnings, which harnesses can run a turn and what the deployment holds a credential for, and which build of each image is running. Always 200 while the process serves |
 | `/readyz` | Readiness: 200 only when the database answers, the egress policy is in sync and Docker is reachable, which is what creating or starting a session needs |
 
 A GET that matches no other route serves the dashboard's `index.html`, so
@@ -158,13 +159,13 @@ were.
 | Method and path | Does |
 |---|---|
 | `GET /api/sessions` | Summaries of every live session |
-| `POST /api/sessions` | Creates a session and returns it |
+| `POST /api/sessions` | Creates a session and returns it; `thread` says what its first conversation runs |
 | `GET /api/sessions/:id` | One session with its Docker object names |
 | `POST /api/sessions/:id/start` | Starts a stopped container |
 | `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
 | `DELETE /api/sessions/:id` | Deletes the session, its workspace and home included |
 | `GET /api/sessions/:id/threads` | Every conversation the session owns |
-| `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `{"from":"<threadId>"}` forks that one instead of starting empty |
+| `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `options` says which harness it runs and what it starts configured with, and `{"from":"<threadId>"}` forks that one instead — on its own harness, so `options` is then ignored |
 | `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
 | `POST /api/sessions/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
 | `POST /api/sessions/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
@@ -185,6 +186,18 @@ were.
 | `PUT /api/agent-sets/:setId/items` | Creates a skill or command, or replaces the one under that name |
 | `DELETE /api/agent-sets/:setId/items?kind=&name=` | Deletes one |
 | `GET /api/agent-sets/:setId/preview` | What a session naming this set would get, global set merged in |
+| `GET /api/harnesses` | Every harness: what the registry says, what its adapter last advertised, and whether it can run |
+| `GET /api/credentials` | Every stored credential, as an account and a status. Never a secret |
+| `PUT /api/credentials/:id` | Stores one: `{"method":"token","secret":"…"}` |
+| `DELETE /api/credentials/:id` | Forgets one, and its hosts stop being intercepted |
+| `POST /api/credentials/:id/login` | Starts a login for an account that cannot be pasted |
+| `GET /api/credentials/:id/login/:loginId` | Where that login has got to, which the page polls |
+| `POST /api/credentials/:id/login/:loginId/code` | Hands back the code the CLI asked to have pasted |
+| `DELETE /api/credentials/:id/login/:loginId` | Gives up on one, and the container goes with it |
+| `GET /api/settings` | The git identity and each dialog's last choice |
+| `PATCH /api/settings` | Writes the ones a body names |
+| `POST /api/sessions/:id/threads/:threadId/background/stop` | Stops one task the thread announced, or all of them |
+| `POST /api/sessions/:id/background/stop` | Kills everything running in the box, whoever left it there |
 | `GET /api/push/key` | The deployment's VAPID public key, which a browser subscribes with |
 | `POST /api/push/subscribe` | Registers a browser for Web Push, or refreshes what is stored for it |
 | `DELETE /api/push/subscribe` | Forgets one browser's subscription |
@@ -340,7 +353,12 @@ session has current — so every older link and bookmark still works. The ops �
 start, stop, delete, the details — live at `/sessions/:id/info`.
 What the agent is configured with belongs to the deployment rather than to any
 one box, so it hangs off the list instead: `/agents` lists the sets and
-`/agents/:setId` edits one.
+`/agents/:setId` edits one. The deployment's credentials hang off the same
+header for the same reason, at `/settings`: one card per credential with the
+account it is for and whether it works, the git identity every box commits as,
+and — where an account cannot be pasted — the login, which shows the URL and
+the one-time code and asks for a code back where the CLI wants one. Nothing on
+that page ever shows a secret.
 
 Each card carries its session's threads under its badges, the default one
 marked, so the list is the tree. Each row is a plain link to that thread,
@@ -348,7 +366,10 @@ because opening one is a plain navigation now: the connection names its own
 thread, so nothing has to be switched first. Opening a thread still makes it
 the session's default, as a fire-and-forget POST that neither blocks the
 navigation nor disturbs anybody. **New thread** and **Fork** sit under the
-rows, the second only when the adapter offers it.
+rows, the second only when that thread's own adapter offers it. **New thread**
+opens the dialog that asks which agent the conversation runs and what it starts
+configured with; a fork asks nothing, because it stays on its source's harness
+and keeps its settings.
 
 A row is a name and a bullet, and the bullet is that thread's state, in the
 one colour vocabulary `StatusBadge` holds: amber for a question waiting on it,
@@ -751,77 +772,217 @@ file stays open, the confirmation that a back press must never answer, and the
 deep link with nothing beneath it. Nothing in the suite pressed back before,
 which is how the two halves of this came to disagree in the first place.
 
+## Harnesses
+
+A *harness* is an agent and the ACP adapter that drives it. Boxes carries two —
+Claude Code behind `claude-agent-acp`, and OpenAI Codex behind `codex-acp` —
+and which one runs a conversation is a property of the thread rather than of
+the box. One box, one checkout, two agents working on it is the point, so
+nothing about a session says which agent it is for.
+
+`orchestrator/src/harness.ts` is the registry: one record per harness, and the
+one place a harness-specific value is written down. Everything in it is a value
+and nothing in it is behaviour. The modules that spawn an adapter, mint a
+thread, materialize an agent set or read a box's process table ask the registry
+what this harness wants and then do the one thing they do — so a third harness
+is an entry in a table rather than a search through the code for every `if`,
+and a harness needing something no field expresses wants a new field rather
+than a branch at the call site.
+
+| The record holds | Claude Code | Codex |
+|---|---|---|
+| `cmd`, the adapter exec'd in the box | `claude-agent-acp` | `codex-acp` |
+| `processToken`, what that process is known by in the process table | `claude-agent-acp` | `codex-acp` |
+| `residentProcesses`, what under it is the harness rather than work | `claude` | `codex app-server` |
+| `defaultModeId`, what a fresh thread starts in | `auto` | `agent-full-access` |
+| `forkModeId`, what a fork starts in instead | `plan` | `read-only` |
+| `defaultConfig`, what a fresh thread is configured with | `model: opus` | nothing; the adapter's own defaults |
+| `sessionMeta`, the `_meta` its session calls carry | the thinking options | none |
+| `credentialId`, what must be stored before a thread can run | `claude` | `openai` |
+| `env()`, the container environment it needs, holding a placeholder | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR` | `CODEX_API_KEY`, `CODEX_HOME`, `NO_BROWSER`, `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST` |
+| `layout`, where an agent set is installed under `$HOME` | `.claude/CLAUDE.md`, `.claude/skills`, `.claude/commands` | `.codex/AGENTS.md`, `.agents/skills`, `.codex/prompts` |
+| `alwaysBackground`, tools that background their work whatever their input says | `Monitor`, `Workflow` | none |
+
+Two of those rows are decisions rather than readings. Codex's
+`agent-full-access` default is one: its other two modes run every command under
+bubblewrap, which needs unprivileged user namespaces that a container with
+`CapDrop: ALL` and Docker's default seccomp profile is unlikely to grant, and
+Codex's own documentation names the container as the boundary for exactly that
+case. `CODEX_API_KEY` is another: Codex itself reads no key from its
+environment, and what puts one in reach is the adapter, which logs itself in
+with the method `DEFAULT_AUTH_REQUEST` names when a session call finds no
+account. And the value in that variable is a placeholder, because a real secret
+never enters a box — see [Token translation](#token-translation).
+
+**The thread carries the harness.** `threads.harness` records it and defaults
+to `claude`, which is what every row that predates the column runs. Nothing
+moves a conversation from one harness to another: a transcript can only be
+loaded by the adapter that wrote it. A fork is that rule read forward — it
+stays on its source's harness and keeps what the source was configured with, so
+the options a create request carries are ignored when it names a source.
+
+**A session holds one adapter connection per harness in use.** It is spawned
+when a thread of that harness first needs it, so a box with only Claude threads
+never starts `codex-acp`, and a box with both runs two adapter processes over
+one checkout. See [The ACP gateway](#the-acp-gateway) for what that splits and
+what it shares.
+
+**A harness runs when its credential is deliverable.** `/healthz` and
+`GET /api/harnesses` report one entry per harness: the credential it needs, a
+summary of what is stored for it, and whether a thread of it can run a turn
+right now. Only the harnesses this deployment could deliver a credential to at
+all are reported — a box holds one placeholder per entry of `CREDENTIAL_SET`,
+so a harness whose credential is not in that set could not be given one
+whatever the store held. Stored is not the same as usable: a credential can be
+perfectly good and still not reach a box, which is what a subscription login
+is, so the answer carries the reason as well. The dialogs offer every reported
+harness and grey out the ones that cannot run, saying which of those it is.
+
+**The catalogue is what a dialog offers.** A dialog cannot ask an adapter what
+modes and options it has, because the thread it would ask about does not exist
+yet, and starting a box to find out would cost a container per dialog. So
+whenever an adapter answers `session/new`, `session/load` or `session/fork`
+with modes or config options, both are cached against its harness in
+`harness_catalog`, and `GET /api/harnesses` serves that beside the registry
+entry and the health. A deployment that has never run a harness has no
+catalogue for it: the dialog then offers the choice of agent alone, the thread
+starts on the registry's defaults, and the adapter's first answer corrects the
+screen.
+
 ## The ACP gateway
 
 Two halves, in `orchestrator/src/gateway/`.
 
-### Upstream: one connection per session
+### Upstream: the session, and one connection per harness
 
-`upstream.ts` holds the connection to the adapter. `SessionManager` creates one
-`UpstreamSession` per session on first use and keeps it for the process's life.
+`upstream.ts` owns what belongs to the *session*; `gateway/adapter.ts` owns
+what belongs to one *adapter process*. `SessionManager` creates one
+`UpstreamSession` per session on first use and keeps it for the process's life,
+and that session creates an `AdapterConnection` for each harness a thread of it
+runs, the first time a thread of that harness needs one — so a box with only
+Claude threads never starts `codex-acp`.
 
-Starting it, in `ensureStarted`:
+The split is what makes two adapters in one box work. The session holds the
+browsers, the reading of what the box is running, the permission requests
+waiting for an answer, which conversation each message is about, the tap into
+`acp_log`, and the container, which is started once however many adapters want
+it. A connection holds its exec and its streams, its spawn, the `initialize`
+answer it caches, the set of ACP ids that process is holding, its own replay
+counter and its own board of running tasks. A load on one harness therefore
+cannot mask live activity on the other, and an adapter that exits tears down
+its own conversations and leaves the other connection running.
 
-1. Start the container and make sure the egress proxy is attached.
-2. Spawn `claude-agent-acp` as a `docker exec` with `Tty: false`. Docker frames
+Starting a connection, in `ensureStarted`:
+
+1. Start the container and make sure the egress proxy is attached. Two
+   connections coming up at once share that work rather than racing over it.
+2. Spawn the harness's `cmd` as a `docker exec` with `Tty: false`. Docker frames
    stdout and stderr into one stream, so the streams are demuxed. stdout
    carries newline-delimited JSON-RPC; stderr is log-only.
-3. Send `initialize` with empty client capabilities: no filesystem, no
-   terminal, no elicitation. That confines adapter-to-client traffic to
-   `session/update` and `session/request_permission`. The response is cached
-   verbatim.
-4. Replay the session's *default* thread with `session/load`, or, when it has
-   none or the adapter no longer holds it, mint one with `session/new` and
-   store its id. Then re-issue `session/load` for every other thread an
-   attached browser is watching, so a respawn brings back every conversation
-   somebody is already reading rather than only one of them. A watched thread
-   the adapter cannot bring back has its browsers' sockets closed, because the
-   id they hold is one the adapter would now reject; each reconnects and pins
-   whatever that thread is next. The session's remaining threads are brought
-   up when somebody opens one; see the pinning below.
+3. Send `initialize` advertising one client capability: the async-task
+   extension, under the namespace both adapters read it from. Nothing else — no
+   filesystem, no terminal, no elicitation — which confines adapter-to-client
+   traffic to `session/update`, `session/request_permission` and the task
+   updates. The response is cached verbatim, on this connection.
+4. Replay this harness's threads. The session's *default* thread with
+   `session/load`, or, when it has none or the adapter no longer holds it, mint
+   one with `session/new` and store its id. Then re-issue `session/load` for
+   every other thread of this harness an attached browser is watching, so a
+   respawn brings back every conversation somebody is already reading rather
+   than only one of them. A watched thread the adapter cannot bring back has its
+   browsers' sockets closed, because the id they hold is one the adapter would
+   now reject; each reconnects and pins whatever that thread is next. The
+   session's remaining threads are brought up when somebody opens one; see the
+   pinning below.
 
-Every thread is then put in the mode and on the model it is meant to have:
-what its row records, or this deployment's default — `auto` and `opus` — when
-it records nothing. A fresh thread records nothing, which is what an empty
-column is for. A fork is the exception and says so: it starts in `plan`,
-because it shares the thread it came from's checkout and the point of one is
-to ask about work the original is still doing, so it starts in a mode that
-reads rather than writes. That does not fix the shared workspace; it stops the
-common accident, and flipping the fork to `auto` is the header's settings. An
-adapter offering no such mode is left in whichever mode it starts in, and a
-switch that fails is logged rather than failing the spawn.
+Every thread is then put back into what it is meant to be: its mode, and then
+the map of adapter config options its row records — a model, an effort level,
+whatever else that adapter offers. Each is one `set_config_option`, sent only
+where the adapter offers that option and its current value differs. The model
+is the one entry with a fallback, because its ids move: a value the adapter no
+longer lists resolves to a bracketed variant of itself, such as `opus[1m]`,
+which is the same model with a different context window, and otherwise to the
+harness's default model. Everything else is sent as it was recorded, and a
+value the adapter rejects is logged rather than fatal — the adapter's own
+answer is what corrects the dashboard.
 
-Both are on the thread's row (`threads.mode_id`, `threads.model_id`) because
-the adapter forgets them. A mode lives in that process and nothing else, so
-without the row every respawn — an idle stop and a return, a deploy, an
-adapter that died — would hand the conversation back in whatever mode the
-adapter starts in, and a thread left in `auto` would return on manual
-approvals half an hour later. `session/load` brings the conversation back and
-nothing else, so the row is read on every load rather than only at the mint.
+**The mode is excluded from that map on every path**: never written to it,
+never replayed from it. Both adapters also echo the mode as a config option
+with `category: 'mode'`, and a thread put into its mode by two mechanisms is
+how the two answers come apart. The mode travels through `session/set_mode` and
+`threads.mode_id` alone, which is also why the dashboard hides that option from
+the settings list.
 
-The row is written wherever the answer changes. A `session/set_mode` the
-adapter accepts is recorded as it passes through the gateway, because that is
-the request the user made. `current_mode_update` and
-`config_option_update` are recorded as they arrive, because the adapter also
-changes both on its own — leaving `plan` when a plan is accepted, falling back
-to another model under load — and a thread should come back where it ended up
-rather than where it was last sent. Which config option is the model is read
-from its `category`, never from the adapter's id for it.
+A fresh thread starts in whatever the dialog chose, or in its harness's default
+when it chose nothing, which is what an empty column already means. A fork is
+the exception and records its mode: it starts in its harness's *fork* mode —
+`plan` under Claude Code, `read-only` under Codex — because it shares the
+thread it came from's checkout and the point of one is to ask about work the
+original is still doing, so it starts in a mode that reads rather than writes.
+That does not fix the shared workspace; it stops the common accident, and
+flipping the fork back is one tap in the header. An adapter offering no such
+mode leaves the thread wherever it starts, and a switch that fails is logged
+rather than failing the spawn.
 
-Every one of those calls — `session/new`, `session/fork` and `session/load`
-alike — carries the same `_meta.claudeCode.options.thinking`, which is where
-the adapter reads options to lay over the ones it hands the Claude Agent SDK.
-It asks for `display: 'summarized'`. Current models default that to
-`omitted`, which streams thinking blocks carrying a signature and no text, so
-the adapter has nothing to put in an `agent_thought_chunk` and the reasoning
-disclosure in the thread never appears at all — the agent was thinking and
-saying so, and the words were not on the wire. The budgeted `enabled` form
-rather than `adaptive`: on a current model the two are the same thing, and
-`adaptive` is a flag an older one can reject, while which model a thread runs
-is chosen from the header's settings long after this is fixed.
+`threads.mode_id` and `threads.config` exist because the adapter forgets both.
+They live in that process and nothing else, so without the row every respawn —
+an idle stop and a return, a deploy, an adapter that died — would hand the
+conversation back in whatever the adapter starts in, and a thread left in `auto`
+would return on manual approvals half an hour later. `session/load` brings the
+conversation back and nothing else, so both are read on every load rather than
+only at the mint.
+
+They are written wherever the answer changes. A `session/set_mode` or a
+`session/set_config_option` the adapter accepts is recorded as it passes
+through the gateway, because that is the request the user made and because both
+adapters answer a change with their whole option list. `current_mode_update`
+and `config_option_update` are recorded as they arrive, because an adapter also
+changes things on its own — leaving `plan` when a plan is accepted, a slash
+command switching a model, a fallback under load — and a thread should come
+back where it ended up rather than where it was last sent. Which option is the
+model is read from its `category`, never from the adapter's id for it.
+
+**`_meta` comes from the registry.** `session/new`, `session/fork` and
+`session/load` carry whatever the harness's `sessionMeta` says and nothing
+otherwise. Only Claude Code asks for anything: `_meta.claudeCode.options.thinking`,
+which is where its adapter reads options to lay over the ones it hands the
+Claude Agent SDK. It asks for `display: 'summarized'`. Current models default
+that to `omitted`, which streams thinking blocks carrying a signature and no
+text, so the adapter has nothing to put in an `agent_thought_chunk` and the
+reasoning disclosure in the thread never appears at all — the agent was
+thinking and saying so, and the words were not on the wire. The budgeted
+`enabled` form rather than `adaptive`: on a current model the two are the same
+thing, and `adaptive` is a flag an older one can reject, while which model a
+thread runs is chosen from the header's settings long after this is fixed.
+Codex reads no `_meta`, and sending it something it does not know would be
+noise on the wire.
+
+**`initialize` is cached per connection**, because the two adapters advertise
+different modes and different session capabilities and a browser has to be told
+what the agent holding its conversation says. Which one it gets is settled
+downstream, at the pin.
+
+**`canFork` is a fact about a thread**, for the same reason. Both adapters
+advertise `sessionCapabilities.fork`, but the answer comes from each
+connection's own `initialize`, so `ThreadSummary.canFork` is what the fork
+button reads and a harness whose adapter has not been reached reports false
+rather than being assumed.
 
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
-that the session's status becomes `error`.
+that the session's status becomes `error` — but only for a thread that needed
+*that* connection: a connection failing while the other runs logs, clears its
+own threads and is respawned by the next message on one of them.
+
+**An adapter with no account is a configuration problem, not a spawn failure.**
+Codex's adapter checks authorization on every session call and logs itself in
+from the environment first, so a box holding a placeholder for a credential
+nobody has stored answers `session/new` with JSON-RPC `-32000` and a message
+beginning `Authentication required`. That is matched on both halves and treated
+as what it is: no retry, the session's status left alone, the connection kept
+up, the browser's request failed with the adapter's own message, and one line
+in the log naming the credential that is missing. Claude Code's adapter offers
+no auth method Boxes uses and fails inside the turn instead, with a 401 from
+the API.
 
 The guard on `ensureStarted` is the cached `initialize` response rather than
 the connection object. The connection exists as soon as the exec stream is
@@ -837,10 +998,22 @@ the session's other threads have transcripts of their own and are untouched.
 Any other error is rethrown, which keeps a transient fault from discarding a
 live thread.
 
-When the adapter exits on its own, the connection is torn down and nothing
-reconnects immediately. The next forwarded message calls `ensureStarted` again,
-which re-spawns and re-issues `session/load`. A deliberate stop sets a flag
-that suppresses even that.
+When an adapter exits on its own, its connection is torn down and nothing
+reconnects immediately: its threads' turns are cleared, its tasks dropped and
+its browsers told, and the other connection is not touched. The next forwarded
+message for that harness calls `ensureStarted` again, which re-spawns and
+re-issues `session/load`. A deliberate stop sets a flag that suppresses even
+that.
+
+**Routing.** A forwarded message goes to the connection holding the
+conversation it names; failing that, to the connection for that conversation's
+stored harness; failing that, to the one the sending browser's own thread is
+on; and failing all of those — `authenticate`, `session/list`, a message about
+nothing in particular — to the session's default harness, which is whatever its
+current thread runs. A thread lookup takes the harness and the ACP id together,
+as hygiene rather than because a collision is expected: both adapters mint
+UUIDs, and the in-memory maps in `Broadcast`, `Activity` and `PendingStore`
+stay keyed by the id alone.
 
 ### Downstream: one connection per browser
 
@@ -875,24 +1048,28 @@ the caller may know.
 
 Which thread the connection is on is settled once, at attach, and needs the
 adapter first. Pinning is where a thread the spawn did not reach is brought
-up: the upstream tracks which conversations this adapter process has been
-made to hold, and a thread that is not among them is loaded here, on the
-same terms as at spawn — the same `_meta`, and the mode and model its row
-records put back afterwards. A stored ACP id says a thread had a conversation
-once, not that the process running now knows about it, so handing one back
+up: it resolves the thread's harness, starts that connection if nothing has
+yet, and loads the thread there when the process is not already holding it —
+on the same terms as at spawn, with that harness's `_meta` and the mode and
+config the row records put back afterwards. A stored ACP id says a thread had
+a conversation once, not that the process running now knows about it, so
+handing one back
 unchecked left the browser's own `session/load` to rebuild the thread instead,
 and the adapter rebuilds one in the mode it starts in: a thread left in `auto`
 came back on manual approvals, without this deployment's thinking options
 either. A thread minted and never prompted has no conversation to load, and
-gets a freshly minted one in the mode and model its row records. Concurrent
+gets a freshly minted one in the mode and config its row records. Concurrent
 tabs opening the same thread share one bring-up. The handle counts as attached
 from the moment the socket opens — that is what the reaper counts — and
 nothing is routed to it until its thread is settled.
 
 Three methods are answered or reshaped rather than forwarded:
 
-- `initialize` returns the cached upstream response, so its `_meta` extensions
-  reach the browser intact.
+- `initialize` returns the response cached by the adapter holding this
+  connection's thread, so its `_meta` extensions reach the browser intact and a
+  browser is told what the agent it is actually talking to advertises. The
+  handler awaits the pin for that, which costs it nothing it was not already
+  waiting for.
 - `session/new` returns the ACP id of the thread this connection is pinned to.
   Which thread that is, is decided outside ACP, so a browser or an external
   ACP client speaks the same contract either way: a `session/new` that hands
@@ -952,7 +1129,9 @@ threads, and two things make new ones: **New thread** starts an empty one on
 the same workspace, and **Fork** branches the one you are on so an
 investigation can go two ways without disturbing the original. Everything else
 about the session is shared, so an extra thread costs nothing but its own
-transcript.
+transcript — and a new thread names the harness it runs, which is how one box
+comes to hold a Claude Code conversation and a Codex one over the same
+checkout.
 
 **A connection names its thread, and `current_thread_id` is the default.**
 The thread is in the WebSocket URL, so one session's adapter connection
@@ -974,13 +1153,14 @@ removing it, and a user who flips the fork to `auto` and edits gets exactly
 the conflict they asked for. A git worktree per thread is the honest fix and a
 larger change than this.
 
-Whether the adapter serves two prompts concurrently is not settled here. The
+Whether an adapter serves two prompts concurrently is not settled here. The
 wire allows it — the ACP SDK keys pending responses by JSON-RPC id with no
 write queue, so two `session/prompt` calls naming different threads can be in
-flight on one connection — but `claude-agent-acp` holds every thread of a
-session in one process and may queue the second behind the first. Nothing in
-the UI claims otherwise: each thread's own bullet reports what that thread is
-doing, which is true either way.
+flight on one connection — but each adapter holds every thread of its harness
+in one process and may queue the second behind the first. Two threads on
+*different* harnesses are two processes and do not queue behind each other at
+all. Nothing in the UI claims either way: each thread's own bullet reports what
+that thread is doing, which is true whatever the adapter does.
 
 The adapter is not the source of truth for which threads exist. `session/list`
 returns only threads that have a transcript on disk, and a thread minted but
@@ -1001,8 +1181,9 @@ never reused.
 
 Forking is offered only when the adapter advertised
 `sessionCapabilities.fork` in its `initialize` answer, which the orchestrator
-already caches verbatim. The capability is marked unstable in the ACP schema,
-so an adapter that drops it costs the dashboard a button rather than a build.
+already caches verbatim — per thread, since the answer is per adapter and a box
+may be running two. The capability is marked unstable in the ACP schema, so an
+adapter that drops it costs the dashboard a button rather than a build.
 
 **A fork's log starts as a copy of its source's.** The adapter branches the
 conversation in full — the fork knows everything the source said — but it
@@ -1086,120 +1267,130 @@ awake by talking, because every adapter update marks the session active. What
 was left was the quiet task: a command compiling for two hours, or a monitor
 watching a log that says nothing.
 
-`gateway/background.ts` asks the box what is running in it. `docker top` over
-the session's container: the adapter Boxes launched is in there by the command
-Boxes gave it, one agent process per conversation sits under it, and the shells
-the agent's tool calls run in sit under those. Anything under an agent is work.
+`gateway/background.ts` answers two questions that are not the same question.
 
-**Whose work it is comes off the process.** The Claude Agent SDK spawns the CLI
-as the session it is to be, so an agent process carries `--session-id=<uuid>`
-for a conversation the adapter minted or forked and `--resume=<uuid>` for one it
-loaded after a restart — and either way that uuid is the adapter's own id for
-the thread, the id every ACP message names and the id the `threads` table
-stores. A fork carries both, and `--session-id` is the one it *is*;
-`--resume-session-at` names a message and is not a session id. So work is
-attributed to a conversation with no bookkeeping at all, and each thread is
-told what it is running and nothing another thread left behind. This was one
-boolean about the whole box for a while, sent to every thread in it: a command
-one conversation forgot about read as "something is still running" on a thread
-opened a minute ago, with a stop button beside it that could not have reached
-the work.
+**What a person sees comes from the adapters.** Both harnesses implement the
+same async-task extension, at the versions the image pins: the same capability
+name, the same three update names, the same stop request. So one translation
+serves both. Boxes advertises `asyncTasks` at `initialize` — without it neither
+adapter sends a task update at all — and from then on a backgrounded command is
+a thing the agent announced rather than a line parsed out of a process table.
+An `async_task_spawned` puts a `BackgroundProcess` on the thread its `sessionId`
+names, carrying the adapter's own task id, the command or description it sent
+as the name, what kind of task it is, and whether it can be stopped. An
+`async_task_state_update` whose state is `completed`, `failed` or `stopped`
+takes it off again; `running` and `paused` leave it where it is. Claude Code
+also sends `async_task_progress`, which may rename a task and is required to
+carry nothing. Codex sends no progress and, as its source has it, no `running`
+either: a task is spawned and then terminal.
 
-An agent is found by the id on its line rather than by its depth under the
-adapter, because the adapter's *package* name is on the agent's command line
-too — the CLI binary lives inside `claude-agent-acp/node_modules` — so the
-token that finds the adapter finds the agent as well. What tells them apart is
-that only an agent carries a conversation id. The depth rule is kept underneath
-for an agent that names no conversation: its work is real and holds the reaper
-off, and only who to show it to is unknown.
+`TaskBoard` holds them, one board per adapter connection, keyed by thread.
+Tasks go with the process that announced them: an adapter that exits drops
+every task it announced and re-sends the thread states, and nothing
+re-announces them on the respawn. Neither adapter can — Claude Code's replay
+mentions tasks nowhere, and Codex's reconciles against a fresh app-server that
+owns none of the old terminals — which is the case the floor below exists for.
 
-**What is running is recoverable.** A tool call's process is a shell restoring a
-snapshot, undoing an alias and then `eval`-ing the command, with the words the
-agent chose in the middle of the line — `eval 'npm run build' < /dev/null &&
-pwd -P >| /tmp/claude-9138-cwd`. Boxes claimed for a while that a process
-carried only the wrapper and built a bar around saying so; the command was
-always in there. Each of an agent's own children is one entry, whatever tree
-hangs off it, and `etimes` from the same `ps` gives how long it has been going.
+The stop is `_session/async_task/stop` with the thread's ACP id and the task
+id, sent on that thread's own connection.
+`POST /api/sessions/:id/threads/:threadId/background/stop` keeps its shape and
+`processId` in its body is now the task id; the adapter answers whether it
+stopped anything, and the thread's state is re-sent either way so the bar
+catches up on a task that had already finished.
 
-Foreground and background calls are the same shell with the same ancestry, and
-they do not need telling apart. A foreground command cannot outlive the turn
-waiting on it, and a thread that is mid-turn already says so without help.
+**The SDK had to be stepped around for this.** The ACP client installs a
+session-update router ahead of every handler an app registers, and that router
+parses each `session/update` against the schema it was generated from — a
+strict union of the update kinds that existed then. An update outside it throws
+there, and a handler that throws takes the whole message with it: nothing else
+sees the frame, however raw a parser the app asked for. The async-task
+extension is by construction outside any generated schema, so every frame this
+rests on was being logged as invalid params and dropped. So the connection
+reads the bytes one step earlier, lifting those lines off the adapter's stdout
+before the SDK parses them and delivering them by the path the SDK would have
+used. Everything downstream is unchanged — the update is tapped, its thread is
+touched, the browsers watching are sent it, the board reads it — and what it
+costs is strict ordering against the frames still going through the SDK's own
+parsing: a bar may appear a beat before the tool call it belongs to, which is a
+level rather than a sequence and reads the same either way.
 
-This was a tally once, kept from the adapter's own updates: a tool call that
-backgrounded something added an entry, and the harness's `<task-notification>`
-block removed it again, matched on `<tool-use-id>`. The adding worked. The
-removing never ran once in production, because the harness delivers that block
-as a queued *prompt* and the ACP adapter drops a queued turn's echo from the
-feed as something the client already knows about — true of a prompt the client
-sent, false of one the harness injected. The block never crossed ACP, live or
-on replay, so nothing was ever removed and a box that had run one background
-command was held awake until a four-hour cap let go of it.
+**Whether the box is busy comes from the box.** The reaper's question has to be
+answerable when no adapter is running and when not every thread is loaded, and
+no event can answer it: a respawned adapter knows nothing about the shells the
+one before it left running, so after a restart the bars are empty and the build
+is still compiling. So the process reading stays, reduced to one answer about
+the whole box rather than one per conversation — `docker top` over the
+container, and `readBox` over what it prints.
 
-The difference is an edge against a level. A count of transitions is wrong
-forever after one is missed; a reading of what is running now cannot drift,
-cannot wedge, and needs nothing reported at all — a task killed with no
-notification, an adapter restarted, a frame lost, all answer correctly on the
-next reading. A container the daemon will not answer for at all is the one
-silence there is: the last answer stands until a reading settles it, because
-stopping a box late is recoverable and stopping one with a two-hour build in it
-is not.
+Resident is a short list, and everything not on it is work: PID 1 and the
+`sleep infinity` the entrypoint holds the container open with; every adapter,
+found by its harness's `processToken`; every adapter's direct children, which
+are the agent processes, `claude` under `claude-agent-acp` and `codex
+app-server` under `codex-acp`; anything matching a harness's
+`residentProcesses`, which is where a long-lived helper of either agent goes;
+and the `ps` that took the reading. Everything else — a shell under an agent, a
+build orphaned to PID 1 by an adapter that died, the shell behind an open
+terminal — is work and holds the box. Under Codex's sandboxed modes a
+command sits three wrappers down, and every one of those wrappers is that
+command's own and correctly reads as work. The rule has to know both harnesses'
+tokens: left with one it silently reads the other harness's box as empty, and
+an invisible build gets suspended half an hour later.
 
-**An empty box is empty, whatever the reason.** A reading that finds nothing
-of Boxes' own — no adapter, no agent process — counts as empty rather than as
-a shape this cannot understand. Boxes spawns the adapter as an exec and keeps
-none there between connections, so a container that is up and has never been
-opened, or that has outlived the orchestrator process that opened it, runs the
-entrypoint and nothing else. Counting that as busy would put "still running"
-on its card with no thread able to say what, *and* would keep it from ever
-being reaped, because the reaper asks this same question. A stopped session
-was the same answer from the other side: nothing to ask, read as nothing
-answering.
+Finding the adapters is the one subtle part. The token is on the *agent's*
+command line too — `claude-agent-acp` is a package name, and the CLI it spawns
+lives inside that package's own `node_modules` — so a process carrying a token
+counts as an adapter only when no harness's `residentProcesses` pattern matches
+it and nothing above it carries a token either. Either test alone is enough,
+and getting this wrong is expensive in one direction: an agent read as an
+adapter makes the shells under it read as agents, which is work made invisible.
 
-What makes "empty" safe is the id. Work sits only under an adapter or
-under an agent process, an agent is recognised by the conversation on its
-command line wherever it sits, and an agent that outlived its adapter is still
-an agent — so a box that has lost its adapter still reports what its
-conversations were running, under the conversation that was running it. A box
-with neither in it has nothing running that Boxes ever started. Stopping a
-session says so at once rather than at the next reading, so a card does not
-carry the badge over the moment its box was shut down.
+Whose work it is, is no longer asked. `codex app-server` runs every Codex
+conversation of a box in one process and names none of them on its command
+line, so the process table cannot answer it — and it no longer has to, because
+the adapters name the work they know about and this answers the only question
+left, which is the reaper's.
 
-Busy with nothing to show for it — work under an agent process that names no
-conversation — is a real state and looks exactly like a bug from the outside: a
-card saying "still running" with every one of its threads quiet. It is reported
-once, on the transition, with the commands it could not place, because the log
-is the only place that reason can go.
+**The events decorate the reading. They never replace it.** A missed event
+costs a name on a bar. A missed reading costs a build. The difference is an
+edge against a level: a count of transitions is wrong forever after one is
+missed, while a reading of what is running now cannot drift, cannot wedge, and
+needs nothing reported at all. A container the daemon will not answer for is
+the one silence there is — the last answer stands until a reading settles it,
+because stopping a box late is recoverable and stopping one with a two-hour
+build in it is not.
+
+**An empty box is empty, whatever the reason.** A reading that finds nothing of
+Boxes' own — no adapter, no agent — counts as empty rather than as a shape this
+cannot understand. Boxes spawns adapters as execs and keeps none there between
+connections, so a container that is up and has never been opened, or that has
+outlived the orchestrator process that opened it, runs the entrypoint and
+nothing else. Counting that as busy would put "still running" on its card with
+no thread able to say what, *and* would keep the reaper off it forever, because
+the reaper asks this same question. A stopped session is the same answer from
+the other side: nothing to ask, read as nothing answering.
 
 **A level has to be pushed as well as read.** Nothing reports a build
 finishing, so a reading is the only news there is — and a reading only happens
 when somebody asks. The reaper asks when it sweeps, which is what the lazy
 refresh behind the probe is for. A person looking at a thread is the other
-reader, and nobody was asking on their behalf: the bar above their composer
-appeared and then stayed for as long as the thread was open, including after
-the work had been stopped. So the probe polls every
-`BACKGROUND_POLL_SECONDS` while a browser is attached, and pushes a fresh
-thread state to the conversations whose work changed — only those, so a poll
-over a quiet box says nothing at all.
+reader, so the probe polls every `BACKGROUND_POLL_SECONDS` while a browser is
+attached, and pushes a fresh thread state to the conversations whose work
+changed — only those, so a poll over a quiet box says nothing at all.
 
-**Stopping it is a kill, not a cancel.** `session/cancel` is the composer's
-button and it is right for a turn: the adapter interrupts the query and tears
-down the subagents it was being held open for. It does nothing to a background
-command, which is a child of the CLI process that outlives its turn by design
-— so the bar, which borrowed that button, offered a stop that stopped nothing.
-`POST /api/sessions/:id/threads/:threadId/background/stop` kills instead: TERM
-to the entry's whole process tree, leaves first so nothing is orphaned into a
-reading that can no longer see it, and KILL to whatever is still there two
-seconds later.
+**The kill stays, for the work no task claims.** After a respawn the bars are
+empty and the box is busy, and a signal is the only thing that can stop the
+orphaned build. `POST /api/sessions/:id/background/stop` — session-level —
+reads the box from inside, TERMs every pid the reading calls work, leaves
+before the branches they hang off so nothing is orphaned into a reading that
+can no longer see it, and KILLs whatever is still there two seconds later. The
+escalation is not waited for: the answer says what was signalled, and the next
+reading says what died.
 
 The pids need care. `docker top` runs `ps` on the *host*, so its pids are the
 host's numbering and mean nothing inside the container where the kill has to
 happen — the box is read again from inside, through `ps` there, at the moment
-the stop runs. What crosses between the two is the command line, which is the
-same string in both and identifies a call on its own: the harness gives every
-tool call its own `/tmp/claude-<hex>-cwd`, so two runs of the same command are
-two different strings. `BackgroundProcess.id` is a hash of it, and the session
-image installs procps and asserts `ps` for this reason as much as for a
-person's.
+the stop runs. The session image installs procps and asserts `ps` for this
+reason as much as for a person's.
 
 ### Is the agent talking, or is it your turn
 
@@ -1221,14 +1412,20 @@ processing cycle, and that one carries a `cost` where the ones it sends while
 a message streams do not. `gateway/activity.ts` reads it, so a held turn and a
 cycle the harness woke on its own both end the instant they end.
 
-That marker is the adapter's own rather than anything ACP promises, and it
-appears only when the backend reported usage, so silence is the fallback and
-the same file infers it: an update from the agent says it is working, and
-silence lasting `AGENT_QUIET_SECONDS` says it has stopped. The one exception
+That marker is one adapter's own rather than anything ACP promises, and it
+appears only when the backend reported usage — and `codex-acp` sends no
+`usage_update` with a cost at all, so for a Codex thread the fallback is the
+whole answer. Silence is that fallback, and the same file infers it: an update
+from the agent says it is working, and silence lasting `AGENT_QUIET_SECONDS`
+says it has stopped. The one exception
 is a tool call the agent is waiting on, which is evidence where silence is not
 — a thread with one open stays speaking however quiet it goes. A call that
 runs *in the background* is not counted, which is why this and `background.ts`
-share the one predicate that decides which those are.
+share the one predicate that decides which those are. It reads the marker both
+adapters put on a backgrounded call's own update first, and falls back to the
+tool's input and to the harness's `alwaysBackground` names — Codex has no
+"run in background" flag and no tool name on its calls, so for its shell calls
+the marker is the whole of the answer.
 
 Which calls hold a prompt open is the adapter's rule, not a guess: it defers a
 turn's settlement for the **subagents** it spawned and for nothing else — a
@@ -1369,8 +1566,18 @@ Creating a session, in `SessionManager.create`:
    configuration to `${DATA_DIR}/agents/<id>`, create the home directory
    `${DATA_DIR}/homes/<id>` and fill it from the image, create the container
    `session-<id>`, and start it.
+6. Insert the box's first conversation as a row: which harness it runs, and
+   what it is configured with. Nothing is minted with the adapter here — a
+   thread with no adapter-side conversation is a state the gateway already
+   handles, since it is what an adapter restart leaves behind, and the first
+   browser to open the box brings it up. So creating a box costs no adapter
+   spawn, and a box can be created for a harness whose credential has not been
+   entered yet.
 
-Any failed step tears the whole session down and marks it `error`.
+Any failed step tears the whole session down and marks it `error`. What the
+first thread is to run is checked before step 2, so a request naming an agent
+the registry does not have is a 400 rather than a box built on the way to
+one.
 
 The container's `HostConfig` is a fixed template that user input never reaches.
 It runs as `SESSION_UID:SESSION_GID` — numbers rather than the image's `agent`,
@@ -1636,6 +1843,13 @@ mounted from the wrong place than a genuine pile of orphans, and it is the one
 mistake here that nothing could recover. A deployment whose sessions have all
 been deleted still has its tombstones, so its failed teardowns are still swept.
 
+The same sweep removes login containers nothing is waiting on. A login runs a
+harness's CLI in a container of its own and removes it when the flow ends, but
+that takes the process that started it still being alive — so a restart
+mid-login would leave one holding a tmpfs home with a half-finished login in
+it. Age is the whole rule there, because such a container has no other owner to
+ask about.
+
 The materialized agent configuration under `${DATA_DIR}/agents/<id>` is not in
 the sweep. It is kilobytes of markdown, rewritten from the database at every
 start, and worth neither the code nor the risk.
@@ -1654,25 +1868,42 @@ express.
 
 **The database is the truth and the files are derived from it.** At every
 create and every start, a session's merged set is written to
-`${DATA_DIR}/agents/<id>` and bind-mounted **read-only** at `/boxes/agent`. The
-layout is already the one it takes under `~/.claude` — `CLAUDE.md`,
-`skills/<name>/SKILL.md`, `commands/<name>.md` — so the entrypoint copies and
-interprets nothing.
+`${DATA_DIR}/agents/<id>` and bind-mounted **read-only** at `/boxes/agent`.
+Every path in it is already home-relative and already the one it takes inside
+the box, so the entrypoint copies and interprets nothing.
 
-**Why the copy exists at all.** `~/.claude` is in the session's home, which the
-orchestrator now has a path to but still has no business writing into while the
-box is running — that would race with the agent living in it. Mounting over the
-directory read-only would break the box; mounting it writable would let the
-agent edit what the dashboard says is configured. So the configuration arrives
-beside `~/.claude` and the entrypoint installs it.
+**A set is written once per harness, in each one's own layout.** A box may hold
+threads of either and nothing here knows which — the merged set is a property
+of the box, and where it lands is a property of the agent reading it — so both
+layouts are installed, always, driven by each registry entry's `layout`:
+`.claude/CLAUDE.md`, `.claude/skills/<name>/SKILL.md` and
+`.claude/commands/<name>.md` for Claude Code, and `.codex/AGENTS.md`,
+`.agents/skills/<name>/SKILL.md` and `.codex/prompts/<name>.md` for Codex.
+Neither agent reads the other's directories — Claude Code loads skills from
+`~/.claude/skills` only, and Codex from `~/.agents/skills` — so both copies are
+needed, and a few kilobytes written twice is cheaper than a decision.
+
+**Why the copy exists at all.** Those directories are in the session's home,
+which the orchestrator now has a path to but still has no business writing into
+while the box is running — that would race with the agent living in it.
+Mounting over one read-only would break the box; mounting it writable would let
+the agent edit what the dashboard says is configured. So the configuration
+arrives beside them and the entrypoint installs it.
 
 **The manifest is what makes the install reversible.** The materialized
 directory carries a `manifest` naming every path in it. The entrypoint removes
-exactly what the *previous* start recorded in `~/.claude/.boxes-managed`,
-installs the current manifest, and leaves a copy of it behind. So a skill
-deleted in the dashboard disappears from the box, while anything the agent
-itself put in `~/.claude` is never touched. Manifest lines are checked, not
-trusted: they decide what gets deleted.
+exactly what the *previous* start recorded in `~/.boxes/managed`, installs the
+current manifest, and leaves a copy of it behind. So a skill deleted in the
+dashboard disappears from the box, while anything the agent itself put in its
+home is never touched.
+
+Manifest lines are checked, not trusted: they decide what gets deleted, and
+their root is now the whole home rather than one configuration directory. So
+`safe_rel` in the entrypoint takes a line only if it has at least two
+components and starts with one of the six layout prefixes, a list written into
+the entrypoint rather than read from the manifest — which would be the same
+thing as trusting it. A manifest naming `.claude` or `.ssh` is refused rather
+than quietly turned into a recursive delete.
 
 **An edit reaches a box at its next start**, and the UI says so. A half-live
 mechanism that reloaded an `AGENTS.md` but not a skill would be worse than a
@@ -2028,16 +2259,33 @@ egress at all, because there is no direct route to fall back to.
 any DNS lookup. Exact names and one-label wildcards — `*.example.com` matches
 `a.example.com` and neither `example.com` nor `a.b.example.com` — matched
 case-insensitively, with address literals matched only as literals. Empty is
-off: any public host, private ranges still denied. A configured credential's
-hosts are implied members, so a narrow list cannot sever the traffic the proxy
-exists to authenticate. The grammar lives in `policy.ts` as pure functions.
+off: any public host, private ranges still denied. A stored credential's hosts
+are implied members, so a narrow list cannot sever the traffic the proxy exists
+to authenticate, and so are the hosts its tools merely need — each credential's
+`alsoAllow`, which is what keeps a login, a token refresh or a tarball download
+working under a list that names none of them. The grammar lives in `policy.ts`
+as pure functions.
 
 ### Token translation
 
-A session holds placeholders. Real credentials exist only in the
-orchestrator's environment and in the proxy's memory.
+A session holds placeholders. Real credentials exist only in the credential
+store on the orchestrator's data volume and in the proxy's memory.
 
-A host becomes a *translated host* when its credential is configured. Reaching
+**Every box holds a placeholder for every credential, always**, and is given
+the deployment CA on the same terms. A container's environment is fixed when it
+is created, so anything conditional on a credential existing would leave a box
+built today unable to use a token entered tomorrow — and a box created before
+the first credential would fail TLS against every intercepted host for the rest
+of its life. `resolveEgressMaterial` is therefore passed the whole credential
+set rather than the configured part of it, `placeholderFor` never returns a
+real value, and the policy carries the CA unconditionally.
+
+A placeholder for a credential nobody has stored leaves the box as a bearer to
+a host nobody intercepts, and the service refuses it. That is the intended
+failure: the dialogs do not offer a harness that cannot run, so the only way to
+reach it is to have removed the credential after the thread was made.
+
+A host becomes a *translated host* when its credential is stored. Reaching
 one, the front door hands the CONNECT to the interception engine instead of
 tunnelling it — by replaying the CONNECT on loopback, so the engine picks the
 certificate for the host the client asked for. The engine terminates
@@ -2062,16 +2310,50 @@ credential header, which covers `Bearer <p>`, `token <p>`, a bare value, and
 the HTTP Basic pair git's credential helper produces — one mechanism instead of
 a rule per tool.
 
+A protocol upgrade on a translated host is refused with `501`, because the
+swap cannot follow a request there: the engine rewrites the host, the path,
+the query and the protocol of an upgrade, and no header, so a forwarded one
+would carry the placeholder to the far end and be refused as a bad credential
+after sending it. It is the same answer the front door gives an upgrade on a
+host it is only tunnelling, so the proxy has one position on upgrades rather
+than two.
+
+Codex opens its transport with one, against
+`wss://api.openai.com/v1/responses`, and falls back to HTTPS when it is
+refused — which is swapped and works. It says so in the thread each time, a
+warning of its own that nothing here can silence: it retries the upgrade a
+few times first, so a Codex turn starts a moment later than it would
+otherwise. Supporting the upgrade means swapping a credential into it, which
+needs an interceptor that can rewrite an upgrade's headers.
+
 Everything else stays an opaque tunnel that never reaches the engine, so
 interception is bounded by policy rather than by trust in the engine. And every
 request the engine forwards leaves through the upstream tunnel, so the vetting
 above governs the connection that leaves: decrypting a host buys no way
 around the checks.
 
-`api.anthropic.com`, `github.com`, `api.github.com` and
-`*.githubusercontent.com` are the translated hosts, fixed in `config.ts`
-alongside the headers each credential travels in. They are facts about the
-services rather than preferences, so they are not configurable.
+`api.anthropic.com`, `api.openai.com`, `github.com`, `api.github.com` and
+`*.githubusercontent.com` are the translated hosts, fixed in `config.ts` as
+`CREDENTIAL_SET` alongside the headers each credential travels in and the hosts
+it merely needs reachable. They are facts about the services rather than
+preferences, so they are not configurable; only whether a credential for one is
+stored is.
+
+`chatgpt.com` is in that set as a host to allow and never to intercept. It
+carries the other kind of OpenAI credential — a subscription — and the two
+kinds reject each other's material, so leaving it alone is what lets a
+deployment's API key and a person's subscription live in one box. It is also
+why an `oauth` credential — a ChatGPT subscription, obtained by logging in — is
+not delivered to a box at all: it is a document rather than a header value, and
+the traffic it authenticates goes to that unintercepted host. Such a credential
+is stored, refreshed and reported, and the harness that needs it says it cannot
+run until a key is pasted. A Claude login is not that case: it ends in a token,
+which is delivered exactly as a pasted one is.
+
+The policy is composed from the store on every sync rather than once at boot,
+and the store calls `sync()` on every write — so a credential entered on the
+settings page is live within the second, and the reconciler's minute tick is
+only the retry for a proxy that was not listening.
 
 ### The control channel
 
@@ -2111,24 +2393,34 @@ applies migrations tracked by `user_version`.
 | Table | Holds |
 |---|---|
 | `sessions` | One row per session: names, Docker object names, where its workspace and home are, status, which thread is the default, timestamps |
-| `threads` | One row per conversation: which session owns it, the adapter's id for it, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
+| `threads` | One row per conversation: which session owns it, which harness runs it, the adapter's id for it, the mode and the config map it is meant to be in, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
 | `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |
 | `agent_items` | The skills and slash commands of a set, keyed by set, kind and name |
+| `credentials` | One row per credential the deployment holds: the secret as the harness needs it, the account it is shown as, when it expires, when it was last refreshed, and whether it is believed to work |
+| `settings` | Plain configuration a person sets on the settings page: the git identity, and each thread dialog's last choice |
+| `harness_catalog` | What each adapter last advertised — its modes and config options — so a dialog with no adapter to ask has something to offer |
 | `counters` | The subnet allocation counter |
 
-Three kinds of state deliberately stay out of the database. Secrets live only
-in the environment, in the session containers, and in the generated secret
-files; `log.ts` redacts anything credential-shaped before it reaches stderr.
-Thread transcripts live in the session's home directory, read back by the
-adapter. And the tap of forwarded ACP messages is a log rather than a table:
-at `LOG_LEVEL=debug` each one is a line on stderr, where `docker logs` has it
-alongside everything else, with an image or audio block's base64 payload
-replaced by its size and the line truncated. At any other level the tap does
-not even serialize the message. A log nobody can read without the process's
-own output is a log in the wrong place, and writing one to disk on the hot
-path cost every session a synchronous write per message.
+Secrets are the one kind of state that moved *into* the database. They are
+stored as-is, with no encryption layer: the orchestrator has to hand them to
+the proxy on every boot, so there is nobody to ask for a passphrase. That puts
+live logins on the data volume and therefore in any backup of it, which is why
+the reverse proxy in front of the dashboard is a requirement rather than a
+suggestion. `log.ts` redacts anything credential-shaped before it reaches
+stderr, and no API route ever answers with a secret — only with an account, a
+status and a time.
+
+Two kinds of state deliberately stay out. Thread transcripts live in the
+session's home directory and are read back by the adapter, so Boxes stores no
+transcript of its own. And the tap of forwarded ACP messages is a log rather
+than a table: at `LOG_LEVEL=debug` each one is a line on stderr, where
+`docker logs` has it alongside everything else, with an image or audio block's
+base64 payload replaced by its size and the line truncated. At any other level
+the tap does not even serialize the message. A log nobody can read without the
+process's own output is a log in the wrong place, and writing one to disk on
+the hot path cost every session a synchronous write per message.
 
 Pending requests are the one place where the database and memory both matter.
 The row lets the dashboard show that something is waiting and survives a
@@ -2143,6 +2435,7 @@ restart; the resolver that answers the request is in memory only, so
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running session's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
 | Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
 | Orphan sweep (`sessions.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with sessions that no longer exist. See below |
+| Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login whose access token is within the hour of expiring, or which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
 
 The list screen polls `GET /api/sessions` every 5 seconds while it is up and
 its tab is visible. A view watching one box — its thread, its review, its info
@@ -2159,13 +2452,9 @@ working default, which is why the stack runs with no `.env` at all.
 That file is the only place a default is written down, and the only place
 that knows which settings exist. `compose.yaml` hands the orchestrator an env
 file wholesale (`BOXES_ENV`, defaulting to `.env` and optional), so adding a
-setting means editing the schema and nothing else. It hands the orchestrator
-no setting of its own. The one thing it names is the two credentials, listed
-with no value so that they can be exported in a shell rather than written
-down at all. The cost is that `environment` overrides `env_file` whether or
-not the shell has a value, so those two names cannot come from a `BOXES_ENV`
-file outside the repo — they come from the shell or from `./.env`, which
-compose reads for both. Every other setting is unaffected.
+setting means editing the schema and nothing else. It names no variable at all
+and sets no value: nothing about a credential is configuration any more, so
+there is nothing compose has to pass through from a shell.
 
 `BIND_ADDR` and `HOST_PORT` are the two names compose reads for itself, each
 with its default written into the published port line. They are variable
@@ -2197,23 +2486,49 @@ in `DATA_DIR/egress-secrets.json` at mode 0600. They are generated rather than
 configured, and they persist rather than being regenerated, because running
 sessions hold them.
 
-Profile credentials — the Claude token, the GitHub token and the git identity —
-are injected into a session container at create time and nowhere else. With
-translation on, what is injected is a placeholder: the real value never enters
-a session container, and never reaches a filesystem outside the orchestrator's
-own data volume. The CA certificate travels the same path, as
-`BOXES_PROXY_CA`, which the entrypoint writes to `~/.boxes/proxy-ca.crt` for
-the four CA-trust variables to point at.
+**The credentials themselves are rows, not settings.** `credentials.ts` owns
+the table and `settings.ts` the plain configuration beside it — the git
+identity, which only ever lived in the environment because the credentials
+did, and each thread dialog's last choice. Both are managed from the settings
+page, because a credential has to be enterable without a restart and a
+subscription login has no static form to write down at all. Every write calls
+the store's `onChange`, which recomposes the egress policy and pushes it.
+
+What reaches a session container is a placeholder for each of them, built by
+`credentialEnv` from every harness's `env()` plus `GH_TOKEN`, `GIT_NAME` and
+`GIT_EMAIL`, and fixed into the container at create time. The real value never
+enters a box and never reaches a filesystem outside the orchestrator's own data
+volume. The CA certificate travels the same path, as `BOXES_PROXY_CA`, which
+the entrypoint writes to `~/.boxes/proxy-ca.crt` for the CA-trust variables to
+point at — `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`,
+`CURL_CA_BUNDLE`, and `CODEX_CA_CERTIFICATE`, which Codex reads before it falls
+back to `SSL_CERT_FILE`.
+
+`GH_TOKEN` is now always set, so `gh auth setup-git` in the entrypoint always
+runs. A push from a box with no GitHub credential stored gets a 401 from
+GitHub rather than a prompt, which in a headless box is the same outcome said
+sooner.
 
 ## Build-time pins
 
-The agent, the ACP adapter and the browser CLI are pinned in
+The agents, the ACP adapters and the browser CLI are pinned in
 `session-image/Dockerfile` rather than in configuration, so what runs in a
-session is what this commit names and no `.env` entry can change it. Each is
-pinned to a major line rather than to an exact release, so a rebuild takes
-fixes on that line and a new major is an edit to that file. Two of the three
-are below 1.0, where a caret pins the minor, which is where a package that
-young puts its breaking changes.
+session is what this commit names and no `.env` entry can change it. Claude
+Code, its adapter and the browser CLI are pinned to a major line rather than
+to an exact release, so a rebuild takes fixes on that line and a new major is
+an edit to that file; below 1.0 a caret pins the minor, which is where a
+package that young puts its breaking changes.
+
+Codex is pinned as a pair, and exactly. `@openai/codex` on npm is a 13 KB
+launcher whose platform binary arrives as an optional dependency of 339 MB, so
+the global install is the one copy of it; `@agentclientprotocol/codex-acp` is
+installed with `--omit=optional`, which leaves the copy npm nests under the
+adapter as a launcher with no binary behind it, and `CODEX_PATH` in the image's
+environment points the adapter at the global one. One binary, both commands on
+`PATH`, both packages at the release the pair was verified on — and the
+`codex` a person runs in a box is the build the adapter drives. The image
+asserts that, and that `codex --version` prints the pinned number, at build
+time.
 
 Frontend dependencies are pinned in `dashboard/package.json` and resolved by
 `package-lock.json`, which every Docker stage installs with `npm ci` rather
@@ -2235,6 +2550,10 @@ orchestrator/src/
   http-error.ts         The one error that carries an HTTP status, thrown wherever a request is refused
   attachments.ts        Files a prompt carries, written into the session's own workspace
   config.ts             Environment parsing, and the translatable credential set
+  harness.ts            The registry: one record per harness, and every value that varies between them
+  credentials.ts        The credential store, and the refresh that keeps a login true
+  settings.ts           Git identity and each dialog's last choice, over the settings table
+  login.ts              Logging in to an account: a CLI in a throwaway container, and the state a page polls
   secret.ts             WS auth token: configured, stored, or generated
   notify.ts             "A thread wants you", pushed to every subscribed browser
   push.ts               VAPID and RFC 8291 payload encryption, on node:crypto
@@ -2261,7 +2580,8 @@ orchestrator/src/
   gateway/
     activity.ts         Whether the agent is talking on a thread, which silence is the only evidence of
     background.ts       What a session left running in the background, so the reaper waits for it
-    upstream.ts         One persistent ACP client per session, carrying every watched thread
+    upstream.ts         What belongs to a session: browsers, threads, the box, and the connections it owns
+    adapter.ts          One adapter process: spawn, initialize, load, mint, config replay, tasks, teardown
     downstream.ts       One ACP agent connection per browser, pinned to one thread
     broadcast.ts        Which browsers each adapter update goes to, routed by thread
     pending.ts          Permission requests waiting for an answer
@@ -2287,6 +2607,7 @@ dashboard/
     api.ts              Typed fetch client
     stores/
       sessions.ts       Polled session list and health, read by useSyncExternalStore
+      harnesses.ts      Which agents this deployment can run, what each last advertised, and the dialog's last choice
       push.ts           Web Push registration: the service worker, the subscription, the toggle's state
       review.ts         The review view's whole state: the tree and the open file, fetched on arrival
       thread/
@@ -2301,11 +2622,15 @@ dashboard/
     lib/
       history.ts        Where in the stack the browser is, which both of the above read
       staged-prompt.ts  A prompt handed from one view to another, consumed once, out of history's reach
+      harness.ts        What only a reader needs about a harness: why one cannot run, and the caveat on a mode
       terminal-socket.ts  The browser's end of a terminal: bytes out, bytes in, a size
     views/              SessionList, SessionCreate, SessionThread, SessionInfo,
                         SessionReview, SessionTerminal, AgentSets, AgentSetEditor,
-                        Playground, Shell
+                        Settings, Playground, Shell
     components/
+      ThreadOptions.tsx The agent, mode, model and effort block both dialogs ask with
+      NewThreadDialog.tsx  That block, as what a card's "New thread" opens
+      AgentSettings.tsx The controls a thread's settings are drawn with, shared by the header and the dialogs
       Spinner.tsx       The one thing that says "working": blocks-wave, in every running state
       assistant-ui/     Installed registry sources, ours to edit
       ui/               Installed shadcn primitives
@@ -2336,7 +2661,11 @@ exit status.
 `scripts/live-test.sh` covers what only a real inference call can prove:
 subscription auth inside the container, a turn running to completion after the
 browser leaves, the thread replaying on reattach, and a permission request held
-with nobody watching.
+with nobody watching. Both scripts now seed the credential store over the API
+rather than reading the orchestrator's environment, since that is where a
+credential lives; give the live test an OpenAI key as well and it runs a Codex
+thread beside the Claude one in the same box, which is the whole of what a
+per-thread harness claims.
 
 The review surface is tested at three levels, because it has three kinds of
 thing to get wrong. The format is asserted byte-for-byte against REVIEW.md
@@ -2353,6 +2682,28 @@ no Docker; every invocation is checked to be addressed to a session's container
 and a path inside its workspace. They cover root resolution, drift, concurrent
 writes, and that reading a review marks the session active, since git now runs
 in the box.
+
+The second harness added suites of its own, each about one of the things it
+moved. `harness.test.ts` holds the registry to its own shape — every harness
+supplying every field, each `env()` naming its placeholder, no two layouts
+sharing a path — because the registry is a table other code trusts.
+`credentials.test.ts` covers the store, that a summary is never the secret, and
+that every write fires the hook the egress push hangs off; `settings.test.ts`
+the patch semantics, including a field cleared back to its default;
+`login.test.ts` both flows over a fake exec, their timeouts and their
+cancellation. `db.test.ts` runs the migration over a thread row that predates
+it and asserts it comes out on harness `claude` with its model in the config
+map. `config.test.ts` and `egress.test.ts` assert the store as the source of
+secrets, a placeholder for every entry whether or not it is configured, the CA
+present unconditionally, a recompose on change, and the OpenAI credential's
+hosts and headers; `docker.test.ts` that a box's environment carries both
+harnesses' variables and the CA. `upstream.test.ts` puts two connections in one
+session: a thread routed to its own, a failure in one leaving the other up,
+`initialize` answered per harness, an `auth_required` not retried, and the
+config map replayed with the mode category excluded. `background.test.ts`
+covers the task translation and the stop, and the box reading with two adapters
+present, with a shell under each, with an orphan under PID 1, and with only
+resident processes.
 
 Unit tests cover the pure logic that is easiest to get quietly wrong: the
 proxy's range checks, subnet allocation, the WebSocket upgrade check, update
@@ -2388,6 +2739,13 @@ carrying the source's messages,
 a switch bringing the first thread's transcript back, and two tabs on two
 threads each keeping to their own conversation are asserted against a gateway
 that behaves like the real one.
+The dialogs and the settings page are in that suite: both ways of starting a
+conversation, an agent greyed out with its reason, a deployment with no
+catalogue offering the agent choice alone, a thread showing which agent runs
+it, the per-harness warning on the list, a credential entered and shown as an
+account and removed again, and a login driven end to end — against a stub
+orchestrator that answers the harness, credential, settings and login routes
+the real one does.
 The review pages are in that suite too, on a phone viewport and a desktop one,
 because the two arrangements are different enough that one passing says little
 about the other: browse the tree, open a file, tap the gutter for the hunk and

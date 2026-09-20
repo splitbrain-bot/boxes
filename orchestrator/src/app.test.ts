@@ -15,8 +15,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildApp, type Orchestrator } from './app.ts';
 import { config } from './config.ts';
-import { openDb, type Db } from './db.ts';
+import { openDb, upsertHarnessCatalog, type Db } from './db.ts';
 import * as dk from './docker.ts';
+import type { LoginExecSpec } from './login.ts';
 import * as ws from './workspaces.ts';
 
 /**
@@ -25,6 +26,26 @@ import * as ws from './workspaces.ts';
  * Every exec here is a probe the manager runs while it prepares a box — the
  * repository check, the process list — and each produces nothing.
  */
+
+/** One frame of a demuxable Docker stream. */
+function frame(text: string): Buffer {
+  const payload = Buffer.from(text, 'utf8');
+  const header = Buffer.alloc(8);
+  header[0] = 1;
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
+}
+
+/**
+ * What the box's own `ps` prints, for the stop that reads it from inside.
+ * Reset for every test, like everything else the fake Docker answers with.
+ */
+let insideBox = '';
+
+/** Every `kill` the routes ran inside a box, as its arguments. */
+let killedInBox: string[][] = [];
+
+/** Installs a fake Docker client that answers everything the routes touch. */
 function fakeDocker(): void {
   const modem = new Docker({ socketPath: '/var/run/docker.sock' }).modem;
 
@@ -33,14 +54,29 @@ function fakeDocker(): void {
     getContainer: () => ({
       start: async () => undefined,
       inspect: async () => ({ State: { Running: true } }),
-      exec: async () => ({
-        start: async () => {
-          const stream = new PassThrough();
-          queueMicrotask(() => stream.end());
-          return stream;
-        },
-        inspect: async () => ({ ExitCode: 0 }),
-      }),
+      exec: async (opts: { Cmd: string[] }) => {
+        if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
+        // The box-wide stop's two calls: a reading taken inside the container,
+        // and the signal it aims at what the reading found.
+        const answers = opts.Cmd[0] === 'ps' ? insideBox : null;
+        return {
+          start: async () => {
+            const stream = new PassThrough();
+            queueMicrotask(() => {
+              // The repo probe is a plain `test -d`, which produces nothing.
+              if (answers === null) return stream.end();
+              stream.write(frame(answers));
+              stream.end();
+            });
+            return stream;
+          },
+          inspect: async () => ({
+            // A `ps` or a `kill` the stop ran succeeded; anything else this fake
+            // does not answer for failed.
+            ExitCode: answers === null && opts.Cmd[0] !== 'kill' ? 1 : 0,
+          }),
+        };
+      },
     }),
   } as unknown as Docker);
 }
@@ -58,10 +94,10 @@ let orchestrator: Orchestrator;
 function insertSession(id: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        ws_token, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?, ?)`,
   ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
@@ -78,6 +114,8 @@ function insertThread(sessionId: string, threadId: string, ordinal: number): voi
 }
 
 beforeEach(() => {
+  insideBox = '';
+  killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
   // Before config(), which reads DATA_DIR once and keeps it for the process.
   process.env['DATA_DIR'] = dir;
@@ -802,7 +840,7 @@ test('starting a container to reach into writes the current configuration first'
   // orchestrator's own rather than this test's fresh one.
   assert.equal(
     readFileSync(
-      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', 'commands', 'ship.md'),
+      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', '.claude', 'commands', 'ship.md'),
       'utf8',
     ),
     'Open a PR.\n',
@@ -819,8 +857,9 @@ test('stopping background work names a thread, and 404s for one that is not ther
   });
   assert.equal(missing.statusCode, 404);
 
-  // A thread with no conversation upstream cannot have left anything in the
-  // box, and says so without reaching Docker at all.
+  // A thread with no conversation upstream cannot have announced a task: a
+  // task is named by the adapter's own id for the conversation it is on, and
+  // this thread has none. Said without reaching Docker at all.
   const now = Date.now();
   db.prepare(
     `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
@@ -828,13 +867,55 @@ test('stopping background work names a thread, and 404s for one that is not ther
      VALUES ('t1', 'abc123', NULL, NULL, 1, ?, ?)`,
   ).run(now, now);
 
+  // `processId` is the adapter's async task id now, not a hash of a command
+  // line. The body keeps its shape, so a browser from before this is wrong
+  // about what the id means rather than about how to send it.
   const unminted = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/sessions/abc123/threads/t1/background/stop',
-    payload: { processId: 'aabbccdd' },
+    payload: { processId: 'task-1' },
   });
   assert.equal(unminted.statusCode, 200);
   assert.deepEqual(unminted.json(), { stopped: 0 });
+});
+
+test('stopping everything in a box signals the work and nothing of Boxes own', async () => {
+  // The floor's own stop, for work no conversation can name: after an adapter
+  // restart the bars are empty and the box is still compiling something.
+  insertSession('abc123');
+  fakeDocker();
+  insideBox = [
+    '  PID  PPID COMMAND',
+    '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
+    '    7     1 sleep infinity',
+    '   12     1 node /usr/local/bin/claude-agent-acp',
+    '   13    12 claude --output-format stream-json --session-id=acp-1',
+    "   14    13 /bin/bash -c eval 'npm run build'",
+    '   20     1 node /usr/local/bin/codex-acp',
+    '   21    20 codex app-server',
+    '   22    21 bash -lc npm run watch',
+    '   30     1 ps -eo pid,ppid,args',
+  ].join('\n');
+
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/abc123/background/stop',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { stopped: 2 });
+  // The two shells, and neither adapter, neither agent, nothing of the
+  // entrypoint's and not the `ps` that took the reading.
+  assert.deepEqual(killedInBox, [['-TERM', '14', '22']]);
+});
+
+test('stopping everything in a box that is not there is a 404', async () => {
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/nope/background/stop',
+    payload: {},
+  });
+  assert.equal(res.statusCode, 404);
 });
 
 test('marking a thread done is remembered, reversible, and 404s for a thread that is not there', async () => {
@@ -962,4 +1043,491 @@ test('a body that leaves out an optional field is taken as it is', async () => {
   const set = res.json() as { name: string; agentsMd: string };
   assert.equal(set.name, 'Everywhere');
   assert.equal(set.agentsMd, 'House rules.');
+});
+
+// --- credentials and settings over their real routes --------------------------
+
+test('a pasted credential is stored, shown by its last four, and never read back', async () => {
+  const put = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual(put.json(), {
+    id: 'claude',
+    method: 'token',
+    account: '1234',
+    status: 'ok',
+    lastError: null,
+    expiresAt: null,
+    refreshedAt: null,
+    updatedAt: (put.json() as { updatedAt: number }).updatedAt,
+  });
+
+  const list = await orchestrator.app.inject({ url: '/api/credentials' });
+  // Write-only: the secret exists in the database and in the proxy, and in no
+  // answer this API gives.
+  assert.ok(!list.payload.includes('sk-ant-oat01-abcdefgh1234'));
+  assert.deepEqual(
+    (list.json() as Array<{ id: string }>).map((c) => c.id),
+    ['claude'],
+  );
+
+  const removed = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: '/api/credentials/claude',
+  });
+  assert.equal(removed.statusCode, 204);
+  assert.deepEqual((await orchestrator.app.inject({ url: '/api/credentials' })).json(), []);
+});
+
+test('a credential nobody can use is refused rather than stored', async () => {
+  const unknown = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/gitlab',
+    payload: { method: 'token', secret: 'x' },
+  });
+  assert.equal(unknown.statusCode, 400);
+
+  const method = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'magic', secret: 'x' },
+  });
+  assert.equal(method.statusCode, 400);
+
+  const empty = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: '   ' },
+  });
+  assert.equal(empty.statusCode, 400);
+
+  assert.deepEqual((await orchestrator.app.inject({ url: '/api/credentials' })).json(), []);
+});
+
+/**
+ * A login, over its real routes and a scripted CLI.
+ *
+ * The container and the exec are injected — a daemon is the one thing these
+ * tests cannot have — so what is exercised here is the shape the settings page
+ * consumes: one call to start, a poll that answers with a state, a code posted
+ * back, and a cancel that takes the container with it.
+ */
+function fakeLogins(): {
+  execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> ;
+  removed: string[];
+} {
+  const execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> = [];
+  const removed: string[] = [];
+  orchestrator.logins.setRuntimeForTests({
+    start: async () => 'login-container',
+    exec: async (_id, spec) => {
+      const output = new PassThrough();
+      const record = { spec, output, input: '' };
+      execs.push(record);
+      const stdin = spec.tty ? new PassThrough() : null;
+      stdin?.on('data', (chunk: Buffer) => {
+        record.input += chunk.toString('utf8');
+      });
+      return {
+        output,
+        stdin,
+        exited: new Promise<number | null>(() => {}),
+        kill: () => output.destroy(),
+      };
+    },
+    remove: async (id) => {
+      removed.push(id);
+    },
+  });
+  return { execs, removed };
+}
+
+/** Waits for something a flow does on its own, or gives up loudly. */
+async function untilTrue(
+  what: string,
+  ready: () => boolean | Promise<boolean>,
+): Promise<void> {
+  for (let i = 0; i < 500; i += 1) {
+    if (await ready()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+test('a login is started, polled, and cancelled over its own routes', async () => {
+  const fake = fakeLogins();
+
+  const started = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/openai/login',
+  });
+  assert.equal(started.statusCode, 200);
+  const { loginId } = started.json() as { loginId: string };
+  assert.ok(loginId);
+
+  const first = await orchestrator.app.inject({
+    url: `/api/credentials/openai/login/${loginId}`,
+  });
+  assert.deepEqual(first.json(), { state: 'starting' });
+
+  await untilTrue('the CLI to be running', () => fake.execs.length === 1);
+  fake.execs[0]!.output.write(
+    'Open https://auth.openai.com/codex/device and enter WXYZ-1234\n',
+  );
+
+  let state = { state: 'starting' } as Record<string, unknown>;
+  await untilTrue('the poll to move', async () => {
+    const res = await orchestrator.app.inject({
+      url: `/api/credentials/openai/login/${loginId}`,
+    });
+    state = res.json() as Record<string, unknown>;
+    return state['state'] === 'awaiting_browser';
+  });
+  assert.deepEqual(state, {
+    state: 'awaiting_browser',
+    url: 'https://auth.openai.com/codex/device',
+    code: 'WXYZ-1234',
+  });
+
+  const cancelled = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: `/api/credentials/openai/login/${loginId}`,
+  });
+  assert.equal(cancelled.statusCode, 204);
+  await untilTrue('the container to go', () => fake.removed.length === 1);
+
+  // The id stops resolving with it, which is what a page polling an abandoned
+  // login sees.
+  const gone = await orchestrator.app.inject({
+    url: `/api/credentials/openai/login/${loginId}`,
+  });
+  assert.equal(gone.statusCode, 404);
+});
+
+test("a code is posted back into Claude's flow, and refused where none is wanted", async () => {
+  const fake = fakeLogins();
+  const started = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/claude/login',
+  });
+  const { loginId } = started.json() as { loginId: string };
+
+  await untilTrue('the CLI to be running', () => fake.execs.length === 1);
+  const cli = fake.execs[0]!;
+  // Nothing is waiting for a code yet, and saying so beats writing into a
+  // stream nobody is reading.
+  const early = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/credentials/claude/login/${loginId}/code`,
+    payload: { code: 'x' },
+  });
+  assert.equal(early.statusCode, 409);
+
+  cli.output.write('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
+  await untilTrue('the prompt', async () => {
+    const res = await orchestrator.app.inject({
+      url: `/api/credentials/claude/login/${loginId}`,
+    });
+    return (res.json() as { state: string }).state === 'awaiting_code';
+  });
+
+  const posted = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/credentials/claude/login/${loginId}/code`,
+    payload: { code: 'from-the-page' },
+  });
+  assert.equal(posted.statusCode, 204);
+  await untilTrue('the code to be entered', () => cli.input.endsWith('\r'));
+  // A carriage return: the Enter key's own byte, which is what the raw
+  // terminal the UI reads needs to see.
+  assert.equal(cli.input, 'from-the-page\r');
+
+  const missing = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/credentials/claude/login/${loginId}/code`,
+    payload: {},
+  });
+  assert.equal(missing.statusCode, 400);
+});
+
+test('GitHub has no login flow, and neither has anything else unknown', async () => {
+  const fake = fakeLogins();
+  const github = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/github/login',
+  });
+  assert.equal(github.statusCode, 400);
+  assert.match((github.json() as { error: string }).error, /no login flow/);
+
+  const unknown = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/credentials/gitlab/login',
+  });
+  assert.equal(unknown.statusCode, 400);
+  assert.deepEqual(fake.removed, []);
+});
+
+test('an account credential is reported, and says why it cannot run a box yet', async () => {
+  const document = JSON.stringify({
+    tokens: { access_token: 'a.b.c', refresh_token: 'r' },
+    last_refresh: '2026-09-12T10:00:00Z',
+  });
+  orchestrator.credentials.put('openai', 'oauth', document, { account: 'someone@example.com' });
+
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{
+      id: string;
+      runnable: boolean;
+      credential: { account: string; status: string; lastError: string | null } | null;
+    }>;
+  };
+  const codex = health.harnesses.find((h) => h.id === 'codex');
+  assert.equal(codex?.credential?.account, 'someone@example.com');
+  assert.equal(codex?.credential?.status, 'ok');
+  // Stored, refreshed, and still not something a box can be handed: the proxy
+  // swaps a header and this authenticates traffic nobody intercepts.
+  assert.equal(codex?.runnable, false);
+  assert.match(codex?.credential?.lastError ?? '', /cannot hand a subscription login to a box/);
+});
+
+test('the git identity round-trips, and defaults where nobody has set it', async () => {
+  const initial = await orchestrator.app.inject({ url: '/api/settings' });
+  assert.deepEqual(initial.json(), {
+    gitName: 'boxes-bot',
+    gitEmail: 'boxes-bot@users.noreply.github.com',
+    dialogs: {},
+  });
+
+  const patched = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/settings',
+    payload: { gitEmail: 'bot@example.com' },
+  });
+  assert.deepEqual(patched.json(), {
+    gitName: 'boxes-bot',
+    gitEmail: 'bot@example.com',
+    dialogs: {},
+  });
+  assert.equal(
+    ((await orchestrator.app.inject({ url: '/api/settings' })).json() as { gitEmail: string })
+      .gitEmail,
+    'bot@example.com',
+  );
+
+  const bad = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/settings',
+    payload: { gitName: 42 },
+  });
+  assert.equal(bad.statusCode, 400);
+});
+
+test('the health probe says which harness can run, and on what', async () => {
+  const before = await orchestrator.app.inject({ url: '/healthz' });
+  const empty = before.json() as {
+    harnesses: Array<{ id: string; runnable: boolean; credential: unknown }>;
+    credentials: unknown[];
+  };
+  // Both harnesses, because a box can be handed a placeholder for either
+  // credential. Neither runs yet: nothing is stored.
+  assert.deepEqual(
+    empty.harnesses.map((h) => [h.id, h.runnable]),
+    [
+      ['claude', false],
+      ['codex', false],
+    ],
+  );
+  assert.equal(empty.harnesses[0]!.credential, null);
+  assert.equal(empty.harnesses[1]!.credential, null);
+  assert.deepEqual(empty.credentials, []);
+
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
+  });
+
+  const after = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ id: string; runnable: boolean; credential: { account: string } | null }>;
+    credentials: Array<{ id: string }>;
+  };
+  assert.equal(after.harnesses[0]!.runnable, true);
+  assert.equal(after.harnesses[0]!.credential?.account, '1234');
+  // One credential is one harness: Codex is still waiting for its own.
+  assert.equal(after.harnesses[1]!.runnable, false);
+  // Every stored credential is reported, GitHub included, because the
+  // settings page reads them from here.
+  assert.deepEqual(
+    after.credentials.map((c) => c.id),
+    ['claude'],
+  );
+});
+
+test('an OpenAI key entered on the settings page is what makes Codex runnable', async () => {
+  const put = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/openai',
+    payload: { method: 'api_key', secret: 'sk-proj-abcdefgh5678' },
+  });
+  assert.equal(put.statusCode, 200);
+  // Write-only: the page is told which key this is and never the key.
+  assert.deepEqual(put.json(), {
+    id: 'openai',
+    method: 'api_key',
+    account: '5678',
+    status: 'ok',
+    lastError: null,
+    expiresAt: null,
+    refreshedAt: null,
+    updatedAt: (put.json() as { updatedAt: number }).updatedAt,
+  });
+
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ id: string; runnable: boolean }>;
+  };
+  assert.deepEqual(
+    health.harnesses.map((h) => [h.id, h.runnable]),
+    [
+      ['claude', false],
+      ['codex', true],
+    ],
+  );
+
+  const harnesses = (await orchestrator.app.inject({ url: '/api/harnesses' })).json() as Array<{
+    id: string;
+    runnable: boolean;
+  }>;
+  assert.equal(harnesses.find((h) => h.id === 'codex')?.runnable, true);
+});
+
+test('a credential that is failing is still offered, and says it is not runnable', async () => {
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
+  });
+  orchestrator.credentials.markStatus('claude', 'expired', 'a year is up');
+
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ runnable: boolean; credential: { status: string; lastError: string } }>;
+  };
+  assert.equal(health.harnesses[0]!.runnable, false);
+  assert.equal(health.harnesses[0]!.credential.status, 'expired');
+  assert.equal(health.harnesses[0]!.credential.lastError, 'a year is up');
+});
+
+// --- harnesses, and the thread bodies that name one ---------------------------
+
+test('the harness list carries the registry, the catalogue and the health', async () => {
+  const res = await orchestrator.app.inject({ url: '/api/harnesses' });
+  assert.equal(res.statusCode, 200);
+  const fresh = res.json() as Array<{
+    id: string;
+    runnable: boolean;
+    defaultModeId: string;
+    forkModeId: string;
+    defaultConfig: Record<string, string>;
+    catalog: unknown;
+  }>;
+  // Both, on the same rule the health probe uses: a harness this deployment
+  // can carry a credential to is offered whether or not one is stored.
+  assert.deepEqual(
+    fresh.map((h) => h.id),
+    ['claude', 'codex'],
+  );
+  assert.equal(fresh[0]!.defaultModeId, 'auto');
+  assert.equal(fresh[0]!.forkModeId, 'plan');
+  assert.deepEqual(fresh[0]!.defaultConfig, { model: 'opus' });
+  // Codex's own defaults, which the dialog prefills from: the container is the
+  // boundary, so a fresh thread is in full access, and the model is left to
+  // the adapter.
+  assert.equal(fresh[1]!.defaultModeId, 'agent-full-access');
+  assert.equal(fresh[1]!.forkModeId, 'read-only');
+  assert.deepEqual(fresh[1]!.defaultConfig, {});
+  assert.equal(fresh[1]!.catalog, null);
+  // Nothing has run an adapter here, so there is nothing cached and no box is
+  // started to find out: the dialog shows the agent choice alone.
+  assert.equal(fresh[0]!.catalog, null);
+  assert.equal(fresh[0]!.runnable, false);
+
+  // What an adapter last advertised, cached by the gateway and read back here.
+  upsertHarnessCatalog(
+    db,
+    'claude',
+    { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
+    [{ id: 'model', category: 'model', currentValue: 'opus' }],
+  );
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/credentials/claude',
+    payload: { method: 'token', secret: 'sk-ant-oat01-abcd1234' },
+  });
+
+  const after = (await orchestrator.app.inject({ url: '/api/harnesses' })).json() as Array<{
+    runnable: boolean;
+    catalog: { modes: { availableModes: Array<{ id: string }> } } | null;
+  }>;
+  assert.equal(after[0]!.runnable, true);
+  assert.deepEqual(after[0]!.catalog?.modes.availableModes, [{ id: 'auto' }, { id: 'plan' }]);
+});
+
+test('a thread reports the agent it runs and what it is configured with', async () => {
+  insertSession('harn01');
+  db.prepare(
+    `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
+  ).run('harn01-t1');
+
+  const res = await orchestrator.app.inject({ url: '/api/sessions/harn01/threads' });
+  assert.deepEqual(res.json(), [
+    {
+      id: 'harn01-t1',
+      // Claude, which is what a row written before harnesses existed is and
+      // what a request naming none asks for.
+      harness: 'claude',
+      acpSessionId: null,
+      title: null,
+      ordinal: 1,
+      turnActive: false,
+      speaking: false,
+      backgroundBusy: false,
+      pendingCount: 0,
+      modeId: 'plan',
+      config: { model: 'opus' },
+      // No adapter has been reached, so nothing is claimed about forking.
+      canFork: false,
+      done: false,
+      createdAt: (res.json() as Array<{ createdAt: number }>)[0]!.createdAt,
+      lastActiveAt: (res.json() as Array<{ lastActiveAt: number }>)[0]!.lastActiveAt,
+    },
+  ]);
+});
+
+test('a thread for an agent nobody has is refused before anything is started', async () => {
+  insertSession('harn02');
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions/harn02/threads',
+    payload: { options: { harness: 'gemini' } },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /Unknown harness/);
+  // Nothing was created on the way to the refusal: the box still has the one
+  // thread it was seeded with.
+  const threads = (
+    await orchestrator.app.inject({ url: '/api/sessions/harn02/threads' })
+  ).json() as unknown[];
+  assert.equal(threads.length, 1);
+
+  // Same answer when a box is asked for on an agent nobody has, and before
+  // anything is allocated for it — no image pull, no network, no container.
+  const created = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: { name: 'a box on nothing', thread: { harness: 'gemini' } },
+  });
+  assert.equal(created.statusCode, 400);
+  assert.match((created.json() as { error: string }).error, /Unknown harness/);
 });

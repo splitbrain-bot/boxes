@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { HarnessId } from '../../shared/types.ts';
 import { HttpError } from './http-error.ts';
 
 /**
@@ -37,16 +38,29 @@ export function parseBody<S extends z.ZodTypeAny>(schema: S, body: unknown): z.i
 /** A string that has to carry something, for a field an empty value cannot name. */
 const filled = z.string().min(1, 'must not be empty');
 
-/** POST /api/sessions — the session to create. */
+/**
+ * What a new thread runs: the harness, and its mode and settings when the
+ * dialog chose them. Whether the harness is one this deployment has is the
+ * session manager's check, which is where the registry is.
+ */
+const threadOptions = z.object({
+  harness: z.custom<HarnessId>((id) => typeof id === 'string', 'must be a string'),
+  modeId: z.string().optional(),
+  config: z.record(z.string(), z.string()).optional(),
+});
+
+/** POST /api/sessions — the session to create, and what its first thread runs. */
 export const createSessionBody = z.object({
   name: z.string(),
   profile: z.string().optional(),
   agentSet: z.string().nullable().optional(),
+  thread: threadOptions.optional(),
 });
 
 /** POST /api/sessions/:id/threads — the conversation to add. */
 export const createThreadBody = z.object({
   from: z.string().optional(),
+  options: threadOptions.optional(),
 });
 
 /** POST /api/sessions/:id/threads/:threadId/done — the mark to set or clear. */
@@ -127,4 +141,40 @@ export const pushSubscribeBody = z.object({
 /** DELETE /api/push/subscribe — the subscription to forget. */
 export const pushUnsubscribeBody = z.object({
   endpoint: z.string(),
+});
+
+/**
+ * PUT /api/credentials/:id — the secret to store and how it was obtained.
+ *
+ * The method defaults to a pasted token, which is what a settings page that
+ * names none is sending. Whether the id is a credential this deployment
+ * knows is the route's own check.
+ */
+export const putCredentialBody = z.object({
+  method: z.enum(['token', 'api_key', 'oauth']).default('token'),
+  secret: z.string().trim().min(1, 'must not be empty'),
+});
+
+/** POST /api/credentials/:id/login/:loginId/code — the code the CLI asked for. */
+export const loginCodeBody = z.object({
+  code: filled,
+});
+
+/** One dialog's remembered choices, as the thread dialog last left them. */
+const threadDialogDefaults = z.object({
+  modeId: z.string().optional(),
+  config: z.record(z.string(), z.string()).optional(),
+});
+
+/**
+ * PATCH /api/settings — the settings to write.
+ *
+ * Every field is optional: the git identity and a dialog's last choice are
+ * written by different screens, and neither should carry the other's values
+ * to be able to save.
+ */
+export const patchSettingsBody = z.object({
+  gitName: z.string().optional(),
+  gitEmail: z.string().optional(),
+  dialogs: z.record(z.string(), threadDialogDefaults).optional(),
 });

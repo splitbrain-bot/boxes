@@ -5,10 +5,15 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
+  CredentialSummary,
+  HarnessHealth,
+  HarnessInfo,
   HealthResponse,
+  LoginState,
   PushKeyResponse,
   ReadyResponse,
   ReviewAnnotationsResponse,
+  Settings,
   StoredAttachment,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
@@ -19,32 +24,45 @@ import {
   createAgentSetBody,
   createSessionBody,
   createThreadBody,
+  loginCodeBody,
   parseBody,
+  patchSettingsBody,
   pushSubscribeBody,
   pushUnsubscribeBody,
+  putCredentialBody,
   reviewAnnotationBody,
   reviewBaseBody,
   reviewFileBody,
   threadDoneBody,
   updateAgentSetBody,
 } from './bodies.ts';
-import type { Config } from './config.ts';
+import { CREDENTIAL_SET, type Config } from './config.ts';
+import {
+  CredentialStore,
+  isCredentialId,
+  undeliverableReason,
+  type CredentialId,
+} from './credentials.ts';
 import {
   countLiveSessions,
   countPushSubscriptions,
   deletePushSubscription,
+  readHarnessCatalog,
   upsertPushSubscription,
   type Db,
 } from './db.ts';
 import * as dk from './docker.ts';
 import { EgressManager } from './egress.ts';
+import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
+import { dockerLoginRuntime, LoginManager } from './login.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { SessionManager } from './sessions.ts';
+import { patchSettings, readSettings } from './settings.ts';
 import { setSessionOwner } from './workspaces.ts';
 
 /** The HTTP surface: the REST API and the static bundle. */
@@ -176,6 +194,10 @@ export interface Orchestrator {
   cfg: Config;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
+  /** The deployment's credentials, as the settings page manages them. */
+  credentials: CredentialStore;
+  /** The logins in flight, one per credential at most. */
+  logins: LoginManager;
   /** Session ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -193,8 +215,31 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // that writes files for the agent, or runs a process as it, reads this.
   setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
 
-  const egress = new EgressManager(cfg);
+  // The store and the manager each need the other: the policy is composed
+  // from the store's rows, and every write to the store re-pushes it. The
+  // hoisted function below is what lets them be built in this order.
+  const credentials = new CredentialStore(db, () => repushPolicy());
+  const egress = new EgressManager(cfg, credentials);
   const notifier = new Notifier(db, cfg);
+
+  /**
+   * Pushes the policy again because a credential changed.
+   *
+   * Best effort and never awaited: the write that caused it has already
+   * happened, the settings page should not fail because the proxy is
+   * restarting, and the reconciler re-pushes every minute regardless.
+   */
+  function repushPolicy(): void {
+    void egress.sync().catch((err: Error) => {
+      log.warn('could not push the egress policy after a credential changed; will retry', {
+        error: err.message,
+      });
+    });
+  }
+  // A login runs the harness's own CLI in a throwaway container built from
+  // the session image, so the one thing it needs from the deployment is which
+  // image that is.
+  const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.SESSION_IMAGE));
   const agents = new AgentStore(db, cfg.DATA_DIR);
   const manager = new SessionManager(db, cfg, egress, notifier, agents);
   // The review surface reaches the files and the box through the manager,
@@ -269,7 +314,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       sessions,
       proxyWarnings,
       egress: egress.status(),
-      claudeTokenConfigured: cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '',
+      harnesses: harnessHealth(),
+      credentials: credentials.list().map((row) => credentials.summarize(row)),
       pushSubscriptions: countPushSubscriptions(db),
       // The one thing here that asks the daemon anything. Cached for a minute
       // and null on every failure, so the probe answers at the same speed and
@@ -287,11 +333,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * egress policy that is not in sync counts because a session started
    * against a stale one reaches hosts the deployment has stopped allowing.
    *
-   * What /healthz also reports stays out of this. A missing Claude token is a
-   * deployment that serves sessions nobody has given a credential, and a
-   * proxy warning names one session's network rather than the instance — a
-   * probe that took the instance out of service for either would be answering
-   * about the wrong thing.
+   * What /healthz also reports stays out of this. A harness with no
+   * credential is a deployment that serves sessions nobody has given a
+   * credential, and a proxy warning names one session's network rather than
+   * the instance — a probe that took the instance out of service for either
+   * would be answering about the wrong thing.
    */
   app.get('/readyz', async (_req, reply): Promise<ReadyResponse> => {
     const checks = {
@@ -302,6 +348,65 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const ready = Object.values(checks).every(Boolean);
     return reply.code(ready ? 200 : 503).send({ ready, version: VERSION, checks });
   });
+
+  /**
+   * What each harness needs, and whether it has it.
+   *
+   * Only the harnesses this deployment can carry a credential to: a box holds
+   * one placeholder per entry of CREDENTIAL_SET, so a harness whose
+   * credential is not in that set could not be given one whatever the store
+   * held. Both harnesses qualify now that the OpenAI credential is in the set,
+   * and a third would the moment its own credential joined it.
+   */
+  function harnessHealth(): HarnessHealth[] {
+    const deliverable = new Set(CREDENTIAL_SET.map((spec) => spec.id));
+    return Object.values(HARNESSES)
+      .filter((h) => deliverable.has(h.credentialId))
+      .map((h) => {
+        const row = credentials.get(h.credentialId);
+        // A credential can be perfectly good and still not reach a box: a
+        // subscription obtained by logging in is a document rather than a
+        // header value, and Boxes has no way to hand one to a container yet.
+        // See credentials.ts's deliverableSecret(). The reason travels in
+        // the field the dashboard already shows beside a harness it cannot
+        // offer.
+        const blocked = row ? undeliverableReason(row) : null;
+        const summary = row ? credentials.summarize(row) : null;
+        return {
+          id: h.id,
+          label: h.label,
+          credential:
+            summary && blocked ? { ...summary, lastError: summary.lastError ?? blocked } : summary,
+          // A stored credential that is expired or failing is still stored:
+          // the dashboard offers the harness and says what is wrong with it,
+          // rather than having it disappear.
+          runnable: row?.status === 'ok' && blocked === null,
+        };
+      });
+  }
+
+  /**
+   * Every harness this deployment can run: what the registry says about it,
+   * what its adapter last advertised, and whether it can run right now.
+   *
+   * What the dialogs are built from. The catalogue half is a cache written by
+   * whichever adapter last answered a `session/new`, `session/load` or
+   * `session/fork`, and it is null on a deployment that has never run one —
+   * such a dialog offers the agent choice alone rather than starting a box to
+   * find out what it would have offered.
+   */
+  app.get('/api/harnesses', async (): Promise<HarnessInfo[]> =>
+    harnessHealth().map((health) => {
+      const entry = HARNESSES[health.id];
+      return {
+        ...health,
+        defaultModeId: entry.defaultModeId,
+        forkModeId: entry.forkModeId,
+        defaultConfig: { ...entry.defaultConfig },
+        catalog: readHarnessCatalog(db, health.id),
+      };
+    }),
+  );
 
   app.get('/api/sessions', async () => manager.list());
 
@@ -377,21 +482,37 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Kills one thing that conversation left running, or everything it has.
+   * Stops one task that conversation left running, or every task it has.
    *
-   * A kill and not a cancel: a background command is a child of the agent's
-   * own process that outlives the turn which started it, and interrupting the
-   * conversation does not reach it. The `processId` is the one the thread
-   * state carried; without one, everything that thread is running stops.
+   * A stop and not a cancel: a background command outlives the turn which
+   * started it, and interrupting the conversation does not reach it. The
+   * adapter running the task is asked to stop it by name. The `processId` is
+   * the id the thread state carried, which is the adapter's own id for the
+   * task; without one, everything that thread is running stops.
    *
-   * The answer says how many processes were signalled, and zero is an
-   * ordinary one — the work can end between a browser being told about it and
-   * somebody pressing stop.
+   * The answer says how many tasks the adapter stopped, and zero is an
+   * ordinary one — a task that had already finished answers that it had, and
+   * the thread's state is re-sent either way so the bar catches up.
    */
   app.post('/api/sessions/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
     const { processId } = parseBody(backgroundStopBody, req.body);
     return manager.stopBackgroundWork(id, threadId, processId);
+  });
+
+  /**
+   * Kills everything running in a box, whoever left it there.
+   *
+   * The per-thread stop reaches what an adapter is still holding; this reaches
+   * what no adapter can name any more. Neither adapter re-announces the tasks
+   * of a process that has died, so after a restart the bars are empty and the
+   * box is still compiling something — and a signal is all that is left.
+   *
+   * The answer says how many processes were signalled.
+   */
+  app.post('/api/sessions/:id/background/stop', async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.stopBoxWork(id);
   });
 
   /**
@@ -645,6 +766,94 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return agents.bundle(setId);
   });
 
+  // --- Credentials and settings ------------------------------------------------
+
+  /**
+   * The deployment's credentials and the plain settings beside them.
+   *
+   * Secrets are write-only: they go in through PUT and come back out only as
+   * an account and a status. Every write starts a recompose and a push of the
+   * egress policy through the store's own change hook, so a pasted token
+   * reaches the proxy in the same second rather than at the reconciler's next
+   * minute.
+   */
+
+  app.get('/api/credentials', async (): Promise<CredentialSummary[]> =>
+    credentials.list().map((row) => credentials.summarize(row)),
+  );
+
+  app.put('/api/credentials/:id', async (req) => {
+    const id = credentialId(req.params as { id: string });
+    const { method, secret } = parseBody(putCredentialBody, req.body);
+    return credentials.summarize(credentials.put(id, method, secret));
+  });
+
+  app.delete('/api/credentials/:id', async (req, reply) => {
+    credentials.remove(credentialId(req.params as { id: string }));
+    return reply.code(204).send();
+  });
+
+  /**
+   * Logging in, for a credential that cannot be pasted.
+   *
+   * A ChatGPT or Claude subscription has no static form: the only thing that
+   * can obtain one is the harness's own CLI, which Boxes runs in a throwaway
+   * container and drives from here. Four calls, because the flow is a state
+   * machine a page polls rather than a request that blocks for the minutes a
+   * person takes in a browser: start it, ask where it is, answer the one
+   * question Claude's CLI asks, and give up.
+   *
+   * `github` has no flow — a personal access token is a string somebody
+   * pastes — and says so rather than starting a container that would print
+   * nothing.
+   */
+
+  app.post('/api/credentials/:id/login', async (req) => {
+    const id = credentialId(req.params as { id: string });
+    return { loginId: logins.start(id) };
+  });
+
+  app.get('/api/credentials/:id/login/:loginId', async (req): Promise<LoginState> => {
+    const { loginId } = req.params as { loginId: string };
+    return logins.state(credentialId(req.params as { id: string }), loginId);
+  });
+
+  app.post('/api/credentials/:id/login/:loginId/code', async (req, reply) => {
+    const { loginId } = req.params as { loginId: string };
+    const { code } = parseBody(loginCodeBody, req.body);
+    logins.submitCode(credentialId(req.params as { id: string }), loginId, code);
+    // Nothing to answer with: where the login goes next is what the poll
+    // above says, and it may not have moved yet.
+    return reply.code(204).send();
+  });
+
+  app.delete('/api/credentials/:id/login/:loginId', async (req, reply) => {
+    const { loginId } = req.params as { loginId: string };
+    logins.cancel(credentialId(req.params as { id: string }), loginId);
+    return reply.code(204).send();
+  });
+
+  /** The credential a route names, or a 400 rather than a row nobody can use. */
+  function credentialId(params: { id: string }): CredentialId {
+    if (!isCredentialId(params.id)) {
+      throw new HttpError(400, `Unknown credential: ${params.id}`);
+    }
+    return params.id;
+  }
+
+  app.get('/api/settings', async (): Promise<Settings> => readSettings(db));
+
+  /**
+   * Writes the settings a body names and answers with the whole of them.
+   *
+   * A patch rather than a put: the git identity and a dialog's last choice are
+   * written by different screens, and neither should carry the other's values
+   * to be able to save.
+   */
+  app.patch('/api/settings', async (req): Promise<Settings> =>
+    patchSettings(db, parseBody(patchSettingsBody, req.body)),
+  );
+
   // --- Web Push --------------------------------------------------------------
 
   /**
@@ -816,6 +1025,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     manager,
     cfg,
     egress,
+    credentials,
+    logins,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

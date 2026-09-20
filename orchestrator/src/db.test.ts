@@ -7,7 +7,9 @@ import { join } from 'node:path';
 import {
   MIGRATIONS,
   openDb,
+  readHarnessCatalog,
   touchSession,
+  upsertHarnessCatalog,
   type Db,
 } from './db.ts';
 
@@ -268,15 +270,18 @@ test('threads from before the mode column upgrade to the deployment default', ()
   const upgraded = openDb(dir);
   try {
     assert.ok(columns(upgraded, 'threads').includes('mode_id'));
-    assert.ok(columns(upgraded, 'threads').includes('model_id'));
 
     // No backfill, because null already says the right thing: this thread is
-    // in whatever the deployment starts one in. Nothing has to guess what a
+    // in whatever its harness starts one in. Nothing has to guess what a
     // conversation from before the column was in.
+    //
+    // The model column is gone by the time every migration has run — it is one
+    // entry of the config map now — and a thread that never had one comes out
+    // with an empty map rather than a guess.
     const row = upgraded
-      .prepare("SELECT mode_id, model_id FROM threads WHERE id = 't1'")
-      .get() as { mode_id: string | null; model_id: string | null };
-    assert.deepEqual(row, { mode_id: null, model_id: null });
+      .prepare("SELECT mode_id, config FROM threads WHERE id = 't1'")
+      .get() as { mode_id: string | null; config: string };
+    assert.deepEqual(row, { mode_id: null, config: '{}' });
   } finally {
     upgraded.close();
   }
@@ -421,10 +426,10 @@ test('a database written by a newer build is refused rather than opened', () => 
 /** A live session row, in the shape today's schema wants. */
 function insertLiveSession(db: Db, id: string): void {
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', '', '', 'running', NULL, 1000, 2000)`,
   ).run(id, `sn-${id}`);
 }
@@ -446,3 +451,156 @@ test('a deleted session takes no more writes', () => {
   db.close();
 });
 
+/**
+ * A deployment at the version before credentials, harnesses and the config map
+ * — the last state anybody can be in — with one live session and one thread
+ * that was left on a model.
+ */
+function atLastRelease(): void {
+  const db = new Database(join(dir, 'boxes.db'));
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('CREATE TABLE credentials'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  db.prepare(
+    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       created_at, last_active_at)
+     VALUES ('live', 'from before credentials moved', 'DEFAULT', 'img',
+       '["claude-agent-acp"]', 'c1',
+       'sn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+       mode_id, model_id, created_at, last_active_at)
+     VALUES ('t1', 'live', 'acp-1', NULL, 1, 'plan', 'opus', 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+       mode_id, model_id, created_at, last_active_at)
+     VALUES ('t2', 'live', 'acp-2', NULL, 2, NULL, NULL, 1000, 2000)`,
+  ).run();
+  db.close();
+}
+
+test('the credential and settings tables arrive empty on an existing deployment', () => {
+  atLastRelease();
+
+  const upgraded = openDb(dir);
+  try {
+    // Nothing is carried over from the environment, deliberately: a
+    // deployment that had credentials in its .env enters them again on the
+    // settings page, and the release notes say so.
+    const credentials = upgraded
+      .prepare('SELECT COUNT(*) AS n FROM credentials')
+      .get() as { n: number };
+    assert.equal(credentials.n, 0);
+    const settings = upgraded.prepare('SELECT COUNT(*) AS n FROM settings').get() as {
+      n: number;
+    };
+    assert.equal(settings.n, 0);
+
+    assert.deepEqual(columns(upgraded, 'settings'), ['key', 'value', 'updated_at']);
+    assert.deepEqual(columns(upgraded, 'credentials'), [
+      'id',
+      'method',
+      'secret',
+      'account',
+      'expires_at',
+      'refreshed_at',
+      'status',
+      'last_error',
+      'created_at',
+      'updated_at',
+    ]);
+
+    // And the session that predates them is untouched: its box gets a
+    // placeholder for every credential at its next start, whatever is stored.
+    const row = upgraded.prepare("SELECT name FROM sessions WHERE id = 'live'").get() as {
+      name: string;
+    };
+    assert.equal(row.name, 'from before credentials moved');
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('a thread from before harnesses is Claude, on the model it was left on', () => {
+  atLastRelease();
+  const upgraded = openDb(dir);
+  try {
+    // Every thread there has ever been is Claude's, which is what the column
+    // default says without a backfill.
+    const threads = upgraded
+      .prepare('SELECT id, harness, mode_id, config FROM threads ORDER BY ordinal')
+      .all() as Array<{ id: string; harness: string; mode_id: string | null; config: string }>;
+    assert.deepEqual(threads, [
+      // The model becomes one entry of the config map, keeping the meaning it
+      // had: both adapters call that option `model`. The mode is untouched —
+      // it stays its own column, because ACP treats a mode as its own concept.
+      { id: 't1', harness: 'claude', mode_id: 'plan', config: '{"model":"opus"}' },
+      // And a thread nobody chose a model for gets an empty map rather than a
+      // guess: it comes back on its harness's default, which is what an empty
+      // column has always meant.
+      { id: 't2', harness: 'claude', mode_id: null, config: '{}' },
+    ]);
+    // The column it replaces is gone, so nothing can keep writing to it.
+    assert.ok(!columns(upgraded, 'threads').includes('model_id'));
+
+    // And the argv comes from the registry now: a box may need either adapter,
+    // so the one a session was created with says nothing.
+    assert.ok(!columns(upgraded, 'sessions').includes('agent_cmd'));
+
+    // The catalogue arrives empty. Nothing fills it until an adapter has
+    // answered for a thread — a dialog on a fresh deployment offers the agent
+    // choice alone rather than starting a box to find out what it would offer.
+    assert.deepEqual(columns(upgraded, 'harness_catalog'), [
+      'harness',
+      'modes',
+      'config_options',
+      'seen_at',
+    ]);
+    const cached = upgraded
+      .prepare('SELECT COUNT(*) AS n FROM harness_catalog')
+      .get() as { n: number };
+    assert.equal(cached.n, 0);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('the catalogue keeps the half an answer says nothing about', () => {
+  const db = openDb(dir);
+  try {
+    // A `session/new` answer carries both lists, which is what a dialog with
+    // no adapter to ask reads.
+    upsertHarnessCatalog(
+      db,
+      'claude',
+      { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
+      [{ id: 'model', category: 'model', currentValue: 'opus' }],
+    );
+    assert.deepEqual(readHarnessCatalog(db, 'claude'), {
+      modes: { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
+      configOptions: [{ id: 'model', category: 'model', currentValue: 'opus' }],
+      seenAt: readHarnessCatalog(db, 'claude')!.seenAt,
+    });
+
+    // An answer that carries only one of them says nothing about the other,
+    // and emptying the half it did not mention would cost the dialog a list it
+    // has no other way to get.
+    upsertHarnessCatalog(db, 'claude', null, [
+      { id: 'model', category: 'model', currentValue: 'sonnet' },
+    ]);
+    const after = readHarnessCatalog(db, 'claude');
+    assert.equal(after?.modes?.currentModeId, 'auto');
+    assert.deepEqual(after?.configOptions, [
+      { id: 'model', category: 'model', currentValue: 'sonnet' },
+    ]);
+
+    // A harness no adapter has ever answered for has no cache, which is what
+    // a fresh deployment's dialog is built against.
+    assert.equal(readHarnessCatalog(db, 'codex'), null);
+  } finally {
+    db.close();
+  }
+});

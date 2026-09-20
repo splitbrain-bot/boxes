@@ -427,6 +427,73 @@ test('a turn held open for background work still hands the composer back', async
   }
 });
 
+test('the bar names the work by kind, and offers no stop for a task that says it cannot be', async () => {
+  // What the adapters announce beyond a command line: a task's kind, which is
+  // the only thing that says what a name like "watch the deploy log" is, and
+  // its `canStop`, which both adapters send true today and neither promises
+  // to. A row that cannot be stopped gets no button rather than one that
+  // would answer nothing.
+  await start({
+    prompts: [
+      {
+        match: () => true,
+        updates: reply('Watching the deploy, and building meanwhile.'),
+        hold: true,
+        background: true,
+      },
+    ],
+    backgroundTasks: [
+      {
+        id: 'bg-1',
+        command: 'watch the deploy log',
+        kind: 'monitor',
+        stoppable: false,
+        startedAt: Date.now() - 90_000,
+      },
+      {
+        id: 'bg-2',
+        command: 'npm run build',
+        kind: 'shell',
+        stoppable: true,
+        startedAt: Date.now() - 30_000,
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    await input.fill('watch it');
+    await input.press('Control+Enter');
+
+    const bar = page.locator('[data-slot="boxes_background-bar"]');
+    await expect.poll(() => bar.isVisible()).toBe(true);
+    await page.getByText('2 commands still running').click();
+
+    // The kind, for the one whose name is a description rather than a command.
+    await expect.poll(() => bar.getByText('Monitor').isVisible()).toBe(true);
+    await expect.poll(() => bar.getByText('watch the deploy log').isVisible()).toBe(true);
+    expect(await bar.getByLabel('Stop watch the deploy log').count()).toBe(0);
+
+    // And the one that can be stopped is stopped by name, not by thread.
+    await bar.getByLabel('Stop npm run build').click();
+    await page.getByRole('button', { name: 'Stop', exact: true }).click();
+    await expect.poll(() => stub.backgroundStops.length).toBe(1);
+    assert.deepEqual(stub.backgroundStops[0], {
+      sessionId: SESSION.id,
+      threadId: SESSION.threadId,
+      processId: 'bg-2',
+    });
+
+    stub.gateway.finishTasks();
+    stub.gateway.release();
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a thread that has not been read yet shows a placeholder, then all of it at once', async () => {
   // Long enough to scroll, so where the reading starts is a real question.
   const said = Array.from({ length: 12 }, (_, i) => `exchange number ${i}`);

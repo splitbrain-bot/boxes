@@ -15,11 +15,18 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
 import type {
   AgentSetDetail,
+  CredentialId,
+  CredentialStatus,
+  CredentialSummary,
+  HarnessId,
   ReviewAnnotation,
   ReviewFileResponse,
   SessionSummary,
+  Settings,
+  ThreadOptions,
 } from '../../shared/types.ts';
 import { buildApp, type Orchestrator } from '../../orchestrator/src/app.ts';
 import { loadConfig, setConfigForTests, type Config } from '../../orchestrator/src/config.ts';
@@ -28,6 +35,8 @@ import {
   getThread,
   listThreads,
   openDb,
+  setThreadAcpId,
+  upsertHarnessCatalog,
   type Db,
   type SessionRow,
   type ThreadRow,
@@ -35,6 +44,7 @@ import {
 import { checkUpgrade } from '../../orchestrator/src/gateway/downstream.ts';
 import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
 import { setLogLevel } from '../../orchestrator/src/log.ts';
+import type { LoginExecSpec } from '../../orchestrator/src/login.ts';
 import type { SessionManager } from '../../orchestrator/src/sessions.ts';
 import * as ws from '../../orchestrator/src/workspaces.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
@@ -67,8 +77,100 @@ import {
 /** The bearer every session's WebSocket upgrade carries in this suite. */
 const WS_TOKEN = 'e2e-ws-token-0123456789abcdef';
 
-/** The Claude token this deployment is configured with, as far as it knows. */
-const CLAUDE_TOKEN = 'a-token-for-the-tests';
+/** The Claude token the deployment holds, as the settings page would have stored it. */
+const CLAUDE_TOKEN = 'sk-ant-oat01-a-token-for-the-tests-1234';
+
+/** The OpenAI key the deployment holds when a test gives it one. */
+const OPENAI_KEY = 'sk-proj-a-key-for-the-tests-abcd';
+
+/**
+ * The auth.json a finished Codex login is read back from: an id token naming
+ * the account, and an access token that has not expired.
+ */
+const LOGIN_DOCUMENT = "{\"tokens\": {\"access_token\": \"eyJhbGciOiAibm9uZSJ9.eyJleHAiOiA0MTAyNDQ0ODAwfQ.\", \"id_token\": \"eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJhZ2VudEBleGFtcGxlLmNvbSIsICJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOiB7ImVtYWlsIjogImFnZW50QGV4YW1wbGUuY29tIn19.\", \"refresh_token\": \"r\"}, \"last_refresh\": \"2026-09-12T10:00:00Z\"}";
+
+/**
+ * What each adapter is said to have advertised, for a dialog that reads the
+ * catalogue rather than asking an adapter: the modes and the settings the
+ * real ones offer, in the adapter's own words.
+ */
+const CATALOG: Record<
+  HarnessId,
+  {
+    modes: Parameters<typeof upsertHarnessCatalog>[2];
+    configOptions: Parameters<typeof upsertHarnessCatalog>[3];
+  }
+> = {
+  claude: {
+    modes: {
+      currentModeId: 'auto',
+      availableModes: [
+        { id: 'auto', name: 'Auto', description: 'Decides for itself when to ask.' },
+        { id: 'plan', name: 'Plan', description: 'Reads and plans; changes nothing.' },
+      ],
+    },
+    configOptions: [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        currentValue: 'opus',
+        options: [
+          { value: 'opus', name: 'Opus' },
+          { value: 'sonnet', name: 'Sonnet' },
+        ],
+      },
+      {
+        id: 'effort',
+        name: 'Thinking',
+        category: 'thought_level',
+        currentValue: 'medium',
+        options: [
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'high', name: 'High' },
+        ],
+      },
+    ],
+  },
+  codex: {
+    modes: {
+      currentModeId: 'agent-full-access',
+      availableModes: [
+        { id: 'read-only', name: 'Ask for approval', description: 'Every command waits for a human.' },
+        { id: 'agent', name: 'Approve for me', description: 'Codex approves its own work.' },
+        {
+          id: 'agent-full-access',
+          name: 'Full access',
+          description: 'No sandbox: the container is the boundary.',
+        },
+      ],
+    },
+    configOptions: [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        currentValue: 'gpt-5.6-codex',
+        options: [
+          { value: 'gpt-5.6-codex', name: 'GPT-5.6 Codex' },
+          { value: 'gpt-5.6', name: 'GPT-5.6' },
+        ],
+      },
+      {
+        id: 'reasoning_effort',
+        name: 'Reasoning effort',
+        category: 'thought_level',
+        currentValue: 'medium',
+        options: [
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'high', name: 'High' },
+        ],
+      },
+    ],
+  },
+};
 
 /** Marks a request this harness made, so setup is not recorded as a test's. */
 const SETUP_HEADER = 'x-boxes-e2e-setup';
@@ -84,6 +186,8 @@ export const DEFAULT_SESSION = {
 export interface ThreadSpec {
   /** Named rather than generated, so a test can link straight at it. */
   id?: string;
+  /** Which agent runs it. Claude unless a test says otherwise. */
+  harness?: HarnessId;
   title?: string | null;
   done?: boolean;
   /** Whether a prompt is open on this thread, as the database records it. */
@@ -105,6 +209,12 @@ export interface SessionSpec {
   /** Whether the fake daemon has its container running. */
   containerRunning?: boolean;
   threads?: ThreadSpec[];
+  /**
+   * Whether the box is busy with work no conversation claims, which is what a
+   * box looks like after its adapter was respawned over a running build.
+   * Without it, the box is busy exactly when one of its threads is.
+   */
+  backgroundBusy?: boolean;
   /** How many browsers the gateway has on this session. */
   attachedCount?: number;
   /** Whether the adapter advertises forking, which the list offers. */
@@ -120,8 +230,22 @@ export interface SessionSpec {
 
 /** What the deployment answers about itself, which a test may change. */
 export interface DeploymentState {
-  /** Whether the health probe says a Claude token is configured. */
-  claudeTokenConfigured: boolean;
+  /**
+   * The Claude credential this deployment holds, by the status the settings
+   * page would show for it, or null where nobody has entered one.
+   *
+   * Anything but `ok` is a harness the health probe reports as unrunnable,
+   * which is what the dashboard's warning is about.
+   */
+  claudeCredential: CredentialStatus | null;
+  /** The OpenAI key, on the same terms. None unless a test gives it one. */
+  openaiCredential: CredentialStatus | null;
+  /**
+   * The harnesses whose adapters have answered here, and so have a catalogue
+   * for the dialogs to read. A harness not in it offers the agent choice
+   * alone, which is what a deployment that never ran an adapter shows.
+   */
+  catalogued: HarnessId[];
   /**
    * The cookie an authenticating reverse proxy in front of this deployment
    * would be checking, or null for the loopback default that has none.
@@ -182,6 +306,16 @@ export interface TestOrchestrator {
   state: DeploymentState;
   /** Files uploaded to the attachments endpoint, in order. */
   attachmentUploads: Array<{ sessionId: string; name: string; bytes: Buffer }>;
+  /** Every thread the browser asked for, with the body it sent. */
+  threadCalls: Array<{ sessionId: string; body: unknown }>;
+  /** Every session the browser asked for, as the body it sent. */
+  sessionCalls: unknown[];
+  /**
+   * Every login the browser started, in order, over a runtime that runs no
+   * container: what the CLI is scripted to print goes in through `print`,
+   * and what the browser pasted back comes out in `input`.
+   */
+  logins: TestLogin[];
   /**
    * Every stop of background work the browser asked for, in order.
    *
@@ -189,6 +323,8 @@ export interface TestOrchestrator {
    * rather than one command of it.
    */
   backgroundStops: Array<{ sessionId: string; threadId: string; processId?: string }>;
+  /** Every box-wide stop the browser asked for, by session, in order. */
+  boxStops: string[];
   /** Every review mutation the browser made, in order. */
   reviewCalls: ReviewCall[];
   /** Adds a session, its directories, its threads and its container. */
@@ -215,7 +351,32 @@ export interface TestOrchestrator {
   agentSets(global: Omit<AgentSetSpec, 'id' | 'name'>, named: AgentSetSpec[]): Promise<void>;
   /** One agent set as the API reports it, for what a test wrote through the UI. */
   agentSet(setId: string): Promise<AgentSetDetail>;
+  /** The credentials the deployment holds, as the settings page sees them. */
+  credentials(): Promise<CredentialSummary[]>;
+  /** The deployment's plain settings, as the API reports them. */
+  settings(): Promise<Settings>;
   close(): Promise<void>;
+}
+
+/**
+ * One login the browser started, over the stand-in runtime.
+ *
+ * The real runtime runs the harness's CLI in a throwaway container; this one
+ * gives the test the CLI's streams instead, so a test says what the CLI
+ * printed and reads what was typed into it.
+ */
+export interface TestLogin {
+  id: CredentialId;
+  /** What the flow asked to run, which says which CLI it is driving. */
+  spec: LoginExecSpec;
+  /** Everything pasted back into the CLI, as the login manager wrote it. */
+  input: string;
+  /** Whether the flow's container was removed: a cancel, or a finished flow. */
+  cancelled: boolean;
+  /** Writes what the CLI printed. */
+  print(text: string): void;
+  /** Ends the CLI with a status, or with none where it was killed. */
+  exit(code: number | null): void;
 }
 
 /**
@@ -235,7 +396,7 @@ export interface TestOrchestrator {
 class TestUpstream {
   /** Browsers the gateway has on this session, as the list reports it. */
   attachedCount = 0;
-  /** Whether the adapter advertises forking, which the list offers. */
+  /** Whether the adapters advertise forking, which the list offers. */
   canFork = true;
   /** Whether anything is running in the box, or null before it was read. */
   backgroundActive: boolean | null = false;
@@ -255,16 +416,29 @@ class TestUpstream {
     return true;
   }
 
-  /** Mints an empty conversation and makes it current. */
-  async newThread(): Promise<ThreadRow> {
-    return this.mint(this.gateway.newThread(), null);
+  /** Every harness whose adapter advertised forking: both, or neither. */
+  get forkableHarnesses(): Set<HarnessId> {
+    return new Set<HarnessId>(this.canFork ? ['claude', 'codex'] : []);
+  }
+
+  /** Mints an empty conversation on the agent asked for, and makes it current. */
+  async newThread(options?: ThreadOptions): Promise<ThreadRow> {
+    return this.mint(this.gateway.newThread(), null, {
+      harness: options?.harness ?? 'claude',
+      modeId: options?.modeId ?? null,
+      config: options?.config ?? {},
+    });
   }
 
   /** Mints a conversation carrying another's history, and makes it current. */
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
     const source = getThread(this.db, sourceThreadId);
     if (!source?.acp_session_id) throw new Error('Thread not found');
-    return this.mint(this.gateway.forkThread(source.acp_session_id), source.id);
+    return this.mint(this.gateway.forkThread(source.acp_session_id), source.id, {
+      harness: source.harness,
+      modeId: source.mode_id,
+      config: JSON.parse(source.config) as Record<string, string>,
+    });
   }
 
   /** Makes one of the session's threads current. Nobody is dropped. */
@@ -278,13 +452,34 @@ class TestUpstream {
     return row;
   }
 
+  /** Nothing to spawn: the stand-in is up from the moment it exists. */
+  async ensureStarted(): Promise<void> {
+    return undefined;
+  }
+
+  /** Gives a thread that has a row and no conversation one, and reports its id. */
+  adoptThread(row: ThreadRow): string {
+    const acpSessionId = this.gateway.newThread();
+    setThreadAcpId(this.db, row.id, acpSessionId);
+    return acpSessionId;
+  }
+
   /** Mints this session's first conversation and reports the adapter's id. */
   mintFirstThread(): string {
-    return this.mint(this.gateway.newThread(), null).acp_session_id ?? '';
+    return (
+      this.mint(this.gateway.newThread(), null, { harness: 'claude', modeId: null, config: {} })
+        .acp_session_id ?? ''
+    );
   }
 
   /** Reports one process signalled, which is what the browser is told. */
   async stopBackgroundWork(): Promise<number> {
+    return 1;
+  }
+
+  /** Signals one process, after which the box reads as no longer busy. */
+  async stopBoxWork(): Promise<number> {
+    this.backgroundActive = false;
     return 1;
   }
 
@@ -299,13 +494,18 @@ class TestUpstream {
   }
 
   /** Stores a minted conversation and makes it the session's current one. */
-  private mint(acpSessionId: string, inheritsFrom: string | null): ThreadRow {
+  private mint(
+    acpSessionId: string,
+    inheritsFrom: string | null,
+    on: { harness: HarnessId; modeId: string | null; config: Record<string, string> },
+  ): ThreadRow {
     const ordinal = listThreads(this.db, this.sessionId).length + 1;
     return insertThread(this.db, this.sessionId, {
       id: threadName(this.sessionId, ordinal),
       acpSessionId,
       ordinal,
       inheritsFrom,
+      ...on,
     });
   }
 }
@@ -340,6 +540,9 @@ function insertThread(
     id: string;
     acpSessionId: string;
     ordinal: number;
+    harness?: HarnessId;
+    modeId?: string | null;
+    config?: Record<string, string>;
     title?: string | null;
     done?: boolean;
     turnActive?: boolean;
@@ -351,24 +554,25 @@ function insertThread(
   const row: ThreadRow = {
     id: thread.id,
     session_id: sessionId,
+    harness: thread.harness ?? 'claude',
     acp_session_id: thread.acpSessionId,
     title: thread.title ?? null,
     ordinal: thread.ordinal,
     turn_active: thread.turnActive ? 1 : 0,
     inherits_from: thread.inheritsFrom ?? null,
-    mode_id: null,
-    model_id: null,
+    mode_id: thread.modeId ?? null,
+    config: JSON.stringify(thread.config ?? {}),
     done: thread.done ? 1 : 0,
     created_at: now,
     last_active_at: thread.lastActiveAt ?? now,
   };
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
-         turn_active, inherits_from, mode_id, model_id, done, created_at,
+      `INSERT INTO threads (id, session_id, harness, acp_session_id, title, ordinal,
+         turn_active, inherits_from, mode_id, config, done, created_at,
          last_active_at)
-       VALUES (@id, @session_id, @acp_session_id, @title, @ordinal,
-         @turn_active, @inherits_from, @mode_id, @model_id, @done, @created_at,
+       VALUES (@id, @session_id, @harness, @acp_session_id, @title, @ordinal,
+         @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
          @last_active_at)`,
     ).run(row);
     db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(row.id, sessionId);
@@ -415,11 +619,11 @@ function createSession(
   const containerId = `session-${id}`;
   const index = (db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n;
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
+    `INSERT INTO sessions (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
        review_base_rev, status, agent_set_id, current_thread_id, ws_token,
        created_at, last_active_at)
-     VALUES (?, ?, 'DEFAULT', ?, '["claude-agent-acp"]', ?, ?, ?, ?, '', ?, ?,
+     VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, ?, '', ?, ?,
        NULL, ?, NULL, NULL, ?, ?, ?)`,
   ).run(
     id,
@@ -452,6 +656,7 @@ function createSession(
       id: thread.id ?? threadName(id, at + 1),
       acpSessionId,
       ordinal: at + 1,
+      harness: thread.harness ?? 'claude',
       title: thread.title ?? null,
       done: thread.done ?? false,
       turnActive: thread.turnActive ?? false,
@@ -466,7 +671,7 @@ function createSession(
       ).run(id, acpSessionId, now);
     }
   });
-  upstream.backgroundActive = upstream.workingThreads.length > 0;
+  upstream.backgroundActive = spec.backgroundBusy ?? upstream.workingThreads.length > 0;
   upstream.attachedCount = spec.attachedCount ?? 0;
   // The first conversation is the one a connection naming none gets, which is
   // where a session that has been worked in is left.
@@ -549,7 +754,12 @@ function installHooks(
   state: DeploymentState,
   calls: Pick<
     TestOrchestrator,
-    'attachmentUploads' | 'backgroundStops' | 'reviewCalls'
+    | 'attachmentUploads'
+    | 'backgroundStops'
+    | 'boxStops'
+    | 'reviewCalls'
+    | 'threadCalls'
+    | 'sessionCalls'
   >,
 ): void {
   app.app.addHook('onRequest', async (req: HookRequest, reply: HookReply) => {
@@ -568,6 +778,16 @@ function installHooks(
     const path = req.url.split('?')[0] ?? '';
     const body = req.body as Record<string, unknown> | Buffer | undefined;
 
+    if (path === '/api/sessions' && req.method === 'POST') {
+      calls.sessionCalls.push(body ?? null);
+      return;
+    }
+    const thread = /^\/api\/sessions\/([^/]+)\/threads$/.exec(path);
+    if (thread && req.method === 'POST') {
+      calls.threadCalls.push({ sessionId: thread[1]!, body: body ?? null });
+      return;
+    }
+
     const attachment = /^\/api\/sessions\/([^/]+)\/attachments$/.exec(path);
     if (attachment && req.method === 'POST' && Buffer.isBuffer(body)) {
       calls.attachmentUploads.push({
@@ -575,6 +795,12 @@ function installHooks(
         name: String((req.query as { name?: string }).name ?? ''),
         bytes: body,
       });
+      return;
+    }
+
+    const boxStop = /^\/api\/sessions\/([^/]+)\/background\/stop$/.exec(path);
+    if (boxStop && req.method === 'POST') {
+      calls.boxStops.push(boxStop[1]!);
       return;
     }
 
@@ -605,6 +831,73 @@ function installHooks(
   });
 }
 
+/**
+ * Stands in for the containers a login runs in.
+ *
+ * Each start is one entry the test drives: it prints what the CLI would have
+ * and ends it with a status, and the flow reads that the way it reads a real
+ * one. A `cat` of the file Codex wrote answers with the document under
+ * `loginDocument`, so a finished Codex login stores an account.
+ */
+function installLoginRuntime(app: Orchestrator): TestLogin[] {
+  const logins: TestLogin[] = [];
+  const byContainer = new Map<string, TestLogin>();
+  app.logins.setRuntimeForTests({
+    start: async (id) => {
+      const containerId = `login-${logins.length + 1}`;
+      const output = new PassThrough();
+      let exit: (code: number | null) => void = () => {};
+      const exited = new Promise<number | null>((resolve) => {
+        exit = resolve;
+      });
+      const login: TestLogin & { output: PassThrough; exited: Promise<number | null> } = {
+        id,
+        spec: { cmd: [] },
+        input: '',
+        cancelled: false,
+        output,
+        exited,
+        print: (text) => output.write(text),
+        exit: (code) => {
+          output.end();
+          exit(code);
+        },
+      };
+      logins.push(login);
+      byContainer.set(containerId, login);
+      return containerId;
+    },
+    exec: async (containerId, spec) => {
+      const login = byContainer.get(containerId) as
+        | (TestLogin & { output: PassThrough; exited: Promise<number | null> })
+        | undefined;
+      if (!login) throw new Error(`no login container ${containerId}`);
+      if (spec.cmd[0] === 'cat') {
+        // What the Codex CLI left behind, read back once it has exited.
+        const output = new PassThrough();
+        output.end(LOGIN_DOCUMENT);
+        return { output, stdin: null, exited: Promise.resolve(0), kill: () => undefined };
+      }
+      login.spec = spec;
+      const stdin = spec.tty ? new PassThrough() : null;
+      stdin?.on('data', (chunk: Buffer) => {
+        login.input += chunk.toString('utf8');
+      });
+      return {
+        output: login.output,
+        stdin,
+        exited: login.exited,
+        kill: () => login.exit(null),
+      };
+    },
+    remove: async (containerId) => {
+      const login = byContainer.get(containerId);
+      if (login) login.cancelled = true;
+    },
+  });
+  return logins;
+}
+
 /** What a review delete names, taken off the query it travels in. */
 function deleteSubject(query: unknown): unknown {
   const { path, line } = query as { path?: string; line?: string };
@@ -633,7 +926,6 @@ export async function startOrchestrator(
     // away and every chown is a no-op.
     SESSION_UID: String(process.getuid?.() ?? 1020),
     SESSION_GID: String(process.getgid?.() ?? 1020),
-    PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_TOKEN,
   });
   setConfigForTests(cfg);
 
@@ -660,22 +952,54 @@ export async function startOrchestrator(
     return made;
   };
 
+  /** Puts a credential in the store at a status, or takes it out. */
+  const holdCredential = (
+    id: 'claude' | 'openai',
+    method: 'token' | 'api_key',
+    secret: string,
+    status: CredentialStatus | null,
+  ): void => {
+    // Through the real store, because that is the only place a credential
+    // lives now: a test changing this is somebody at the settings page.
+    if (status === null) {
+      app.credentials.remove(id);
+      return;
+    }
+    app.credentials.put(id, method, secret);
+    if (status !== 'ok') app.credentials.markStatus(id, status, null);
+  };
+  let catalogued: HarnessId[] = [];
   const state: DeploymentState = {
-    get claudeTokenConfigured() {
-      return cfg.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN !== '';
+    get claudeCredential() {
+      return app.credentials.get('claude')?.status ?? null;
     },
-    set claudeTokenConfigured(configured: boolean) {
-      // Written through, because the configuration is read-only to the
-      // orchestrator: it parses it once at boot, and a test changing this is
-      // the deployment having been configured differently.
-      const writable = cfg as { PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: string };
-      writable.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN = configured ? CLAUDE_TOKEN : '';
+    set claudeCredential(status: CredentialStatus | null) {
+      holdCredential('claude', 'token', CLAUDE_TOKEN, status);
+    },
+    get openaiCredential() {
+      return app.credentials.get('openai')?.status ?? null;
+    },
+    set openaiCredential(status: CredentialStatus | null) {
+      holdCredential('openai', 'api_key', OPENAI_KEY, status);
+    },
+    get catalogued() {
+      return catalogued;
+    },
+    set catalogued(harnesses: HarnessId[]) {
+      catalogued = harnesses;
+      db.prepare('DELETE FROM harness_catalog').run();
+      for (const id of harnesses) {
+        upsertHarnessCatalog(db, id, CATALOG[id].modes, CATALOG[id].configOptions);
+      }
     },
     requireCookie: null,
   };
   const calls = {
     attachmentUploads: [] as TestOrchestrator['attachmentUploads'],
+    threadCalls: [] as TestOrchestrator['threadCalls'],
+    sessionCalls: [] as TestOrchestrator['sessionCalls'],
     backgroundStops: [] as TestOrchestrator['backgroundStops'],
+    boxStops: [] as TestOrchestrator['boxStops'],
     reviewCalls: [] as ReviewCall[],
   };
 
@@ -697,7 +1021,13 @@ export async function startOrchestrator(
       token: (sessionId) => sessionRow(db, sessionId)?.ws_token ?? null,
       thread: (sessionId, threadId) => {
         const row = threadId ? getThread(db, threadId) : currentThread(db, sessionId);
-        if (row) return row.session_id === sessionId ? row.acp_session_id : null;
+        if (row) {
+          if (row.session_id !== sessionId) return null;
+          // A thread a box was created with has a row and no conversation
+          // yet: the real gateway mints one as a browser pins to it, and so
+          // does the stand-in.
+          return row.acp_session_id ?? upstreamFor(sessionId).adoptThread(row);
+        }
         if (threadId !== null) return null;
         // A box nobody has opened has no conversation yet. The real gateway
         // mints one as a browser pins to it, which is what makes a session
@@ -715,10 +1045,18 @@ export async function startOrchestrator(
   attachTerminalEndpoint(app, db);
 
   installHooks(app, state, calls);
+  const logins = installLoginRuntime(app);
 
   // As boot does, and for the same reason: a session's environment is built
   // from the egress policy, so creating one before it exists fails.
   await app.egress.prepare();
+  // A deployment a test finds working, which is what all but the warning
+  // tests want: a credential for each agent, and Claude's catalogue for the
+  // dialogs. The settings page is where the credentials come from in a real
+  // one.
+  state.claudeCredential = 'ok';
+  state.openaiCredential = 'ok';
+  state.catalogued = ['claude'];
 
   await app.app.listen({ host: '127.0.0.1', port: 0 });
   const { port } = app.app.server.address() as AddressInfo;
@@ -784,6 +1122,9 @@ export async function startOrchestrator(
       const res = await setup('GET', `/api/agent-sets/${setId}`);
       return res.json() as AgentSetDetail;
     },
+    credentials: async () => (await setup('GET', '/api/credentials')).json() as CredentialSummary[],
+    settings: async () => (await setup('GET', '/api/settings')).json() as Settings,
+    logins,
     agentSets: async (global, named) => {
       db.prepare('DELETE FROM agent_items').run();
       db.prepare("DELETE FROM agent_sets WHERE id <> 'global'").run();

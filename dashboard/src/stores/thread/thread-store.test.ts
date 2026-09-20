@@ -181,8 +181,14 @@ test('subscribers are woken on every update', () => {
   expect(listener).toHaveBeenCalled();
 });
 
-/** One command still running, as the gateway reads it out of the box. */
-const BUILD = { id: 'aabbccdd', command: 'npm run build', startedAt: null };
+/** One command still running, as the adapter announced it. */
+const BUILD = {
+  id: 'aabbccdd',
+  command: 'npm run build',
+  kind: 'shell',
+  stoppable: true,
+  startedAt: Date.parse('2026-08-01T10:00:00Z'),
+};
 
 /** What the gateway says about a thread, defaulting to a quiet one. */
 function threadState(patch: Partial<TurnStateParams> = {}): TurnStateParams {

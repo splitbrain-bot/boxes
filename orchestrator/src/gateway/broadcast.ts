@@ -6,7 +6,7 @@ import {
   type TurnStateParams,
 } from '../../../shared/types.ts';
 import { log } from '../log.ts';
-import { ThreadLog, type ThreadOptions } from './thread-log.ts';
+import { ThreadLog, type AdapterOptions } from './thread-log.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
 /**
@@ -145,7 +145,7 @@ export class Broadcast {
   }
 
   /** The transcript has all been read; the thread's updates are live again. */
-  endFill(acpThreadId: string, options: ThreadOptions): void {
+  endFill(acpThreadId: string, options: AdapterOptions): void {
     const history = this.logs.get(acpThreadId);
     if (!history) return;
     history.filling = false;
@@ -164,7 +164,7 @@ export class Broadcast {
    * of this one: the fork carries that conversation, and until it is first
    * prompted the adapter has no transcript of its own to say so.
    */
-  openLog(acpThreadId: string, options: ThreadOptions, from?: string): void {
+  openLog(acpThreadId: string, options: AdapterOptions, from?: string): void {
     const history = new ThreadLog();
     history.options = options;
     const source = from ? this.logs.get(from) : undefined;
@@ -186,7 +186,7 @@ export class Broadcast {
    * sent as empty rather than refused: the browser asked to open a thread,
    * and what there is of it is nothing.
    */
-  open(handle: DownstreamHandle, acpThreadId: string, anchor?: string): ThreadOptions {
+  open(handle: DownstreamHandle, acpThreadId: string, anchor?: string): AdapterOptions {
     const history = this.logs.get(acpThreadId);
     const opening = history?.opening(anchor) ?? {
       resumed: false,

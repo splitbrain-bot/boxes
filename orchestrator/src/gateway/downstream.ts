@@ -255,10 +255,16 @@ export function attachDownstream(
   const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
     // Answered from the cached upstream response, so its _meta extensions
     // reach the browser intact.
+    //
+    // Which adapter's response that is, is the pinned thread's: a box may run
+    // two, and they advertise different modes and different capabilities. The
+    // pin is already in flight — it was started at attach — and a browser
+    // sends `initialize` before `session/new`, so awaiting it here costs this
+    // connection nothing it was not already waiting for.
     .onRequest(ACP_METHOD.initialize as string, raw, async () => {
       handle.lastActiveAt = Date.now();
-      await up.ensureStarted();
-      const cached = up.cachedInitialize;
+      const acpThreadId = await pinned;
+      const cached = up.initializeFor(acpThreadId);
       if (!cached) throw new Error('Upstream initialize unavailable');
       return cached;
     })

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CredentialId } from '../../shared/types.ts';
 import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 
 /**
@@ -7,7 +8,9 @@ import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
  * at startup.
  *
  * Every setting has a working default, so the orchestrator starts with no
- * configuration at all.
+ * configuration at all. Nothing here is a secret: the deployment's
+ * credentials live in the database and are managed from the settings page,
+ * and this file knows only which hosts each of them travels to.
  */
 
 /** A positive whole number of minutes. */
@@ -84,6 +87,18 @@ const schema = z.object({
    */
   SESSION_IMAGE_PRUNE: flag.default('true'),
   SESSION_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
+  /**
+   * What one box may take. Both of these now cover *two* adapters: a box may
+   * hold threads of either harness, and each one that has a thread runs its own
+   * adapter process with its own agent under it.
+   *
+   * The numbers are unchanged, because they were generous for one and a second
+   * adapter is a native binary that idles cheaply — but they have not been
+   * measured against two busy agents in one box, and a deployment that meets
+   * the ceiling raises them. A pids limit reached shows up as a tool call that
+   * cannot fork; a memory limit reached shows up as the kernel killing
+   * something in the box.
+   */
   SESSION_MEM_LIMIT: z.string().regex(/^\d+[kmgKMG]?$/).default('4g'),
   SESSION_CPUS: z.coerce.number().positive().default(2),
   SESSION_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
@@ -104,11 +119,13 @@ const schema = z.object({
    * How long a thread has to say nothing before the agent counts as having
    * stopped, in seconds.
    *
-   * The fallback. The adapter Boxes ships with marks the end of a processing
-   * cycle with a `usage_update` carrying a cost, which is read instead. This
-   * covers the adapters that say nothing: no stop reason arrives for a prompt
-   * held open, and a turn the harness started on its own has no request to
-   * end. A tool call the agent is waiting on suspends the question.
+   * The fallback, and for one of the two harnesses the whole answer.
+   * `claude-agent-acp` marks the end of a processing cycle with a
+   * `usage_update` carrying a cost, which is read instead; `codex-acp` sends
+   * no `usage_update` with a cost at all, so every Codex thread falls to this
+   * timer. That is what it is for: no stop reason arrives for a prompt held
+   * open, and a turn the harness started on its own has no request to end. A
+   * tool call the agent is waiting on suspends the question.
    */
   AGENT_QUIET_SECONDS: z.coerce.number().int().positive().default(3),
 
@@ -164,23 +181,11 @@ const schema = z.object({
    * which leaves every public host reachable.
    */
   EGRESS_ALLOWED_HOSTS: z.string().default(''),
-
-  PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: z.string().default(''),
-  PROFILE_DEFAULT_GH_TOKEN: z.string().default(''),
-  PROFILE_DEFAULT_GIT_NAME: z.string().default('boxes-bot'),
-  PROFILE_DEFAULT_GIT_EMAIL: z.string().default('boxes-bot@users.noreply.github.com'),
 });
 
 export type Config = Readonly<z.infer<typeof schema>> & {
-  /** Credentials by profile name. */
-  readonly profiles: Readonly<Record<string, SessionProfile>>;
   /** The parsed allowlist. Empty means the allowlist is off. */
   readonly egressAllowedHosts: readonly string[];
-  /**
-   * The credentials this deployment translates: the entries of CREDENTIAL_SET
-   * whose secret this deployment configured.
-   */
-  readonly egressCredentials: readonly ConfiguredCredential[];
 };
 
 /**
@@ -190,9 +195,9 @@ export type Config = Readonly<z.infer<typeof schema>> & {
  * The host lists and header names are fixed here rather than configured:
  * they are facts about the services rather than preferences.
  */
-interface CredentialSpec {
-  /** Stable identifier, used in logs, status and the placeholder file. */
-  id: string;
+export interface CredentialSpec {
+  /** Which stored credential this is: the key of the row that holds its secret. */
+  id: CredentialId;
   /** Hosts intercepted so the credential can be swapped in. */
   hosts: readonly string[];
   /** Headers the credential may travel in, lowercased. */
@@ -209,26 +214,41 @@ interface CredentialSpec {
   placeholderPrefix: string;
 }
 
-/** A credential spec together with the secret this deployment configured. */
-interface ConfiguredCredential extends CredentialSpec {
-  secret: string;
-}
-
 /**
- * Every credential the proxy knows how to translate. A deployment translates
- * the ones it configures a secret for; the rest stay ordinary passthrough
- * hosts, which is what preserves the "log in inside a session" flow.
+ * Every credential the proxy knows how to translate, and where each one
+ * travels. A deployment translates the ones the credential store holds a
+ * secret for; the rest stay ordinary passthrough hosts.
+ *
+ * This stays configuration-free even though the secrets have left the
+ * environment: which hosts a credential is sent to, and which header it
+ * arrives in, are facts about the services rather than preferences.
  */
-const CREDENTIAL_SET: readonly CredentialSpec[] = [
+export const CREDENTIAL_SET: readonly CredentialSpec[] = [
   {
     id: 'claude',
     hosts: ['api.anthropic.com'],
     headers: ['authorization', 'x-api-key'],
-    // The token endpoints an OAuth credential may be refreshed at. They are
-    // reachable but not intercepted, so a session that runs `claude
-    // setup-token` still works and keeps its own token.
+    // The token endpoints an OAuth credential may be refreshed at. Reachable
+    // but never intercepted: a refresh is the orchestrator's own business and
+    // carries its own credential rather than a box's placeholder.
     alsoAllow: ['console.anthropic.com', 'platform.claude.com', 'claude.ai'],
     placeholderPrefix: 'sk-ant-oat01-',
+  },
+  {
+    id: 'openai',
+    // The API-key endpoint alone. `chatgpt.com` carries the other kind of
+    // OpenAI credential — a subscription — and the two reject each other's
+    // material, so leaving it unintercepted is what lets a deployment key and
+    // a person's subscription coexist in one box.
+    hosts: ['api.openai.com'],
+    headers: ['authorization'],
+    // Where Codex logs in and refreshes, and the subscription endpoint it may
+    // be talking to instead. Reachable so a narrow allowlist cannot break
+    // either, never intercepted. `files.openai.com` and `ab.chatgpt.com` —
+    // attachments and Codex's own telemetry — are a deployment's own choice
+    // and are deliberately not implied here.
+    alsoAllow: ['auth.openai.com', 'chatgpt.com'],
+    placeholderPrefix: 'sk-',
   },
   {
     id: 'github',
@@ -251,14 +271,6 @@ function parseHostList(value: string): string[] {
         .filter((h) => h !== ''),
     ),
   ];
-}
-
-/** Credentials + identity handed to a session container at create time. */
-export interface SessionProfile {
-  claudeOauthToken: string;
-  ghToken: string;
-  gitName: string;
-  gitEmail: string;
 }
 
 /** The config parsed at first use, or null before then. */
@@ -301,26 +313,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
-  const secrets: Record<string, string> = {
-    claude: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,
-    github: base.PROFILE_DEFAULT_GH_TOKEN,
-  };
-
   return {
     ...base,
     egressAllowedHosts: allowedHosts,
-    egressCredentials: CREDENTIAL_SET.flatMap((spec) => {
-      const secret = secrets[spec.id] ?? '';
-      return secret ? [{ ...spec, secret }] : [];
-    }),
-    profiles: {
-      DEFAULT: {
-        claudeOauthToken: base.PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN,
-        ghToken: base.PROFILE_DEFAULT_GH_TOKEN,
-        gitName: base.PROFILE_DEFAULT_GIT_NAME,
-        gitEmail: base.PROFILE_DEFAULT_GIT_EMAIL,
-      },
-    },
   };
 }
 

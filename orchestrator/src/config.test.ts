@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { loadConfig } from './config.ts';
+import { CREDENTIAL_SET, loadConfig } from './config.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,7 +39,6 @@ test('an empty environment yields the documented defaults', () => {
     assert.equal(cfg.EGRESS_PROXY_ALIAS, 'proxy');
     assert.equal(cfg.EGRESS_PROXY_PORT, 3128);
     assert.equal(cfg.LOG_LEVEL, 'info');
-    assert.equal(cfg.profiles['DEFAULT']?.gitName, 'boxes-bot');
   });
 });
 
@@ -59,14 +58,12 @@ test('an empty value means unset, not an invalid value', () => {
       SESSION_IMAGE_PRUNE: '',
       PERMISSION_FALLBACK: '',
       PERMISSION_HOLD_MINUTES: '',
-      PROFILE_DEFAULT_GIT_NAME: '',
     });
     assert.equal(cfg.SESSION_MEM_LIMIT, '4g');
     assert.equal(cfg.SESSION_CPUS, 2);
     assert.equal(cfg.PERMISSION_FALLBACK, 'hold');
     assert.equal(cfg.IDLE_STOP_MINUTES, 30);
     assert.equal(cfg.SESSION_IMAGE_PRUNE, true);
-    assert.equal(cfg.profiles['DEFAULT']?.gitName, 'boxes-bot');
   });
 });
 
@@ -143,28 +140,52 @@ test('an allowlist entry that would allow everything is refused at boot', () => 
   });
 });
 
-test('only a credential with a configured secret is translated', () => {
+test('no secret comes from the environment any more', () => {
   withDataDir((dir) => {
-    assert.deepEqual(loadConfig({ DATA_DIR: dir }).egressCredentials, []);
-
-    const one = loadConfig({ DATA_DIR: dir, PROFILE_DEFAULT_GH_TOKEN: 'ghp_x' });
-    assert.deepEqual(
-      one.egressCredentials.map((c) => c.id),
-      ['github'],
-    );
-    assert.equal(one.egressCredentials[0]?.secret, 'ghp_x');
-    assert.ok(one.egressCredentials[0]?.hosts.includes('api.github.com'));
-
-    const both = loadConfig({
+    // Credentials live in the database and are managed from the settings
+    // page. Anything named PROFILE_DEFAULT_* is a setting from a release
+    // before that, and it must not come back to life by being parsed.
+    const cfg = loadConfig({
       DATA_DIR: dir,
       PROFILE_DEFAULT_GH_TOKEN: 'ghp_x',
       PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x',
+      PROFILE_DEFAULT_GIT_NAME: 'somebody',
     });
-    assert.deepEqual(
-      both.egressCredentials.map((c) => c.id),
-      ['claude', 'github'],
-    );
+    assert.ok(!JSON.stringify(cfg).includes('ghp_x'));
+    assert.ok(!JSON.stringify(cfg).includes('sk-ant-oat01-x'));
+    assert.ok(!JSON.stringify(cfg).includes('somebody'));
   });
+});
+
+test('the credential set describes where each credential travels', () => {
+  // Which hosts a credential is sent to and which header it arrives in are
+  // facts about the services, so they are here rather than configurable. The
+  // secrets that go with them come from the store.
+  assert.deepEqual(
+    CREDENTIAL_SET.map((c) => c.id),
+    ['claude', 'openai', 'github'],
+  );
+  const github = CREDENTIAL_SET.find((c) => c.id === 'github');
+  assert.ok(github?.hosts.includes('api.github.com'));
+  assert.deepEqual(github?.headers, ['authorization']);
+  assert.ok(CREDENTIAL_SET.every((c) => c.placeholderPrefix !== ''));
+});
+
+test('the OpenAI credential travels to the API-key endpoint alone', () => {
+  const openai = CREDENTIAL_SET.find((c) => c.id === 'openai');
+  // One intercepted host, because only `api.openai.com` takes an API key.
+  assert.deepEqual(openai?.hosts, ['api.openai.com']);
+  // Codex sends it as a bearer and nothing else.
+  assert.deepEqual(openai?.headers, ['authorization']);
+  // `chatgpt.com` is the subscription endpoint, which rejects an API key and
+  // whose credential Boxes does not hold yet; `auth.openai.com` is where Codex
+  // logs in and refreshes. Both have to stay reachable under a narrow
+  // allowlist, and neither may be intercepted.
+  assert.deepEqual(openai?.alsoAllow, ['auth.openai.com', 'chatgpt.com']);
+  assert.ok(!openai?.hosts.includes('chatgpt.com'));
+  // Codex checks the shape of the key before it sends it anywhere, so the
+  // placeholder has to look like one.
+  assert.equal(openai?.placeholderPrefix, 'sk-');
 });
 
 test('the session uid defaults off 1000 and is settable', () => {

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
 import {
   GLOBAL_AGENT_SET,
@@ -11,6 +11,7 @@ import {
   type AgentSetSummary,
 } from '../../shared/types.ts';
 import type { AgentItemRow, AgentSetRow, Db } from './db.ts';
+import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { chownToAgent } from './workspaces.ts';
 
@@ -25,9 +26,14 @@ import { chownToAgent } from './workspaces.ts';
  * The database is the source of truth and the files are derived from it. At
  * every create and every start, a session's merged set is written out as a
  * directory under `${DATA_DIR}/agents/<id>`, bind-mounted read-only into the
- * container, and installed into `~/.claude` by the entrypoint. That hop is
- * needed because `~/.claude` is on the home volume, which the orchestrator
- * has no path to, and Claude reads its user configuration from there alone.
+ * container, and installed under `$HOME` by the entrypoint. That hop is needed
+ * because the home volume is where every harness reads its user configuration
+ * from, and a box's home is the box's to write.
+ *
+ * A set is written once per harness, in each one's own layout, because a box
+ * may hold threads of both and nothing here knows which: the merged set is a
+ * property of the box, and where it lands is a property of the agent reading
+ * it. The content is kilobytes, so two copies cost nothing worth a decision.
  *
  * Editing a set therefore reaches a session at its next start rather than
  * while it runs.
@@ -315,13 +321,15 @@ export class AgentStore {
   /**
    * Writes a session's merged set to its directory and returns that path.
    *
-   * The layout is already the one it takes inside `~/.claude`, so the
-   * entrypoint copies rather than interprets: `CLAUDE.md`, `skills/<name>/
-   * SKILL.md`, `commands/<name>.md`, and a `manifest` naming each of them.
-   * The manifest is what makes the install reversible — the container records
-   * it and, at the next start, removes exactly what it put there before, so a
-   * skill deleted here disappears from the box rather than staying on its
-   * home volume.
+   * Every path here is home-relative and already the one it takes inside the
+   * box, so the entrypoint copies rather than interprets. Each harness in the
+   * registry contributes its own layout — `.claude/CLAUDE.md` and
+   * `.claude/skills/<name>/SKILL.md` for one, `.codex/AGENTS.md` and
+   * `.agents/skills/<name>/SKILL.md` for the other — and the `manifest` names
+   * every one of them. The manifest is what makes the install reversible: the
+   * container records it and, at the next start, removes exactly what it put
+   * there before, so a skill deleted here disappears from the box rather than
+   * staying on its home volume.
    *
    * The directory's own inode is kept and only its contents are replaced: a
    * running container has it bind-mounted, and swapping the directory would
@@ -341,18 +349,26 @@ export class AgentStore {
     const bundle = this.bundle(setId);
     const manifest: string[] = [];
 
-    if (bundle.agentsMd !== '') {
-      // Claude reads its user-level memory from ~/.claude/CLAUDE.md, which is
-      // what the dashboard calls AGENTS.md. Landing it here applies it to
-      // every directory the agent works in rather than only to /workspace.
-      this.write(dir, 'CLAUDE.md', bundle.agentsMd);
-      manifest.push('CLAUDE.md');
-    }
-    for (const item of bundle.items) {
-      const rel =
-        item.kind === 'skill' ? `skills/${item.name}` : `commands/${item.name}.md`;
-      this.write(dir, item.kind === 'skill' ? `${rel}/SKILL.md` : rel, item.content);
-      manifest.push(rel);
+    for (const { layout } of Object.values(HARNESSES)) {
+      if (bundle.agentsMd !== '') {
+        // What the dashboard calls AGENTS.md is each harness's user-level
+        // memory. Landing it in the home rather than in the checkout applies
+        // it to every directory the agent works in rather than only to
+        // /workspace.
+        this.write(dir, layout.agentsMd, bundle.agentsMd);
+        manifest.push(layout.agentsMd);
+      }
+      for (const item of bundle.items) {
+        // A skill is a directory, so the manifest names the directory and the
+        // content goes in the SKILL.md inside it: removing the entry has to
+        // take anything else the skill carried with it.
+        const rel =
+          item.kind === 'skill'
+            ? `${layout.skills}/${item.name}`
+            : `${layout.commands}/${item.name}.md`;
+        this.write(dir, item.kind === 'skill' ? `${rel}/SKILL.md` : rel, item.content);
+        manifest.push(rel);
+      }
     }
     this.write(dir, 'manifest', manifest.join('\n'));
     this.prune(dir, [...manifest, 'manifest']);
@@ -365,27 +381,26 @@ export class AgentStore {
    * Removes whatever an earlier bundle left in the directory and this one
    * does not have, so a skill deleted here disappears from the box.
    *
+   * Only the three places a layout names are looked at, once per harness:
+   * the instructions file, and the entries of the skills and commands
+   * directories, each of which is one skill or one command.
+   *
    * @param dir The session's materialized directory.
    * @param keep Every path this bundle wrote, relative to `dir`.
    */
   private prune(dir: string, keep: readonly string[]): void {
     const wanted = new Set(keep);
-    for (const entry of readdirSync(dir)) {
-      // The two directories the layout has: what is pruned in them is their
-      // own entries, each of which is one skill or one command.
-      if (entry === 'skills' || entry === 'commands') {
-        for (const child of readdirSync(join(dir, entry))) {
-          if (wanted.has(`${entry}/${child}`)) continue;
-          rmSync(join(dir, entry, child), { recursive: true, force: true });
+    for (const { layout } of Object.values(HARNESSES)) {
+      if (!wanted.has(layout.agentsMd)) rmSync(join(dir, layout.agentsMd), { force: true });
+      for (const rel of [layout.skills, layout.commands]) {
+        if (!existsSync(join(dir, rel))) continue;
+        for (const child of readdirSync(join(dir, rel))) {
+          if (wanted.has(`${rel}/${child}`)) continue;
+          rmSync(join(dir, rel, child), { recursive: true, force: true });
         }
-        // An empty one is left by a set that has none of that kind any more.
-        if (readdirSync(join(dir, entry)).length === 0) {
-          rmSync(join(dir, entry), { recursive: true, force: true });
-        }
-        continue;
       }
-      if (!wanted.has(entry)) rmSync(join(dir, entry), { recursive: true, force: true });
     }
+    removeEmptyDirs(dir);
   }
 
   /** Writes one file under the materialized directory, agent-owned. */
@@ -404,6 +419,22 @@ export class AgentStore {
   /** Drops a session's materialized directory, when the session is deleted. */
   removeMaterialized(sessionId: string): void {
     rmSync(agentConfigPath(this.dataDir, sessionId), { recursive: true, force: true });
+  }
+}
+
+/**
+ * Removes every empty directory under `dir`, deepest first, leaving `dir`.
+ *
+ * A layout's directories nest, so the last skill of a harness leaving takes
+ * the directory it was in and the harness directory above it: a harness with
+ * nothing installed keeps nothing.
+ */
+function removeEmptyDirs(dir: string): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(dir, entry.name);
+    removeEmptyDirs(path);
+    if (readdirSync(path).length === 0) rmSync(path, { recursive: true, force: true });
   }
 }
 
