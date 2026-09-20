@@ -194,8 +194,7 @@ describe('composePolicy', () => {
     // header value, and it authenticates traffic to chatgpt.com, which is
     // deliberately not intercepted. Storing it therefore changes nothing
     // about the wire — the row is kept and refreshed, and the harness health
-    // is where a person is told it cannot reach a box yet. PLAN.md section 3,
-    // verify step 10.
+    // is where a person is told it cannot reach a box yet.
     store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
     const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
     const policy = composePolicy(cfg, material, rows(store));

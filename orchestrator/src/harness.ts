@@ -76,9 +76,9 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     label: 'Claude Code',
     cmd: ['claude-agent-acp'],
     processToken: 'claude-agent-acp',
-    // Read from the adapter's source, not yet confirmed against a real box's
-    // process table (PLAN.md section 3, verify step 2): the adapter spawns the
-    // Claude Code CLI as its agent and nothing else that outlives a turn. The
+    // Read from the adapter's source, and since seen in a box's own process
+    // table: the adapter spawns the Claude Code CLI as its agent, and nothing
+    // else of its own outlives a turn. The
     // pattern matches the `claude` argv0 and not a workspace path that merely
     // contains the word.
     residentProcesses: [/(^|\/)claude(\s|$)/],
@@ -122,12 +122,11 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     label: 'Codex',
     cmd: ['codex-acp'],
     processToken: 'codex-acp',
-    // Same caveat as Claude's: read from `codex-acp`'s source, still to be
-    // confirmed against a real box (PLAN.md section 3, verify step 2). The
-    // adapter spawns the Codex binary as `codex app-server` and talks JSON-RPC
-    // to it for the life of the exec; what else sits under that app-server —
-    // a sandbox helper, an MCP server — is exactly what step 2 is for, and
-    // anything long-lived it finds belongs in this list.
+    // Read from `codex-acp`'s source, and still to be confirmed against a
+    // real box. The adapter spawns the Codex binary as `codex app-server` and
+    // talks JSON-RPC to it for the life of the exec; what else sits under that
+    // app-server — a sandbox helper, an MCP server — is what a box's own
+    // process table would say, and anything long-lived in it belongs here.
     residentProcesses: [/codex app-server/],
     /**
      * `agent-full-access` rather than the adapter's own `agent` default: the
@@ -150,9 +149,10 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      * The same intent as a Claude fork starting in `plan`: every write asks
      * first. `read-only` is not a read-only sandbox — it is Codex's
      * `on-request` approval with a human reviewer — which is why it is the
-     * fork's mode and not a safety boundary. If verify step 3 finds that the
-     * sandboxed modes cannot run in the container at all, a fork starts in
-     * `agent-full-access` instead and the dashboard says so.
+     * fork's mode and not a safety boundary. A box cannot give bubblewrap
+     * the namespace it wants, so Codex says so and carries on without the
+     * sandbox; should it ever refuse the mode outright instead, a fork
+     * starts in `agent-full-access` and the dashboard says so.
      */
     forkModeId: 'read-only',
     /** Empty: a fresh Codex thread stays on the adapter's own default model. */
@@ -171,8 +171,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      * without validating it against OpenAI first, and that the copy it leaves
      * in `auth.json` — on the persistent home, so it survives a stop — is
      * still the same placeholder on the next start. It is per deployment and
-     * never changes, so a stale copy is the right copy. PLAN.md section 3,
-     * verify step 5.
+     * never changes, so a stale copy is the right copy.
      *
      * `CODEX_CA_CERTIFICATE` is deliberately absent. Codex wants it to trust
      * the egress proxy's CA, but that is a fact about the deployment rather

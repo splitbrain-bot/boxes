@@ -1288,8 +1288,7 @@ test('an account credential is reported, and says why it cannot run a box yet', 
   assert.equal(codex?.credential?.account, 'someone@example.com');
   assert.equal(codex?.credential?.status, 'ok');
   // Stored, refreshed, and still not something a box can be handed: the proxy
-  // swaps a header and this authenticates traffic nobody intercepts. PLAN.md
-  // section 3, verify step 10.
+  // swaps a header and this authenticates traffic nobody intercepts.
   assert.equal(codex?.runnable, false);
   assert.match(codex?.credential?.lastError ?? '', /cannot hand a subscription login to a box/);
 });

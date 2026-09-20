@@ -25,8 +25,8 @@ import { log } from './log.ts';
  * change without the flow itself changing — a URL on the service's own host, a
  * one-time code, a token with a fixed prefix — and puts the raw output in the
  * log so that a person can finish by hand on the day a CLI surprises us.
- * PLAN.md section 3, verify steps 8 and 9, neither of which can be run without
- * a Docker daemon.
+ * What either CLI really prints is a thing only a box can answer, and the
+ * tests below say what the parse expects rather than what it will meet.
  */
 
 /** How long a person gets to finish a login before it is given up on. */
@@ -356,10 +356,10 @@ export class LoginManager {
    * polls OpenAI for up to fifteen minutes, writes `auth.json` and exits 0;
    * any failure exits 1 with the reason on stderr. So the whole of the
    * orchestrator's part is to read two things off the output, wait, and then
-   * read the file. PLAN.md section 3, verify step 9: the wording of those
-   * lines is what a real box still has to confirm, which is why the parse
-   * below takes the URL by prefix and the code by shape, and why every line
-   * is logged whether it was understood or not.
+   * read the file. The wording of those lines is the CLI's own and may be
+   * reworded, which is why the parse below takes the URL by prefix and the
+   * code by shape, and why every line is logged whether it was understood
+   * or not.
    */
   private async codexLogin(flow: Flow): Promise<void> {
     const exec = await this.runtime.exec(flow.containerId!, {
@@ -435,9 +435,10 @@ export class LoginManager {
    * `claude setup-token` has no device-code mode and no non-interactive one.
    * It needs a TTY, prints a URL, blocks on a prompt, and prints a one-year
    * token once the code is entered. Everything here is therefore read off a
-   * terminal stream — redraws, escape sequences and all — which is why the
-   * scan is over the whole of the stripped output rather than over lines.
-   * PLAN.md section 3, verify step 8.
+   * terminal — redraws, escape sequences and all — which is why the scan is
+   * over a screen rebuilt from them rather than over the text they surround:
+   * the UI sends only the cells it is changing, so what it does not resend
+   * is lost to anything that reads the stream as text.
    */
   private async claudeLogin(flow: Flow): Promise<void> {
     const exec = await this.runtime.exec(flow.containerId!, {
@@ -705,8 +706,7 @@ const NOT_A_CODE = new Set([
  * ones are excluded and a candidate has to be hyphenated, carry a digit, or be
  * long enough not to be a word anybody writes in capitals. If a real box shows
  * the parse picking the wrong token, the log line beside it carries the
- * untouched output and this is the function to fix. PLAN.md section 3, verify
- * step 9.
+ * untouched output and this is the function to fix.
  */
 export function deviceCodeIn(text: string, url: string): string | null {
   const from = text.indexOf(url);
@@ -727,7 +727,7 @@ export function deviceCodeIn(text: string, url: string): string | null {
  * `Visit:` first, since that is what the CLI labels it with today, and the
  * first https URL otherwise. A terminal wraps a long URL at its own width, so
  * a soft-wrapped one arrives split across lines; the exec asks for a wide
- * terminal to make that unlikely, and verify step 8 is where it is confirmed.
+ * terminal to make that unlikely.
  */
 export function visitUrlIn(text: string): string | null {
   const labelled = /Visit:\s*(https?:\/\/[^\s"'<>]+)/i.exec(text);

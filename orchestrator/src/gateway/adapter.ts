@@ -727,8 +727,7 @@ export class AdapterConnection {
    * Both adapters stream a load's whole conversation back as `session/update`
    * notifications, so one path serves either. What only a box can show is that
    * a Codex rollout survives its container being stopped and started, which is
-   * what makes this return true rather than mint a fresh thread. PLAN.md
-   * section 3, verify step 6.
+   * what makes this return true rather than mint a fresh thread.
    */
   private async loadSession(thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;

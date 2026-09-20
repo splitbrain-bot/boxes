@@ -134,8 +134,7 @@ export function composePolicy(
   // What a box can be given rather than what is stored: a subscription
   // obtained by logging in is a document rather than a header value, and the
   // traffic it authenticates does not pass through the swap at all. See
-  // deliverableSecret() for the whole of why, and PLAN.md section 3, verify
-  // step 10, for what is still undecided about it. A credential with nothing
+  // deliverableSecret() for the whole of why. A credential with nothing
   // deliverable leaves its hosts unintercepted, exactly as an absent one does.
   const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
   const configured = CREDENTIAL_SET.filter((spec) => (secrets.get(spec.id) ?? '') !== '');

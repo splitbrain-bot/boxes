@@ -23,9 +23,8 @@ import type { HarnessHealth, HarnessId, SessionModeState } from '../../../shared
  * not work given back.
  *
  * The card offers the API key alone until a box can be given an `auth.json`
- * of its own, which is PLAN.md section 3, verify step 10. Turning this on is
- * what that change ends with: the flow and the tests that drive it are still
- * here.
+ * of its own. Turning this on is what that change ends with: the flow and
+ * the tests that drive it are still here.
  */
 export const CODEX_LOGIN_OFFERED = false;
 

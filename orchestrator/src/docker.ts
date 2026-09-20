@@ -225,8 +225,7 @@ export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
     // native-tls and rustls both, and only the OpenSSL path applies these. A
     // Codex turn that fails TLS against api.openai.com with the CA delivered
     // here is that, and the answer is upstream rather than anything Boxes can
-    // do — the CA is per deployment and cannot go into the image. PLAN.md
-    // section 3, verify step 4.
+    // do — the CA is per deployment and cannot go into the image.
     env['CODEX_CA_CERTIFICATE'] = CA_PATH;
   }
 
@@ -791,8 +790,8 @@ export interface LoginExec {
  * asks for has to be written back to the same stream. Under a TTY Docker does
  * not frame the output, so there is nothing to demux and the one stream is
  * both halves already — which is also why the stream carries the CLI's
- * redraws and escape sequences, and why every flow strips those before
- * reading anything. PLAN.md section 3, verify step 8.
+ * redraws and escape sequences, and why a flow reading one rebuilds the
+ * screen from them rather than reading them as text.
  */
 export async function spawnLoginExec(
   containerId: string,

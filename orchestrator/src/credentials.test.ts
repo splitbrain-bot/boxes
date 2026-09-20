@@ -275,7 +275,7 @@ test('a stored login with no refresh token says so once rather than every minute
 test('an account credential is stored and refreshed, and is not delivered to a box', () => {
   const oauth = store.put('openai', 'oauth', authJson(IN_FIVE_HOURS, '2026-09-12T11:00:00Z'));
   // The proxy swaps a header value, and this is a document authenticating
-  // traffic that is deliberately not intercepted. See verify step 10.
+  // traffic that is deliberately not intercepted. See deliverableSecret().
   assert.equal(deliverableSecret(oauth), null);
   assert.match(undeliverableReason(oauth) ?? '', /cannot hand a subscription login to a box/);
 

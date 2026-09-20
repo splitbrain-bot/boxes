@@ -367,9 +367,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
         // A credential can be perfectly good and still not reach a box: a
         // subscription obtained by logging in is a document rather than a
         // header value, and Boxes has no way to hand one to a container yet.
-        // See credentials.ts's deliverableSecret(), and PLAN.md section 3,
-        // verify step 10. The reason travels in the field the dashboard
-        // already shows beside a harness it cannot offer.
+        // See credentials.ts's deliverableSecret(). The reason travels in
+        // the field the dashboard already shows beside a harness it cannot
+        // offer.
         const blocked = row ? undeliverableReason(row) : null;
         const summary = row ? credentials.summarize(row) : null;
         return {

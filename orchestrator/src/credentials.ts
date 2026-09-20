@@ -206,8 +206,7 @@ export class CredentialStore {
  *
  * So an `oauth` row is stored, refreshed and reported, and is not delivered.
  * Making it reach a box means minting a short-lived `auth.json` into the box
- * instead of swapping a header, which is the other branch of the spike in
- * PLAN.md section 3, verify step 10, and is not built. Until it is, the
+ * instead of swapping a header, and that is not built. Until it is, the
  * harness whose only credential is an `oauth` one reports `runnable: false`
  * and says why.
  *

@@ -25,8 +25,8 @@ import {
  * the only part worth a daemon is the part a daemon cannot be asked about
  * here. The runtime is injected and the streams are written by hand, exactly
  * as `docker.test.ts` fakes dockerode — which also means these tests say what
- * the parse expects, and a real box that prints something else (PLAN.md
- * section 3, verify steps 8 and 9) is a change to the strings below.
+ * the parse expects, and a real box that prints something else is a change to
+ * the strings below.
  */
 
 /** The escape byte, spelled rather than typed, so the source stays printable. */
