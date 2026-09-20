@@ -1259,7 +1259,10 @@ export async function openTerminalExec(
     ConsoleSize: [rows, cols],
   });
 
-  const stream = (await exec.start({ hijack: true, stdin: true })) as Duplex;
+  // The daemon frames the output unless the start request says Tty too: the
+  // flag on the exec alone leaves every chunk behind an eight-byte header,
+  // whose last byte lands in the terminal as a stray character.
+  const stream = (await exec.start({ hijack: true, stdin: true, Tty: true })) as Duplex;
   const { exited, kill } = execCompletion(stream, exec, () => {}, (err) =>
     log.warn('terminal exec stream error', { error: err.message }),
   );
