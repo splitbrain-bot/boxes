@@ -737,10 +737,11 @@ export class SessionManager {
       homeSource: row.home_dir
         ? ws.hostHomePath(this.hostDataDir, row.id)
         : row.home_volume,
-      env: dk.credentialEnv((id) => this.egress.placeholderFor(id), {
-        gitName: settings.gitName,
-        gitEmail: settings.gitEmail,
-      }),
+      env: dk.credentialEnv(
+        (id) => this.egress.placeholderFor(id),
+        { gitName: settings.gitName, gitEmail: settings.gitEmail },
+        this.cfg.GITLAB_HOST,
+      ),
       caCertificate: this.egress.caCertificate(),
     };
   }

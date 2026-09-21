@@ -32,6 +32,7 @@ for (const scheme of ['light', 'dark'] as const) {
     try {
       await expect.poll(() => page.getByText('Git identity').isVisible()).toBe(true);
       await expect.poll(() => page.getByRole('heading', { name: 'GitHub' }).isVisible()).toBe(true);
+      await expect.poll(() => page.getByRole('heading', { name: 'GitLab' }).isVisible()).toBe(true);
       await shoot(page, `settings-${scheme}`);
       expect(errors).toEqual([]);
     } finally {

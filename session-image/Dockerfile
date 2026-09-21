@@ -75,6 +75,26 @@ RUN install -d -m 0755 /usr/share/keyrings \
  && apt-get update && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
+# GitLab CLI, for the same flow against a deployment's own GitLab instance.
+# There is no apt repository for it: the release carries a .deb per
+# architecture, so the version and each package's checksum are pinned here,
+# and a bump is an edit to these three lines. The package depends on git
+# alone, which is already installed, so dpkg can take it directly.
+ARG GLAB_VERSION=1.118.0
+ARG GLAB_SHA256_AMD64=2a4a6413594cfaf9b84af33780d32098ee5011092607389a57a8452efa33c698
+ARG GLAB_SHA256_ARM64=633adef24092ae9406d114e8daa4fcbe87b1c32fab2fbba8e2a55dd217975392
+RUN arch="$(dpkg --print-architecture)" \
+ && case "$arch" in \
+      amd64) sha="$GLAB_SHA256_AMD64" ;; \
+      arm64) sha="$GLAB_SHA256_ARM64" ;; \
+      *) echo "no glab package pinned for $arch" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${arch}.deb" \
+      -o /tmp/glab.deb \
+ && echo "$sha  /tmp/glab.deb" | sha256sum -c - \
+ && dpkg -i /tmp/glab.deb \
+ && rm -f /tmp/glab.deb
+
 # Go, Rust and PHP, so a session can work in them without installing a
 # toolchain first. The distribution's own packages rather than upstream
 # tarballs: they carry its security updates and pin no checksum here. This is

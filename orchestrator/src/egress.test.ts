@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Config } from './config.ts';
-import { CREDENTIAL_SET, loadConfig } from './config.ts';
+import { loadConfig } from './config.ts';
 import { CredentialStore, type CredentialId, type CredentialRow } from './credentials.ts';
 import { openDb, type Db } from './db.ts';
 import {
@@ -24,6 +24,7 @@ import {
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
 const OPENAI_KEY = 'sk-therealopenaiapikey';
 const GH_TOKEN = 'ghp_therealgithubtoken';
+const GITLAB_TOKEN = 'glpat-therealgitlabtoken';
 
 let dirs: string[] = [];
 let servers: http.Server[] = [];
@@ -134,7 +135,7 @@ describe('composePolicy', () => {
   it('translates only the credentials the store holds a secret for', async () => {
     const cfg = configFrom();
     const store = storeWith(cfg, { github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials.map((c) => c.id)).toEqual(['github']);
@@ -145,7 +146,7 @@ describe('composePolicy', () => {
   it('intercepts nothing when the store is empty, and still carries the CA', async () => {
     const cfg = configFrom();
     const store = storeWith(cfg);
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials).toEqual([]);
@@ -159,8 +160,8 @@ describe('composePolicy', () => {
 
   it('holds a placeholder for every credential, configured or not', async () => {
     const cfg = configFrom();
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
-    for (const spec of CREDENTIAL_SET) {
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    for (const spec of cfg.credentialSet) {
       expect(material.placeholders[spec.id]).toMatch(
         new RegExp(`^${spec.placeholderPrefix.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&')}`),
       );
@@ -170,14 +171,14 @@ describe('composePolicy', () => {
   it('leaves the allowlist off when none is configured', async () => {
     const cfg = configFrom();
     const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     expect(composePolicy(cfg, material, rows(store)).allowedHosts).toEqual([]);
   }, 30_000);
 
   it('adds the hosts a configured credential needs but never travels to', async () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
     const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     const { allowedHosts } = composePolicy(cfg, material, rows(store));
 
     expect(allowedHosts).toContain('registry.npmjs.org');
@@ -185,6 +186,19 @@ describe('composePolicy', () => {
     expect(allowedHosts).toContain('codeload.github.com');
     // The credential's own hosts are implied by the proxy, not listed here.
     expect(allowedHosts).not.toContain('evil.com');
+  }, 30_000);
+
+  it('intercepts the GitLab the deployment names, and only that one', async () => {
+    const cfg = configFrom({ GITLAB_HOST: 'gitlab.example.com' });
+    const store = storeWith(cfg, { gitlab: GITLAB_TOKEN });
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const policy = composePolicy(cfg, material, rows(store));
+
+    const gitlab = policy.credentials.find((c) => c.id === 'gitlab');
+    expect(gitlab?.hosts).toEqual(['gitlab.example.com']);
+    expect(gitlab?.headers).toEqual(['authorization', 'private-token']);
+    expect(gitlab?.secret).toBe(GITLAB_TOKEN);
+    expect(gitlab?.placeholder).toMatch(/^glpat-/);
   }, 30_000);
 
   it('has nothing to swap for a subscription obtained by logging in', async () => {
@@ -196,7 +210,7 @@ describe('composePolicy', () => {
     // about the wire — the row is kept and refreshed, and the harness health
     // is where a person is told it cannot reach a box yet.
     store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
@@ -208,7 +222,7 @@ describe('composePolicy', () => {
   it('intercepts the OpenAI key host, and only that one', async () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
     const store = storeWith(cfg, { openai: OPENAI_KEY });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     const policy = composePolicy(cfg, material, rows(store));
 
     const openai = policy.credentials.find((c) => c.id === 'openai');
@@ -262,7 +276,7 @@ describe('the control channel, from the orchestrator side', () => {
       EGRESS_CONTROL_PORT: String(port),
     });
     const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, CREDENTIAL_SET);
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     return { cfg, material, store, seen };
   }
 

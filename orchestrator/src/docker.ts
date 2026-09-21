@@ -164,16 +164,24 @@ export interface CreateContainerSpec {
  * always has something to set up. A push with no GitHub credential stored
  * gets a 401 from GitHub, which in a headless box is the same outcome said
  * sooner than a prompt nobody can answer.
+ *
+ * GITLAB_TOKEN and GITLAB_HOST are the same pair for git and glab, against
+ * gitlab.com or against whichever instance the deployment named. The host
+ * travels with the token because glab needs it, and because it is what the
+ * entrypoint points the credential helper at.
  */
 export function credentialEnv(
   placeholderFor: (credentialId: string) => string,
   identity: { gitName: string; gitEmail: string },
+  gitlabHost: string,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const harness of Object.values(HARNESSES)) {
     Object.assign(env, harness.env(placeholderFor(harness.credentialId)));
   }
   env['GH_TOKEN'] = placeholderFor('github');
+  env['GITLAB_TOKEN'] = placeholderFor('gitlab');
+  env['GITLAB_HOST'] = gitlabHost;
   env['GIT_NAME'] = identity.gitName;
   env['GIT_EMAIL'] = identity.gitEmail;
   return env;

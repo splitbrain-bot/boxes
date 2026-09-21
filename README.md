@@ -78,10 +78,15 @@ card per credential, and the identity every session commits as.
 | Claude | The token `claude setup-token` prints, `sk-ant-oat01-…` | A Claude Code thread fails at its first prompt |
 | OpenAI | An API key, `sk-…` | A Codex thread fails at its first prompt |
 | GitHub | A classic personal access token, `ghp_…` | git and gh reach GitHub unauthenticated, and a push is refused |
+| GitLab | A personal access token, `glpat-…` | git and glab reach GitLab unauthenticated, and a push is refused |
 | Git identity | The name and email a session commits as | Sessions commit as `boxes-bot <boxes-bot@users.noreply.github.com>` |
 
 A secret is write-only. It goes in, and what comes back out is its last four
 characters, whether it is working, and what it last failed with.
+
+The GitLab token is for `gitlab.com` unless the deployment runs its own
+instance and names it in `GITLAB_HOST`. Which GitLab is the one thing about a
+credential that is configuration rather than a fact about the service.
 
 Entering one takes effect within the second, and it reaches sessions that
 already exist: every session holds a placeholder for every credential whether

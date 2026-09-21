@@ -384,6 +384,18 @@ if [ -n "${GH_TOKEN:-}" ]; then
   fi
 fi
 
+# --- gitlab auth ------------------------------------------------------------
+# glab reads GITLAB_TOKEN and GITLAB_HOST from the environment, so nothing has
+# to be logged in; git is pointed at glab's credential helper for that one
+# host, which is what `gh auth setup-git` does for GitHub.
+if [ -n "${GITLAB_TOKEN:-}" ] && [ -n "${GITLAB_HOST:-}" ]; then
+  if git config --global "credential.https://${GITLAB_HOST}.helper" '!glab auth git-credential'; then
+    log "configured git credential helper for $GITLAB_HOST via glab"
+  else
+    log "WARNING: could not configure the glab credential helper; https pushes to $GITLAB_HOST may prompt"
+  fi
+fi
+
 # --- hold the container -----------------------------------------------------
 log "ready; holding container open"
 exec sleep infinity
