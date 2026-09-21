@@ -831,9 +831,9 @@ what it shares.
 `GET /api/harnesses` report one entry per harness: the credential it needs, a
 summary of what is stored for it, and whether a thread of it can run a turn
 right now. Only the harnesses this deployment could deliver a credential to at
-all are reported — a box holds one placeholder per entry of `CREDENTIAL_SET`,
-so a harness whose credential is not in that set could not be given one
-whatever the store held. Stored is not the same as usable: a credential can be
+all are reported — a box holds one placeholder per entry of the config's
+credential set, so a harness whose credential is not in that set could not be
+given one whatever the store held. Stored is not the same as usable: a credential can be
 perfectly good and still not reach a box, which is what a subscription login
 is, so the answer carries the reason as well. The dialogs offer every reported
 harness and grey out the ones that cannot run, saying which of those it is.
@@ -2336,11 +2336,16 @@ above governs the connection that leaves: decrypting a host buys no way
 around the checks.
 
 `api.anthropic.com`, `api.openai.com`, `github.com`, `api.github.com` and
-`*.githubusercontent.com` are the translated hosts, fixed in `config.ts` as
-`CREDENTIAL_SET` alongside the headers each credential travels in and the hosts
-it merely needs reachable. They are facts about the services rather than
-preferences, so they are not configurable; only whether a credential for one is
-stored is.
+`*.githubusercontent.com` are the translated hosts, fixed in `config.ts`
+alongside the headers each credential travels in and the hosts it merely needs
+reachable. They are facts about the services rather than preferences, so they
+are not configurable; only whether a credential for one is stored is. The
+config's `credentialSet` is that fixed list plus the GitLab credential, whose
+host is the one exception: `GITLAB_HOST`, `gitlab.com` unless a deployment
+runs its own instance. Its token travels in `authorization` — git's Basic
+pair, or a bearer — and in `PRIVATE-TOKEN`, which is what glab sends a
+personal access token in. A deployment that names its own instance intercepts
+that host instead, and gitlab.com becomes an ordinary passthrough host.
 
 `chatgpt.com` is in that set as a host to allow and never to intercept. It
 carries the other kind of OpenAI credential — a subscription — and the two
@@ -2498,10 +2503,10 @@ subscription login has no static form to write down at all. Every write calls
 the store's `onChange`, which recomposes the egress policy and pushes it.
 
 What reaches a session container is a placeholder for each of them, built by
-`credentialEnv` from every harness's `env()` plus `GH_TOKEN`, `GIT_NAME` and
-`GIT_EMAIL`, and fixed into the container at create time. The real value never
-enters a box and never reaches a filesystem outside the orchestrator's own data
-volume. The CA certificate travels the same path, as `BOXES_PROXY_CA`, which
+`credentialEnv` from every harness's `env()` plus `GH_TOKEN`, `GITLAB_TOKEN`,
+`GITLAB_HOST`, `GIT_NAME` and `GIT_EMAIL`, and fixed into the container at
+create time. The real value never enters a box and never reaches a filesystem
+outside the orchestrator's own data volume. The CA certificate travels the same path, as `BOXES_PROXY_CA`, which
 the entrypoint writes to `~/.boxes/proxy-ca.crt` for the CA-trust variables to
 point at — `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`,
 `CURL_CA_BUNDLE`, and `CODEX_CA_CERTIFICATE`, which Codex reads before it falls
@@ -2510,7 +2515,9 @@ back to `SSL_CERT_FILE`.
 `GH_TOKEN` is now always set, so `gh auth setup-git` in the entrypoint always
 runs. A push from a box with no GitHub credential stored gets a 401 from
 GitHub rather than a prompt, which in a headless box is the same outcome said
-sooner.
+sooner. `GITLAB_TOKEN` is set on the same terms, and the entrypoint points git
+at `glab auth git-credential` for the one host `GITLAB_HOST` names; glab reads
+both variables itself and needs no login.
 
 ## Build-time pins
 
@@ -2521,6 +2528,10 @@ Code, its adapter and the browser CLI are pinned to a major line rather than
 to an exact release, so a rebuild takes fixes on that line and a new major is
 an edit to that file; below 1.0 a caret pins the minor, which is where a
 package that young puts its breaking changes.
+
+glab is pinned exactly, to a release and to the checksum of its `.deb` for
+each architecture, because there is no apt repository to take a signed package
+from. `gh` comes from one, and is pinned by nothing but that.
 
 Codex is pinned as a pair, and exactly. `@openai/codex` on npm is a 13 KB
 launcher whose platform binary arrives as an optional dependency of 339 MB, so

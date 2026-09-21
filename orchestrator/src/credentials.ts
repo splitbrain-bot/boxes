@@ -32,7 +32,7 @@ import type { Db } from './db.ts';
 export type { CredentialId, CredentialMethod, CredentialStatus };
 
 /** Every credential id, in the order the settings page lists them. */
-export const CREDENTIAL_IDS: readonly CredentialId[] = ['claude', 'openai', 'github'];
+export const CREDENTIAL_IDS: readonly CredentialId[] = ['claude', 'openai', 'github', 'gitlab'];
 
 /** Every way a secret can be obtained. */
 export const CREDENTIAL_METHODS: readonly CredentialMethod[] = ['token', 'api_key', 'oauth'];

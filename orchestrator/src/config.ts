@@ -16,6 +16,9 @@ import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
 /** A positive whole number of minutes. */
 const durationMinutes = z.coerce.number().int().positive();
 
+/** A bare hostname of two labels or more: no scheme, no port, no path. */
+const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
 /**
  * An on/off setting, spelled the way a person would write one.
  *
@@ -181,11 +184,29 @@ const schema = z.object({
    * which leaves every public host reachable.
    */
   EGRESS_ALLOWED_HOSTS: z.string().default(''),
+
+  /**
+   * The GitLab the settings page's token is for, as a bare hostname with no
+   * scheme and no path. `gitlab.com` unless a deployment runs its own.
+   *
+   * A self-managed instance has to be on a public address, because the proxy
+   * refuses private ranges whatever the credential set says.
+   */
+  GITLAB_HOST: z
+    .string()
+    .regex(HOSTNAME, { message: 'must be a bare hostname such as gitlab.example.com' })
+    .default('gitlab.com'),
 });
 
 export type Config = Readonly<z.infer<typeof schema>> & {
   /** The parsed allowlist. Empty means the allowlist is off. */
   readonly egressAllowedHosts: readonly string[];
+  /**
+   * Every credential this deployment can translate, and where each one
+   * travels. A box holds a placeholder for each entry; the proxy swaps in the
+   * ones the store holds a secret for.
+   */
+  readonly credentialSet: readonly CredentialSpec[];
 };
 
 /**
@@ -193,7 +214,8 @@ export type Config = Readonly<z.infer<typeof schema>> & {
  * about it that is not the secret itself.
  *
  * The host lists and header names are fixed here rather than configured:
- * they are facts about the services rather than preferences.
+ * they are facts about the services rather than preferences. The one
+ * exception is which GitLab a deployment uses, which GITLAB_HOST names.
  */
 export interface CredentialSpec {
   /** Which stored credential this is: the key of the row that holds its secret. */
@@ -215,15 +237,15 @@ export interface CredentialSpec {
 }
 
 /**
- * Every credential the proxy knows how to translate, and where each one
- * travels. A deployment translates the ones the credential store holds a
- * secret for; the rest stay ordinary passthrough hosts.
+ * The credentials whose hosts are fixed. A deployment translates the ones the
+ * credential store holds a secret for; the rest stay ordinary passthrough
+ * hosts.
  *
  * This stays configuration-free even though the secrets have left the
  * environment: which hosts a credential is sent to, and which header it
  * arrives in, are facts about the services rather than preferences.
  */
-export const CREDENTIAL_SET: readonly CredentialSpec[] = [
+const FIXED_CREDENTIALS: readonly CredentialSpec[] = [
   {
     id: 'claude',
     hosts: ['api.anthropic.com'],
@@ -260,6 +282,30 @@ export const CREDENTIAL_SET: readonly CredentialSpec[] = [
     placeholderPrefix: 'ghp_',
   },
 ];
+
+/**
+ * The GitLab credential, whose host is the one part of the set a deployment
+ * chooses: GITLAB_HOST, which is gitlab.com unless it runs its own instance.
+ *
+ * git sends the token as the password of an HTTP Basic pair. glab sends a
+ * personal access token in PRIVATE-TOKEN, which is the header GitLab
+ * documents for one, and an OAuth token as a bearer; both headers are read so
+ * that every shape is either swapped or refused.
+ */
+function gitlabCredential(host: string): CredentialSpec {
+  return {
+    id: 'gitlab',
+    hosts: [host],
+    headers: ['authorization', 'private-token'],
+    alsoAllow: [],
+    placeholderPrefix: 'glpat-',
+  };
+}
+
+/** Every credential this deployment can translate, in settings-page order. */
+function credentialSetFor(gitlabHost: string): readonly CredentialSpec[] {
+  return [...FIXED_CREDENTIALS, gitlabCredential(gitlabHost)];
+}
 
 /** Splits a comma or whitespace separated host list into patterns. */
 function parseHostList(value: string): string[] {
@@ -316,6 +362,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     ...base,
     egressAllowedHosts: allowedHosts,
+    credentialSet: credentialSetFor(base.GITLAB_HOST),
   };
 }
 

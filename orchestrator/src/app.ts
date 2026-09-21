@@ -36,7 +36,7 @@ import {
   threadDoneBody,
   updateAgentSetBody,
 } from './bodies.ts';
-import { CREDENTIAL_SET, type Config } from './config.ts';
+import type { Config } from './config.ts';
 import {
   CredentialStore,
   isCredentialId,
@@ -353,13 +353,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * What each harness needs, and whether it has it.
    *
    * Only the harnesses this deployment can carry a credential to: a box holds
-   * one placeholder per entry of CREDENTIAL_SET, so a harness whose
-   * credential is not in that set could not be given one whatever the store
-   * held. Both harnesses qualify now that the OpenAI credential is in the set,
-   * and a third would the moment its own credential joined it.
+   * one placeholder per entry of the config's credential set, so a harness
+   * whose credential is not in that set could not be given one whatever the
+   * store held. Both harnesses qualify now that the OpenAI credential is in
+   * the set, and a third would the moment its own credential joined it.
    */
   function harnessHealth(): HarnessHealth[] {
-    const deliverable = new Set(CREDENTIAL_SET.map((spec) => spec.id));
+    const deliverable = new Set(cfg.credentialSet.map((spec) => spec.id));
     return Object.values(HARNESSES)
       .filter((h) => deliverable.has(h.credentialId))
       .map((h) => {

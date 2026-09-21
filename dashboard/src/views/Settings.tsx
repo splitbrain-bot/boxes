@@ -98,6 +98,18 @@ const KINDS: CredentialKind[] = [
     method: 'token',
     canLogin: false,
   },
+  {
+    id: 'gitlab',
+    label: 'GitLab',
+    harnesses: [],
+    blurb:
+      'What a box clones and pushes with at gitlab.com, or at the instance the ' +
+      'deployment named instead. Without it, git and glab reach it unauthenticated ' +
+      'and a push is refused.',
+    hint: 'glpat-…, a personal access token with the api and write_repository scopes',
+    method: 'token',
+    canLogin: false,
+  },
 ];
 
 export function Settings() {

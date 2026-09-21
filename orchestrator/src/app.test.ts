@@ -1085,7 +1085,7 @@ test('a pasted credential is stored, shown by its last four, and never read back
 test('a credential nobody can use is refused rather than stored', async () => {
   const unknown = await orchestrator.app.inject({
     method: 'PUT',
-    url: '/api/credentials/gitlab',
+    url: '/api/credentials/bitbucket',
     payload: { method: 'token', secret: 'x' },
   });
   assert.equal(unknown.statusCode, 400);

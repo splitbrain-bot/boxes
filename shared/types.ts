@@ -29,7 +29,7 @@ export type HarnessId = 'claude' | 'codex';
  * part of the API. `orchestrator/src/credentials.ts` owns the store and
  * re-exports the three types below.
  */
-export type CredentialId = 'claude' | 'openai' | 'github';
+export type CredentialId = 'claude' | 'openai' | 'github' | 'gitlab';
 
 /**
  * How a credential was obtained, which decides what the secret is: a token

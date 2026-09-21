@@ -85,7 +85,7 @@ async function envFor(
     workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
     agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
     homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
-    env: credentialEnv((id) => egress.placeholderFor(id), settings),
+    env: credentialEnv((id) => egress.placeholderFor(id), settings, cfg.GITLAB_HOST),
     caCertificate: egress.caCertificate(),
   };
 
@@ -124,6 +124,18 @@ describe('sessionEnv', () => {
     // And what each harness needs beside its credential, from the registry.
     expect(env['CLAUDE_CONFIG_DIR']).toBe('/home/agent/.claude');
     expect(env['CODEX_HOME']).toBe('/home/agent/.codex');
+  }, 30_000);
+
+  it('carries the GitLab pair, at gitlab.com or at the named instance', async () => {
+    // The placeholder, before any token is stored, on the same terms as
+    // GH_TOKEN; and the host, which is what glab reads and what the
+    // entrypoint points the credential helper at.
+    const env = await envFor();
+    expect(env['GITLAB_TOKEN']).toMatch(/^glpat-/);
+    expect(env['GITLAB_HOST']).toBe('gitlab.com');
+
+    const own = await envFor({}, { GITLAB_HOST: 'gitlab.example.com' });
+    expect(own['GITLAB_HOST']).toBe('gitlab.example.com');
   }, 30_000);
 
   it('carries what Codex needs to log itself in from the environment', async () => {

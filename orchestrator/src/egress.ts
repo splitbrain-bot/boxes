@@ -8,7 +8,7 @@ import type {
   EgressPolicy,
   EgressStatus,
 } from '../../shared/types.ts';
-import { CREDENTIAL_SET, type Config } from './config.ts';
+import type { Config } from './config.ts';
 import { deliverableSecret, type CredentialRow, type CredentialStore } from './credentials.ts';
 import { log } from './log.ts';
 import { writeSecretFile } from './secret.ts';
@@ -137,7 +137,7 @@ export function composePolicy(
   // deliverableSecret() for the whole of why. A credential with nothing
   // deliverable leaves its hosts unintercepted, exactly as an absent one does.
   const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
-  const configured = CREDENTIAL_SET.filter((spec) => (secrets.get(spec.id) ?? '') !== '');
+  const configured = cfg.credentialSet.filter((spec) => (secrets.get(spec.id) ?? '') !== '');
 
   const credentials: EgressCredential[] = configured.map((spec) => {
     const placeholder = material.placeholders[spec.id];
@@ -238,7 +238,7 @@ export class EgressManager {
     // placeholder for every credential this deployment could ever translate,
     // because its environment is fixed when it is created and a credential
     // entered afterwards has to reach it.
-    this.material = await resolveEgressMaterial(this.cfg.DATA_DIR, CREDENTIAL_SET);
+    this.material = await resolveEgressMaterial(this.cfg.DATA_DIR, this.cfg.credentialSet);
     this.composed = composePolicy(this.cfg, this.material, this.credentials.list());
   }
 

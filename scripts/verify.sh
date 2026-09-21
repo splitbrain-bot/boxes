@@ -21,6 +21,11 @@
 #                                     which still exercises interception
 #   PROFILE_DEFAULT_OPENAI_API_KEY=sk-...  what a Codex thread runs on. Without
 #                                     one, every Codex check below is skipped
+#   PROFILE_DEFAULT_GITLAB_TOKEN=glpat-...  a real PAT; a fake one is used
+#                                     otherwise, as for GitHub
+#   PROFILE_DEFAULT_GITLAB_HOST=gitlab.example.com  a self-managed instance to
+#                                     run the GitLab checks against instead of
+#                                     gitlab.com
 #   SKIP_BUILD=1                      reuse the images already built
 #   SKIP_UNIT=1                       skip the two vitest suites
 #   SKIP_SUITES=1                     skip smoke-test.sh and live-test.sh
@@ -40,6 +45,8 @@ COMPOSE=(docker compose -f "$REPO/compose.yaml")
 REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
 REAL_GH="${PROFILE_DEFAULT_GH_TOKEN:-}"
 REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
+GITLAB_HOST="${PROFILE_DEFAULT_GITLAB_HOST:-gitlab.com}"
+REAL_GITLAB="${PROFILE_DEFAULT_GITLAB_TOKEN:-}"
 
 # A fake PAT still proves the GitHub half: it is intercepted and swapped, and
 # then rejected by GitHub rather than by the proxy, which is a different answer
@@ -48,6 +55,13 @@ GH_IS_FAKE=0
 if [ -z "$REAL_GH" ]; then
   REAL_GH="ghp_verifyFake$(openssl rand -hex 12)"
   GH_IS_FAKE=1
+fi
+
+# The same for GitLab.
+GITLAB_IS_FAKE=0
+if [ -z "$REAL_GITLAB" ]; then
+  REAL_GITLAB="glpat-verifyFake$(openssl rand -hex 12)"
+  GITLAB_IS_FAKE=1
 fi
 
 ALLOWLIST='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,api.openai.com,registry.npmjs.org'
@@ -67,7 +81,8 @@ head1() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 redact() {
   sed -e "s|$REAL_GH|<GH_TOKEN>|g" \
       ${REAL_CLAUDE:+-e "s|$REAL_CLAUDE|<CLAUDE_TOKEN>|g"} \
-      ${REAL_OPENAI:+-e "s|$REAL_OPENAI|<OPENAI_KEY>|g"}
+      ${REAL_OPENAI:+-e "s|$REAL_OPENAI|<OPENAI_KEY>|g"} \
+      ${REAL_GITLAB:+-e "s|$REAL_GITLAB|<GITLAB_TOKEN>|g"}
 }
 
 # Drops the escapes a coloured suite writes, so its summary can be read.
@@ -147,6 +162,7 @@ chmod 600 "$ENV_FILE"
 write_env() {
   cat > "$ENV_FILE" <<ENV
 EGRESS_ALLOWED_HOSTS=$1
+GITLAB_HOST=$GITLAB_HOST
 IDLE_STOP_MINUTES=60
 SESSION_IMAGE=boxes-session:latest
 SESSION_IMAGE_PULL_MINUTES=0
@@ -307,6 +323,7 @@ seed_credential() {
   fi
 }
 seed_credential github "$REAL_GH"
+seed_credential gitlab "$REAL_GITLAB"
 seed_credential claude "$REAL_CLAUDE"
 seed_credential openai "$REAL_OPENAI" api_key
 
@@ -322,9 +339,9 @@ else bad "A1" "/healthz never reported inSync"; why "$(curl -sS -m 5 "$API_BASE/
 matches "A2" "the allowlist is reported active" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.egress.allowlistActive'"
 
-WANT_CREDS="github"
-[ -n "$REAL_CLAUDE" ] && WANT_CREDS="claude $WANT_CREDS"
 # Alphabetical, because the check sorts what /healthz reports.
+WANT_CREDS="github gitlab"
+[ -n "$REAL_CLAUDE" ] && WANT_CREDS="claude $WANT_CREDS"
 [ -n "$REAL_OPENAI" ] && WANT_CREDS="$WANT_CREDS openai"
 matches "A3" "the proxy holds exactly the stored credentials ($WANT_CREDS)" "^$WANT_CREDS\$" \
   bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.egress.credentialIds | sort | join(\" \")'"
@@ -603,6 +620,22 @@ else
     sxs 'curl -sS -m 25 -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user'
   matches "D5" "gh authenticates with the placeholder" '"login"' \
     sxs 'gh api user'
+fi
+
+matches "D6" "an invented GitLab credential is refused by the proxy" 'egress denied' \
+  sxs "curl -sS -m 25 -H 'PRIVATE-TOKEN: glpat-notThisDeploymentsToken' https://$GITLAB_HOST/api/v4/user"
+
+# The instance answering at all is the proof: the placeholder was swapped and
+# forwarded, rather than refused here as a foreign credential would be.
+if [ "$GITLAB_IS_FAKE" = 1 ]; then
+  matches "D7" "the GitLab placeholder is swapped and $GITLAB_HOST answers (fake PAT, so 401)" '401|"username"' \
+    sxs "curl -sS -m 25 -H \"PRIVATE-TOKEN: \$GITLAB_TOKEN\" https://$GITLAB_HOST/api/v4/user"
+  skipped "D8" "glab api user needs a real PAT"
+else
+  matches "D7" "the GitLab placeholder authenticates at $GITLAB_HOST" '"username"' \
+    sxs "curl -sS -m 25 -H \"PRIVATE-TOKEN: \$GITLAB_TOKEN\" https://$GITLAB_HOST/api/v4/user"
+  matches "D8" "glab authenticates with the placeholder" '"username"' \
+    sxs 'glab api user'
 fi
 
 if [ -n "$REAL_OPENAI" ]; then

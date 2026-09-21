@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { CREDENTIAL_SET, loadConfig } from './config.ts';
+import { loadConfig } from './config.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +38,7 @@ test('an empty environment yields the documented defaults', () => {
     assert.equal(cfg.EGRESS_PROXY_CONTAINER, 'boxes-egress-proxy');
     assert.equal(cfg.EGRESS_PROXY_ALIAS, 'proxy');
     assert.equal(cfg.EGRESS_PROXY_PORT, 3128);
+    assert.equal(cfg.GITLAB_HOST, 'gitlab.com');
     assert.equal(cfg.LOG_LEVEL, 'info');
   });
 });
@@ -161,18 +162,55 @@ test('the credential set describes where each credential travels', () => {
   // Which hosts a credential is sent to and which header it arrives in are
   // facts about the services, so they are here rather than configurable. The
   // secrets that go with them come from the store.
-  assert.deepEqual(
-    CREDENTIAL_SET.map((c) => c.id),
-    ['claude', 'openai', 'github'],
-  );
-  const github = CREDENTIAL_SET.find((c) => c.id === 'github');
-  assert.ok(github?.hosts.includes('api.github.com'));
-  assert.deepEqual(github?.headers, ['authorization']);
-  assert.ok(CREDENTIAL_SET.every((c) => c.placeholderPrefix !== ''));
+  withDataDir((dir) => {
+    const { credentialSet } = loadConfig({ DATA_DIR: dir });
+    assert.deepEqual(
+      credentialSet.map((c) => c.id),
+      ['claude', 'openai', 'github', 'gitlab'],
+    );
+    const github = credentialSet.find((c) => c.id === 'github');
+    assert.ok(github?.hosts.includes('api.github.com'));
+    assert.deepEqual(github?.headers, ['authorization']);
+    assert.ok(credentialSet.every((c) => c.placeholderPrefix !== ''));
+
+    const gitlab = credentialSet.find((c) => c.id === 'gitlab');
+    // gitlab.com until a deployment names its own instance, and that host
+    // alone is intercepted for the credential.
+    assert.deepEqual(gitlab?.hosts, ['gitlab.com']);
+    // git's Basic pair and a bearer in the one header, glab's personal access
+    // token in the other.
+    assert.deepEqual(gitlab?.headers, ['authorization', 'private-token']);
+    assert.equal(gitlab?.placeholderPrefix, 'glpat-');
+  });
+});
+
+test('a self-managed GitLab replaces the host the credential travels to', () => {
+  withDataDir((dir) => {
+    const { credentialSet } = loadConfig({ DATA_DIR: dir, GITLAB_HOST: 'gitlab.example.com' });
+    const gitlab = credentialSet.find((c) => c.id === 'gitlab');
+    assert.deepEqual(gitlab?.hosts, ['gitlab.example.com']);
+    // gitlab.com is then nobody's host, so nothing is intercepted there.
+    assert.ok(!credentialSet.some((c) => c.hosts.includes('gitlab.com')));
+  });
+});
+
+test('a GitLab host is a bare hostname, or the boot fails', () => {
+  withDataDir((dir) => {
+    for (const bad of [
+      'https://gitlab.example.com',
+      'gitlab.example.com/group',
+      'gitlab',
+      '*.example.com',
+    ]) {
+      assert.throws(() => loadConfig({ DATA_DIR: dir, GITLAB_HOST: bad }), /GITLAB_HOST/);
+    }
+  });
 });
 
 test('the OpenAI credential travels to the API-key endpoint alone', () => {
-  const openai = CREDENTIAL_SET.find((c) => c.id === 'openai');
+  const openai = withDataDir((dir) => loadConfig({ DATA_DIR: dir })).credentialSet.find(
+    (c) => c.id === 'openai',
+  );
   // One intercepted host, because only `api.openai.com` takes an API key.
   assert.deepEqual(openai?.hosts, ['api.openai.com']);
   // Codex sends it as a bearer and nothing else.
