@@ -193,6 +193,10 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
     name: 'orphaned build',
     backgroundBusy: true,
     threads: [{ backgroundBusy: false }],
+    boxWork: [
+      { pid: 2180, command: 'bash -c eval npm run build', elapsedSeconds: 16_741 },
+      { pid: 2184, command: 'james -config conf/james.yaml', elapsedSeconds: 16_741 },
+    ],
   });
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
@@ -202,6 +206,15 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
     // Asked first: it kills work nobody is watching, and half-done work stays
     // half-done.
     await stop.click();
+    // And asked in front of what it is about to kill, because nothing else in
+    // the dashboard can name these: no thread claims them, so no bar lists
+    // them, and a person deciding has only the reading to go on. With the age,
+    // which is what separates a build somebody is waiting on from something
+    // left behind hours ago.
+    await expect
+      .poll(() => page.getByText('james -config conf/james.yaml').isVisible())
+      .toBe(true);
+    expect(await page.getByText('4h 39m').count()).toBe(2);
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(() => stub.boxStops).toEqual(['orphan01']);
 
@@ -224,6 +237,30 @@ test('a box whose own conversation is running the work offers no box-wide kill',
     expect(
       await page.getByRole('button', { name: 'Stop everything running in this box' }).count(),
     ).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the info view lists what the box is running, whoever left it there', async () => {
+  // The ops side of the same question, for looking rather than for deciding:
+  // the card's offer is behind a confirmation, and a reader who only wants to
+  // know what is holding a box awake should not have to open a kill to see it.
+  stub.createSession({
+    id: 'orphan02',
+    name: 'leaked server',
+    backgroundBusy: true,
+    threads: [{ backgroundBusy: false }],
+    boxWork: [{ pid: 2184, command: 'james -config conf/james.yaml', elapsedSeconds: 16_741 }],
+  });
+  const { page, errors, close } = await openPage(stub.url, '/sessions/orphan02/info');
+  try {
+    await expect.poll(() => page.getByText('Running in the box').isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText('james -config conf/james.yaml').isVisible())
+      .toBe(true);
+    await expect.poll(() => page.getByText('4h 39m').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();

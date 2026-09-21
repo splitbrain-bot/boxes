@@ -1,6 +1,6 @@
 import type { ContainerProcess } from '../docker.ts';
 import type { Harness } from '../harness.ts';
-import type { BackgroundProcess } from '../../../shared/types.ts';
+import type { BackgroundProcess, BoxWork } from '../../../shared/types.ts';
 
 /**
  * What a session has left running: what the adapters say, and what the box
@@ -210,8 +210,16 @@ function describe(update: AsyncTaskUpdate): string | null {
 export interface BoxReading {
   /** Whether anything is running that Boxes did not put there to hold the box open. */
   busy: boolean;
-  /** The command lines of what is, for the log and for the session-level stop. */
-  work: readonly string[];
+  /**
+   * What is, for the log and for a reader deciding whether to stop it.
+   *
+   * The pids are the reading's own and are not what a stop signals:
+   * {@link workPids} answers the same question again in the numbering a kill
+   * inside the box takes. These are here to tell two identical command lines
+   * apart, and because an age is the one field that separates a build somebody
+   * is waiting on from something left behind hours ago.
+   */
+  work: readonly BoxWork[];
 }
 
 /** Nothing running anywhere: a box that is not there, or not up. */
@@ -371,7 +379,11 @@ export function readBox(
   const inits = initPids(processes);
   const work = processes
     .filter((p) => !isResident(p, adapters, harnesses, inits))
-    .map((p) => p.command.trim());
+    .map((p) => ({
+      pid: p.pid,
+      command: p.command.trim(),
+      elapsedSeconds: p.elapsedSeconds,
+    }));
   return { busy: work.length > 0, work };
 }
 
@@ -506,6 +518,20 @@ export class BackgroundProbe {
   get active(): boolean | null {
     this.freshen();
     return this.read ? this.reading.busy : null;
+  }
+
+  /**
+   * What the last reading found running, and a refresh started if it has gone
+   * stale.
+   *
+   * Empty where {@link active} answers null, because a box nobody has read is
+   * a box nothing is known to be running in. The two come off the same
+   * reading, so a badge saying the box is busy and a list saying what with
+   * cannot contradict each other.
+   */
+  get work(): readonly BoxWork[] {
+    this.freshen();
+    return this.reading.work;
   }
 
   /**

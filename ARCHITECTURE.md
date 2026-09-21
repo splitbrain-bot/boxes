@@ -1348,7 +1348,8 @@ Whose work it is, is no longer asked. `codex app-server` runs every Codex
 conversation of a box in one process and names none of them on its command
 line, so the process table cannot answer it — and it no longer has to, because
 the adapters name the work they know about and this answers the only question
-left, which is the reaper's.
+left: whether the box is busy. That is the reaper's question, and it is also
+what a person is shown when no adapter can name the work.
 
 **The events decorate the reading. They never replace it.** A missed event
 costs a name on a bar. A missed reading costs a build. The difference is an
@@ -1385,6 +1386,23 @@ before the branches they hang off so nothing is orphaned into a reading that
 can no longer see it, and KILLs whatever is still there two seconds later. The
 escalation is not waited for: the answer says what was signalled, and the next
 reading says what died.
+
+**The reading is shown, not only acted on.** A card saying "still running"
+with every thread of it quiet names nothing, and the stop it offers is
+all-or-nothing, so a person deciding whether to use it had only the badge to go
+on. `SessionDetail.boxWork` carries the last reading — each process's pid, its
+whole command line and its age — and `BoxWorkList` draws it in the two places
+that decision is made: the confirmation the box-wide stop asks first, which
+reads the detail as it opens, and the session's info view, which polls it
+already. The age is what separates a build somebody is waiting on from
+something left behind hours ago; it comes from `docker top`'s `etimes` column
+and is absent where a host's `ps` has none. A command line is shown as the box
+has it, so an agent that put a secret in an environment assignment in front of
+its command shows that here — the same text the transcript already carries, but
+in a second place, and without the redaction pass the orchestrator's own logger
+makes. Read-only, deliberately: the reading cannot say whose work is whose, so
+there is nothing for a stop to be addressed to, and a pid a browser has been
+holding for a poll may since have been reused.
 
 The pids need care. `docker top` runs `ps` on the *host*, so its pids are the
 host's numbering and mean nothing inside the container where the kill has to

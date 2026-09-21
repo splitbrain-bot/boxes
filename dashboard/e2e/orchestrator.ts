@@ -24,6 +24,7 @@ import type {
   HarnessId,
   ReviewAnnotation,
   ReviewFileResponse,
+  BoxWork,
   SessionSummary,
   Settings,
   ThreadOptions,
@@ -215,6 +216,13 @@ export interface SessionSpec {
    * Without it, the box is busy exactly when one of its threads is.
    */
   backgroundBusy?: boolean;
+  /**
+   * What a reading of the box finds running in it, as the detail reports it.
+   * Independent of the flag above, which is what the badge is drawn from: the
+   * two come apart whenever a task an adapter announced is not a process of
+   * its own.
+   */
+  boxWork?: BoxWork[];
   /** How many browsers the gateway has on this session. */
   attachedCount?: number;
   /** Whether the adapter advertises forking, which the list offers. */
@@ -400,6 +408,8 @@ class TestUpstream {
   canFork = true;
   /** Whether anything is running in the box, or null before it was read. */
   backgroundActive: boolean | null = false;
+  /** What a reading of the box found running in it, which the detail carries. */
+  boxWork: BoxWork[] = [];
   /** The adapter's ids for the threads the agent is talking on. */
   speakingThreads: string[] = [];
   /** The adapter's ids for the threads with work still running. */
@@ -480,6 +490,7 @@ class TestUpstream {
   /** Signals one process, after which the box reads as no longer busy. */
   async stopBoxWork(): Promise<number> {
     this.backgroundActive = false;
+    this.boxWork = [];
     return 1;
   }
 
@@ -672,6 +683,7 @@ function createSession(
     }
   });
   upstream.backgroundActive = spec.backgroundBusy ?? upstream.workingThreads.length > 0;
+  upstream.boxWork = spec.boxWork ?? [];
   upstream.attachedCount = spec.attachedCount ?? 0;
   // The first conversation is the one a connection naming none gets, which is
   // where a session that has been worked in is left.

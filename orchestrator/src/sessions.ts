@@ -1394,6 +1394,10 @@ export class SessionManager {
       homeDir: row.home_dir,
       acpSessionId: currentThread(this.db, id)?.acp_session_id ?? null,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
+      // `upstreams.get` rather than `upstream()`, which would start one: a
+      // box nothing holds has nothing read about it, and an empty list is the
+      // honest answer rather than a reason to go and look.
+      boxWork: [...(this.upstreams.get(id)?.boxWork ?? [])],
     };
   }
 

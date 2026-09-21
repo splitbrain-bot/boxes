@@ -230,6 +230,27 @@ export interface BackgroundProcess {
   startedAt: number;
 }
 
+/**
+ * One process a reading of a box found running in it.
+ *
+ * The other answer to "what is running", taken off the process table rather
+ * than from an adapter. It names no task and belongs to no conversation — a
+ * reading knows what runs in a box and not whose it is — so this is what a
+ * reader gets when the bars are empty and the box says it is busy anyway.
+ */
+export interface BoxWork {
+  /**
+   * The pid as the reading took it, which tells two identical command lines
+   * apart. Not what a stop signals: that is read again in the numbering a
+   * kill inside the box takes.
+   */
+  pid: number;
+  /** The whole command line, which is how a process is recognised. */
+  command: string;
+  /** How long it has been running, or null where `ps` would not say. */
+  elapsedSeconds: number | null;
+}
+
 /** One conversation of a session, as the API reports it. */
 export interface ThreadSummary {
   id: string;
@@ -406,6 +427,16 @@ export interface SessionDetail extends SessionSummary {
   acpSessionId: string | null;
   /** True when the egress proxy is attached to this session's network. */
   proxyAttached: boolean;
+  /**
+   * What the last reading found running in the box, which is what the
+   * box-wide stop would signal.
+   *
+   * Empty for a box nothing has read yet and for one that is not up, both of
+   * which are boxes with nothing known to be running in them. Not on the
+   * summary: the list is polled for every session at once, and a command line
+   * is only wanted by somebody looking at one box.
+   */
+  boxWork: BoxWork[];
 }
 
 /**

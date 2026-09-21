@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
 export function ConfirmDialog({
   title,
   description,
+  children,
   confirmLabel,
   danger = false,
   busy = false,
@@ -20,6 +22,15 @@ export function ConfirmDialog({
 }: {
   title: string;
   description?: string;
+  /**
+   * What the action is about to happen to, under the description.
+   *
+   * A slot rather than a longer description, because what goes here is a list
+   * and the description is a paragraph: markup inside one is invalid, and a
+   * confirmation that has to name a dozen things cannot say them in a
+   * sentence.
+   */
+  children?: ReactNode;
   confirmLabel: string;
   danger?: boolean;
   busy?: boolean;
@@ -33,6 +44,7 @@ export function ConfirmDialog({
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
+        {children}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
             Cancel
