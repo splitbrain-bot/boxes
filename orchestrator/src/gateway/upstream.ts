@@ -35,6 +35,7 @@ import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import {
   BOXES_META,
   type BackgroundProcess,
+  type BoxWork,
   type LoadMeta,
   type SessionConfigOption,
   type ThreadOptions,
@@ -527,6 +528,21 @@ export class UpstreamSession implements AdapterHost {
   get backgroundActive(): boolean | null {
     if ([...this.connections.values()].some((conn) => conn.hasTasks)) return true;
     return this.background.active;
+  }
+
+  /**
+   * What the last reading found running in the box, for a reader deciding
+   * whether to stop it.
+   *
+   * The reading alone, with nothing of the adapters' in it: a task an adapter
+   * announced is named on its own thread's bar, and a task that is not a
+   * process of its own — a monitor the agent holds open inside the CLI — is
+   * not in a process table at all. So this is shorter than
+   * {@link backgroundActive} is true for, and the two disagreeing is the
+   * ordinary case rather than a fault.
+   */
+  get boxWork(): readonly BoxWork[] {
+    return this.background.work;
   }
 
   /**

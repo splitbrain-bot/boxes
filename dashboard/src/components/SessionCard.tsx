@@ -9,8 +9,9 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import type { SessionSummary, ThreadSummary } from '../../../shared/types.ts';
+import type { BoxWork, SessionSummary, ThreadSummary } from '../../../shared/types.ts';
 import { DOT, StatusBadge, type BadgeKind } from './StatusBadge';
+import { BoxWorkList } from '@/components/BoxWorkList';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { NewThreadDialog } from '@/components/NewThreadDialog';
 import { Card } from '@/components/ui/card';
@@ -79,6 +80,12 @@ export function SessionCard({ session }: { session: SessionSummary }) {
   const [starting, setStarting] = useState(false);
   /** Whether the box-wide kill is waiting to be confirmed. */
   const [stopping, setStopping] = useState(false);
+  /**
+   * What the box was read to be running, for the confirmation to name: the
+   * processes, or that they are still being asked for, or that the box could
+   * not be asked.
+   */
+  const [boxWork, setBoxWork] = useState<BoxWork[] | 'reading' | 'unreadable'>('reading');
   // What each thread's agent is called. Off the health probe the list is
   // polling anyway rather than a call of its own: a row needs the label and
   // nothing else about the harness, and the dialog is what needs the rest.
@@ -113,6 +120,28 @@ export function SessionCard({ session }: { session: SessionSummary }) {
       return false;
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * Puts the confirmation up and asks what the box is running, so the decision
+   * is made in front of the processes it is about.
+   *
+   * Read when the dialog opens rather than carried on every session in the
+   * list: the list is polled for all of them at once, and a command line is
+   * wanted by one reader about to act on one box. It comes off the same
+   * reading as the badge, so it names what the stop would signal rather than
+   * what the box is running a moment from now.
+   */
+  async function askToStop(): Promise<void> {
+    setBoxWork('reading');
+    setStopping(true);
+    try {
+      setBoxWork((await api.getSession(session.id)).boxWork);
+    } catch {
+      // Said in the dialog rather than on the card behind it, which is where
+      // the reader is looking and what the offer to stop has to stand on.
+      setBoxWork('unreadable');
     }
   }
 
@@ -307,7 +336,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
               type="button"
               disabled={busy}
               aria-label="Stop everything running in this box"
-              onClick={() => setStopping(true)}
+              onClick={() => void askToStop()}
               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
             >
               <Square className="size-3.5" />
@@ -335,7 +364,28 @@ export function SessionCard({ session }: { session: SessionSummary }) {
             busy={busy}
             onConfirm={() => void stopEverything()}
             onCancel={() => setStopping(false)}
-          />
+          >
+            {boxWork === 'reading' ? (
+              <p className="text-xs text-muted-foreground">Reading what is running in it…</p>
+            ) : boxWork === 'unreadable' ? (
+              /* The offer stands on a reading this browser could not get, and
+                 saying so is the difference between an empty list and one
+                 nobody was able to draw. */
+              <p className="text-xs text-muted-foreground">
+                What is running in it could not be read. Stopping signals whatever the
+                orchestrator finds.
+              </p>
+            ) : boxWork.length === 0 ? (
+              /* The badge that offered this is up to a poll old, so a box that
+                 finished in the meantime is worth saying so rather than
+                 signalling. */
+              <p className="text-xs text-muted-foreground">
+                Nothing was running in it at the last reading.
+              </p>
+            ) : (
+              <BoxWorkList work={boxWork} />
+            )}
+          </ConfirmDialog>
         ) : null}
 
         {/* Asked before it is started, because the agent a thread runs is

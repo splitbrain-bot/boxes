@@ -255,7 +255,7 @@ test('a shell in a host-numbered box is still the only work in it', () => {
   );
   assert.equal(reading.busy, true);
   assert.equal(reading.work.length, 1);
-  assert.match(reading.work[0] ?? '', /npm run build/);
+  assert.match(reading.work[0]?.command ?? '', /npm run build/);
 });
 
 test('a shell under either agent is work, and both are named', () => {
@@ -272,8 +272,8 @@ test('a shell under either agent is work, and both are named', () => {
   // What it is running, for the log: the words are in the wrapper, and the
   // line is the evidence of what a box nobody can name work in was doing.
   assert.equal(reading.work.length, 3);
-  assert.ok(reading.work.some((line) => line.includes('npm run build')));
-  assert.ok(reading.work.includes('bash -lc npm run watch'));
+  assert.ok(reading.work.some((found) => found.command.includes('npm run build')));
+  assert.ok(reading.work.some((found) => found.command === 'bash -lc npm run watch'));
 });
 
 test("Codex's sandbox wrappers are the command's own, not the harness's", () => {
@@ -300,9 +300,26 @@ test('a build orphaned to PID 1 by a dead adapter still holds the box', () => {
   const reading = readBox(table(...HELD, [23490, 1, shell('npm run build')]), BOTH);
   assert.equal(reading.busy, true);
   assert.deepEqual(
-    reading.work.map((line) => line.includes('npm run build')),
+    reading.work.map((found) => found.command.includes('npm run build')),
     [true],
   );
+});
+
+test('what the reading found is named, numbered and aged', () => {
+  // The fields a person deciding whether to kill it needs. The age is the one
+  // that separates a build somebody is waiting on from something an adapter
+  // left behind hours ago, and the pid tells two identical command lines
+  // apart where the command alone cannot.
+  const reading = readBox(
+    [
+      ...table(...HELD),
+      { pid: 23490, ppid: 1, command: 'james -config conf/james.yaml', elapsedSeconds: 16_741 },
+    ],
+    BOTH,
+  );
+  assert.deepEqual(reading.work, [
+    { pid: 23490, command: 'james -config conf/james.yaml', elapsedSeconds: 16_741 },
+  ]);
 });
 
 test('a box with nothing of ours in it is empty, not unreadable', () => {
@@ -334,7 +351,7 @@ test('an agent an adapter left behind is still the harness, not work', () => {
     BOTH,
   );
   assert.deepEqual(
-    reading.work.map((line) => line.includes('npm test')),
+    reading.work.map((found) => found.command.includes('npm test')),
     [true],
   );
 });
@@ -421,6 +438,24 @@ test('the first reading is not waited for, and lands behind the reader', async (
   assert.equal(p.active, null);
   await settle();
   assert.equal(p.active, true);
+});
+
+test('what is running is served from the same reading as whether anything is', async () => {
+  const { p, settle } = probe(WORKING);
+  // Before any reading, and after one: the list and the flag cannot disagree,
+  // because a card showing "still running" over an empty list would read as a
+  // fault rather than as a box nobody has looked at yet.
+  assert.equal(p.work.length, 0);
+  await settle();
+  assert.equal(p.active, true);
+  assert.deepEqual(
+    p.work.map((found) => found.command.includes('npm run build')),
+    [true],
+  );
+  // And a box that has been shut down holds nothing, said now rather than at
+  // a reading that will never be taken.
+  p.clear();
+  assert.equal(p.work.length, 0);
 });
 
 test('a box that has been stopped is empty rather than unread', async () => {

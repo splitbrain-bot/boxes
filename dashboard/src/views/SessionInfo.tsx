@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router';
 import type { SessionDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
+import { BoxWorkList } from '@/components/BoxWorkList';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
@@ -168,6 +169,22 @@ export function SessionInfo() {
           </dl>
         </CardContent>
       </Card>
+
+      {/* Only where there is something to list. The badge on the card can be
+          true with nothing here — a task an adapter announced is named on its
+          own thread's bar, and one that is not a process of its own is in no
+          process table at all — and a card headed "running in the box" over an
+          empty list would read as a fault. */}
+      {session.boxWork.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Running in the box</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <BoxWorkList work={session.boxWork} />
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="flex gap-2">
         {running ? (
