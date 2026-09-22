@@ -8,12 +8,12 @@ import { Interceptor } from './inject.ts';
 import { EMPTY_POLICY, injectionPatterns, policyHash } from './policy.ts';
 
 /**
- * The sole egress path out of every session network.
+ * The sole egress path out of every box network.
  *
- * Session networks are internal Docker networks with no NAT and no default
+ * Box networks are internal Docker networks with no NAT and no default
  * route. This process is attached to each of them under the alias proxy, so it
- * is the only thing an agent can reach and the boundary between a session, the
- * LAN, and every other session.
+ * is the only thing an agent can reach and the boundary between a box, the
+ * LAN, and every other box.
  *
  * It holds no secret at rest: no config file, no database, no CA on disk. It
  * boots with no policy at all and is given one over the control channel.
@@ -46,7 +46,7 @@ function portFromEnv(name: string, fallback: number): number {
   return value;
 }
 
-/** Port the proxy listens on, facing the sessions. */
+/** Port the proxy listens on, facing the boxes. */
 const PORT = portFromEnv('PORT', 3128);
 
 /** Port the control channel listens on, facing the orchestrator. */
@@ -54,7 +54,7 @@ const CONTROL_PORT = portFromEnv('CONTROL_PORT', 3129);
 
 /**
  * Address the control channel binds to. Left unset it is derived from the
- * default route, which is the compose network and not any session's.
+ * default route, which is the compose network and not any box's.
  */
 const CONTROL_BIND = process.env['CONTROL_BIND']?.trim() ?? '';
 if (CONTROL_BIND !== '' && net.isIP(CONTROL_BIND) === 0) {
@@ -71,7 +71,7 @@ let applied = false;
 
 /**
  * Denials since boot, by category, reported back on the control channel. The
- * categories are a fixed set, so this cannot grow with what a session asks
+ * categories are a fixed set, so this cannot grow with what a box asks
  * for, and no hostname of its choosing ends up in the status.
  */
 const denials = new Map<DenialCategory, number>();
@@ -115,7 +115,7 @@ let upstreamPort = 0;
 /**
  * The interception engine, on loopback. It terminates TLS for the hosts a
  * credential is configured for, under the deployment CA, and swaps the
- * session's placeholder for the real credential.
+ * box's placeholder for the real credential.
  */
 const interceptor = new Interceptor({
   policy: () => policy,
@@ -125,7 +125,7 @@ const interceptor = new Interceptor({
 });
 
 /**
- * The front door, facing the sessions. It vets every destination, then either
+ * The front door, facing the boxes. It vets every destination, then either
  * tunnels it opaquely or hands it to the interception engine.
  */
 const front = createForwardServer({
@@ -207,7 +207,7 @@ async function main(): Promise<void> {
 
   const bind = CONTROL_BIND || (await resolveControlAddress());
   if (bind === null) {
-    // Binding wide would publish a secret-bearing endpoint to every session
+    // Binding wide would publish a secret-bearing endpoint to every box
     // network. Loopback keeps it unreachable, and the orchestrator's failed
     // pushes show up in /healthz.
     log('WARNING: could not resolve the control interface; binding to loopback only');

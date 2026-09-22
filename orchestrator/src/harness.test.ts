@@ -132,7 +132,7 @@ test('the Codex entry matches what codex-acp reads', () => {
     INITIAL_AGENT_MODE: 'agent-full-access',
     DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
   });
-  // The mode the adapter is told to start every session in is the same one a
+  // The mode the adapter is told to start every box in is the same one a
   // fresh thread is switched into; two answers here would fight each other.
   assert.equal(h.env('key')['INITIAL_AGENT_MODE'], h.defaultModeId);
   assert.equal(h.alwaysBackground.size, 0);

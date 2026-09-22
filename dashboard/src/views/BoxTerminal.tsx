@@ -6,7 +6,7 @@ import { useParams } from 'react-router';
 import { Button } from '@/components/ui/button';
 import { Notice } from '@/components/Notice';
 import { useDocumentTitle } from '@/hooks/use-document-title';
-import { useSession } from '@/hooks/use-session';
+import { useBox } from '@/hooks/use-box';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { TerminalSocket, type TerminalStatus } from '@/lib/terminal-socket';
@@ -44,21 +44,21 @@ function closedText(detail: string | undefined): string {
 }
 
 /**
- * A shell in the session's container, at `/sessions/:id/terminal`.
+ * A shell in the box's container, at `/boxes/:id/terminal`.
  *
  * Names the box rather than a conversation. Every terminal opened on one
- * session attaches to the same tmux session, so two tabs show the same shell.
+ * box attaches to the same tmux box, so two tabs show the same shell.
  * The box is held running for as long as this page is open.
  *
  * Owns the whole viewport, because a full-screen program in the box needs
  * every row it can be given.
  */
-export function SessionTerminal() {
+export function BoxTerminal() {
   const { id = '' } = useParams();
-  const { session } = useSession(id);
-  const up = useUp(`/sessions/${id}`);
-  const name = session?.name ?? id;
-  const token = session?.wsToken ?? null;
+  const { box } = useBox(id);
+  const up = useUp(`/boxes/${id}`);
+  const name = box?.name ?? id;
+  const token = box?.wsToken ?? null;
 
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [detail, setDetail] = useState<string | undefined>(undefined);
@@ -74,7 +74,7 @@ export function SessionTerminal() {
 
   useEffect(() => {
     const element = host.current;
-    // The token arrives with the session, one request after the first render.
+    // The token arrives with the box, one request after the first render.
     if (!element || !token) return;
 
     const term = new Terminal({

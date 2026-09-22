@@ -90,7 +90,7 @@ function makeStore(
   resetIds();
   let client!: FakeClient;
   const store = new ThreadStore({
-    sessionId: 'box-1',
+    boxId: 'box-1',
     threadId: 'thread-1',
     createClient: (handlers) => {
       client = new FakeClient(handlers);

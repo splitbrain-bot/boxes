@@ -6,7 +6,7 @@ import type {
   ReviewFileResponse,
   ReviewRepo,
 } from '../../../shared/types.ts';
-import type { Db, SessionRow } from '../db.ts';
+import type { Db, BoxRow } from '../db.ts';
 import { HttpError } from '../http-error.ts';
 import { log } from '../log.ts';
 import { emptyDiff, fileDiff } from './difflines.ts';
@@ -56,11 +56,11 @@ import {
 } from './tree.ts';
 
 /**
- * The per-session review façade: the repo map, the REVIEW.md
+ * The per-box review façade: the repo map, the REVIEW.md
  * read-modify-write, and the routing of git questions to the repository that
  * can answer them.
  *
- * The workspace is the review. The root is always the session's
+ * The workspace is the review. The root is always the box's
  * `/workspace`, there is nothing to pick and nothing to switch between, and
  * every file under it is browsable in one tree. A repository decides which
  * status and which diff one path is shown with: the closest enclosing one, by
@@ -68,7 +68,7 @@ import {
  *
  * REVIEW.md is the single source of truth and it is shared with the agent, so
  * there is no annotation table anywhere. Every mutation is
- * read → parse → apply → serialize → write-tmp-then-rename, under a per-session
+ * read → parse → apply → serialize → write-tmp-then-rename, under a per-box
  * lock, with the file's hash checked between the read and the write. If the
  * hash moved — the agent edited REVIEW.md mid-mutation — the whole thing is
  * re-read and re-applied once. A lost race costs one visible refresh rather
@@ -78,7 +78,7 @@ import {
  * committed by accident or show up in a repository's own status.
  *
  * Files are read and written here, on the workspace directory. Git is not: it
- * runs in the session's own container, over a repository whose configuration
+ * runs in the box's own container, over a repository whose configuration
  * the agent writes. So a question with git in it starts the box if it was
  * stopped, and the box stays counted as in use while the review is open.
  */
@@ -100,34 +100,34 @@ interface GitSnapshot {
   statuses: FileStatuses;
 }
 
-/** What the review needs of the sessions it is a view onto. */
-export interface ReviewSessions {
-  /** Where a session's files are, or null while it is still volume-backed. */
+/** What the review needs of the boxes it is a view onto. */
+export interface ReviewBoxes {
+  /** Where a box's files are, or null while it is still volume-backed. */
   workspacePath(id: string): string | null;
   /**
-   * The session's container, started if it was stopped, and the directory a
+   * The box's container, started if it was stopped, and the directory a
    * command runs in inside it.
    *
-   * Asking for it marks the session active, so a review that keeps asking
+   * Asking for it marks the box active, so a review that keeps asking
    * keeps the box it is asking about.
    */
   execTarget(id: string): Promise<{ containerId: string; workingDir: string }>;
 }
 
-/** Review operations over the sessions of one orchestrator. */
+/** Review operations over the boxes of one orchestrator. */
 export class ReviewService {
   /**
-   * One promise chain per session, so two mutations of the same REVIEW.md are
-   * serialized. Different sessions do not wait on each other.
+   * One promise chain per box, so two mutations of the same REVIEW.md are
+   * serialized. Different boxes do not wait on each other.
    */
   private readonly locks = new Map<string, Promise<unknown>>();
 
-  /** What each open review last learned from git, by session id. */
+  /** What each open review last learned from git, by box id. */
   private readonly snapshots = new Map<string, GitSnapshot>();
 
   constructor(
     private readonly db: Db,
-    private readonly sessions: ReviewSessions,
+    private readonly boxes: ReviewBoxes,
   ) {}
 
   // --- the workspace and its repositories -----------------------------------
@@ -141,46 +141,46 @@ export class ReviewService {
    */
   private static readonly SNAPSHOT_MS = 60_000;
 
-  /** The session row, or a 404 by the same rule every other endpoint uses. */
-  private row(id: string): SessionRow {
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as
-      | SessionRow
+  /** The box row, or a 404 by the same rule every other endpoint uses. */
+  private row(id: string): BoxRow {
+    const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as
+      | BoxRow
       | undefined;
-    if (!row || row.status === 'deleted') throw new HttpError(404, 'Session not found');
+    if (!row || row.status === 'deleted') throw new HttpError(404, 'Box not found');
     return row;
   }
 
   /**
-   * The session's workspace on this process's filesystem, which is the review
+   * The box's workspace on this process's filesystem, which is the review
    * root and the only one there is.
    *
-   * A session created before workspaces became directories has none until its
+   * A box created before workspaces became directories has none until its
    * next start, which recreates its container with the bind and copies the
-   * volume across. 409 rather than 404, because the session is real and the
+   * volume across. 409 rather than 404, because the box is real and the
    * fix is a start — which is what the review view says.
    */
   private workspace(id: string): string {
     const row = this.row(id);
-    const path = this.sessions.workspacePath(row.id);
+    const path = this.boxes.workspacePath(row.id);
     if (!path || !isDirectory(path)) {
       throw new HttpError(
         409,
-        'This session stores its workspace in a volume the orchestrator cannot read. ' +
-          'Start the session once to migrate it, then review it.',
+        'This box stores its workspace in a volume the orchestrator cannot read. ' +
+          'Start the box once to migrate it, then review it.',
       );
     }
     return path;
   }
 
   /**
-   * The session's container to run git in, started if it was stopped.
+   * The box's container to run git in, started if it was stopped.
    *
    * Resolved for each request that asks git something, rather than remembered:
    * a container can be stopped between two requests, or replaced by one, and
    * either leaves a held id naming nothing.
    */
   private async box(id: string): Promise<GitBox> {
-    const target = await this.sessions.execTarget(id);
+    const target = await this.boxes.execTarget(id);
     return { containerId: target.containerId, workspaceDir: target.workingDir };
   }
 
@@ -189,7 +189,7 @@ export class ReviewService {
    * each is compared against, and the status of every changed file in it.
    *
    * Taken once for the whole workspace and reused, because git runs in the
-   * session's container — a status per folder tap would be a `docker exec` per
+   * box's container — a status per folder tap would be a `docker exec` per
    * tap. A directory answer is a slice of the map it holds.
    *
    * A new one is taken when `fresh` says the browser has just arrived (the view
@@ -212,13 +212,13 @@ export class ReviewService {
     return taken;
   }
 
-  /** Drops a session's git snapshot, for a change that moves what git says. */
+  /** Drops a box's git snapshot, for a change that moves what git says. */
   private invalidate(id: string): void {
     this.snapshots.delete(id);
   }
 
   /**
-   * The revision expression the session compares against, or '' for each
+   * The revision expression the box compares against, or '' for each
    * repository's own working tree.
    *
    * One expression for the whole workspace: what it resolves to is a different
@@ -479,13 +479,13 @@ export class ReviewService {
    * resolves nowhere. Null clears it.
    */
   async setBase(id: string, rev: string | null): Promise<ReviewBaseResponse> {
-    // The session is validated here as it is everywhere else, because the held
-    // repository map would otherwise answer for a session that has none.
+    // The box is validated here as it is everywhere else, because the held
+    // repository map would otherwise answer for a box that has none.
     this.workspace(id);
     const box = await this.box(id);
     const { map } = await this.snapshot(box, id, false);
     if (rev === null || rev.trim() === '') {
-      this.db.prepare('UPDATE sessions SET review_base_rev = NULL WHERE id = ?').run(id);
+      this.db.prepare('UPDATE boxes SET review_base_rev = NULL WHERE id = ?').run(id);
       // Every status the snapshot holds was an answer about the old base.
       this.invalidate(id);
       return { rev: '', repos: await this.describeRepos(box, map, new Map()) };
@@ -499,14 +499,14 @@ export class ReviewService {
       throw new HttpError(400, `unknown revision: ${wanted}`);
     }
     if (bases.size < map.repos.length) {
-      log.session(id).info('review base resolved in some repositories only', {
+      log.box(id).info('review base resolved in some repositories only', {
         rev: wanted,
         resolved: bases.size,
         repositories: map.repos.length,
       });
     }
 
-    this.db.prepare('UPDATE sessions SET review_base_rev = ? WHERE id = ?').run(wanted, id);
+    this.db.prepare('UPDATE boxes SET review_base_rev = ? WHERE id = ?').run(wanted, id);
     this.invalidate(id);
     return { rev: wanted, repos: await this.describeRepos(box, map, bases) };
   }
@@ -514,7 +514,7 @@ export class ReviewService {
   // --- the read-modify-write ------------------------------------------------
 
   /**
-   * Applies one change to REVIEW.md and writes it back, under the session's
+   * Applies one change to REVIEW.md and writes it back, under the box's
    * lock and guarded by the file's hash.
    *
    * The hash check is what makes sharing the file with the agent safe: between
@@ -547,7 +547,7 @@ export class ReviewService {
         const serialized = serializeReview(review);
 
         if (fileHash(path) !== before) {
-          log.session(id).info('REVIEW.md changed mid-write; re-applying');
+          log.box(id).info('REVIEW.md changed mid-write; re-applying');
           continue;
         }
         writeFileAtomic(path, serialized);
@@ -633,10 +633,10 @@ export class ReviewService {
   }
 
   /**
-   * Runs `fn` with the session's REVIEW.md to itself.
+   * Runs `fn` with the box's REVIEW.md to itself.
    *
    * A plain promise chain rather than a mutex library: the queue is per
-   * session, every holder is a few filesystem operations long, and a rejection
+   * box, every holder is a few filesystem operations long, and a rejection
    * must not wedge the chain — hence the catch on the stored tail.
    */
   private withLock<T>(id: string, fn: () => T | Promise<T>): Promise<T> {
@@ -751,7 +751,7 @@ export class ReviewService {
     throw new HttpError(404, 'Directory not found');
   }
 
-  /** Drops what a session's review holds, for a delete. */
+  /** Drops what a box's review holds, for a delete. */
   forget(id: string): void {
     this.snapshots.delete(id);
     this.locks.delete(id);

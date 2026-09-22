@@ -10,7 +10,7 @@ import { HttpError } from './http-error.ts';
  * missing or of the wrong type becomes a cast that misbehaves further in, or
  * a 500 that says nothing the caller can act on. Each schema below states one
  * route's body and nothing more: how long a name may be, whether a revision
- * resolves, whether a session exists, all stay with the code that knows.
+ * resolves, whether a box exists, all stay with the code that knows.
  *
  * Unknown fields are dropped rather than refused, so a newer client talking to
  * an older orchestrator is served rather than rejected.
@@ -41,7 +41,7 @@ const filled = z.string().min(1, 'must not be empty');
 /**
  * What a new thread runs: the harness, and its mode and settings when the
  * dialog chose them. Whether the harness is one this deployment has is the
- * session manager's check, which is where the registry is.
+ * box manager's check, which is where the registry is.
  */
 const threadOptions = z.object({
   harness: z.custom<HarnessId>((id) => typeof id === 'string', 'must be a string'),
@@ -49,27 +49,27 @@ const threadOptions = z.object({
   config: z.record(z.string(), z.string()).optional(),
 });
 
-/** POST /api/sessions — the session to create, and what its first thread runs. */
-export const createSessionBody = z.object({
+/** POST /api/boxes — the box to create, and what its first thread runs. */
+export const createBoxBody = z.object({
   name: z.string(),
   profile: z.string().optional(),
   agentSet: z.string().nullable().optional(),
   thread: threadOptions.optional(),
 });
 
-/** POST /api/sessions/:id/threads — the conversation to add. */
+/** POST /api/boxes/:id/threads — the conversation to add. */
 export const createThreadBody = z.object({
   from: z.string().optional(),
   options: threadOptions.optional(),
 });
 
-/** POST /api/sessions/:id/threads/:threadId/done — the mark to set or clear. */
+/** POST /api/boxes/:id/threads/:threadId/done — the mark to set or clear. */
 export const threadDoneBody = z.object({
   done: z.boolean(),
 });
 
 /**
- * POST /api/sessions/:id/threads/:threadId/background/stop — which process to
+ * POST /api/boxes/:id/threads/:threadId/background/stop — which process to
  * kill. Without one, everything that thread is running stops.
  */
 export const backgroundStopBody = z.object({
@@ -77,7 +77,7 @@ export const backgroundStopBody = z.object({
 });
 
 /**
- * PUT /api/sessions/:id/review/file — the whole file, and the hash it was read
+ * PUT /api/boxes/:id/review/file — the whole file, and the hash it was read
  * at. An absent hash matches nothing, so the save is refused as a stale one.
  */
 export const reviewFileBody = z.object({
@@ -87,7 +87,7 @@ export const reviewFileBody = z.object({
 });
 
 /**
- * PUT /api/sessions/:id/review/annotations — the comment on one line.
+ * PUT /api/boxes/:id/review/annotations — the comment on one line.
  *
  * `line` is coerced, so a client that sends its line number as a string is
  * still understood. Which numbers are lines is the review service's rule.
@@ -99,7 +99,7 @@ export const reviewAnnotationBody = z.object({
 });
 
 /**
- * PUT /api/sessions/:id/review/base — the revision to compare against. Null
+ * PUT /api/boxes/:id/review/base — the revision to compare against. Null
  * and absent both clear the base back to each repository's working tree.
  */
 export const reviewBaseBody = z.object({

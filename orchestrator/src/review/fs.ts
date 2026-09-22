@@ -18,7 +18,7 @@ import { chownFdToAgent } from '../workspaces.ts';
 
 /**
  * Contained reads and writes under one root, which for a review is the
- * session's whole workspace.
+ * box's whole workspace.
  *
  * This file holds the symlink-containment invariant, and it holds it alone, so
  * that it stays reviewable. A review serves a whole source tree that an agent

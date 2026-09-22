@@ -14,7 +14,7 @@ import { TASK_NOTIFICATION_PART } from '@/lib/task-notifications';
  *
  * This is where a component upgrade is reviewed: every part kind the live
  * thread renders appears here, so a registry re-run that changes how one of
- * them looks shows up on one page rather than in a live session.
+ * them looks shows up on one page rather than in a live box.
  */
 
 /**

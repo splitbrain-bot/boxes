@@ -28,7 +28,7 @@ let held = 0;
  * thread is back at its top and an overscroll reaches the document. With
  * nothing to scroll there is nothing to strand.
  *
- * Scoped to the views that own the viewport. The reading column — the session
+ * Scoped to the views that own the viewport. The reading column — the box
  * list, the forms — scrolls the document on purpose, and the browser hiding its
  * chrome for those is the behaviour to leave alone.
  */

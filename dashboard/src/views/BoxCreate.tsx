@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { AgentSetSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
-import { refresh } from '../stores/sessions.ts';
+import { refresh } from '../stores/boxes.ts';
 import { Notice } from '@/components/Notice';
 import { ThreadOptions, useThreadOptions } from '@/components/ThreadOptions';
 import { useUp } from '@/hooks/use-up';
@@ -20,10 +20,10 @@ import {
 /** What the picker calls "no extra set", which the API treats as absent. */
 const NO_SET = 'none';
 
-/** The new-session form, which opens the session's thread on success. */
-export function SessionCreate() {
+/** The new-box form, which opens the box's thread on success. */
+export function BoxCreate() {
   const navigate = useNavigate();
-  /** Out to the session list, whether the form was cancelled or submitted. */
+  /** Out to the box list, whether the form was cancelled or submitted. */
   const up = useUp('/');
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -63,7 +63,7 @@ export function SessionCreate() {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createSession({
+      const created = await api.createBox({
         name: name.trim(),
         agentSet: agentSet === NO_SET ? null : agentSet,
         ...(thread.value ? { thread: thread.value } : {}),
@@ -75,7 +75,7 @@ export function SessionCreate() {
       // The form's entry is spent on the thread it made rather than left
       // under it: the box exists now, and back onto a form that would make a
       // second one is not where anybody meant to go.
-      void navigate(`/sessions/${created.id}`, { replace: true });
+      void navigate(`/boxes/${created.id}`, { replace: true });
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
@@ -84,12 +84,12 @@ export function SessionCreate() {
 
   return (
     <form className="flex flex-col gap-5" onSubmit={(e) => void submit(e)}>
-      <h1 className="text-xl font-semibold">New session</h1>
+      <h1 className="text-xl font-semibold">New box</h1>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="session-name">Name</Label>
+        <Label htmlFor="box-name">Name</Label>
         <Input
-          id="session-name"
+          id="box-name"
           value={name}
           required
           maxLength={100}
@@ -100,9 +100,9 @@ export function SessionCreate() {
 
       {agentSets && agentSets.length > 0 ? (
         <div className="flex flex-col gap-2">
-          <Label htmlFor="session-agent-set">Agent set</Label>
+          <Label htmlFor="box-agent-set">Agent set</Label>
           <Select value={agentSet} onValueChange={setAgentSet}>
-            <SelectTrigger id="session-agent-set" className="w-full">
+            <SelectTrigger id="box-agent-set" className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

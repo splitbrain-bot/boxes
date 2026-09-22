@@ -29,8 +29,8 @@ export type NotifyKind = 'approval' | 'idle';
 /** One thing worth interrupting somebody for. */
 export interface NotifyEvent {
   kind: NotifyKind;
-  sessionId: string;
-  sessionName: string;
+  boxId: string;
+  boxName: string;
   /** The dashboard's own thread id, so the notification can link at it. */
   threadId: string | null;
   /** What that conversation is called, or null for an untitled one. */
@@ -66,8 +66,8 @@ interface PushPayload {
  */
 export function wording(event: NotifyEvent): { title: string; body: string } {
   const where = event.threadName
-    ? `${event.sessionName} · ${shortTitle(event.threadName)}`
-    : event.sessionName;
+    ? `${event.boxName} · ${shortTitle(event.threadName)}`
+    : event.boxName;
   if (event.kind === 'approval') {
     return {
       title: 'Boxes: approval needed',
@@ -97,8 +97,8 @@ function shortTitle(name: string): string {
 /** Where a notification about this event points. */
 function target(event: NotifyEvent): string {
   return event.threadId
-    ? `/sessions/${event.sessionId}/threads/${event.threadId}`
-    : `/sessions/${event.sessionId}`;
+    ? `/boxes/${event.boxId}/threads/${event.threadId}`
+    : `/boxes/${event.boxId}`;
 }
 
 /** Sends one event to every subscribed browser. */
@@ -143,9 +143,9 @@ export class Notifier {
     try {
       await this.push(event);
     } catch (err) {
-      log.warn('could not notify anybody about a session event', {
+      log.warn('could not notify anybody about a box event', {
         kind: event.kind,
-        session: event.sessionId,
+        box: event.boxId,
         error: (err as Error).message,
       });
     }
@@ -182,7 +182,7 @@ export class Notifier {
     const payload: PushPayload = {
       title,
       body,
-      tag: `${event.threadId ?? event.sessionId}:${event.kind}`,
+      tag: `${event.threadId ?? event.boxId}:${event.kind}`,
       url: target(event),
     };
     const message = JSON.stringify(payload);

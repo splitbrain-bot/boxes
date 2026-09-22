@@ -16,7 +16,7 @@ import type { DownstreamHandle } from './upstream.ts';
 
 /** The thread most of these tests are about. */
 const T1 = 'acp-1';
-/** A second thread of the same session, watched by nobody unless said. */
+/** A second thread of the same box, watched by nobody unless said. */
 const T2 = 'acp-2';
 
 /** A browser that records what it was sent, watching one thread. */

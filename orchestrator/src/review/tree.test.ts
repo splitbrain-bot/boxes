@@ -23,7 +23,7 @@ import {
  * filesystem, and `dirEntries` is pure and merges what it found with the two
  * maps a review holds. What git there is here is repository discovery, driven
  * through a runner that starts git on this machine over the test's own
- * repositories rather than in a session container.
+ * repositories rather than in a box container.
  */
 
 /** A runner that starts git here, in the directory the target names. */
@@ -290,7 +290,7 @@ describe('dirEntries over real repositories', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The session box this workspace would be reviewed in. */
+  /** The box this workspace would be reviewed in. */
   function box(): GitBox {
     return { containerId: 'box-1', workspaceDir: dir };
   }

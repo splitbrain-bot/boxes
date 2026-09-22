@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { CredentialId } from '../../shared/types.ts';
-import { DEFAULT_SESSION_GID, DEFAULT_SESSION_UID } from './workspaces.ts';
+import { DEFAULT_BOX_GID, DEFAULT_BOX_UID } from './workspaces.ts';
 
 /**
  * Environment parsing. Every setting the orchestrator reads comes from the
@@ -31,7 +31,7 @@ const flag = z
 const schema = z.object({
   DATA_DIR: z.string().min(1).default('/data'),
   /**
-   * Host-side path of DATA_DIR, which is what a session's workspace bind has
+   * Host-side path of DATA_DIR, which is what a box's workspace bind has
    * to name — the daemon resolves bind sources, not this process.
    *
    * Empty is the normal case: at boot the orchestrator inspects its own
@@ -49,47 +49,47 @@ const schema = z.object({
    */
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
-  SESSION_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/session:latest'),
+  BOX_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/box:latest'),
   /**
-   * uid and gid session containers run as, and so the owner of every file in
+   * uid and gid box containers run as, and so the owner of every file in
    * a workspace.
    *
-   * The session image has to agree: it builds its `agent` user on these same
-   * numbers through the AGENT_UID and AGENT_GID build args, and a session's
+   * The box image has to agree: it builds its `agent` user on these same
+   * numbers through the AGENT_UID and AGENT_GID build args, and a box's
    * home is a named volume Docker ownership-initialises from the image, which
-   * nothing outside the container can then chown. ensureSessionImage() reads
+   * nothing outside the container can then chown. ensureBoxImage() reads
    * the image's own user back and says so when the two have drifted.
    *
    * Setting these to the uid the orchestrator itself runs as is what lets it
    * drop root: there is then nothing to give away.
    */
-  SESSION_UID: z.coerce.number().int().positive().default(DEFAULT_SESSION_UID),
-  SESSION_GID: z.coerce.number().int().positive().default(DEFAULT_SESSION_GID),
+  BOX_UID: z.coerce.number().int().positive().default(DEFAULT_BOX_UID),
+  BOX_GID: z.coerce.number().int().positive().default(DEFAULT_BOX_GID),
   /**
-   * How often the session image is pulled again, so a moving tag such as
-   * `:latest` keeps moving. A session adopts what has arrived when it is next
+   * How often the box image is pulled again, so a moving tag such as
+   * `:latest` keeps moving. A box adopts what has arrived when it is next
    * started; nothing running is disturbed.
    *
    * 0 turns the refresh off, which is what an image built on the host wants —
    * there is no registry to pull it from, and trying every hour would only
    * fill the log. The image is still pulled once when it is missing
-   * altogether, because a session cannot be created without it.
+   * altogether, because a box cannot be created without it.
    */
-  SESSION_IMAGE_PULL_MINUTES: z.coerce.number().int().nonnegative().default(60),
+  BOX_IMAGE_PULL_MINUTES: z.coerce.number().int().nonnegative().default(60),
   /**
-   * Whether a copy of the session image that a pull has superseded is removed
+   * Whether a copy of the box image that a pull has superseded is removed
    * from this host.
    *
    * On, because an untagged image left behind is a gigabyte or two per
-   * release that nothing else reclaims. Only images carrying the session
+   * release that nothing else reclaims. Only images carrying the box
    * image's own label are touched, and only once no container is left running
    * on one.
    *
    * Off is for a host that keeps old images deliberately: to roll back to one
    * without the registry, or because something outside Boxes runs them.
    */
-  SESSION_IMAGE_PRUNE: flag.default('true'),
-  SESSION_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
+  BOX_IMAGE_PRUNE: flag.default('true'),
+  BOX_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
   /**
    * What one box may take. Both of these now cover *two* adapters: a box may
    * hold threads of either harness, and each one that has a thread runs its own
@@ -102,9 +102,9 @@ const schema = z.object({
    * cannot fork; a memory limit reached shows up as the kernel killing
    * something in the box.
    */
-  SESSION_MEM_LIMIT: z.string().regex(/^\d+[kmgKMG]?$/).default('4g'),
-  SESSION_CPUS: z.coerce.number().positive().default(2),
-  SESSION_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
+  BOX_MEM_LIMIT: z.string().regex(/^\d+[kmgKMG]?$/).default('4g'),
+  BOX_CPUS: z.coerce.number().positive().default(2),
+  BOX_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
 
   IDLE_STOP_MINUTES: durationMinutes.default(30),
 
@@ -112,7 +112,7 @@ const schema = z.object({
    * How long an answer about what is running in a box stands before the box
    * is asked again, in seconds.
    *
-   * One Docker API call per running session per window, and also what a
+   * One Docker API call per running box per window, and also what a
    * browser is shown, so it trades that cost against how long a finished
    * build still reads as running.
    */
@@ -174,12 +174,12 @@ const schema = z.object({
   /**
    * Port of the proxy's control channel, on the compose network. Nobody sets
    * this: the orchestrator is the only thing that speaks to it, and it is
-   * unreachable from a session either way.
+   * unreachable from a box either way.
    */
   EGRESS_CONTROL_PORT: z.coerce.number().int().positive().default(3129),
 
   /**
-   * Hosts sessions may reach, comma or whitespace separated. Exact names and
+   * Hosts boxes may reach, comma or whitespace separated. Exact names and
    * one-label wildcards: `github.com, *.githubusercontent.com`. Empty is off,
    * which leaves every public host reachable.
    */

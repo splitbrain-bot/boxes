@@ -22,7 +22,7 @@ import { Label } from '@/components/ui/label';
  * it is explained, because nowhere else in the UI has room for it.
  */
 export function AgentSets() {
-  /** Out to the session list, popped rather than pushed; see useUp. */
+  /** Out to the box list, popped rather than pushed; see useUp. */
   const up = useUp('/');
   const [sets, setSets] = useState<AgentSetSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +77,7 @@ export function AgentSets() {
 
   return (
     <div className="flex flex-col gap-4">
-      <BackLink up={up} label="Sessions" />
+      <BackLink up={up} label="Boxes" />
 
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Agent configuration</h1>
@@ -168,10 +168,10 @@ export function AgentSets() {
         <ConfirmDialog
           title={`Delete ${confirmDelete.name}?`}
           description={
-            confirmDelete.sessionCount === 0
+            confirmDelete.boxCount === 0
               ? 'The set and everything in it is removed. Boxes are unaffected.'
-              : `${confirmDelete.sessionCount} existing ${
-                  confirmDelete.sessionCount === 1 ? 'box was' : 'boxes were'
+              : `${confirmDelete.boxCount} existing ${
+                  confirmDelete.boxCount === 1 ? 'box was' : 'boxes were'
                 } created with this set. They keep running and keep what is already installed in them, but fall back to the global set alone the next time they start.`
           }
           confirmLabel="Delete"
@@ -197,8 +197,8 @@ function describe(set: AgentSetSummary): string {
   }
   if (parts.length === 0) parts.push('empty');
   if (set.global) return `${parts.join(' · ')} — applied to every box`;
-  if (set.sessionCount > 0) {
-    parts.push(`${set.sessionCount} ${set.sessionCount === 1 ? 'box' : 'boxes'}`);
+  if (set.boxCount > 0) {
+    parts.push(`${set.boxCount} ${set.boxCount === 1 ? 'box' : 'boxes'}`);
   }
   return parts.join(' · ');
 }

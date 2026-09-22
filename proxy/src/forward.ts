@@ -9,7 +9,7 @@ import { hostAllowed, isInjectionHost } from './policy.ts';
  * The forwarding half of the proxy: allowlist, address vetting, and the pinned
  * connection out.
  *
- * The proxy runs two of these. The front door faces the session networks and
+ * The proxy runs two of these. The front door faces the box networks and
  * may hand an intercepted host to the TLS engine; the upstream tunnel listens
  * on loopback and vets every connection the TLS engine makes, so decrypting a
  * host buys no way around the checks below.

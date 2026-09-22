@@ -6,19 +6,19 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 import { loadConfig } from './config.ts';
 import { openDb, type Db } from './db.ts';
 import { startReaper } from './reaper.ts';
-import type { SessionManager } from './sessions.ts';
+import type { BoxManager } from './boxes.ts';
 
 /**
  * What the idle reaper leaves alone.
  *
  * Every condition here is a different answer to "is anybody or anything still
- * using this box", and each is the only thing standing between a session and
+ * using this box", and each is the only thing standing between a box and
  * being stopped under whoever is using it. They are asserted one at a time,
  * because a reaper that honoured four of the five would look healthy in a
  * suite that only ever set up one.
  */
 
-/** How long a session must be quiet before the reaper stops it. */
+/** How long a box must be quiet before the reaper stops it. */
 const IDLE_MINUTES = 30;
 
 let dir: string;
@@ -35,11 +35,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** A running session row, quiet for `idleMinutes`. */
-function insertSession(id: string, idleMinutes: number): void {
+/** A running box row, quiet for `idleMinutes`. */
+function insertBox(id: string, idleMinutes: number): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
        status, current_thread_id, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', ?,
@@ -47,7 +47,7 @@ function insertSession(id: string, idleMinutes: number): void {
   ).run(
     id,
     `c-${id}`,
-    `sn-${id}`,
+    `bn-${id}`,
     `home-${id}`,
     `${dir}/workspaces/${id}`,
     `${dir}/homes/${id}`,
@@ -56,13 +56,13 @@ function insertSession(id: string, idleMinutes: number): void {
   );
 }
 
-/** One of a session's threads, with or without a turn running on it. */
-function insertThread(id: string, sessionId: string, turnActive = false): void {
+/** One of a box's threads, with or without a turn running on it. */
+function insertThread(id: string, boxId: string, turnActive = false): void {
   db.prepare(
-    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+    `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
        turn_active, created_at, last_active_at)
      VALUES (?, ?, ?, NULL, 1, ?, 1000, 2000)`,
-  ).run(id, sessionId, `acp-${id}`, turnActive ? 1 : 0);
+  ).run(id, boxId, `acp-${id}`, turnActive ? 1 : 0);
 }
 
 /** What one tick of the reaper did, over a manager that answers as told. */
@@ -72,23 +72,23 @@ async function tick(
     attachedCount?: number;
     /** Null is a box whose work has not been read yet. */
     backgroundActive?: boolean | null;
-    /** Run as each session is stopped, for what a slow stop lets happen. */
+    /** Run as each box is stopped, for what a slow stop lets happen. */
     onStop?: (id: string) => void;
-    /** The count asked for again just before a session is stopped. */
+    /** The count asked for again just before a box is stopped. */
     pendingNow?: (id: string) => number;
     /** Terminals open on the box, which is somebody working in it directly. */
     terminals?: number;
-    /** The terminal count asked for again just before a session is stopped. */
+    /** The terminal count asked for again just before a box is stopped. */
     terminalsNow?: (id: string) => number;
-    /** Sessions with an operation of their own in flight, which never wait. */
+    /** Boxes with an operation of their own in flight, which never wait. */
     busy?: Set<string>;
   } = {},
 ): Promise<string[]> {
   const stopped: string[] = [];
   const manager = {
     pending: {
-      countsBySession: () => new Map(over.pending ? [['s1', over.pending]] : []),
-      countForSession: (id: string) =>
+      countsByBox: () => new Map(over.pending ? [['s1', over.pending]] : []),
+      countForBox: (id: string) =>
         over.pendingNow?.(id) ?? (id === 's1' ? (over.pending ?? 0) : 0),
     },
     upstream: () => ({
@@ -104,7 +104,7 @@ async function tick(
     },
     maintenance: () => undefined,
     sweepOrphans: () => Promise.resolve(),
-  } as unknown as SessionManager;
+  } as unknown as BoxManager;
 
   vi.useFakeTimers();
   const cfg = loadConfig({ DATA_DIR: dir, IDLE_STOP_MINUTES: String(IDLE_MINUTES) });
@@ -114,30 +114,30 @@ async function tick(
   return stopped;
 }
 
-test('a session quiet for longer than the idle limit is stopped', async () => {
-  insertSession('s1', IDLE_MINUTES + 1);
+test('a box quiet for longer than the idle limit is stopped', async () => {
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick(), ['s1']);
 });
 
-test('a session quiet for less than the idle limit is left running', async () => {
-  insertSession('s1', IDLE_MINUTES / 2);
+test('a box quiet for less than the idle limit is left running', async () => {
+  insertBox('s1', IDLE_MINUTES / 2);
   assert.deepEqual(await tick(), []);
 });
 
-test("a turn running on any of a session's threads holds the box", async () => {
-  insertSession('s1', IDLE_MINUTES + 1);
+test("a turn running on any of a box's threads holds the box", async () => {
+  insertBox('s1', IDLE_MINUTES + 1);
   insertThread('t1', 's1');
   insertThread('t2', 's1', true);
   assert.deepEqual(await tick(), []);
 });
 
 test('a permission request waiting for an answer holds the box', async () => {
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ pending: 1 }), []);
 });
 
 test('a browser still attached holds the box', async () => {
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ attachedCount: 1 }), []);
 });
 
@@ -145,12 +145,12 @@ test('a terminal open on the box holds it, however quiet the shell has gone', as
   // The case the activity clock cannot see: a build that prints nothing for
   // an hour, with somebody watching it. Stopping the box would take the
   // shell, its scrollback and the build with it.
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ terminals: 1 }), []);
 });
 
 test('work left running in the background holds the box', async () => {
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ backgroundActive: true }), []);
 });
 
@@ -158,7 +158,7 @@ test('a box whose work has not been read yet is held for this tick', async () =>
   // The state after every restart: the probe has not answered, and a box
   // with a build in it and nobody watching looks exactly like an idle one.
   // The reading lands well before the next sweep.
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ backgroundActive: null }), []);
 });
 
@@ -166,8 +166,8 @@ test('a turn that starts while another box is being stopped holds its own box', 
   // The counts the tick opens with are one reading of the whole deployment,
   // and stopping a box takes seconds. By the time a sweep of many idle boxes
   // reaches the last of them, a prompt sent meanwhile is minutes old.
-  insertSession('s1', IDLE_MINUTES + 1);
-  insertSession('s2', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
+  insertBox('s2', IDLE_MINUTES + 1);
   insertThread('t2', 's2');
   const stopped = await tick({
     onStop: (id) => {
@@ -182,8 +182,8 @@ test('a turn that starts while another box is being stopped holds its own box', 
 test('a permission request that arrives mid-sweep holds its box', async () => {
   // The same window as the turn above: the question is asked while the first
   // box is being stopped, and only a fresh count can see it.
-  insertSession('s1', IDLE_MINUTES + 1);
-  insertSession('s2', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
+  insertBox('s2', IDLE_MINUTES + 1);
   let asked = false;
   const stopped = await tick({
     onStop: () => {
@@ -198,8 +198,8 @@ test('a terminal opened mid-sweep holds its box', async () => {
   // The same window a permission request arriving mid-sweep falls into: the
   // counts are one reading of the whole deployment, and stopping many boxes
   // takes long enough for somebody to have opened a shell in one of them.
-  insertSession('s1', IDLE_MINUTES + 1);
-  insertSession('s2', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
+  insertBox('s2', IDLE_MINUTES + 1);
   const opened = new Set<string>();
   assert.deepEqual(
     await tick({
@@ -214,7 +214,7 @@ test('a tick still running when the next one is due is not joined by it', async 
   // Every tick re-asserts the same thing, and stopping many boxes takes
   // longer than the interval. Two of them at once sweep each other's
   // half-finished work.
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   let sweeps = 0;
   let finish: () => void = () => {};
   const held = new Promise<void>((resolve) => {
@@ -222,8 +222,8 @@ test('a tick still running when the next one is due is not joined by it', async 
   });
   const manager = {
     pending: {
-      countsBySession: () => new Map<string, number>(),
-      countForSession: () => 0,
+      countsByBox: () => new Map<string, number>(),
+      countForBox: () => 0,
     },
     upstream: () => ({ attachedCount: 0, backgroundActive: false }),
     terminalCount: () => 0,
@@ -233,7 +233,7 @@ test('a tick still running when the next one is due is not joined by it', async 
       sweeps += 1;
       return held;
     },
-  } as unknown as SessionManager;
+  } as unknown as BoxManager;
 
   vi.useFakeTimers();
   const cfg = loadConfig({ DATA_DIR: dir, IDLE_STOP_MINUTES: String(IDLE_MINUTES) });
@@ -251,16 +251,16 @@ test('a tick still running when the next one is due is not joined by it', async 
   reaper.stop();
 });
 
-test("a session that is not running is not the reaper's to stop", async () => {
-  insertSession('s1', IDLE_MINUTES + 1);
-  db.prepare("UPDATE sessions SET status = 'stopped' WHERE id = 's1'").run();
+test("a box that is not running is not the reaper's to stop", async () => {
+  insertBox('s1', IDLE_MINUTES + 1);
+  db.prepare("UPDATE boxes SET status = 'stopped' WHERE id = 's1'").run();
   assert.deepEqual(await tick(), []);
 });
 
-test('a session something else is already working on is left for the next tick', async () => {
+test('a box something else is already working on is left for the next tick', async () => {
   // Starting a box, replacing its container or deleting it all hold the
-  // session's own queue. The reaper never waits on that: the session is
+  // box's own queue. The reaper never waits on that: the box is
   // skipped and looked at again a minute later.
-  insertSession('s1', IDLE_MINUTES + 1);
+  insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ busy: new Set(['s1']) }), []);
 });

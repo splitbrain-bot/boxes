@@ -10,7 +10,7 @@ import { HttpError } from './http-error.ts';
 /**
  * Agent sets: what merges, what overrides, and what the container is handed.
  *
- * The materialized directory is the contract with the session image, so these
+ * The materialized directory is the contract with the box image, so these
  * assert its bytes and its manifest rather than only the store's own answers —
  * the entrypoint copies what is written here and interprets nothing. That
  * includes writing one copy per harness: the box is what holds a set, and
@@ -32,26 +32,26 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** The materialized manifest of a session, as lines. */
-function manifest(sessionId: string): string[] {
-  const text = readFileSync(join(agentConfigPath(dir, sessionId), 'manifest'), 'utf8');
+/** The materialized manifest of a box, as lines. */
+function manifest(boxId: string): string[] {
+  const text = readFileSync(join(agentConfigPath(dir, boxId), 'manifest'), 'utf8');
   return text.split('\n').filter((line) => line !== '');
 }
 
 /** One materialized file's content. */
-function materialized(sessionId: string, rel: string): string {
-  return readFileSync(join(agentConfigPath(dir, sessionId), rel), 'utf8');
+function materialized(boxId: string, rel: string): string {
+  return readFileSync(join(agentConfigPath(dir, boxId), rel), 'utf8');
 }
 
-/** Inserts a session row, which is all the set's session count reads. */
-function insertSession(id: string, agentSetId: string | null): void {
+/** Inserts a box row, which is all the set's box count reads. */
+function insertBox(id: string, agentSetId: string | null): void {
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, agent_set_id,
        created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', '', ?, 'running', ?, 0, 0)`,
-  ).run(id, `sn-${id}`, `home-${id}`, agentSetId);
+  ).run(id, `bn-${id}`, `home-${id}`, agentSetId);
 }
 
 // --- the global set ----------------------------------------------------------
@@ -85,7 +85,7 @@ test('an AGENTS.md accumulates: the global one first, then the set own', () => {
   store.updateSet(set.id, { agentsMd: 'Go rules.' });
 
   assert.equal(store.bundle(set.id).agentsMd, 'House rules.\n\nGo rules.');
-  // The global set alone is what a session naming none gets.
+  // The global set alone is what a box naming none gets.
   assert.equal(store.bundle(null).agentsMd, 'House rules.');
 });
 
@@ -172,7 +172,7 @@ test('every manifest path is home-relative and inside a layout', () => {
   }
 });
 
-test('a session with nothing configured still gets a manifest', () => {
+test('a box with nothing configured still gets a manifest', () => {
   // An empty manifest is not the same as no mount: it is what tells the
   // entrypoint to remove whatever a previous start installed.
   store.materialize('s1', null);
@@ -208,7 +208,7 @@ test('re-materializing keeps the directory a running container is mounted on', (
   assert.equal(statSync(agentConfigPath(dir, 's1')).ino, before);
 });
 
-test('deleting a session takes its materialized directory with it', () => {
+test('deleting a box takes its materialized directory with it', () => {
   store.materialize('s1', null);
   store.removeMaterialized('s1');
   assert.equal(readdirSync(join(dir, 'agents')).includes('s1'), false);
@@ -272,22 +272,22 @@ test('an unknown set is a 404 on every route into it', () => {
   }
 });
 
-// --- sessions ----------------------------------------------------------------
+// --- boxes ----------------------------------------------------------------
 
-test('a set counts the live sessions that selected it', () => {
+test('a set counts the live boxes that selected it', () => {
   const set = store.createSet('go');
-  insertSession('s1', set.id);
-  insertSession('s2', null);
-  assert.equal(store.getSet(set.id).sessionCount, 1);
+  insertBox('s1', set.id);
+  insertBox('s2', null);
+  assert.equal(store.getSet(set.id).boxCount, 1);
 });
 
-test('deleting a set leaves its sessions alone and falls them back to global', () => {
+test('deleting a set leaves its boxes alone and falls them back to global', () => {
   const set = store.createSet('go');
-  insertSession('s1', set.id);
+  insertBox('s1', set.id);
 
   store.deleteSet(set.id);
 
-  const row = db.prepare('SELECT agent_set_id, status FROM sessions WHERE id = ?').get('s1') as {
+  const row = db.prepare('SELECT agent_set_id, status FROM boxes WHERE id = ?').get('s1') as {
     agent_set_id: string | null;
     status: string;
   };

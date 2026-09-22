@@ -22,7 +22,7 @@ import {
 /**
  * How review invokes git.
  *
- * Git runs in the session's container, so what is pinned down here is the
+ * Git runs in the box's container, so what is pinned down here is the
  * command line and the environment the builders produce, that every
  * invocation is addressed to a container and a directory inside it, and that
  * no file of the orchestrator can start a process at all.

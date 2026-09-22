@@ -194,7 +194,7 @@ describe('parseReview', () => {
   });
 
   test('an empty document is an empty review', () => {
-    // What a session with no REVIEW.md yet reads as.
+    // What a box with no REVIEW.md yet reads as.
     const review = parseReview('');
     assert.equal(review.data.size, 0);
     assert.equal(review.started, '');

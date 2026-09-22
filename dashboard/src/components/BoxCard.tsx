@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import type { BoxWork, SessionSummary, ThreadSummary } from '../../../shared/types.ts';
+import type { BoxWork, BoxSummary, ThreadSummary } from '../../../shared/types.ts';
 import { DOT, StatusBadge, type BadgeKind } from './StatusBadge';
 import { BoxWorkList } from '@/components/BoxWorkList';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -20,18 +20,18 @@ import { STILL_RUNNING } from '@/lib/activity';
 import { harnessLabel } from '@/lib/harness';
 import { shortAge, shortSize } from '@/lib/rough';
 import { threadName } from '@/lib/threads';
-import { refresh, useSessions } from '../stores/sessions.ts';
+import { refresh, useBoxes } from '../stores/boxes.ts';
 import { cn } from '@/lib/utils';
 
 /**
- * Builds the badges for a session: waiting approvals, a running turn, the
- * session's own state, and how many browsers are watching.
+ * Builds the badges for a box: waiting approvals, a running turn, the
+ * box's own state, and how many browsers are watching.
  *
- * The turn and approval counts are the session's, derived from every thread
+ * The turn and approval counts are the box's, derived from every thread
  * it owns, so a box with one busy thread reads as busy. Which thread that is
  * is the rows' job, below.
  */
-export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label: string }> {
+export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string }> {
   const badges: Array<{ kind: BadgeKind; label: string }> = [];
   if (s.pendingCount > 0) {
     badges.push({
@@ -57,12 +57,12 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
 }
 
 /**
- * One session in the list, with its conversations under it. Tapping the card
+ * One box in the list, with its conversations under it. Tapping the card
  * opens whichever one is current; tapping a thread opens that one.
  *
  * The thread rows are plain links, because opening a thread is now a plain
  * navigation: the connection names its own thread, so nothing has to be
- * switched first. Opening one still makes it the session's default, but as a
+ * switched first. Opening one still makes it the box's default, but as a
  * fire-and-forget POST that neither blocks the navigation nor disturbs
  * anybody — no live connection is pinned to the default.
  *
@@ -71,7 +71,7 @@ export function sessionBadges(s: SessionSummary): Array<{ kind: BadgeKind; label
  * details view goes back to is not something this link has to say: it goes
  * back, and the entry it goes back to is this list.
  */
-export function SessionCard({ session }: { session: SessionSummary }) {
+export function BoxCard({ box }: { box: BoxSummary }) {
   const navigate = useNavigate();
   /** Held while a thread call is in flight, so a double tap cannot fork twice. */
   const [busy, setBusy] = useState(false);
@@ -89,7 +89,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
   // What each thread's agent is called. Off the health probe the list is
   // polling anyway rather than a call of its own: a row needs the label and
   // nothing else about the harness, and the dialog is what needs the rest.
-  const { harnesses } = useSessions();
+  const { harnesses } = useBoxes();
 
   /**
    * Runs one thread call and opens the thread it made. Answers whether it
@@ -113,7 +113,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
       // The card's own thread list comes from the poll, so a change made here
       // is visible on the way back rather than a reload later.
       void refresh();
-      await navigate(`/sessions/${session.id}/threads/${created.id}`, { replace });
+      await navigate(`/boxes/${box.id}/threads/${created.id}`, { replace });
       return true;
     } catch (err) {
       setError((err as Error).message);
@@ -127,7 +127,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
    * Puts the confirmation up and asks what the box is running, so the decision
    * is made in front of the processes it is about.
    *
-   * Read when the dialog opens rather than carried on every session in the
+   * Read when the dialog opens rather than carried on every box in the
    * list: the list is polled for all of them at once, and a command line is
    * wanted by one reader about to act on one box. It comes off the same
    * reading as the badge, so it names what the stop would signal rather than
@@ -137,7 +137,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
     setBoxWork('reading');
     setStopping(true);
     try {
-      setBoxWork((await api.getSession(session.id)).boxWork);
+      setBoxWork((await api.getBox(box.id)).boxWork);
     } catch {
       // Said in the dialog rather than on the card behind it, which is where
       // the reader is looking and what the offer to stop has to stand on.
@@ -160,7 +160,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
     setBusy(true);
     setError(null);
     try {
-      await api.stopBoxWork(session.id);
+      await api.stopBoxWork(box.id);
       void refresh();
     } catch (err) {
       setError((err as Error).message);
@@ -169,7 +169,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
     }
   }
 
-  const current = session.threads.find((t) => t.id === session.currentThreadId);
+  const current = box.threads.find((t) => t.id === box.currentThreadId);
   /**
    * Whether this box holds work that no conversation in it claims.
    *
@@ -180,7 +180,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
    * table. That is the gap this offer fills — the box says it is busy, no
    * thread says what with, and nothing else in the dashboard can stop it.
    */
-  const orphaned = session.backgroundBusy && !session.threads.some((t) => t.backgroundBusy);
+  const orphaned = box.backgroundBusy && !box.threads.some((t) => t.backgroundBusy);
   // What the thread ages are measured from. Read at render rather than kept on
   // a timer: the list is polled every five seconds and every answer re-renders
   // this card, which is a finer clock than an indicator in whole minutes and
@@ -191,57 +191,57 @@ export function SessionCard({ session }: { session: SessionSummary }) {
   return (
     <Card className="relative gap-0 overflow-hidden py-0 transition-colors hover:border-ring">
       <Link
-        to={`/sessions/${session.id}`}
+        to={`/boxes/${box.id}`}
         className="flex flex-col gap-1 px-4 pt-4 pb-3 no-underline"
       >
         <div className="flex items-baseline gap-2 pr-9">
-          <span className="truncate font-medium">{session.name}</span>
-          <span className="font-mono text-xs text-muted-foreground">{session.id}</span>
+          <span className="truncate font-medium">{box.name}</span>
+          <span className="font-mono text-xs text-muted-foreground">{box.id}</span>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {sessionBadges(session).map((b) => (
+          {boxBadges(box).map((b) => (
             <StatusBadge key={b.label} kind={b.kind} label={b.label} />
           ))}
           {/* How much disk the box has taken — its workspace and its home
               together. Not a badge: it is a measurement rather than a state,
               and giving it a pill of its own would put it in the row that
-              says what the session is doing. Absent until the orchestrator
+              says what the box is doing. Absent until the orchestrator
               has measured one — a zero would be a claim about a box nobody
               has looked at yet. */}
-          {session.diskBytes === null ? null : (
+          {box.diskBytes === null ? null : (
             <span
               className="inline-flex items-center gap-1 text-xs text-muted-foreground"
               title="Workspace and home on disk"
             >
               <HardDrive className="size-3" aria-hidden />
-              {shortSize(session.diskBytes)}
+              {shortSize(box.diskBytes)}
             </span>
           )}
         </div>
       </Link>
       <Link
-        to={`/sessions/${session.id}/info`}
-        aria-label={`Details and controls for ${session.name}`}
+        to={`/boxes/${box.id}/info`}
+        aria-label={`Details and controls for ${box.name}`}
         className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       >
         <Info className="size-4" />
       </Link>
 
       <div className="flex flex-col border-t px-2 py-2">
-        {session.threads.map((thread) => {
+        {box.threads.map((thread) => {
           const dot = threadDot(thread);
           return (
             <Link
               key={thread.id}
-              to={`/sessions/${session.id}/threads/${thread.id}`}
+              to={`/boxes/${box.id}/threads/${thread.id}`}
               // Selecting is a side effect of opening, not a step before it:
               // the navigation does not wait for it, and nothing breaks if it
               // never lands.
-              onClick={() => void api.selectThread(session.id, thread.id).catch(() => {})}
-              aria-current={thread.id === session.currentThreadId ? 'true' : undefined}
+              onClick={() => void api.selectThread(box.id, thread.id).catch(() => {})}
+              aria-current={thread.id === box.currentThreadId ? 'true' : undefined}
               className={cn(
                 'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline hover:bg-accent',
-                thread.id === session.currentThreadId ? 'font-medium' : 'text-muted-foreground',
+                thread.id === box.currentThreadId ? 'font-medium' : 'text-muted-foreground',
               )}
             >
               {/* Which thread this is is said by the weight of the row and by
@@ -294,10 +294,10 @@ export function SessionCard({ session }: { session: SessionSummary }) {
             New thread
           </button>
           {/* Reviewing works whether or not the box is running: the files are
-              a directory the orchestrator reads, so a stopped session — the
+              a directory the orchestrator reads, so a stopped box — the
               natural moment, once the agent is done — needs no start. */}
           <Link
-            to={`/sessions/${session.id}/review`}
+            to={`/boxes/${box.id}/review`}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground no-underline hover:bg-accent hover:text-accent-foreground"
           >
             <FileSearch className="size-3.5" />
@@ -307,7 +307,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
               thread: a terminal belongs to the box, and every one opened on
               it is the same shell. */}
           <Link
-            to={`/sessions/${session.id}/terminal`}
+            to={`/boxes/${box.id}/terminal`}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground no-underline hover:bg-accent hover:text-accent-foreground"
           >
             <SquareTerminal className="size-3.5" />
@@ -321,7 +321,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
             <button
               type="button"
               disabled={busy}
-              onClick={() => void open(() => api.createThread(session.id, { from: current.id }))}
+              onClick={() => void open(() => api.createThread(box.id, { from: current.id }))}
               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
             >
               <GitBranch className="size-3.5" />
@@ -401,7 +401,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
             // would land after the push and undo it.
             onCreate={(options) => {
               void open(
-                () => api.createThread(session.id, options ? { options } : {}),
+                () => api.createThread(box.id, options ? { options } : {}),
                 true,
               ).then((opened) => {
                 if (!opened) setStarting(false);
@@ -418,7 +418,7 @@ export function SessionCard({ session }: { session: SessionSummary }) {
  * The bullet on a thread's row: what that conversation is doing, in one dot,
  * and the whole of what a row says about it.
  *
- * Which thread is the session's default is not among them: the row says that
+ * Which thread is the box's default is not among them: the row says that
  * twice already, in its weight and in `aria-current`. Being up is a
  * precondition of every state here.
  *

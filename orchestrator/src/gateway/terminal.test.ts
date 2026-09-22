@@ -6,7 +6,7 @@ import type { WebSocket } from 'ws';
 import { parseTerminalControl } from '../../../shared/terminal.ts';
 import * as dk from '../docker.ts';
 import { setLogLevel } from '../log.ts';
-import type { SessionManager } from '../sessions.ts';
+import type { BoxManager } from '../boxes.ts';
 import { attachTerminal } from './terminal.ts';
 
 /**
@@ -163,10 +163,10 @@ function fakeDocker(): FakePty {
 
 /** What a test's fake manager recorded about the box being held. */
 interface FakeManager {
-  manager: SessionManager;
-  /** How many terminals the manager currently counts on the session. */
+  manager: BoxManager;
+  /** How many terminals the manager currently counts on the box. */
   held: () => number;
-  /** How many times the session was marked active by typing. */
+  /** How many times the box was marked active by typing. */
   touches: () => number;
 }
 
@@ -188,14 +188,14 @@ function fakeManager(opts: { fail?: string } = {}): FakeManager {
       if (opts.fail) throw new Error(opts.fail);
       return { containerId: 'c1', workingDir: '/workspace' };
     },
-  } as unknown as SessionManager;
+  } as unknown as BoxManager;
   return { manager, held: () => open, touches: () => touches };
 }
 
 /** Opens a terminal and waits for the pty behind it to be there. */
 async function attach(
   ws: FakeSocket,
-  manager: SessionManager,
+  manager: BoxManager,
   size: { cols: number; rows: number } | null = { cols: 100, rows: 40 },
 ): Promise<void> {
   attachTerminal(ws as unknown as WebSocket, 'box-1', manager);
@@ -351,13 +351,13 @@ test('two terminals on one box get shells of their own to end', async () => {
 });
 
 test('a box that cannot be reached closes the socket and says why', async () => {
-  const { manager, held } = fakeManager({ fail: 'Session has no container' });
+  const { manager, held } = fakeManager({ fail: 'Box has no container' });
   const ws = new FakeSocket();
 
   attachTerminal(ws as unknown as WebSocket, 'box-1', manager);
   await vi.waitFor(() => assert.equal(ws.closes.length, 1));
 
-  assert.equal(ws.closes[0]?.reason, 'Session has no container');
+  assert.equal(ws.closes[0]?.reason, 'Box has no container');
   // The hold went up before the box was started, so it has to come down on
   // the way that never reaches a shell.
   assert.equal(held(), 0);

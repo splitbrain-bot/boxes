@@ -20,7 +20,7 @@ import { Label } from '@/components/ui/label';
 import { useUp } from '@/hooks/use-up';
 import { CODEX_LOGIN_OFFERED } from '@/lib/harness';
 import { shortAge } from '@/lib/rough';
-import { useSessions } from '../stores/sessions.ts';
+import { useBoxes } from '../stores/boxes.ts';
 
 /**
  * The deployment's credentials, and the identity its boxes commit as.
@@ -113,9 +113,9 @@ const KINDS: CredentialKind[] = [
 ];
 
 export function Settings() {
-  /** Out to the session list, popped rather than pushed; see useUp. */
+  /** Out to the box list, popped rather than pushed; see useUp. */
   const up = useUp('/');
-  const { harnesses } = useSessions();
+  const { harnesses } = useBoxes();
 
   const [credentials, setCredentials] = useState<CredentialSummary[] | null>(null);
   const [settings, setSettings] = useState<SettingsShape | null>(null);
@@ -192,7 +192,7 @@ export function Settings() {
 
   return (
     <div className="flex flex-col gap-4">
-      <BackLink up={up} label="Sessions" />
+      <BackLink up={up} label="Boxes" />
 
       <h1 className="text-xl font-semibold">Settings</h1>
 

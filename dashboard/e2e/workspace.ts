@@ -7,10 +7,10 @@ import {
 } from '../../orchestrator/src/review/git.ts';
 
 /**
- * A session's workspace on disk, which is what the review reads.
+ * A box's workspace on disk, which is what the review reads.
  *
  * The orchestrator reviews the files of a workspace directly and asks git
- * about them inside the session's container. There is no container here, so
+ * about them inside the box's container. There is no container here, so
  * git runs on this machine over the same directory — which is the seam
  * `setGitRunnerForTests` exists for — and the fixtures below build the
  * repositories it answers about.
@@ -129,26 +129,26 @@ export function buildWorkspace(root: string, spec: WorkspaceSpec): void {
 }
 
 /**
- * The session a container id belongs to, which is how a git invocation finds
+ * The box a container id belongs to, which is how a git invocation finds
  * the workspace it is addressed at.
  *
- * Every session container is named after its session, so the name carries the
+ * Every box container is named after its box, so the name carries the
  * mapping and nothing has to be looked up.
  */
-function sessionOfContainer(containerId: string): string {
-  return containerId.startsWith('session-') ? containerId.slice('session-'.length) : '';
+function boxOfContainer(containerId: string): string {
+  return containerId.startsWith('box-') ? containerId.slice('box-'.length) : '';
 }
 
 /**
  * Runs review's git here, in the host directory a container path names.
  *
  * A workspace is at `/workspace` inside a box, and the container id names the
- * session, so the two together say which directory on this machine an
+ * box, so the two together say which directory on this machine an
  * invocation means. One addressed anywhere else fails rather than running.
  */
-export function installLocalGit(workspaceOf: (sessionId: string) => string): void {
+export function installLocalGit(workspaceOf: (boxId: string) => string): void {
   const runner: GitRunner = async (target, argv, env) => {
-    const root = workspaceOf(sessionOfContainer(target.containerId));
+    const root = workspaceOf(boxOfContainer(target.containerId));
     const inside = target.dir === '/workspace' || target.dir.startsWith('/workspace/');
     const cwd = join(root, target.dir.slice('/workspace'.length));
     if (!inside || !existsSync(cwd)) {

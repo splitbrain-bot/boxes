@@ -59,7 +59,7 @@ test('a pasted credential is stored and comes back as its last four characters',
     // Stored as the deployment sees it, without the secret.
     expect((await stub.credentials()).find((c) => c.id === 'claude')?.account).toBe('9876');
 
-    // And the warning the session list was showing goes with it.
+    // And the warning the box list was showing goes with it.
     const list = await openPage(stub.url, '/');
     try {
       await expect.poll(() => list.page.getByText('refactor auth').isVisible()).toBe(true);
@@ -118,7 +118,7 @@ test('the git identity round-trips through the deployment', async () => {
   }
 });
 
-test('the session list links to the settings page', async () => {
+test('the box list links to the settings page', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     await page.getByRole('link', { name: 'Settings' }).click();

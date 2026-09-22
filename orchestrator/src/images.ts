@@ -10,7 +10,7 @@ import { log } from './log.ts';
  * than when a person does. Each image is reached differently: the
  * orchestrator's own is whatever its container was created from, the proxy's
  * is whatever the container named by EGRESS_PROXY_CONTAINER was created from,
- * and the session image is named by SESSION_IMAGE outright, so no container
+ * and the box image is named by BOX_IMAGE outright, so no container
  * has to exist for it.
  */
 
@@ -28,7 +28,7 @@ export function resetImagesForTests(): void {
 /**
  * One image's reading, or null where anything went wrong.
  *
- * Absence is a legitimate answer: a proxy container that is not up, a session
+ * Absence is a legitimate answer: a proxy container that is not up, a box
  * image not pulled yet, an orchestrator running from a checkout rather than a
  * container, a daemon that cannot be reached. Logged at debug, because on a
  * deployment where this cannot work it would otherwise be a line a minute.
@@ -62,12 +62,12 @@ export async function deploymentImages(cfg: Config): Promise<DeploymentImages> {
   const now = Date.now();
   if (cached && now - cached.at < CACHE_MS) return cached.images;
 
-  const [orchestrator, proxy, session] = await Promise.all([
+  const [orchestrator, proxy, box] = await Promise.all([
     safely('orchestrator', () => imageOfContainer(dk.selfContainerId())),
     safely('proxy', () => imageOfContainer(cfg.EGRESS_PROXY_CONTAINER)),
-    safely('session', () => dk.imageInfo(cfg.SESSION_IMAGE)),
+    safely('box', () => dk.imageInfo(cfg.BOX_IMAGE)),
   ]);
 
-  cached = { at: now, images: { orchestrator, proxy, session } };
+  cached = { at: now, images: { orchestrator, proxy, box } };
   return cached.images;
 }

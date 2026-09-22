@@ -115,7 +115,7 @@ export class Activity {
     return this.threads.get(acpThreadId)?.speaking === true;
   }
 
-  /** The threads believed to be working, for a session-wide answer. */
+  /** The threads believed to be working, for a box-wide answer. */
   get speakingThreads(): string[] {
     return [...this.threads]
       .filter(([, state]) => state.speaking)
@@ -269,7 +269,7 @@ export class Activity {
     this.threads.delete(acpThreadId);
   }
 
-  /** Forgets every thread, for a session whose adapter is gone. */
+  /** Forgets every thread, for a box whose adapter is gone. */
   clear(): void {
     for (const state of this.threads.values()) state.cancel?.();
     this.threads.clear();

@@ -4,13 +4,13 @@ import { ACP_SUBPROTOCOL } from '../../../shared/acp.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../../shared/terminal.ts';
 import { checkUpgrade } from './downstream.ts';
 
-/** The token of the session being connected to. */
+/** The token of the box being connected to. */
 const TOKEN = 'a'.repeat(64);
 
-/** The token of some other session of the same deployment. */
+/** The token of some other box of the same deployment. */
 const OTHER_TOKEN = 'b'.repeat(64);
 
-test('accepts an upgrade offering acp.v1 and the session own token', () => {
+test('accepts an upgrade offering acp.v1 and the box own token', () => {
   const result = checkUpgrade(`acp.v1, bearer.${TOKEN}`, TOKEN, ACP_SUBPROTOCOL);
   assert.deepEqual(result, { ok: true });
 });
@@ -30,21 +30,21 @@ test('rejects a missing bearer entry', () => {
   assert.equal(result.ok, false);
 });
 
-test('rejects another session token on this session', () => {
-  // The whole point of a token per session: one that opens a box somewhere
+test('rejects another box token on this box', () => {
+  // The whole point of a token per box: one that opens a box somewhere
   // else in this deployment opens nothing here.
   const result = checkUpgrade(`acp.v1, bearer.${OTHER_TOKEN}`, TOKEN, ACP_SUBPROTOCOL);
   assert.equal(result.ok, false);
 });
 
-test('rejects a token no session has', () => {
+test('rejects a token no box has', () => {
   const result = checkUpgrade(`acp.v1, bearer.${'c'.repeat(64)}`, TOKEN, ACP_SUBPROTOCOL);
   assert.equal(result.ok, false);
 });
 
-test('rejects every token for a session that is not there', () => {
-  // A session id nobody holds has no token, so an upgrade to it is refused
-  // the way a wrong token is rather than saying the session is missing.
+test('rejects every token for a box that is not there', () => {
+  // A box id nobody holds has no token, so an upgrade to it is refused
+  // the way a wrong token is rather than saying the box is missing.
   assert.equal(checkUpgrade(`acp.v1, bearer.${TOKEN}`, null, ACP_SUBPROTOCOL).ok, false);
   assert.equal(checkUpgrade('acp.v1, bearer.', null, ACP_SUBPROTOCOL).ok, false);
 });

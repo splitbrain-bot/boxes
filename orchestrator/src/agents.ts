@@ -16,15 +16,15 @@ import { HttpError } from './http-error.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
- * What the agent is configured with, and how a session gets it.
+ * What the agent is configured with, and how a box gets it.
  *
  * Three things go in: an `AGENTS.md`, skills, and slash commands. They live in
- * named sets. One set — `global` — is applied to every session; a session may
+ * named sets. One set — `global` — is applied to every box; a box may
  * name one more, and the two are merged, the named set winning where both
  * define a skill or a command of the same name.
  *
  * The database is the source of truth and the files are derived from it. At
- * every create and every start, a session's merged set is written out as a
+ * every create and every start, a box's merged set is written out as a
  * directory under `${DATA_DIR}/agents/<id>`, bind-mounted read-only into the
  * container, and installed under `$HOME` by the entrypoint. That hop is needed
  * because the home volume is where every harness reads its user configuration
@@ -35,7 +35,7 @@ import { chownToAgent } from './workspaces.ts';
  * property of the box, and where it lands is a property of the agent reading
  * it. The content is kilobytes, so two copies cost nothing worth a decision.
  *
- * Editing a set therefore reaches a session at its next start rather than
+ * Editing a set therefore reaches a box at its next start rather than
  * while it runs.
  */
 
@@ -62,9 +62,9 @@ function agentsRoot(dataDir: string): string {
   return join(dataDir, AGENTS_SUBDIR);
 }
 
-/** Where a session's merged configuration is written, as this process sees it. */
-export function agentConfigPath(dataDir: string, sessionId: string): string {
-  return join(agentsRoot(dataDir), sessionId);
+/** Where a box's merged configuration is written, as this process sees it. */
+export function agentConfigPath(dataDir: string, boxId: string): string {
+  return join(agentsRoot(dataDir), boxId);
 }
 
 /**
@@ -72,8 +72,8 @@ export function agentConfigPath(dataDir: string, sessionId: string): string {
  * has to name. Bind sources are resolved by the daemon rather than by the
  * process asking for the mount.
  */
-export function hostAgentConfigPath(hostDataDir: string, sessionId: string): string {
-  return posix.join(hostDataDir, AGENTS_SUBDIR, sessionId);
+export function hostAgentConfigPath(hostDataDir: string, boxId: string): string {
+  return posix.join(hostDataDir, AGENTS_SUBDIR, boxId);
 }
 
 /** Creates the parent of every materialized set, mode 0700. */
@@ -82,7 +82,7 @@ export function ensureAgentsRoot(dataDir: string): void {
 }
 
 /**
- * Sets, their items, and the merged bundle a session is given.
+ * Sets, their items, and the merged bundle a box is given.
  *
  * Every mutation returns the whole set, so a client needs one round trip per
  * screen rather than one per field.
@@ -150,7 +150,7 @@ export class AgentStore {
       .get(row.id) as { skills: number | null; commands: number | null };
     const used = this.db
       .prepare(
-        "SELECT COUNT(*) AS n FROM sessions WHERE agent_set_id = ? AND status != 'deleted'",
+        "SELECT COUNT(*) AS n FROM boxes WHERE agent_set_id = ? AND status != 'deleted'",
       )
       .get(row.id) as { n: number };
     return {
@@ -160,7 +160,7 @@ export class AgentStore {
       hasAgentsMd: row.agents_md.trim() !== '',
       skillCount: counts.skills ?? 0,
       commandCount: counts.commands ?? 0,
-      sessionCount: used.n,
+      boxCount: used.n,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -210,16 +210,16 @@ export class AgentStore {
 
   /**
    * Removes a set. The global one stays, because it is the thing every
-   * session gets.
+   * box gets.
    *
-   * Sessions that named it are not blocked and not touched. Their files are
+   * Boxes that named it are not blocked and not touched. Their files are
    * already materialized; the column clears itself and they fall back to the
    * global set alone at their next start.
    */
   deleteSet(id: string): void {
     this.mustGet(id);
     if (id === GLOBAL_AGENT_SET) {
-      throw new HttpError(400, 'The global set is applied to every session and cannot be deleted');
+      throw new HttpError(400, 'The global set is applied to every box and cannot be deleted');
     }
     this.db.prepare('DELETE FROM agent_sets WHERE id = ?').run(id);
   }
@@ -275,7 +275,7 @@ export class AgentStore {
   // --- merging --------------------------------------------------------------
 
   /**
-   * What a session that selected `setId` gets: the global set with that one
+   * What a box that selected `setId` gets: the global set with that one
    * laid over it.
    *
    * The two kinds of content merge differently. An AGENTS.md is prose and
@@ -319,7 +319,7 @@ export class AgentStore {
   // --- materializing --------------------------------------------------------
 
   /**
-   * Writes a session's merged set to its directory and returns that path.
+   * Writes a box's merged set to its directory and returns that path.
    *
    * Every path here is home-relative and already the one it takes inside the
    * box, so the entrypoint copies rather than interprets. Each harness in the
@@ -336,13 +336,13 @@ export class AgentStore {
    * leave that container mounted on an unlinked one.
    *
    * The bundle is written over what is there, and only then is what it does
-   * not have removed. This runs on every start of a session, including a
+   * not have removed. This runs on every start of a box, including a
    * command run against a box that is already up, and clearing first would
    * leave that box with no configuration at all for as long as the write
    * takes.
    */
-  materialize(sessionId: string, setId: string | null): string {
-    const dir = agentConfigPath(this.dataDir, sessionId);
+  materialize(boxId: string, setId: string | null): string {
+    const dir = agentConfigPath(this.dataDir, boxId);
     ensureAgentsRoot(this.dataDir);
     mkdirSync(dir, { recursive: true, mode: 0o755 });
 
@@ -385,7 +385,7 @@ export class AgentStore {
    * the instructions file, and the entries of the skills and commands
    * directories, each of which is one skill or one command.
    *
-   * @param dir The session's materialized directory.
+   * @param dir The box's materialized directory.
    * @param keep Every path this bundle wrote, relative to `dir`.
    */
   private prune(dir: string, keep: readonly string[]): void {
@@ -416,9 +416,9 @@ export class AgentStore {
     chownToAgent(path);
   }
 
-  /** Drops a session's materialized directory, when the session is deleted. */
-  removeMaterialized(sessionId: string): void {
-    rmSync(agentConfigPath(this.dataDir, sessionId), { recursive: true, force: true });
+  /** Drops a box's materialized directory, when the box is deleted. */
+  removeMaterialized(boxId: string): void {
+    rmSync(agentConfigPath(this.dataDir, boxId), { recursive: true, force: true });
   }
 }
 

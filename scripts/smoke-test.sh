@@ -2,7 +2,7 @@
 # Security smoke test.
 #
 # Run on the Docker host after `docker compose up -d`. Creates throwaway
-# sessions via the API, asserts the isolation properties from inside one of
+# boxes via the API, asserts the isolation properties from inside one of
 # their containers, then cleans up.
 #
 #   API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
@@ -38,7 +38,7 @@ grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
 # live-test.sh uses, so the two scripts read the same.
 api() { curl -sS "${CURL_AUTH[@]}" "$@"; }
 
-# Asserts a command run inside the session container FAILS.
+# Asserts a command run inside the box container FAILS.
 must_fail() {
   local desc="$1"; shift
   if docker exec -u agent "$CONTAINER" "$@" >/dev/null 2>&1; then
@@ -48,7 +48,7 @@ must_fail() {
   fi
 }
 
-# Asserts a command run inside the session container SUCCEEDS.
+# Asserts a command run inside the box container SUCCEEDS.
 must_pass() {
   local desc="$1"; shift
   if docker exec -u agent "$CONTAINER" "$@" >/dev/null 2>&1; then
@@ -69,9 +69,9 @@ note() {
   noted=$((noted+1))
 }
 
-# Asserts that a string appears nowhere in a session's environment or volumes.
+# Asserts that a string appears nowhere in a box's environment or volumes.
 # The needle is the real credential, so it is never printed.
-absent_from_session() {
+absent_from_box() {
   local desc="$1" needle="$2"
   if [ -z "$needle" ]; then return; fi
   local found=0
@@ -89,7 +89,7 @@ absent_from_session() {
   fi
 }
 
-# Runs a command in the session and asserts its output matches a pattern.
+# Runs a command in the box and asserts its output matches a pattern.
 must_output() {
   local desc="$1" pattern="$2"; shift 2
   local out
@@ -103,12 +103,12 @@ must_output() {
 }
 
 cleanup() {
-  if [ -n "${SESSION_ID:-}" ]; then
-    grey "cleaning up session $SESSION_ID"
-    api -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null || true
+  if [ -n "${BOX_ID:-}" ]; then
+    grey "cleaning up box $BOX_ID"
+    api -X DELETE "$API_BASE/api/boxes/$BOX_ID" >/dev/null || true
   fi
   if [ -n "${SIBLING_ID:-}" ]; then
-    api -X DELETE "$API_BASE/api/sessions/$SIBLING_ID" >/dev/null || true
+    api -X DELETE "$API_BASE/api/boxes/$SIBLING_ID" >/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -122,7 +122,7 @@ REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
 REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
 
 # Seeds one credential, and says so if the deployment refuses it. Before the
-# sessions, so the boxes below are created against the policy that results —
+# boxes, so the boxes below are created against the policy that results —
 # though a box created before one is entered holds the same placeholder.
 #
 # The method is how the secret was obtained, which the settings page would
@@ -149,21 +149,21 @@ else
 fi
 
 echo
-echo "== creating throwaway sessions =="
-SESSION_ID=$(api -X POST "$API_BASE/api/sessions" \
+echo "== creating throwaway boxes =="
+BOX_ID=$(api -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' \
   -d '{"name":"smoke-test"}' | jq -r '.id')
-[ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] || { red "could not create session"; exit 1; }
+[ -n "$BOX_ID" ] && [ "$BOX_ID" != "null" ] || { red "could not create box"; exit 1; }
 
-SIBLING_ID=$(api -X POST "$API_BASE/api/sessions" \
+SIBLING_ID=$(api -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' \
   -d '{"name":"smoke-test-sibling"}' | jq -r '.id')
 
-CONTAINER="session-$SESSION_ID"
-SIBLING_CONTAINER="session-$SIBLING_ID"
+CONTAINER="box-$BOX_ID"
+SIBLING_CONTAINER="box-$SIBLING_ID"
 SIBLING_IP=$(docker inspect -f \
   '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIBLING_CONTAINER" 2>/dev/null)
-grey "session=$SESSION_ID sibling=$SIBLING_ID sibling_ip=${SIBLING_IP:-unknown}"
+grey "box=$BOX_ID sibling=$SIBLING_ID sibling_ip=${SIBLING_IP:-unknown}"
 
 echo
 echo "== both harnesses in one box =="
@@ -175,7 +175,7 @@ if [ -z "$REAL_OPENAI" ]; then
   grey "skipped: no OpenAI key was passed, so a Codex thread could not run a turn"
   noted=$((noted+1))
 else
-  ADDED_HARNESS=$(api -X POST "$API_BASE/api/sessions/$SESSION_ID/threads" \
+  ADDED_HARNESS=$(api -X POST "$API_BASE/api/boxes/$BOX_ID/threads" \
     -H 'Content-Type: application/json' \
     -d '{"options":{"harness":"codex"}}' | jq -r '.harness')
   if [ "$ADDED_HARNESS" = "codex" ]; then
@@ -183,7 +183,7 @@ else
   else
     red   "FAIL (no Codex thread):        the box would not take one"; fail=$((fail+1))
   fi
-  HARNESSES=$(api "$API_BASE/api/sessions/$SESSION_ID/threads" | jq -r '[.[].harness] | sort | unique | join(",")')
+  HARNESSES=$(api "$API_BASE/api/boxes/$BOX_ID/threads" | jq -r '[.[].harness] | sort | unique | join(",")')
   if [ "$HARNESSES" = "claude,codex" ]; then
     green "ok   (two harnesses, one box):   $HARNESSES"; pass=$((pass+1))
   else
@@ -200,7 +200,7 @@ fi
 
 echo
 echo "== MUST FAIL: direct (proxy-bypassing) egress =="
-# The session network is internal: no NAT, no default route.
+# The box network is internal: no NAT, no default route.
 must_fail "curl --noproxy '*' https://api.github.com" \
   curl --noproxy '*' -fsS -m 3 https://api.github.com
 must_fail "nc -w3 1.1.1.1 443" \
@@ -221,7 +221,7 @@ must_fail "curl http://[::ffff:192.168.1.1] (v4-mapped bypass)" \
   curl -fsS -m 3 'http://[::ffff:192.168.1.1]'
 
 echo
-echo "== MUST FAIL: cross-session reachability =="
+echo "== MUST FAIL: cross-box reachability =="
 if [ -n "${SIBLING_IP:-}" ]; then
   must_fail "nc -w3 <sibling> 22 (distinct internal networks)" \
     nc -w3 -z "$SIBLING_IP" 22
@@ -282,33 +282,33 @@ fi
 echo
 echo "== pids limit containment =="
 # PidsLimit must contain a fork bomb without affecting the host or the sibling
-# session. The bomb runs under bash, because the image's sh is dash and dash
+# box. The bomb runs under bash, because the image's sh is dash and dash
 # rejects a function named ':'. Its children all stay in the process group of
-# the exec, so one kill ends the whole bomb and the session stays testable.
+# the exec, so one kill ends the whole bomb and the box stays testable.
 docker exec -u agent "$CONTAINER" bash -c \
   'bomb() { bomb | bomb & }; bomb & sleep 5; kill -9 0' >/dev/null 2>&1
 if docker exec -u agent "$SIBLING_CONTAINER" true >/dev/null 2>&1; then
   green "ok   (sibling unaffected):      fork bomb contained by pids-limit"; pass=$((pass+1))
 else
-  red   "FAIL: sibling session affected by fork bomb"; fail=$((fail+1))
+  red   "FAIL: sibling box affected by fork bomb"; fail=$((fail+1))
 fi
 
-# The bombed session itself must be usable again once the bomb is gone.
+# The bombed box itself must be usable again once the bomb is gone.
 recovered=0
 for _ in $(seq 1 15); do
   if docker exec -u agent "$CONTAINER" true >/dev/null 2>&1; then recovered=1; break; fi
   sleep 2
 done
 if [ "$recovered" -eq 1 ]; then
-  green "ok   (session survived):        the bombed session answers again"; pass=$((pass+1))
+  green "ok   (box survived):        the bombed box answers again"; pass=$((pass+1))
 else
-  red   "FAIL: the bombed session stays out of processes"; fail=$((fail+1))
+  red   "FAIL: the bombed box stays out of processes"; fail=$((fail+1))
 fi
 
 echo
 echo "== workspace storage: a directory on the data volume, bound in =="
-# A session's workspace is a directory under the orchestrator's own /data,
-# bind-mounted at /workspace. The agent must own it, one session must not see
+# A box's workspace is a directory under the orchestrator's own /data,
+# bind-mounted at /workspace. The agent must own it, one box must not see
 # another's, and the parent must not be readable by a stray container.
 must_pass "the agent can write to its bound workspace" \
   sh -c 'echo ok > /workspace/.smoke-ws && rm /workspace/.smoke-ws'
@@ -317,19 +317,19 @@ WS_SOURCE=$(docker inspect -f \
   '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Type}} {{.Source}}{{end}}{{end}}' \
   "$CONTAINER" 2>/dev/null)
 case "$WS_SOURCE" in
-  "bind "*/workspaces/"$SESSION_ID")
-    green "ok   /workspace is a bind of the session's own directory"; pass=$((pass+1)) ;;
+  "bind "*/workspaces/"$BOX_ID")
+    green "ok   /workspace is a bind of the box's own directory"; pass=$((pass+1)) ;;
   *)
-    red   "FAIL: /workspace is not a bind of workspaces/\$SESSION_ID: ${WS_SOURCE:-none}"
+    red   "FAIL: /workspace is not a bind of workspaces/\$BOX_ID: ${WS_SOURCE:-none}"
     fail=$((fail+1)) ;;
 esac
 
 # The orchestrator must see the very file the agent wrote, with no exec: that
-# is what makes reviewing a stopped session possible at all.
+# is what makes reviewing a stopped box possible at all.
 docker exec -u agent "$CONTAINER" sh -c 'echo from-the-agent > /workspace/.smoke-seen' \
   >/dev/null 2>&1
 if docker exec boxes-orchestrator \
-     sh -c 'cat "/data/workspaces/'"$SESSION_ID"'/.smoke-seen"' 2>/dev/null \
+     sh -c 'cat "/data/workspaces/'"$BOX_ID"'/.smoke-seen"' 2>/dev/null \
      | grep -q from-the-agent; then
   green "ok   the orchestrator reads the agent's file directly"; pass=$((pass+1))
 else
@@ -345,14 +345,14 @@ else
   red   "FAIL: workspaces/ is ${WS_MODE:-unknown}, must be 700"; fail=$((fail+1))
 fi
 
-# One session's workspace is not mounted into another, and the sibling's
+# One box's workspace is not mounted into another, and the sibling's
 # directory is not reachable from inside this one.
 if [ -n "${SIBLING_ID:-}" ]; then
   docker exec -u agent "$SIBLING_CONTAINER" \
     sh -c 'echo sibling > /workspace/.smoke-sibling' >/dev/null 2>&1
   must_fail "the sibling's workspace file is not visible" \
     sh -c 'test -f /workspace/.smoke-sibling'
-  must_fail "the data volume is not reachable from a session" \
+  must_fail "the data volume is not reachable from a box" \
     sh -c 'ls /data'
   docker exec -u agent "$SIBLING_CONTAINER" rm -f /workspace/.smoke-sibling \
     >/dev/null 2>&1
@@ -363,20 +363,20 @@ echo "== documented-but-accepted residual surface =="
 # Docker's internal-network isolation filters forwarded traffic only, so the
 # host stays addressable at its per-bridge IP. The owner accepted this, so it
 # is logged rather than failed.
-HOST_BRIDGE_IP=$(docker network inspect "sn-$SESSION_ID" \
+HOST_BRIDGE_IP=$(docker network inspect "bn-$BOX_ID" \
   -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)
 if [ -n "$HOST_BRIDGE_IP" ]; then
   note "host per-bridge IP $HOST_BRIDGE_IP:22" nc -w3 -z "$HOST_BRIDGE_IP" 22
 fi
 
 echo
-echo "== token translation: the session holds placeholders, not credentials =="
+echo "== token translation: the box holds placeholders, not credentials =="
 if [ -z "$REAL_GH" ] && [ -z "$REAL_CLAUDE" ] && [ -z "$REAL_OPENAI" ]; then
   grey "skipped: no credential was seeded, so this deployment translates none"
 else
-  absent_from_session "GH_TOKEN is nowhere in the session" "$REAL_GH"
-  absent_from_session "CLAUDE_CODE_OAUTH_TOKEN is nowhere in the session" "$REAL_CLAUDE"
-  absent_from_session "CODEX_API_KEY is nowhere in the session" "$REAL_OPENAI"
+  absent_from_box "GH_TOKEN is nowhere in the box" "$REAL_GH"
+  absent_from_box "CLAUDE_CODE_OAUTH_TOKEN is nowhere in the box" "$REAL_CLAUDE"
+  absent_from_box "CODEX_API_KEY is nowhere in the box" "$REAL_OPENAI"
 
   if [ -n "$REAL_GH" ]; then
     # The placeholder must authenticate as the bot: proof the proxy swapped it.
@@ -457,10 +457,10 @@ fi
 
 echo
 echo "== proxy attachment =="
-if api "$API_BASE/api/sessions/$SESSION_ID" | jq -e '.proxyAttached' >/dev/null; then
-  green "ok   proxy attached to session network"; pass=$((pass+1))
+if api "$API_BASE/api/boxes/$BOX_ID" | jq -e '.proxyAttached' >/dev/null; then
+  green "ok   proxy attached to box network"; pass=$((pass+1))
 else
-  red   "FAIL: egress proxy is not attached to the session network"; fail=$((fail+1))
+  red   "FAIL: egress proxy is not attached to the box network"; fail=$((fail+1))
 fi
 
 echo

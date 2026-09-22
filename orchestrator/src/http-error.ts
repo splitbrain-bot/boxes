@@ -1,7 +1,7 @@
 /**
  * The one error that carries an HTTP status.
  *
- * Every layer that can refuse a request throws this: the session lifecycle,
+ * Every layer that can refuse a request throws this: the box lifecycle,
  * the review surface, the agent store.
  */
 export class HttpError extends Error {

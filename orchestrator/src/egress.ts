@@ -18,11 +18,11 @@ import { writeSecretFile } from './secret.ts';
  * the key material that has to outlive a restart.
  *
  * Real credentials come from the credential store and never leave this
- * process except over the control channel, into the proxy's memory. A session
- * is given a placeholder in their place, so nothing inside a session container
+ * process except over the control channel, into the proxy's memory. A box
+ * is given a placeholder in their place, so nothing inside a box container
  * is worth stealing.
  *
- * Two pieces of material must survive a restart, because running sessions hold
+ * Two pieces of material must survive a restart, because running boxes hold
  * them in their environment and trust store: the CA the proxy mints
  * interception certificates from, and the placeholders themselves. They live
  * beside the generated WebSocket token, on the orchestrator's own data volume,
@@ -57,7 +57,7 @@ function generatePlaceholder(prefix: string): string {
  * Loads the deployment's egress material, generating and storing whatever is
  * missing.
  *
- * A running session holds this CA's certificate in the trust file its tools
+ * A running box holds this CA's certificate in the trust file its tools
  * were pointed at, so a CA regenerated on every boot would break TLS against
  * every intercepted host. Rotating it means deleting this file.
  */
@@ -90,8 +90,8 @@ export async function resolveEgressMaterial(
     log.info('generated an egress CA for this deployment', { path });
   }
 
-  // Placeholders are per deployment rather than per session, so the policy
-  // does not change as sessions come and go.
+  // Placeholders are per deployment rather than per box, so the policy
+  // does not change as boxes come and go.
   const placeholders: Record<string, string> = { ...stored.placeholders };
   for (const { id, placeholderPrefix } of credentials) {
     if (placeholders[id]) continue;
@@ -242,7 +242,7 @@ export class EgressManager {
     this.composed = composePolicy(this.cfg, this.material, this.credentials.list());
   }
 
-  /** The CA certificate a session is given to trust. Public, never the key. */
+  /** The CA certificate a box is given to trust. Public, never the key. */
   caCertificate(): string {
     return this.prepared().material.ca.cert;
   }
@@ -250,7 +250,7 @@ export class EgressManager {
   /**
    * The prepared state, or a refusal.
    *
-   * Every caller here decides what a session container will hold, and an
+   * Every caller here decides what a box container will hold, and an
    * unprepared manager holds neither the placeholders nor the CA. Answering
    * with nothing would build a box that can never authenticate and never
    * trust an intercepted host, and say so nowhere, so this refuses instead.

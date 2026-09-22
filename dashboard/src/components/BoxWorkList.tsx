@@ -4,7 +4,7 @@ import { formatDuration } from '@/lib/task-notifications';
 /**
  * What a reading of a box found running in it.
  *
- * The other half of what a session has going, and the half nothing else in
+ * The other half of what a box has going, and the half nothing else in
  * the dashboard shows. A thread's own bar lists the tasks its adapter
  * announced; this lists processes off the box's own table, which is the only
  * thing that still sees what an adapter left behind when it died.

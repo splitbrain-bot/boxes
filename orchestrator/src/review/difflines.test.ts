@@ -13,7 +13,7 @@ import { NO_BASE } from './gitstatus.ts';
  * implementation's, which is what says these markers are the right ones.
  *
  * The one part that runs git is driven through a runner that starts it on this
- * machine instead of in a session container, over a repository the test built
+ * machine instead of in a box container, over a repository the test built
  * itself: what is being checked is that the parser reads what git really
  * writes.
  */

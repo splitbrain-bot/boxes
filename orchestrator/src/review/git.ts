@@ -4,7 +4,7 @@ import { log } from '../log.ts';
 /**
  * The one place review starts a git process.
  *
- * Git runs inside the session's own container, as the agent user, over the
+ * Git runs inside the box's own container, as the agent user, over the
  * agent's own files — never in this process. A repository's configuration can
  * make git run a command on exactly the operations review runs: a clean filter
  * on `diff`, an fsmonitor hook on `status`. Inside the box that command is one
@@ -19,7 +19,7 @@ import { log } from '../log.ts';
  * remote.
  */
 
-/** A session's container and the workspace inside it: where review runs git. */
+/** A box's container and the workspace inside it: where review runs git. */
 export interface GitBox {
   /** The running container git is executed in. */
   containerId: string;
@@ -108,7 +108,7 @@ export interface GitResult {
 /**
  * Starts one git command and reports what it produced.
  *
- * The seam a test replaces: the default reaches into a session container, and
+ * The seam a test replaces: the default reaches into a box container, and
  * a suite that has no Docker substitutes a runner of its own.
  */
 export type GitRunner = (
@@ -117,8 +117,8 @@ export type GitRunner = (
   env: Record<string, string>,
 ) => Promise<GitResult>;
 
-/** The runner review ships with: one exec in the session container. */
-const inSessionContainer: GitRunner = async (target, argv, env) => {
+/** The runner review ships with: one exec in the box container. */
+const inBoxContainer: GitRunner = async (target, argv, env) => {
   const result = await dk.execInContainer(target.containerId, argv, {
     workingDir: target.dir,
     env,
@@ -134,11 +134,11 @@ const inSessionContainer: GitRunner = async (target, argv, env) => {
 };
 
 /** Where git is started. Replaced only by a test. */
-let runner: GitRunner = inSessionContainer;
+let runner: GitRunner = inBoxContainer;
 
 /** Replaces the runner that starts git. Null puts the shipped one back. */
 export function setGitRunnerForTests(next: GitRunner | null): void {
-  runner = next ?? inSessionContainer;
+  runner = next ?? inBoxContainer;
 }
 
 /**

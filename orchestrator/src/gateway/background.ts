@@ -3,12 +3,12 @@ import type { Harness } from '../harness.ts';
 import type { BackgroundProcess, BoxWork } from '../../../shared/types.ts';
 
 /**
- * What a session has left running: what the adapters say, and what the box
+ * What a box has left running: what the adapters say, and what the box
  * says underneath them.
  *
  * A turn that leaves something running in the background ends like any other:
  * the agent says it will report back, the thread goes quiet, and — with the
- * browser closed — every test the reaper makes says the session is idle. Half
+ * browser closed — every test the reaper makes says the box is idle. Half
  * an hour later the container is stopped, and with it the build, the crawl or
  * the monitor watching them.
  *
@@ -428,7 +428,7 @@ export function workPids(
  * The answer for one container, re-read no more often than `ttlMs`.
  *
  * Every reader wants an answer it can have without waiting — the reaper mid
- * sweep, a session summary being built for a browser — and every reader wants
+ * sweep, a box summary being built for a browser — and every reader wants
  * it to be current. So it is polled behind them: a reading is served from the
  * last one until it goes stale, and refreshing is something the holder does,
  * not something a reader waits on.
@@ -438,7 +438,7 @@ export interface ProbeOptions {
    * How to ask the box what is running, or null where there is no box to ask
    * — no container, or one that is not up. Null is an answer and not a
    * failure: a stopped box is empty, and saying so is the difference between
-   * a session that is quiet and one that says "still running" forever.
+   * a box that is quiet and one that says "still running" forever.
    *
    * Injected so this is testable without a Docker daemon under it.
    */
@@ -484,7 +484,7 @@ export class BackgroundProbe {
   /**
    * How many times the answer has been settled without asking the box. A
    * reading carries the number it started under, so one still on the wire
-   * when a session is stopped is dropped rather than put back.
+   * when a box is stopped is dropped rather than put back.
    */
   private generation = 0;
   /** Whether the last reading failed, so the trouble is reported once. */
@@ -537,7 +537,7 @@ export class BackgroundProbe {
   /**
    * Forgets what was read, for a box that is going away.
    *
-   * Stopping a session is the one moment the answer is known without asking,
+   * Stopping a box is the one moment the answer is known without asking,
    * and waiting a poll to say so would leave "still running" on a box that
    * has just been shut down.
    */

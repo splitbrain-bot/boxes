@@ -25,13 +25,13 @@ test('an empty environment yields the documented defaults', () => {
   withDataDir((dir) => {
     const cfg = loadConfig({ DATA_DIR: dir });
     assert.equal(cfg.PORT, 3000);
-    assert.equal(cfg.SESSION_IMAGE, 'ghcr.io/splitbrain/boxes/session:latest');
-    assert.equal(cfg.SESSION_SUBNET_POOL, '10.200.0.0/16');
-    assert.equal(cfg.SESSION_MEM_LIMIT, '4g');
-    assert.equal(cfg.SESSION_CPUS, 2);
-    assert.equal(cfg.SESSION_PIDS_LIMIT, 512);
+    assert.equal(cfg.BOX_IMAGE, 'ghcr.io/splitbrain/boxes/box:latest');
+    assert.equal(cfg.BOX_SUBNET_POOL, '10.200.0.0/16');
+    assert.equal(cfg.BOX_MEM_LIMIT, '4g');
+    assert.equal(cfg.BOX_CPUS, 2);
+    assert.equal(cfg.BOX_PIDS_LIMIT, 512);
     assert.equal(cfg.IDLE_STOP_MINUTES, 30);
-    assert.equal(cfg.SESSION_IMAGE_PRUNE, true);
+    assert.equal(cfg.BOX_IMAGE_PRUNE, true);
     assert.equal(cfg.BACKGROUND_POLL_SECONDS, 20);
     assert.equal(cfg.PERMISSION_FALLBACK, 'hold');
     assert.equal(cfg.PERMISSION_HOLD_MINUTES, 120);
@@ -50,21 +50,21 @@ test('an empty value means unset, not an invalid value', () => {
     // boot for a setting nobody set.
     const cfg = loadConfig({
       DATA_DIR: dir,
-      SESSION_IMAGE: '',
-      SESSION_SUBNET_POOL: '',
-      SESSION_MEM_LIMIT: '',
-      SESSION_CPUS: '',
-      SESSION_PIDS_LIMIT: '',
+      BOX_IMAGE: '',
+      BOX_SUBNET_POOL: '',
+      BOX_MEM_LIMIT: '',
+      BOX_CPUS: '',
+      BOX_PIDS_LIMIT: '',
       IDLE_STOP_MINUTES: '',
-      SESSION_IMAGE_PRUNE: '',
+      BOX_IMAGE_PRUNE: '',
       PERMISSION_FALLBACK: '',
       PERMISSION_HOLD_MINUTES: '',
     });
-    assert.equal(cfg.SESSION_MEM_LIMIT, '4g');
-    assert.equal(cfg.SESSION_CPUS, 2);
+    assert.equal(cfg.BOX_MEM_LIMIT, '4g');
+    assert.equal(cfg.BOX_CPUS, 2);
     assert.equal(cfg.PERMISSION_FALLBACK, 'hold');
     assert.equal(cfg.IDLE_STOP_MINUTES, 30);
-    assert.equal(cfg.SESSION_IMAGE_PRUNE, true);
+    assert.equal(cfg.BOX_IMAGE_PRUNE, true);
   });
 });
 
@@ -73,14 +73,14 @@ test('an off switch is off however it is spelled, and never on by accident', () 
     // The mistake a boolean environment variable exists to make: a coercion
     // that reads any non-empty string as true turns this into on.
     for (const off of ['false', '0', 'no', 'off']) {
-      assert.equal(loadConfig({ DATA_DIR: dir, SESSION_IMAGE_PRUNE: off }).SESSION_IMAGE_PRUNE, false);
+      assert.equal(loadConfig({ DATA_DIR: dir, BOX_IMAGE_PRUNE: off }).BOX_IMAGE_PRUNE, false);
     }
     for (const on of ['true', '1', 'yes', 'on']) {
-      assert.equal(loadConfig({ DATA_DIR: dir, SESSION_IMAGE_PRUNE: on }).SESSION_IMAGE_PRUNE, true);
+      assert.equal(loadConfig({ DATA_DIR: dir, BOX_IMAGE_PRUNE: on }).BOX_IMAGE_PRUNE, true);
     }
     // And a typo is a failed boot rather than whichever of the two is worse.
     assert.throws(
-      () => loadConfig({ DATA_DIR: dir, SESSION_IMAGE_PRUNE: 'nope' }),
+      () => loadConfig({ DATA_DIR: dir, BOX_IMAGE_PRUNE: 'nope' }),
       /Invalid configuration/,
     );
   });
@@ -90,13 +90,13 @@ test('a provided value wins over the default', () => {
   withDataDir((dir) => {
     const cfg = loadConfig({
       DATA_DIR: dir,
-      SESSION_MEM_LIMIT: '8g',
-      SESSION_CPUS: '4',
+      BOX_MEM_LIMIT: '8g',
+      BOX_CPUS: '4',
       PERMISSION_FALLBACK: 'deny',
       PUSH_SUBJECT: 'mailto:ops@example.com',
     });
-    assert.equal(cfg.SESSION_MEM_LIMIT, '8g');
-    assert.equal(cfg.SESSION_CPUS, 4);
+    assert.equal(cfg.BOX_MEM_LIMIT, '8g');
+    assert.equal(cfg.BOX_CPUS, 4);
     assert.equal(cfg.PERMISSION_FALLBACK, 'deny');
     assert.equal(cfg.PUSH_SUBJECT, 'mailto:ops@example.com');
   });
@@ -104,10 +104,10 @@ test('a provided value wins over the default', () => {
 
 test('a genuinely invalid value still fails the boot', () => {
   withDataDir((dir) => {
-    assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_MEM_LIMIT: 'lots' }), /Invalid configuration/);
+    assert.throws(() => loadConfig({ DATA_DIR: dir, BOX_MEM_LIMIT: 'lots' }), /Invalid configuration/);
     assert.throws(() => loadConfig({ DATA_DIR: dir, PERMISSION_FALLBACK: 'maybe' }), /Invalid configuration/);
     assert.throws(() => loadConfig({ DATA_DIR: dir, LOG_LEVEL: 'verbose' }), /Invalid configuration/);
-    assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_CPUS: '-1' }), /Invalid configuration/);
+    assert.throws(() => loadConfig({ DATA_DIR: dir, BOX_CPUS: '-1' }), /Invalid configuration/);
     assert.throws(
       () => loadConfig({ DATA_DIR: dir, PUSH_SUBJECT: 'ops@example.com' }),
       /Invalid configuration/,
@@ -226,22 +226,22 @@ test('the OpenAI credential travels to the API-key endpoint alone', () => {
   assert.equal(openai?.placeholderPrefix, 'sk-');
 });
 
-test('the session uid defaults off 1000 and is settable', () => {
+test('the box uid defaults off 1000 and is settable', () => {
   withDataDir((dir) => {
     // 1000 is the base image's own uid and, on a real host, usually a person's.
     // The default moves off it so a deployment can give the agent a uid of its
     // own the way it would any other service.
     const base = loadConfig({ DATA_DIR: dir });
-    assert.equal(base.SESSION_UID, 1020);
-    assert.equal(base.SESSION_GID, 1020);
+    assert.equal(base.BOX_UID, 1020);
+    assert.equal(base.BOX_GID, 1020);
 
-    const set = loadConfig({ DATA_DIR: dir, SESSION_UID: '1000', SESSION_GID: '1000' });
-    assert.equal(set.SESSION_UID, 1000);
-    assert.equal(set.SESSION_GID, 1000);
+    const set = loadConfig({ DATA_DIR: dir, BOX_UID: '1000', BOX_GID: '1000' });
+    assert.equal(set.BOX_UID, 1000);
+    assert.equal(set.BOX_GID, 1000);
 
-    // Root would put a session's every process back at uid 0, which the whole
+    // Root would put a box's every process back at uid 0, which the whole
     // container template exists to avoid, so it is not a value to accept.
-    assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_UID: '0' }));
-    assert.throws(() => loadConfig({ DATA_DIR: dir, SESSION_UID: 'agent' }));
+    assert.throws(() => loadConfig({ DATA_DIR: dir, BOX_UID: '0' }));
+    assert.throws(() => loadConfig({ DATA_DIR: dir, BOX_UID: 'agent' }));
   });
 });

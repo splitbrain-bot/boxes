@@ -17,7 +17,7 @@ import { deploymentImages, resetImagesForTests } from './images.ts';
  * exercise it through the proxy.
  */
 
-const SESSION_IMAGE = 'ghcr.io/example/boxes/session:latest';
+const BOX_IMAGE = 'ghcr.io/example/boxes/box:latest';
 const PROXY_CONTAINER = 'boxes-egress-proxy';
 
 /** An inspect answer, as the daemon shapes one. */
@@ -71,7 +71,7 @@ function cfg(): Config {
   dirs.push(dir);
   return loadConfig({
     DATA_DIR: dir,
-    SESSION_IMAGE,
+    BOX_IMAGE,
     EGRESS_PROXY_CONTAINER: PROXY_CONTAINER,
   });
 }
@@ -90,9 +90,9 @@ afterEach(() => {
 
 describe('deploymentImages', () => {
   it('reports the registry digest of a pulled image, not the local id', async () => {
-    fake.images.set(SESSION_IMAGE, {
+    fake.images.set(BOX_IMAGE, {
       Id: 'sha256:localconfigid',
-      RepoDigests: [`${SESSION_IMAGE.split(':')[0]}@sha256:published`],
+      RepoDigests: [`${BOX_IMAGE.split(':')[0]}@sha256:published`],
       Created: '2026-08-12T22:40:00Z',
       Size: 4_509_715_661,
     });
@@ -101,7 +101,7 @@ describe('deploymentImages', () => {
 
     // The digest the tag was published under is what a deployment following
     // that tag can compare against; the config id means nothing off this host.
-    assert.deepEqual(images.session, {
+    assert.deepEqual(images.box, {
       digest: 'sha256:published',
       builtAt: Date.parse('2026-08-12T22:40:00Z'),
       sizeBytes: 4_509_715_661,
@@ -111,7 +111,7 @@ describe('deploymentImages', () => {
   it('falls back to the local id for an image built on this host', async () => {
     // What `docker compose build` leaves: a real image that has never been in
     // a registry, so there is no manifest digest to report.
-    fake.images.set(SESSION_IMAGE, {
+    fake.images.set(BOX_IMAGE, {
       Id: 'sha256:builthere',
       RepoDigests: [],
       Created: '2026-08-12T22:40:00Z',
@@ -119,7 +119,7 @@ describe('deploymentImages', () => {
 
     const images = await deploymentImages(cfg());
 
-    assert.equal(images.session?.digest, 'sha256:builthere');
+    assert.equal(images.box?.digest, 'sha256:builthere');
   });
 
   it('reads the proxy image through the container it is running as', async () => {
@@ -144,9 +144,9 @@ describe('deploymentImages', () => {
     const images = await deploymentImages(cfg());
 
     // Every one of these is a legitimate state: no proxy container up, and a
-    // session image not pulled yet.
+    // box image not pulled yet.
     assert.equal(images.proxy, null);
-    assert.equal(images.session, null);
+    assert.equal(images.box, null);
   });
 
   it('says nothing rather than failing when the daemon is unwell', async () => {
@@ -167,22 +167,22 @@ describe('deploymentImages', () => {
     // nothing in it is the whole of the failure.
     const images = await deploymentImages(cfg());
 
-    assert.deepEqual(images, { orchestrator: null, proxy: null, session: null });
+    assert.deepEqual(images, { orchestrator: null, proxy: null, box: null });
   });
 
   it('reports no build date and no size rather than what cannot be rendered', async () => {
     // A NaN date and an absent size both serialize to null over JSON anyway;
     // saying so here is what keeps the type honest about it.
-    fake.images.set(SESSION_IMAGE, { Id: 'sha256:nodate', Created: '' });
+    fake.images.set(BOX_IMAGE, { Id: 'sha256:nodate', Created: '' });
 
     const images = await deploymentImages(cfg());
 
-    assert.equal(images.session?.builtAt, null);
-    assert.equal(images.session?.sizeBytes, null);
+    assert.equal(images.box?.builtAt, null);
+    assert.equal(images.box?.sizeBytes, null);
   });
 
   it('asks the daemon once for a run of calls', async () => {
-    fake.images.set(SESSION_IMAGE, { Id: 'sha256:one', Created: '2026-08-12T22:40:00Z' });
+    fake.images.set(BOX_IMAGE, { Id: 'sha256:one', Created: '2026-08-12T22:40:00Z' });
     const config = cfg();
 
     await deploymentImages(config);

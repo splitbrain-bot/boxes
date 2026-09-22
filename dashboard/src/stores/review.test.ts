@@ -117,8 +117,8 @@ beforeEach(() => {
     });
   });
 
-  // A fresh store per test: it is a singleton keyed by session id.
-  useReview.setState({ sessionId: null, facts: null, dirs: {}, expanded: [], file: null });
+  // A fresh store per test: it is a singleton keyed by box id.
+  useReview.setState({ boxId: null, facts: null, dirs: {}, expanded: [], file: null });
   open('abc123');
 });
 
@@ -238,21 +238,21 @@ test('closing a file leaves the tree loaded', async () => {
   assert.ok(useReview.getState().dirs['']);
 });
 
-test('re-opening the same session keeps what is loaded', async () => {
+test('re-opening the same box keeps what is loaded', async () => {
   await loadTree();
   open('abc123');
   // Otherwise every remount of the route would refetch the whole tree.
   assert.ok(useReview.getState().dirs['']);
 });
 
-test('opening a different session discards the previous one', async () => {
+test('opening a different box discards the previous one', async () => {
   await loadTree();
   await loadDir('src');
   open('other');
   assert.deepEqual(useReview.getState().dirs, {});
   assert.deepEqual(useReview.getState().expanded, []);
   assert.equal(useReview.getState().facts, null);
-  assert.equal(useReview.getState().sessionId, 'other');
+  assert.equal(useReview.getState().boxId, 'other');
 });
 
 test('how far a file was read is remembered per file', () => {
@@ -263,7 +263,7 @@ test('how far a file was read is remembered per file', () => {
   assert.equal(recallScroll('b.ts'), 0);
 });
 
-test('a new session starts every file at the top again', () => {
+test('a new box starts every file at the top again', () => {
   rememberScroll('a.ts', 420);
   open('another-box');
   assert.equal(recallScroll('a.ts'), 0);
@@ -340,8 +340,8 @@ test('a refresh while the pane holds unsaved edits is skipped', async () => {
   setDirty(false);
 });
 
-test('nothing is fetched before a session is set', async () => {
-  useReview.setState({ sessionId: null });
+test('nothing is fetched before a box is set', async () => {
+  useReview.setState({ boxId: null });
   await loadTree();
   await loadFile('a.ts');
   await refresh();

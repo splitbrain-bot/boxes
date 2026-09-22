@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage } from './browser.ts';
-import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply } from './stub-gateway.ts';
 
 /**
@@ -16,7 +16,7 @@ import { reply } from './stub-gateway.ts';
  * the other five are asserted in ux.test.ts.
  */
 
-const ID = DEFAULT_SESSION.id;
+const ID = DEFAULT_BOX.id;
 
 let stub: TestOrchestrator;
 
@@ -41,7 +41,7 @@ function screen(page: import('playwright').Page): Promise<string> {
 
 // 4 — a command runs in the box without going through the agent.
 test('a terminal opens on the box and carries what is typed both ways', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/terminal`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/terminal`);
   try {
     // The prompt is the pty's first bytes, so seeing it means the socket, the
     // exec and the emulator are all wired together.
@@ -63,18 +63,18 @@ test('a terminal opens on the box and carries what is typed both ways', async ()
 });
 
 test('the terminal is opened from the thread and steps back to it', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     await page.getByLabel('Open a terminal in this box').click();
-    await page.waitForURL(`**/sessions/${ID}/terminal`);
+    await page.waitForURL(`**/boxes/${ID}/terminal`);
     await expect.poll(() => screen(page)).toContain('agent@box');
 
     // Back is one step out, and it lands on the conversation rather than
     // pushing a second copy of it.
     await page.getByLabel('Back to the thread').click();
-    await page.waitForURL(`**/sessions/${ID}`);
+    await page.waitForURL(`**/boxes/${ID}`);
 
     expect(errors).toEqual([]);
   } finally {
@@ -82,11 +82,11 @@ test('the terminal is opened from the thread and steps back to it', async () => 
   }
 });
 
-test('the terminal is opened from the session list', async () => {
+test('the terminal is opened from the box list', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     await page.getByRole('link', { name: 'Terminal' }).click();
-    await page.waitForURL(`**/sessions/${ID}/terminal`);
+    await page.waitForURL(`**/boxes/${ID}/terminal`);
     await expect.poll(() => screen(page)).toContain('agent@box');
 
     expect(errors).toEqual([]);
@@ -98,7 +98,7 @@ test('the terminal is opened from the session list', async () => {
 test('a terminal holds the box, and closing the page lets it go', async () => {
   // The reaper reads this count, so it is what stands between a build running
   // in a terminal and the container being stopped under it.
-  const { page, close } = await openPage(stub.url, `/sessions/${ID}/terminal`);
+  const { page, close } = await openPage(stub.url, `/boxes/${ID}/terminal`);
   try {
     await expect.poll(() => screen(page)).toContain('agent@box');
     expect(stub.terminalsOpen(ID)).toBe(1);

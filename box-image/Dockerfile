@@ -1,4 +1,4 @@
-# Boxes session image: one long-lived container per agent session.
+# Boxes box image: one long-lived container per box.
 # PID 1 only holds the container open; the ACP adapter runs as a gateway-owned
 # docker exec, so browser churn never restarts it.
 #
@@ -15,7 +15,7 @@ FROM ubuntu:26.04
 # this the only way to reclaim the space is `docker image prune`, which is not
 # an operation a tool holding the host's Docker socket has any business
 # performing on images it did not fetch.
-LABEL boxes.image=session
+LABEL boxes.image=box
 
 # What the repositories below need before they can be added. apt reaches the
 # Ubuntu archive over plain http, but curl needs a trust store.
@@ -47,7 +47,7 @@ RUN install -d -m 0755 /etc/apt/keyrings \
 # tmux is what the dashboard's terminal attaches to, so a reader who closes
 # the tab and comes back finds the same shell with the same scrollback, and
 # a build carries on while nobody is watching. Its socket goes in /tmp, which
-# is a tmpfs, so a stopped box starts again with no session to attach to.
+# is a tmpfs, so a stopped box starts again with no tmux session to attach to.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
@@ -95,7 +95,7 @@ RUN arch="$(dpkg --print-architecture)" \
  && dpkg -i /tmp/glab.deb \
  && rm -f /tmp/glab.deb
 
-# Go, Rust and PHP, so a session can work in them without installing a
+# Go, Rust and PHP, so a box can work in them without installing a
 # toolchain first. The distribution's own packages rather than upstream
 # tarballs: they carry its security updates and pin no checksum here. This is
 # the reason the base image is Ubuntu.
@@ -169,13 +169,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uv, the one tool here the archive does not carry. Installed with the pipx
 # that is already present, both of its directories pointed at /usr/local for
 # this one command: the runtime values below put the agent's own `pipx install`
-# in the session's home, and uv belongs on the image beside the npm globals for
-# the same reason -- a home is filled from this image when the session is
+# in the box's home, and uv belongs on the image beside the npm globals for
+# the same reason -- a home is filled from this image when the box is
 # created and never refreshed, so anything durable landing there is frozen at
-# the version that session was born with.
+# the version that box was born with.
 #
 # It earns its place twice over under a read-only /usr: `uv tool install` and
-# `uv python install` both write to the session's home, so the agent can fetch a
+# `uv python install` both write to the box's home, so the agent can fetch a
 # Python it does not have without any privilege at all.
 RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
  && rm -rf /root/.cache
@@ -260,11 +260,11 @@ COPY codex-config.toml /etc/codex/config.toml
 # non-Latin script comes back as boxes.
 #
 # BOXES_IMAGE_BROWSERS is where the browser lives: on the image rather than in
-# the session's home, for the reason the npm globals are on the image, that a
-# home is filled once when its session is created and never refreshed. It is
-# also what the entrypoint links into a session's browsers path, and what the
+# the box's home, for the reason the npm globals are on the image, that a
+# home is filled once when its box is created and never refreshed. It is
+# also what the entrypoint links into a box's browsers path, and what the
 # build below installs into -- PLAYWRIGHT_BROWSERS_PATH is pointed here for as
-# long as this build needs to write browsers, and moved to the session's home
+# long as this build needs to write browsers, and moved to the box's home
 # at the end of the file. Read that block for why the two differ at runtime.
 #
 # libnss3-tools is not Playwright's: it is certutil, which the entrypoint uses
@@ -286,7 +286,7 @@ COPY codex-config.toml /etc/codex/config.toml
 # in this build to say so -- the browser check at the end says it again, and
 # far later.
 #
-# /usr/local/bin/playwright is the Playwright CLI under the name a session
+# /usr/local/bin/playwright is the Playwright CLI under the name a box
 # reaches for. @playwright/cli depends on the full `playwright` package and a
 # global npm install nests it, so the binary is already here -- just below a
 # path nothing types. Linked, the documented Firefox and WebKit download runs
@@ -301,7 +301,7 @@ COPY codex-config.toml /etc/codex/config.toml
 # with no output rather than reporting that the browser is already present.
 # So this link is not an alternative way to run that command, and the skill
 # note the entrypoint appends tells an agent not to run it at all. What the
-# link buys is the one install a session does have a reason to run -- the
+# link buys is the one install a box does have a reason to run -- the
 # Firefox and WebKit one, which names a writable path and works.
 # Below 1.0, so the caret pins the minor: rebuilds take 0.1.x and nothing more.
 ARG PLAYWRIGHT_CLI_VERSION=^0.1.19
@@ -321,15 +321,15 @@ RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION}
 
 # Firefox's and WebKit's system libraries, without their browser binaries.
 #
-# The binaries are the half a session can supply for itself and the libraries
+# The binaries are the half a box can supply for itself and the libraries
 # are the half it cannot: `npx playwright install firefox` downloads happily
-# into the session's home as the agent, and then the browser will not start,
-# because `apt-get` needs a root and a writable /usr that no session has. What
+# into the box's home as the agent, and then the browser will not start,
+# because `apt-get` needs a root and a writable /usr that no box has. What
 # that looks like is a download that reports success followed by a launch that
 # dies on `libgtk-3.so.0`, or on WebKit's forty-odd gstreamer and flite
 # objects -- which reads as a broken image rather than as a missing package.
 # Putting the libraries here and leaving the binaries out is what lets a
-# session download the build its own Playwright wants, for all three browsers
+# box download the build its own Playwright wants, for all three browsers
 # instead of only for Chromium.
 #
 # Deps rather than binaries is also the only half that keeps: a binary here
@@ -369,7 +369,7 @@ RUN pw=/usr/local/lib/node_modules/@playwright/cli/node_modules/.bin/playwright 
  && rm -rf /var/lib/apt/lists/*
 
 # The environment's half of the CLI's configuration: which browser, and the two
-# launch options a session container needs. The entrypoint copies this to the
+# launch options a box container needs. The entrypoint copies this to the
 # CLI's global config with the egress proxy added, since only runtime knows
 # that. Read the file -- it explains why each key is there.
 COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
@@ -378,8 +378,8 @@ COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.jso
 # no developer user to reuse, and 1020 keeps clear of the `ubuntu` account it
 # does carry at 1000 -- which on a real host is usually a person.
 #
-# These have to match the orchestrator's SESSION_UID and SESSION_GID -- their
-# defaults are the same numbers, in orchestrator/src/workspaces.ts. A session's
+# These have to match the orchestrator's BOX_UID and BOX_GID -- their
+# defaults are the same numbers, in orchestrator/src/workspaces.ts. A box's
 # home is a directory the orchestrator fills by copying /home/agent out of this
 # image, ownership and all, so a mismatch leaves the agent unable to write its
 # own home; the orchestrator reads this image's user back at boot and says so
@@ -392,11 +392,11 @@ RUN groupadd -g "${AGENT_GID}" agent \
 
 # HOME is named outright rather than left to Docker's /etc/passwd lookup: it
 # is what GOPATH, GOCACHE, CARGO_HOME and COMPOSER_HOME are each derived from,
-# so a session that resolved it differently would put every build cache
+# so a box that resolved it differently would put every build cache
 # somewhere other than its own volume.
 #
 # LANG likewise: the node image carried the locales package and this base does
-# not, and a session that ran in the C locale would mangle any non-ASCII path
+# not, and a box that ran in the C locale would mangle any non-ASCII path
 # or diff it touched. C.UTF-8 is built into glibc, so it needs no package.
 #
 # CODEX_HOME is the same kind of statement as CLAUDE_CONFIG_DIR: it is where
@@ -412,17 +412,17 @@ ENV HOME=/home/agent \
 
 # Where the agent installs tools for itself.
 #
-# The root filesystem is read-only at runtime and nothing in a session is
+# The root filesystem is read-only at runtime and nothing in a box is
 # root, so `apt-get install` cannot work and neither can `npm install -g` into
 # /usr/local. /home/agent is a persistent volume, so pointing the user-level
 # package managers there is what turns "the agent needs one more tool" into
-# something it can do on its own -- and it needs no privilege the session
+# something it can do on its own -- and it needs no privilege the box
 # does not already have, which is the point.
 #
 # Set after the global install above, deliberately. That one belongs in
-# /usr/local, on the image. Landing it in the session's home instead would pin
-# the adapter to whatever version that session was born with: a home is filled
-# from this image exactly once, when the session is created, and never
+# /usr/local, on the image. Landing it in the box's home instead would pin
+# the adapter to whatever version that box was born with: a home is filled
+# from this image exactly once, when the box is created, and never
 # refreshed, so every later image update would be invisible to it.
 ENV NPM_CONFIG_PREFIX=/home/agent/.local \
     PIPX_HOME=/home/agent/.local/pipx \
@@ -458,7 +458,7 @@ RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 
 # The root filesystem is mounted read-only at runtime. /workspace and
 # /home/agent are the writable volumes, and /tmp is a tmpfs.
-# /boxes/agent is where the orchestrator binds this session's merged agent
+# /boxes/agent is where the orchestrator binds this box's merged agent
 # configuration, read-only. Created here rather than left to the daemon so the
 # mount point exists on a read-only rootfs.
 #
@@ -479,8 +479,8 @@ WORKDIR /workspace
 # build succeeds anyway having quietly undone both the uid and the non-root
 # part of the security model. The rest is the tool directories: an unwritable
 # one, an npm prefix that did not take, a login shell that lost them all to
-# /etc/profile, or an adapter that ended up in a session's home instead of on
-# the image -- none of which shows up until a session is running. Runs as the
+# /etc/profile, or an adapter that ended up in a box's home instead of on
+# the image -- none of which shows up until a box is running. Runs as the
 # user it is checking, so it needs no privileges of its own.
 #
 # `codex --version` is the one line here that runs a tool rather than locating
@@ -539,7 +539,7 @@ RUN set -eu; \
 # a missing shared library, a browsers directory the agent cannot read, a
 # config that leaves the CLI looking for Google Chrome at /opt/google/chrome,
 # and above all a Chromium sandbox left on -- which fails at browser startup
-# and would make every browser command in every session useless.
+# and would make every browser command in every box useless.
 #
 # Served over loopback by python rather than fetched, because the build host
 # has no business needing egress for this, and `file:` URLs are blocked by the
@@ -550,7 +550,7 @@ RUN set -eu; \
 # than passed as --config, which is an option of `open` alone and not a global
 # one: `snapshot` rejects it outright, and `close` takes no options at all.
 # The global config would be the other place to put it, but that is
-# ~/.playwright, and anything left there is baked into every session's home
+# ~/.playwright, and anything left there is baked into every box's home
 # volume. Placed rather than passed, all three commands resolve the same
 # config, whether one launches the browser or attaches to the one already up.
 RUN set -eu; \
@@ -571,8 +571,8 @@ RUN set -eu; \
     playwright-cli close; \
     rm -rf /tmp/index.html /tmp/.playwright /tmp/.playwright-cli
 
-# Firefox and WebKit do the same, the way a session would have to get them:
-# downloaded as the agent into the session's home, run from there, deleted again.
+# Firefox and WebKit do the same, the way a box would have to get them:
+# downloaded as the agent into the box's home, run from there, deleted again.
 #
 # This is the check the layer above exists for, and nothing cheaper stands in
 # for it. `install-deps` reports success for packages it installed, not for a
@@ -586,15 +586,15 @@ RUN set -eu; \
 # instead. So the one browser here running against libraries from a release it
 # was not built on is the one this most needs to try, and a future image bump
 # that moves the base off a release Playwright still maps stops here rather
-# than in a session.
+# than in a box.
 #
-# PLAYWRIGHT_BROWSERS_PATH is exported to the path a session will really use,
+# PLAYWRIGHT_BROWSERS_PATH is exported to the path a box will really use,
 # rather than left at the image's own, for two reasons: that directory is what
-# a session can write, so pointing at it is what proves the route a session
+# a box can write, so pointing at it is what proves the route a box
 # walks rather than a build-time-only one, and the binaries are meant to leave
-# with this RUN. A session's home is filled by copying /home/agent out of this
+# with this RUN. A box's home is filled by copying /home/agent out of this
 # image, so anything still in /home/agent/.cache at the end of the build is
-# copied into every session created from it -- the same reason the toolchain
+# copied into every box created from it -- the same reason the toolchain
 # caches below are removed. The export is still needed despite the ENV further
 # down setting the same path: ENV applies from where it appears, and this runs
 # above it.
@@ -624,11 +624,11 @@ RUN set -eu; \
     ' "$deps/playwright-core"; \
     rm -rf /home/agent/.cache
 
-# Where a session looks for browsers, which is not where the image keeps
+# Where a box looks for browsers, which is not where the image keeps
 # them.
 #
 # Everything above this line needed the variable pointed at the image, because
-# everything above this line was installing browsers into it. A session needs
+# everything above this line was installing browsers into it. A box needs
 # the opposite: a directory it can write. The entrypoint links the image's
 # builds into this one at every start, so the browser the image carries
 # resolves here without being copied, and a browser a project downloads for
@@ -646,7 +646,7 @@ RUN set -eu; \
 #
 # Linked at every start rather than baked into the image's /home/agent, which
 # would be the cheaper-looking place: a home is copied out of this image when
-# its session is created and never refreshed, so a baked link would name
+# its box is created and never refreshed, so a baked link would name
 # whichever revision that image carried and dangle the moment the image is
 # rebuilt onto a newer Playwright. The entrypoint relinks against the image it
 # is running under, and drops links that no longer resolve.
@@ -655,16 +655,16 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
 # The browser resolves through links of the kind the entrypoint writes.
 #
 # Nothing above proves this: the checks above found the browser by pointing at
-# the directory holding it, and every session will instead find it through a
+# the directory holding it, and every box will instead find it through a
 # symlink one level up. That indirection is an assumption about Playwright's
 # registry -- which reads a revision directory and an INSTALLATION_COMPLETE
 # marker inside it -- rather than a documented guarantee, so a Playwright bump
 # that starts resolving the real path of its browsers directory would break
-# every session's browser and nothing else here would notice.
+# every box's browser and nothing else here would notice.
 #
 # A throwaway directory rather than /home/agent/.cache/ms-playwright, for the
 # reason the Firefox check removes what it downloads: what is left in the home
-# at the end of this build is copied into every session created from it, and
+# at the end of this build is copied into every box created from it, and
 # these links belong to the entrypoint rather than to the image.
 RUN set -eu; \
     seed=/tmp/browsers-seed; \
@@ -690,17 +690,17 @@ RUN set -eu; \
     rm -rf "$seed"
 
 # The toolchains build something, as the agent, with their caches where a
-# session will really put them.
+# box will really put them.
 #
 # Running each binary with --version would only prove it is installed. The
 # thing that breaks at runtime is subtler: /usr is read-only there, so every
 # one of these has to be writing its build cache somewhere under /home/agent.
 # One compiled file each is what shows that, and it shows it here rather than
-# in the first real session that tries to build anything.
+# in the first real box that tries to build anything.
 #
 # The caches are removed afterwards, deliberately: left in place they would be
-# copied into every new session's home, which is filled from this image when
-# the session is created and never refreshed.
+# copied into every new box's home, which is filled from this image when
+# the box is created and never refreshed.
 RUN set -eu; \
     cd /tmp; \
     printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("ok") }\n' > hello.go; \
@@ -717,9 +717,9 @@ RUN set -eu; \
 
 # Scratch space on disk rather than in memory.
 #
-# /tmp in a session is a 512 MB tmpfs, which the read-only root filesystem
+# /tmp in a box is a 512 MB tmpfs, which the read-only root filesystem
 # makes necessary and which is RAM: its pages are charged to the container's
-# memory limit, so filling /tmp spends an eighth of a default session's 4 GB
+# memory limit, so filling /tmp spends an eighth of a default box's 4 GB
 # rather than any disk. Unset, TMPDIR sends every tool that stages anything --
 # an archive being unpacked, a package manager's download, a build's
 # intermediates -- into that budget, where running out arrives as an OOM or an
@@ -734,13 +734,13 @@ RUN set -eu; \
 #
 # Set last, after every RUN above has finished writing: with TMPDIR pointed
 # into the home during the build, each of those steps would leave its
-# intermediates in a directory that gets copied into every session created
+# intermediates in a directory that gets copied into every box created
 # from this image. The cleanup on the line above is what the build relies on
 # instead, and it only runs once.
 #
 # The entrypoint creates this and empties it on every start. A tmpfs is
 # discarded at restart for free and a directory on a persistent volume is not,
-# so without that it would accumulate for the life of the session.
+# so without that it would accumulate for the life of the box.
 ENV TMPDIR=/home/agent/.cache/tmp
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

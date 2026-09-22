@@ -14,9 +14,9 @@ let browser: Browser | null = null;
 const NAMED_CHROMIUM = process.env['CHROMIUM_PATH'];
 
 /**
- * Where a Boxes session image keeps the browser it ships.
+ * Where the box image keeps the browser it ships.
  *
- * A session's PLAYWRIGHT_BROWSERS_PATH holds links to the browsers the image
+ * A box's PLAYWRIGHT_BROWSERS_PATH holds links to the browsers the image
  * carries, so this suite's Playwright resolves a real browser there whenever
  * it pins the revision the image has. When it pins a different one, that path
  * is writable and the build can be downloaded — but this name is the one that
@@ -29,7 +29,7 @@ const IMAGE_CHROMIUM = '/usr/local/bin/chromium';
  *
  * The flag answers a 64 MB `/dev/shm`, which Chromium exhausts on any
  * substantial page and reports as a closed target, and it answers it by
- * moving that traffic to `TMPDIR`. In a session `TMPDIR` is the home volume,
+ * moving that traffic to `TMPDIR`. In a box `TMPDIR` is the home volume,
  * so the flag puts a browser's shared memory on a disk; the orchestrator
  * gives the container a 512 MB `/dev/shm` instead, which is the better half
  * of that trade. CI and a developer's machine both have half of RAM there,
@@ -51,8 +51,8 @@ const IGNORED_DEFAULT_ARGS = ['--disable-dev-shm-usage'];
  * exists: an explicit path that is wrong should say which path, not be
  * quietly ignored. Then the build this suite's own Playwright pins, when it
  * has been installed — the exactly matching one, which is what CI installs
- * and what a session's browsers path already links or can download. Then the
- * session image's, which is a couple of Chrome majors off and used because it
+ * and what a box's browsers path already links or can download. Then the
+ * box image's, which is a couple of Chrome majors off and used because it
  * is there and needs no download.
  *
  * `channel: 'chromium'` rather than the default, which is the
@@ -94,7 +94,7 @@ export async function getBrowser(): Promise<Browser> {
  * behind it. A persistent context is an ordinary profile.
  *
  * The context is returned rather than a page: what a browser carries before
- * its first navigation — a session cookie, most of the point here — has to be
+ * its first navigation — a box cookie, most of the point here — has to be
  * put there first.
  */
 export async function launchProfile(): Promise<{
@@ -152,7 +152,7 @@ export async function openPage(
   const errors: string[] = [];
   page.on('console', (msg) => {
     // A request the app deliberately provokes and handles — a 404 for an
-    // unknown file, a 409 for a session whose workspace cannot be read — logs
+    // unknown file, a 409 for a box whose workspace cannot be read — logs
     // a console error in Chromium for the response itself. Handling those
     // correctly is what several tests are about, so the resource line is not a
     // page fault; a real one still arrives as a pageerror or as a message of

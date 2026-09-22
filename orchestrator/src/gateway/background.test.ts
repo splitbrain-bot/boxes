@@ -546,7 +546,7 @@ test('a box going busy or idle is said once, and only when it turns', async () =
 
 test('a box that is not there is empty, not unreadable', async () => {
   // The two answers are opposites — one is knowledge, the other is silence —
-  // and they arrived here as the same empty table. So every session that had
+  // and they arrived here as the same empty table. So every box that had
   // ever been started and was now stopped said "still running" for as long as
   // the orchestrator remembered it.
   const { p, settle } = probe(null);
@@ -567,7 +567,7 @@ test('a box that stops is empty from that moment, not from the next reading', as
 
 test('a box that cannot be asked keeps the answer it had, and says so once', async () => {
   // The answer is a guess for as long as this lasts, and the guess holds the
-  // reaper off — so a probe that has quietly stopped working is a session
+  // reaper off — so a probe that has quietly stopped working is a box
   // that never stops, for a reason nobody can see.
   const { p, fail, pass, trouble, settle } = probe(WORKING);
   await settle();

@@ -61,8 +61,8 @@ function subscribe(endpoint: string, vapidKey = loadVapidKeys(dir).publicKey): v
 
 const event: NotifyEvent = {
   kind: 'approval',
-  sessionId: 's1',
-  sessionName: 'muffin',
+  boxId: 's1',
+  boxName: 'muffin',
   threadId: 't2',
   threadName: 'Rewrite the parser',
 };
@@ -94,8 +94,8 @@ test('one event reaches every subscribed browser', async () => {
   assert.match(push.headers['Authorization']!, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
 });
 
-test('the thread is named in the message, not just the session', () => {
-  // From a lock screen, "your session needs you" is not enough to act on.
+test('the thread is named in the message, not just the box', () => {
+  // From a lock screen, "your box needs you" is not enough to act on.
   assert.match(wording(event).body, /muffin · Rewrite the parser/);
 });
 

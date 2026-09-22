@@ -423,7 +423,7 @@ const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       {/* Boxes edit: the add-attachment button is back, and does something.
-          A file picked here is uploaded into the session's workspace, which
+          A file picked here is uploaded into the box's workspace, which
           is why it takes any type — see stores/thread/attachments.ts. */}
       <ComposerAddAttachment />
       <div className="flex items-center gap-1.5">
@@ -669,7 +669,7 @@ const AssistantActionBar: FC = () => {
 };
 
 // Boxes edit: an attached file is a link. Its data is the endpoint serving it
-// out of the session's workspace, so a PDF opens in the browser's own viewer
+// out of the box's workspace, so a PDF opens in the browser's own viewer
 // and anything else downloads — the registry's own chip offers neither,
 // because `sourceType: 'id'` means it has no bytes of its own to hand over.
 const UserFilePart: FileMessagePartComponent = (part) => {

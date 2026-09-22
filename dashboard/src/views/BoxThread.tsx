@@ -14,11 +14,11 @@ import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api, ApiError } from '../api.ts';
 import { useDocumentTitle } from '@/hooks/use-document-title';
-import { useSession } from '@/hooks/use-session';
+import { useBox } from '@/hooks/use-box';
 import { useUp } from '@/hooks/use-up';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
 import { threadTitle, type TabState } from '@/lib/tab-title';
-import { refreshHealth } from '../stores/sessions.ts';
+import { refreshHealth } from '../stores/boxes.ts';
 import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
@@ -26,7 +26,7 @@ import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
 import { harnessLabel } from '@/lib/harness';
 import { threadName } from '@/lib/threads';
-import { useSessions } from '../stores/sessions.ts';
+import { useBoxes } from '../stores/boxes.ts';
 import { buildEnvelope, formatBytes, type AttachmentEntry } from '@/lib/attachments';
 import { Shelf } from '@/components/Shelf';
 import { ThreadLoading } from '@/components/ThreadLoading';
@@ -73,25 +73,25 @@ function blocksOf(message: AppendMessage): ContentBlock[] {
 }
 
 /**
- * One of a session's conversations, inside the dashboard.
+ * One of a box's conversations, inside the dashboard.
  *
  * The browser speaks plain ACP to the gateway; the store turns the adapter's
  * session/update notifications into messages and this route mounts them into
  * the installed assistant-ui components.
  *
- * Two routes land here: `/sessions/:id/threads/:threadId` is that thread, and
- * `/sessions/:id` is whichever one the session has current. The thread is
+ * Two routes land here: `/boxes/:id/threads/:threadId` is that thread, and
+ * `/boxes/:id` is whichever one the box has current. The thread is
  * part of the connection's own URL, so two tabs on two threads of one box
  * each get their own conversation and neither sees the other's stream.
  */
-/** Why this view could not read its session, in the words it shows. */
+/** Why this view could not read its box, in the words it shows. */
 interface LoadError {
   message: string;
   detail: string;
 }
 
 /**
- * What to say about a session that would not load.
+ * What to say about a box that would not load.
  *
  * Only a 404 means the box is gone. An authenticating proxy in front of the
  * deployment answers 401 or 403 once its cookie expires, and telling that
@@ -118,7 +118,7 @@ function describeLoadError(err: Error): LoadError {
   };
 }
 
-export function SessionThread() {
+export function BoxThread() {
   const { id = '', threadId } = useParams();
   /**
    * Text the review view staged in the composer on its way here — "read
@@ -137,24 +137,24 @@ export function SessionThread() {
   const [forking, setForking] = useState(false);
 
   /**
-   * This session, polled: the WS token the connection needs, the name in the
+   * This box, polled: the WS token the connection needs, the name in the
    * header, the threads, and the mark on the one being read. It comes from
-   * the session API, behind the deployment's auth.
+   * the box API, behind the deployment's auth.
    *
    * Polled rather than read once, because a snapshot of arrival goes stale —
    * a thread the agent titles at the end of its first turn would keep its
    * ordinal until a reload.
    */
-  const { session, error: readError, reload } = useSession(id);
+  const { box, error: readError, reload } = useBox(id);
 
   /**
    * Why there is nothing to show, or null.
    *
-   * Only while the session has never been read: a poll that failed after one
+   * Only while the box has never been read: a poll that failed after one
    * answered says the deployment is busy, not that the box is gone, and the
    * conversation on screen is still worth reading.
    */
-  const loadError: LoadError | null = session || !readError ? null : describeLoadError(readError);
+  const loadError: LoadError | null = box || !readError ? null : describeLoadError(readError);
 
   // Whether the deployment holds a Claude token, which the warning below
   // reads. A fact about the deployment rather than about this box, so it is
@@ -170,21 +170,21 @@ export function SessionThread() {
     if (staged !== null) setPrefill(staged);
   }, [id]);
 
-  /** The way out of the thread: the session list, popped rather than pushed. */
+  /** The way out of the thread: the box list, popped rather than pushed. */
   const up = useUp('/');
 
-  const { store, state } = useThread(id, threadId ?? null, session?.wsToken ?? null);
+  const { store, state } = useThread(id, threadId ?? null, box?.wsToken ?? null);
 
-  // Which of the session's conversations this is, named always rather than
-  // only when there is more than one: two tabs on one session are otherwise
+  // Which of the box's conversations this is, named always rather than
+  // only when there is more than one: two tabs on one box are otherwise
   // indistinguishable, which is the whole point of a thread in the URL.
-  const threads = session?.threads ?? [];
-  const thread = threads.find((t) => t.id === (threadId ?? session?.currentThreadId));
+  const threads = box?.threads ?? [];
+  const thread = threads.find((t) => t.id === (threadId ?? box?.currentThreadId));
   const threadLabel = thread ? threadName(thread) : null;
   // What this thread's agent is called. The polled health list rather than a
   // call of its own: a header needs the label and nothing else, and the list
   // is being kept fresh for the warning under it either way.
-  const { harnesses } = useSessions();
+  const { harnesses } = useBoxes();
 
   /**
    * What this tab is doing, for its title.
@@ -198,7 +198,7 @@ export function SessionThread() {
   const tabState: TabState =
     state.awaiting ??
     (state.isRunning ? 'running' : state.background.length > 0 ? 'waiting' : 'idle');
-  useDocumentTitle(threadTitle(tabState, session?.name ?? id, threadLabel));
+  useDocumentTitle(threadTitle(tabState, box?.name ?? id, threadLabel));
 
   // The thread's viewport is the only scroller this route has: a document
   // that scrolled too would take the header off the top of the screen.
@@ -215,7 +215,7 @@ export function SessionThread() {
    *
    * A `window.open` after the await is what popup blockers stop, so the
    * result is a link and one extra tap. This thread stays where it is either
-   * way, because no connection is pinned to the session's default.
+   * way, because no connection is pinned to the box's default.
    */
   const onFork = useCallback(() => {
     if (!thread || forking) return;
@@ -226,7 +226,7 @@ export function SessionThread() {
       .createThread(id, { from: thread.id })
       .then(setForked)
       // Reported where the action was, rather than in the bar that means the
-      // session itself could not be read.
+      // box itself could not be read.
       .catch((err: Error) => setForkError(err.message))
       .finally(() => setForking(false));
   }, [id, thread, forking]);
@@ -235,7 +235,7 @@ export function SessionThread() {
    * Marks this conversation done, or takes the mark off again.
    *
    * The mark is the orchestrator's to keep, so nothing is drawn from the
-   * answer: the session list is asked for again instead, and the header shows
+   * answer: the box list is asked for again instead, and the header shows
    * the mark when that row carries it.
    */
   const onSetDone = useCallback(
@@ -243,7 +243,7 @@ export function SessionThread() {
       if (!thread) return;
       api
         .setThreadDone(id, thread.id, next)
-        // The polled session is what the header reads, so the mark appears
+        // The polled box is what the header reads, so the mark appears
         // when that reading does. Asking for it now rather than waiting out
         // the poll is what keeps the control answering under the finger that
         // hit it.
@@ -288,7 +288,7 @@ export function SessionThread() {
   );
 
   /**
-   * The composer's attachment adapter, which uploads into this session's
+   * The composer's attachment adapter, which uploads into this box's
    * workspace. Rebuilt with the store so a failed upload has somewhere to
    * report to; the composer holds the attachments themselves, so nothing is
    * lost when it is.
@@ -298,7 +298,7 @@ export function SessionThread() {
     [id, store],
   );
 
-  // Bound to the session because an attachment is fetched back from it: the
+  // Bound to the box because an attachment is fetched back from it: the
   // thread's own pictures are served from its workspace, not carried in the
   // transcript.
   const convert = useCallback((message: Message) => convertMessage(message, id), [id]);
@@ -338,18 +338,18 @@ export function SessionThread() {
                 things to act on, and none of them is in the way of anything. */}
             <Shelf away={away}>
               <ThreadHeader
-                sessionId={id}
+                boxId={id}
                 threadId={thread?.id ?? null}
                 up={up}
-                name={session?.name ?? id}
+                name={box?.name ?? id}
                 threadLabel={threadLabel}
                 // Off the health probe the app polls anyway: a header wants
                 // the name of the agent and the caveat its modes carry, and
-                // both are in the harness list the session store already
+                // both are in the harness list the box store already
                 // holds.
                 harness={thread?.harness ?? null}
                 harnessLabel={harnessLabel(harnesses, thread?.harness)}
-                // Nothing is connecting while the session itself could not be
+                // Nothing is connecting while the box itself could not be
                 // read, and a dot that pulses forever says the opposite.
                 connection={loadError ? 'closed' : state.connection}
                 modes={state.modes}
@@ -358,7 +358,7 @@ export function SessionThread() {
                 canFork={thread?.canFork === true}
                 forking={forking}
                 onFork={onFork}
-                // Nothing to mark until the session has been read and said
+                // Nothing to mark until the box has been read and said
                 // which of its threads this is; the header drops the button
                 // rather than offering one that marks nothing.
                 onSetDone={thread ? onSetDone : undefined}
@@ -382,7 +382,7 @@ export function SessionThread() {
                 {/* A real click on a real link, so the browser opens the tab
                     rather than a script asking it to. */}
                 <Link
-                  to={`/sessions/${id}/threads/${forked.id}`}
+                  to={`/boxes/${id}/threads/${forked.id}`}
                   target="_blank"
                   rel="noopener"
                   className="font-medium underline"
@@ -407,7 +407,7 @@ export function SessionThread() {
               <Notice className="border-b px-4 py-2">{state.error}</Notice>
             ) : null}
             <div className="min-h-0 flex-1">
-              {/* A session that could not be read has no token, so nothing can
+              {/* A box that could not be read has no token, so nothing can
                   connect and nothing can be sent. A composer over an empty
                   greeting would say otherwise — which is exactly what a
                   bookmark for a deleted box lands on. */}
@@ -415,12 +415,12 @@ export function SessionThread() {
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
                   <p className="text-sm">{loadError.message}</p>
                   <p className="text-sm text-muted-foreground">{loadError.detail}</p>
-                  {/* The same step out as the header's, so a session that
+                  {/* The same step out as the header's, so a box that
                       turned out to be gone is left the same way any other is:
                       whatever sent the visitor here, not a list pushed over
                       it. */}
                   <a href={up.href} onClick={up.onClick} className="text-sm font-medium underline">
-                    Back to sessions
+                    Back to boxes
                   </a>
                 </div>
               ) : state.loading ? (

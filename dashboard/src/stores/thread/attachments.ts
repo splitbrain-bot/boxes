@@ -5,7 +5,7 @@ import { api } from '../../api.ts';
  * The composer's attachment adapter: what happens to a file between being
  * dropped on the thread and being part of a prompt.
  *
- * Everything is uploaded into the session's workspace, whatever it is, and
+ * Everything is uploaded into the box's workspace, whatever it is, and
  * nothing travels inside the message. That is what makes this type-agnostic:
  * a PDF, a CSV and a core dump all become a path the agent opens with the
  * tools it already has.
@@ -29,7 +29,7 @@ function kindOf(type: string): PendingAttachment['type'] {
 }
 
 /**
- * Builds the adapter for one session.
+ * Builds the adapter for one box.
  *
  * `onError` is how a failed upload becomes something the user can read: the
  * composer's send button does not await the promise it starts, so an
@@ -37,11 +37,11 @@ function kindOf(type: string): PendingAttachment['type'] {
  * why.
  */
 export function createAttachmentAdapter(
-  sessionId: string,
+  boxId: string,
   onError: (message: string) => void,
 ): AttachmentAdapter {
   return {
-    // Every type. What a session can do with a file is the agent's business,
+    // Every type. What a box can do with a file is the agent's business,
     // and a picker that refuses the thing the user wanted to hand over is a
     // worse answer than an agent saying it cannot read it.
     accept: '*',
@@ -59,7 +59,7 @@ export function createAttachmentAdapter(
 
     async send(attachment) {
       try {
-        const stored = await api.uploadAttachment(sessionId, attachment.file);
+        const stored = await api.uploadAttachment(boxId, attachment.file);
         return {
           ...attachment,
           status: { type: 'complete' },

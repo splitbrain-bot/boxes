@@ -23,7 +23,7 @@ import {
 } from './translate.ts';
 
 /**
- * One session's thread: the ACP connection, the message model built from it,
+ * One box's thread: the ACP connection, the message model built from it,
  * and the actions the view can take.
  *
  * Framework-free on purpose. React reads it through useSyncExternalStore and
@@ -113,16 +113,16 @@ interface OpenApproval {
 export interface ThreadStoreDeps {
   /** Builds the client. Present so a test can supply a fake. */
   createClient: (handlers: ConstructorParameters<typeof AcpClient>[2]) => AcpClient;
-  /** The Boxes session id this thread belongs to. */
-  sessionId: string;
+  /** The box this thread belongs to. */
+  boxId: string;
   /**
    * The thread within it, and null on the route that means whichever thread
-   * the session has current.
+   * the box has current.
    */
   threadId: string | null;
 }
 
-/** The live thread for one Boxes session. */
+/** The live thread for one box. */
 export class ThreadStore {
   private model: ThreadModel = emptyModel();
   private snapshot: ThreadSnapshot;

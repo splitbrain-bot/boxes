@@ -5,7 +5,7 @@ import { ACP_SUBPROTOCOL } from '../../shared/acp.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { buildApp } from './app.ts';
 import { config } from './config.ts';
-import { openDb, sessionsWithActiveTurns } from './db.ts';
+import { openDb, boxesWithActiveTurns } from './db.ts';
 import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { attachTerminal } from './gateway/terminal.ts';
 import { claimDataDir } from './lock.ts';
@@ -73,11 +73,11 @@ const wss = new WebSocketServer({
  * The upgrade paths the gateway answers.
  *
  * The long shape names a thread, and is a connection to that conversation.
- * The short one names none and means whichever thread the session has
+ * The short one names none and means whichever thread the box has
  * current, which is what an external ACP client uses.
  */
 const WS_PATH =
-  /^\/ws\/sessions\/([A-Za-z0-9_-]{1,64})(?:\/threads\/([A-Za-z0-9_-]{1,64}))?\/acp$/;
+  /^\/ws\/boxes\/([A-Za-z0-9_-]{1,64})(?:\/threads\/([A-Za-z0-9_-]{1,64}))?\/acp$/;
 
 /**
  * A terminal server of its own, because the two endpoints negotiate different
@@ -90,16 +90,16 @@ const terminals = new WebSocketServer({
 });
 
 /** The upgrade path a terminal connects on. It names a box, never a thread. */
-const TERMINAL_PATH = /^\/ws\/sessions\/([A-Za-z0-9_-]{1,64})\/terminal$/;
+const TERMINAL_PATH = /^\/ws\/boxes\/([A-Za-z0-9_-]{1,64})\/terminal$/;
 
 /**
- * How many terminals one session may have open at once.
+ * How many terminals one box may have open at once.
  *
  * Each one is a pty and a tmux client in a container whose processes are
  * already capped, and they all show the same shell. More than a handful is a
  * browser reconnecting in a loop.
  */
-const MAX_TERMINALS_PER_SESSION = 4;
+const MAX_TERMINALS_PER_BOX = 4;
 
 app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   const url = req.url ?? '';
@@ -111,16 +111,16 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
     socket.destroy();
     return;
   }
-  const sessionId = (match ?? terminal!)[1]!;
+  const boxId = (match ?? terminal!)[1]!;
   const threadId = match?.[2] ?? null;
 
-  // The upgrade is checked against the token of the session the path names,
-  // so a token opens that session and no other one. A session that is not
+  // The upgrade is checked against the token of the box the path names,
+  // so a token opens that box and no other one. A box that is not
   // there, or one that is deleted, has no token, and the upgrade is then
-  // refused the way a wrong token is: the handshake never says which sessions
+  // refused the way a wrong token is: the handshake never says which boxes
   // exist. Both endpoints are the same box seen two ways, so both are opened
   // by the same token, and each is offered the name of its own protocol.
-  const row = manager.getRow(sessionId);
+  const row = manager.getRow(boxId);
   const live = row && row.status !== 'deleted' ? row : null;
 
   const check = checkUpgrade(
@@ -129,7 +129,7 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
     terminal ? TERMINAL_SUBPROTOCOL : ACP_SUBPROTOCOL,
   );
   if (!check.ok) {
-    log.warn('rejected WS upgrade', { sessionId, reason: check.reason });
+    log.warn('rejected WS upgrade', { boxId, reason: check.reason });
     // The handshake fails before a WebSocket exists, so the refusal is an
     // HTTP status rather than a close code.
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -138,31 +138,31 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   }
 
   if (terminal) {
-    if (manager.terminalCount(sessionId) >= MAX_TERMINALS_PER_SESSION) {
-      log.warn('rejected a terminal upgrade for a session that has enough', { sessionId });
+    if (manager.terminalCount(boxId) >= MAX_TERMINALS_PER_BOX) {
+      log.warn('rejected a terminal upgrade for a box that has enough', { boxId });
       socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
       socket.destroy();
       return;
     }
     terminals.handleUpgrade(req, socket, head, (ws) => {
-      attachTerminal(ws, sessionId, manager);
+      attachTerminal(ws, boxId, manager);
     });
     return;
   }
 
-  // A thread that is not this session's is refused here, before a WebSocket
-  // exists. Whoever asks has the session's token, so a 404 tells them only
-  // about their own session. A connection is pinned for its whole life, so
+  // A thread that is not this box's is refused here, before a WebSocket
+  // exists. Whoever asks has the box's token, so a 404 tells them only
+  // about their own box. A connection is pinned for its whole life, so
   // there is no later point at which to find this out.
-  if (threadId !== null && !manager.hasThread(sessionId, threadId)) {
-    log.warn('rejected WS upgrade for an unknown thread', { sessionId, threadId });
+  if (threadId !== null && !manager.hasThread(boxId, threadId)) {
+    log.warn('rejected WS upgrade for an unknown thread', { boxId, threadId });
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     socket.destroy();
     return;
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
-    attachDownstream(ws, sessionId, threadId, manager);
+    attachDownstream(ws, boxId, threadId, manager);
   });
 });
 
@@ -173,8 +173,8 @@ const loops: Array<{ stop: () => void }> = [];
 
 /** Reconciles against Docker, starts the background loops, and listens. */
 async function main(): Promise<void> {
-  // The policy has to exist before the first session is created, because a
-  // session's environment is built from it. Pushing it can fail — the proxy
+  // The policy has to exist before the first box is created, because a
+  // box's environment is built from it. Pushing it can fail — the proxy
   // may still be booting — and the reconciler retries every minute.
   await egress.prepare();
   try {
@@ -189,21 +189,21 @@ async function main(): Promise<void> {
   // host-side path, and this is what resolves it.
   await manager.resolveHostDataDir();
 
-  // Before the first session is created, and best-effort: a deployment whose
+  // Before the first box is created, and best-effort: a deployment whose
   // registry is unreachable should still come up and serve what it has. The
   // create path pulls again, and reports properly when there is nothing to
-  // create a session from.
+  // create a box from.
   //
   // The refresh is what makes a restart a way to pick up a tag that has moved,
   // rather than waiting out the refresher's first tick. It is skipped where
   // the refresh is off, which says the image is built on this host and no
   // registry has it.
   try {
-    if (cfg.SESSION_IMAGE_PULL_MINUTES > 0) await manager.refreshSessionImage();
-    await manager.ensureSessionImage();
+    if (cfg.BOX_IMAGE_PULL_MINUTES > 0) await manager.refreshBoxImage();
+    await manager.ensureBoxImage();
   } catch (err) {
-    log.warn('could not pull the session image at boot', {
-      image: cfg.SESSION_IMAGE,
+    log.warn('could not pull the box image at boot', {
+      image: cfg.BOX_IMAGE,
       error: (err as Error).message,
     });
   }
@@ -243,20 +243,20 @@ const TURN_DRAIN_POLL_MS = 250;
  * like a clean shutdown.
  */
 async function drainTurns(): Promise<void> {
-  let busy = sessionsWithActiveTurns(db);
+  let busy = boxesWithActiveTurns(db);
   if (busy.size === 0) return;
   log.info('waiting for the turns in flight to finish', {
-    sessions: [...busy],
+    boxes: [...busy],
     graceMs: TURN_DRAIN_MS,
   });
   const deadline = Date.now() + TURN_DRAIN_MS;
   while (busy.size > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, TURN_DRAIN_POLL_MS));
-    busy = sessionsWithActiveTurns(db);
+    busy = boxesWithActiveTurns(db);
   }
   if (busy.size > 0) {
     log.warn('shutting down with turns still running; they are cut here', {
-      sessions: [...busy],
+      boxes: [...busy],
     });
     return;
   }

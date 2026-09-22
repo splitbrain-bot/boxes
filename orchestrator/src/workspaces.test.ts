@@ -14,7 +14,7 @@ import { afterEach, beforeEach, test } from 'vitest';
 import * as ws from './workspaces.ts';
 
 /**
- * The directories a session is made of on the data volume — its workspace and
+ * The directories a box is made of on the data volume — its workspace and
  * its home — where they are, who may see them, and that removing one cannot
  * reach out of it.
  */
@@ -34,7 +34,7 @@ afterEach(() => {
 test('the workspaces parent is created 0700', () => {
   ws.ensureWorkspacesRoot(dir);
   const mode = statSync(ws.workspacesRoot(dir)).mode & 0o777;
-  // One session's files must not be readable from another, and the only thing
+  // One box's files must not be readable from another, and the only thing
   // that reads across all of them is the orchestrator. A stray
   // `docker run -v boxes-data:/x` sees nothing through this.
   assert.equal(mode, 0o700);
@@ -75,7 +75,7 @@ test('removing a workspace takes its content and no more', () => {
 
   assert.ok(!existsSync(path));
   assert.ok(existsSync(keep));
-  // And the parent survives to hold the next session's workspace.
+  // And the parent survives to hold the next box's workspace.
   assert.ok(existsSync(ws.workspacesRoot(dir)));
 });
 
@@ -101,8 +101,8 @@ test('a home is created 0700, because of what is in one', () => {
   assert.equal(statSync(path).mode & 0o777, 0o700);
 });
 
-test('a home and a workspace of the same session are different directories', () => {
-  // Both are named by the session id, under different parents: one is the
+test('a home and a workspace of the same box are different directories', () => {
+  // Both are named by the box id, under different parents: one is the
   // agent's work, and the other is everything the agent installed to do it.
   assert.notEqual(ws.homePath(dir, 'abcd1234'), ws.workspacePath(dir, 'abcd1234'));
 });
@@ -141,14 +141,14 @@ test.skipIf(process.getuid?.() !== 0)(
 
     ws.chownToAgent(link);
 
-    assert.equal(lstatSync(link).uid, ws.DEFAULT_SESSION_UID);
+    assert.equal(lstatSync(link).uid, ws.DEFAULT_BOX_UID);
     // The deployment's own file stays the deployment's.
     assert.equal(statSync(target).uid, 0);
   },
 );
 
 test('a directory that is there is reported, and one that is gone is not', () => {
-  // What a start asks before it binds either half of a session: Docker would
+  // What a start asks before it binds either half of a box: Docker would
   // create a missing bind source itself, empty and owned by root.
   const path = ws.createWorkspace(dir, 's1');
   assert.equal(ws.directoryExists(path), true);

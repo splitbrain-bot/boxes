@@ -2,8 +2,8 @@
  * REST API shapes shared by the orchestrator handlers and the dashboard.
  */
 
-/** Lifecycle status of a Boxes session, as stored in the sessions table. */
-export type SessionStatus =
+/** Lifecycle status of a box, as stored in the boxes table. */
+export type BoxStatus =
   | 'creating'
   | 'running'
   | 'stopped'
@@ -251,7 +251,7 @@ export interface BoxWork {
   elapsedSeconds: number | null;
 }
 
-/** One conversation of a session, as the API reports it. */
+/** One conversation of a box, as the API reports it. */
 export interface ThreadSummary {
   id: string;
   /**
@@ -274,7 +274,7 @@ export interface ThreadSummary {
   /**
    * True when this thread's adapter advertised `sessionCapabilities.fork`.
    *
-   * Per thread rather than per session, because a box may hold threads of two
+   * Per thread rather than per box, because a box may hold threads of two
    * harnesses and the answer comes from each adapter's own `initialize`. The
    * capability is unstable in the ACP schema, so an adapter may omit it, and
    * false is also what a thread whose adapter has not been reached reports.
@@ -291,7 +291,7 @@ export interface ThreadSummary {
    * prompt sent on it while it has none. Null until it has been prompted.
    */
   title: string | null;
-  /** Per session and never reused; what an untitled thread is called. */
+  /** Per box and never reused; what an untitled thread is called. */
   ordinal: number;
   /**
    * True while a prompt this gateway forwarded is still open on this thread.
@@ -328,17 +328,17 @@ export interface ThreadSummary {
   lastActiveAt: number;
 }
 
-/** A session as returned by the list endpoint. */
-export interface SessionSummary {
+/** A box as returned by the list endpoint. */
+export interface BoxSummary {
   id: string;
   name: string;
   profile: string;
-  status: SessionStatus;
+  status: BoxStatus;
   /** Live container state, resolved against Docker on every request. */
   dockerState: DockerState;
   /**
    * True while a prompt this gateway forwarded is open on any of the
-   * session's threads. Derived from the threads rather than stored.
+   * box's threads. Derived from the threads rather than stored.
    */
   turnActive: boolean;
   /** True while the agent is producing output on any of them. */
@@ -354,40 +354,40 @@ export interface SessionSummary {
   /** Permission requests waiting for a browser to answer them, on any thread. */
   pendingCount: number;
   /**
-   * Number of browsers currently attached to the session, across all of its
+   * Number of browsers currently attached to the box, across all of its
    * threads. Two tabs on two threads is two attachments.
    */
   attachedCount: number;
   /**
    * Bearer token an ACP client authenticates the WebSocket upgrade with,
-   * carried in the subprotocol. This session's own: it opens this session and
+   * carried in the subprotocol. This box's own: it opens this box and
    * no other one in the deployment.
    */
   wsToken: string;
-  /** Every conversation this session owns, oldest first. */
+  /** Every conversation this box owns, oldest first. */
   threads: ThreadSummary[];
   /**
-   * The thread a connection that names none gets: `/sessions/:id`, the short
+   * The thread a connection that names none gets: `/boxes/:id`, the short
    * WebSocket path, an external ACP client. A default rather than what any
-   * browser has loaded, and null before the session has any thread.
+   * browser has loaded, and null before the box has any thread.
    */
   currentThreadId: string | null;
   /**
-   * The agent set selected when this session was created, or null for the
-   * global set alone. Null is also what a session whose set has since been
+   * The agent set selected when this box was created, or null for the
+   * global set alone. Null is also what a box whose set has since been
    * deleted reports.
    */
   agentSetId: string | null;
   /** That set's current name, for the UI. Null whenever `agentSetId` is. */
   agentSetName: string | null;
   /**
-   * How much disk this session is taking up, in bytes, or null when there is
+   * How much disk this box is taking up, in bytes, or null when there is
    * no measurement yet.
    *
    * Its workspace and its home together. Measured in the background and read
    * from the last measurement, so it lags: a running box is re-measured at
    * most every fifteen minutes, and a stopped one is not re-measured at all.
-   * Null covers both a session not measured yet and one with no directory to
+   * Null covers both a box not measured yet and one with no directory to
    * walk.
    */
   diskBytes: number | null;
@@ -395,37 +395,37 @@ export interface SessionSummary {
   lastActiveAt: number;
 }
 
-/** A single session with the extra detail the detail view needs. */
-export interface SessionDetail extends SessionSummary {
+/** A single box with the extra detail the detail view needs. */
+export interface BoxDetail extends BoxSummary {
   image: string;
   containerId: string | null;
   networkName: string;
   subnet: string;
   /**
-   * The named volume holding the workspace of a session created before
-   * workspaces became directories. Empty for a directory-backed session,
+   * The named volume holding the workspace of a box created before
+   * workspaces became directories. Empty for a directory-backed box,
    * which a volume-backed one becomes at its next start.
    */
   wsVolume: string;
   /**
-   * Where the session's files are on the orchestrator's own filesystem, or
-   * null while the session is still volume-backed.
+   * Where the box's files are on the orchestrator's own filesystem, or
+   * null while the box is still volume-backed.
    */
   workspaceDir: string | null;
   /**
-   * The named volume holding the home of a session created before homes
-   * became directories. Empty for a directory-backed session.
+   * The named volume holding the home of a box created before homes
+   * became directories. Empty for a directory-backed box.
    */
   homeVolume: string;
   /**
-   * Where the session's home is on the orchestrator's own filesystem — its
+   * Where the box's home is on the orchestrator's own filesystem — its
    * thread history, its tool caches, whatever a login inside the box wrote —
    * or null for one still backed by a named volume.
    */
   homeDir: string | null;
-  /** The adapter's id for the session's default thread, or null before one exists. */
+  /** The adapter's id for the box's default thread, or null before one exists. */
   acpSessionId: string | null;
-  /** True when the egress proxy is attached to this session's network. */
+  /** True when the egress proxy is attached to this box's network. */
   proxyAttached: boolean;
   /**
    * What the last reading found running in the box, which is what the
@@ -433,7 +433,7 @@ export interface SessionDetail extends SessionSummary {
    *
    * Empty for a box nothing has read yet and for one that is not up, both of
    * which are boxes with nothing known to be running in them. Not on the
-   * summary: the list is polled for every session at once, and a command line
+   * summary: the list is polled for every box at once, and a command line
    * is only wanted by somebody looking at one box.
    */
   boxWork: BoxWork[];
@@ -454,7 +454,7 @@ export interface ThreadOptions {
   config?: Record<string, string>;
 }
 
-/** Body of a request to add a thread to a session. */
+/** Body of a request to add a thread to a box. */
 export interface CreateThreadBody {
   /**
    * Fork this thread, carrying its context into the new one. Absent means a
@@ -474,8 +474,8 @@ export interface ThreadDoneBody {
   done: boolean;
 }
 
-/** Body of a create-session request. */
-export interface CreateSessionBody {
+/** Body of a create-box request. */
+export interface CreateBoxBody {
   name: string;
   /**
    * Ignored. Every box runs on the one set of credentials the settings page
@@ -485,7 +485,7 @@ export interface CreateSessionBody {
   profile?: string;
   /**
    * Id of the agent set whose AGENTS.md, skills and commands are merged over
-   * the global ones for this session. Absent, empty or the global set's own id
+   * the global ones for this box. Absent, empty or the global set's own id
    * all mean "the global set alone" — it is applied either way.
    */
   agentSet?: string | null;
@@ -526,15 +526,15 @@ export interface ImageInfo {
 export interface DeploymentImages {
   orchestrator: ImageInfo | null;
   proxy: ImageInfo | null;
-  session: ImageInfo | null;
+  box: ImageInfo | null;
 }
 
 /** Answer to a health probe. */
 export interface HealthResponse {
   ok: boolean;
   version: string;
-  sessions: number;
-  /** Session ids whose network is missing the egress proxy. */
+  boxes: number;
+  /** Box ids whose network is missing the egress proxy. */
   proxyWarnings: string[];
   /** Egress policy state, or null before the first push has been attempted. */
   egress: EgressHealth | null;
@@ -563,7 +563,7 @@ export interface ReadyResponse {
   /** True only when every check below passed. */
   ready: boolean;
   version: string;
-  /** Each thing a session needs before it can be served, and whether it is there. */
+  /** Each thing a box needs before it can be served, and whether it is there. */
   checks: {
     /** The database answered a query. */
     database: boolean;
@@ -616,7 +616,7 @@ export interface StoredAttachment {
 /**
  * One credential the proxy swaps in on the wire.
  *
- * A session holds `placeholder`; `secret` never leaves the orchestrator's and
+ * A box holds `placeholder`; `secret` never leaves the orchestrator's and
  * the proxy's memory. A request to one of `hosts` carrying `placeholder` in
  * one of `headers` is rewritten to carry `secret`; one carrying anything else
  * there is refused by the proxy rather than forwarded.
@@ -631,7 +631,7 @@ export interface EgressCredential {
   hosts: string[];
   /** Header names that may carry it, lowercased. */
   headers: string[];
-  /** What the session holds. Shaped like the real thing, worth nothing. */
+  /** What the box holds. Shaped like the real thing, worth nothing. */
   placeholder: string;
   /** The real credential. */
   secret: string;
@@ -643,7 +643,7 @@ export interface EgressCredential {
  */
 export interface EgressPolicy {
   /**
-   * Hostnames a session may reach. Empty means every public host, which is
+   * Hostnames a box may reach. Empty means every public host, which is
    * the behavior of a deployment that sets no allowlist.
    */
   allowedHosts: string[];
@@ -683,7 +683,7 @@ export interface EgressHealth {
   error: string | null;
 }
 
-// --- code review over a session's workspace ---------------------------------
+// --- code review over a box's workspace ---------------------------------
 
 /** The git status of a file, as the review tree colours it. */
 export type ReviewFileStatus =
@@ -908,13 +908,13 @@ export interface ReviewBaseResponse {
 // --- agent configuration ----------------------------------------------------
 
 /**
- * The id of the set that is applied to every session.
+ * The id of the set that is applied to every box.
  *
  * There is exactly one, seeded by the migration that creates the table.
  */
 export const GLOBAL_AGENT_SET = 'global';
 
-/** What an item of an agent set becomes inside the session container. */
+/** What an item of an agent set becomes inside the box container. */
 export type AgentItemKind = 'skill' | 'command';
 
 /** One skill or one slash command, as stored and as the API reports it. */
@@ -935,14 +935,14 @@ export interface AgentItem {
 export interface AgentSetSummary {
   id: string;
   name: string;
-  /** True for the one set every session gets. It cannot be deleted. */
+  /** True for the one set every box gets. It cannot be deleted. */
   global: boolean;
   /** True when this set contributes an AGENTS.md of its own. */
   hasAgentsMd: boolean;
   skillCount: number;
   commandCount: number;
-  /** How many live sessions were created with this set selected. */
-  sessionCount: number;
+  /** How many live boxes were created with this set selected. */
+  boxCount: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -974,7 +974,7 @@ export interface AgentItemBody {
 }
 
 /**
- * What one session's merged configuration comes to: the global set, with the
+ * What one box's merged configuration comes to: the global set, with the
  * selected set laid over it.
  */
 export interface AgentBundlePreview {

@@ -72,10 +72,10 @@ test('sizes are formatted in the units a person would say', () => {
   assert.equal(formatBytes(3 * 1024 * 1024), '3.0 MB');
 });
 
-test('an attachment is fetched back by name, from its session', () => {
+test('an attachment is fetched back by name, from its box', () => {
   assert.equal(
     attachmentUrl('abc123', '.boxes/attachments/shot.png'),
-    '/api/sessions/abc123/attachments/shot.png',
+    '/api/boxes/abc123/attachments/shot.png',
   );
 });
 

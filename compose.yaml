@@ -7,7 +7,7 @@
 # a reverse proxy's job, and no proxy is named here. Whichever one is put in
 # front has to forward the WebSocket upgrade on /ws.
 #
-# The orchestrator creates session containers at runtime, each on an internal
+# The orchestrator creates box containers at runtime, each on an internal
 # network of its own, so they appear in no compose file.
 
 name: boxes
@@ -39,7 +39,7 @@ services:
     # A ceiling, not a budget: the orchestrator buffers a whole attachment
     # upload (MAX_ATTACHMENT_MB, 25 MiB by default) and a whole WebSocket
     # frame (16 MiB) in memory per request, and holds one ACP connection per
-    # live session. Without a limit, one large upload is charged to the host.
+    # live box. Without a limit, one large upload is charged to the host.
     # A gigabyte is several times what a small deployment's steady state needs
     # and still leaves the host standing when something runs away.
     #
@@ -63,10 +63,10 @@ services:
     build:
       context: .
       dockerfile: proxy/Dockerfile
-    # Fixed name: the orchestrator attaches this container to every session
+    # Fixed name: the orchestrator attaches this container to every box
     # network by name, and expects this one — it is the default of
     # EGRESS_PROXY_CONTAINER in orchestrator/src/config.ts. Renaming it here
-    # means setting that too, or sessions get no egress at all.
+    # means setting that too, or boxes get no egress at all.
     container_name: boxes-egress-proxy
     restart: unless-stopped
     read_only: true
@@ -76,7 +76,7 @@ services:
       - ALL
     # Attached to the compose default network for external egress, and for the
     # control channel the orchestrator pushes the egress policy over. The
-    # orchestrator dynamically connects it to each session's internal network
+    # orchestrator dynamically connects it to each box's internal network
     # too — those are internal, so nothing on them can route back here.
     #
     # read_only holds: the proxy keeps its policy, its credentials and its CA
@@ -84,9 +84,9 @@ services:
     networks:
       - default
     # Smaller than the orchestrator's, because this holds no database and no
-    # session state — only the in-flight requests of every session at once,
+    # box state — only the in-flight requests of every box at once,
     # each of which it buffers to swap a credential into. Half a gigabyte is
-    # room for a busy moment and a bound on a session that uploads or
+    # room for a busy moment and a bound on a box that uploads or
     # downloads something enormous.
     mem_limit: 512m
     pids_limit: 256

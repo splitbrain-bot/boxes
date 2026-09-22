@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
-import { directorySize, SessionUsage } from './diskusage.ts';
+import { directorySize, BoxUsage } from './diskusage.ts';
 
 /**
  * How big a workspace is: the walk itself, and the cache in front of it that
@@ -66,7 +66,7 @@ function usage(over: {
 } = {}) {
   const walks: string[] = [];
   const measure = over.measure ?? ((): Promise<number> => Promise.resolve(42));
-  const cache = new SessionUsage({
+  const cache = new BoxUsage({
     pathsOf: over.pathsOf ?? ((id) => [`/data/workspaces/${id}`]),
     ttlMs: 1000,
     now: over.now ?? (() => 0),
@@ -113,7 +113,7 @@ test('a measurement stands until it goes stale', async () => {
   assert.equal(walks.length, 2);
 });
 
-test('a session with no directory of its own has no size and is never walked', async () => {
+test('a box with no directory of its own has no size and is never walked', async () => {
   const { cache, walks } = usage({ pathsOf: () => [null, null] });
 
   assert.equal(cache.bytes('legacy', up), null);
@@ -121,7 +121,7 @@ test('a session with no directory of its own has no size and is never walked', a
   assert.deepEqual(walks, []);
 });
 
-test('what a session is using is its workspace and its home, together', async () => {
+test('what a box is using is its workspace and its home, together', async () => {
   const sizes: Record<string, number> = {
     '/data/workspaces/s1': 300,
     '/data/homes/s1': 700,
@@ -140,7 +140,7 @@ test('what a session is using is its workspace and its home, together', async ()
   assert.deepEqual(walks, ['/data/workspaces/s1', '/data/homes/s1']);
 });
 
-test('a session whose home is still a volume is measured by its workspace alone', async () => {
+test('a box whose home is still a volume is measured by its workspace alone', async () => {
   const { cache } = usage({
     pathsOf: (id) => [`/data/workspaces/${id}`, null],
     measure: () => Promise.resolve(300),
@@ -151,7 +151,7 @@ test('a session whose home is still a volume is measured by its workspace alone'
   assert.equal(cache.bytes('legacy', up), 300);
 });
 
-test('half a session is not reported as the whole of it', async () => {
+test('half a box is not reported as the whole of it', async () => {
   const { cache } = usage({
     pathsOf: (id) => [`/data/workspaces/${id}`, `/data/homes/${id}`],
     measure: (path) =>
@@ -203,7 +203,7 @@ test('a failed walk holds the answer that came before it', async () => {
   assert.equal(cache.bytes('s1', up), 7);
 });
 
-test('one session with a slow walk does not queue a second for the same session', async () => {
+test('one box with a slow walk does not queue a second for the same box', async () => {
   let finish = (): void => {};
   let walks = 0;
   const { cache } = usage({
@@ -367,7 +367,7 @@ test('an upload into a stopped box has its size measured again', async () => {
   assert.equal(cache.bytes('s1', down), 99);
 });
 
-test('a deleted session takes its measurement with it', async () => {
+test('a deleted box takes its measurement with it', async () => {
   const { cache } = usage();
 
   cache.bytes('s1', up);

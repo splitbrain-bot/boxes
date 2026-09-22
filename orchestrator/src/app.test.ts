@@ -86,31 +86,31 @@ let db: Db;
 let orchestrator: Orchestrator;
 
 /**
- * A running session row with one thread, made current.
+ * A running box row with one thread, made current.
  *
- * The thread is what a local command is logged against, so a session without
+ * The thread is what a local command is logged against, so a box without
  * one runs commands nobody is ever shown.
  */
-function insertSession(id: string): void {
+function insertBox(id: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        ws_token, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?, ?)`,
-  ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, `token-${id}`, now, now);
+  ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 
-/** One conversation of a session. Which one is current is set on the session. */
-function insertThread(sessionId: string, threadId: string, ordinal: number): void {
+/** One conversation of a box. Which one is current is set on the box. */
+function insertThread(boxId: string, threadId: string, ordinal: number): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+    `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
        created_at, last_active_at)
      VALUES (?, ?, NULL, NULL, ?, ?, ?)`,
-  ).run(threadId, sessionId, ordinal, now, now);
+  ).run(threadId, boxId, ordinal, now, now);
 }
 
 beforeEach(() => {
@@ -124,7 +124,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // See insertWorkspaceSession: workspaces are written under the config's
+  // See insertWorkspaceBox: workspaces are written under the config's
   // DATA_DIR, which outlives this test's own directory.
   rmSync(ws.workspacesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   rmSync(ws.homesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
@@ -134,15 +134,15 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** A directory-backed session, which is what an attachment needs. */
-function insertWorkspaceSession(id: string): string {
-  insertSession(id);
+/** A directory-backed box, which is what an attachment needs. */
+function insertWorkspaceBox(id: string): string {
+  insertBox(id);
   // config() is memoised for the process, so the app's DATA_DIR is whatever
   // the first test in this file set — not necessarily this test's `dir`.
   // Everything that reaches the disk has to go through the app's own copy.
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
   const home = ws.createHome(orchestrator.cfg.DATA_DIR, id);
-  db.prepare('UPDATE sessions SET workspace_dir = ?, home_dir = ? WHERE id = ?').run(
+  db.prepare('UPDATE boxes SET workspace_dir = ?, home_dir = ? WHERE id = ?').run(
     workspace,
     home,
     id,
@@ -151,11 +151,11 @@ function insertWorkspaceSession(id: string): string {
 }
 
 test('an attachment is stored in the workspace and its path reported back', async () => {
-  const workspace = insertWorkspaceSession('abc123');
+  const workspace = insertWorkspaceBox('abc123');
 
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=shot.png',
+    url: '/api/boxes/abc123/attachments?name=shot.png',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('PNGDATA'),
   });
@@ -167,7 +167,7 @@ test('an attachment is stored in the workspace and its path reported back', asyn
 });
 
 /**
- * Lists sessions until one reports a workspace size, or gives up.
+ * Lists boxes until one reports a workspace size, or gives up.
  *
  * A measurement happens off the request path on purpose — the list must never
  * wait for a disk walk — so a test that wants one has to ask again. See
@@ -175,7 +175,7 @@ test('an attachment is stored in the workspace and its path reported back', asyn
  */
 async function measuredSize(id: string): Promise<number | null> {
   for (let attempt = 0; attempt < 100; attempt++) {
-    const res = await orchestrator.app.inject({ url: '/api/sessions' });
+    const res = await orchestrator.app.inject({ url: '/api/boxes' });
     const listed = res.json() as Array<{ id: string; diskBytes: number | null }>;
     const size = listed.find((s) => s.id === id)?.diskBytes ?? null;
     if (size !== null) return size;
@@ -184,8 +184,8 @@ async function measuredSize(id: string): Promise<number | null> {
   return null;
 }
 
-test('a session is measured off the request path and reported on the list', async () => {
-  const workspace = insertWorkspaceSession('abc123');
+test('a box is measured off the request path and reported on the list', async () => {
+  const workspace = insertWorkspaceBox('abc123');
   writeFileSync(join(workspace, 'checkout.bin'), Buffer.alloc(4096));
   // The home counts too, and on a box that has been working it is the larger
   // half: the thread history, the tool caches, whatever the agent installed.
@@ -196,7 +196,7 @@ test('a session is measured off the request path and reported on the list', asyn
 
   // The first list answers with no size rather than waiting for the walk it
   // starts. A card shows nothing; a zero would be a claim.
-  const first = await orchestrator.app.inject({ url: '/api/sessions' });
+  const first = await orchestrator.app.inject({ url: '/api/boxes' });
   assert.equal(
     (first.json() as Array<{ diskBytes: number | null }>)[0]!.diskBytes,
     null,
@@ -206,13 +206,13 @@ test('a session is measured off the request path and reported on the list', asyn
 });
 
 test('an upload is what says a workspace grew, since nothing else can say it', async () => {
-  const workspace = insertWorkspaceSession('abc123');
+  const workspace = insertWorkspaceBox('abc123');
   writeFileSync(join(workspace, 'checkout.bin'), Buffer.alloc(4096));
   assert.equal(await measuredSize('abc123'), 4096);
 
   await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=shot.png',
+    url: '/api/boxes/abc123/attachments?name=shot.png',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.alloc(2048),
   });
@@ -225,11 +225,11 @@ test('an upload is what says a workspace grew, since nothing else can say it', a
 });
 
 test('an attachment name that is a path is reduced to a name', async () => {
-  const workspace = insertWorkspaceSession('abc123');
+  const workspace = insertWorkspaceBox('abc123');
 
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: `/api/sessions/abc123/attachments?name=${encodeURIComponent('../../escape.txt')}`,
+    url: `/api/boxes/abc123/attachments?name=${encodeURIComponent('../../escape.txt')}`,
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('x'),
   });
@@ -239,12 +239,12 @@ test('an attachment name that is a path is reduced to a name', async () => {
 });
 
 test('an attachment upload without a name or a body is refused', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
   const headers = { 'content-type': 'application/octet-stream' };
 
   const nameless = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments',
+    url: '/api/boxes/abc123/attachments',
     headers,
     payload: Buffer.from('x'),
   });
@@ -252,20 +252,20 @@ test('an attachment upload without a name or a body is refused', async () => {
 
   const empty = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=a.txt',
+    url: '/api/boxes/abc123/attachments?name=a.txt',
     headers,
     payload: Buffer.alloc(0),
   });
   assert.equal(empty.statusCode, 400);
 });
 
-test('an attachment to a session that has no workspace is a 404', async () => {
+test('an attachment to a box that has no workspace is a 404', async () => {
   // Inserted, but never given a workspace directory: nothing to write into.
-  insertSession('abc123');
+  insertBox('abc123');
 
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=a.txt',
+    url: '/api/boxes/abc123/attachments?name=a.txt',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('x'),
   });
@@ -273,11 +273,11 @@ test('an attachment to a session that has no workspace is a 404', async () => {
 });
 
 test('an attachment over the size limit is refused, and says so', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
 
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=big.bin',
+    url: '/api/boxes/abc123/attachments?name=big.bin',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.alloc(config().MAX_ATTACHMENT_MB * 1024 * 1024 + 1),
   });
@@ -288,15 +288,15 @@ test('an attachment over the size limit is refused, and says so', async () => {
 });
 
 test('a stored image is served back as itself, for the thread to show', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
   await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=shot.png',
+    url: '/api/boxes/abc123/attachments?name=shot.png',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('PNGDATA'),
   });
 
-  const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/attachments/shot.png' });
+  const res = await orchestrator.app.inject({ url: '/api/boxes/abc123/attachments/shot.png' });
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers['content-type'], 'image/png');
@@ -306,16 +306,16 @@ test('a stored image is served back as itself, for the thread to show', async ()
 });
 
 test('an SVG is served as one, inert, so a diagram can be looked at', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
   await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=diagram.svg',
+    url: '/api/boxes/abc123/attachments?name=diagram.svg',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('<svg onload="alert(1)"></svg>'),
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/sessions/abc123/attachments/diagram.svg',
+    url: '/api/boxes/abc123/attachments/diagram.svg',
   });
 
   assert.equal(res.headers['content-type'], 'image/svg+xml');
@@ -327,16 +327,16 @@ test('an SVG is served as one, inert, so a diagram can be looked at', async () =
 });
 
 test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
   await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=report.pdf',
+    url: '/api/boxes/abc123/attachments?name=report.pdf',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('%PDF-1.4'),
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/sessions/abc123/attachments/report.pdf',
+    url: '/api/boxes/abc123/attachments/report.pdf',
   });
 
   assert.equal(res.headers['content-type'], 'application/pdf');
@@ -348,19 +348,19 @@ test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
 });
 
 test('a format nothing renders is served as a download of unknown type', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
   // HTML above all: served as itself it would run as this origin, and unlike
   // an SVG there is no way to show it that does not.
   for (const name of ['page.html', 'notes.txt', 'archive.zip']) {
     await orchestrator.app.inject({
       method: 'POST',
-      url: `/api/sessions/abc123/attachments?name=${name}`,
+      url: `/api/boxes/abc123/attachments?name=${name}`,
       headers: { 'content-type': 'application/octet-stream' },
       payload: Buffer.from('x'),
     });
 
     const res = await orchestrator.app.inject({
-      url: `/api/sessions/abc123/attachments/${name}`,
+      url: `/api/boxes/abc123/attachments/${name}`,
     });
     assert.equal(res.headers['content-type'], 'application/octet-stream');
     assert.match(res.headers['content-disposition'] as string, /^attachment/);
@@ -369,37 +369,37 @@ test('a format nothing renders is served as a download of unknown type', async (
 });
 
 test('a link planted in the attachments directory serves nothing', async () => {
-  const workspace = insertWorkspaceSession('abc123');
+  const workspace = insertWorkspaceBox('abc123');
   await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/attachments?name=real.png',
+    url: '/api/boxes/abc123/attachments?name=real.png',
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('x'),
   });
   // What an agent with a foothold in its own workspace would try: the
-  // orchestrator's own uid can read the database, and every session's gateway
+  // orchestrator's own uid can read the database, and every box's gateway
   // token is in it.
   const secret = join(dir, 'secret.txt');
   writeFileSync(secret, 'a gateway token');
   symlinkSync(secret, join(workspace, '.boxes/attachments/escape.png'));
 
   const res = await orchestrator.app.inject({
-    url: '/api/sessions/abc123/attachments/escape.png',
+    url: '/api/boxes/abc123/attachments/escape.png',
   });
   assert.equal(res.statusCode, 404);
 });
 
 test('an attachment name that is a path fetches nothing', async () => {
-  insertWorkspaceSession('abc123');
+  insertWorkspaceBox('abc123');
   const res = await orchestrator.app.inject({
-    url: `/api/sessions/abc123/attachments/${encodeURIComponent('../../../etc/passwd')}`,
+    url: `/api/boxes/abc123/attachments/${encodeURIComponent('../../../etc/passwd')}`,
   });
   assert.equal(res.statusCode, 404);
 });
 
 test('an attachment that was never stored is a 404', async () => {
-  insertWorkspaceSession('abc123');
-  const res = await orchestrator.app.inject({ url: '/api/sessions/abc123/attachments/nope.png' });
+  insertWorkspaceBox('abc123');
+  const res = await orchestrator.app.inject({ url: '/api/boxes/abc123/attachments/nope.png' });
   assert.equal(res.statusCode, 404);
 });
 
@@ -440,7 +440,7 @@ test('the dashboard bundle is served, with a single-page fallback', async () => 
     assert.match(css.headers['content-type'] as string, /text\/css/);
 
     // A client-side route is not a file, and must survive a reload.
-    for (const url of ['/', '/new', '/sessions/abc123', '/sessions/abc123/info']) {
+    for (const url of ['/', '/new', '/boxes/abc123', '/boxes/abc123/info']) {
       const res = await orchestrator.app.inject({ url });
       assert.equal(res.statusCode, 200, url);
       assert.match(res.headers['content-type'] as string, /text\/html/, url);
@@ -506,7 +506,7 @@ test('the hashed assets are cached for good and the page never is', async () => 
 
     // index.html is the file that says which assets are current, so a held
     // copy would go on naming the ones it was built with.
-    const page = await orchestrator.app.inject({ url: '/sessions/abc123' });
+    const page = await orchestrator.app.inject({ url: '/boxes/abc123' });
     assert.equal(page.headers['cache-control'], 'no-cache');
     // And so is everything else that keeps its name across builds.
     const worker = await orchestrator.app.inject({ url: '/sw.js' });
@@ -564,8 +564,8 @@ test('a bundle worth compressing is compressed', async () => {
 
 // --- Liveness, readiness and the request log ---------------------------------
 
-test('a deployment that cannot serve sessions is live but not ready', async () => {
-  // Nothing has pushed an egress policy here, so a session created now would
+test('a deployment that cannot serve boxes is live but not ready', async () => {
+  // Nothing has pushed an egress policy here, so a box created now would
   // get no egress at all.
   const ready = await orchestrator.app.inject({ url: '/readyz' });
   assert.equal(ready.statusCode, 503);
@@ -589,8 +589,8 @@ test('every response is logged with what was asked and what came back', async ()
     return true;
   }) as typeof process.stderr.write;
   try {
-    await orchestrator.app.inject({ url: '/api/sessions?name=secret' });
-    await orchestrator.app.inject({ url: '/api/sessions/nope' });
+    await orchestrator.app.inject({ url: '/api/boxes?name=secret' });
+    await orchestrator.app.inject({ url: '/api/boxes/nope' });
   } finally {
     process.stderr.write = written;
   }
@@ -602,7 +602,7 @@ test('every response is logged with what was asked and what came back', async ()
   const ok = logged.find((line) => line['status'] === 200);
   assert.equal(ok?.['method'], 'GET');
   // The query string is left off: it carries what the reader typed.
-  assert.equal(ok?.['path'], '/api/sessions');
+  assert.equal(ok?.['path'], '/api/boxes');
   assert.equal(typeof ok?.['ms'], 'number');
 
   // A refusal is the caller's problem rather than the deployment's, so it is
@@ -809,16 +809,16 @@ test('the global set is refused deletion, and an unknown set is a 404', async ()
   assert.equal(unknown.statusCode, 404);
 });
 
-test('creating a session against an unknown set is refused before anything is built', async () => {
+test('creating a box against an unknown set is refused before anything is built', async () => {
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions',
+    url: '/api/boxes',
     payload: { name: 'a box', agentSet: 'nope' },
   });
   assert.equal(res.statusCode, 400);
   assert.match((res.json() as { error: string }).error, /Unknown agent set/);
   // Nothing was inserted: the check runs before the row does.
-  const rows = db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number };
+  const rows = db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number };
   assert.equal(rows.n, 0);
 });
 
@@ -826,7 +826,7 @@ test('starting a container to reach into writes the current configuration first'
   // Opening a thread and opening a terminal both start a stopped box without
   // going through /start, and the entrypoint installs whatever is on disk at
   // that moment — so the box must not be started against a stale set.
-  insertSession('abc123');
+  insertBox('abc123');
   fakeDocker();
   await orchestrator.app.inject({
     method: 'PUT',
@@ -848,11 +848,11 @@ test('starting a container to reach into writes the current configuration first'
 });
 
 test('stopping background work names a thread, and 404s for one that is not there', async () => {
-  insertSession('abc123');
+  insertBox('abc123');
 
   const missing = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/nope/background/stop',
+    url: '/api/boxes/abc123/threads/nope/background/stop',
     payload: {},
   });
   assert.equal(missing.statusCode, 404);
@@ -862,7 +862,7 @@ test('stopping background work names a thread, and 404s for one that is not ther
   // this thread has none. Said without reaching Docker at all.
   const now = Date.now();
   db.prepare(
-    `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+    `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
        created_at, last_active_at)
      VALUES ('t1', 'abc123', NULL, NULL, 1, ?, ?)`,
   ).run(now, now);
@@ -872,7 +872,7 @@ test('stopping background work names a thread, and 404s for one that is not ther
   // about what the id means rather than about how to send it.
   const unminted = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/t1/background/stop',
+    url: '/api/boxes/abc123/threads/t1/background/stop',
     payload: { processId: 'task-1' },
   });
   assert.equal(unminted.statusCode, 200);
@@ -882,14 +882,14 @@ test('stopping background work names a thread, and 404s for one that is not ther
 test('stopping everything in a box signals the work and nothing of Boxes own', async () => {
   // The floor's own stop, for work no conversation can name: after an adapter
   // restart the bars are empty and the box is still compiling something.
-  insertSession('abc123');
+  insertBox('abc123');
   fakeDocker();
   insideBox = [
     '  PID  PPID COMMAND',
     '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
     '    7     1 sleep infinity',
     '   12     1 node /usr/local/bin/claude-agent-acp',
-    '   13    12 claude --output-format stream-json --session-id=acp-1',
+    '   13    12 claude --output-format stream-json --box-id=acp-1',
     "   14    13 /bin/bash -c eval 'npm run build'",
     '   20     1 node /usr/local/bin/codex-acp',
     '   21    20 codex app-server',
@@ -899,7 +899,7 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
 
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/background/stop',
+    url: '/api/boxes/abc123/background/stop',
     payload: {},
   });
   assert.equal(res.statusCode, 200);
@@ -912,21 +912,21 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
 test('stopping everything in a box that is not there is a 404', async () => {
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/nope/background/stop',
+    url: '/api/boxes/nope/background/stop',
     payload: {},
   });
   assert.equal(res.statusCode, 404);
 });
 
 test('marking a thread done is remembered, reversible, and 404s for a thread that is not there', async () => {
-  insertSession('abc123');
+  insertBox('abc123');
   const before = db.prepare("SELECT last_active_at FROM threads WHERE id = 'abc123-t1'").get() as {
     last_active_at: number;
   };
 
   const missing = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/nope/done',
+    url: '/api/boxes/abc123/threads/nope/done',
     payload: { done: true },
   });
   assert.equal(missing.statusCode, 404);
@@ -935,14 +935,14 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   // otherwise unmark whatever it was sent about.
   const empty = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/abc123-t1/done',
+    url: '/api/boxes/abc123/threads/abc123-t1/done',
     payload: {},
   });
   assert.equal(empty.statusCode, 400);
 
   const marked = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/abc123-t1/done',
+    url: '/api/boxes/abc123/threads/abc123-t1/done',
     payload: { done: true },
   });
   assert.equal(marked.statusCode, 200);
@@ -951,7 +951,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   // Read back over the list route, which is where the dashboard sees it.
   const threads = await orchestrator.app.inject({
     method: 'GET',
-    url: '/api/sessions/abc123/threads',
+    url: '/api/boxes/abc123/threads',
   });
   assert.deepEqual(
     (threads.json() as Array<{ id: string; done: boolean }>).map((t) => [t.id, t.done]),
@@ -961,7 +961,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   // And the mark comes off the same way it went on.
   const unmarked = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/abc123-t1/done',
+    url: '/api/boxes/abc123/threads/abc123-t1/done',
     payload: { done: false },
   });
   assert.equal((unmarked.json() as { done: boolean }).done, false);
@@ -974,15 +974,15 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   assert.equal(after.last_active_at, before.last_active_at);
 });
 
-test('a listed session carries its own WebSocket token', async () => {
-  insertSession('abc123');
-  insertSession('def456');
+test('a listed box carries its own WebSocket token', async () => {
+  insertBox('abc123');
+  insertBox('def456');
 
-  const res = await orchestrator.app.inject({ url: '/api/sessions' });
+  const res = await orchestrator.app.inject({ url: '/api/boxes' });
   const listed = res.json() as Array<{ id: string; wsToken: string }>;
 
-  // Each summary hands out the token of the session it is about, so a reader
-  // of one session never learns what opens the one beside it.
+  // Each summary hands out the token of the box it is about, so a reader
+  // of one box never learns what opens the one beside it.
   assert.deepEqual(
     listed.map((s) => [s.id, s.wsToken]).sort(),
     [
@@ -1001,7 +1001,7 @@ test('a listed session carries its own WebSocket token', async () => {
 test('a body missing a required field is refused, and the answer names it', async () => {
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions',
+    url: '/api/boxes',
     payload: {},
   });
   assert.equal(res.statusCode, 400);
@@ -1009,11 +1009,11 @@ test('a body missing a required field is refused, and the answer names it', asyn
 });
 
 test('a field of the wrong type is refused rather than read as one', async () => {
-  insertSession('abc123');
+  insertBox('abc123');
 
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/abc123/threads/abc123-t1/done',
+    url: '/api/boxes/abc123/threads/abc123-t1/done',
     payload: { done: 'yes' },
   });
   assert.equal(res.statusCode, 400);
@@ -1475,12 +1475,12 @@ test('the harness list carries the registry, the catalogue and the health', asyn
 });
 
 test('a thread reports the agent it runs and what it is configured with', async () => {
-  insertSession('harn01');
+  insertBox('harn01');
   db.prepare(
     `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
   ).run('harn01-t1');
 
-  const res = await orchestrator.app.inject({ url: '/api/sessions/harn01/threads' });
+  const res = await orchestrator.app.inject({ url: '/api/boxes/harn01/threads' });
   assert.deepEqual(res.json(), [
     {
       id: 'harn01-t1',
@@ -1506,10 +1506,10 @@ test('a thread reports the agent it runs and what it is configured with', async 
 });
 
 test('a thread for an agent nobody has is refused before anything is started', async () => {
-  insertSession('harn02');
+  insertBox('harn02');
   const res = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions/harn02/threads',
+    url: '/api/boxes/harn02/threads',
     payload: { options: { harness: 'gemini' } },
   });
   assert.equal(res.statusCode, 400);
@@ -1517,7 +1517,7 @@ test('a thread for an agent nobody has is refused before anything is started', a
   // Nothing was created on the way to the refusal: the box still has the one
   // thread it was seeded with.
   const threads = (
-    await orchestrator.app.inject({ url: '/api/sessions/harn02/threads' })
+    await orchestrator.app.inject({ url: '/api/boxes/harn02/threads' })
   ).json() as unknown[];
   assert.equal(threads.length, 1);
 
@@ -1525,7 +1525,7 @@ test('a thread for an agent nobody has is refused before anything is started', a
   // anything is allocated for it — no image pull, no network, no container.
   const created = await orchestrator.app.inject({
     method: 'POST',
-    url: '/api/sessions',
+    url: '/api/boxes',
     payload: { name: 'a box on nothing', thread: { harness: 'gemini' } },
   });
   assert.equal(created.statusCode, 400);

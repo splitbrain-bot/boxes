@@ -32,13 +32,13 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
 };
 
 /**
- * The thread's own chrome: where it goes back to, which of the session's
+ * The thread's own chrome: where it goes back to, which of the box's
  * conversations it is, what it is connected to, whether the reader is done
  * with it, how to branch it — and one button holding everything the adapter
  * lets a client set.
  */
 export function ThreadHeader({
-  sessionId,
+  boxId,
   threadId,
   up,
   name,
@@ -56,13 +56,13 @@ export function ThreadHeader({
   onSetMode,
   onSetConfigOption,
 }: {
-  sessionId: string;
+  boxId: string;
   /** Which thread this is, which the review link carries so it leads back here. */
   threadId: string | null;
   /** The way out, which pops the thread rather than pushing the list. */
   up: Up;
   name: string;
-  /** Which conversation of the session this is, or null while it is unknown. */
+  /** Which conversation of the box this is, or null while it is unknown. */
   threadLabel: string | null;
   /**
    * Which agent is on the other end, or null while the thread is unknown.
@@ -78,7 +78,7 @@ export function ThreadHeader({
   configOptions: readonly SessionConfigOption[];
   /** Whether the reader has marked this conversation finished with. */
   done: boolean;
-  /** Whether the adapter advertised the fork capability; see SessionSummary. */
+  /** Whether the adapter advertised the fork capability; see BoxSummary. */
   canFork: boolean;
   /** Held while a fork is in flight, so a double tap cannot branch twice. */
   forking: boolean;
@@ -116,17 +116,17 @@ export function ThreadHeader({
           top of them, so this button and the device's back button do not
           point the same way. */}
       <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
-        <a href={up.href} onClick={up.onClick} aria-label="Back to sessions">
+        <a href={up.href} onClick={up.onClick} aria-label="Back to boxes">
           <ArrowLeft className="size-4" />
         </a>
       </Button>
 
       {/* A floor under the name, which the icon buttons cannot push past. */}
       <div className="flex min-w-16 flex-1 flex-col">
-        {/* The thread's name shares the session's line: the row below is the
+        {/* The thread's name shares the box's line: the row below is the
             connection state. */}
         <span className="flex items-baseline gap-1.5 text-sm">
-          {/* The session's name goes first and keeps up to two thirds of the
+          {/* The box's name goes first and keeps up to two thirds of the
               line: which box you are in matters more than which of its
               conversations, so the thread's name is what gives way. */}
           <span className="max-w-2/3 shrink-0 truncate font-medium">{name}</span>
@@ -247,13 +247,13 @@ export function ThreadHeader({
           what it wrote, comment on it, and hand the comments back. */}
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link
-          to={`/sessions/${sessionId}/review`}
+          to={`/boxes/${boxId}/review`}
           // Which conversation the review was opened from, so its back link
           // and its handoff come back here rather than to whichever thread the
-          // session has current — the two differ as soon as one is forked.
+          // box has current — the two differ as soon as one is forked.
           state={{ threadId }}
-          aria-label="Review this session's code"
-          title="Review this session's code"
+          aria-label="Review this box's code"
+          title="Review this box's code"
         >
           <FileSearch />
         </Link>
@@ -264,7 +264,7 @@ export function ThreadHeader({
           is the same shell. */}
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link
-          to={`/sessions/${sessionId}/terminal`}
+          to={`/boxes/${boxId}/terminal`}
           aria-label="Open a terminal in this box"
           title="Open a terminal in this box"
         >

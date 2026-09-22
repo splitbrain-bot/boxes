@@ -81,7 +81,7 @@ test('a payload too long for one record is refused rather than mangled', () => {
 test('a subscriber can decrypt what encryptPayload produced', () => {
   // The receiver's side of RFC 8291, done independently of the sender's: the
   // round trip covers the random salt and ephemeral key the vector cannot.
-  const message = 'Session muffin is waiting for a permission decision.';
+  const message = 'Box muffin is waiting for a permission decision.';
   const body = encryptPayload(
     Buffer.from(message, 'utf8'),
     b64(RFC8291.uaPublic),

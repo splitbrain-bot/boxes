@@ -1,7 +1,7 @@
 import { afterAll, afterEach, expect, test } from 'vitest';
 import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
@@ -9,7 +9,7 @@ import { reply, type GatewayScript } from './stub-gateway.ts';
  * against the real bundle in a real browser.
  */
 
-const SESSION = DEFAULT_SESSION;
+const BOX = DEFAULT_BOX;
 
 let stub: TestOrchestrator;
 
@@ -30,7 +30,7 @@ afterAll(async () => {
 // reserves Ctrl/Cmd+Enter for the send.
 test('Enter opens a line in the composer, Ctrl+Enter sends it', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -54,7 +54,7 @@ test('Enter opens a line in the composer, Ctrl+Enter sends it', async () => {
 // 2 — ArrowUp recalls previous messages.
 test('ArrowUp walks back through what was sent, ArrowDown returns', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -92,7 +92,7 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
 // 3 — the composer keeps focus.
 test('the composer is focused on arrival and stays focused after a send', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('done') }] });
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -115,7 +115,7 @@ test('a send that fails still leaves the composer focused', async () => {
   // No prompt script and a gateway that answers, but the store reports the
   // failure through the error banner; either way the caret must not be lost.
   await start({ prompts: [] });
-  const { page, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -163,7 +163,7 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -231,7 +231,7 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -365,7 +365,7 @@ test('a row run stays a list across a message that speaks, and the prose in it s
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -469,7 +469,7 @@ test('a tool call that never reported back is not offered as a decision', async 
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -502,7 +502,7 @@ test('a turn still running is still running after a detour away and back', async
     prompts: [{ match: () => true, updates: reply('working on it'), hold: true }],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -513,7 +513,7 @@ test('a turn still running is still running after a detour away and back', async
     await expect.poll(() => stop.isVisible(), { timeout: 10_000 }).toBe(true);
 
     // Out to the review and back, which is what tears the store down.
-    await page.getByLabel("Review this session's code").click();
+    await page.getByLabel("Review this box's code").click();
     await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
     await page.getByLabel('Back to the thread').click();
 
@@ -543,7 +543,7 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     prompts: [{ match: () => true, updates: reply(`here it is\n\n${header}\n${rule}\n${row}\n`) }],
   });
 
-  const wide = await openPage(stub.url, `/sessions/${SESSION.id}`, 'dark', 'desktop');
+  const wide = await openPage(stub.url, `/boxes/${BOX.id}`, 'dark', 'desktop');
   try {
     const input = wide.page.getByLabel('Message input');
     await input.fill('show me the table');
@@ -569,13 +569,13 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     await wide.close();
   }
 
-  const phone = await openPage(stub.url, `/sessions/${SESSION.id}`, 'dark', 'phone');
+  const phone = await openPage(stub.url, `/boxes/${BOX.id}`, 'dark', 'phone');
   try {
     const input = phone.page.getByLabel('Message input');
     await input.fill('show me the table');
     await input.press('Control+Enter');
     // Two of them, and the wait is for both: this page is a second look at
-    // the session the desktop half just used, so the thread replays that
+    // the box the desktop half just used, so the thread replays that
     // exchange and then answers this page's own prompt with another table.
     // Waiting only for the first leaves the second free to arrive between the
     // wait and the measurement, and a locator matching two elements is an
@@ -608,7 +608,7 @@ test('the mode switcher lists the advertised modes and sets one', async () => {
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     // Behind the settings button, with the model and the rest: the header row
     // is a name and four icons now.
@@ -642,7 +642,7 @@ test('a current_mode_update from the adapter moves the switcher', async () => {
     },
   });
 
-  const { page, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await page.getByLabel('Agent settings').click();
     const modes = page.getByRole('combobox', { name: 'Agent mode' });
@@ -673,7 +673,7 @@ test('the model selector lists the advertised models and sets one', async () => 
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await page.getByLabel('Agent settings').click();
     const models = page.getByRole('combobox', { name: 'Model' });
@@ -695,7 +695,7 @@ test('the model selector lists the advertised models and sets one', async () => 
 test('the tab says which box and thread it is, and what that thread is doing', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('done'), hold: true }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     // The box's name and the conversation's, in the header's own order and
     // with the header's own names for them.
@@ -716,7 +716,7 @@ test('the tab says which box and thread it is, and what that thread is doing', a
       .toBe('\u25cb refactor auth \u00b7 Thread 1');
 
     // And leaving the thread puts the plain app title back.
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await expect.poll(() => page.title()).toBe('Boxes');
     expect(errors).toEqual([]);
   } finally {
@@ -739,7 +739,7 @@ test('a thread waiting on a decision says so in its tab', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -773,7 +773,7 @@ test('a thread asked which way to go says that instead', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -840,7 +840,7 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     const settings = page.getByLabel('Agent settings');
     await expect.poll(() => settings.isVisible()).toBe(true);
@@ -887,7 +887,7 @@ test('a harness with no credential is warned about in the list and the thread', 
     await list.close();
   }
 
-  const thread = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const thread = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => thread.page.getByText(warning).isVisible()).toBe(true);
     expect(thread.errors).toEqual([]);
@@ -946,7 +946,7 @@ test('a permission request renders its options and the choice answers the agent'
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -992,7 +992,7 @@ test('a permission request queued while nobody watched is delivered on attach', 
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     const approval = page.locator('[data-slot="tool-fallback-approval"]');
     await expect.poll(() => approval.isVisible(), { timeout: 10_000 }).toBe(true);
@@ -1009,7 +1009,7 @@ test('a permission request queued while nobody watched is delivered on attach', 
 test('typing a slash lists the adapter commands and completes the one picked', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     stub.gateway.emit({

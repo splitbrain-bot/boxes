@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Base configuration for @playwright/cli in a session container. The",
+    "Base configuration for @playwright/cli in a box container. The",
     "entrypoint copies this to ~/.playwright/cli.config.json -- the CLI's",
     "documented global config -- adding the egress proxy, which is only known",
     "at runtime. A project's own .playwright/cli.config.json still overrides",

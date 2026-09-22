@@ -13,8 +13,8 @@ import { parsePolicy } from './policy.ts';
  * for as long as it runs. A restarted proxy has nothing again until the
  * orchestrator's reconciler pushes afresh.
  *
- * Two things keep it out of a session's reach. It binds to the compose network
- * only, and a session sits on an internal network with no route to that
+ * Two things keep it out of a box's reach. It binds to the compose network
+ * only, and a box sits on an internal network with no route to that
  * address. It also requires a bearer token, which nobody configures: the first
  * push sets it and every later push has to match, and the orchestrator is the
  * only party that can reach the interface to claim it.
@@ -48,7 +48,7 @@ function tokensMatch(a: string, b: string): boolean {
  * The address to bind the control channel to: this container's own address on
  * the network that carries the default route.
  *
- * Session networks are created internal, so they install no default route.
+ * Box networks are created internal, so they install no default route.
  * The compose network does, so the interface the default route leaves by is
  * the one the orchestrator is on. Connecting a UDP socket performs that route
  * lookup and sends nothing.

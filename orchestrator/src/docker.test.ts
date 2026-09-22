@@ -18,14 +18,14 @@ import {
   killInContainer,
   resetPsFormatForTests,
   seedHomeFromImage,
-  sessionEnv,
+  boxEnv,
   setDockerForTests,
   type CreateContainerSpec,
 } from './docker.ts';
 import { readSettings } from './settings.ts';
 
 /**
- * The environment of a session container, which is the only place a session's
+ * The environment of a box container, which is the only place a box's
  * credentials ever come from — and, with translation on, the place a real one
  * must never appear.
  */
@@ -70,7 +70,7 @@ async function deployment(
   return { cfg, db, egress };
 }
 
-/** The env of one session, as a map, for a given deployment. */
+/** The env of one box, as a map, for a given deployment. */
 async function envFor(
   secrets: Partial<Record<CredentialId, string>> = {},
   over: Record<string, string> = {},
@@ -78,9 +78,9 @@ async function envFor(
   const { cfg, db, egress } = await deployment(secrets, over);
   const settings = readSettings(db);
   const spec: CreateContainerSpec = {
-    sessionId: 'abcd1234',
-    image: cfg.SESSION_IMAGE,
-    networkName: 'sn-abcd1234',
+    boxId: 'abcd1234',
+    image: cfg.BOX_IMAGE,
+    networkName: 'bn-abcd1234',
     subnet: '10.200.0.0/29',
     workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
     agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
@@ -90,14 +90,14 @@ async function envFor(
   };
 
   return Object.fromEntries(
-    sessionEnv(spec, cfg).map((entry) => {
+    boxEnv(spec, cfg).map((entry) => {
       const eq = entry.indexOf('=');
       return [entry.slice(0, eq), entry.slice(eq + 1)];
     }),
   );
 }
 
-describe('sessionEnv', () => {
+describe('boxEnv', () => {
   it('carries placeholders, and no real credential anywhere in it', async () => {
     const env = await envFor({ claude: CLAUDE_TOKEN, github: GH_TOKEN });
 
@@ -141,7 +141,7 @@ describe('sessionEnv', () => {
   it('carries what Codex needs to log itself in from the environment', async () => {
     // The Codex app-server reads no key from its environment; `codex-acp` is
     // what reads CODEX_API_KEY, and it only does so when DEFAULT_AUTH_REQUEST
-    // tells it to log in with the api-key method on the first session call.
+    // tells it to log in with the api-key method on the first box call.
     // The value has to reach the box as the JSON the adapter parses.
     const env = await envFor({ openai: OPENAI_KEY });
 
@@ -196,9 +196,9 @@ describe('the container template', () => {
     try {
       await createContainer(
         {
-          sessionId: 'abcd1234',
-          image: cfg.SESSION_IMAGE,
-          networkName: 'sn-abcd1234',
+          boxId: 'abcd1234',
+          image: cfg.BOX_IMAGE,
+          networkName: 'bn-abcd1234',
           subnet: '10.200.0.0/29',
           workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
           agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
@@ -219,7 +219,7 @@ describe('the container template', () => {
     const host = opts['HostConfig'] as { Binds: string[] };
     // Paths, not volume names: the orchestrator has to read these files
     // itself, which is what the whole review surface rests on — and what
-    // lets a session's size be read by walking two directories.
+    // lets a box's size be read by walking two directories.
     assert.deepEqual(host.Binds, [
       '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234:/workspace',
       '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234:/home/agent',
@@ -244,7 +244,7 @@ describe('the container template', () => {
     try {
       await seedHomeFromImage(
         '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
-        'boxes-session:latest',
+        'boxes-box:latest',
         'abcd1234',
       );
     } finally {
@@ -269,20 +269,20 @@ describe('the container template', () => {
 
   it('runs as the configured uid and gid, not the image\'s user name', async () => {
     const opts = await capture();
-    // Numbers, so SESSION_UID alone decides who a session is. The default
+    // Numbers, so BOX_UID alone decides who a box is. The default
     // is off 1000 deliberately: on a real host that is usually a person.
     assert.equal(opts['User'], '1020:1020');
   }, 30_000);
 
-  it('tells an outside updater to leave session containers alone', async () => {
+  it('tells an outside updater to leave box containers alone', async () => {
     const opts = await capture();
     const labels = opts['Labels'] as Record<string, string>;
-    // The session id is how Boxes finds its own containers again.
-    assert.equal(labels['boxes.session'], 'abcd1234');
+    // The box id is how Boxes finds its own containers again.
+    assert.equal(labels['boxes.box'], 'abcd1234');
     // And this is how something else is told not to. A container recreated
     // from under the orchestrator loses the id in the database and the
-    // runtime proxy attachment that is the session's only way out; the
-    // orchestrator rolls sessions onto a new image itself, at start.
+    // runtime proxy attachment that is the box's only way out; the
+    // orchestrator rolls boxes onto a new image itself, at start.
     assert.equal(labels['com.centurylinklabs.watchtower.enable'], 'false');
   }, 30_000);
 
@@ -296,10 +296,10 @@ describe('the container template', () => {
     assert.deepEqual(host['SecurityOpt'], ['no-new-privileges:true']);
   }, 30_000);
 
-  // The session image suppresses Playwright's --disable-dev-shm-usage on the
+  // The box image suppresses Playwright's --disable-dev-shm-usage on the
   // strength of this number, so removing it would not fail anywhere near
   // itself: Chromium would be left on Docker's 64 MB /dev/shm and report the
-  // exhaustion as a closed target, in a session, on whichever page first
+  // exhaustion as a closed target, in a box, on whichever page first
   // happened to be large enough.
   it('gives the browser enough shared memory to not need the flag', async () => {
     const opts = await capture();
@@ -319,7 +319,7 @@ describe('the login container', () => {
       },
     } as unknown as Docker);
     try {
-      await createLoginContainer({ image: 'boxes-session:latest', credentialId: 'openai' });
+      await createLoginContainer({ image: 'boxes-box:latest', credentialId: 'openai' });
     } finally {
       setDockerForTests(null);
     }
@@ -330,7 +330,7 @@ describe('the login container', () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
 
-    // Nothing of a session is here. No workspace, no agent configuration, no
+    // Nothing of a box is here. No workspace, no agent configuration, no
     // placeholder for the proxy to swap — the CLI inside is authenticating a
     // person to their own service, and there is no deployment secret in the
     // container for an egress policy to protect.
@@ -356,8 +356,8 @@ describe('the login container', () => {
     const opts = await capture();
     const labels = opts['Labels'] as Record<string, string>;
     assert.equal(labels['boxes.login'], 'openai');
-    // It is not a session, so nothing that reads the session label finds it.
-    assert.equal(labels['boxes.session'], undefined);
+    // It is not a box, so nothing that reads the box label finds it.
+    assert.equal(labels['boxes.box'], undefined);
   }, 30_000);
 });
 

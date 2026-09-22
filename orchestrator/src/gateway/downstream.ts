@@ -7,9 +7,9 @@ import {
 import type { WebSocket } from 'ws';
 import { ACP_METHOD } from '../../../shared/acp.ts';
 import { log } from '../log.ts';
-import type { SessionManager } from '../sessions.ts';
+import type { BoxManager } from '../boxes.ts';
 import { threadOf } from './broadcast.ts';
-import type { DownstreamHandle, UpstreamSession } from './upstream.ts';
+import type { DownstreamHandle, UpstreamBox } from './upstream.ts';
 
 /**
  * The browser-facing half of the gateway. Toward browsers the orchestrator
@@ -46,7 +46,7 @@ const FORWARDED_NOTIFICATIONS = [ACP_METHOD.sessionCancel] as const;
  *
  * A send the socket cannot take is buffered in this process, so a browser
  * that has stopped reading — a phone asleep with the tab open — would grow
- * that buffer for as long as its session keeps talking. Past this it is
+ * that buffer for as long as its box keeps talking. Past this it is
  * closed instead, which costs it nothing it cannot get back: it reconnects
  * and resumes from the message it holds.
  */
@@ -56,7 +56,7 @@ const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 let nextHandleId = 1;
 
 /**
- * Validates a WebSocket upgrade against the token of the session it names,
+ * Validates a WebSocket upgrade against the token of the box it names,
  * saying why when it refuses.
  *
  * A browser cannot set an Authorization header on a WebSocket, so a client
@@ -69,14 +69,14 @@ let nextHandleId = 1;
  * the caller names it because every endpoint checks its upgrades here while
  * each speaks a protocol of its own.
  *
- * `sessionToken` is the token of the session being connected to, so a token
- * reaches that session alone. An id no live session holds has none, which is
- * null here and refuses every offer: an upgrade never says which sessions
+ * `boxToken` is the token of the box being connected to, so a token
+ * reaches that box alone. An id no live box holds has none, which is
+ * null here and refuses every offer: an upgrade never says which boxes
  * exist.
  */
 export function checkUpgrade(
   protocolHeader: string | undefined,
-  sessionToken: string | null,
+  boxToken: string | null,
   subprotocol: string,
 ): { ok: true } | { ok: false; reason: string } {
   const offered = (protocolHeader ?? '')
@@ -86,8 +86,8 @@ export function checkUpgrade(
   if (!offered.includes(subprotocol)) {
     return { ok: false, reason: `missing ${subprotocol} subprotocol` };
   }
-  if (!sessionToken) return { ok: false, reason: 'no such session' };
-  const expected = `bearer.${sessionToken}`;
+  if (!boxToken) return { ok: false, reason: 'no such box' };
+  const expected = `bearer.${boxToken}`;
   const presented = offered.find((p) => p.startsWith('bearer.'));
   if (!presented) return { ok: false, reason: 'missing bearer token subprotocol' };
   if (!timingSafeEqualStr(presented, expected)) {
@@ -111,8 +111,8 @@ function timingSafeEqualStr(a: string, b: string): boolean {
  *
  * Exported so the tests can drive the write side directly.
  */
-export function wsStream(ws: WebSocket, sessionId: string): Stream {
-  const slog = log.session(sessionId);
+export function wsStream(ws: WebSocket, boxId: string): Stream {
+  const slog = log.box(boxId);
 
   const readable = new ReadableStream<unknown>({
     start(c) {
@@ -162,7 +162,7 @@ export function wsStream(ws: WebSocket, sessionId: string): Stream {
     write(msg) {
       if (ws.readyState !== ws.OPEN) return;
       // Settled by the send itself, so the writer waits for the socket
-      // instead of handing it everything a session says at once. A send that
+      // instead of handing it everything a box says at once. A send that
       // failed settles too: a socket that has gone is the read side's to
       // notice, and it closes the stream.
       return new Promise<void>((resolve) => {
@@ -185,11 +185,11 @@ export function wsStream(ws: WebSocket, sessionId: string): Stream {
 }
 
 /**
- * Wires one browser connection to the session's persistent upstream, pinned
+ * Wires one browser connection to the box's persistent upstream, pinned
  * to one of its threads.
  *
  * `threadId` is the thread the URL named, or null when it named none, as an
- * external ACP client does, which pins to the session's current thread
+ * external ACP client does, which pins to the box's current thread
  * instead. Either way the pinning happens here rather than in the browser,
  * and the ACP contract stays a `session/new` that hands back an id the client
  * did not choose.
@@ -199,12 +199,12 @@ export function wsStream(ws: WebSocket, sessionId: string): Stream {
  */
 export function attachDownstream(
   ws: WebSocket,
-  sessionId: string,
+  boxId: string,
   threadId: string | null,
-  manager: SessionManager,
+  manager: BoxManager,
 ): void {
-  const slog = log.session(sessionId);
-  const up: UpstreamSession = manager.upstream(sessionId);
+  const slog = log.box(boxId);
+  const up: UpstreamBox = manager.upstream(boxId);
   // Declared before the handle, so the closures below never read it in its
   // temporal dead zone.
   let conn: AgentConnection | null = null;
@@ -237,9 +237,9 @@ export function attachDownstream(
   };
 
   // Attached before the thread is settled: the socket is open and holding the
-  // session up, which is what the reaper counts, and nothing is routed to a
+  // box up, which is what the reaper counts, and nothing is routed to a
   // handle that has no thread yet. Attaching is also what brings a stopped
-  // session back up, because pinning needs the adapter to answer for the
+  // box back up, because pinning needs the adapter to answer for the
   // thread.
   up.attach(handle);
   const pinned = up.pin(handle, threadId);
@@ -252,7 +252,7 @@ export function attachDownstream(
     }
   });
 
-  const app = acpAgent({ name: `boxes-downstream-${sessionId}` })
+  const app = acpAgent({ name: `boxes-downstream-${boxId}` })
     // Answered from the cached upstream response, so its _meta extensions
     // reach the browser intact.
     //
@@ -268,8 +268,8 @@ export function attachDownstream(
       if (!cached) throw new Error('Upstream initialize unavailable');
       return cached;
     })
-    // This connection is about one thread of the session — the one the URL
-    // named, or the session's current one — so hand back that thread's ACP
+    // This connection is about one thread of the box — the one the URL
+    // named, or the box's current one — so hand back that thread's ACP
     // id rather than starting a second conversation on every reconnect.
     // Which thread that is, is decided outside ACP, so the contract a client
     // speaks does not change.
@@ -320,7 +320,7 @@ export function attachDownstream(
     });
   }
 
-  conn = app.connect(wsStream(ws, sessionId));
+  conn = app.connect(wsStream(ws, boxId));
   const active = conn;
 
   const detach = (): void => {

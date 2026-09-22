@@ -8,17 +8,17 @@ import {
   MIGRATIONS,
   openDb,
   readHarnessCatalog,
-  touchSession,
+  touchBox,
   upsertHarnessCatalog,
   type Db,
 } from './db.ts';
 
 /**
- * The migrations that moved a session's conversation onto its threads.
+ * The migrations that moved a box's conversation onto its threads.
  *
- * A deployment upgrading in place has live sessions whose conversation is a
- * single `sessions.acp_session_id`, and that conversation has to survive as
- * the session's first thread. What was session-wide about a running turn then
+ * A deployment upgrading in place has live boxes whose conversation is a
+ * single `boxes.acp_session_id`, and that conversation has to survive as
+ * the box's first thread. What was box-wide about a running turn then
  * moves onto the thread it is about.
  */
 
@@ -41,8 +41,8 @@ function atVersion3(withAcpSessionId: string | null): void {
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, acp_session_id,
        turn_active, created_at, last_active_at)
-     VALUES ('s1', 'old session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
-       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', ?, 0, 1000, 2000)`,
+     VALUES ('s1', 'old box', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', ?, 0, 1000, 2000)`,
   ).run(withAcpSessionId);
   db.close();
 }
@@ -52,44 +52,44 @@ function columns(db: Db, table: string): string[] {
   return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name);
 }
 
-test('an existing conversation becomes the session first thread', () => {
+test('an existing conversation becomes the box first thread', () => {
   atVersion3('acp-abc');
   const db = openDb(dir);
   try {
     const threads = db.prepare('SELECT * FROM threads').all() as Array<Record<string, unknown>>;
     assert.equal(threads.length, 1);
-    assert.equal(threads[0]!['session_id'], 's1');
+    assert.equal(threads[0]!['box_id'], 's1');
     assert.equal(threads[0]!['acp_session_id'], 'acp-abc');
     assert.equal(threads[0]!['ordinal'], 1);
-    // The session's own timestamps carry over: the thread is that session's
+    // The box's own timestamps carry over: the thread is that box's
     // conversation, not a new one made today.
     assert.equal(threads[0]!['created_at'], 1000);
     assert.equal(threads[0]!['last_active_at'], 2000);
 
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+    const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
       string,
       unknown
     >;
-    assert.equal(session['current_thread_id'], threads[0]!['id']);
+    assert.equal(box['current_thread_id'], threads[0]!['id']);
     // The column it replaces is gone, so nothing can keep writing to it.
-    assert.ok(!columns(db, 'sessions').includes('acp_session_id'));
+    assert.ok(!columns(db, 'boxes').includes('acp_session_id'));
   } finally {
     db.close();
   }
 });
 
-test('a session that never had a conversation gets no thread', () => {
+test('a box that never had a conversation gets no thread', () => {
   atVersion3(null);
   const db = openDb(dir);
   try {
     const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
     assert.equal(count.n, 0);
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+    const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
       string,
       unknown
     >;
     // The orchestrator mints one on the next spawn, exactly as it did before.
-    assert.equal(session['current_thread_id'], null);
+    assert.equal(box['current_thread_id'], null);
   } finally {
     db.close();
   }
@@ -104,8 +104,8 @@ function atVersion4(turnActive: number): void {
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        turn_active, created_at, last_active_at)
-     VALUES ('s1', 'busy session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
-       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, 1000, 2000)`,
+     VALUES ('s1', 'busy box', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, 1000, 2000)`,
   ).run(turnActive);
   db.prepare(
     `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
@@ -129,7 +129,7 @@ test('a running turn moves onto the threads, starting cleared', () => {
     >;
     assert.equal(thread['turn_active'], 0);
     // The column it replaces is gone, so nothing can keep writing to it.
-    assert.ok(!columns(db, 'sessions').includes('turn_active'));
+    assert.ok(!columns(db, 'boxes').includes('turn_active'));
     // And the thread's conversation and identity are untouched by the move.
     assert.equal(thread['acp_session_id'], 'acp-abc');
     assert.equal(thread['ordinal'], 1);
@@ -163,26 +163,26 @@ function atVersion5(): void {
     `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
-     VALUES ('s1', 'volume session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
-       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'stopped', NULL, 1000, 2000)`,
+     VALUES ('s1', 'volume box', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'stopped', NULL, 1000, 2000)`,
   ).run();
   db.close();
 }
 
-test('a volume-backed session keeps its volume and gains no directory', () => {
+test('a volume-backed box keeps its volume and gains no directory', () => {
   atVersion5();
   const db = openDb(dir);
   try {
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+    const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
       string,
       unknown
     >;
     // Nothing is moved by the migration itself: the files are in a named
     // volume this process has no path to, and only a start can recreate the
     // container with the new mount.
-    assert.equal(session['ws_volume'], 'ws-s1');
-    assert.equal(session['workspace_dir'], null);
-    assert.ok(columns(db, 'sessions').includes('workspace_dir'));
+    assert.equal(box['ws_volume'], 'ws-s1');
+    assert.equal(box['workspace_dir'], null);
+    assert.ok(columns(db, 'boxes').includes('workspace_dir'));
   } finally {
     db.close();
   }
@@ -207,7 +207,7 @@ test('a deployment on the previous release upgrades cleanly', () => {
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
      VALUES ('live', 'on the old release', 'DEFAULT', 'img', '[]', 'c1',
-       'sn-live', '10.200.0.0/24', 'ws-live', 'home-live', 'stopped', NULL, 1000, 2000)`,
+       'bn-live', '10.200.0.0/24', 'ws-live', 'home-live', 'stopped', NULL, 1000, 2000)`,
   ).run();
   db.prepare(
     `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label,
@@ -218,15 +218,15 @@ test('a deployment on the previous release upgrades cleanly', () => {
 
   const upgraded = openDb(dir);
   try {
-    const sessions = columns(upgraded, 'sessions');
-    assert.ok(sessions.includes('workspace_dir'));
+    const boxes = columns(upgraded, 'boxes');
+    assert.ok(boxes.includes('workspace_dir'));
     // The review's base revision survives as the expression it always was.
-    assert.ok(sessions.includes('review_base_rev'));
+    assert.ok(boxes.includes('review_base_rev'));
     // Its root and its resolved commit do not: the review is over the whole
     // workspace now, and one expression resolves separately in every
     // repository the workspace holds, so neither can mean anything.
-    assert.ok(!sessions.includes('review_root'));
-    assert.ok(!sessions.includes('review_base_commit'));
+    assert.ok(!boxes.includes('review_root'));
+    assert.ok(!boxes.includes('review_base_commit'));
 
     // The migration that shipped first kept its index, so what it created is
     // still there and still holds its rows.
@@ -236,10 +236,10 @@ test('a deployment on the previous release upgrades cleanly', () => {
       .get() as { n: number };
     assert.equal(push.n, 1);
 
-    // And the session that predates workspace directories is untouched: it
+    // And the box that predates workspace directories is untouched: it
     // migrates at its next start, not here.
     const row = upgraded
-      .prepare("SELECT ws_volume, workspace_dir FROM sessions WHERE id = 'live'")
+      .prepare("SELECT ws_volume, workspace_dir FROM boxes WHERE id = 'live'")
       .get() as { ws_volume: string; workspace_dir: string | null };
     assert.deepEqual(row, { ws_volume: 'ws-live', workspace_dir: null });
   } finally {
@@ -258,7 +258,7 @@ test('threads from before the mode column upgrade to the deployment default', ()
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
      VALUES ('live', 'from before modes were kept', 'DEFAULT', 'img', '[]', 'c1',
-       'sn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
+       'bn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
   ).run();
   db.prepare(
     `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
@@ -287,7 +287,7 @@ test('threads from before the mode column upgrade to the deployment default', ()
   }
 });
 
-test('the agent tables arrive with a global set, and existing sessions select none', () => {
+test('the agent tables arrive with a global set, and existing boxes select none', () => {
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS.slice(0, 8)) db.exec(sql);
   db.pragma('user_version = 8');
@@ -296,7 +296,7 @@ test('the agent tables arrive with a global set, and existing sessions select no
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
      VALUES ('live', 'from before agent sets', 'DEFAULT', 'img', '[]', 'c1',
-       'sn-live', '10.200.0.0/24', '', 'home-live', 'stopped', NULL, 1000, 2000)`,
+       'bn-live', '10.200.0.0/24', '', 'home-live', 'stopped', NULL, 1000, 2000)`,
   ).run();
   db.close();
 
@@ -307,11 +307,11 @@ test('the agent tables arrive with a global set, and existing sessions select no
     const sets = upgraded.prepare('SELECT id, name FROM agent_sets').all();
     assert.deepEqual(sets, [{ id: 'global', name: 'Global' }]);
 
-    // A session that predates the feature gets the global set and nothing
+    // A box that predates the feature gets the global set and nothing
     // else, which is what a null column means.
-    assert.ok(columns(upgraded, 'sessions').includes('agent_set_id'));
+    assert.ok(columns(upgraded, 'boxes').includes('agent_set_id'));
     const row = upgraded
-      .prepare("SELECT agent_set_id FROM sessions WHERE id = 'live'")
+      .prepare("SELECT agent_set_id FROM boxes WHERE id = 'live'")
       .get() as { agent_set_id: string | null };
     assert.equal(row.agent_set_id, null);
   } finally {
@@ -352,7 +352,7 @@ test('threads from before the done column read as not done', () => {
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
      VALUES ('live', 'from before threads were marked', 'DEFAULT', 'img', '[]', 'c1',
-       'sn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
+       'bn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
   ).run();
   db.prepare(
     `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
@@ -377,7 +377,7 @@ test('threads from before the done column read as not done', () => {
 });
 
 
-test('sessions from before the token column each get one of their own', () => {
+test('boxes from before the token column each get one of their own', () => {
   const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN ws_token'));
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
@@ -386,23 +386,23 @@ test('sessions from before the token column each get one of their own', () => {
     db.prepare(
       `INSERT INTO sessions (id, name, profile, image, agent_cmd, container_id,
          network_name, subnet, ws_volume, home_volume, status, created_at, last_active_at)
-       VALUES (?, 'old session', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
+       VALUES (?, 'old box', 'DEFAULT', 'img', '["claude-agent-acp"]', 'c1',
          ?, '10.200.0.0/24', '', '', 'running', 1000, 2000)`,
-    ).run(id, `sn-${id}`);
+    ).run(id, `bn-${id}`);
   }
   db.close();
 
   const upgraded = openDb(dir);
   try {
-    // A session that existed before this went on being reachable, so it needs
+    // A box that existed before this went on being reachable, so it needs
     // a token now rather than at its next start.
     const rows = upgraded
-      .prepare('SELECT id, ws_token FROM sessions ORDER BY id')
+      .prepare('SELECT id, ws_token FROM boxes ORDER BY id')
       .all() as Array<{ id: string; ws_token: string }>;
     assert.equal(rows.length, 2);
     for (const row of rows) assert.match(row.ws_token, /^[0-9a-f]{64}$/);
     // One each: the backfill is what keeps a leaked token from opening the
-    // session next to it.
+    // box next to it.
     assert.notEqual(rows[0]!.ws_token, rows[1]!.ws_token);
   } finally {
     upgraded.close();
@@ -423,28 +423,28 @@ test('a database written by a newer build is refused rather than opened', () => 
   });
 });
 
-/** A live session row, in the shape today's schema wants. */
-function insertLiveSession(db: Db, id: string): void {
+/** A live box row, in the shape today's schema wants. */
+function insertLiveBox(db: Db, id: string): void {
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', '', '', 'running', NULL, 1000, 2000)`,
-  ).run(id, `sn-${id}`);
+  ).run(id, `bn-${id}`);
 }
 
-test('a deleted session takes no more writes', () => {
+test('a deleted box takes no more writes', () => {
   // Deleting sets the tombstone before it clears the tables, so work still in
   // flight — an upstream that is only now settling — must not stir the row
   // behind it.
   const db = openDb(dir);
-  insertLiveSession(db, 's1');
+  insertLiveBox(db, 's1');
 
-  db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = 's1'").run();
-  touchSession(db, 's1');
+  db.prepare("UPDATE boxes SET status = 'deleted' WHERE id = 's1'").run();
+  touchBox(db, 's1');
 
-  const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('s1') as {
+  const row = db.prepare('SELECT last_active_at FROM boxes WHERE id = ?').get('s1') as {
     last_active_at: number;
   };
   assert.equal(row.last_active_at, 2000);
@@ -453,7 +453,7 @@ test('a deleted session takes no more writes', () => {
 
 /**
  * A deployment at the version before credentials, harnesses and the config map
- * — the last state anybody can be in — with one live session and one thread
+ * — the last state anybody can be in — with one live box and one thread
  * that was left on a model.
  */
 function atLastRelease(): void {
@@ -467,7 +467,7 @@ function atLastRelease(): void {
        created_at, last_active_at)
      VALUES ('live', 'from before credentials moved', 'DEFAULT', 'img',
        '["claude-agent-acp"]', 'c1',
-       'sn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
+       'bn-live', '10.200.0.0/24', '', 'home-live', 'running', 't1', 1000, 2000)`,
   ).run();
   db.prepare(
     `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
@@ -513,9 +513,9 @@ test('the credential and settings tables arrive empty on an existing deployment'
       'updated_at',
     ]);
 
-    // And the session that predates them is untouched: its box gets a
+    // And the box that predates them is untouched: its box gets a
     // placeholder for every credential at its next start, whatever is stored.
-    const row = upgraded.prepare("SELECT name FROM sessions WHERE id = 'live'").get() as {
+    const row = upgraded.prepare("SELECT name FROM boxes WHERE id = 'live'").get() as {
       name: string;
     };
     assert.equal(row.name, 'from before credentials moved');
@@ -547,8 +547,8 @@ test('a thread from before harnesses is Claude, on the model it was left on', ()
     assert.ok(!columns(upgraded, 'threads').includes('model_id'));
 
     // And the argv comes from the registry now: a box may need either adapter,
-    // so the one a session was created with says nothing.
-    assert.ok(!columns(upgraded, 'sessions').includes('agent_cmd'));
+    // so the one a box was created with says nothing.
+    assert.ok(!columns(upgraded, 'boxes').includes('agent_cmd'));
 
     // The catalogue arrives empty. Nothing fills it until an adapter has
     // answered for a thread — a dialog on a fresh deployment offers the agent

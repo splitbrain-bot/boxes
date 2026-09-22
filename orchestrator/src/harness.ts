@@ -162,7 +162,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     /**
      * `CODEX_API_KEY` is read by the adapter, not by Codex itself: with
      * `DEFAULT_AUTH_REQUEST` naming the `api-key` method, `codex-acp` logs
-     * itself in from the environment when a session call finds no account, and
+     * itself in from the environment when a box call finds no account, and
      * Codex persists the key to `$CODEX_HOME/auth.json` from there.
      * `NO_BROWSER` hides the browser-based method, which would otherwise open
      * a browser inside the box.
@@ -175,7 +175,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      *
      * `CODEX_CA_CERTIFICATE` is deliberately absent. Codex wants it to trust
      * the egress proxy's CA, but that is a fact about the deployment rather
-     * than about the harness, so it is set in `sessionEnv` beside
+     * than about the harness, so it is set in `boxEnv` beside
      * `SSL_CERT_FILE` and the other CA variables.
      */
     env: (placeholder: string) => ({

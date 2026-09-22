@@ -41,9 +41,9 @@ no()    { red   "FAIL $*"; fail=$((fail+1)); }
 api() { curl -sS "${CURL_AUTH[@]}" "$@"; }
 
 cleanup() {
-  if [ -n "${SESSION_ID:-}" ]; then
-    grey "cleaning up session $SESSION_ID"
-    api -X DELETE "$API_BASE/api/sessions/$SESSION_ID" >/dev/null || true
+  if [ -n "${BOX_ID:-}" ]; then
+    grey "cleaning up box $BOX_ID"
+    api -X DELETE "$API_BASE/api/boxes/$BOX_ID" >/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -70,15 +70,15 @@ seed_credential() {
 seed_credential claude "$REAL_CLAUDE"
 seed_credential openai "$REAL_OPENAI" api_key
 
-echo "== creating a session =="
-SESSION_ID=$(api -X POST "$API_BASE/api/sessions" \
+echo "== creating a box =="
+BOX_ID=$(api -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' -d '{"name":"live-test"}' | jq -r '.id')
-[ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] || { red "could not create session"; exit 1; }
-CONTAINER="session-$SESSION_ID"
-WS_TOKEN=$(api "$API_BASE/api/sessions/$SESSION_ID" | jq -r '.wsToken')
+[ -n "$BOX_ID" ] && [ "$BOX_ID" != "null" ] || { red "could not create box"; exit 1; }
+CONTAINER="box-$BOX_ID"
+WS_TOKEN=$(api "$API_BASE/api/boxes/$BOX_ID" | jq -r '.wsToken')
 # Same origin as the API, the way the dashboard derives it.
-LOCAL_WS="${API_BASE/http/ws}/ws/sessions/$SESSION_ID/acp"
-grey "session=$SESSION_ID  ws=$LOCAL_WS"
+LOCAL_WS="${API_BASE/http/ws}/ws/boxes/$BOX_ID/acp"
+grey "box=$BOX_ID  ws=$LOCAL_WS"
 
 echo
 echo "== M1: the subscription token works inside the container =="
@@ -95,15 +95,15 @@ echo
 echo "== the turn above ran on a placeholder, not on the real token =="
 # The same turn, seen from the credential's side: the container holds something
 # that is not the stored token, and the proxy is what made it work.
-IN_SESSION=$(docker exec "$CONTAINER" printenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
+IN_BOX=$(docker exec "$CONTAINER" printenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
 if [ -z "$REAL_CLAUDE" ]; then
   grey "skipped: this run was passed no token, so there is nothing to compare against"
-elif [ -z "$IN_SESSION" ]; then
-  no "the session has no CLAUDE_CODE_OAUTH_TOKEN at all"
-elif [ "$IN_SESSION" = "$REAL_CLAUDE" ]; then
-  no "the session holds the real Claude token - translation is not in effect"
+elif [ -z "$IN_BOX" ]; then
+  no "the box has no CLAUDE_CODE_OAUTH_TOKEN at all"
+elif [ "$IN_BOX" = "$REAL_CLAUDE" ]; then
+  no "the box holds the real Claude token - translation is not in effect"
 else
-  ok "the session holds a placeholder; the proxy swapped it for the real token"
+  ok "the box holds a placeholder; the proxy swapped it for the real token"
 fi
 
 echo
@@ -114,10 +114,10 @@ echo "== a Codex thread beside the Claude one, in the same box =="
 if [ -z "$REAL_OPENAI" ]; then
   grey "skipped: no OpenAI key was passed, so nothing can run a Codex turn"
 else
-  CODEX_THREAD=$(api -X POST "$API_BASE/api/sessions/$SESSION_ID/threads" \
+  CODEX_THREAD=$(api -X POST "$API_BASE/api/boxes/$BOX_ID/threads" \
     -H 'Content-Type: application/json' \
     -d '{"options":{"harness":"codex"}}' | jq -r '.id')
-  CODEX_HARNESS=$(api "$API_BASE/api/sessions/$SESSION_ID/threads" \
+  CODEX_HARNESS=$(api "$API_BASE/api/boxes/$BOX_ID/threads" \
     | jq -r --arg t "$CODEX_THREAD" '.[] | select(.id==$t) | .harness')
   if [ "$CODEX_HARNESS" = "codex" ]; then
     ok "the box took a Codex thread beside its Claude one"
@@ -127,16 +127,16 @@ else
 
   # The box holds a placeholder, never the key. Same proof as the Claude one
   # above, on the variable the Codex adapter logs itself in with.
-  IN_SESSION_KEY=$(docker exec "$CONTAINER" printenv CODEX_API_KEY 2>/dev/null || true)
-  if [ -z "$IN_SESSION_KEY" ]; then
-    no "the session has no CODEX_API_KEY at all"
-  elif [ "$IN_SESSION_KEY" = "$REAL_OPENAI" ]; then
-    no "the session holds the real OpenAI key - translation is not in effect"
+  IN_BOX_KEY=$(docker exec "$CONTAINER" printenv CODEX_API_KEY 2>/dev/null || true)
+  if [ -z "$IN_BOX_KEY" ]; then
+    no "the box has no CODEX_API_KEY at all"
+  elif [ "$IN_BOX_KEY" = "$REAL_OPENAI" ]; then
+    no "the box holds the real OpenAI key - translation is not in effect"
   else
-    ok "the session holds a placeholder for the OpenAI key"
+    ok "the box holds a placeholder for the OpenAI key"
   fi
 
-  CODEX_WS="${API_BASE/http/ws}/ws/sessions/$SESSION_ID/threads/$CODEX_THREAD/acp"
+  CODEX_WS="${API_BASE/http/ws}/ws/boxes/$BOX_ID/threads/$CODEX_THREAD/acp"
   grey "codex thread=$CODEX_THREAD"
   # One turn on the other adapter. `session/new` hands back the pinned
   # thread's own conversation rather than starting a second one, so this is
@@ -169,9 +169,9 @@ const rpc = (method, params) =>
     setTimeout(() => { if (pending.delete(i)) rej(new Error(`timeout: ${method}`)); }, 300000);
   });
 await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
-const { sessionId } = await rpc('session/new', { cwd: '/workspace', mcpServers: [] });
+const { boxId } = await rpc('session/new', { cwd: '/workspace', mcpServers: [] });
 await rpc('session/prompt', {
-  sessionId,
+  boxId,
   prompt: [{ type: 'text', text: 'reply with the word ok and nothing else' }],
 });
 ws.close();
@@ -187,9 +187,9 @@ NODE
 
   # And the real key is still nowhere in the box after a turn has carried it.
   if docker exec "$CONTAINER" env 2>/dev/null | grep -qF -- "$REAL_OPENAI"; then
-    no "the real OpenAI key is in the session's environment"
+    no "the real OpenAI key is in the box's environment"
   else
-    ok "the real OpenAI key is nowhere in the session after a Codex turn"
+    ok "the real OpenAI key is nowhere in the box after a Codex turn"
   fi
 fi
 
@@ -236,12 +236,12 @@ const record = (good, text) => { results.push([good, text]); };
 const a = connect();
 await a.open;
 await a.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
-const { sessionId } = await a.rpc('session/new', { cwd: '/workspace', mcpServers: [] });
+const { boxId } = await a.rpc('session/new', { cwd: '/workspace', mcpServers: [] });
 
 // Long enough that the socket is certainly closed before the turn ends.
 const prompt = 'Count slowly from 1 to 20, one number per line, then say DONE.';
 const turn = a.rpc('session/prompt', {
-  sessionId,
+  boxId,
   prompt: [{ type: 'text', text: prompt }],
 });
 turn.catch(() => {}); // this browser will not be around to see the answer
@@ -259,7 +259,7 @@ await b.open;
 await b.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
 // A reattaching browser clears its messages and calls session/load, expecting the replay to
 // arrive as session/update notifications.
-await b.rpc('session/load', { sessionId, cwd: '/workspace', mcpServers: [] });
+await b.rpc('session/load', { boxId, cwd: '/workspace', mcpServers: [] });
 await sleep(5000);
 
 // Only the agent's own messages count: the replay also carries the prompt,
@@ -303,9 +303,9 @@ const rpc = (method, params) => new Promise((res) => {
 });
 await new Promise((r) => ws.addEventListener('open', r));
 await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
-const { sessionId } = await rpc('session/new', { cwd: '/workspace', mcpServers: [] });
+const { boxId } = await rpc('session/new', { cwd: '/workspace', mcpServers: [] });
 rpc('session/prompt', {
-  sessionId,
+  boxId,
   prompt: [{ type: 'text', text: 'Create a file /workspace/permission-probe.txt containing the word hello.' }],
 }).catch(() => {});
 await new Promise((r) => setTimeout(r, 3000));
@@ -315,7 +315,7 @@ NODE
 grey "waiting up to 60s for the request to be queued"
 held=0
 for _ in $(seq 1 20); do
-  n=$(api "$API_BASE/api/sessions/$SESSION_ID" | jq -r '.pendingCount')
+  n=$(api "$API_BASE/api/boxes/$BOX_ID" | jq -r '.pendingCount')
   if [ "$n" != "0" ] && [ "$n" != "null" ]; then held=1; break; fi
   sleep 3
 done

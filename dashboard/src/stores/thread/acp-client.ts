@@ -146,7 +146,7 @@ class RpcError extends Error {
   }
 }
 
-/** One session's connection, which reconnects on its own until closed. */
+/** One box's connection, which reconnects on its own until closed. */
 export class AcpClient {
   private ws: WebSocket | null = null;
   private nextId = 1;

@@ -95,7 +95,7 @@ describe('resolveEgressMaterial', () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   }, 30_000);
 
-  it('reuses what it stored, because running sessions hold the old CA', async () => {
+  it('reuses what it stored, because running boxes hold the old CA', async () => {
     const dir = dataDir();
     const first = await resolveEgressMaterial(dir, specs);
     const second = await resolveEgressMaterial(dir, specs);
@@ -356,7 +356,7 @@ describe('EgressManager', () => {
     const manager = new EgressManager(cfg, storeWith(cfg));
     await manager.prepare();
 
-    // An empty string rather than an invention: sessionEnv drops a variable
+    // An empty string rather than an invention: boxEnv drops a variable
     // with no value, so the box is given nothing rather than nonsense.
     expect(manager.placeholderFor('gemini')).toBe('');
   }, 30_000);

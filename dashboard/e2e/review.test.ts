@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reviewWorkspace } from './workspace.ts';
 
 /**
@@ -17,7 +17,7 @@ import { reviewWorkspace } from './workspace.ts';
  * around, so it is the one the browser walks.
  */
 
-const SESSION = DEFAULT_SESSION.id;
+const BOX = DEFAULT_BOX.id;
 
 let stub: TestOrchestrator;
 
@@ -26,12 +26,12 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // A fresh session and a fresh workspace per test: comments are written for
-  // real, one test reviews a session of another shape, and a leftover of
+  // A fresh box and a fresh workspace per test: comments are written for
+  // real, one test reviews a box of another shape, and a leftover of
   // either would make the next test's counts wrong.
-  stub.resetSessions();
-  stub.createSession();
-  stub.review(SESSION);
+  stub.resetBoxes();
+  stub.createBox();
+  stub.review(BOX);
   stub.reviewCalls.length = 0;
 });
 
@@ -43,7 +43,7 @@ afterAll(async () => {
 // --- browsing ---------------------------------------------------------------
 
 test('the tree is the whole screen on a phone, and a file replaces it', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
     // The workspace's own top level: two repositories and a directory that is
     // in neither. Every one of them is browsable, which is the whole change.
@@ -88,7 +88,7 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
 test('the tree is a column beside the pane on a desktop', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
     'dark',
     'desktop',
   );
@@ -116,7 +116,7 @@ test('the tree is a column beside the pane on a desktop', async () => {
 test('a pasted link opens straight to its file', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2FREADME.md`,
+    `/boxes/${BOX}/review?path=app%2FREADME.md`,
   );
   try {
     await expect.poll(() => page.getByText('A project the agent cloned.').isVisible()).toBe(true);
@@ -129,7 +129,7 @@ test('a pasted link opens straight to its file', async () => {
 test('the code is highlighted, and a line is addressable', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fapp.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
     'dark',
     'desktop',
   );
@@ -156,7 +156,7 @@ test('the code is highlighted, and a line is addressable', async () => {
 test('a gutter marker opens the hunk, deleted lines included', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     await expect.poll(() => page.getByText('lines deleted here').isVisible()).toBe(true);
@@ -176,7 +176,7 @@ test('a gutter marker opens the hunk, deleted lines included', async () => {
 test('the gutter opens the hunk, and the code opens the comment', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     // The row is split: the gutter is the change, the code is the comment. A
@@ -201,7 +201,7 @@ test('the gutter opens the hunk, and the code opens the comment', async () => {
 test('a line with no hunk behind it has no gutter button', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fapp.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
   );
   try {
     // An unchanged file has nothing to show, so its gutter is not a target
@@ -217,10 +217,10 @@ test('a line with no hunk behind it has no gutter button', async () => {
 test('a file the change deleted is listed, and says it is gone', async () => {
   // Listed by its status alone: it is on no disk and in no ls-files, which is
   // exactly why it used to fall out of the tree the moment it mattered.
-  stub.review(SESSION, reviewWorkspace({ deleted: ['app/src/old.ts'] }));
+  stub.review(BOX, reviewWorkspace({ deleted: ['app/src/old.ts'] }));
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fold.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fold.ts`,
     'dark',
     'desktop',
   );
@@ -246,11 +246,11 @@ test('a file past the line limit is one plain block with nothing to tap', async 
   const workspace = reviewWorkspace();
   workspace.files['app/long.ts'] = `const first = false;\n${body}\n`;
   workspace.committed!['app/long.ts'] = `const first = true;\n${body}\n`;
-  stub.review(SESSION, workspace);
+  stub.review(BOX, workspace);
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Flong.ts`,
+    `/boxes/${BOX}/review?path=app%2Flong.ts`,
     'dark',
     'desktop',
   );
@@ -280,7 +280,7 @@ test('a file past the line limit is one plain block with nothing to tap', async 
 test('prev/next steps through the changes', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
     'dark',
     'desktop',
   );
@@ -304,7 +304,7 @@ test('prev/next steps through the changes', async () => {
 test('commenting a line on a phone writes it through the API', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     // The code half of the row, which is the comment target: it is not
@@ -325,10 +325,10 @@ test('commenting a line on a phone writes it through the API', async () => {
     await expect.poll(() => stub.reviewCalls.length).toBe(1);
     expect(stub.reviewCalls[0]).toMatchObject({
       method: 'PUT',
-      sessionId: SESSION,
+      boxId: BOX,
       body: { path: 'app/src/boot.ts', line: 2, comment: 'this TODO needs an owner' },
     });
-    expect((await stub.comments(SESSION, 'app/src/boot.ts'))[0]?.comment).toBe(
+    expect((await stub.comments(BOX, 'app/src/boot.ts'))[0]?.comment).toBe(
       'this TODO needs an owner',
     );
 
@@ -343,7 +343,7 @@ test('commenting a line on a phone writes it through the API', async () => {
 test('commenting a line on a desktop uses the inline composer', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fapp.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
     'dark',
     'desktop',
   );
@@ -372,11 +372,11 @@ test('commenting a line on a desktop uses the inline composer', async () => {
 });
 
 test('a comment can be edited and deleted', async () => {
-  await stub.comment(SESSION, 'app/src/app.ts', 2, 'first thoughts');
+  await stub.comment(BOX, 'app/src/app.ts', 2, 'first thoughts');
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fapp.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
     'dark',
     'desktop',
   );
@@ -400,7 +400,7 @@ test('a comment can be edited and deleted', async () => {
       .toBe(true);
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(false);
-    expect(await stub.comments(SESSION, 'app/src/app.ts')).toEqual([]);
+    expect(await stub.comments(BOX, 'app/src/app.ts')).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -408,14 +408,14 @@ test('a comment can be edited and deleted', async () => {
 });
 
 test('an outdated comment says the code moved', async () => {
-  await stub.comment(SESSION, 'app/src/app.ts', 1, 'about the old import');
+  await stub.comment(BOX, 'app/src/app.ts', 1, 'about the old import');
   // The agent rewrote the file underneath it, so the lines the comment was
   // written against are not there any more — which is what makes it outdated.
-  stub.write(SESSION, 'app/src/app.ts', 'import { start } from "./start";\n\nstart();\n');
+  stub.write(BOX, 'app/src/app.ts', 'import { start } from "./start";\n\nstart();\n');
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fapp.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
     'dark',
     'desktop',
   );
@@ -432,11 +432,11 @@ test('an outdated comment says the code moved', async () => {
 });
 
 test('handing the review to the agent stages a prompt, unsent', async () => {
-  await stub.comment(SESSION, 'app/src/app.ts', 2, 'please fix');
+  await stub.comment(BOX, 'app/src/app.ts', 2, 'please fix');
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review`,
+    `/boxes/${BOX}/review`,
     'dark',
     'desktop',
   );
@@ -448,7 +448,7 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
 
     // Lands in the thread, with the prompt sitting in the composer and no
     // turn started: what to do with a review is the reviewer's call.
-    await expect.poll(() => page.url()).toContain(`/sessions/${SESSION}/threads/th1`);
+    await expect.poll(() => page.url()).toContain(`/boxes/${BOX}/threads/th1`);
     await expect
       .poll(() => page.getByText('Read REVIEW.md and address the comments in it.').isVisible())
       .toBe(true);
@@ -462,11 +462,11 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
 });
 
 test('a new review clears every comment, behind a confirmation', async () => {
-  await stub.comment(SESSION, 'app/src/app.ts', 2, 'to be discarded');
+  await stub.comment(BOX, 'app/src/app.ts', 2, 'to be discarded');
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fapp.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
     'dark',
     'desktop',
   );
@@ -478,7 +478,7 @@ test('a new review clears every comment, behind a confirmation', async () => {
     await page.getByRole('button', { name: 'Delete the review' }).click();
 
     await expect.poll(() => page.getByText('to be discarded').isVisible()).toBe(false);
-    expect(stub.hasReview(SESSION)).toBe(false);
+    expect(stub.hasReview(BOX)).toBe(false);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -490,7 +490,7 @@ test('a new review clears every comment, behind a confirmation', async () => {
 test('a line can be fixed in place, and the save reaches the workspace', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     await expect.poll(() => page.locator('[data-line="2"] code').isVisible()).toBe(true);
@@ -514,13 +514,13 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
     await expect.poll(() => stub.reviewCalls.length).toBe(1);
     expect(stub.reviewCalls[0]).toMatchObject({
       method: 'PUT file',
-      sessionId: SESSION,
+      boxId: BOX,
       body: { path: 'app/src/boot.ts' },
     });
     // The file of the workspace the agent is working in, which is the whole
     // point of the review living here.
     await expect
-      .poll(() => stub.read(SESSION, 'app/src/boot.ts'))
+      .poll(() => stub.read(BOX, 'app/src/boot.ts'))
       .toContain('wireTheRouter();');
     // And saved is saved: nothing left to write.
     await expect
@@ -536,15 +536,15 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
 test('the line being read stays put across a switch into editing', async () => {
   // A comment high up, so the card between the rows is what moves everything
   // below it when edit mode folds it away.
-  stub.review(SESSION, {
+  stub.review(BOX, {
     files: { 'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n') },
     repos: [''],
   });
-  await stub.comment(SESSION, 'long.ts', 3, 'a card tall enough to push the rest down');
+  await stub.comment(BOX, 'long.ts', 3, 'a card tall enough to push the rest down');
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=long.ts`,
+    `/boxes/${BOX}/review?path=long.ts`,
   );
   try {
     const pane = page.locator('[data-slot="review-code-pane"]');
@@ -587,7 +587,7 @@ test('the line being read stays put across a switch into editing', async () => {
 test('a save the agent got in first is refused, and the choice is offered', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=lib%2Findex.ts`,
+    `/boxes/${BOX}/review?path=lib%2Findex.ts`,
     'dark',
     'desktop',
   );
@@ -600,19 +600,19 @@ test('a save the agent got in first is refused, and the choice is offered', asyn
 
     // The box is running while the review is open, which is allowed: the
     // agent writes the same file.
-    stub.write(SESSION, 'lib/index.ts', 'export const version = "9.9.9";\n');
+    stub.write(BOX, 'lib/index.ts', 'export const version = "9.9.9";\n');
 
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect
       .poll(() => page.getByText('The agent changed this file while you were editing it.').isVisible())
       .toBe(true);
     // Refused rather than applied, and the buffer is still there to save.
-    expect(stub.read(SESSION, 'lib/index.ts')).toBe('export const version = "9.9.9";\n');
+    expect(stub.read(BOX, 'lib/index.ts')).toBe('export const version = "9.9.9";\n');
     await shoot(page, 'review-edit-conflict-desktop');
 
     await page.getByRole('button', { name: 'Save anyway' }).click();
     await expect
-      .poll(() => stub.read(SESSION, 'lib/index.ts'))
+      .poll(() => stub.read(BOX, 'lib/index.ts'))
       .toBe('export const version = "2.0.0";\n');
     expect(errors).toEqual([]);
   } finally {
@@ -623,7 +623,7 @@ test('a save the agent got in first is refused, and the choice is offered', asyn
 test('walking away from unsaved edits asks first', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2FREADME.md`,
+    `/boxes/${BOX}/review?path=app%2FREADME.md`,
   );
   try {
     await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
@@ -642,7 +642,7 @@ test('walking away from unsaved edits asks first', async () => {
     await page.getByRole('button', { name: 'Discard the edits' }).click();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
     // Nothing was written, which is what discarding means.
-    expect(stub.read(SESSION, 'app/README.md')).toBe('# demo\n\nA project the agent cloned.\n');
+    expect(stub.read(BOX, 'app/README.md')).toBe('# demo\n\nA project the agent cloned.\n');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -663,11 +663,11 @@ test('the rows and the editor over them wrap in the same places', async () => {
     'A line that ends in two spaces, which markdown reads as a break.  ',
   ];
   const lines = Array.from({ length: 25 }, (_, i) => shapes[i % shapes.length]!);
-  stub.write(SESSION, 'readme.md', `${lines.join('\n')}\n`);
+  stub.write(BOX, 'readme.md', `${lines.join('\n')}\n`);
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=readme.md`,
+    `/boxes/${BOX}/review?path=readme.md`,
   );
   try {
     await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
@@ -707,10 +707,10 @@ test('the rows and the editor over them wrap in the same places', async () => {
 });
 
 test('a file the pane cannot show whole cannot be edited', async () => {
-  stub.review(SESSION, reviewWorkspace({ deleted: ['app/gone.ts'] }));
+  stub.review(BOX, reviewWorkspace({ deleted: ['app/gone.ts'] }));
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fgone.ts`,
+    `/boxes/${BOX}/review?path=app%2Fgone.ts`,
   );
   try {
     await expect.poll(() => page.getByText('This file was deleted').isVisible()).toBe(true);
@@ -727,7 +727,7 @@ test('a file the pane cannot show whole cannot be edited', async () => {
 test('the base picker sets a revision and says which one is active', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review`,
+    `/boxes/${BOX}/review`,
     'dark',
     'desktop',
   );
@@ -761,7 +761,7 @@ test('the base picker sets a revision and says which one is active', async () =>
 test('a revision that names nothing in one repository is reported, not refused', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review`,
+    `/boxes/${BOX}/review`,
     'dark',
     'desktop',
   );
@@ -785,7 +785,7 @@ test('a revision that names nothing in one repository is reported, not refused',
 test('a revision that is not one anywhere is reported, not swallowed', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review`,
+    `/boxes/${BOX}/review`,
     'dark',
     'desktop',
   );
@@ -805,11 +805,11 @@ test('a revision that is not one anywhere is reported, not swallowed', async () 
 // --- degraded shapes --------------------------------------------------------
 
 test('a workspace with no repository still browses and comments', async () => {
-  stub.review(SESSION, { files: { 'notes.txt': 'just some notes\nnothing tracked\n' }, repos: [] });
+  stub.review(BOX, { files: { 'notes.txt': 'just some notes\nnothing tracked\n' }, repos: [] });
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=notes.txt`,
+    `/boxes/${BOX}/review?path=notes.txt`,
     'dark',
     'desktop',
   );
@@ -831,18 +831,18 @@ test('a workspace with no repository still browses and comments', async () => {
   }
 });
 
-test('a session whose workspace cannot be read says what to do', async () => {
-  // A session from before workspaces became directories, whose files are in a
+test('a box whose workspace cannot be read says what to do', async () => {
+  // A box from before workspaces became directories, whose files are in a
   // named volume this process has no way to read.
-  stub.resetSessions();
-  stub.createSession({ legacy: true });
+  stub.resetBoxes();
+  stub.createBox({ legacy: true });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
-    // A legacy session, before its next start migrates it. The message has to
+    // A legacy box, before its next start migrates it. The message has to
     // name the fix, since nothing about the view suggests one.
     await expect.poll(() => page.getByRole('alert').isVisible()).toBe(true);
-    await expect.poll(() => page.getByText(/Start the session once to migrate it/).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText(/Start the box once to migrate it/).isVisible()).toBe(true);
     await shoot(page, 'review-legacy-phone');
     expect(errors).toEqual([]);
   } finally {
@@ -851,9 +851,9 @@ test('a session whose workspace cannot be read says what to do', async () => {
 });
 
 test('an empty workspace says so rather than showing nothing', async () => {
-  stub.review(SESSION, { files: {}, repos: [] });
+  stub.review(BOX, { files: {}, repos: [] });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
     await expect.poll(() => page.getByText(/This workspace is empty/).isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -866,7 +866,7 @@ test('an empty workspace says so rather than showing nothing', async () => {
 
 test('each file remembers how far it was read, and a new one starts at the top', async () => {
   // Long enough to scroll, which the small fixture files are not.
-  stub.review(SESSION, {
+  stub.review(BOX, {
     files: {
       'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
       'short.ts': 'const one = 1;\n',
@@ -876,7 +876,7 @@ test('each file remembers how far it was read, and a new one starts at the top',
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review`,
+    `/boxes/${BOX}/review`,
     'dark',
     'desktop',
   );
@@ -908,14 +908,14 @@ test('each file remembers how far it was read, and a new one starts at the top',
 
 test('the review header gives way to reading the file, and returns', async () => {
   // Long enough to scroll, which the small fixture files are not.
-  stub.review(SESSION, {
+  stub.review(BOX, {
     files: {
       'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
     },
     repos: [''],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
     const pane = page.locator('[data-slot="review-code-pane"]');
     const shelf = page.locator('[data-slot="shelf"]');
@@ -991,23 +991,23 @@ test('the review header gives way to reading the file, and returns', async () =>
 
 // --- the entry points -------------------------------------------------------
 
-test('the review is reachable from the session card and the thread header', async () => {
+test('the review is reachable from the box card and the thread header', async () => {
   const list = await openPage(stub.url, '/', 'dark', 'desktop');
   try {
     await expect.poll(() => list.page.getByRole('link', { name: 'Review' }).isVisible()).toBe(true);
     await list.page.getByRole('link', { name: 'Review' }).click();
-    await expect.poll(() => list.page.url()).toContain(`/sessions/${SESSION}/review`);
+    await expect.poll(() => list.page.url()).toContain(`/boxes/${BOX}/review`);
     expect(list.errors).toEqual([]);
   } finally {
     await list.close();
   }
 
-  const thread = await openPage(stub.url, `/sessions/${SESSION}`, 'dark', 'desktop');
+  const thread = await openPage(stub.url, `/boxes/${BOX}`, 'dark', 'desktop');
   try {
-    const link = thread.page.getByRole('link', { name: "Review this session's code" });
+    const link = thread.page.getByRole('link', { name: "Review this box's code" });
     await expect.poll(() => link.isVisible()).toBe(true);
     await link.click();
-    await expect.poll(() => thread.page.url()).toContain(`/sessions/${SESSION}/review`);
+    await expect.poll(() => thread.page.url()).toContain(`/boxes/${BOX}/review`);
     expect(thread.errors).toEqual([]);
   } finally {
     await thread.close();
