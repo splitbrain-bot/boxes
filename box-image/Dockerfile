@@ -466,9 +466,15 @@ RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 # not there rather than creating it, and the check below wants a `codex` that
 # runs. The entrypoint creates it too, for the home that was filled from an
 # image older than this line.
-RUN mkdir -p /workspace /home/agent/.local/bin /home/agent/.codex /boxes/agent \
+RUN mkdir -p /workspace /home/agent/.local/bin /home/agent/.codex /home/agent/.claude /boxes/agent \
  && chown agent:agent /workspace /home/agent /home/agent/.local /home/agent/.local/bin \
-      /home/agent/.codex
+      /home/agent/.codex /home/agent/.claude
+
+# Claude Code's user settings, with which a new box starts. They leave out the
+# attribution Claude Code would otherwise add to commits and pull requests. A
+# home is filled from this image only when the box is created, so the file is
+# the agent's from then on, and changing it here reaches new boxes only.
+COPY --chown=agent:agent claude-settings.json /home/agent/.claude/settings.json
 
 # Numeric rather than `agent`, so the uid is readable from the image itself.
 USER ${AGENT_UID}
