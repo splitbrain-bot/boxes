@@ -62,8 +62,8 @@ test('the thread header pops the thread rather than pushing the list over it', a
     await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
     expect(await stackIndex(page)).toBe(0);
 
-    await page.getByText('refactor auth').click();
-    await page.waitForURL(`**/boxes/${BOX}`);
+    await page.getByRole('link', { name: 'Thread 1' }).click();
+    await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     expect(await stackIndex(page)).toBe(1);
 
     await page.getByLabel('Back to boxes').click();
@@ -73,7 +73,7 @@ test('the thread header pops the thread rather than pushing the list over it', a
 
     // And the thread is where forward goes, which is only true of a pop.
     await page.goForward();
-    await page.waitForURL(`**/boxes/${BOX}`);
+    await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -81,7 +81,7 @@ test('the thread header pops the thread rather than pushing the list over it', a
 });
 
 test('a file is a step on a phone: back to the tree, then to the thread', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await page.getByLabel("Review this box's code").click();
     await page.waitForURL(`**/boxes/${BOX}/review`);
@@ -99,7 +99,7 @@ test('a file is a step on a phone: back to the tree, then to the thread', async 
     await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
 
     await page.goBack();
-    await page.waitForURL(`**/boxes/${BOX}`);
+    await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -109,7 +109,7 @@ test('a file is a step on a phone: back to the tree, then to the thread', async 
 test('a file is not a step on a pointer, where the tree never left', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/boxes/${BOX}`,
+    `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`,
     'dark',
     'desktop',
   );
@@ -129,7 +129,7 @@ test('a file is not a step on a pointer, where the tree never left', async () =>
     // says it does.
     expect(await stackIndex(page)).toBe(1);
     await page.goBack();
-    await page.waitForURL(`**/boxes/${BOX}`);
+    await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -137,7 +137,7 @@ test('a file is not a step on a pointer, where the tree never left', async () =>
 });
 
 test('leaving the review leaves none of its files behind to fall into', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await page.getByLabel("Review this box's code").click();
     await page.waitForURL(`**/boxes/${BOX}/review`);
@@ -154,7 +154,7 @@ test('leaving the review leaves none of its files behind to fall into', async ()
     await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
     await page.getByLabel('Back to the thread').click();
 
-    await page.waitForURL(`**/boxes/${BOX}`);
+    await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     await expect.poll(() => stackIndex(page)).toBe(0);
     expect(errors).toEqual([]);
   } finally {
@@ -178,8 +178,8 @@ test('a pasted link with nothing beneath it steps up instead of out of the app',
     // Rewritten in place rather than pushed: a step out must not add a step.
     expect(await stackIndex(page)).toBe(0);
 
-    await page.getByLabel('Back to the thread').click();
-    await page.waitForURL(`**/boxes/${BOX}/threads/th1`);
+    await page.getByLabel('Back to boxes').click();
+    await page.waitForURL(`${stub.url}/`);
     // Still the one entry. The parent took this one's place, so the browser's
     // own back button still leads out of the app, which is what it is for.
     expect(await stackIndex(page)).toBe(0);
@@ -319,7 +319,7 @@ test('a deleted box is not what the entry left behind leads to', async () => {
 test('the handoff prompt is staged once, not replayed by back and forward', async () => {
   await stub.comment(BOX, 'app/src/app.ts', 2, 'please fix');
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await page.getByLabel("Review this box's code").click();
     // Icon-only at this width, so the title is what names it.
@@ -330,7 +330,7 @@ test('the handoff prompt is staged once, not replayed by back and forward', asyn
     // Back to the conversation it was opened from — the entry that was
     // already there, which is the route as it was entered rather than a
     // rebuilt one naming the thread.
-    await page.waitForURL(`${stub.url}/boxes/${BOX}`);
+    await page.waitForURL(`${stub.url}/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     await expect
       .poll(() => page.getByLabel('Message input').inputValue())
       .toContain('Read REVIEW.md');
@@ -342,7 +342,7 @@ test('the handoff prompt is staged once, not replayed by back and forward', asyn
     await page.goForward();
     await expect.poll(() => handoff.isVisible()).toBe(true);
     await page.goBack();
-    await page.waitForURL(`${stub.url}/boxes/${BOX}`);
+    await page.waitForURL(`${stub.url}/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
     expect(await page.getByLabel('Message input').inputValue()).toBe('');
     expect(errors).toEqual([]);

@@ -244,25 +244,25 @@ class RecordingNotifier extends Notifier {
   }
 }
 
-/** A running box with two threads, the first of which is current. */
+/** A running box with two threads, the first of which was active last. */
 function seed(): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       network_name, subnet, ws_volume, home_volume, status,
        created_at, last_active_at)
      VALUES ('s1', 'test', 'DEFAULT', 'img', 'c1',
-       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, ?)`,
+       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', ?, ?)`,
   ).run(now, now);
-  for (const [id, acp, ordinal] of [
-    ['t1', 'acp-gone', 1],
-    ['t2', 'acp-kept', 2],
+  for (const [id, acp, ordinal, active] of [
+    ['t1', 'acp-gone', 1, now],
+    ['t2', 'acp-kept', 2, now - 60_000],
   ] as const) {
     db.prepare(
       `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
          created_at, last_active_at)
        VALUES (?, 's1', ?, NULL, ?, ?, ?)`,
-    ).run(id, acp, ordinal, now, now);
+    ).run(id, acp, ordinal, now, active);
   }
 }
 
@@ -400,7 +400,7 @@ test('a thread the adapter has forgotten is re-minted, and the others are left a
 
   await manager.upstream('s1').ensureStarted();
 
-  // The current thread keeps its row and its ordinal, and gets the freshly
+  // The latest thread keeps its row and its ordinal, and gets the freshly
   // minted conversation.
   assert.equal(thread('t1')['acp_session_id'], 'acp-fresh');
   assert.equal(thread('t1')['ordinal'], 1);
@@ -408,12 +408,6 @@ test('a thread the adapter has forgotten is re-minted, and the others are left a
   assert.equal(thread('t2')['acp_session_id'], 'acp-kept');
   const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
   assert.equal(count.n, 2);
-  // Still the same current thread: a re-mint is not a switch.
-  const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
-    string,
-    unknown
-  >;
-  assert.equal(box['current_thread_id'], 't1');
 });
 
 test('a thread the adapter still holds is replayed rather than replaced', async () => {
@@ -432,7 +426,6 @@ test('a thread the adapter still holds is replayed rather than replaced', async 
 
 test('a box with no thread yet gets its first one recorded', async () => {
   db.prepare('DELETE FROM threads').run();
-  db.prepare('UPDATE boxes SET current_thread_id = NULL WHERE id = ?').run('s1');
 
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
@@ -523,8 +516,8 @@ test('a title the adapter reports lands on the thread it is about', async () => 
   fakeDocker(adapter);
   await manager.upstream('s1').ensureStarted();
 
-  // A session_info_update for the thread that is not current, to show the
-  // title is routed by the update's own ACP id rather than by what is current.
+  // A session_info_update for the thread that was not active last, to show the
+  // title is routed by the update's own ACP id rather than by activity.
   adapter.push(
     frame(
       `${JSON.stringify({
@@ -580,7 +573,7 @@ test('a prompt with nothing to name a thread after leaves it on its ordinal', as
   assert.equal(thread('t1')['title'], null);
 });
 
-test('a new thread is minted, recorded and made current', async () => {
+test('a new thread is minted, recorded and becomes the latest', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === 'session/new') return { sessionId: 'acp-third' };
@@ -594,11 +587,8 @@ test('a new thread is minted, recorded and made current', async () => {
   // Past the highest the box has used, so "Thread 2" stays that thread's.
   assert.equal(created.ordinal, 3);
   assert.equal(created.title, null);
-  const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
-    string,
-    unknown
-  >;
-  assert.equal(box['current_thread_id'], created.id);
+  // What a connection naming no thread gets from now on.
+  assert.equal(manager.upstream('s1').latest?.id, created.id);
   assert.deepEqual(
     manager.threads('s1').map((t) => t.ordinal),
     [1, 2, 3],
@@ -637,29 +627,6 @@ test('forking a thread of another box is a 404 rather than a fork', async () => 
     () => manager.createThread('s1', { from: 'someone-elses-thread' }),
     (err: Error & { statusCode?: number }) => err.statusCode === 404,
   );
-});
-
-test('selecting a thread moves the default without disturbing anyone watching', async () => {
-  const adapter = new FakeAdapter((msg) => {
-    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
-    return {};
-  });
-  fakeDocker(adapter);
-  const up = manager.upstream('s1');
-  await up.ensureStarted();
-
-  const watcher = fakeHandle(1, 'acp-gone');
-  up.attach(watcher);
-
-  const selected = manager.selectThread('s1', 't2');
-
-  assert.equal(selected.id, 't2');
-  assert.equal(up.current?.id, 't2');
-  // No live connection is pinned to the default, so selecting one is an
-  // ordinary write: the browser on the other thread keeps its socket, its
-  // transcript and its place.
-  assert.equal(watcher.closed, 0);
-  assert.equal(watcher.acpThreadId, 'acp-gone');
 });
 
 /**
@@ -869,14 +836,14 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
   assert.equal(thread('t2')['acp_session_id'], null);
 });
 
-test('a respawn that re-mints the current thread drops the browsers on its old id', async () => {
+test('a respawn that re-mints the latest thread drops the browsers on its old id', async () => {
   let firstLoadDone = false;
   fakeDocker(
     () =>
       new FakeAdapter((msg) => {
         if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
         if (msg.method === 'session/load') {
-          // The current thread's own transcript is gone by the time the
+          // The latest thread's own transcript is gone by the time the
           // adapter restarts, so its stored id is re-minted rather than
           // loaded back.
           if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
@@ -905,7 +872,7 @@ test('a respawn that re-mints the current thread drops the browsers on its old i
   assert.equal(stranded.closed, 1);
 });
 
-test('a connection pins the thread it named, and a bare one gets the default', async () => {
+test('a connection pins the thread it named, and a bare one gets the latest', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -922,6 +889,12 @@ test('a connection pins the thread it named, and a bare one gets the default', a
   assert.equal(await up.pin(bare, null), 'acp-gone');
   assert.equal(named.acpThreadId, 'acp-kept');
   assert.equal(bare.acpThreadId, 'acp-gone');
+
+  // Which thread that is follows the activity rather than anything stored.
+  db.prepare('UPDATE threads SET last_active_at = ? WHERE id = ?').run(Date.now() + 1000, 't2');
+  const later = fakeHandle(3, null);
+  up.attach(later);
+  assert.equal(await up.pin(later, null), 'acp-kept');
 });
 
 test('pinning to a thread the adapter has forgotten mints one for it', async () => {
@@ -1153,7 +1126,7 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
   const up = manager.upstream('s1');
   await up.ensureStarted();
 
-  // The spawn reaches the box's current thread and the ones browsers were
+  // The spawn reaches the box's latest thread and the ones browsers were
   // already watching. t2 is neither, so nothing has touched it yet.
   assert.deepEqual(asked, ['load acp-gone', 'mode acp-gone auto', 'model acp-gone opus']);
 
@@ -1175,7 +1148,7 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
   assert.deepEqual(asked, []);
 });
 
-test('re-minting the current thread keeps the mode and model its row remembers', async () => {
+test('re-minting the latest thread keeps the mode and model its row remembers', async () => {
   // A thread minted and never prompted: the row remembers what it was put
   // into, and the adapter has no transcript to bring back.
   db.prepare(
@@ -2464,14 +2437,14 @@ test('a thread whose load was cut short is heard from again after the restart', 
  * separately.
  */
 
-/** Adds a thread of any harness to the seeded box. */
+/** Adds a thread of any harness to the seeded box, active before its first one. */
 function seedThread(id: string, harness: string, acp: string | null, ordinal: number): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
        created_at, last_active_at)
      VALUES (?, 's1', ?, ?, NULL, ?, ?, ?)`,
-  ).run(id, harness, acp, ordinal, now, now);
+  ).run(id, harness, acp, ordinal, now, now - 60_000);
 }
 
 /**
@@ -2972,7 +2945,7 @@ test('what an adapter advertises is cached against its harness', async () => {
 
 test('pinning to the thread a spawn already brought back does not replay it twice', async () => {
   // The first browser on a stopped box does both halves at once: its pin
-  // starts the adapter, and the adapter brings back the box's current
+  // starts the adapter, and the adapter brings back the box's latest
   // thread on its way up. Loading it again afterwards would say the whole
   // conversation to that browser a second time.
   const loads: string[] = [];

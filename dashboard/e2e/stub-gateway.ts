@@ -108,8 +108,6 @@ export interface StubGateway {
   newThread: () => string;
   /** Mints a thread carrying another's history and makes it the default. */
   forkThread: (from: string) => string;
-  /** Makes an existing thread the default. Nobody is dropped. */
-  select: (threadId: string) => void;
   /** Releases a held prompt, ending the turn. */
   release: () => void;
   /** Ends the background work a held turn declared, as a report would. */
@@ -153,7 +151,7 @@ export interface BoxLookup {
   /**
    * The adapter's own id for the thread a path names, which is the mapping
    * the real gateway does out of the threads table. A path naming no thread
-   * asks for the box's current one.
+   * asks for the box's most recently active one.
    */
   thread: (boxId: string, threadId: string | null) => string | null;
 }
@@ -513,12 +511,6 @@ export function attachStubGateway(
     attached: () => sockets.size,
     newThread: () => mint(null),
     forkThread: (from) => mint(from),
-    select: (threadId) => {
-      historyOf(threadId);
-      // An ordinary write. No socket is pinned to the default, so selecting
-      // one moves nobody and drops nothing.
-      current = threadId;
-    },
     release: () => releaseHeld?.(),
     finishTasks: (threadId = current) => {
       background.delete(threadId);

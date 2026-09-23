@@ -75,7 +75,8 @@ export function BoxCreate() {
       // The form's entry is spent on the thread it made rather than left
       // under it: the box exists now, and back onto a form that would make a
       // second one is not where anybody meant to go.
-      void navigate(`/boxes/${created.id}`, { replace: true });
+      const first = created.threads[0];
+      void navigate(first ? `/boxes/${created.id}/threads/${first.id}` : '/', { replace: true });
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);

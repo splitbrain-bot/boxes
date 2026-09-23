@@ -164,8 +164,7 @@ were.
 | `POST /api/boxes/:id/stop` | Stops the container and drops the upstream |
 | `DELETE /api/boxes/:id` | Deletes the box, its workspace and home included |
 | `GET /api/boxes/:id/threads` | Every conversation the box owns |
-| `POST /api/boxes/:id/threads` | Adds one and makes it the box's default; `options` says which harness it runs and what it starts configured with, and `{"from":"<threadId>"}` forks that one instead — on its own harness, so `options` is then ignored |
-| `POST /api/boxes/:id/threads/:threadId/select` | Makes one the box's default |
+| `POST /api/boxes/:id/threads` | Adds one; `options` says which harness it runs and what it starts configured with, and `{"from":"<threadId>"}` forks that one instead — on its own harness, so `options` is then ignored |
 | `POST /api/boxes/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
 | `POST /api/boxes/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
 | `POST /api/boxes/:id/attachments?name=` | Stores one file, raw bytes, in the box's workspace |
@@ -347,9 +346,9 @@ gateway answers any ACP client, and an ACP prompt may carry an image inline.
 ## The frontend
 
 One React app, served at `/`. The box list is the thread list: a thread is
-`/boxes/:id/threads/:threadId`, and `/boxes/:id` is whichever thread the
-box has current — so every older link and bookmark still works. The ops —
-start, stop, delete, the details — live at `/boxes/:id/info`.
+`/boxes/:id/threads/:threadId`. A box has no page of its own, so `/boxes/:id`
+leads to the list. The ops — start, stop, delete, the details — live at
+`/boxes/:id/info`.
 What the agent is configured with belongs to the deployment rather than to any
 one box, so it hangs off the list instead: `/agents` lists the sets and
 `/agents/:setId` edits one. The deployment's credentials hang off the same
@@ -359,16 +358,13 @@ and — where an account cannot be pasted — the login, which shows the URL and
 the one-time code and asks for a code back where the CLI wants one. Nothing on
 that page ever shows a secret.
 
-Each card carries its box's threads under its badges, the default one
-marked, so the list is the tree. Each row is a plain link to that thread,
-because opening one is a plain navigation now: the connection names its own
-thread, so nothing has to be switched first. Opening a thread still makes it
-the box's default, as a fire-and-forget POST that neither blocks the
-navigation nor disturbs anybody. **New thread** and **Fork** sit under the
-rows, the second only when that thread's own adapter offers it. **New thread**
-opens the dialog that asks which agent the conversation runs and what it starts
-configured with; a fork asks nothing, because it stays on its source's harness
-and keeps its settings.
+Each card carries its box's threads under its badges, so the list is the tree.
+Each row is a plain link to that thread, because the connection names its own
+thread. None of them is marked, and the card itself opens nothing: a reader
+moves between a box's threads rather than working in one of them, so there is
+no thread the box could open on its own. **New thread** sits under the rows
+and opens the dialog that asks which agent the conversation runs and what it
+starts configured with. Forking is done from inside the thread to be forked.
 
 A row is a name and a bullet, and the bullet is that thread's state, in the
 one colour vocabulary `StatusBadge` holds: amber for a question waiting on it,
@@ -411,7 +407,8 @@ so the working thread stays where it is and the new tab is opened by a real
 click. A `window.open` after the await is the thing to reach for, and it is
 what popup blockers exist to stop.
 
-That header gets out of the way while you read, and so does the review's —
+On a narrow screen that header gets out of the way while you read, and so
+does the review's —
 one hook and one wrapper serve both, because a thread and a code pane are the
 same shape of thing: a full-viewport route whose one scroller is the thing you
 came for. A downward run of thirty-odd pixels collapses the row, and two dozen
@@ -420,7 +417,9 @@ below it. Going is a decision about the reading you are doing and coming back
 is a request that should not have to be repeated, so the two distances are not
 the same. Runs are measured from the last change of direction rather than the
 last event, which is what makes a pixel of finger jitter mean nothing and a
-slow drift down mean something. The notices under the header do not collapse:
+slow drift down mean something. From md up the header stays where it is: a
+wide screen has room for both, and a header that moves there is only in the
+way. The notices under the header do not collapse:
 a missing token, a fork to open, an error to read are things to act on rather
 than things in the way.
 
@@ -1009,7 +1008,7 @@ conversation it names; failing that, to the connection for that conversation's
 stored harness; failing that, to the one the sending browser's own thread is
 on; and failing all of those — `authenticate`, `session/list`, a message about
 nothing in particular — to the box's default harness, which is whatever its
-current thread runs. A thread lookup takes the harness and the ACP id together,
+most recently active thread runs. A thread lookup takes the harness and the ACP id together,
 as hygiene rather than because a collision is expected: both adapters mint
 UUIDs, and the in-memory maps in `Broadcast`, `Activity` and `PendingStore`
 stay keyed by the id alone.
@@ -1022,10 +1021,10 @@ request and response within it.
 
 There are two upgrade paths, and each connection is **pinned to one thread**
 for its whole life. `/ws/boxes/:id/threads/:threadId/acp` is a connection
-to that conversation; `/ws/boxes/:id/acp` names none and means whichever
-thread the box has current. The short path is what an external ACP client
-and every link from before this existed use, so their contract does not change
-at all — only the dashboard learns the longer one. A path naming a thread that
+to that conversation; `/ws/boxes/:id/acp` names none and means the box's most
+recently active thread. The short path is what an external ACP client uses, so
+its contract does not change at all — only the dashboard learns the longer
+one. A path naming a thread that
 is not the box's is refused at the handshake, as a 404 before a WebSocket
 exists: a connection is pinned for its whole life, so there is no later point
 at which to find this out.
@@ -1132,15 +1131,14 @@ transcript — and a new thread names the harness it runs, which is how one box
 comes to hold a Claude Code conversation and a Codex one over the same
 checkout.
 
-**A connection names its thread, and `current_thread_id` is the default.**
+**A connection names its thread, and a box has no current one.**
 The thread is in the WebSocket URL, so one box's adapter connection
 carries every thread anybody is watching and two tabs can hold two
-conversations of one box at once. The box row still records a current
-thread, but only as what a connection that names none gets — the short
-WebSocket path, `/boxes/:id`, an external client, a bookmark from before
-this existed. Selecting a thread moves that default and nothing else: no live
-connection is pinned to it, so nobody is dropped and nothing reconnects, which
-is what makes opening a thread a plain navigation rather than a call.
+conversations of one box at once. Nothing is stored about which thread a box
+is on, because a reader switches between them. A caller that names none — the
+short WebSocket path, an external client — gets the thread that was active
+last, read from the threads' own `last_active_at`. Opening a thread is a
+plain navigation rather than a call.
 
 The motion this exists for: you are in a thread doing something long, you fork
 it, and you ask the fork about what it is doing without stopping it or losing

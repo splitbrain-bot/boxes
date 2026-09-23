@@ -63,7 +63,7 @@ test('a terminal opens on the box and carries what is typed both ways', async ()
 });
 
 test('the terminal is opened from the thread and steps back to it', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -73,8 +73,8 @@ test('the terminal is opened from the thread and steps back to it', async () => 
 
     // Back is one step out, and it lands on the conversation rather than
     // pushing a second copy of it.
-    await page.getByLabel('Back to the thread').click();
-    await page.waitForURL(`**/boxes/${ID}`);
+    await page.getByLabel('Back', { exact: true }).click();
+    await page.waitForURL(`**/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
 
     expect(errors).toEqual([]);
   } finally {

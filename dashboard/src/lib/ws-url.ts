@@ -6,16 +6,11 @@
  * setting can make it wrong, and the API carries no endpoint URL.
  *
  * Naming the thread is what lets two tabs watch two conversations of one box:
- * the connection is pinned to it for its whole life. Naming none asks for
- * whichever thread the box has current, which is what every link from
- * before this existed — and every external ACP client — still gets.
+ * the connection is pinned to it for its whole life.
  */
-export function wsUrlFor(boxId: string, threadId?: string | null): string {
+export function wsUrlFor(boxId: string, threadId: string): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const path = threadId
-    ? `/ws/boxes/${boxId}/threads/${threadId}/acp`
-    : `/ws/boxes/${boxId}/acp`;
-  return `${scheme}//${window.location.host}${path}`;
+  return `${scheme}//${window.location.host}/ws/boxes/${boxId}/threads/${threadId}/acp`;
 }
 
 /**

@@ -68,12 +68,6 @@ export interface BoxRow {
    */
   agent_set_id: string | null;
   /**
-   * The thread a connection that names none gets, or null before one exists.
-   * A default rather than the truth: a connection may pin itself to any of
-   * the box's threads instead.
-   */
-  current_thread_id: string | null;
-  /**
    * The bearer token a WebSocket upgrade to this box has to present. Its
    * own: it opens this box and no other one in the deployment.
    */
@@ -543,6 +537,12 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_pending_box ON pending_requests(box_id);
   CREATE INDEX idx_threads_box ON threads(box_id, ordinal);
   `,
+  // A reader switches between a box's threads rather than working in one of
+  // them, so the box no longer records one as current. What a caller naming
+  // no thread gets is derived from the threads' own activity instead.
+  `
+  ALTER TABLE boxes DROP COLUMN current_thread_id;
+  `,
 ];
 
 /** An open database handle. */
@@ -670,13 +670,17 @@ export function threadByAcpId(
     .get(boxId, harness, acpSessionId) as ThreadRow | undefined;
 }
 
-/** The thread a box's gateway is currently answering for, or undefined. */
-export function currentThread(db: Db, boxId: string): ThreadRow | undefined {
+/**
+ * The box's most recently active thread, or undefined before it has one.
+ *
+ * What a caller that names no thread gets. Ties go to the newer thread, so a
+ * thread just created wins over one that was active in the same millisecond.
+ */
+export function latestThread(db: Db, boxId: string): ThreadRow | undefined {
   return db
     .prepare(
-      `SELECT t.* FROM threads t
-         JOIN boxes s ON s.current_thread_id = t.id
-        WHERE s.id = ?`,
+      `SELECT * FROM threads WHERE box_id = ?
+        ORDER BY last_active_at DESC, ordinal DESC LIMIT 1`,
     )
     .get(boxId) as ThreadRow | undefined;
 }
@@ -695,7 +699,7 @@ export interface NewThread {
 }
 
 /**
- * Inserts a thread and makes it the box's current one.
+ * Inserts a thread.
  *
  * The ordinal is one past the highest the box has ever used, so a name
  * like "Thread 2" stays that thread's for good.
@@ -727,17 +731,14 @@ export function insertThread(db: Db, boxId: string, thread: NewThread): ThreadRo
     created_at: now,
     last_active_at: now,
   };
-  db.transaction(() => {
-    db.prepare(
-      `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
-         turn_active, inherits_from, mode_id, config, done, created_at,
-         last_active_at)
-       VALUES (@id, @box_id, @harness, @acp_session_id, @title, @ordinal,
-         @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
-         @last_active_at)`,
-    ).run(row);
-    db.prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?').run(id, boxId);
-  })();
+  db.prepare(
+    `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
+       turn_active, inherits_from, mode_id, config, done, created_at,
+       last_active_at)
+     VALUES (@id, @box_id, @harness, @acp_session_id, @title, @ordinal,
+       @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
+       @last_active_at)`,
+  ).run(row);
   return row;
 }
 

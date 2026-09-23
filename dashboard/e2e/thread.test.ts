@@ -51,7 +51,7 @@ test('a prompt streams back and renders as it arrives', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -81,7 +81,7 @@ test('a prompt streams back and renders as it arrives', async () => {
 test('an attached image is uploaded, named in the prompt, and shown from the workspace', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('The margin is wrong.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -141,7 +141,7 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
 test('an attached SVG is shown as the drawing it is', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('A box and an arrow.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -181,7 +181,7 @@ test('an attached SVG is shown as the drawing it is', async () => {
 test('an attached file that is not an image travels as a path, and reads as a chip', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('It is a receipt.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -235,7 +235,7 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
     prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually.') }],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -273,7 +273,7 @@ test('reloading mid-conversation replays the whole thread', async () => {
     prompts: [{ match: () => true, updates: reply('First answer.') }],
   });
 
-  const first = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const first = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => first.page.getByText('connected').isVisible()).toBe(true);
     const input = first.page.getByLabel('Message input');
@@ -286,7 +286,7 @@ test('reloading mid-conversation replays the whole thread', async () => {
 
   // A fresh browser gets the same thread back, because session/load replays
   // it as notifications.
-  const second = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const second = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => second.page.getByText('First answer.').isVisible()).toBe(true);
     await expect.poll(() => second.page.getByText('question one').isVisible()).toBe(true);
@@ -303,8 +303,8 @@ test('a second tab sees updates live', async () => {
     prompts: [{ match: () => true, updates: reply('Shared answer.') }],
   });
 
-  const a = await openPage(stub.url, `/boxes/${BOX.id}`);
-  const b = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const a = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const b = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => a.page.getByText('connected').isVisible()).toBe(true);
     await expect.poll(() => b.page.getByText('connected').isVisible()).toBe(true);
@@ -332,7 +332,7 @@ test('cancelling stops the run state', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -374,7 +374,7 @@ test('a turn held open for background work still hands the composer back', async
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -460,7 +460,7 @@ test('the bar names the work by kind, and offers no stop for a task that says it
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -509,7 +509,7 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     } as ThreadUpdate);
   }
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     // The browser has asked for its history and the stub is sitting on the
     // answer. Waited for rather than assumed: releasing frees the loads that
@@ -566,7 +566,7 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -598,7 +598,7 @@ test('an update the dashboard does not know about does not break the thread', as
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -614,7 +614,7 @@ test('an update the dashboard does not know about does not break the thread', as
 test('an image renders wherever it arrives — a tool result, or what the agent said', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -662,7 +662,7 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
 test('a background task reporting in is a row of its own, not the user talking', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 

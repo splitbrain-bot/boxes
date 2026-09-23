@@ -182,8 +182,8 @@ export interface AdapterHost {
    * adapters starting at once start one container.
    */
   ensureContainer(): Promise<string>;
-  /** The box's current thread, or null before it has one. */
-  currentThread(): ThreadRow | null;
+  /** The box's most recently active thread, or null before it has one. */
+  latestThread(): ThreadRow | null;
   /** Every conversation a browser is watching, by the adapter's own id. */
   watchedThreads(): readonly string[];
   /**
@@ -522,28 +522,28 @@ export class AdapterConnection {
 
   /**
    * Brings back every conversation of this harness that this connection has to
-   * carry: the box's current thread when it is one of ours, and each
-   * thread of ours a browser is watching.
+   * carry: the box's most recently active thread when it is one of ours, and
+   * each thread of ours a browser is watching.
    *
-   * With two tabs on two threads, a respawn that loaded only the current one
+   * With two tabs on two threads, a respawn that loaded only the latest one
    * would leave the other browser's next prompt naming a thread the adapter has
    * never heard of. The set is derived from the attached handles, so it needs no
    * storage and shrinks as tabs close.
    */
   private async loadThreads(): Promise<void> {
-    // The current thread first, because it is the one a box with no threads
-    // at all has to be given. A current thread of the *other* harness is that
+    // The latest thread first, because it is the one a box with no threads
+    // at all has to be given. A latest thread of the *other* harness is that
     // connection's to bring up, not this one's.
-    const current = this.host.currentThread();
-    if (!current) {
+    const latest = this.host.latestThread();
+    if (!latest) {
       await this.mintFirstThread();
-    } else if (current.harness === this.harness.id) {
-      const replayed = current.acp_session_id ? await this.loadBox(current) : false;
-      if (!replayed) await this.mintInto(current.id);
+    } else if (latest.harness === this.harness.id) {
+      const replayed = latest.acp_session_id ? await this.loadBox(latest) : false;
+      if (!replayed) await this.mintInto(latest.id);
     }
 
     for (const acpThreadId of this.host.watchedThreads()) {
-      // What this adapter already holds: the current thread above, and a
+      // What this adapter already holds: the latest thread above, and a
       // thread a second tab is watching as well.
       if (this.live.has(acpThreadId)) continue;
       const row = threadByAcpId(this.host.db, this.host.boxId, this.harness.id, acpThreadId);
@@ -609,7 +609,7 @@ export class AdapterConnection {
   async bringUp(threadId: string): Promise<string> {
     await this.ensureStarted();
     // Read after the spawn, not before: an adapter coming up brings back the
-    // box's current thread and every watched one, so this may be a thread
+    // box's most recently active thread and every watched one, so this may be a thread
     // that is already here — and loading it again would replay the whole
     // conversation a second time to whoever is watching.
     const row = getThread(this.host.db, threadId);

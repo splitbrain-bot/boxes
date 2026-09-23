@@ -56,7 +56,7 @@ function closedText(detail: string | undefined): string {
 export function BoxTerminal() {
   const { id = '' } = useParams();
   const { box } = useBox(id);
-  const up = useUp(`/boxes/${id}`);
+  const up = useUp('/');
   const name = box?.name ?? id;
   const token = box?.wsToken ?? null;
 
@@ -131,7 +131,7 @@ export function BoxTerminal() {
     <div className="flex h-dvh flex-col">
       <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
-          <a href={up.href} onClick={up.onClick} aria-label="Back to the thread">
+          <a href={up.href} onClick={up.onClick} aria-label="Back">
             <ArrowLeft className="size-4" />
           </a>
         </Button>

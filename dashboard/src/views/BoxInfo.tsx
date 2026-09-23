@@ -30,21 +30,21 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * What a box is made of and what can be done to it. The conversation
- * lives at /boxes/:id; this route is the ops side of the same box.
+ * What a box is made of and what can be done to it: the ops side of a box,
+ * beside its conversations.
  *
  * Back goes where the visitor came from, by going back: the entry this view
  * was opened from is still on the stack, whether it was the list or a thread
  * that opened it, so there is nothing to remember and nothing to get wrong.
  * Pushing the sender instead is how a back control ends up pointing the same
  * way as the browser's own. Where there is nothing to pop — a pasted link, a
- * notification, a shortcut on a home screen — the box's current thread is
- * the parent that replaces this entry.
+ * notification, a shortcut on a home screen — the box list is the parent
+ * that replaces this entry.
  */
 export function BoxInfo() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
-  const up = useUp(`/boxes/${id}`);
+  const up = useUp('/');
 
   const [box, setBox] = useState<BoxDetail | null>(null);
   const [error, setError] = useState<string | null>(null);

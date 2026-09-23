@@ -2,7 +2,7 @@ import type { Config } from '../config.ts';
 import {
   clearBoxTurns,
   clearThreadInheritance,
-  currentThread,
+  latestThread,
   getThread,
   insertThread,
   setThreadMode,
@@ -58,9 +58,8 @@ import {
  * The orchestrator owns the connections, not a browser, so a turn runs to
  * completion whoever is watching. Each browser connection is pinned to a single
  * thread, chosen at the handshake, so two tabs can watch two conversations of
- * one box at once — and the box's `current_thread_id` is the default a
- * connection that names none gets rather than the truth about what any browser
- * has loaded.
+ * one box at once. A connection that names none gets the box's most recently
+ * active thread.
  */
 
 /** How much of one tapped ACP message a debug line carries. */
@@ -316,8 +315,8 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Starts the adapter a box needs by default: the one its current thread
-   * runs on, or Claude's before it has a thread at all.
+   * Starts the adapter a box needs by default: the one its most recently
+   * active thread runs on, or Claude's before it has a thread at all.
    *
    * Every other path names the harness it wants — a pin resolves the thread
    * first, a forwarded message is routed by the conversation it is about — and
@@ -327,9 +326,9 @@ export class UpstreamBox implements AdapterHost {
     await this.connection(harnessId ?? this.defaultHarness()).ensureStarted();
   }
 
-  /** The harness of the box's current thread, or the registry's default. */
+  /** The harness of the box's most recently active thread, or the registry's default. */
   private defaultHarness(): HarnessId {
-    return this.current?.harness ?? DEFAULT_HARNESS;
+    return this.latest?.harness ?? DEFAULT_HARNESS;
   }
 
   /**
@@ -790,7 +789,7 @@ export class UpstreamBox implements AdapterHost {
    *
    * `threadId` names one of the box's threads, or is null for a
    * connection that named none, as an external ACP client does, which gets
-   * the box's current one.
+   * the box's most recently active one.
    *
    * The thread's own harness decides which adapter has to be up: a thread
    * minted and never prompted has no adapter-side conversation until one is
@@ -808,20 +807,20 @@ export class UpstreamBox implements AdapterHost {
    * The live adapter id for one of the box's threads, bringing the thread
    * up first when its adapter is not already holding it.
    *
-   * The spawn path brings back the box's current thread and the ones
+   * The spawn path brings back the box's most recently active thread and the ones
    * browsers were already watching, which is every thread it can know about.
    * Opening any other one lands here, and is loaded on the same terms as at
    * spawn, so the connection is never pinned to a conversation the adapter
    * has never heard of.
    */
   private async resolveThread(threadId: string | null): Promise<string> {
-    let row = threadId ? getThread(this.db, threadId) : this.current;
+    let row = threadId ? getThread(this.db, threadId) : this.latest;
     if (!row && !threadId) {
       // A box with no thread at all: its first one is minted by the
       // default adapter coming up, which is the one path that creates a row
       // rather than bringing one up.
       await this.ensureStarted();
-      row = this.current;
+      row = this.latest;
     }
     if (!row || row.box_id !== this.boxId) throw new Error(THREAD_NOT_FOUND);
     const conn = this.connection(row.harness);
@@ -848,8 +847,8 @@ export class UpstreamBox implements AdapterHost {
    * reconnects from scratch and pins whatever that thread is now.
    *
    * The only caller is the respawn path, for a thread whose adapter id did
-   * not survive. A connection is pinned to its own thread, so neither
-   * switching the box's default nor adding a thread drops a browser.
+   * not survive. A connection is pinned to its own thread, so adding a
+   * thread drops no browser.
    */
   dropWatchers(acpThreadId: string): void {
     for (const handle of this.downstreams.byRecency(acpThreadId)) {
@@ -889,21 +888,21 @@ export class UpstreamBox implements AdapterHost {
   // --- threads --------------------------------------------------------------
 
   /**
-   * The box's default conversation: what a connection naming no thread is
-   * pinned to. Null before the box has one.
+   * The box's most recently active conversation: what a connection naming no
+   * thread is pinned to. Null before the box has one.
    */
-  get current(): ThreadRow | null {
-    return currentThread(this.db, this.boxId) ?? null;
+  get latest(): ThreadRow | null {
+    return latestThread(this.db, this.boxId) ?? null;
   }
 
-  /** The box's current thread, for the connections. */
-  currentThread(): ThreadRow | null {
-    return this.current;
+  /** The box's most recently active thread, for the connections. */
+  latestThread(): ThreadRow | null {
+    return this.latest;
   }
 
   /**
-   * Starts a fresh, empty conversation on the same workspace and makes it the
-   * box's default. Nobody is moved onto it: a browser already watching
+   * Starts a fresh, empty conversation on the same workspace. Nobody is moved
+   * onto it: a browser already watching
    * another thread keeps watching it, and the new one is opened by following
    * a link to it.
    *
@@ -928,7 +927,7 @@ export class UpstreamBox implements AdapterHost {
     });
     try {
       // Through the same resolution a pin uses, because the row is already the
-      // box's current thread: an adapter coming up for it mints its
+      // box's most recently active thread: an adapter coming up for it mints its
       // conversation on the way, and asking for one again would leave two
       // behind.
       const acpSessionId = await this.resolveThread(thread.id);
@@ -943,9 +942,8 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Branches one conversation into a second carrying its context, and makes
-   * the new one the box's default. The source is left exactly as it was,
-   * still streaming to whoever is watching it.
+   * Branches one conversation into a second carrying its context. The source
+   * is left exactly as it was, still streaming to whoever is watching it.
    *
    * A fork stays on its source's harness and keeps what the source is
    * configured with: only the adapter that wrote a transcript can load it, and
@@ -988,25 +986,6 @@ export class UpstreamBox implements AdapterHost {
       inheritsFrom: source.id,
     });
     this.slog.info('thread forked', { from: source.id, threadId: thread.id });
-    return thread;
-  }
-
-  /**
-   * Makes another of this box's threads its default: what a connection
-   * naming no thread gets.
-   *
-   * An ordinary write, and nothing more. No live connection is pinned to the
-   * default, so nobody is dropped and nothing reconnects.
-   */
-  switchThread(threadId: string): ThreadRow {
-    const thread = getThread(this.db, threadId);
-    if (!thread || thread.box_id !== this.boxId) {
-      throw new Error(THREAD_NOT_FOUND);
-    }
-    this.db
-      .prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?')
-      .run(thread.id, this.boxId);
-    this.slog.info('thread selected', { threadId: thread.id });
     return thread;
   }
 
@@ -1299,7 +1278,7 @@ export class UpstreamBox implements AdapterHost {
 
     // Which conversation this is about, taken from the message itself: two
     // threads of one box share this gateway, so nothing here may be
-    // decided by which of them is the box's default.
+    // decided by which of them was active last.
     const thread = threadOf(params);
     const isPrompt = method === ACP_METHOD.sessionPrompt && thread !== undefined;
     const isLoad = method === ACP_METHOD.sessionLoad && thread !== undefined && from !== undefined;

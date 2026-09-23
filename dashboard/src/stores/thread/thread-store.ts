@@ -115,11 +115,8 @@ export interface ThreadStoreDeps {
   createClient: (handlers: ConstructorParameters<typeof AcpClient>[2]) => AcpClient;
   /** The box this thread belongs to. */
   boxId: string;
-  /**
-   * The thread within it, and null on the route that means whichever thread
-   * the box has current.
-   */
-  threadId: string | null;
+  /** The thread within it. */
+  threadId: string;
 }
 
 /** The live thread for one box. */

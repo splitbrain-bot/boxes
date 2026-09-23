@@ -195,9 +195,9 @@ function insertBox(
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-       status, current_thread_id, created_at, last_active_at)
+       status, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', ?, ?,
-       ?, '10.200.0.0/24', '', ?, ?, ?, 'stopped', NULL, ?, ?)`,
+       ?, '10.200.0.0/24', '', ?, ?, ?, 'stopped', ?, ?)`,
   ).run(
     id,
     IMAGE,

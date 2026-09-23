@@ -100,10 +100,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  selectThread: (id: string, threadId: string) =>
-    request<ThreadSummary>(`/api/boxes/${id}/threads/${threadId}/select`, {
-      method: 'POST',
-    }),
   /**
    * Marks a conversation done, or takes the mark off again.
    *
