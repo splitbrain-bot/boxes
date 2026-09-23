@@ -88,7 +88,7 @@ const schema = z.object({
    * Off is for a host that keeps old images deliberately: to roll back to one
    * without the registry, or because something outside Boxes runs them.
    */
-  BOX_IMAGE_PRUNE: flag.default('true'),
+  BOX_IMAGE_PRUNE: flag.default(true),
   BOX_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
   /**
    * What one box may take. Both of these now cover *two* adapters: a box may

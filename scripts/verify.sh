@@ -265,7 +265,7 @@ if [ "${SKIP_UNIT:-0}" != 1 ]; then
     [ "$pkg" = dashboard ] && project='-- --project unit'
     out=$(docker run --rm \
             -v "$REPO:/repo" -v "/repo/$pkg/node_modules" \
-            -w "/repo/$pkg" node:22-bookworm \
+            -w "/repo/$pkg" node:26-bookworm \
             sh -c "npm ci --no-audit --no-fund >/dev/null 2>&1 && npm test $project" 2>&1)
     if [ $? -eq 0 ]; then
       ok "unit-$pkg" "$(printf '%s' "$out" | uncolour | grep -Eo 'Tests +[0-9]+ passed.*' | tail -1)"

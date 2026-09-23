@@ -2,7 +2,7 @@
 #
 # The build mirrors the repository layout so that proxy/src and shared/ resolve
 # each other exactly as they do in a checkout.
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /build
 COPY shared/ ./shared/
 COPY proxy/package.json proxy/package-lock.json* ./proxy/
@@ -12,7 +12,7 @@ COPY proxy/tsconfig.json proxy/vite.config.ts ./
 COPY proxy/src ./src
 RUN npm run check && npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # mockttp is left external by the bundle, so its tree is installed here rather
