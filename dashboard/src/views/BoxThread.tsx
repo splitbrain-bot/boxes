@@ -79,10 +79,9 @@ function blocksOf(message: AppendMessage): ContentBlock[] {
  * session/update notifications into messages and this route mounts them into
  * the installed assistant-ui components.
  *
- * Two routes land here: `/boxes/:id/threads/:threadId` is that thread, and
- * `/boxes/:id` is whichever one the box has current. The thread is
- * part of the connection's own URL, so two tabs on two threads of one box
- * each get their own conversation and neither sees the other's stream.
+ * The route names the thread, and so does the connection's own URL, so two
+ * tabs on two threads of one box each get their own conversation and neither
+ * sees the other's stream.
  */
 /** Why this view could not read its box, in the words it shows. */
 interface LoadError {
@@ -119,7 +118,7 @@ function describeLoadError(err: Error): LoadError {
 }
 
 export function BoxThread() {
-  const { id = '', threadId } = useParams();
+  const { id = '', threadId = '' } = useParams();
   /**
    * Text the review view staged in the composer on its way here — "read
    * REVIEW.md and address the comments in it". Staged, never sent: what to do
@@ -173,13 +172,13 @@ export function BoxThread() {
   /** The way out of the thread: the box list, popped rather than pushed. */
   const up = useUp('/');
 
-  const { store, state } = useThread(id, threadId ?? null, box?.wsToken ?? null);
+  const { store, state } = useThread(id, threadId, box?.wsToken ?? null);
 
   // Which of the box's conversations this is, named always rather than
   // only when there is more than one: two tabs on one box are otherwise
   // indistinguishable, which is the whole point of a thread in the URL.
   const threads = box?.threads ?? [];
-  const thread = threads.find((t) => t.id === (threadId ?? box?.currentThreadId));
+  const thread = threads.find((t) => t.id === threadId);
   const threadLabel = thread ? threadName(thread) : null;
   // What this thread's agent is called. The polled health list rather than a
   // call of its own: a header needs the label and nothing else, and the list

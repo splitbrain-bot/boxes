@@ -14,7 +14,7 @@ import type { Config } from './config.ts';
 import type { EgressManager } from './egress.ts';
 import {
   clearBoxTurns,
-  currentThread,
+  latestThread,
   getThread,
   insertThread,
   listThreads,
@@ -843,7 +843,6 @@ export class BoxManager {
       review_base_rev: null,
       status: 'creating',
       agent_set_id: agentSetId,
-      current_thread_id: null,
       // Its own from the start: what opens this box's WebSocket opens no
       // other box.
       ws_token: generateWsToken(),
@@ -855,10 +854,10 @@ export class BoxManager {
       .prepare(
         `INSERT INTO boxes (id, name, profile, image, container_id,
            network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-           status, agent_set_id, current_thread_id, ws_token, created_at, last_active_at)
+           status, agent_set_id, ws_token, created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @container_id,
            @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @home_dir,
-           @status, @agent_set_id, @current_thread_id, @ws_token, @created_at, @last_active_at)`,
+           @status, @agent_set_id, @ws_token, @created_at, @last_active_at)`,
       )
       .run(row);
 
@@ -1359,7 +1358,6 @@ export class BoxManager {
           upstream?.forkableHarnesses ?? new Set<HarnessId>(),
         ),
       ),
-      currentThreadId: row.current_thread_id,
       agentSetId: row.agent_set_id,
       agentSetName: this.agents.nameOf(row.agent_set_id),
       // What was last measured, and null until there is a measurement.
@@ -1392,7 +1390,7 @@ export class BoxManager {
       workspaceDir: row.workspace_dir,
       homeVolume: row.home_volume,
       homeDir: row.home_dir,
-      acpSessionId: currentThread(this.db, id)?.acp_session_id ?? null,
+      acpSessionId: latestThread(this.db, id)?.acp_session_id ?? null,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
       // `upstreams.get` rather than `upstream()`, which would start one: a
       // box nothing holds has nothing read about it, and an empty list is the
@@ -1431,21 +1429,7 @@ export class BoxManager {
   }
 
   /**
-   * The thread a request is about: the one it names, or the box's current
-   * one when it names none — and null before the box has any thread at
-   * all.
-   *
-   * Same rule as the WebSocket paths, so a route that can name a thread is
-   * still usable by a caller that knows nothing about threads.
-   */
-  resolveThread(id: string, threadId?: string): string | null {
-    this.mustGet(id);
-    if (threadId === undefined) return currentThread(this.db, id)?.id ?? null;
-    return this.mustGetThread(id, threadId).id;
-  }
-
-  /**
-   * Adds a conversation to a box and makes it current: on the agent and
+   * Adds a conversation to a box: on the agent and
    * settings the body names, or carrying another thread's context when `from`
    * names one.
    *
@@ -1480,27 +1464,6 @@ export class BoxManager {
       if (message === NOTHING_TO_FORK) throw new HttpError(409, message);
       throw new HttpError(500, `Failed to create thread: ${message}`);
     }
-  }
-
-  /**
-   * Makes one of a box's threads current: the thread a connection that
-   * names none gets.
-   *
-   * Nobody is dropped and nothing reconnects. A browser is pinned to its own
-   * thread for the life of its socket, so the box's default is read only
-   * at a handshake; see UpstreamBox.switchThread.
-   */
-  selectThread(id: string, threadId: string): ThreadSummary {
-    this.mustGet(id);
-    this.mustGetThread(id, threadId);
-    const up = this.upstream(id);
-    return toThreadSummary(
-      up.switchThread(threadId),
-      new Map(),
-      new Set(),
-      new Set(),
-      up.forkableHarnesses,
-    );
   }
 
   /**

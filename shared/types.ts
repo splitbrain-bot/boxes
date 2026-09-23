@@ -367,12 +367,6 @@ export interface BoxSummary {
   /** Every conversation this box owns, oldest first. */
   threads: ThreadSummary[];
   /**
-   * The thread a connection that names none gets: `/boxes/:id`, the short
-   * WebSocket path, an external ACP client. A default rather than what any
-   * browser has loaded, and null before the box has any thread.
-   */
-  currentThreadId: string | null;
-  /**
    * The agent set selected when this box was created, or null for the
    * global set alone. Null is also what a box whose set has since been
    * deleted reports.
@@ -423,7 +417,7 @@ export interface BoxDetail extends BoxSummary {
    * or null for one still backed by a named volume.
    */
   homeDir: string | null;
-  /** The adapter's id for the box's default thread, or null before one exists. */
+  /** The adapter's id for the box's most recently active thread, or null before one exists. */
   acpSessionId: string | null;
   /** True when the egress proxy is attached to this box's network. */
   proxyAttached: boolean;

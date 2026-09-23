@@ -189,8 +189,8 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
  * to one of its threads.
  *
  * `threadId` is the thread the URL named, or null when it named none, as an
- * external ACP client does, which pins to the box's current thread
- * instead. Either way the pinning happens here rather than in the browser,
+ * external ACP client does, which pins to the box's most recently active
+ * thread instead. Either way the pinning happens here rather than in the browser,
  * and the ACP contract stays a `session/new` that hands back an id the client
  * did not choose.
  *
@@ -269,7 +269,7 @@ export function attachDownstream(
       return cached;
     })
     // This connection is about one thread of the box — the one the URL
-    // named, or the box's current one — so hand back that thread's ACP
+    // named, or the box's most recently active one — so hand back that thread's ACP
     // id rather than starting a second conversation on every reconnect.
     // Which thread that is, is decided outside ACP, so the contract a client
     // speaks does not change.

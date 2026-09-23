@@ -100,9 +100,9 @@ function insertBox(id: string): string {
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir,
-       review_base_rev, status, current_thread_id, created_at, last_active_at)
+       review_base_rev, status, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', '', ?, ?, NULL, 'running', NULL, ?, ?)`,
+       ?, '10.200.0.0/24', '', ?, ?, NULL, 'running', ?, ?)`,
   ).run(id, `bn-${id}`, `home-${id}`, workspace(id), now, now);
   const path = workspace(id);
   mkdirSync(path, { recursive: true });
@@ -115,9 +115,9 @@ function insertVolumeBox(id: string): void {
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir,
-       review_base_rev, status, current_thread_id, created_at, last_active_at)
+       review_base_rev, status, created_at, last_active_at)
      VALUES (?, 'legacy', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', ?, ?, NULL, NULL, 'stopped', NULL, ?, ?)`,
+       ?, '10.200.0.0/24', ?, ?, NULL, NULL, 'stopped', ?, ?)`,
   ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, now, now);
 }
 

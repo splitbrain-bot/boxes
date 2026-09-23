@@ -32,8 +32,8 @@ import type {
 import { buildApp, type Orchestrator } from '../../orchestrator/src/app.ts';
 import { loadConfig, setConfigForTests, type Config } from '../../orchestrator/src/config.ts';
 import {
-  currentThread,
   getThread,
+  latestThread,
   listThreads,
   openDb,
   setThreadAcpId,
@@ -431,7 +431,7 @@ class TestUpstream {
     return new Set<HarnessId>(this.canFork ? ['claude', 'codex'] : []);
   }
 
-  /** Mints an empty conversation on the agent asked for, and makes it current. */
+  /** Mints an empty conversation on the agent asked for. */
   async newThread(options?: ThreadOptions): Promise<ThreadRow> {
     return this.mint(this.gateway.newThread(), null, {
       harness: options?.harness ?? 'claude',
@@ -440,7 +440,7 @@ class TestUpstream {
     });
   }
 
-  /** Mints a conversation carrying another's history, and makes it current. */
+  /** Mints a conversation carrying another's history. */
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
     const source = getThread(this.db, sourceThreadId);
     if (!source?.acp_session_id) throw new Error('Thread not found');
@@ -449,17 +449,6 @@ class TestUpstream {
       modeId: source.mode_id,
       config: JSON.parse(source.config) as Record<string, string>,
     });
-  }
-
-  /** Makes one of the box's threads current. Nobody is dropped. */
-  switchThread(threadId: string): ThreadRow {
-    const row = getThread(this.db, threadId);
-    if (!row) throw new Error('Thread not found');
-    this.db
-      .prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?')
-      .run(threadId, this.boxId);
-    if (row.acp_session_id) this.gateway.select(row.acp_session_id);
-    return row;
   }
 
   /** Nothing to spawn: the stand-in is up from the moment it exists. */
@@ -504,7 +493,7 @@ class TestUpstream {
     return undefined;
   }
 
-  /** Stores a minted conversation and makes it the box's current one. */
+  /** Stores a minted conversation. */
   private mint(
     acpSessionId: string,
     inheritsFrom: string | null,
@@ -543,7 +532,7 @@ function threadName(boxId: string, ordinal: number): string {
   return boxId === DEFAULT_BOX.id ? `th${ordinal}` : `${boxId}-th${ordinal}`;
 }
 
-/** Inserts one conversation and makes it the box's current one. */
+/** Inserts one conversation. */
 function insertThread(
   db: Db,
   boxId: string,
@@ -577,17 +566,14 @@ function insertThread(
     created_at: now,
     last_active_at: thread.lastActiveAt ?? now,
   };
-  db.transaction(() => {
-    db.prepare(
-      `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
-         turn_active, inherits_from, mode_id, config, done, created_at,
-         last_active_at)
-       VALUES (@id, @box_id, @harness, @acp_session_id, @title, @ordinal,
-         @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
-         @last_active_at)`,
-    ).run(row);
-    db.prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?').run(row.id, boxId);
-  })();
+  db.prepare(
+    `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
+       turn_active, inherits_from, mode_id, config, done, created_at,
+       last_active_at)
+     VALUES (@id, @box_id, @harness, @acp_session_id, @title, @ordinal,
+       @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
+       @last_active_at)`,
+  ).run(row);
   return row;
 }
 
@@ -632,10 +618,10 @@ function createBox(
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-       review_base_rev, status, agent_set_id, current_thread_id, ws_token,
+       review_base_rev, status, agent_set_id, ws_token,
        created_at, last_active_at)
      VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, ?, '', ?, ?,
-       NULL, ?, NULL, NULL, ?, ?, ?)`,
+       NULL, ?, NULL, ?, ?, ?)`,
   ).run(
     id,
     spec.name ?? DEFAULT_BOX.name,
@@ -685,12 +671,6 @@ function createBox(
   upstream.backgroundActive = spec.backgroundBusy ?? upstream.workingThreads.length > 0;
   upstream.boxWork = spec.boxWork ?? [];
   upstream.attachedCount = spec.attachedCount ?? 0;
-  // The first conversation is the one a connection naming none gets, which is
-  // where a box that has been worked in is left.
-  db.prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?').run(
-    threads[0]?.id ?? threadName(id, 1),
-    id,
-  );
 
   if (spec.diskBytes !== undefined && !legacy) {
     sparseFile(join(ws.workspacePath(cfg.DATA_DIR, id), 'checkout.bin'), spec.diskBytes);
@@ -1032,7 +1012,7 @@ export async function startOrchestrator(
     {
       token: (boxId) => boxRow(db, boxId)?.ws_token ?? null,
       thread: (boxId, threadId) => {
-        const row = threadId ? getThread(db, threadId) : currentThread(db, boxId);
+        const row = threadId ? getThread(db, threadId) : latestThread(db, boxId);
         if (row) {
           if (row.box_id !== boxId) return null;
           // A thread a box was created with has a row and no conversation

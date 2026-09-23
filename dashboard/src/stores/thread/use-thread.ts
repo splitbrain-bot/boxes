@@ -6,9 +6,8 @@ import { wsUrlFor } from '@/lib/ws-url';
 /**
  * Mounts one thread's ThreadStore for as long as the view is on screen.
  *
- * `threadId` names which of the box's conversations this is, or is null
- * for the route that means whichever one is current. It is part of the URL
- * the connection opens, so moving between two threads tears one store down
+ * `threadId` names which of the box's conversations this is. It is part of
+ * the URL the connection opens, so moving between two threads tears one store down
  * and builds the other — two tabs on two threads hold two of these, and
  * neither sees the other's stream.
  *
@@ -18,7 +17,7 @@ import { wsUrlFor } from '@/lib/ws-url';
  */
 export function useThread(
   boxId: string,
-  threadId: string | null,
+  threadId: string,
   token: string | null,
 ): { store: ThreadStore | null; state: ThreadSnapshot } {
   const [store, setStore] = useState<ThreadStore | null>(null);

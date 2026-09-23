@@ -96,9 +96,7 @@ function shortTitle(name: string): string {
 
 /** Where a notification about this event points. */
 function target(event: NotifyEvent): string {
-  return event.threadId
-    ? `/boxes/${event.boxId}/threads/${event.threadId}`
-    : `/boxes/${event.boxId}`;
+  return event.threadId ? `/boxes/${event.boxId}/threads/${event.threadId}` : '/';
 }
 
 /** Sends one event to every subscribed browser. */

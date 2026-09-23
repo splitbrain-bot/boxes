@@ -95,11 +95,11 @@ function insertBox(id: string): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       network_name, subnet, ws_volume, home_volume, status,
        ws_token, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?, ?)`,
-  ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, `${id}-t1`, `token-${id}`, now, now);
+       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?)`,
+  ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 

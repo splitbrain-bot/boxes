@@ -59,7 +59,7 @@ async function askOnce(page: import('playwright').Page): Promise<void> {
 }
 
 test('a new thread starts empty on the same box', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await askOnce(page);
 
@@ -80,16 +80,16 @@ test('a new thread starts empty on the same box', async () => {
 });
 
 test('a fork carries the source thread messages into the new one', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await askOnce(page);
 
+    await page.getByLabel('Fork this thread').click();
+    await expect
+      .poll(() => page.getByRole('link', { name: 'Open it in a new tab' }).isVisible())
+      .toBe(true);
     await page.getByLabel('Back to boxes').click();
-    // Exact, because a name matches by substring and the thread header's own
-    // "Fork this thread" is still on the page for a moment after the list has
-    // taken the URL. That button forks without leaving the thread, so the one
-    // this test means is the card's, once the card is there.
-    await page.getByRole('button', { name: 'Fork', exact: true }).click();
+    await page.getByRole('link', { name: 'Thread 2' }).click();
     await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -105,7 +105,7 @@ test('a fork carries the source thread messages into the new one', async () => {
 });
 
 test('switching back to the first thread returns its transcript', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await askOnce(page);
 
@@ -130,7 +130,7 @@ test('switching back to the first thread returns its transcript', async () => {
 });
 
 test('the thread names itself even when the box has only one', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     // Two tabs on one box are otherwise indistinguishable, which is the
@@ -226,12 +226,10 @@ test('forking is not offered when the adapter does not advertise it', async () =
   await stub.close();
   stub = await startOrchestrator([{ canFork: false }]);
 
-  const { page, errors, close } = await openPage(stub.url, '/');
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/th1`);
   try {
-    await expect.poll(() => page.getByRole('button', { name: 'New thread' }).isVisible()).toBe(
-      true,
-    );
-    expect(await page.getByRole('button', { name: 'Fork' }).count()).toBe(0);
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    expect(await page.getByLabel('Fork this thread').count()).toBe(0);
     expect(errors).toEqual([]);
   } finally {
     await close();

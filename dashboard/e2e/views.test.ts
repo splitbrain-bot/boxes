@@ -111,12 +111,15 @@ test('a deep link into the SPA is served by the index fallback', async () => {
   }
 });
 
-test('tapping a card opens that box thread', async () => {
+test('tapping a card opens nothing, and tapping a thread opens that thread', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
+    // The card is not a link: a box has no thread it would open on its own.
     await page.getByText('refactor auth').click();
-    await page.waitForURL('**/boxes/a1b2c3d4');
-    expect(new URL(page.url()).pathname).toBe('/boxes/a1b2c3d4');
+    expect(new URL(page.url()).pathname).toBe('/');
+
+    await page.locator('a[href="/boxes/a1b2c3d4/threads/th1"]').click();
+    await page.waitForURL('**/boxes/a1b2c3d4/threads/th1');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -136,7 +139,7 @@ test('the info corner opens the ops route instead', async () => {
 });
 
 test('a link to a box that is gone says so instead of offering a composer', async () => {
-  const { page, errors, close } = await openPage(stub.url, '/boxes/deadbeef');
+  const { page, errors, close } = await openPage(stub.url, '/boxes/deadbeef/threads/th1');
   try {
     // What a bookmark for a deleted box lands on. Nothing can connect without
     // the box's token, so a composer would be an invitation to type into
@@ -291,7 +294,7 @@ test('a box is created from the form and is on the list afterwards', async () =>
 
     // Straight into the conversation of the box that was just made, which is
     // the point of creating one.
-    await page.waitForURL(/\/boxes\/[0-9a-f]{8}$/);
+    await page.waitForURL(/\/boxes\/[0-9a-f]{8}\/threads\/[^/]+$/);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     await page.getByLabel('Back to boxes').click();

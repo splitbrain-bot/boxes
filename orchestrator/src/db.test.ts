@@ -66,13 +66,10 @@ test('an existing conversation becomes the box first thread', () => {
     assert.equal(threads[0]!['created_at'], 1000);
     assert.equal(threads[0]!['last_active_at'], 2000);
 
-    const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
-      string,
-      unknown
-    >;
-    assert.equal(box['current_thread_id'], threads[0]!['id']);
     // The column it replaces is gone, so nothing can keep writing to it.
     assert.ok(!columns(db, 'boxes').includes('acp_session_id'));
+    // A box no longer records a current thread at all.
+    assert.ok(!columns(db, 'boxes').includes('current_thread_id'));
   } finally {
     db.close();
   }
@@ -82,14 +79,9 @@ test('a box that never had a conversation gets no thread', () => {
   atVersion3(null);
   const db = openDb(dir);
   try {
+    // The orchestrator mints one on the next spawn, exactly as it did before.
     const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
     assert.equal(count.n, 0);
-    const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
-      string,
-      unknown
-    >;
-    // The orchestrator mints one on the next spawn, exactly as it did before.
-    assert.equal(box['current_thread_id'], null);
   } finally {
     db.close();
   }
@@ -427,10 +419,10 @@ test('a database written by a newer build is refused rather than opened', () => 
 function insertLiveBox(db: Db, id: string): void {
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status, current_thread_id,
+       network_name, subnet, ws_volume, home_volume, status,
        created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', '', '', 'running', NULL, 1000, 2000)`,
+       ?, '10.200.0.0/24', '', '', 'running', 1000, 2000)`,
   ).run(id, `bn-${id}`);
 }
 

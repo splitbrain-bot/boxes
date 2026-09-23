@@ -251,4 +251,4 @@ review.
 
 Review comments are stored in a `REVIEW.md` at the top of the workspace.
 
-`Hand to agent` opens the thread with a prefilled prompt instructing the agent to address the review. The `Start a new review` button deletes the review file and all its comments.
+`Hand to agent` goes back to the thread the review was opened from, with a prefilled prompt instructing the agent to address the review. A review opened from the box list does not offer it. The `Start a new review` button deletes the review file and all its comments.

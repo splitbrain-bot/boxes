@@ -80,8 +80,8 @@ export function BoxReview() {
 
   const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
     useReview();
-  // This box, polled: its name for the header and its current thread for the
-  // way out. One box off the wire rather than the whole list.
+  // This box, polled: its name for the header. One box off the wire rather
+  // than the whole list.
   const { box } = useBox(id);
 
   /**
@@ -122,19 +122,18 @@ export function BoxReview() {
   const held = useRef<ScrollAnchor | null>(null);
   /**
    * The conversation this review was opened from, so leaving it goes back
-   * there rather than to whichever thread the box has current — after a
-   * fork those are two different conversations, and the fork cannot act on
-   * the comments while it is in plan mode.
+   * there. After a fork a box has two conversations on one checkout, and the
+   * fork cannot act on the comments while it is in plan mode.
    *
    * Read once: opening a file is a navigation of this same route, which keeps
-   * the component mounted but carries no state of its own. A reload has none
-   * either, and falls back to the box's current thread.
+   * the component mounted but carries no state of its own. A review opened
+   * from the box list has none, and neither has a reload: both lead back to
+   * the list.
    */
   const [origin] = useState<string | null>(
     () => (location.state as { threadId?: string } | null)?.threadId ?? null,
   );
   const name = box?.name ?? id;
-  const thread = origin ?? box?.currentThreadId;
   /**
    * The way out of the review: the conversation it was opened from.
    *
@@ -144,7 +143,7 @@ export function BoxReview() {
    * pushed. The path is what a deep link falls back to, and what the link's
    * href says for a middle click.
    */
-  const threadPath = thread ? `/boxes/${id}/threads/${thread}` : `/boxes/${id}`;
+  const threadPath = origin ? `/boxes/${id}/threads/${origin}` : '/';
   const up = useUp(threadPath);
   const navigate = useNavigate();
   /**
@@ -455,19 +454,17 @@ export function BoxReview() {
   );
 
   /**
-   * Hands the review to the agent: stage the prompt, then go to the thread.
+   * Hands the review to the agent: stage the prompt, then go back to the
+   * thread the review was opened from.
    *
-   * Back out of the review when the thread is what opened it, so the
-   * conversation is the one already on the stack rather than a second copy
-   * pushed over the review. Otherwise the review's own entry is spent getting
-   * there — the comments have been handed over, so there is nothing here to
-   * come back to.
+   * Only offered when there is such a thread. A review opened from the box
+   * list names none, and the box has no thread that would be the right one
+   * on its own.
    */
   const handoff = useCallback((): void => {
     stagePrompt(id, HANDOFF_PROMPT);
-    if (origin) up.go();
-    else void navigate(threadPath, { replace: true });
-  }, [id, origin, up, navigate, threadPath]);
+    up.go();
+  }, [id, up]);
 
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
@@ -547,7 +544,7 @@ export function BoxReview() {
                   }
                   up.onClick(event);
                 }}
-                aria-label="Back to the thread"
+                aria-label={origin ? 'Back to the thread' : 'Back to boxes'}
               >
                 <ArrowLeft className="size-4" />
               </a>
@@ -592,7 +589,7 @@ export function BoxReview() {
               a file of the project the agent is working on, so handing it over is
               one line of prompt rather than an export. Staged in the composer,
               not sent — the reviewer decides when to ask. */}
-          {facts && facts.commentCount > 0 ? (
+          {origin && facts && facts.commentCount > 0 ? (
             <Button
               type="button"
               variant="outline"

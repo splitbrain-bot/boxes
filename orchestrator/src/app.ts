@@ -449,23 +449,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Adds a conversation and makes it current: empty, or carrying the context of
+   * Adds a conversation: empty, or carrying the context of
    * the thread named by `from`.
    */
   app.post('/api/boxes/:id/threads', async (req, reply) => {
     const { id } = req.params as { id: string };
     const created = await manager.createThread(id, parseBody(createThreadBody, req.body));
     return reply.code(201).send(created);
-  });
-
-  /**
-   * Makes one of a box's threads current: what a connection naming no
-   * thread gets. An ordinary write — every live connection is pinned to its
-   * own thread, so nobody is dropped and nothing reconnects.
-   */
-  app.post('/api/boxes/:id/threads/:threadId/select', async (req) => {
-    const { id, threadId } = req.params as { id: string; threadId: string };
-    return manager.selectThread(id, threadId);
   });
 
   /**

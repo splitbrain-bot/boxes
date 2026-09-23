@@ -1,6 +1,5 @@
 import {
   FileSearch,
-  GitBranch,
   HardDrive,
   Info,
   Plus,
@@ -57,23 +56,20 @@ export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string
 }
 
 /**
- * One box in the list, with its conversations under it. Tapping the card
- * opens whichever one is current; tapping a thread opens that one.
+ * One box in the list, with its conversations under it. Tapping a thread
+ * opens that one; the card itself opens nothing, because a reader moves
+ * between a box's threads rather than working in one of them.
  *
- * The thread rows are plain links, because opening a thread is now a plain
- * navigation: the connection names its own thread, so nothing has to be
- * switched first. Opening one still makes it the box's default, but as a
- * fire-and-forget POST that neither blocks the navigation nor disturbs
- * anybody — no live connection is pinned to the default.
+ * The thread rows are plain links: the connection names its own thread, so
+ * opening one is a plain navigation.
  *
- * Ops live behind the info corner, and the two sit side by side rather than
- * nested, because an anchor inside an anchor is invalid markup. Where the
- * details view goes back to is not something this link has to say: it goes
- * back, and the entry it goes back to is this list.
+ * Ops live behind the info corner. Where the details view goes back to is not
+ * something this link has to say: it goes back, and the entry it goes back to
+ * is this list.
  */
 export function BoxCard({ box }: { box: BoxSummary }) {
   const navigate = useNavigate();
-  /** Held while a thread call is in flight, so a double tap cannot fork twice. */
+  /** Held while a thread call is in flight, so a double tap cannot start two. */
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** Whether the new-thread dialog is up. */
@@ -169,7 +165,6 @@ export function BoxCard({ box }: { box: BoxSummary }) {
     }
   }
 
-  const current = box.threads.find((t) => t.id === box.currentThreadId);
   /**
    * Whether this box holds work that no conversation in it claims.
    *
@@ -189,11 +184,8 @@ export function BoxCard({ box }: { box: BoxSummary }) {
   const now = Date.now();
 
   return (
-    <Card className="relative gap-0 overflow-hidden py-0 transition-colors hover:border-ring">
-      <Link
-        to={`/boxes/${box.id}`}
-        className="flex flex-col gap-1 px-4 pt-4 pb-3 no-underline"
-      >
+    <Card className="relative gap-0 overflow-hidden py-0">
+      <div className="flex flex-col gap-1 px-4 pt-4 pb-3">
         <div className="flex items-baseline gap-2 pr-9">
           <span className="truncate font-medium">{box.name}</span>
           <span className="font-mono text-xs text-muted-foreground">{box.id}</span>
@@ -218,7 +210,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
             </span>
           )}
         </div>
-      </Link>
+      </div>
       <Link
         to={`/boxes/${box.id}/info`}
         aria-label={`Details and controls for ${box.name}`}
@@ -234,18 +226,9 @@ export function BoxCard({ box }: { box: BoxSummary }) {
             <Link
               key={thread.id}
               to={`/boxes/${box.id}/threads/${thread.id}`}
-              // Selecting is a side effect of opening, not a step before it:
-              // the navigation does not wait for it, and nothing breaks if it
-              // never lands.
-              onClick={() => void api.selectThread(box.id, thread.id).catch(() => {})}
-              aria-current={thread.id === box.currentThreadId ? 'true' : undefined}
-              className={cn(
-                'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline hover:bg-accent',
-                thread.id === box.currentThreadId ? 'font-medium' : 'text-muted-foreground',
-              )}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline hover:bg-accent"
             >
-              {/* Which thread this is is said by the weight of the row and by
-                  aria-current; the bullet is what it is doing. */}
+              {/* The bullet is what the thread is doing. */}
               <span
                 role="img"
                 aria-label={dot.label}
@@ -313,21 +296,6 @@ export function BoxCard({ box }: { box: BoxSummary }) {
             <SquareTerminal className="size-3.5" />
             Terminal
           </Link>
-          {/* Forking needs a thread to fork and that thread's own adapter to
-              have advertised the capability, which is unstable in the ACP
-              schema and may be absent — and a box may hold threads of two
-              harnesses, each answering for itself. */}
-          {current?.canFork ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void open(() => api.createThread(box.id, { from: current.id }))}
-              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
-            >
-              <GitBranch className="size-3.5" />
-              Fork
-            </button>
-          ) : null}
           {/* Only for work nobody claims: while a thread has a task of its
               own, its own bar is where that gets stopped, by name and with
               the adapter rather than with a signal. */}
@@ -389,8 +357,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
         ) : null}
 
         {/* Asked before it is started, because the agent a thread runs is
-            fixed for the life of its transcript. Forking asks nothing: it
-            stays on its source's harness with its source's settings. */}
+            fixed for the life of its transcript. */}
         {starting ? (
           <NewThreadDialog
             busy={busy}
@@ -418,9 +385,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
  * The bullet on a thread's row: what that conversation is doing, in one dot,
  * and the whole of what a row says about it.
  *
- * Which thread is the box's default is not among them: the row says that
- * twice already, in its weight and in `aria-current`. Being up is a
- * precondition of every state here.
+ * Being up is a precondition of every state here.
  *
  * The order is what outranks what, and it is the reader's order rather than
  * the machine's: a question stops everything, talking is next, and work still

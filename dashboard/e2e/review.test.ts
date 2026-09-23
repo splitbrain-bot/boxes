@@ -76,8 +76,9 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
     await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
 
-    // And from the list, the next step out is the thread.
-    await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
+    // And from the list, the next step out is the box list: a review opened
+    // by a link names no thread to go back to.
+    await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
 
     expect(errors).toEqual([]);
   } finally {
@@ -103,9 +104,9 @@ test('the tree is a column beside the pane on a desktop', async () => {
     // a root the review no longer has.
     await expect.poll(() => page.getByText(/· app/).isVisible()).toBe(true);
     // The list and the file are one view here, so there is no step between
-    // the review and the thread: back leaves, with a file open or without.
+    // the review and what opened it: back leaves, with a file open or without.
     expect(await page.getByLabel('Back to the file list').count()).toBe(0);
-    await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
     await shoot(page, 'review-file-desktop');
     expect(errors).toEqual([]);
   } finally {
@@ -436,11 +437,12 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
 
   const { page, errors, close } = await openPage(
     stub.url,
-    `/boxes/${BOX}/review`,
+    `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`,
     'dark',
     'desktop',
   );
   try {
+    await page.getByLabel("Review this box's code").click();
     await expect.poll(() => page.getByRole('button', { name: /Hand to agent/ }).isVisible()).toBe(
       true,
     );
@@ -455,6 +457,25 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
     // One line, and the same one however many repositories the workspace
     // holds: there is exactly one REVIEW.md, at the top of the workspace.
     await shoot(page, 'review-handoff-desktop');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a review opened from the box list offers no thread to hand it to', async () => {
+  await stub.comment(BOX, 'app/src/app.ts', 2, 'please fix');
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review`,
+    'dark',
+    'desktop',
+  );
+  try {
+    // The comments are there, and so is the rest of the toolbar.
+    await expect.poll(() => page.getByLabel('Start a new review').isVisible()).toBe(true);
+    expect(await page.getByRole('button', { name: /Hand to agent/ }).count()).toBe(0);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -1045,7 +1066,7 @@ test('the review is reachable from the box card and the thread header', async ()
     await list.close();
   }
 
-  const thread = await openPage(stub.url, `/boxes/${BOX}`, 'dark', 'desktop');
+  const thread = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`, 'dark', 'desktop');
   try {
     const link = thread.page.getByRole('link', { name: "Review this box's code" });
     await expect.poll(() => link.isVisible()).toBe(true);

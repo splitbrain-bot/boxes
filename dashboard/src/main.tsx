@@ -62,13 +62,10 @@ function App() {
       <Suspense fallback={<Loading className="flex h-dvh items-center justify-center" />}>
         <Routes>
           {/* The thread owns the whole viewport; every other route sits in the
-              narrow reading column.
-
-              Two routes onto the same view: one naming a thread, which is what
-              makes two tabs on two conversations of one box possible, and one
-              naming none, which means whichever thread the box has current
-              — so every link and bookmark from before survives. */}
-          <Route path="/boxes/:id" element={<BoxThread />} />
+              narrow reading column. The thread is always named, which is what
+              makes two tabs on two conversations of one box possible. A box
+              on its own is not a page: it is a card in the list. */}
+          <Route path="/boxes/:id" element={<Navigate to="/" replace />} />
           <Route path="/boxes/:id/threads/:threadId" element={<BoxThread />} />
           {/* Reviewing owns the whole viewport too: a code pane in the reading
               column is not a code pane. The open file is in the search string,
