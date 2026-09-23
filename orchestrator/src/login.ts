@@ -374,9 +374,9 @@ export class LoginManager {
     let code: string | null = null;
     const output = await readOutput(exec.output, (text) => {
       if (flow.settled) return;
-      url ??= deviceUrlIn(text);
+      url = grown(url, deviceUrlIn(text));
       if (!url) return;
-      code ??= deviceCodeIn(text, url);
+      code = grown(code, deviceCodeIn(text, url));
       this.settle(flow, { state: 'awaiting_browser', url, code });
     });
 
@@ -464,7 +464,7 @@ export class LoginManager {
       // What the CLI has drawn so far. At debug level because it is the only
       // way to see what a login actually said.
       log.debug('claude login output', { text: tail(text) });
-      url ??= visitUrlIn(text);
+      url = grown(url, visitUrlIn(text));
       token ??= CLAUDE_TOKEN.exec(text)?.[0] ?? null;
       if (token) {
         this.storeClaudeToken(flow, token);
@@ -673,6 +673,24 @@ export function stripAnsi(text: string): string {
       // text, that is a new line.
       .replace(/\r\n?/g, '\n')
   );
+}
+
+/**
+ * The longer of what has been read and what a later read says.
+ *
+ * A read ends wherever it ends, which may be in the middle of a URL or a code,
+ * and the piece that arrived looks exactly like a whole one: the pattern stops
+ * where the text does. The rest comes with the next read, so a later reading
+ * that begins with the one in hand replaces it.
+ *
+ * Anything else is left alone. A CLI that redraws itself can scroll part of a
+ * line away or draw over it, and a URL read whole once must not be shortened
+ * by what is on the screen afterwards.
+ */
+export function grown(seen: string | null, read: string | null): string | null {
+  if (read === null) return seen;
+  if (seen === null || read.startsWith(seen)) return read;
+  return seen;
 }
 
 /** The Codex device URL in some output, or null. */

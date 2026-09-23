@@ -10,6 +10,7 @@ import { HttpError } from './http-error.ts';
 import {
   deviceCodeIn,
   deviceUrlIn,
+  grown,
   LoginManager,
   stripAnsi,
   visitUrlIn,
@@ -111,6 +112,11 @@ function fakeRuntime(): Fake {
 }
 
 /** Waits for something the flow does on its own, or gives up loudly. */
+/** Lets the reader take what has been written, so the next write is a read of its own. */
+async function flush(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 async function until(what: string, ready: () => boolean): Promise<void> {
   for (let i = 0; i < 500; i += 1) {
     if (ready()) return;
@@ -171,9 +177,13 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   assert.match(cli.spec.cmd.join(' '), /codex login --device-auth/);
   assert.equal(cli.spec.env?.['CODEX_HOME'], '/home/agent/.codex');
 
-  // Coloured, and split across reads, because that is how it arrives.
+  // Coloured, and split across reads, because that is how it arrives. Each
+  // piece is handed over on its own: writes the reader has not got to yet are
+  // read as one, which would hide the split this is here for.
   cli.print(`Open this URL to authenticate:\n  ${coloured('https://auth.openai.com/codex/dev')}`);
+  await flush();
   cli.print('ice\nand enter the code ');
+  await flush();
   cli.print(`${coloured('WXYZ-1234')}\n`);
 
   await until('the URL and the code to be read', () => {
@@ -443,6 +453,17 @@ test("Claude's URL is read after its label, and off the stream otherwise", () =>
   );
   assert.equal(visitUrlIn('open https://console.anthropic.com/x in a browser'), 'https://console.anthropic.com/x');
   assert.equal(visitUrlIn('press enter'), null);
+});
+
+test('a value a read cut in half grows, and a redraw cannot shorten it', () => {
+  const url = 'https://auth.openai.com/codex/device';
+  assert.equal(grown(null, null), null);
+  assert.equal(grown(null, 'https://auth.openai.com/codex/dev'), 'https://auth.openai.com/codex/dev');
+  // The rest of it arrived.
+  assert.equal(grown('https://auth.openai.com/codex/dev', url), url);
+  // The screen scrolled part of the line away, which says nothing new.
+  assert.equal(grown(url, 'https://auth.openai.com/codex/dev'), url);
+  assert.equal(grown(url, null), url);
 });
 
 test('a Codex auth.json is described without being verified', () => {
