@@ -278,6 +278,26 @@ test('the Claude flow takes a code back and stores the token it prints', async (
   await until('the container to be removed', () => fake.removed.length === 1);
 });
 
+test('a token a read ended in the middle of is stored whole', async () => {
+  const loginId = logins.start('claude');
+  await until('the CLI to be running', () => fake.execs.length === 1);
+  const cli = fake.execs[0]!;
+
+  cli.print(`${ESC}[2J${ESC}[HVisit: https://claude.ai/oauth/authorize?code=true\n`);
+  await until('the URL to be read', () => {
+    return logins.state('claude', loginId).state === 'awaiting_browser';
+  });
+
+  // The first piece carries the prefix and more than the length the parse
+  // asks for, so it reads as a whole token. The rest is a read behind.
+  cli.print('\nsk-ant-oat01-abcdefghijklmnop');
+  await flush();
+  cli.print('1234\n');
+
+  await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
+  assert.equal(store.get('claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
+});
+
 test('the prompt is recognised when the UI lays it out by column', async () => {
   const loginId = logins.start('claude');
   await until('the CLI to be running', () => fake.execs.length === 1);

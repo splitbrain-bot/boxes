@@ -91,6 +91,18 @@ const RETRY_PROMPT = /press enter to retry/i;
  */
 const ENTER_DELAY_MS = 150;
 
+/**
+ * How long a token is left to finish arriving before it is stored.
+ *
+ * A read ends wherever it ends, and a token it ended in the middle of matches
+ * the pattern above as well as a whole one does. Storing what arrived would
+ * store a token a character or more short, which is minted, delivered and
+ * then refused. The read that carries the rest is milliseconds behind, so the
+ * wait is short, and it is a fixed one rather than a wait for more output:
+ * the CLI may print nothing after the token and never exit.
+ */
+const TOKEN_GRACE_MS = 150;
+
 /** How long a Claude token is good for. The CLI says a year and cannot refresh. */
 const CLAUDE_TOKEN_DAYS = 365;
 
@@ -450,6 +462,8 @@ export class LoginManager {
 
     let url: string | null = null;
     let token: string | null = null;
+    /** Set once a token has been seen, while the rest of it is given time to arrive. */
+    let storing: ReturnType<typeof setTimeout> | null = null;
     /**
      * Whether the CLI has asked for a code yet.
      *
@@ -465,13 +479,20 @@ export class LoginManager {
       // way to see what a login actually said.
       log.debug('claude login output', { text: tail(text) });
       url = grown(url, visitUrlIn(text));
-      token ??= CLAUDE_TOKEN.exec(text)?.[0] ?? null;
+      token = grown(token, CLAUDE_TOKEN.exec(text)?.[0] ?? null);
       if (token) {
-        this.storeClaudeToken(flow, token);
         // The token is the end of the flow. The CLI may go on drawing, and
         // waiting for it to exit would risk waiting out the whole timeout on
         // a UI that wants a keypress. Verify step 8 says whether it does.
-        exec.kill();
+        //
+        // Not on sight, though: a read can end in the middle of a token, and
+        // what arrived carries the prefix and the length this looks for as
+        // well as the whole does. The reads that follow finish it.
+        storing ??= setTimeout(() => {
+          if (flow.settled) return;
+          if (token) this.storeClaudeToken(flow, token);
+          exec.kill();
+        }, TOKEN_GRACE_MS);
         return;
       }
       if (!url) return;
@@ -505,7 +526,14 @@ export class LoginManager {
       this.settle(flow, { state: 'awaiting_browser', url, code: null });
     });
 
+    if (storing) clearTimeout(storing);
     if (flow.settled) return;
+    if (token) {
+      // The CLI ended while the wait above was still running, which is the
+      // one thing that proves there is no more of the token to come.
+      this.storeClaudeToken(flow, token);
+      return;
+    }
     log.info('claude setup-token finished', { exit: await exec.exited, url, output: tail(output) });
     this.fail(
       flow,
