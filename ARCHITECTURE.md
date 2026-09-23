@@ -796,7 +796,7 @@ than a branch at the call site.
 | `defaultModeId`, what a fresh thread starts in | `auto` | `agent-full-access` |
 | `forkModeId`, what a fork starts in instead | `plan` | `read-only` |
 | `defaultConfig`, what a fresh thread is configured with | `model: opus` | nothing; the adapter's own defaults |
-| `sessionMeta`, the `_meta` its box calls carry | the thinking options | none |
+| `threadMeta`, the `_meta` its `session/*` calls carry | the thinking options | none |
 | `credentialId`, what must be stored before a thread can run | `claude` | `openai` |
 | `env()`, the container environment it needs, holding a placeholder | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR` | `CODEX_API_KEY`, `CODEX_HOME`, `NO_BROWSER`, `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST` |
 | `layout`, where an agent set is installed under `$HOME` | `.claude/CLAUDE.md`, `.claude/skills`, `.claude/commands` | `.codex/AGENTS.md`, `.agents/skills`, `.codex/prompts` |
@@ -809,7 +809,7 @@ bubblewrap, which needs unprivileged user namespaces that a container with
 Codex's own documentation names the container as the boundary for exactly that
 case. `CODEX_API_KEY` is another: Codex itself reads no key from its
 environment, and what puts one in reach is the adapter, which logs itself in
-with the method `DEFAULT_AUTH_REQUEST` names when a box call finds no
+with the method `DEFAULT_AUTH_REQUEST` names when a `session/*` call finds no
 account. And the value in that variable is a placeholder, because a real secret
 never enters a box — see [Token translation](#token-translation).
 
@@ -942,7 +942,7 @@ back where it ended up rather than where it was last sent. Which option is the
 model is read from its `category`, never from the adapter's id for it.
 
 **`_meta` comes from the registry.** `session/new`, `session/fork` and
-`session/load` carry whatever the harness's `sessionMeta` says and nothing
+`session/load` carry whatever the harness's `threadMeta` says and nothing
 otherwise. Only Claude Code asks for anything: `_meta.claudeCode.options.thinking`,
 which is where its adapter reads options to lay over the ones it hands the
 Claude Agent SDK. It asks for `display: 'summarized'`. Current models default

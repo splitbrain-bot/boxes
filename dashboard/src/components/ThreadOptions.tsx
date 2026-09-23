@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import type {
   HarnessId,
   HarnessInfo,
-  SessionConfigOption,
+  ThreadConfigOption,
   ThreadDialogDefaults,
   ThreadOptions as ThreadOptionsBody,
 } from '../../../shared/types.ts';
@@ -183,7 +183,7 @@ export function useThreadOptions(): ThreadOptionsState {
  * between one thread and the next would otherwise leave a select with nothing
  * selected in it.
  */
-function valueOf(option: SessionConfigOption, config: Record<string, string>): string {
+function valueOf(option: ThreadConfigOption, config: Record<string, string>): string {
   const offered = (value: string | undefined): boolean =>
     value !== undefined && (option.options?.some((entry) => entry.value === value) ?? false);
   const chosen = config[option.id];

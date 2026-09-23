@@ -1,5 +1,5 @@
 import { afterAll, afterEach, expect, test } from 'vitest';
-import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
+import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
@@ -158,7 +158,7 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
               { type: 'content', content: { type: 'text', text: 'ok 1 - cidr\nok 2 - subnet' } },
             ],
           },
-        ] as SessionUpdate[],
+        ] as ThreadUpdate[],
       },
     ],
   });
@@ -200,7 +200,7 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
   // sends them and as one that does not. The turn's own letter keeps the
   // tool call ids apart: a re-announced id is an update to the call already
   // in the thread, not a second one.
-  const row = (turn: string, n: number, split: boolean): SessionUpdate[] =>
+  const row = (turn: string, n: number, split: boolean): ThreadUpdate[] =>
     [
       {
         sessionUpdate: 'agent_thought_chunk',
@@ -215,9 +215,9 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
         status: 'completed',
         rawInput: { path: `file-${n}.ts` },
       },
-    ] as SessionUpdate[];
+    ] as ThreadUpdate[];
 
-  const turn = (letter: string, split: boolean): SessionUpdate[] => [
+  const turn = (letter: string, split: boolean): ThreadUpdate[] => [
     ...row(letter, 1, split),
     ...row(letter, 2, split),
     ...row(letter, 3, split),
@@ -324,19 +324,19 @@ test('a row run stays a list across a message that speaks, and the prose in it s
   // Message ids of the adapter's own choosing, which is what splits a turn
   // into messages. They are not the ids the thread mints for the chunks that
   // arrive without one, and must not collide with them.
-  const think = (id: string, text: string): SessionUpdate =>
+  const think = (id: string, text: string): ThreadUpdate =>
     ({
       sessionUpdate: 'agent_thought_chunk',
       messageId: id,
       content: { type: 'text', text },
-    }) as SessionUpdate;
-  const speak = (id: string, text: string): SessionUpdate =>
+    }) as ThreadUpdate;
+  const speak = (id: string, text: string): ThreadUpdate =>
     ({
       sessionUpdate: 'agent_message_chunk',
       messageId: id,
       content: { type: 'text', text },
-    }) as SessionUpdate;
-  const call = (n: number): SessionUpdate =>
+    }) as ThreadUpdate;
+  const call = (n: number): ThreadUpdate =>
     ({
       sessionUpdate: 'tool_call',
       toolCallId: `s-call-${n}`,
@@ -344,7 +344,7 @@ test('a row run stays a list across a message that speaks, and the prose in it s
       kind: 'read',
       status: 'completed',
       rawInput: { path: `file-${n}.ts` },
-    }) as SessionUpdate;
+    }) as ThreadUpdate;
 
   await start({
     prompts: [
@@ -464,7 +464,7 @@ test('a tool call that never reported back is not offered as a decision', async 
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'that is all' },
           },
-        ] as SessionUpdate[],
+        ] as ThreadUpdate[],
       },
     ],
   });
@@ -940,7 +940,7 @@ test('a permission request renders its options and the choice answers the agent'
           {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: `chose ${optionId}` },
-          } as SessionUpdate,
+          } as ThreadUpdate,
         ],
       },
     ],
@@ -987,7 +987,7 @@ test('a permission request queued while nobody watched is delivered on attach', 
         {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: `queued answer: ${optionId}` },
-        } as SessionUpdate,
+        } as ThreadUpdate,
       ],
     },
   });
@@ -1019,7 +1019,7 @@ test('typing a slash lists the adapter commands and completes the one picked', a
         { name: 'release', description: 'Cut a release' },
         { name: 'compact', description: 'Compact the thread' },
       ],
-    } as SessionUpdate);
+    } as ThreadUpdate);
 
     const input = page.getByLabel('Message input');
     await input.press('/');

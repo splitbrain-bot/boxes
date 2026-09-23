@@ -19,8 +19,8 @@ import type { Logger } from '../log.ts';
 import { ACP_METHOD } from '../../../shared/acp.ts';
 import type {
   BackgroundProcess,
-  SessionConfigOption,
-  SessionModeState,
+  ThreadConfigOption,
+  ThreadModeState,
 } from '../../../shared/types.ts';
 import { TaskBoard } from './background.ts';
 import { threadOf } from './broadcast.ts';
@@ -62,7 +62,7 @@ const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
 /** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
 const RESOURCE_NOT_FOUND = -32002;
 
-/** JSON-RPC code an adapter refusing an unauthenticated box call uses. */
+/** JSON-RPC code an adapter refusing an unauthenticated `session/*` call uses. */
 const AUTH_REQUIRED = -32000;
 
 /**
@@ -101,7 +101,7 @@ export function isResourceNotFound(err: unknown): boolean {
  *
  * Matched on both halves, because -32000 is the generic server error and only
  * the message says what this one is. Codex's adapter checks authorization on
- * every box call and logs itself in from the environment first, so this is
+ * every `session/*` call and logs itself in from the environment first, so this is
  * what a box holding a placeholder for a credential nobody has entered answers
  * with.
  */
@@ -159,8 +159,8 @@ export function inheritedSource(
  */
 function optionsOf(
   res: {
-    modes?: SessionModeState | null;
-    configOptions?: SessionConfigOption[] | null;
+    modes?: ThreadModeState | null;
+    configOptions?: ThreadConfigOption[] | null;
   } | null,
 ): AdapterOptions {
   return { modes: res?.modes ?? null, configOptions: res?.configOptions ?? [] };
@@ -695,8 +695,8 @@ export class AdapterConnection {
       ...this.meta(),
     })) as {
       sessionId?: string;
-      modes?: SessionModeState | null;
-      configOptions?: SessionConfigOption[] | null;
+      modes?: ThreadModeState | null;
+      configOptions?: ThreadConfigOption[] | null;
     };
     if (!res?.sessionId) throw new Error(`${method} returned no sessionId`);
     this.live.add(res.sessionId);
@@ -744,8 +744,8 @@ export class AdapterConnection {
           ...this.meta(),
         }),
       )) as {
-        modes?: SessionModeState | null;
-        configOptions?: SessionConfigOption[] | null;
+        modes?: ThreadModeState | null;
+        configOptions?: ThreadConfigOption[] | null;
       } | null;
       this.host.endFill(acpSessionId, optionsOf(res));
       this.live.add(acpSessionId);
@@ -791,7 +791,7 @@ export class AdapterConnection {
    */
   async applyMode(
     acpSessionId: string,
-    modes: SessionModeState | null,
+    modes: ThreadModeState | null,
     modeId: string,
   ): Promise<void> {
     if (!modes?.availableModes?.some((mode) => mode.id === modeId)) return;
@@ -823,7 +823,7 @@ export class AdapterConnection {
    */
   async applyConfig(
     acpSessionId: string,
-    configOptions: SessionConfigOption[] | null,
+    configOptions: ThreadConfigOption[] | null,
     config: Record<string, string>,
   ): Promise<void> {
     if (!configOptions) return;
@@ -862,7 +862,7 @@ export class AdapterConnection {
    * that recorded a model this adapter no longer lists comes back on a variant
    * of it or on that default. Everything else is either recorded or not.
    */
-  private wantedValue(option: SessionConfigOption, recorded: string | undefined): string | null {
+  private wantedValue(option: ThreadConfigOption, recorded: string | undefined): string | null {
     if (option.category !== 'model') return recorded ?? null;
     const offered = option.options ?? [];
     const fallback = this.harness.defaultConfig[option.id];
@@ -886,7 +886,7 @@ export class AdapterConnection {
    * Merged rather than replaced, because an answer that omits an option says
    * nothing about it, and the mode's own option is dropped here as everywhere.
    */
-  recordConfigOptions(acpSessionId: string, configOptions: SessionConfigOption[]): void {
+  recordConfigOptions(acpSessionId: string, configOptions: ThreadConfigOption[]): void {
     const row = this.rowOf(acpSessionId);
     if (!row) return;
     const config = threadConfig(row);
@@ -1006,13 +1006,13 @@ export class AdapterConnection {
    * noise on the wire.
    */
   meta(): { _meta?: Record<string, unknown> } {
-    return this.harness.sessionMeta ? { _meta: { ...this.harness.sessionMeta } } : {};
+    return this.harness.threadMeta ? { _meta: { ...this.harness.threadMeta } } : {};
   }
 
   /** Caches what this answer advertised, for a dialog with no adapter to ask. */
   private noteCatalog(res: {
-    modes?: SessionModeState | null;
-    configOptions?: SessionConfigOption[] | null;
+    modes?: ThreadModeState | null;
+    configOptions?: ThreadConfigOption[] | null;
   }): void {
     if (!res.modes && !res.configOptions) return;
     for (const option of res.configOptions ?? []) {

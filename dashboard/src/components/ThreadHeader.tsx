@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router';
 import type { HarnessId } from '../../../shared/types.ts';
-import type { SessionConfigOption, SessionModeState } from '../stores/thread/acp-types.ts';
+import type { ThreadConfigOption, ThreadModeState } from '../stores/thread/acp-types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
 import type { Up } from '@/hooks/use-up';
 import {
@@ -74,8 +74,8 @@ export function ThreadHeader({
   harness: HarnessId | null;
   harnessLabel: string | null;
   connection: ConnectionState;
-  modes: SessionModeState | null;
-  configOptions: readonly SessionConfigOption[];
+  modes: ThreadModeState | null;
+  configOptions: readonly ThreadConfigOption[];
   /** Whether the reader has marked this conversation finished with. */
   done: boolean;
   /** Whether the adapter advertised the fork capability; see BoxSummary. */

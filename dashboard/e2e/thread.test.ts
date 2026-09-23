@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
-import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
+import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
@@ -502,11 +502,11 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     stub.gateway.emit({
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text: `asking about ${text}` },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: `answering about ${text}` },
-    } as SessionUpdate);
+    } as ThreadUpdate);
   }
 
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
@@ -591,7 +591,7 @@ test('an update the dashboard does not know about does not break the thread', as
       {
         match: () => true,
         updates: [
-          { sessionUpdate: 'usage_update', tokens: 42 } as unknown as SessionUpdate,
+          { sessionUpdate: 'usage_update', tokens: 42 } as unknown as ThreadUpdate,
           ...reply('Still fine.'),
         ],
       },
@@ -627,16 +627,16 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
       kind: 'read',
       status: 'completed',
       content: [{ type: 'content', content: { type: 'image', mimeType: 'image/png', data: PNG } }],
-    } as SessionUpdate);
+    } as ThreadUpdate);
     // And the other way one can arrive: in the message itself.
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'Here is the page:' },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'image', mimeType: 'image/png', data: PNG },
-    } as SessionUpdate);
+    } as ThreadUpdate);
 
     // Both of them, as loaded images rather than as parts that merely exist:
     // a broken src renders an <img> too.
@@ -683,7 +683,7 @@ test('a background task reporting in is a row of its own, not the user talking',
           '</task-notification>',
         ].join('\n'),
       },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'user_message_chunk',
       messageId: 'note-2',
@@ -700,11 +700,11 @@ test('a background task reporting in is a row of its own, not the user talking',
           '</task-notification>',
         ].join('\n'),
       },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'The crawl is being rate limited; the backoff is holding.' },
-    } as SessionUpdate);
+    } as ThreadUpdate);
 
     // Two rows, neither of them a message on the user's side of the thread.
     const rows = page.locator('[data-role="task-notification"]');

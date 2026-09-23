@@ -1,4 +1,4 @@
-import type { HarnessId, SessionConfigOption, SessionModeState } from '../../../shared/types.ts';
+import type { HarnessId, ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 import { modeDescription, modeLabel } from '@/lib/harness';
 import { cn } from '@/lib/utils';
 
@@ -30,12 +30,12 @@ const SELECT = 'min-w-0 rounded-md border bg-muted px-2 py-1 text-xs';
  * which this one does not — and an option with a single value is not a
  * choice.
  */
-export function isSelectable(option: SessionConfigOption): boolean {
+export function isSelectable(option: ThreadConfigOption): boolean {
   return (option.type ?? 'select') === 'select' && (option.options?.length ?? 0) > 1;
 }
 
 /** What to call an option whose adapter did not name it. */
-export function optionName(option: SessionConfigOption): string {
+export function optionName(option: ThreadConfigOption): string {
   return option.name ?? option.id;
 }
 
@@ -71,7 +71,7 @@ export function ConfigSelect({
   className,
   onSet,
 }: {
-  option: SessionConfigOption;
+  option: ThreadConfigOption;
   /** What to call it. The adapter's own name, unless the caller has a better one. */
   label?: string;
   /**
@@ -117,7 +117,7 @@ export function ModeSelect({
   className,
   onSet,
 }: {
-  modes: SessionModeState;
+  modes: ThreadModeState;
   /** Whose modes these are, which is what the caveat depends on. */
   harness: HarnessId | null;
   className?: string;
@@ -141,7 +141,7 @@ export function ModeSelect({
 
 /** What the mode picker says under its name: the current mode's own line. */
 export function currentModeDescription(
-  modes: SessionModeState | null | undefined,
+  modes: ThreadModeState | null | undefined,
   harness: HarnessId | null,
 ): string | null {
   const current = modes?.availableModes.find((mode) => mode.id === modes.currentModeId);

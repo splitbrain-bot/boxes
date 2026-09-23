@@ -7,9 +7,9 @@ import type {
   PlanEntry,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
-  SessionModeState,
-  SessionNotification,
+  ThreadConfigOption,
+  ThreadModeState,
+  ThreadNotification,
 } from './acp-types.ts';
 import { AcpClient, loadParams, type ConnectionState } from './acp-client.ts';
 import {
@@ -64,9 +64,9 @@ export interface ThreadSnapshot {
   /** What the thread is waiting for an answer to, or null. */
   awaiting: Awaiting | null;
   connection: ConnectionState;
-  modes: SessionModeState | null;
+  modes: ThreadModeState | null;
   /** The options the adapter lets a client set, such as the model. */
-  configOptions: readonly SessionConfigOption[];
+  configOptions: readonly ThreadConfigOption[];
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
   commands: AvailableCommand[];
@@ -448,7 +448,7 @@ export class ThreadStore {
 
   // --- incoming ------------------------------------------------------------
 
-  private onUpdate(params: SessionNotification): void {
+  private onUpdate(params: ThreadNotification): void {
     const touched = applyUpdate(this.model, params.update);
     // A replay's own notifications say nothing on their way past; flushReplay
     // publishes what they built.

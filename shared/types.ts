@@ -80,7 +80,7 @@ export interface HarnessHealth {
  * the dialog that offers the modes and the gateway that applies them agree
  * about what one is.
  */
-export interface SessionModeState {
+export interface ThreadModeState {
   currentModeId: string;
   availableModes: Array<{ id: string; name?: string; description?: string | null }>;
 }
@@ -94,7 +94,7 @@ export interface SessionModeState {
  * that merely echoes the mode is kept out of a thread's config map, since the
  * mode travels through `session/set_mode` alone.
  */
-export interface SessionConfigOption {
+export interface ThreadConfigOption {
   id: string;
   name?: string;
   /** What the adapter says the option does, where it says anything. */
@@ -120,9 +120,9 @@ export interface SessionConfigOption {
  */
 export interface HarnessCatalog {
   /** The modes of the last answer, or null when it carried none. */
-  modes: SessionModeState | null;
+  modes: ThreadModeState | null;
   /** The config options of the last answer; empty when it carried none. */
-  configOptions: SessionConfigOption[];
+  configOptions: ThreadConfigOption[];
   /** When the answer arrived, in epoch milliseconds. */
   seenAt: number;
 }

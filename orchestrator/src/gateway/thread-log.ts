@@ -1,5 +1,5 @@
 import { UPDATE_KIND } from '../../../shared/acp.ts';
-import type { SessionConfigOption, SessionModeState } from '../../../shared/types.ts';
+import type { ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 
 /**
  * How many bytes of one thread's log are kept, counted on the notifications
@@ -18,8 +18,8 @@ export const MAX_LOG_BYTES = 4 * 1024 * 1024;
  * it offers and the options it lets a client set.
  */
 export interface AdapterOptions {
-  modes: SessionModeState | null;
-  configOptions: SessionConfigOption[];
+  modes: ThreadModeState | null;
+  configOptions: ThreadConfigOption[];
 }
 
 /** What a browser asking to open a thread is sent, and told about it. */
@@ -148,7 +148,7 @@ export class ThreadLog {
       const configOptions = update['configOptions'];
       this.options = {
         ...this.options,
-        configOptions: Array.isArray(configOptions) ? (configOptions as SessionConfigOption[]) : [],
+        configOptions: Array.isArray(configOptions) ? (configOptions as ThreadConfigOption[]) : [],
       };
     }
   }

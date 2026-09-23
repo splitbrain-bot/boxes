@@ -2,9 +2,9 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
 import { TURN_STATE_METHOD, type BackgroundProcess } from '../../shared/types.ts';
 import type {
-  SessionConfigOption,
-  SessionModeState,
-  SessionUpdate,
+  ThreadConfigOption,
+  ThreadModeState,
+  ThreadUpdate,
 } from '../src/stores/thread/acp-types.ts';
 
 /**
@@ -32,7 +32,7 @@ export interface PromptScript {
   /** Matched against the prompt text; the first match wins. */
   match: (text: string) => boolean;
   /** Updates to stream, in order, with a pause between them. */
-  updates: SessionUpdate[];
+  updates: ThreadUpdate[];
   /** Milliseconds between updates. Zero sends them in one tick. */
   gapMs?: number;
   /** Hold the prompt open until the test releases it. */
@@ -52,10 +52,10 @@ export interface PromptScript {
  *
  * Shared, because a script's updates are what every thread test builds.
  */
-export function reply(...texts: string[]): SessionUpdate[] {
+export function reply(...texts: string[]): ThreadUpdate[] {
   return texts.map(
     (text) =>
-      ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as SessionUpdate,
+      ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }) as ThreadUpdate,
   );
 }
 
@@ -65,14 +65,14 @@ export interface PermissionScript {
   toolCall: { toolCallId: string; title: string; kind?: string };
   options: Array<{ optionId: string; name: string; kind: string }>;
   /** Streamed after the answer arrives, with the chosen option's id. */
-  after: (optionId: string | null) => SessionUpdate[];
+  after: (optionId: string | null) => ThreadUpdate[];
 }
 
 /** How the stub behaves, mutable between tests. */
 export interface GatewayScript {
-  modes: SessionModeState | null;
+  modes: ThreadModeState | null;
   /** The options the adapter offers, such as the model. */
-  configOptions: SessionConfigOption[];
+  configOptions: ThreadConfigOption[];
   prompts: PromptScript[];
   permissions: PermissionScript[];
   /** Delivered to the next socket that attaches, then cleared. */
@@ -127,7 +127,7 @@ export interface StubGateway {
    */
   loadsHeld: () => number;
   /** Sends one update to the sockets watching a thread, and records it. */
-  emit: (update: SessionUpdate, threadId?: string) => void;
+  emit: (update: ThreadUpdate, threadId?: string) => void;
   close: () => void;
 }
 
@@ -171,7 +171,7 @@ export function attachStubGateway(
   /** Every attached socket, each recording the thread it is pinned to. */
   const sockets = new Map<WebSocket, string>();
   /** One transcript per thread, which is what session/load replays. */
-  const threads = new Map<string, SessionUpdate[]>([[THREAD_ID, []]]);
+  const threads = new Map<string, ThreadUpdate[]>([[THREAD_ID, []]]);
   /** The thread a socket naming none is pinned to. */
   let current = THREAD_ID;
   let nextThread = 2;
@@ -190,7 +190,7 @@ export function attachStubGateway(
   /** What each thread has left running in the box, as the gateway reads it. */
   const background = new Map<string, BackgroundProcess[]>();
 
-  const historyOf = (threadId: string): SessionUpdate[] => {
+  const historyOf = (threadId: string): ThreadUpdate[] => {
     let found = threads.get(threadId);
     if (!found) {
       found = [];
@@ -223,7 +223,7 @@ export function attachStubGateway(
     }
   };
 
-  const emit = (update: SessionUpdate, threadId: string = current): void => {
+  const emit = (update: ThreadUpdate, threadId: string = current): void => {
     historyOf(threadId).push(update);
     for (const ws of watchers(threadId)) {
       send(ws, {
@@ -420,7 +420,7 @@ export function attachStubGateway(
     // flattening them to their text is exactly the part a client renders
     // differently.
     for (const content of blocks) {
-      emit({ sessionUpdate: 'user_message_chunk', content } as SessionUpdate, onThread);
+      emit({ sessionUpdate: 'user_message_chunk', content } as ThreadUpdate, onThread);
     }
 
     const permission = script.permissions.find((p) => p.match(promptText));
@@ -469,7 +469,7 @@ export function attachStubGateway(
     permission: PermissionScript,
     onThread: string,
   ): Promise<void> {
-    emit({ sessionUpdate: 'tool_call', ...permission.toolCall } as SessionUpdate, onThread);
+    emit({ sessionUpdate: 'tool_call', ...permission.toolCall } as ThreadUpdate, onThread);
     const answer = await request(ws, 'session/request_permission', {
       sessionId: onThread,
       toolCall: { toolCallId: permission.toolCall.toolCallId },

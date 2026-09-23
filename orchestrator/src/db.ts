@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import type {
   HarnessCatalog,
   HarnessId,
-  SessionConfigOption,
-  SessionModeState,
+  ThreadConfigOption,
+  ThreadModeState,
   BoxStatus,
 } from '../../shared/types.ts';
 
@@ -995,8 +995,8 @@ export interface HarnessCatalogRow {
 export function upsertHarnessCatalog(
   db: Db,
   harness: HarnessId,
-  modes: SessionModeState | null | undefined,
-  configOptions: SessionConfigOption[] | null | undefined,
+  modes: ThreadModeState | null | undefined,
+  configOptions: ThreadConfigOption[] | null | undefined,
 ): void {
   const previous = readHarnessCatalog(db, harness);
   const next: HarnessCatalog = {
@@ -1027,8 +1027,8 @@ export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog |
   if (!row) return null;
   try {
     return {
-      modes: JSON.parse(row.modes) as SessionModeState | null,
-      configOptions: JSON.parse(row.config_options) as SessionConfigOption[],
+      modes: JSON.parse(row.modes) as ThreadModeState | null,
+      configOptions: JSON.parse(row.config_options) as ThreadConfigOption[],
       seenAt: row.seen_at,
     };
   } catch {

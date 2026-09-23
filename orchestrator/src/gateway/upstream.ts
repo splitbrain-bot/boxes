@@ -37,7 +37,7 @@ import {
   type BackgroundProcess,
   type BoxWork,
   type LoadMeta,
-  type SessionConfigOption,
+  type ThreadConfigOption,
   type ThreadOptions,
   type TurnStateParams,
 } from '../../../shared/types.ts';
@@ -1079,7 +1079,7 @@ export class UpstreamBox implements AdapterHost {
           sessionUpdate?: string;
           title?: unknown;
           currentModeId?: unknown;
-          configOptions?: SessionConfigOption[];
+          configOptions?: ThreadConfigOption[];
         };
       }
     )?.update;
@@ -1382,7 +1382,7 @@ export class UpstreamBox implements AdapterHost {
     params: unknown,
     result: unknown,
   ): void {
-    const answered = (result as { configOptions?: SessionConfigOption[] } | null)?.configOptions;
+    const answered = (result as { configOptions?: ThreadConfigOption[] } | null)?.configOptions;
     if (Array.isArray(answered)) {
       conn.recordConfigOptions(acpThreadId, answered);
       return;

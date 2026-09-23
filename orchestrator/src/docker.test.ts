@@ -141,7 +141,7 @@ describe('boxEnv', () => {
   it('carries what Codex needs to log itself in from the environment', async () => {
     // The Codex app-server reads no key from its environment; `codex-acp` is
     // what reads CODEX_API_KEY, and it only does so when DEFAULT_AUTH_REQUEST
-    // tells it to log in with the api-key method on the first box call.
+    // tells it to log in with the api-key method on the first `session/*` call.
     // The value has to reach the box as the JSON the adapter parses.
     const env = await envFor({ openai: OPENAI_KEY });
 

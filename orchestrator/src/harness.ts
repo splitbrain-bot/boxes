@@ -55,7 +55,7 @@ export interface Harness {
   /** Config option values a fresh thread starts with, by option id. */
   defaultConfig: Readonly<Record<string, string>>;
   /** `_meta` sent with session/new, session/load and session/fork, or undefined. */
-  sessionMeta: Readonly<Record<string, unknown>> | undefined;
+  threadMeta: Readonly<Record<string, unknown>> | undefined;
   /** Which credential must be present before a thread can run. */
   credentialId: CredentialId;
   /**
@@ -92,7 +92,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      * to put in an `agent_thought_chunk`. `enabled` with a budget rather than
      * `adaptive`, because a model that predates `adaptive` rejects it.
      */
-    sessionMeta: {
+    threadMeta: {
       claudeCode: {
         options: {
           // A model named on every conversation, so that the adapter offers
@@ -157,12 +157,12 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     forkModeId: 'read-only',
     /** Empty: a fresh Codex thread stays on the adapter's own default model. */
     defaultConfig: {},
-    sessionMeta: undefined,
+    threadMeta: undefined,
     credentialId: 'openai',
     /**
      * `CODEX_API_KEY` is read by the adapter, not by Codex itself: with
      * `DEFAULT_AUTH_REQUEST` naming the `api-key` method, `codex-acp` logs
-     * itself in from the environment when a box call finds no account, and
+     * itself in from the environment when a `session/*` call finds no account, and
      * Codex persists the key to `$CODEX_HOME/auth.json` from there.
      * `NO_BROWSER` hides the browser-based method, which would otherwise open
      * a browser inside the box.
