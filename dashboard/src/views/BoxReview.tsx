@@ -17,7 +17,7 @@ import { useCodeEdit } from '@/hooks/use-code-edit';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useScrollAway } from '@/hooks/use-scroll-away';
-import { useSession } from '@/hooks/use-session';
+import { useBox } from '@/hooks/use-box';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { anchorAt, rowOffsets, scrollForAnchor, type ScrollAnchor } from '@/lib/anchor';
@@ -54,11 +54,11 @@ import {
 const HANDOFF_PROMPT = 'Read REVIEW.md and address the comments in it.';
 
 /**
- * Reviewing a session's code, at `/sessions/:id/review`.
+ * Reviewing a box's code, at `/boxes/:id/review`.
  *
  * The open file is in the search string, so a file is linkable and the
  * browser's own back button works — which on a phone is also one step of the
- * stack: sessions → thread → file list → file, out of each by the same back
+ * stack: boxes → thread → file list → file, out of each by the same back
  * button in the header and by no other control. That button pops the step; it
  * never pushes one, so the header's arrow and the phone's own back gesture
  * always agree with each other.
@@ -72,7 +72,7 @@ const HANDOFF_PROMPT = 'Read REVIEW.md and address the comments in it.';
  * The view owns the whole viewport the way the thread view does, because a code
  * pane in a reading column is not a code pane.
  */
-export function SessionReview() {
+export function BoxReview() {
   const { id = '' } = useParams();
   const [params, setParams] = useSearchParams();
   const location = useLocation();
@@ -81,8 +81,8 @@ export function SessionReview() {
   const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
     useReview();
   // This box, polled: its name for the header and its current thread for the
-  // way out. One session off the wire rather than the whole list.
-  const { session } = useSession(id);
+  // way out. One box off the wire rather than the whole list.
+  const { box } = useBox(id);
 
   /**
    * Long lines wrap unless the reader turns it off.
@@ -122,19 +122,19 @@ export function SessionReview() {
   const held = useRef<ScrollAnchor | null>(null);
   /**
    * The conversation this review was opened from, so leaving it goes back
-   * there rather than to whichever thread the session has current — after a
+   * there rather than to whichever thread the box has current — after a
    * fork those are two different conversations, and the fork cannot act on
    * the comments while it is in plan mode.
    *
    * Read once: opening a file is a navigation of this same route, which keeps
    * the component mounted but carries no state of its own. A reload has none
-   * either, and falls back to the session's current thread.
+   * either, and falls back to the box's current thread.
    */
   const [origin] = useState<string | null>(
     () => (location.state as { threadId?: string } | null)?.threadId ?? null,
   );
-  const name = session?.name ?? id;
-  const thread = origin ?? session?.currentThreadId;
+  const name = box?.name ?? id;
+  const thread = origin ?? box?.currentThreadId;
   /**
    * The way out of the review: the conversation it was opened from.
    *
@@ -144,7 +144,7 @@ export function SessionReview() {
    * pushed. The path is what a deep link falls back to, and what the link's
    * href says for a middle click.
    */
-  const threadPath = thread ? `/sessions/${id}/threads/${thread}` : `/sessions/${id}`;
+  const threadPath = thread ? `/boxes/${id}/threads/${thread}` : `/boxes/${id}`;
   const up = useUp(threadPath);
   const navigate = useNavigate();
   /**
@@ -159,8 +159,8 @@ export function SessionReview() {
    */
   const wide = useMediaQuery('(min-width: 768px)');
 
-  // Point the store at this session and load it. The store is a singleton, so
-  // re-entering the same session paints instantly from what is already there
+  // Point the store at this box and load it. The store is a singleton, so
+  // re-entering the same box paints instantly from what is already there
   // and updates when the fetch lands.
   //
   // The mount is one of the three moments a review refetches; coming back to
@@ -511,7 +511,7 @@ export function SessionReview() {
       <Shelf away={away && !editing}>
         <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
           {/* One back button, one step out, wherever it is pressed.
-              On a phone the stack is sessions → thread → file list → file, so
+              On a phone the stack is boxes → thread → file list → file, so
               a file's parent is the list and the list's parent is the thread.
               From md up the list and the file are one view side by side, so
               there is nothing between the review and the thread.

@@ -4,7 +4,7 @@ import type {
   AgentItemKind,
   AgentSetDetail,
   AgentSetSummary,
-  CreateSessionBody,
+  CreateBoxBody,
   CreateThreadBody,
   CredentialId,
   CredentialMethod,
@@ -21,8 +21,8 @@ import type {
   ReviewDirResponse,
   ReviewFileBody,
   ReviewFileResponse,
-  SessionDetail,
-  SessionSummary,
+  BoxDetail,
+  BoxSummary,
   Settings,
   StartLoginResponse,
   StoredAttachment,
@@ -82,26 +82,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 /** Every REST call the dashboard makes. */
 export const api = {
-  listSessions: () => request<SessionSummary[]>('/api/sessions'),
-  getSession: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
-  createSession: (body: CreateSessionBody) =>
-    request<SessionDetail>('/api/sessions', {
+  listBoxes: () => request<BoxSummary[]>('/api/boxes'),
+  getBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}`),
+  createBox: (body: CreateBoxBody) =>
+    request<BoxDetail>('/api/boxes', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  startSession: (id: string) =>
-    request<SessionDetail>(`/api/sessions/${id}/start`, { method: 'POST' }),
-  stopSession: (id: string) =>
-    request<SessionDetail>(`/api/sessions/${id}/stop`, { method: 'POST' }),
-  deleteSession: (id: string) => request<void>(`/api/sessions/${id}`, { method: 'DELETE' }),
-  listThreads: (id: string) => request<ThreadSummary[]>(`/api/sessions/${id}/threads`),
+  startBox: (id: string) =>
+    request<BoxDetail>(`/api/boxes/${id}/start`, { method: 'POST' }),
+  stopBox: (id: string) =>
+    request<BoxDetail>(`/api/boxes/${id}/stop`, { method: 'POST' }),
+  deleteBox: (id: string) => request<void>(`/api/boxes/${id}`, { method: 'DELETE' }),
+  listThreads: (id: string) => request<ThreadSummary[]>(`/api/boxes/${id}/threads`),
   createThread: (id: string, body: CreateThreadBody = {}) =>
-    request<ThreadSummary>(`/api/sessions/${id}/threads`, {
+    request<ThreadSummary>(`/api/boxes/${id}/threads`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   selectThread: (id: string, threadId: string) =>
-    request<ThreadSummary>(`/api/sessions/${id}/threads/${threadId}/select`, {
+    request<ThreadSummary>(`/api/boxes/${id}/threads/${threadId}/select`, {
       method: 'POST',
     }),
   /**
@@ -112,7 +112,7 @@ export const api = {
    * reading the row back.
    */
   setThreadDone: (id: string, threadId: string, done: boolean) =>
-    request<ThreadSummary>(`/api/sessions/${id}/threads/${threadId}/done`, {
+    request<ThreadSummary>(`/api/boxes/${id}/threads/${threadId}/done`, {
       method: 'POST',
       body: JSON.stringify({ done }),
     }),
@@ -126,7 +126,7 @@ export const api = {
    * child of the agent's own process and outlives the turn by design.
    */
   stopBackgroundWork: (id: string, threadId: string, processId?: string) =>
-    request<{ stopped: number }>(`/api/sessions/${id}/threads/${threadId}/background/stop`, {
+    request<{ stopped: number }>(`/api/boxes/${id}/threads/${threadId}/background/stop`, {
       method: 'POST',
       body: JSON.stringify({ processId }),
     }),
@@ -141,7 +141,7 @@ export const api = {
    * it only for that case — work running with no conversation claiming it.
    */
   stopBoxWork: (id: string) =>
-    request<{ stopped: number }>(`/api/sessions/${id}/background/stop`, { method: 'POST' }),
+    request<{ stopped: number }>(`/api/boxes/${id}/background/stop`, { method: 'POST' }),
   /**
    * Stores one file the user attached, and answers with where it landed.
    *
@@ -151,7 +151,7 @@ export const api = {
    */
   uploadAttachment: (id: string, file: File) =>
     request<StoredAttachment>(
-      `/api/sessions/${id}/attachments?name=${encodeURIComponent(file.name)}`,
+      `/api/boxes/${id}/attachments?name=${encodeURIComponent(file.name)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
@@ -171,7 +171,7 @@ export const api = {
       body: JSON.stringify({ endpoint }),
     }),
 
-  // --- code review over the session's workspace ---------------------------
+  // --- code review over the box's workspace ---------------------------
   //
   // Batched to match the endpoints: the directory call carries a folder and
   // everything the left panel needs around it, and the file call the whole
@@ -184,34 +184,34 @@ export const api = {
    */
   reviewDir: (id: string, path: string, fresh: boolean) =>
     request<ReviewDirResponse>(
-      `/api/sessions/${id}/review/dir?path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`,
+      `/api/boxes/${id}/review/dir?path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`,
     ),
   reviewFile: (id: string, path: string) =>
     request<ReviewFileResponse>(
-      `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,
+      `/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`,
     ),
   saveReviewFile: (id: string, body: ReviewFileBody) =>
-    request<ReviewFileResponse>(`/api/sessions/${id}/review/file`, {
+    request<ReviewFileResponse>(`/api/boxes/${id}/review/file`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
   setAnnotation: (id: string, body: ReviewAnnotationBody) =>
-    request<ReviewAnnotationsResponse>(`/api/sessions/${id}/review/annotations`, {
+    request<ReviewAnnotationsResponse>(`/api/boxes/${id}/review/annotations`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
   deleteAnnotation: (id: string, path: string, line: number) =>
     request<ReviewAnnotationsResponse>(
-      `/api/sessions/${id}/review/annotations?path=${encodeURIComponent(path)}&line=${line}`,
+      `/api/boxes/${id}/review/annotations?path=${encodeURIComponent(path)}&line=${line}`,
       { method: 'DELETE' },
     ),
   setReviewBase: (id: string, rev: string | null) =>
-    request<ReviewBaseResponse>(`/api/sessions/${id}/review/base`, {
+    request<ReviewBaseResponse>(`/api/boxes/${id}/review/base`, {
       method: 'PUT',
       body: JSON.stringify({ rev }),
     }),
   deleteReview: (id: string) =>
-    request<void>(`/api/sessions/${id}/review`, { method: 'DELETE' }),
+    request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
 
   // --- agent configuration -------------------------------------------------
   //

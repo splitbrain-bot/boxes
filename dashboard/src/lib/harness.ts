@@ -1,4 +1,4 @@
-import type { HarnessHealth, HarnessId, SessionModeState } from '../../../shared/types.ts';
+import type { HarnessHealth, HarnessId, ThreadModeState } from '../../../shared/types.ts';
 
 /**
  * What the dashboard knows about a harness beyond what the API sends it.
@@ -54,7 +54,7 @@ function modeIsDoubtful(harness: HarnessId | null, modeId: string): boolean {
 }
 
 /** One of an adapter's modes, as both the catalogue and a live thread carry it. */
-type Mode = SessionModeState['availableModes'][number];
+type Mode = ThreadModeState['availableModes'][number];
 
 /**
  * What a mode is called in the picker.

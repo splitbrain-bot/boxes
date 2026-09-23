@@ -11,12 +11,12 @@ import { join, posix } from 'node:path';
 import { log } from './log.ts';
 
 /**
- * What a session is made of on disk: its workspace, and its home.
+ * What a box is made of on disk: its workspace, and its home.
  *
- * Both are directories under DATA_DIR, bind-mounted into the session
+ * Both are directories under DATA_DIR, bind-mounted into the box
  * container, so the orchestrator reads and writes them as ordinary files,
  * runs git over a workspace with no container running, and measures what a
- * session costs by walking two directories.
+ * box costs by walking two directories.
  *
  * A home holds thread transcripts, the tool caches an agent installs at
  * runtime, and whatever credential a login inside the box wrote, so `homes/`
@@ -24,11 +24,11 @@ import { log } from './log.ts';
  */
 
 /**
- * Default uid and gid the session container runs as.
+ * Default uid and gid the box container runs as.
  *
- * This is the one number the session image and the orchestrator have to agree
- * on, so it is defined once here: `SESSION_UID`/`SESSION_GID` default to it in
- * config.ts, and `session-image/Dockerfile` builds its `agent` user on it
+ * This is the one number the box image and the orchestrator have to agree
+ * on, so it is defined once here: `BOX_UID`/`BOX_GID` default to it in
+ * config.ts, and `box-image/Dockerfile` builds its `agent` user on it
  * through build args of the same name. Outside the range a login user is
  * normally given.
  *
@@ -38,32 +38,32 @@ import { log } from './log.ts';
  * workspace. Unless the orchestrator is already running as this uid, in which
  * case there is nothing to give away; see chownToAgent.
  */
-export const DEFAULT_SESSION_UID = 1020;
-export const DEFAULT_SESSION_GID = 1020;
+export const DEFAULT_BOX_UID = 1020;
+export const DEFAULT_BOX_GID = 1020;
 
 /**
  * The uid and gid in force, installed once at boot from the parsed config and
  * fixed for the life of the process.
  */
 let owner: { uid: number; gid: number } = {
-  uid: DEFAULT_SESSION_UID,
-  gid: DEFAULT_SESSION_GID,
+  uid: DEFAULT_BOX_UID,
+  gid: DEFAULT_BOX_GID,
 };
 
-/** Installs the uid and gid session containers run as. Called from buildApp. */
-export function setSessionOwner(uid: number, gid: number): void {
+/** Installs the uid and gid box containers run as. Called from buildApp. */
+export function setBoxOwner(uid: number, gid: number): void {
   owner = { uid, gid };
 }
 
-/** The uid and gid session containers run as. */
-export function sessionOwner(): { readonly uid: number; readonly gid: number } {
+/** The uid and gid box containers run as. */
+export function boxOwner(): { readonly uid: number; readonly gid: number } {
   return owner;
 }
 
-/** Directory under DATA_DIR holding one directory per session workspace. */
+/** Directory under DATA_DIR holding one directory per box workspace. */
 const WORKSPACES_SUBDIR = 'workspaces';
 
-/** Directory under DATA_DIR holding one directory per session home. */
+/** Directory under DATA_DIR holding one directory per box home. */
 const HOMES_SUBDIR = 'homes';
 
 /** The parent of every workspace directory. */
@@ -71,13 +71,13 @@ export function workspacesRoot(dataDir: string): string {
   return join(dataDir, WORKSPACES_SUBDIR);
 }
 
-/** Where a session's files live, as this process sees them. */
-export function workspacePath(dataDir: string, sessionId: string): string {
-  return join(workspacesRoot(dataDir), sessionId);
+/** Where a box's files live, as this process sees them. */
+export function workspacePath(dataDir: string, boxId: string): string {
+  return join(workspacesRoot(dataDir), boxId);
 }
 
 /**
- * Where a session's files live as the Docker daemon sees them, which is what
+ * Where a box's files live as the Docker daemon sees them, which is what
  * a bind source has to name.
  *
  * Bind sources are resolved by the daemon, not by the process asking for the
@@ -86,8 +86,8 @@ export function workspacePath(dataDir: string, sessionId: string): string {
  * host: on Linux the daemon is the host, and under Docker Desktop it runs in
  * a Linux VM.
  */
-export function hostWorkspacePath(hostDataDir: string, sessionId: string): string {
-  return posix.join(hostDataDir, WORKSPACES_SUBDIR, sessionId);
+export function hostWorkspacePath(hostDataDir: string, boxId: string): string {
+  return posix.join(hostDataDir, WORKSPACES_SUBDIR, boxId);
 }
 
 /** The parent of every home directory. */
@@ -95,20 +95,20 @@ export function homesRoot(dataDir: string): string {
   return join(dataDir, HOMES_SUBDIR);
 }
 
-/** Where a session's home lives, as this process sees them. */
-export function homePath(dataDir: string, sessionId: string): string {
-  return join(homesRoot(dataDir), sessionId);
+/** Where a box's home lives, as this process sees them. */
+export function homePath(dataDir: string, boxId: string): string {
+  return join(homesRoot(dataDir), boxId);
 }
 
-/** A session's home as the Docker daemon sees it, for the bind source. */
-export function hostHomePath(hostDataDir: string, sessionId: string): string {
-  return posix.join(hostDataDir, HOMES_SUBDIR, sessionId);
+/** A box's home as the Docker daemon sees it, for the bind source. */
+export function hostHomePath(hostDataDir: string, boxId: string): string {
+  return posix.join(hostDataDir, HOMES_SUBDIR, boxId);
 }
 
 /**
  * Creates the workspaces and homes parents, mode 0700.
  *
- * One session's files must not be readable from another session, and the only
+ * One box's files must not be readable from another box, and the only
  * thing that reads across all of them is this process. 0700 on the parents
  * says so on the data volume itself, where a stray `docker run -v boxes-data`
  * would otherwise see everything.
@@ -119,28 +119,28 @@ export function ensureWorkspacesRoot(dataDir: string): void {
 }
 
 /**
- * Creates a session's workspace directory and hands it to the agent user.
+ * Creates a box's workspace directory and hands it to the agent user.
  * Returns the path as this process sees it.
  */
-export function createWorkspace(dataDir: string, sessionId: string): string {
+export function createWorkspace(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);
-  const path = workspacePath(dataDir, sessionId);
+  const path = workspacePath(dataDir, boxId);
   mkdirSync(path, { recursive: true, mode: 0o755 });
   chownToAgent(path);
   return path;
 }
 
 /**
- * Creates a session's home directory, empty.
+ * Creates a box's home directory, empty.
  *
  * Empty is not usable on its own: a bind mount covers whatever the image put
  * in `/home/agent`, and Docker does not seed a bind the way it seeds a named
  * volume. `seedHomeFromImage` copies the image's own home in, and the mode
  * and owner set here stand until it does.
  */
-export function createHome(dataDir: string, sessionId: string): string {
+export function createHome(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);
-  const path = homePath(dataDir, sessionId);
+  const path = homePath(dataDir, boxId);
   // 0700 rather than the workspace's 0755: a home holds the credentials a
   // login inside the box wrote, and nothing but the agent reads it.
   mkdirSync(path, { recursive: true, mode: 0o700 });
@@ -151,7 +151,7 @@ export function createHome(dataDir: string, sessionId: string): string {
 /**
  * Whether a path is there and is a directory.
  *
- * Asked before a session's workspace or home is bind-mounted. Docker creates
+ * Asked before a box's workspace or home is bind-mounted. Docker creates
  * a bind source it cannot find, empty and owned by root, so a box whose
  * directory has gone starts and looks healthy while the agent cannot write to
  * it. Nothing is created here: the answer is what turns that into a refusal
@@ -162,14 +162,14 @@ export function directoryExists(path: string): boolean {
 }
 
 /**
- * The session ids that have a workspace or a home directory on disk.
+ * The box ids that have a workspace or a home directory on disk.
  *
  * Read from the two roots rather than from the database, which is what makes
- * it an answer about what is there: a teardown that removed a session's
+ * it an answer about what is there: a teardown that removed a box's
  * Docker objects and then failed leaves these behind with nothing naming
  * them. A root that does not exist yet contributes nothing.
  */
-export function sessionDirectoryIds(dataDir: string): string[] {
+export function boxDirectoryIds(dataDir: string): string[] {
   const ids = new Set<string>();
   for (const root of [workspacesRoot(dataDir), homesRoot(dataDir)]) {
     let entries: Dirent[];
@@ -185,24 +185,24 @@ export function sessionDirectoryIds(dataDir: string): string[] {
   return [...ids];
 }
 
-/** Removes a session's workspace directory and everything in it. */
-export function removeWorkspace(dataDir: string, sessionId: string): void {
+/** Removes a box's workspace directory and everything in it. */
+export function removeWorkspace(dataDir: string, boxId: string): void {
   // recursive removal unlinks symlinks rather than following them, so a link
   // planted in the tree cannot reach out of it.
-  rmSync(workspacePath(dataDir, sessionId), { recursive: true, force: true });
+  rmSync(workspacePath(dataDir, boxId), { recursive: true, force: true });
 }
 
-/** Removes a session's home directory and everything in it. */
-export function removeHome(dataDir: string, sessionId: string): void {
-  rmSync(homePath(dataDir, sessionId), { recursive: true, force: true });
+/** Removes a box's home directory and everything in it. */
+export function removeHome(dataDir: string, boxId: string): void {
+  rmSync(homePath(dataDir, boxId), { recursive: true, force: true });
 }
 
 /**
- * Gives a path to the session's agent user, so the agent can edit and delete
+ * Gives a path to the box's agent user, so the agent can edit and delete
  * what the orchestrator wrote, REVIEW.md above all.
  *
  * Only root can give a file away. A deployment running the orchestrator as
- * the session uid itself needs none of this and returns at once, which is
+ * the box uid itself needs none of this and returns at once, which is
  * what lets it drop root. One running as some other non-root user keeps the
  * files it wrote, which works until a container mounts them, so the failure
  * is logged rather than thrown.
@@ -223,7 +223,7 @@ export function chownToAgent(path: string): void {
 }
 
 /**
- * Gives an open file to the session's agent user, by descriptor.
+ * Gives an open file to the box's agent user, by descriptor.
  *
  * The descriptor names the file that was opened, whatever the name it was
  * opened under points at by now, which is what a write into a directory the

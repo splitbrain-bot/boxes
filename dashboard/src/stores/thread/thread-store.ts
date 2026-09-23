@@ -7,9 +7,9 @@ import type {
   PlanEntry,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
-  SessionModeState,
-  SessionNotification,
+  ThreadConfigOption,
+  ThreadModeState,
+  ThreadNotification,
 } from './acp-types.ts';
 import { AcpClient, loadParams, type ConnectionState } from './acp-client.ts';
 import {
@@ -23,7 +23,7 @@ import {
 } from './translate.ts';
 
 /**
- * One session's thread: the ACP connection, the message model built from it,
+ * One box's thread: the ACP connection, the message model built from it,
  * and the actions the view can take.
  *
  * Framework-free on purpose. React reads it through useSyncExternalStore and
@@ -64,9 +64,9 @@ export interface ThreadSnapshot {
   /** What the thread is waiting for an answer to, or null. */
   awaiting: Awaiting | null;
   connection: ConnectionState;
-  modes: SessionModeState | null;
+  modes: ThreadModeState | null;
   /** The options the adapter lets a client set, such as the model. */
-  configOptions: readonly SessionConfigOption[];
+  configOptions: readonly ThreadConfigOption[];
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
   commands: AvailableCommand[];
@@ -113,16 +113,16 @@ interface OpenApproval {
 export interface ThreadStoreDeps {
   /** Builds the client. Present so a test can supply a fake. */
   createClient: (handlers: ConstructorParameters<typeof AcpClient>[2]) => AcpClient;
-  /** The Boxes session id this thread belongs to. */
-  sessionId: string;
+  /** The box this thread belongs to. */
+  boxId: string;
   /**
    * The thread within it, and null on the route that means whichever thread
-   * the session has current.
+   * the box has current.
    */
   threadId: string | null;
 }
 
-/** The live thread for one Boxes session. */
+/** The live thread for one box. */
 export class ThreadStore {
   private model: ThreadModel = emptyModel();
   private snapshot: ThreadSnapshot;
@@ -448,7 +448,7 @@ export class ThreadStore {
 
   // --- incoming ------------------------------------------------------------
 
-  private onUpdate(params: SessionNotification): void {
+  private onUpdate(params: ThreadNotification): void {
     const touched = applyUpdate(this.model, params.update);
     // A replay's own notifications say nothing on their way past; flushReplay
     // publishes what they built.

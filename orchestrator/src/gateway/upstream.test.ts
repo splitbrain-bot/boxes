@@ -13,7 +13,7 @@ import { CredentialStore } from '../credentials.ts';
 import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { AgentStore } from '../agents.ts';
-import { SessionManager } from '../sessions.ts';
+import { BoxManager } from '../boxes.ts';
 import type { DownstreamHandle } from './upstream.ts';
 import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 
@@ -30,7 +30,7 @@ process.env['AGENT_SETTLE_SECONDS'] = '1';
  * What matters here is what happens to the stored threads when the adapter no
  * longer holds one. The agent SDK writes a transcript only once a prompt has
  * run, so a thread minted and never prompted does not survive the adapter
- * restarting — and that must cost the session only that one thread.
+ * restarting — and that must cost the box only that one thread.
  */
 
 /** One frame of a Docker-multiplexed stream, on stdout. */
@@ -135,7 +135,7 @@ const BASE_PROCESSES: string[][] = [
   ['19', '1', 'node /usr/local/bin/claude-agent-acp'],
   // The agent process says which conversation it is running, which is how
   // work found under it reaches that thread and no other.
-  ['100', '19', 'claude --output-format stream-json --session-id=acp-gone'],
+  ['100', '19', 'claude --output-format stream-json --box-id=acp-gone'],
 ];
 
 /** The box as this test is pretending to find it. Reset for every one. */
@@ -233,7 +233,7 @@ function fakeDocker(adapter: Standins): void {
 
 let dir: string;
 let db: Db;
-let manager: SessionManager;
+let manager: BoxManager;
 /** Every event the gateway announced, in order; see notifications below. */
 let announced: NotifyEvent[];
 
@@ -244,22 +244,22 @@ class RecordingNotifier extends Notifier {
   }
 }
 
-/** A running session with two threads, the first of which is current. */
+/** A running box with two threads, the first of which is current. */
 function seed(): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, status, current_thread_id,
        created_at, last_active_at)
      VALUES ('s1', 'test', 'DEFAULT', 'img', 'c1',
-       'sn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, ?)`,
+       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', 't1', ?, ?)`,
   ).run(now, now);
   for (const [id, acp, ordinal] of [
     ['t1', 'acp-gone', 1],
     ['t2', 'acp-kept', 2],
   ] as const) {
     db.prepare(
-      `INSERT INTO threads (id, session_id, acp_session_id, title, ordinal,
+      `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
          created_at, last_active_at)
        VALUES (?, 's1', ?, NULL, ?, ?, ?)`,
     ).run(id, acp, ordinal, now, now);
@@ -282,7 +282,7 @@ beforeEach(() => {
   killed = [];
   spawned = [];
   containerRunning = true;
-  manager = new SessionManager(
+  manager = new BoxManager(
     db,
     cfg,
     new EgressManager(cfg, new CredentialStore(db, () => {})),
@@ -392,7 +392,7 @@ test('a thread the adapter has forgotten is re-minted, and the others are left a
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     // The stored thread has no transcript on disk, which is what the adapter
     // reports as a missing resource.
-    if (msg.method === 'session/load') return new Error('Session not found');
+    if (msg.method === 'session/load') return new Error('Box not found');
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
   });
@@ -404,16 +404,16 @@ test('a thread the adapter has forgotten is re-minted, and the others are left a
   // minted conversation.
   assert.equal(thread('t1')['acp_session_id'], 'acp-fresh');
   assert.equal(thread('t1')['ordinal'], 1);
-  // The session's other thread has a transcript of its own and is untouched.
+  // The box's other thread has a transcript of its own and is untouched.
   assert.equal(thread('t2')['acp_session_id'], 'acp-kept');
   const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
   assert.equal(count.n, 2);
   // Still the same current thread: a re-mint is not a switch.
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+  const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
     string,
     unknown
   >;
-  assert.equal(session['current_thread_id'], 't1');
+  assert.equal(box['current_thread_id'], 't1');
 });
 
 test('a thread the adapter still holds is replayed rather than replaced', async () => {
@@ -430,9 +430,9 @@ test('a thread the adapter still holds is replayed rather than replaced', async 
   assert.ok(!adapter.seen.includes('session/new'));
 });
 
-test('a session with no thread yet gets its first one recorded', async () => {
+test('a box with no thread yet gets its first one recorded', async () => {
   db.prepare('DELETE FROM threads').run();
-  db.prepare('UPDATE sessions SET current_thread_id = NULL WHERE id = ?').run('s1');
+  db.prepare('UPDATE boxes SET current_thread_id = NULL WHERE id = ?').run('s1');
 
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
@@ -451,7 +451,7 @@ test('a session with no thread yet gets its first one recorded', async () => {
 });
 
 test('every conversation is created asking for Fable and readable thinking', async () => {
-  /** The `_meta` each session-creating call carried. */
+  /** The `_meta` each box-creating call carried. */
   const meta: Array<{ method: string; meta: unknown }> = [];
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
@@ -463,7 +463,7 @@ test('every conversation is created asking for Fable and readable thinking', asy
     }
     // The stored thread is gone, so both paths run: a load that fails and
     // the fresh conversation that replaces it.
-    if (msg.method === 'session/load') return new Error('Session not found');
+    if (msg.method === 'session/load') return new Error('Box not found');
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
   });
@@ -591,14 +591,14 @@ test('a new thread is minted, recorded and made current', async () => {
   const created = await manager.createThread('s1', undefined);
 
   assert.equal(created.acpSessionId, 'acp-third');
-  // Past the highest the session has used, so "Thread 2" stays that thread's.
+  // Past the highest the box has used, so "Thread 2" stays that thread's.
   assert.equal(created.ordinal, 3);
   assert.equal(created.title, null);
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as Record<
+  const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
     string,
     unknown
   >;
-  assert.equal(session['current_thread_id'], created.id);
+  assert.equal(box['current_thread_id'], created.id);
   assert.deepEqual(
     manager.threads('s1').map((t) => t.ordinal),
     [1, 2, 3],
@@ -626,7 +626,7 @@ test('a fork asks the adapter to branch the named thread', async () => {
   assert.equal(thread('t2')['acp_session_id'], 'acp-kept');
 });
 
-test('forking a thread of another session is a 404 rather than a fork', async () => {
+test('forking a thread of another box is a 404 rather than a fork', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -688,9 +688,9 @@ test('a prompt sets the running-turn flag on its own thread and no other', async
     prompt: [{ type: 'text', text: 'a long job' }],
   });
   await expect.poll(() => thread('t1')['turn_active']).toBe(1);
-  // The session's other conversation is not running anything.
+  // The box's other conversation is not running anything.
   assert.equal(thread('t2')['turn_active'], 0);
-  // And the session's own answer is derived from its threads.
+  // And the box's own answer is derived from its threads.
   const summary = await manager.detail('s1');
   assert.equal(summary.turnActive, true);
   assert.deepEqual(
@@ -725,7 +725,7 @@ test('a permission request goes to a browser watching the thread that asked', as
 
   await expect.poll(() => working.asked.length).toBe(1);
   assert.equal(exploring.asked.length, 0);
-  assert.equal(manager.pending.countForSession('s1'), 0);
+  assert.equal(manager.pending.countForBox('s1'), 0);
 });
 
 test('a permission request queues when only another thread has a browser', async () => {
@@ -745,7 +745,7 @@ test('a permission request queues when only another thread has a browser', async
   // Nobody is looking at the thread that asked, so it waits, exactly as it
   // does with no browser attached at all. A question about one conversation
   // cannot be answered from another's transcript.
-  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+  await expect.poll(() => manager.pending.countForBox('s1')).toBe(1);
   assert.equal(elsewhere.asked.length, 0);
   // And it is counted against the thread that asked, which is what the badge
   // on that thread's row reads.
@@ -765,7 +765,7 @@ test('a queued request is delivered only to a browser on its own thread', async 
   await up.ensureStarted();
 
   adapter.push(permissionFrame('acp-kept'));
-  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+  await expect.poll(() => manager.pending.countForBox('s1')).toBe(1);
 
   const wrongThread = fakeHandle(1, 'acp-gone');
   up.attach(wrongThread);
@@ -785,7 +785,7 @@ test('a question one browser answers is taken back from the other', async () => 
   await up.ensureStarted();
 
   adapter.push(permissionFrame('acp-kept'));
-  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+  await expect.poll(() => manager.pending.countForBox('s1')).toBe(1);
 
   // Two browsers on the thread are shown the same question, and only the
   // first answer counts.
@@ -822,7 +822,7 @@ test('a respawn re-issues session/load for every watched thread', async () => {
   await up.ensureStarted();
   assert.deepEqual(loaded, ['acp-gone']);
 
-  // A browser on the thread that is not the session's default. Without the
+  // A browser on the thread that is not the box's default. Without the
   // reload below, its next prompt would name a thread the adapter has never
   // heard of.
   up.attach(fakeHandle(1, 'acp-kept'));
@@ -845,7 +845,7 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
           // The default thread always comes back; the watched one is gone by
           // the time the adapter restarts.
           if (msg.params?.['sessionId'] === 'acp-kept' && firstLoadDone) {
-            return new Error('Session not found');
+            return new Error('Box not found');
           }
           return {};
         }
@@ -880,7 +880,7 @@ test('a respawn that re-mints the current thread drops the browsers on its old i
           // adapter restarts, so its stored id is re-minted rather than
           // loaded back.
           if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
-            return new Error('Session not found');
+            return new Error('Box not found');
           }
           return {};
         }
@@ -947,7 +947,7 @@ test('pinning to a thread the adapter has forgotten mints one for it', async () 
 });
 
 test('a fork starts in plan mode where a fresh thread starts in auto', async () => {
-  const modeSet: Array<{ session: unknown; mode: unknown }> = [];
+  const modeSet: Array<{ box: unknown; mode: unknown }> = [];
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') {
       return {
@@ -962,7 +962,7 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh', modes };
     if (msg.method === 'session/fork') return { sessionId: 'acp-branch', modes };
     if (msg.method === 'session/set_mode') {
-      modeSet.push({ session: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
+      modeSet.push({ box: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
       return {};
     }
     return {};
@@ -975,8 +975,8 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
   // The fork shares the source's checkout, so it starts somewhere that reads
   // rather than writes. It is the user's choice from then on.
   assert.deepEqual(modeSet, [
-    { session: 'acp-fresh', mode: 'auto' },
-    { session: 'acp-branch', mode: 'plan' },
+    { box: 'acp-fresh', mode: 'auto' },
+    { box: 'acp-branch', mode: 'plan' },
   ]);
 });
 
@@ -1047,7 +1047,7 @@ test('a respawn puts a loaded thread back in the mode it was left in', async () 
   assert.deepEqual(asked, ['mode plan']);
   assert.equal(thread('t1')['mode_id'], 'plan');
 
-  // The idle reaper stops the session, and returning to it starts it again.
+  // The idle reaper stops the box, and returning to it starts it again.
   // The adapter is a fresh process in `default`; the thread is put back.
   asked.length = 0;
   up.stop();
@@ -1099,7 +1099,7 @@ test('a respawn puts a loaded thread back on the model it was left on', async ()
 });
 
 /**
- * A forgetful adapter that answers for both of the session's threads, naming
+ * A forgetful adapter that answers for both of the box's threads, naming
  * which one each request was about.
  *
  * Every spawn starts each thread in `default` on `sonnet`, so what a test
@@ -1124,20 +1124,20 @@ function twoThreadAdapter(asked: string[], gone: Set<string> = new Set()): () =>
   });
   return () =>
     new FakeAdapter((msg) => {
-      const session = String(msg.params?.['sessionId'] ?? '');
+      const box = String(msg.params?.['sessionId'] ?? '');
       if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
       if (msg.method === 'session/new') return { sessionId: 'acp-minted', ...state() };
       if (msg.method === 'session/load') {
-        if (gone.has(session)) return new Error('no transcript for that session');
-        asked.push(`load ${session}`);
+        if (gone.has(box)) return new Error('no transcript for that box');
+        asked.push(`load ${box}`);
         return state();
       }
       if (msg.method === 'session/set_mode') {
-        asked.push(`mode ${session} ${String(msg.params?.['modeId'])}`);
+        asked.push(`mode ${box} ${String(msg.params?.['modeId'])}`);
         return {};
       }
       if (msg.method === 'session/set_config_option') {
-        asked.push(`model ${session} ${String(msg.params?.['value'])}`);
+        asked.push(`model ${box} ${String(msg.params?.['value'])}`);
         return {};
       }
       return {};
@@ -1153,7 +1153,7 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
   const up = manager.upstream('s1');
   await up.ensureStarted();
 
-  // The spawn reaches the session's current thread and the ones browsers were
+  // The spawn reaches the box's current thread and the ones browsers were
   // already watching. t2 is neither, so nothing has touched it yet.
   assert.deepEqual(asked, ['load acp-gone', 'mode acp-gone auto', 'model acp-gone opus']);
 
@@ -1275,7 +1275,7 @@ test('forking a thread no browser has opened loads it first, for the fork to cop
   await up.ensureStarted();
   loaded.length = 0;
 
-  // t2 is not the session's default and nobody is watching it, so the spawn
+  // t2 is not the box's default and nobody is watching it, so the spawn
   // left it alone. Its conversation is what the fork is about to carry.
   await manager.createThread('s1', { from: 't2' });
   assert.deepEqual(loaded, ['acp-kept']);
@@ -1343,7 +1343,7 @@ test('a fork whose source is gone too is started empty rather than left unpinnab
       branches += 1;
       // The first branch is the fork itself. By the second the adapter has
       // restarted, and the source turns out to have had no transcript either.
-      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Session not found');
+      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Box not found');
     }
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
@@ -1619,14 +1619,14 @@ test('a turn that finishes with nobody watching is announced, naming the thread'
   assert.deepEqual(announced, [
     {
       kind: 'idle',
-      sessionId: 's1',
-      sessionName: 'test',
+      boxId: 's1',
+      boxName: 'test',
       // The dashboard's own id, so the notification can link straight at the
       // conversation rather than at the box.
       threadId: 't1',
       // The agent's own title lands at the end of the turn, so what names
       // the thread here is the prompt that started it — the same name the
-      // session list shows.
+      // box list shows.
       threadName: 'go',
       // Nothing was left running, which is what makes this a turn somebody
       // can come back to at their leisure.
@@ -1654,7 +1654,7 @@ test('a browser on another thread does not count as watching this one', async ()
   fakeDocker(plainAdapter());
   const up = manager.upstream('s1');
   await up.ensureStarted();
-  // Watching the session's other conversation: this turn still finished with
+  // Watching the box's other conversation: this turn still finished with
   // nobody on it.
   up.attach(fakeHandle(1, 'acp-kept'));
 
@@ -1680,8 +1680,8 @@ test('a queued permission request is announced as one', async () => {
   await expect.poll(() => announced.length).toBe(1);
   assert.deepEqual(announced[0], {
     kind: 'approval',
-    sessionId: 's1',
-    sessionName: 'test',
+    boxId: 's1',
+    boxName: 'test',
     threadId: 't2',
     threadName: 'Thread 2',
     background: false,
@@ -1697,7 +1697,7 @@ test('a thread that asks again inside the hold window is announced once', async 
   adapter.push(permissionFrame('acp-kept'));
   await expect.poll(() => announced.length).toBe(1);
   adapter.push(permissionFrame('acp-kept', 9001));
-  await expect.poll(() => manager.pending.countForSession('s1')).toBe(2);
+  await expect.poll(() => manager.pending.countForBox('s1')).toBe(2);
 
   // An agent asking in a loop is one trip back to that conversation, where
   // every question it has is waiting.
@@ -1786,7 +1786,7 @@ test('work the agent leaves running in the background holds the reaper off', asy
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
 
-  // The turn backgrounds a command and ends. Nothing else about the session
+  // The turn backgrounds a command and ends. Nothing else about the box
   // says so: no browser is attached and no turn is running, and the task the
   // adapter announced went with the process that announced it. What says so is
   // the shell, which is still there.
@@ -1929,7 +1929,7 @@ test('an adapter that dies drops its tasks and re-sends the threads it had', asy
   assert.deepEqual(told.at(-1)?.background, []);
 });
 
-test('the session list says which thread is holding the box awake', async () => {
+test('the box list says which thread is holding the box awake', async () => {
   // The list shows every conversation of a box at once, and the two answers
   // it carries are different questions: the box is busy, and this thread is
   // the one running something.
@@ -1946,10 +1946,10 @@ test('the session list says which thread is holding the box awake', async () => 
   processes = [...processes, ['200', '100', shell('npm run build')]];
   await up.refreshBackgroundForTests();
 
-  const [session] = await manager.list();
-  assert.equal(session?.backgroundBusy, true);
+  const [box] = await manager.list();
+  assert.equal(box?.backgroundBusy, true);
   assert.deepEqual(
-    session?.threads.map((t) => [t.id, t.backgroundBusy]),
+    box?.threads.map((t) => [t.id, t.backgroundBusy]),
     [
       ['t1', true],
       ['t2', false],
@@ -1958,7 +1958,7 @@ test('the session list says which thread is holding the box awake', async () => 
 });
 
 test('a box busy with work no thread claims is still busy', async () => {
-  // What every adapter restart leaves behind, and the state the session-level
+  // What every adapter restart leaves behind, and the state the box-level
   // stop exists for: the card says the box is running something and no thread
   // of it can say what. Reading it as idle would suspend the build.
   const adapter = new FakeAdapter((msg) => {
@@ -1972,10 +1972,10 @@ test('a box busy with work no thread claims is still busy', async () => {
   processes = [...processes, ['200', '100', shell('npm run build')]];
   await up.refreshBackgroundForTests();
 
-  const [session] = await manager.list();
-  assert.equal(session?.backgroundBusy, true);
+  const [box] = await manager.list();
+  assert.equal(box?.backgroundBusy, true);
   assert.deepEqual(
-    session?.threads.map((t) => t.backgroundBusy),
+    box?.threads.map((t) => t.backgroundBusy),
     [false, false],
   );
 });
@@ -1984,7 +1984,7 @@ test('a box nobody has opened is idle, so the reaper can have it', async () => {
   // Boxes keeps no adapter in a container between connections, so this is
   // what an untouched running box looks like: the entrypoint and nothing
   // else. It read as a shape that could not be understood, which counted as
-  // busy — a badge on the card and a session the reaper would never stop.
+  // busy — a badge on the card and a box the reaper would never stop.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2003,7 +2003,7 @@ test('a box nobody has opened is idle, so the reaper can have it', async () => {
 test('a box that is not up has nothing running in it, and says so', async () => {
   // The two ways of having nothing to read arrived here as the same empty
   // process table: a box that is down, and a box that would not answer. The
-  // second counts as busy, so every stopped session that the orchestrator
+  // second counts as busy, so every stopped box that the orchestrator
   // still had in memory said "still running" — on the card, forever, with no
   // thread able to say what was.
   const adapter = new FakeAdapter((msg) => {
@@ -2021,11 +2021,11 @@ test('a box that is not up has nothing running in it, and says so', async () => 
   containerRunning = false;
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
-  const [session] = await manager.list();
-  assert.equal(session?.backgroundBusy, false);
+  const [box] = await manager.list();
+  assert.equal(box?.backgroundBusy, false);
 });
 
-test('stopping a session stops it claiming work, without waiting for a reading', async () => {
+test('stopping a box stops it claiming work, without waiting for a reading', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2040,7 +2040,7 @@ test('stopping a session stops it claiming work, without waiting for a reading',
 
   // The box is going away and what was in it goes with it, so the answer is
   // known without asking. Waiting for the next reading would leave the badge
-  // on a session that has just been shut down.
+  // on a box that has just been shut down.
   up.stop();
   assert.equal(up.backgroundActive, false);
 });
@@ -2129,7 +2129,7 @@ test('a task that was already over is taken off the bar anyway', async () => {
 
 test("a stop goes to the thread's own adapter, and reaches no other", async () => {
   // Two adapters over one checkout, each running tasks of its own. A stop
-  // routed to the wrong one would name a session that adapter has never heard
+  // routed to the wrong one would name a box that adapter has never heard
   // of, and leave the work running.
   seedThread('t3', 'codex', 'cx-1', 3);
   const seen: string[] = [];
@@ -2161,7 +2161,7 @@ test("a stop goes to the thread's own adapter, and reaches no other", async () =
   assert.deepEqual(up.threadState('cx-1').background, []);
 });
 
-test('the session-level stop kills everything the box is running, leaves first', async () => {
+test('the box-level stop kills everything the box is running, leaves first', async () => {
   // The floor's own stop, for work no task claims. After a respawn the bars
   // are empty and the box is still compiling; a signal is the only thing left
   // that can reach it.
@@ -2181,7 +2181,7 @@ test('the session-level stop kills everything the box is running, leaves first',
     ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
     ['7', '1', 'sleep infinity'],
     ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
-    ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
+    ['13', '12', 'claude --output-format stream-json --box-id=acp-gone'],
     ['14', '13', shell('npm run build')],
     ['15', '14', 'node .../vite build'],
     // The other harness's tree, in the same box: its adapter, the app-server
@@ -2200,7 +2200,7 @@ test('the session-level stop kills everything the box is running, leaves first',
   assert.deepEqual(killed, [['-TERM', '15', '14', '22']]);
 });
 
-test('a session-level stop over an empty box signals nothing', async () => {
+test('a box-level stop over an empty box signals nothing', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2376,14 +2376,14 @@ test('a box the gateway has not read yet is not a box known to be empty', async 
 });
 
 test('a start that is stopped under it gives up quietly', async () => {
-  // A spawn retries for twelve seconds, and a session can be stopped inside
+  // A spawn retries for twelve seconds, and a box can be stopped inside
   // that window. Every answer the retries have then is about a box that has
   // been shut down on purpose, an error status included.
   let attempts = 0;
   const up = manager.upstream('s1');
   fakeDocker(() => {
     attempts += 1;
-    // The session is stopped while the first attempt is in flight.
+    // The box is stopped while the first attempt is in flight.
     up.stop();
     throw new Error('no adapter in this box');
   });
@@ -2391,7 +2391,7 @@ test('a start that is stopped under it gives up quietly', async () => {
   await up.ensureStarted();
 
   assert.equal(attempts, 1);
-  const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('s1') as {
+  const row = db.prepare('SELECT status FROM boxes WHERE id = ?').get('s1') as {
     status: string;
   };
   assert.equal(row.status, 'running');
@@ -2399,7 +2399,7 @@ test('a start that is stopped under it gives up quietly', async () => {
 
 test('a queued question is failed when the adapter exec exits', async () => {
   // The adapter that asked it is gone, so no answer can reach it. Left
-  // queued, the request holds its session out of the reaper for good and
+  // queued, the request holds its box out of the reaper for good and
   // shows a browser a question nobody can answer.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
@@ -2411,12 +2411,12 @@ test('a queued question is failed when the adapter exec exits', async () => {
 
   // Nobody is watching the thread that asked, so it queues.
   adapter.push(permissionFrame('acp-gone'));
-  await expect.poll(() => manager.pending.countForSession('s1')).toBe(1);
+  await expect.poll(() => manager.pending.countForBox('s1')).toBe(1);
 
-  // The adapter dies on its own, which is not a stop: the session stays up.
+  // The adapter dies on its own, which is not a stop: the box stays up.
   adapter.push(null);
 
-  await expect.poll(() => manager.pending.countForSession('s1')).toBe(0);
+  await expect.poll(() => manager.pending.countForBox('s1')).toBe(0);
 });
 
 test('a thread whose load was cut short is heard from again after the restart', async () => {
@@ -2457,18 +2457,18 @@ test('a thread whose load was cut short is heard from again after the restart', 
 // --- two harnesses in one box ------------------------------------------------
 
 /**
- * A session holds one adapter per harness a thread of it runs, and everything
+ * A box holds one adapter per harness a thread of it runs, and everything
  * below is about the seam between them: a message reaches the adapter that has
- * the conversation it names, an adapter that will not start costs the session
+ * the conversation it names, an adapter that will not start costs the box
  * only its own threads, and what each of them advertises is answered
  * separately.
  */
 
-/** Adds a thread of any harness to the seeded session. */
+/** Adds a thread of any harness to the seeded box. */
 function seedThread(id: string, harness: string, acp: string | null, ordinal: number): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO threads (id, session_id, harness, acp_session_id, title, ordinal,
+    `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
        created_at, last_active_at)
      VALUES (?, 's1', ?, ?, NULL, ?, ?, ?)`,
   ).run(id, harness, acp, ordinal, now, now);
@@ -2487,10 +2487,10 @@ function harnessAdapter(
 ): () => FakeAdapter {
   return () =>
     new FakeAdapter((msg) => {
-      const session = String(msg.params?.['sessionId'] ?? '');
+      const box = String(msg.params?.['sessionId'] ?? '');
       const answer = answers(msg);
       if (answer !== undefined) {
-        seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
+        seen.push(`${tag} ${String(msg.method)} ${box}`.trim());
         return answer;
       }
       if (msg.method === 'initialize') {
@@ -2500,7 +2500,7 @@ function harnessAdapter(
           _meta: { adapter: tag },
         };
       }
-      seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
+      seen.push(`${tag} ${String(msg.method)} ${box}`.trim());
       if (msg.method === 'session/new') return { sessionId: `${tag}-minted` };
       if (msg.method === 'session/fork') return { sessionId: `${tag}-branch` };
       return {};
@@ -2581,7 +2581,7 @@ test('each thread is served by its own harness, and only its own is started', as
   assert.deepEqual(seen, ['codex session/load cx-1']);
 
   // And a prompt goes to the adapter holding the conversation it names. Sent
-  // to the other one it would be a session id that adapter has never heard of.
+  // to the other one it would be a thread id that adapter has never heard of.
   seen.length = 0;
   await up.forwardRequest('session/prompt', {
     sessionId: 'cx-1',
@@ -2603,7 +2603,7 @@ test('initialize is answered by the adapter holding the thread that asked', asyn
   fakeDocker({
     'claude-agent-acp': harnessAdapter(seen, 'claude'),
     // The other adapter advertises different things, which is the whole reason
-    // the answer cannot be the session's.
+    // the answer cannot be the box's.
     'codex-acp': () =>
       new FakeAdapter((msg) =>
         msg.method === 'initialize'
@@ -2643,7 +2643,7 @@ test('initialize is answered by the adapter holding the thread that asked', asyn
 });
 
 test(
-  'an adapter that will not start costs the session only its own threads',
+  'an adapter that will not start costs the box only its own threads',
   async () => {
     seedThread('t3', 'codex', 'cx-1', 3);
     const seen: string[] = [];
@@ -2662,7 +2662,7 @@ test(
     const handle = fakeHandle(1, null);
     up.attach(handle);
 
-    // Three attempts and then the session is in error, because a thread of
+    // Three attempts and then the box is in error, because a thread of
     // this box cannot be opened at all.
     await assert.rejects(() => up.pin(handle, 't3'));
     assert.deepEqual(
@@ -2732,13 +2732,13 @@ test('an adapter with no credential is not retried, and is kept up', async () =>
     spawned.filter((cmd) => cmd === 'codex-acp'),
     ['codex-acp'],
   );
-  // The session is not in error: the box is running and the other harness is
+  // The box is not in error: the box is running and the other harness is
   // working. What is missing is a credential, which the settings page fixes
   // without restarting anything.
-  const session = db.prepare('SELECT status FROM sessions WHERE id = ?').get('s1') as {
+  const box = db.prepare('SELECT status FROM boxes WHERE id = ?').get('s1') as {
     status: string;
   };
-  assert.equal(session.status, 'running');
+  assert.equal(box.status, 'running');
   // The connection is kept up, so the next attempt is a request rather than a
   // spawn — a credential entered meanwhile is picked up by the adapter itself.
   seen.length = 0;
@@ -2972,7 +2972,7 @@ test('what an adapter advertises is cached against its harness', async () => {
 
 test('pinning to the thread a spawn already brought back does not replay it twice', async () => {
   // The first browser on a stopped box does both halves at once: its pin
-  // starts the adapter, and the adapter brings back the session's current
+  // starts the adapter, and the adapter brings back the box's current
   // thread on its way up. Loading it again afterwards would say the whole
   // conversation to that browser a second time.
   const loads: string[] = [];

@@ -15,7 +15,7 @@ import type { DownstreamHandle } from './upstream.ts';
  *
  * Broadcasting everything to everyone is wrong in two places, both of which
  * need more than one browser attached to show up: a phone and a desktop on
- * one session, or two tabs on two threads of one box.
+ * one box, or two tabs on two threads of one box.
  *
  * Every rule here is scoped to a thread, because every rule is about one
  * conversation. A connection is pinned to a thread and an update carries the
@@ -50,7 +50,7 @@ export class Broadcast {
    *   what a test about routing wants.
    */
   constructor(
-    private readonly sessionId: string,
+    private readonly boxId: string,
     private readonly stateOf: (acpThreadId: string) => TurnStateParams = (acpThreadId) => ({
       sessionId: acpThreadId,
       active: this.isPrompting(acpThreadId),
@@ -267,7 +267,7 @@ export class Broadcast {
 
   /**
    * Re-states every watched thread, for whoever has just changed something
-   * true of all of them — an adapter that exited, a session stopping.
+   * true of all of them — an adapter that exited, a box stopping.
    */
   refreshThreadStates(): void {
     for (const thread of this.watchedThreads) this.threadState(thread);
@@ -284,7 +284,7 @@ export class Broadcast {
       try {
         d.notify(method, params);
       } catch (err) {
-        log.session(this.sessionId).warn('broadcast failed', {
+        log.box(this.boxId).warn('broadcast failed', {
           method,
           error: (err as Error).message,
         });

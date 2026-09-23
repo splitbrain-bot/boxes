@@ -7,7 +7,7 @@ import type { ThreadSummary } from '../../../shared/types.ts';
  * goes by the first line of the last prompt sent on it, which is there from
  * the moment it is sent — so a long first turn is not spent nameless. A
  * thread nobody has prompted has neither, and goes by its ordinal, which is
- * per session and never reused.
+ * per box and never reused.
  */
 export function threadName(thread: ThreadSummary): string {
   return thread.title?.trim() || `Thread ${thread.ordinal}`;

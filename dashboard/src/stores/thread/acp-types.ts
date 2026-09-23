@@ -68,20 +68,20 @@ interface ToolCall {
 export type ToolCallUpdate = Partial<ToolCall> & { toolCallId: string };
 
 /** One mode the adapter can operate in. */
-interface SessionMode {
+interface ThreadMode {
   id: string;
   name: string;
   description?: string | null;
 }
 
 /** The modes an adapter advertises, and the one it is in. */
-export interface SessionModeState {
+export interface ThreadModeState {
   currentModeId: string;
-  availableModes: SessionMode[];
+  availableModes: ThreadMode[];
 }
 
-/** One selectable value of a session configuration option. */
-interface SessionConfigSelectOption {
+/** One selectable value of a thread configuration option. */
+interface ThreadConfigSelectOption {
   value: string;
   name: string;
   description?: string | null;
@@ -94,7 +94,7 @@ interface SessionConfigSelectOption {
  * `category` says what the option is for, so a client can place a known one
  * deliberately rather than depend on the adapter's own id for it.
  */
-export interface SessionConfigOption {
+export interface ThreadConfigOption {
   id: string;
   name: string;
   description?: string | null;
@@ -103,7 +103,7 @@ export interface SessionConfigOption {
   /** `select` carries an options list; other kinds carry none. */
   type?: string;
   currentValue?: string;
-  options?: SessionConfigSelectOption[];
+  options?: ThreadConfigSelectOption[];
 }
 
 /** One slash command the adapter accepts at the start of a prompt. */
@@ -128,7 +128,7 @@ interface ContentChunk {
 }
 
 /** Everything the adapter can push through session/update. */
-export type SessionUpdate =
+export type ThreadUpdate =
   | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.userMessageChunk })
   | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentMessageChunk })
   | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentThoughtChunk })
@@ -137,14 +137,14 @@ export type SessionUpdate =
   | { sessionUpdate: typeof UPDATE_KIND.plan; entries?: PlanEntry[] }
   | { sessionUpdate: typeof UPDATE_KIND.currentMode; currentModeId: string }
   | { sessionUpdate: typeof UPDATE_KIND.availableCommands; availableCommands?: AvailableCommand[] }
-  | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: SessionConfigOption[] }
+  | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: ThreadConfigOption[] }
   // Forward compatibility: an adapter may send a kind this build predates.
   | { sessionUpdate: string; [key: string]: unknown };
 
 /** The params of a session/update notification. */
-export interface SessionNotification {
+export interface ThreadNotification {
   sessionId: string;
-  update: SessionUpdate;
+  update: ThreadUpdate;
 }
 
 /** What a permission option would do if chosen. */
@@ -174,14 +174,14 @@ export interface RequestPermissionResponse {
 }
 
 /** What session/new answers with: the thread the connection is pinned to. */
-export interface NewSessionResponse {
+export interface NewThreadResponse {
   sessionId: string;
 }
 
 /** What session/load answers with. */
-export interface LoadSessionResponse {
-  modes?: SessionModeState | null;
-  configOptions?: SessionConfigOption[] | null;
+export interface LoadThreadResponse {
+  modes?: ThreadModeState | null;
+  configOptions?: ThreadConfigOption[] | null;
 }
 
 /** Reads a content block as plain text, for the blocks that carry any. */

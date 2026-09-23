@@ -366,7 +366,7 @@ const offersInterruptAction = (
  * message with any result-less tool call in it is requires-action, so a call
  * that never reported back is indistinguishable from one blocked on a
  * permission decision. Allow and Deny would be unanswerable on it: a tool of
- * this deployment runs in the session container, and its result cannot come
+ * this deployment runs in the box container, and its result cannot come
  * from a browser.
  *
  * An unanswered approval, or an interrupt the runtime can resume, are the two

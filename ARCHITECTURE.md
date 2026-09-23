@@ -1,9 +1,9 @@
 # Architecture
 
-Boxes runs AI coding-agent sessions in isolated Docker containers and lets a
-browser drive them over the Agent Client Protocol (ACP). One orchestrator
-process owns everything: the REST API, the web assets, the agent connections,
-the container lifecycle and the database.
+Boxes runs AI coding agents in isolated Docker containers — one container per
+*box* — and lets a browser drive them over the Agent Client Protocol (ACP).
+One orchestrator process owns everything: the REST API, the web assets, the
+agent connections, the container lifecycle and the database.
 
 This document describes how the system is put together. [`README.md`](./README.md)
 covers setting it up and using it.
@@ -13,29 +13,28 @@ covers setting it up and using it.
 **A running agent turn continues when the browser disconnects.**
 
 The orchestrator, not the browser, is the ACP client of record. It holds a
-persistent stdio connection to each ACP adapter in the session container — one
-per harness a thread of that session runs. Browsers attach and detach as
-views, and nothing a browser does reaches an adapter except the messages the
-gateway forwards.
+persistent stdio connection to each ACP adapter in the box container — one per
+harness a thread of that box runs. Browsers attach and detach as views, and
+nothing a browser does reaches an adapter except the messages the gateway
+forwards.
 
 Two consequences shape the rest of the design:
 
 - The agent connection outlives any browser, so a long-lived process has to own
   it and be able to rebuild it without losing the thread.
 - Thread history is replayed by the adapter's own `session/load` from the
-  session's home, so the orchestrator stores no transcript of its own. What it
+  box's home, so the orchestrator stores no transcript of its own. What it
   keeps is a bounded log per thread, in memory, of what it has forwarded — the
   adapter's replay read once when a thread is brought up, and everything said
   live since — and a browser opening a thread is sent that log rather than a
   fresh replay.
 
-A session owns several *threads* — ACP calls one conversation a session, and
-this document calls it a thread to keep it apart from a Boxes session. The
-container, the workspace, the home, the network and the egress policy
-are the session's and are shared, so a second thread costs nothing but its own
-transcript. Each
+A box owns several *threads* — ACP calls one conversation a session, and this
+document calls it a thread to keep it apart from a box. The container, the
+workspace, the home, the network and the egress policy are the box's and are
+shared, so a second thread costs nothing but its own transcript. Each
 connection is pinned to one thread, so two of them can be watched at once; see
-[Several threads per session](#several-threads-per-session).
+[Several threads per box](#several-threads-per-box).
 
 ## Processes
 
@@ -57,7 +56,7 @@ connection is pinned to one thread, so two of them can be watched at once; see
                   │      ▲ policy push (compose network, bearer)
    ┌──────────────▼──────┴───────┐                │
    │       egress proxy          │                │
-   │  attached to every session  │                │
+   │  attached to every box      │                │
    │  network under the alias    │                │
    │  "proxy"; holds the policy  │                │
    │  and the credentials in     │                │
@@ -65,29 +64,29 @@ connection is pinned to one thread, so two of them can be watched at once; see
    └──────┬───────────────┬──────┘                │
           │               │                       │
    ┌──────▼───────┐ ┌─────▼────────┐              │
-   │ session-a1b2 │ │ session-c3d4 │◄─────────────┘
-   │ net sn-a1b2  │ │ net sn-c3d4  │  each harness's adapter runs
+   │ box-a1b2     │ │ box-c3d4     │◄─────────────┘
+   │ net bn-a1b2  │ │ net bn-c3d4  │  each harness's adapter runs
    │ (internal)   │ │ (internal)   │  as a long-lived exec, not PID 1
    └──────────────┘ └──────────────┘
 ```
 
 | Process | Built from | Role |
 |---|---|---|
-| orchestrator | `orchestrator/Dockerfile` | Serves every route, owns the sessions, holds the Docker socket |
-| egress proxy | `proxy/Dockerfile` | The only route out of a session network, and where credentials are put on the wire |
-| session container | `session-image/Dockerfile` | Runs the agents and their ACP adapters, one container per session |
+| orchestrator | `orchestrator/Dockerfile` | Serves every route, owns the boxes, holds the Docker socket |
+| egress proxy | `proxy/Dockerfile` | The only route out of a box network, and where credentials are put on the wire |
+| box container | `box-image/Dockerfile` | Runs the agents and their ACP adapters, one container per box |
 
-The orchestrator and the proxy are compose services. Session containers are
+The orchestrator and the proxy are compose services. Box containers are
 created at runtime through the Docker API, so they appear in no compose file.
 
-That makes the session image the orchestrator's to keep, not compose's: it
-pulls `SESSION_IMAGE` when it is missing, at every boot, and again every
-`SESSION_IMAGE_PULL_MINUTES`, and a session moves onto what arrived the next
+That makes the box image the orchestrator's to keep, not compose's: it
+pulls `BOX_IMAGE` when it is missing, at every boot, and again every
+`BOX_IMAGE_PULL_MINUTES`, and a box moves onto what arrived the next
 time it is *started* — never while it runs, where recreating the container
 would kill the adapter exec mid-turn. The copy the tag moved off is removed
 once nothing is left on it, which is the only way that space is ever
-reclaimed; see [Reclaiming what a session leaves](#reclaiming-what-a-session-leaves). Recreating is otherwise cheap and is how
-a session container changes anything about itself: the rootfs is read-only and
+reclaimed; see [Reclaiming what a box leaves](#reclaiming-what-a-box-leaves). Recreating is otherwise cheap and is how
+a box container changes anything about itself: the rootfs is read-only and
 everything durable is in the two mounts, so the workspace and the thread
 history come across untouched. For the same reason nothing outside the
 orchestrator may recreate one — the container id in the database and the
@@ -98,9 +97,9 @@ Which build of the three is running — its digest, when it was built and what
 it takes on disk — is read back off the daemon and reported in `/healthz`,
 because a deployment that follows `latest` moves when a watchtower says so
 rather than when a person does. The orchestrator's image
-and the proxy's are whatever their containers were created from; the session
-image is named by `SESSION_IMAGE` outright, so no container has to exist for
-it. The session list shows
+and the proxy's are whatever their containers were created from; the box
+image is named by `BOX_IMAGE` outright, so no container has to exist for
+it. The box list shows
 all three in a footer. `orchestrator/src/images.ts` caches the reading for a
 minute: the probe is polled by every open tab, and nothing here moves without
 a registry pull behind it.
@@ -118,10 +117,10 @@ The orchestrator serves everything a browser needs:
 |---|---|
 | `/` | Dashboard bundle, with a single-page fallback |
 | `/api/...` | REST |
-| `/ws/sessions/:id/acp` | ACP gateway |
-| `/ws/sessions/:id/terminal` | A shell in the session's container |
-| `/healthz` | Liveness, and what the deployment is: version, session count, proxy warnings, which harnesses can run a turn and what the deployment holds a credential for, and which build of each image is running. Always 200 while the process serves |
-| `/readyz` | Readiness: 200 only when the database answers, the egress policy is in sync and Docker is reachable, which is what creating or starting a session needs |
+| `/ws/boxes/:id/acp` | ACP gateway |
+| `/ws/boxes/:id/terminal` | A shell in the box's container |
+| `/healthz` | Liveness, and what the deployment is: version, box count, proxy warnings, which harnesses can run a turn and what the deployment holds a credential for, and which build of each image is running. Always 200 while the process serves |
+| `/readyz` | Readiness: 200 only when the database answers, the egress policy is in sync and Docker is reachable, which is what creating or starting a box needs |
 
 A GET that matches no other route serves the dashboard's `index.html`, so
 client-side routes survive a reload. Anything under `/api` or `/ws` gets a
@@ -145,7 +144,7 @@ own image. Two things follow:
 
 ## REST API
 
-`orchestrator/src/app.ts` defines the routes; `SessionManager` does the work.
+`orchestrator/src/app.ts` defines the routes; `BoxManager` does the work.
 Request and response shapes live in `shared/types.ts`, which both the
 orchestrator handlers and the dashboard's `api.ts` import. The ACP vocabulary
 both sides speak — the subprotocol, the method names, the update kinds — is
@@ -158,26 +157,26 @@ were.
 
 | Method and path | Does |
 |---|---|
-| `GET /api/sessions` | Summaries of every live session |
-| `POST /api/sessions` | Creates a session and returns it; `thread` says what its first conversation runs |
-| `GET /api/sessions/:id` | One session with its Docker object names |
-| `POST /api/sessions/:id/start` | Starts a stopped container |
-| `POST /api/sessions/:id/stop` | Stops the container and drops the upstream |
-| `DELETE /api/sessions/:id` | Deletes the session, its workspace and home included |
-| `GET /api/sessions/:id/threads` | Every conversation the session owns |
-| `POST /api/sessions/:id/threads` | Adds one and makes it the session's default; `options` says which harness it runs and what it starts configured with, and `{"from":"<threadId>"}` forks that one instead — on its own harness, so `options` is then ignored |
-| `POST /api/sessions/:id/threads/:threadId/select` | Makes one the session's default |
-| `POST /api/sessions/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
-| `POST /api/sessions/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
-| `POST /api/sessions/:id/attachments?name=` | Stores one file, raw bytes, in the session's workspace |
-| `GET /api/sessions/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
-| `GET /api/sessions/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
-| `GET /api/sessions/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
-| `PUT /api/sessions/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
-| `PUT /api/sessions/:id/review/annotations` | Creates or replaces one line's comment |
-| `DELETE /api/sessions/:id/review/annotations?path=&line=` | Deletes one comment |
-| `PUT /api/sessions/:id/review/base` | Sets the revision the review is compared against, or clears it; answers with where it resolved in each repository |
-| `DELETE /api/sessions/:id/review` | Deletes `REVIEW.md` — "New review" |
+| `GET /api/boxes` | Summaries of every live box |
+| `POST /api/boxes` | Creates a box and returns it; `thread` says what its first conversation runs |
+| `GET /api/boxes/:id` | One box with its Docker object names |
+| `POST /api/boxes/:id/start` | Starts a stopped container |
+| `POST /api/boxes/:id/stop` | Stops the container and drops the upstream |
+| `DELETE /api/boxes/:id` | Deletes the box, its workspace and home included |
+| `GET /api/boxes/:id/threads` | Every conversation the box owns |
+| `POST /api/boxes/:id/threads` | Adds one and makes it the box's default; `options` says which harness it runs and what it starts configured with, and `{"from":"<threadId>"}` forks that one instead — on its own harness, so `options` is then ignored |
+| `POST /api/boxes/:id/threads/:threadId/select` | Makes one the box's default |
+| `POST /api/boxes/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
+| `POST /api/boxes/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
+| `POST /api/boxes/:id/attachments?name=` | Stores one file, raw bytes, in the box's workspace |
+| `GET /api/boxes/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
+| `GET /api/boxes/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
+| `GET /api/boxes/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
+| `PUT /api/boxes/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
+| `PUT /api/boxes/:id/review/annotations` | Creates or replaces one line's comment |
+| `DELETE /api/boxes/:id/review/annotations?path=&line=` | Deletes one comment |
+| `PUT /api/boxes/:id/review/base` | Sets the revision the review is compared against, or clears it; answers with where it resolved in each repository |
+| `DELETE /api/boxes/:id/review` | Deletes `REVIEW.md` — "New review" |
 | `GET /api/agent-sets` | Every agent set, the global one first |
 | `POST /api/agent-sets` | Adds a set |
 | `GET /api/agent-sets/:setId` | One set with its `AGENTS.md`, skills and commands |
@@ -185,7 +184,7 @@ were.
 | `DELETE /api/agent-sets/:setId` | Deletes a set. The global one is refused |
 | `PUT /api/agent-sets/:setId/items` | Creates a skill or command, or replaces the one under that name |
 | `DELETE /api/agent-sets/:setId/items?kind=&name=` | Deletes one |
-| `GET /api/agent-sets/:setId/preview` | What a session naming this set would get, global set merged in |
+| `GET /api/agent-sets/:setId/preview` | What a box naming this set would get, global set merged in |
 | `GET /api/harnesses` | Every harness: what the registry says, what its adapter last advertised, and whether it can run |
 | `GET /api/credentials` | Every stored credential, as an account and a status. Never a secret |
 | `PUT /api/credentials/:id` | Stores one: `{"method":"token","secret":"…"}` |
@@ -196,8 +195,8 @@ were.
 | `DELETE /api/credentials/:id/login/:loginId` | Gives up on one, and the container goes with it |
 | `GET /api/settings` | The git identity and each dialog's last choice |
 | `PATCH /api/settings` | Writes the ones a body names |
-| `POST /api/sessions/:id/threads/:threadId/background/stop` | Stops one task the thread announced, or all of them |
-| `POST /api/sessions/:id/background/stop` | Kills everything running in the box, whoever left it there |
+| `POST /api/boxes/:id/threads/:threadId/background/stop` | Stops one task the thread announced, or all of them |
+| `POST /api/boxes/:id/background/stop` | Kills everything running in the box, whoever left it there |
 | `GET /api/push/key` | The deployment's VAPID public key, which a browser subscribes with |
 | `POST /api/push/subscribe` | Registers a browser for Web Push, or refreshes what is stored for it |
 | `DELETE /api/push/subscribe` | Forgets one browser's subscription |
@@ -211,8 +210,8 @@ not need to be, because the gateway authenticates the upgrade itself.
 
 ### The terminal
 
-`/ws/sessions/:id/terminal` is a shell in the session's container, drawn in
-the browser by xterm.js at `/sessions/:id/terminal`. Binary frames are the
+`/ws/boxes/:id/terminal` is a shell in the box's container, drawn in
+the browser by xterm.js at `/boxes/:id/terminal`. Binary frames are the
 pty's bytes in both directions; text frames are control from the browser,
 which is a window size and nothing else so far.
 
@@ -220,29 +219,29 @@ It is the same box the agent works in, reached directly. `openTerminalExec`
 runs the shell as the non-root `agent` user, with `Tty` set so the daemon does
 no framing, in the container's existing isolation — internal network,
 read-only rootfs, capabilities dropped. No new privilege is introduced: anyone
-holding the session's token can already ask the agent to run anything, and
+holding the box's token can already ask the agent to run anything, and
 nothing shell-executes on the host — the command is an argument vector handed
 to the daemon, and the only part of it the orchestrator composes is a name it
 generated itself.
 
-tmux is what makes the shell outlive the page. A box has one shared session,
-`boxes`, created detached on first use; each connection then starts a session
-of its own grouped with it, so every terminal shows the same windows. Two tabs
-are the same shell, a reload comes back to the same scrollback, and the shared
-session holds the windows when every client has gone — which is what lets a
-build carry on with nobody watching. The server lives in the container and its
+tmux is what makes the shell outlive the page. A box has one shared tmux
+session, `boxes`, created detached on first use; each connection then starts a
+session of its own grouped with it, so every terminal shows the same windows.
+Two tabs are the same shell, a reload comes back to the same scrollback, and
+the shared session holds the windows when every client has gone — which is what
+lets a build carry on with nobody watching. The server lives in the container and its
 socket is in `/tmp`, which is a tmpfs, so a box that stops takes the shell with
 it. An image from before tmux gets a plain login shell, which is all of this
 except surviving the tab.
 
-A session per connection is what makes one closable. Docker offers no way to
-signal a running exec, and dropping the stream would leave the tmux client
+A tmux session per connection is what makes one closable. Docker offers no way
+to signal a running exec, and dropping the stream would leave the tmux client
 attached for good — one more with every tab anybody closed. So a closing
 terminal runs `tmux kill-session` against its own session and then drops the
 stream. The windows survive, being linked to the shared session too, and no
 other terminal on the box is touched.
 
-The upgrade is the one the ACP gateway makes, against the same per-session
+The upgrade is the one the ACP gateway makes, against the same per-box
 token: the path names a box and never a thread, because a terminal belongs to
 the box rather than to a conversation. A box that is stopped is started for
 it, which takes seconds, so bytes typed before the prompt appears are held and
@@ -252,7 +251,7 @@ An open terminal holds the idle reaper off the way an attached browser does —
 a build can run for an hour without printing a line, and stopping the
 container under it would take the shell and the build with it. That makes a
 browser that has gone without saying so expensive, so the server pings every
-30 seconds and drops a socket that misses two. Typing marks the session
+30 seconds and drops a socket that misses two. Typing marks the box
 active, at most once a minute, so closing the tab leaves the box its usual
 idle window rather than the next tick.
 
@@ -263,13 +262,13 @@ is drawn is ordinary, unlike a browser falling behind on ACP, which is closed.
 
 ### Attachments
 
-A file attached to a prompt is uploaded into the session's own workspace, at
+A file attached to a prompt is uploaded into the box's own workspace, at
 `.boxes/attachments/`, and the prompt then says so. That is the whole design,
 and what makes it type-agnostic: a PDF, a CSV or a heap dump becomes a path
 the agent opens with the tools it already has, where anything carried inside
 anything carried inside the message would be limited to what a model reads
 directly. A workspace is a plain directory the orchestrator owns, so the
-upload is a file write — no container is involved, and a stopped session takes
+upload is a file write — no container is involved, and a stopped box takes
 attachments as a running one does.
 
 Nothing travels inside the message. What the prompt carries is one block of
@@ -286,7 +285,7 @@ workspace at the paths below; read them if they are relevant.
 ```
 
 An image the user attached is still shown in the thread: the chip is a
-picture, loaded from `GET /api/sessions/:id/attachments/:name`, which reads
+picture, loaded from `GET /api/boxes/:id/attachments/:name`, which reads
 it back out of the workspace. So the bytes cross the wire once, on the way
 up, and the thread looks the same on the phone that sent the screenshot and
 on the desktop that comes to it an hour later.
@@ -347,10 +346,10 @@ gateway answers any ACP client, and an ACP prompt may carry an image inline.
 
 ## The frontend
 
-One React app, served at `/`. The session list is the thread list: a thread is
-`/sessions/:id/threads/:threadId`, and `/sessions/:id` is whichever thread the
-session has current — so every older link and bookmark still works. The ops —
-start, stop, delete, the details — live at `/sessions/:id/info`.
+One React app, served at `/`. The box list is the thread list: a thread is
+`/boxes/:id/threads/:threadId`, and `/boxes/:id` is whichever thread the
+box has current — so every older link and bookmark still works. The ops —
+start, stop, delete, the details — live at `/boxes/:id/info`.
 What the agent is configured with belongs to the deployment rather than to any
 one box, so it hangs off the list instead: `/agents` lists the sets and
 `/agents/:setId` edits one. The deployment's credentials hang off the same
@@ -360,11 +359,11 @@ and — where an account cannot be pasted — the login, which shows the URL and
 the one-time code and asks for a code back where the CLI wants one. Nothing on
 that page ever shows a secret.
 
-Each card carries its session's threads under its badges, the default one
+Each card carries its box's threads under its badges, the default one
 marked, so the list is the tree. Each row is a plain link to that thread,
 because opening one is a plain navigation now: the connection names its own
 thread, so nothing has to be switched first. Opening a thread still makes it
-the session's default, as a fire-and-forget POST that neither blocks the
+the box's default, as a fire-and-forget POST that neither blocks the
 navigation nor disturbs anybody. **New thread** and **Fork** sit under the
 rows, the second only when that thread's own adapter offers it. **New thread**
 opens the dialog that asks which agent the conversation runs and what it starts
@@ -374,7 +373,7 @@ and keeps its settings.
 A row is a name and a bullet, and the bullet is that thread's state, in the
 one colour vocabulary `StatusBadge` holds: amber for a question waiting on it,
 blue for the agent talking on it, dim blue for work still running in it, grey
-for a thread with nothing going on. It marked the session's *default* thread
+for a thread with nothing going on. It marked the box's *default* thread
 until the work below arrived — green for that one, grey for the rest — which
 the row already says in its weight and in `aria-current`, and which spent the
 colour that means "the container is up" on something that is not a state a
@@ -388,7 +387,7 @@ anything — `12s`, `5h`, `14d`, always the largest whole unit and always
 rounded down — which is what picks the thread you were in out of a box with
 six of them. Each card carries how much disk the box is taking up — its
 workspace and its home together — in the badge row but not as a badge: it is a measurement rather than a state, and
-a pill would put it among the things that say what the session is *doing*.
+a pill would put it among the things that say what the box is *doing*.
 Neither is a figure to act on, which is the point of the shape — `340 MB` and
 `1.4 GB` are different news, `341 MB` and `340 MB` are not. Both are
 `lib/rough.ts`; the exact timestamp is on the details view, and the exact
@@ -402,9 +401,9 @@ and a row is for picking a conversation out of a list rather than for reading
 about one. The card keeps its badges, because a card is the whole box and has
 things to report that no dot covers.
 
-The thread view names which thread it is on beside the session's name,
-*always* rather than only when the session has more than one: two tabs on one
-session are otherwise indistinguishable, which is the whole point. It also
+The thread view names which thread it is on beside the box's name,
+*always* rather than only when the box has more than one: two tabs on one
+box are otherwise indistinguishable, which is the whole point. It also
 carries its own **Fork**, because that is where the motion starts — you are in
 a thread doing something long and you want a second one to ask about it. The
 button posts and then reveals the new thread as a link with `target="_blank"`,
@@ -511,7 +510,7 @@ version bump that changes the UI silently. Boxes' own edits are marked
 `grep` is the list, because a count in prose here would rot. They are of three
 kinds: terminal habits the chat did not have (ArrowUp history on the composer,
 returning focus after a send, the slash-command list below), facts about this
-deployment the components could not know (a tool call in a session container
+deployment the components could not know (a tool call in a box container
 cannot be answered from a browser, so only a real question opens a group and
 offers buttons), and
 the look — the reasoning disclosure drawn as quietly as the tool calls beside
@@ -531,7 +530,7 @@ and the gateway stays client-agnostic. That is not only tidiness: this
 dashboard replaced a separate chat application served alongside it, and the
 gateway needed no protocol change to swap one for the other. An external ACP
 client still attaches to the same endpoint, with the path shape below and the
-`wsToken` the session's own summary carries.
+`wsToken` the box's own summary carries.
 
 ```
 AcpClient    ⇄ …/threads/:threadId/acp  JSON-RPC over one WebSocket, one thread
@@ -655,7 +654,7 @@ conversation shape, and nothing that can be acted on. What was there before is
 a composer over *How can I help you today?*, which is a claim that the thread
 is empty: true of a box that has never been prompted, and on arrival at one
 with a conversation in it both wrong and about to be replaced. A reconnect
-mid-session keeps showing what it was showing, since the socket dropping is
+mid-box keeps showing what it was showing, since the socket dropping is
 not news about the conversation; only a first read shows the placeholder.
 
 `available_commands_update` carries the slash commands this agent accepts, and
@@ -679,8 +678,8 @@ Boxes is driven from a phone, where back is *the* navigation control — and in
 an installed app on iOS it is the only one, since there is no browser chrome
 and no Escape key. Two things make it unpredictable, and they compound.
 
-A back control written as a `<Link>` pushes the view it leaves to, so sessions
-→ thread → *back* leaves the stack as sessions, thread, sessions, and the
+A back control written as a `<Link>` pushes the view it leaves to, so boxes
+→ thread → *back* leaves the stack as boxes, thread, boxes, and the
 device's own back button then goes *forward* into the thread that was just
 left. Two controls pointing the same way is what "back goes somewhere
 unexpected" amounts to, and remembering where a visitor came from does not fix
@@ -736,9 +735,9 @@ forward, because a view reads its own state — which thread a review was opened
 from — and an entry that dropped it would change how the view behaves purely
 because a dialog had been open. And it is popped only while both the index and
 the URL still match what was pushed: a replace keeps the index, and a
-confirmation that acts and leaves does exactly that (deleting a session
+confirmation that acts and leaves does exactly that (deleting a box
 replaces the entry with the list while its dialog is still mounted), so an
-index-only check would pop the visitor back onto the session they had just
+index-only check would pop the visitor back onto the box they had just
 deleted.
 
 All of it lives in the primitives under `components/ui`, so every dialog and
@@ -752,10 +751,10 @@ back with a popover open leaves the view, and the popover is closed by the tap
 that took the visitor there.
 
 Terminal actions replace rather than push, which is the rest of the rule:
-deleting a session lands on the list in place of the view that acted, and
-submitting the new-session form spends the form's entry on the thread it made
+deleting a box lands on the list in place of the view that acted, and
+submitting the new-box form spends the form's entry on the thread it made
 rather than leaving a form underneath that would make a second box. What sits
-*below* those entries may still name a session that is gone — history is the
+*below* those entries may still name a box that is gone — history is the
 browser's, not the app's — and the app already answers that with a page saying
 so rather than a composer over nothing.
 
@@ -778,7 +777,7 @@ A *harness* is an agent and the ACP adapter that drives it. Boxes carries two �
 Claude Code behind `claude-agent-acp`, and OpenAI Codex behind `codex-acp` —
 and which one runs a conversation is a property of the thread rather than of
 the box. One box, one checkout, two agents working on it is the point, so
-nothing about a session says which agent it is for.
+nothing about a box says which agent it is for.
 
 `orchestrator/src/harness.ts` is the registry: one record per harness, and the
 one place a harness-specific value is written down. Everything in it is a value
@@ -797,7 +796,7 @@ than a branch at the call site.
 | `defaultModeId`, what a fresh thread starts in | `auto` | `agent-full-access` |
 | `forkModeId`, what a fork starts in instead | `plan` | `read-only` |
 | `defaultConfig`, what a fresh thread is configured with | `model: opus` | nothing; the adapter's own defaults |
-| `sessionMeta`, the `_meta` its session calls carry | the thinking options | none |
+| `threadMeta`, the `_meta` its `session/*` calls carry | the thinking options | none |
 | `credentialId`, what must be stored before a thread can run | `claude` | `openai` |
 | `env()`, the container environment it needs, holding a placeholder | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR` | `CODEX_API_KEY`, `CODEX_HOME`, `NO_BROWSER`, `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST` |
 | `layout`, where an agent set is installed under `$HOME` | `.claude/CLAUDE.md`, `.claude/skills`, `.claude/commands` | `.codex/AGENTS.md`, `.agents/skills`, `.codex/prompts` |
@@ -810,7 +809,7 @@ bubblewrap, which needs unprivileged user namespaces that a container with
 Codex's own documentation names the container as the boundary for exactly that
 case. `CODEX_API_KEY` is another: Codex itself reads no key from its
 environment, and what puts one in reach is the adapter, which logs itself in
-with the method `DEFAULT_AUTH_REQUEST` names when a session call finds no
+with the method `DEFAULT_AUTH_REQUEST` names when a `session/*` call finds no
 account. And the value in that variable is a placeholder, because a real secret
 never enters a box — see [Token translation](#token-translation).
 
@@ -821,7 +820,7 @@ loaded by the adapter that wrote it. A fork is that rule read forward — it
 stays on its source's harness and keeps what the source was configured with, so
 the options a create request carries are ignored when it names a source.
 
-**A session holds one adapter connection per harness in use.** It is spawned
+**A box holds one adapter connection per harness in use.** It is spawned
 when a thread of that harness first needs it, so a box with only Claude threads
 never starts `codex-acp`, and a box with both runs two adapter processes over
 one checkout. See [The ACP gateway](#the-acp-gateway) for what that splits and
@@ -853,16 +852,16 @@ screen.
 
 Two halves, in `orchestrator/src/gateway/`.
 
-### Upstream: the session, and one connection per harness
+### Upstream: the box, and one connection per harness
 
-`upstream.ts` owns what belongs to the *session*; `gateway/adapter.ts` owns
-what belongs to one *adapter process*. `SessionManager` creates one
-`UpstreamSession` per session on first use and keeps it for the process's life,
-and that session creates an `AdapterConnection` for each harness a thread of it
+`upstream.ts` owns what belongs to the *box*; `gateway/adapter.ts` owns
+what belongs to one *adapter process*. `BoxManager` creates one
+`UpstreamBox` per box on first use and keeps it for the process's life,
+and that box creates an `AdapterConnection` for each harness a thread of it
 runs, the first time a thread of that harness needs one — so a box with only
 Claude threads never starts `codex-acp`.
 
-The split is what makes two adapters in one box work. The session holds the
+The split is what makes two adapters in one box work. The box holds the
 browsers, the reading of what the box is running, the permission requests
 waiting for an answer, which conversation each message is about, the tap into
 `acp_log`, and the container, which is started once however many adapters want
@@ -884,7 +883,7 @@ Starting a connection, in `ensureStarted`:
    filesystem, no terminal, no elicitation — which confines adapter-to-client
    traffic to `session/update`, `session/request_permission` and the task
    updates. The response is cached verbatim, on this connection.
-4. Replay this harness's threads. The session's *default* thread with
+4. Replay this harness's threads. The box's *default* thread with
    `session/load`, or, when it has none or the adapter no longer holds it, mint
    one with `session/new` and store its id. Then re-issue `session/load` for
    every other thread of this harness an attached browser is watching, so a
@@ -892,7 +891,7 @@ Starting a connection, in `ensureStarted`:
    than only one of them. A watched thread the adapter cannot bring back has its
    browsers' sockets closed, because the id they hold is one the adapter would
    now reject; each reconnects and pins whatever that thread is next. The
-   session's remaining threads are brought up when somebody opens one; see the
+   box's remaining threads are brought up when somebody opens one; see the
    pinning below.
 
 Every thread is then put back into what it is meant to be: its mode, and then
@@ -943,7 +942,7 @@ back where it ended up rather than where it was last sent. Which option is the
 model is read from its `category`, never from the adapter's id for it.
 
 **`_meta` comes from the registry.** `session/new`, `session/fork` and
-`session/load` carry whatever the harness's `sessionMeta` says and nothing
+`session/load` carry whatever the harness's `threadMeta` says and nothing
 otherwise. Only Claude Code asks for anything: `_meta.claudeCode.options.thinking`,
 which is where its adapter reads options to lay over the ones it hands the
 Claude Agent SDK. It asks for `display: 'summarized'`. Current models default
@@ -958,7 +957,7 @@ Codex reads no `_meta`, and sending it something it does not know would be
 noise on the wire.
 
 **`initialize` is cached per connection**, because the two adapters advertise
-different modes and different session capabilities and a browser has to be told
+different modes and different box capabilities and a browser has to be told
 what the agent holding its conversation says. Which one it gets is settled
 downstream, at the pin.
 
@@ -969,16 +968,16 @@ button reads and a harness whose adapter has not been reached reports false
 rather than being assumed.
 
 A spawn that fails is retried three times, waiting 1, 3 and 8 seconds. After
-that the session's status becomes `error` — but only for a thread that needed
+that the box's status becomes `error` — but only for a thread that needed
 *that* connection: a connection failing while the other runs logs, clears its
 own threads and is respawned by the next message on one of them.
 
 **An adapter with no account is a configuration problem, not a spawn failure.**
-Codex's adapter checks authorization on every session call and logs itself in
+Codex's adapter checks authorization on every `session/*` call and logs itself in
 from the environment first, so a box holding a placeholder for a credential
 nobody has stored answers `session/new` with JSON-RPC `-32000` and a message
 beginning `Authentication required`. That is matched on both halves and treated
-as what it is: no retry, the session's status left alone, the connection kept
+as what it is: no retry, the box's status left alone, the connection kept
 up, the browser's request failed with the adapter's own message, and one line
 in the log naming the credential that is missing. Claude Code's adapter offers
 no auth method Boxes uses and fails inside the turn instead, with a 401 from
@@ -994,7 +993,7 @@ A `session/load` that comes back with `resourceNotFound` is not a failure. The
 agent SDK writes a transcript only once a prompt has run, so an id minted by
 `session/new` and never prompted does not survive the container stopping. Only
 that thread's row loses its adapter id and gets a freshly minted conversation;
-the session's other threads have transcripts of their own and are untouched.
+the box's other threads have transcripts of their own and are untouched.
 Any other error is rethrown, which keeps a transient fault from discarding a
 live thread.
 
@@ -1009,7 +1008,7 @@ that.
 conversation it names; failing that, to the connection for that conversation's
 stored harness; failing that, to the one the sending browser's own thread is
 on; and failing all of those — `authenticate`, `session/list`, a message about
-nothing in particular — to the session's default harness, which is whatever its
+nothing in particular — to the box's default harness, which is whatever its
 current thread runs. A thread lookup takes the harness and the ACP id together,
 as hygiene rather than because a collision is expected: both adapters mint
 UUIDs, and the in-memory maps in `Broadcast`, `Activity` and `PendingStore`
@@ -1022,28 +1021,28 @@ both sides, so each connection runs its own id space and the SDK correlates
 request and response within it.
 
 There are two upgrade paths, and each connection is **pinned to one thread**
-for its whole life. `/ws/sessions/:id/threads/:threadId/acp` is a connection
-to that conversation; `/ws/sessions/:id/acp` names none and means whichever
-thread the session has current. The short path is what an external ACP client
+for its whole life. `/ws/boxes/:id/threads/:threadId/acp` is a connection
+to that conversation; `/ws/boxes/:id/acp` names none and means whichever
+thread the box has current. The short path is what an external ACP client
 and every link from before this existed use, so their contract does not change
 at all — only the dashboard learns the longer one. A path naming a thread that
-is not the session's is refused at the handshake, as a 404 before a WebSocket
+is not the box's is refused at the handshake, as a 404 before a WebSocket
 exists: a connection is pinned for its whole life, so there is no later point
 at which to find this out.
 
 The upgrade is authenticated on the handshake. A browser cannot set an
 `Authorization` header on a WebSocket, so a client offers the token as a
 `bearer.<token>` subprotocol entry alongside `acp.v1`. The gateway compares it
-in constant time against the token of the session the path names, and selects
+in constant time against the token of the box the path names, and selects
 `acp.v1` explicitly rather than relying on the client to list it first.
 
-Each session has its own token, minted when it is created and carried in its
-own summary, so a token that leaks reaches that one session rather than every
-session in the deployment. Authentication comes before disclosure: a session
+Each box has its own token, minted when it is created and carried in its
+own summary, so a token that leaks reaches that one box rather than every
+box in the deployment. Authentication comes before disclosure: a box
 that does not exist is answered the same 401 as a wrong token, because `/ws`
 is the one endpoint the operator's proxy does not sit in front of, and a 404
-there would say which session ids are real to anyone who asked. The 404 above
-is for a thread, and it is reached only once the session's token has proved
+there would say which box ids are real to anyone who asked. The 404 above
+is for a thread, and it is reached only once the box's token has proved
 the caller may know.
 
 Which thread the connection is on is settled once, at attach, and needs the
@@ -1093,7 +1092,7 @@ it, and the reconnect resumes from what it already had.
 
 `broadcast.ts` decides. Sending every update to every browser is almost
 right, and wrong in two places that only appear with more than one attached —
-a phone and a desktop watching the same session, or two tabs on two threads of
+a phone and a desktop watching the same box, or two tabs on two threads of
 one box.
 
 **Every rule is scoped to a thread**, because every rule is about one
@@ -1119,26 +1118,26 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   `session/load` never reaches the adapter: it is answered from the log,
   whole or from the message the browser named. A fork's log starts as a copy
   of its source's, re-tagged as the fork's, because the browser reading it is
-  pinned to the fork — see *Several threads per session*.
+  pinned to the fork — see *Several threads per box*.
 
-### Several threads per session
+### Several threads per box
 
 A workspace an agent has already prepared is worth keeping; the context it
-built up on the way there is often not. So a Boxes session owns several
+built up on the way there is often not. So a box owns several
 threads, and two things make new ones: **New thread** starts an empty one on
 the same workspace, and **Fork** branches the one you are on so an
 investigation can go two ways without disturbing the original. Everything else
-about the session is shared, so an extra thread costs nothing but its own
+about the box is shared, so an extra thread costs nothing but its own
 transcript — and a new thread names the harness it runs, which is how one box
 comes to hold a Claude Code conversation and a Codex one over the same
 checkout.
 
 **A connection names its thread, and `current_thread_id` is the default.**
-The thread is in the WebSocket URL, so one session's adapter connection
+The thread is in the WebSocket URL, so one box's adapter connection
 carries every thread anybody is watching and two tabs can hold two
-conversations of one box at once. The session row still records a current
+conversations of one box at once. The box row still records a current
 thread, but only as what a connection that names none gets — the short
-WebSocket path, `/sessions/:id`, an external client, a bookmark from before
+WebSocket path, `/boxes/:id`, an external client, a bookmark from before
 this existed. Selecting a thread moves that default and nothing else: no live
 connection is pinned to it, so nobody is dropped and nothing reconnects, which
 is what makes opening a thread a plain navigation rather than a call.
@@ -1176,7 +1175,7 @@ a title lands, rather than from the first one only, so a thread the adapter
 puts back on its ordinal — an explicit null clears the column — is named
 again by whatever is asked next. The attachments envelope is passed over: it
 is the dashboard's own words rather than the user's. A thread nobody has
-prompted has neither name, and goes by its ordinal, which is per session and
+prompted has neither name, and goes by its ordinal, which is per box and
 never reused.
 
 Forking is offered only when the adapter advertised
@@ -1206,7 +1205,7 @@ had said, so from then on a respawn loads the fork back like any other thread
 and reads that transcript into its log.
 
 A running turn and a waiting permission request belong to the thread, not the
-session. `threads.turn_active` records the first, and the session's answer is
+box. `threads.turn_active` records the first, and the box's answer is
 derived as any of its threads — two sources of truth for whether a turn is
 running is the thing that goes stale. A permission request records
 the thread that asked, goes to a browser watching *that* thread, and queues
@@ -1223,7 +1222,7 @@ It is not a delete and not an archive — both of those change what the thread
 can do, and this changes what a row looks like.
 
 Deleting a thread is not implemented, though the adapter supports
-`session/delete`. The debug log and the terminal stay session-scoped: the
+`session/delete`. The debug log and the terminal stay box-scoped: the
 first taps one adapter connection and the second opens one shell, and both
 belong to the box rather than to a conversation.
 
@@ -1254,16 +1253,16 @@ proceeding without consent.
 
 A turn that backgrounds something ends like any other. The agent says it will
 report back, the thread goes quiet, and with the browser closed every test the
-reaper makes says the session is idle — so half an hour later the container is
+reaper makes says the box is idle — so half an hour later the container is
 stopped, and the build, the crawl or the monitor inside it goes with it. The
 failure is silent: the thread's last line is still the agent promising to
 report, and the report never comes.
 
 Two things already covered part of this and neither covered it all. A
 background *subagent* holds its turn open — the adapter defers the prompt's
-result until the subagents it spawned settle — so the session counts as running
+result until the subagents it spawned settle — so the box counts as running
 a turn for as long as one is alive. And a task that keeps talking keeps its box
-awake by talking, because every adapter update marks the session active. What
+awake by talking, because every adapter update marks the box active. What
 was left was the quiet task: a command compiling for two hours, or a monitor
 watching a log that says nothing.
 
@@ -1275,7 +1274,7 @@ name, the same three update names, the same stop request. So one translation
 serves both. Boxes advertises `asyncTasks` at `initialize` — without it neither
 adapter sends a task update at all — and from then on a backgrounded command is
 a thing the agent announced rather than a line parsed out of a process table.
-An `async_task_spawned` puts a `BackgroundProcess` on the thread its `sessionId`
+An `async_task_spawned` puts a `BackgroundProcess` on the thread its `boxId`
 names, carrying the adapter's own task id, the command or description it sent
 as the name, what kind of task it is, and whether it can be stopped. An
 `async_task_state_update` whose state is `completed`, `failed` or `stopped`
@@ -1293,13 +1292,13 @@ owns none of the old terminals — which is the case the floor below exists for.
 
 The stop is `_session/async_task/stop` with the thread's ACP id and the task
 id, sent on that thread's own connection.
-`POST /api/sessions/:id/threads/:threadId/background/stop` keeps its shape and
+`POST /api/boxes/:id/threads/:threadId/background/stop` keeps its shape and
 `processId` in its body is now the task id; the adapter answers whether it
 stopped anything, and the thread's state is re-sent either way so the bar
 catches up on a task that had already finished.
 
 **The SDK had to be stepped around for this.** The ACP client installs a
-session-update router ahead of every handler an app registers, and that router
+box-update router ahead of every handler an app registers, and that router
 parses each `session/update` against the schema it was generated from — a
 strict union of the update kinds that existed then. An update outside it throws
 there, and a handler that throws takes the whole message with it: nothing else
@@ -1367,7 +1366,7 @@ connections, so a container that is up and has never been opened, or that has
 outlived the orchestrator process that opened it, runs the entrypoint and
 nothing else. Counting that as busy would put "still running" on its card with
 no thread able to say what, *and* would keep the reaper off it forever, because
-the reaper asks this same question. A stopped session is the same answer from
+the reaper asks this same question. A stopped box is the same answer from
 the other side: nothing to ask, read as nothing answering.
 
 **A level has to be pushed as well as read.** Nothing reports a build
@@ -1380,7 +1379,7 @@ changed — only those, so a poll over a quiet box says nothing at all.
 
 **The kill stays, for the work no task claims.** After a respawn the bars are
 empty and the box is busy, and a signal is the only thing that can stop the
-orphaned build. `POST /api/sessions/:id/background/stop` — session-level —
+orphaned build. `POST /api/boxes/:id/background/stop` — box-level —
 reads the box from inside, TERMs every pid the reading calls work, leaves
 before the branches they hang off so nothing is orphaned into a reading that
 can no longer see it, and KILLs whatever is still there two seconds later. The
@@ -1390,10 +1389,10 @@ reading says what died.
 **The reading is shown, not only acted on.** A card saying "still running"
 with every thread of it quiet names nothing, and the stop it offers is
 all-or-nothing, so a person deciding whether to use it had only the badge to go
-on. `SessionDetail.boxWork` carries the last reading — each process's pid, its
+on. `BoxDetail.boxWork` carries the last reading — each process's pid, its
 whole command line and its age — and `BoxWorkList` draws it in the two places
 that decision is made: the confirmation the box-wide stop asks first, which
-reads the detail as it opens, and the session's info view, which polls it
+reads the detail as it opens, and the box's info view, which polls it
 already. The age is what separates a build somebody is waiting on from
 something left behind hours ago; it comes from `docker top`'s `etimes` column
 and is absent where a host's `ps` has none. A command line is shown as the box
@@ -1407,7 +1406,7 @@ holding for a poll may since have been reused.
 The pids need care. `docker top` runs `ps` on the *host*, so its pids are the
 host's numbering and mean nothing inside the container where the kill has to
 happen — the box is read again from inside, through `ps` there, at the moment
-the stop runs. The session image installs procps and asserts `ps` for this
+the stop runs. The box image installs procps and asserts `ps` for this
 reason as much as for a person's.
 
 ### Is the agent talking, or is it your turn
@@ -1493,7 +1492,7 @@ started on its own has no request to come back at all. See *Is the agent
 talking* above.
 
 The announcement names the conversation, not only the box, and says what is
-still running in it. With two threads live, "your session needs you" is not
+still running in it. With two threads live, "your box needs you" is not
 something you can act on from a lock screen, and "two tasks are still running"
 is the difference between a thread you can come back to whenever and one that
 is about to say something else on its own.
@@ -1546,7 +1545,7 @@ requirement that is nowhere in the manifest. A manifest is fetched with
 credentials omitted unless the link says otherwise, so behind the
 authenticating proxy every deployment past loopback is supposed to have, the
 single request that decides whether a browser offers the install is the single
-request that arrives without the session cookie. The proxy answers it with a
+request that arrives without the box cookie. The proxy answers it with a
 redirect to a login page, the browser is left with no manifest, and nothing
 else on the page is affected — the failure is a missing offer, not an error.
 `index.html` asks with `crossorigin="use-credentials"`, and `e2e/pwa.test.ts`
@@ -1567,23 +1566,23 @@ browsers that need it: that function returns at the first blocker, and the
 blockers are an iPhone that has not installed yet and a user who has declined
 notifications once.
 
-## Session lifecycle
+## Box lifecycle
 
-Creating a session, in `SessionManager.create`:
+Creating a box, in `BoxManager.create`:
 
 1. Validate the name, and the agent set if one was named.
-2. Make sure the session image is on the host, pulling it if it is not. Before
+2. Make sure the box image is on the host, pulling it if it is not. Before
    anything is allocated, so a deployment whose first pull failed gets one
-   clear answer rather than a half-created session and a teardown.
-3. Generate a session id server-side. User input never reaches a Docker object
+   clear answer rather than a half-created box and a teardown.
+3. Generate a box id server-side. User input never reaches a Docker object
    name.
-4. Allocate a `/24` out of `SESSION_SUBNET_POOL` and insert the row as
+4. Allocate a `/24` out of `BOX_SUBNET_POOL` and insert the row as
    `creating`.
-5. Create the network `sn-<id>`, attach the egress proxy, create the workspace
+5. Create the network `bn-<id>`, attach the egress proxy, create the workspace
    directory `${DATA_DIR}/workspaces/<id>`, write the merged agent
    configuration to `${DATA_DIR}/agents/<id>`, create the home directory
    `${DATA_DIR}/homes/<id>` and fill it from the image, create the container
-   `session-<id>`, and start it.
+   `box-<id>`, and start it.
 6. Insert the box's first conversation as a row: which harness it runs, and
    what it is configured with. Nothing is minted with the adapter here — a
    thread with no adapter-side conversation is a state the gateway already
@@ -1592,20 +1591,20 @@ Creating a session, in `SessionManager.create`:
    spawn, and a box can be created for a harness whose credential has not been
    entered yet.
 
-Any failed step tears the whole session down and marks it `error`. What the
+Any failed step tears the whole box down and marks it `error`. What the
 first thread is to run is checked before step 2, so a request naming an agent
 the registry does not have is a 400 rather than a box built on the way to
 one.
 
 The container's `HostConfig` is a fixed template that user input never reaches.
-It runs as `SESSION_UID:SESSION_GID` — numbers rather than the image's `agent`,
-so one setting decides who a session is. The default is 1020, deliberately off
+It runs as `BOX_UID:BOX_GID` — numbers rather than the image's `agent`,
+so one setting decides who a box is. The default is 1020, deliberately off
 the 1000 the `ubuntu` base account holds, as does a host's first login user.
-The session image builds its `agent` user on the same numbers, because a
-session's home is a named volume Docker ownership-initialises from the image
-and nothing outside the container can chown it afterwards; `ensureSessionImage`
+The box image builds its `agent` user on the same numbers, because a
+box's home is a named volume Docker ownership-initialises from the image
+and nothing outside the container can chown it afterwards; `ensureBoxImage`
 reads the image's own user back and warns when the two have drifted. Pointing
-the orchestrator's own user at `SESSION_UID` is what lets it drop root, since
+the orchestrator's own user at `BOX_UID` is what lets it drop root, since
 the workspace chown then has nothing to do. That is a deployment's own
 arrangement — a `user:` on the orchestrator service and a data directory
 owned by the same uid — rather than something the shipped compose does.
@@ -1615,12 +1614,12 @@ It runs non-root with `ReadonlyRootfs`, `CapDrop: ALL`,
 `Init: true`. That last one matters: the kernel discards default-disposition
 signals for PID 1, so without docker-init the entrypoint's `sleep` would never
 see SIGTERM and every stop would wait out the grace period. The only
-caller-supplied values are the session id and the profile secrets.
+caller-supplied values are the box id and the profile secrets.
 
 The entrypoint installs the agent configuration into `~/.claude`, sets the git
 and gh identity, and then holds the container open.
 The adapter is spawned separately by the gateway, so browser churn never
-restarts the container. Both run in `/workspace`, which is the session's own
+restarts the container. Both run in `/workspace`, which is the box's own
 workspace directory and starts empty.
 
 | Status | Means |
@@ -1633,20 +1632,20 @@ workspace directory and starts empty.
 
 Deleting stops and removes the container, detaches the proxy, removes the
 network, the workspace directory, the home directory and the materialized agent
-configuration, and clears the session's pending requests and log rows. Nothing
-refers to any of it once the session is gone, so it goes with the session rather
-than being left orphaned. The tombstone is written first, under the session's
+configuration, and clears the box's pending requests and log rows. Nothing
+refers to any of it once the box is gone, so it goes with the box rather
+than being left orphaned. The tombstone is written first, under the box's
 own slot in the operation queue, and the writers that could still be in flight —
-the debug log, the exec log — refuse a row for a session that carries one, so a
+the debug log, the exec log — refuse a row for a box that carries one, so a
 delete cannot be undone a moment later by work that had not finished.
 
-At boot, `reconcile` lists containers by the `boxes.session` label and aligns
+At boot, `reconcile` lists containers by the `boxes.box` label and aligns
 the stored rows with them: live containers are adopted, missing ones are marked
-stopped, and every running session's proxy attachment is re-checked. Turn flags
+stopped, and every running box's proxy attachment is re-checked. Turn flags
 are cleared, because a turn cannot survive the restart that killed the
 connection owning it.
 
-**A container that is gone is made again.** Everything a session container is
+**A container that is gone is made again.** Everything a box container is
 comes from the row and the two directories it points at — image, network,
 mounts, environment — so a container is reproducible and losing one costs
 nothing durable. Without a rebuild, `start` would hand the missing id to the
@@ -1654,7 +1653,7 @@ daemon and take the 404, leaving the workspace and the home intact on the data
 volume and unreachable through Boxes. `restoreMissingContainer` rebuilds it,
 and makes the network too, since a prune that takes a stopped container takes
 the network that then has nothing on it. This is not an exotic case: `docker
-container prune` takes every stopped container, and an idle Boxes session *is*
+container prune` takes every stopped container, and an idle box *is*
 a stopped container.
 
 Only for a container the daemon says is **not there**. `unknown` — an inspect
@@ -1669,7 +1668,7 @@ repair may have changed the container id the caller is about to use.
 Every repair asks Docker a question and acts on the answer, which is only safe
 while one of them runs at a time. Three of those ways in can arrive at once,
 and the reaper is a fourth, so two starts could have one remove the container
-the other was about to use. **Each session has an operation queue**, one slot at
+the other was about to use. **Each box has an operation queue**, one slot at
 a time, and every mutating operation takes it: create, start, stop, delete, the
 repairs, a local command, and the gateway's own seam. Reads never queue.
 
@@ -1678,7 +1677,7 @@ than minutes and the one slow case — a first pull — is a spinner either way.
 Stop and delete are the exception: they mark whatever is in flight as
 pre-empted and take the slot behind it, so the work gives up at its next step
 rather than the stop waiting out a start it is about to undo. The reaper never
-waits at all; a busy session is skipped and tried again next tick. Re-entering
+waits at all; a busy box is skipped and tried again next tick. Re-entering
 is impossible by construction rather than by care: the queued method is a
 wrapper whose only job is to take the slot, and the work lives in an unqueued
 form that nothing inside a slot can call back into.
@@ -1691,15 +1690,15 @@ mid-answer — no longer ends the turn the instant the signal arrives. The grace
 is deliberately shorter than the container stop grace it sits inside, so the
 process finishes on its own terms rather than being killed part-way.
 
-## Where a session's files live
+## Where a box's files live
 
-A session's workspace is a directory under the orchestrator's own data
+A box's workspace is a directory under the orchestrator's own data
 directory — `${DATA_DIR}/workspaces/<id>` — bind-mounted at `/workspace` in
-the session container. A named volume, mounted only into that container,
+the box container. A named volume, mounted only into that container,
 would leave the orchestrator with no filesystem path to the agent's work at
 all, and reaching a file would mean a `docker exec`.
 
-The directory is what lets the review read a session's files without an exec
+The directory is what lets the review read a box's files without an exec
 round trip per read. That reading is the orchestrator's own, and it is why the
 review layer keeps symlink containment as a maintained invariant, in one file
 with a test: the process holds the Docker socket, and the content it is reading
@@ -1709,14 +1708,14 @@ Git is the exception, and it runs nowhere near this process. A repository's own
 configuration can name a program for git to run — a clean or smudge filter is
 enough, and no git option turns that off — so asking git about a workspace
 here would let the agent choose a command the orchestrator executes. Every git
-invocation is a `docker exec` in the session's own container instead, as the
+invocation is a `docker exec` in the box's own container instead, as the
 agent, which is the one place where running what the repository asks for is
 already the agent's own privilege rather than a boundary being crossed. The
 cost is that a review needs the box up, so opening one starts a stopped
-session.
+box.
 
-**The home followed it**, for a plainer reason: everything a session is should
-be in one place, and the biggest thing a session owns was the one thing Boxes
+**The home followed it**, for a plainer reason: everything a box is should
+be in one place, and the biggest thing a box owns was the one thing Boxes
 could not see. `${DATA_DIR}/homes/<id>` is bind-mounted at `/home/agent`, 0700
 rather than the workspace's 0755 — it holds thread transcripts, the tool caches
 and installs an agent accumulates at runtime, and whatever credential a login
@@ -1737,11 +1736,11 @@ ownership the image gave it, and chowning the directory itself in the same
 breath, which is what makes a home come out right even where the orchestrator
 is not root and cannot chown.
 
-**Sessions from before this** keep their `home_volume` and a null `home_dir`,
+**Boxes from before this** keep their `home_volume` and a null `home_dir`,
 and go on mounting the volume for as long as they live. Unlike the workspace
 there is no migration: `homeSource` is a directory for one and a volume name
 for the other, Docker takes either, and the two arrangements coexist
-until the last old session is deleted.
+until the last old box is deleted.
 
 **Naming the bind source.** Bind sources are resolved by the Docker daemon,
 not by the process asking for the mount, so the orchestrator cannot hand the
@@ -1759,10 +1758,10 @@ path and mount that, so a failure to resolve it is fatal at boot.
 
 **Ownership.** A bind mount, unlike a named volume, is not
 ownership-initialised by Docker, so every path the orchestrator creates in a
-workspace is chowned to `SESSION_UID` — the session image's `agent` user,
+workspace is chowned to `BOX_UID` — the box image's `agent` user,
 1020 by default and named as a constant in `workspaces.ts`. That is what lets the agent write in its own
 workspace, and lets it edit or delete the `REVIEW.md` the review surface
-writes there. `workspaces/` itself is 0700: one session's files are not
+writes there. `workspaces/` itself is 0700: one box's files are not
 another's, and the only thing that reads across all of them is this process.
 
 **How big it has got** is measured by walking the directory, which is the one
@@ -1799,32 +1798,32 @@ rather than allocated — `du --apparent-size` — and symlinks count as nothing
 and are never followed, the same containment the review surface and workspace
 removal keep. Both directories are walked and summed, and the home is usually
 the larger: a workspace holds a checkout, a home holds every toolchain cache
-and globally installed tool the agent ever reached for. A session still backed
+and globally installed tool the agent ever reached for. A box still backed
 by a named home volume contributes only its workspace, there being no path to
 the other half.
 
-**Sessions from before the change** keep their `ws_volume` and a null
+**Boxes from before the change** keep their `ws_volume` and a null
 `workspace_dir`, and migrate at their next start, which is the only moment a
 container can be recreated with a different mount. The order loses nothing at
 any step: create the directory, copy the volume into it through a one-shot
 helper container that can see both (`cp -a`, which preserves the agent's
-ownership), recreate the session container with the bind, start it, and only
+ownership), recreate the box container with the bind, start it, and only
 then delete the volume. A crash before the row is updated leaves a
-volume-backed session that migrates again on the next attempt. A *running*
-legacy session is left alone and comes through at its next stop/start cycle.
+volume-backed box that migrates again on the next attempt. A *running*
+legacy box is left alone and comes through at its next stop/start cycle.
 
-## Reclaiming what a session leaves
+## Reclaiming what a box leaves
 
 Two kinds of garbage accumulate on a Boxes host, and each has a collector.
 
-**Superseded session images.** A pull that moves `:latest` leaves the image it
+**Superseded box images.** A pull that moves `:latest` leaves the image it
 replaced on disk, untagged — a gigabyte or two of Node, browsers and language
 toolchains, once per release, that nothing is ever going to look for again.
-`refreshSessionImage` knows exactly which id it replaced, because it read the
+`refreshBoxImage` knows exactly which id it replaced, because it read the
 id before the pull and after it, and removes that one. Alongside it, a sweep
 catches the copies an *earlier* orchestrator process replaced and did not live
-to clean up: the session image carries `boxes.image=session`
-(`session-image/Dockerfile`), which survives the tag it lost, so an untagged
+to clean up: the box image carries `boxes.image=box`
+(`box-image/Dockerfile`), which survives the tag it lost, so an untagged
 image can still be recognised as one Boxes fetched.
 
 That label is the whole reason this is not `docker image prune`. The
@@ -1833,11 +1832,11 @@ put there is not its to delete. Nothing is forced either: an image a container
 was created from is refused by the daemon with a 409, and that refusal is a
 safety property rather than an error — a box that has not started since the
 tag moved is still on the old image, start recreates it onto the new one, and
-the image goes on a later sweep. `SESSION_IMAGE_PRUNE=false` turns the whole
+the image goes on a later sweep. `BOX_IMAGE_PRUNE=false` turns the whole
 of it off for a deployment that keeps old images to roll back to.
 
-**Objects whose session is gone.** Everything Boxes creates carries
-`boxes.session=<id>`. `reconcile()` reads that in one direction — for each
+**Objects whose box is gone.** Everything Boxes creates carries
+`boxes.box=<id>`. `reconcile()` reads that in one direction — for each
 row, what Docker has — so anything left by a crash between `docker create` and
 the row's own update, or by a teardown that failed halfway and only logged it,
 was invisible: no card lists it, and no teardown will ever be run for it
@@ -1847,18 +1846,18 @@ rootfs it is where everything the agent installed at runtime went.
 `sweepOrphans` reads it the other way, on the reaper's minute. What makes the
 rule exact rather than a heuristic is the order `create()` works in: the row
 is inserted **before** any Docker object exists, so an object labelled with a
-session that has no live row cannot be one on its way up. A deleted session's
+box that has no live row cannot be one on its way up. A deleted box's
 tombstone counts as no row, which is what makes a failed teardown recoverable.
 Containers go first, because a network with a container on it and a volume
 mounted into one are both refused; a removal that fails is a log line and the
 next sweep tries again. The workspace directory goes with them, being the size
 of all of it put together.
 
-One guard: when the sessions the host carries outnumber the rows the database
+One guard: when the boxes the host carries outnumber the rows the database
 knows by a wide margin — an empty table beside a full host being the extreme of
 it — the sweep refuses and says so. That shape is likelier to be a data volume
 mounted from the wrong place than a genuine pile of orphans, and it is the one
-mistake here that nothing could recover. A deployment whose sessions have all
+mistake here that nothing could recover. A deployment whose boxes have all
 been deleted still has its tombstones, so its failed teardowns are still swept.
 
 The same sweep removes login containers nothing is waiting on. A login runs a
@@ -1876,7 +1875,7 @@ start, and worth neither the code nor the risk.
 
 An `AGENTS.md`, skills and slash commands are managed from the dashboard and
 stored in the database, in named *sets*. The set `global` is seeded by the
-migration that creates the tables and goes into every session; a session may
+migration that creates the tables and goes into every box; a box may
 name one more, and `agents.ts` merges the two. `AGENTS.md` files are
 concatenated, global first — prose accumulates, and a set should add to the
 house rules rather than silently replace them. Skills and commands are a union
@@ -1885,7 +1884,7 @@ by name, the named set winning, because two files cannot share one name and
 express.
 
 **The database is the truth and the files are derived from it.** At every
-create and every start, a session's merged set is written to
+create and every start, a box's merged set is written to
 `${DATA_DIR}/agents/<id>` and bind-mounted **read-only** at `/boxes/agent`.
 Every path in it is already home-relative and already the one it takes inside
 the box, so the entrypoint copies and interprets nothing.
@@ -1901,7 +1900,7 @@ Neither agent reads the other's directories — Claude Code loads skills from
 `~/.claude/skills` only, and Codex from `~/.agents/skills` — so both copies are
 needed, and a few kilobytes written twice is cheaper than a decision.
 
-**Why the copy exists at all.** Those directories are in the session's home,
+**Why the copy exists at all.** Those directories are in the box's home,
 which the orchestrator now has a path to but still has no business writing into
 while the box is running — that would race with the agent living in it.
 Mounting over one read-only would break the box; mounting it writable would let
@@ -1930,22 +1929,22 @@ rule anyone can state.
 Two details follow from Docker rather than from the design. The materialized
 directory's contents are replaced in place and its inode kept, because a
 running container has it bind-mounted and swapping the directory would leave
-that container mounted on an unlinked one. And a session created before this
+that container mounted on an unlinked one. And a box created before this
 existed has no such mount — mounts are fixed when a container is created — so
 `start` recreates its container once, the same trade `migrateWorkspace` and
 `rollOntoCurrentImage` make and cheap for the same reason. That check runs
 *after* the image roll, because a roll recreates the container from
-`containerSpec`, which already binds the configuration: a session that moves
+`containerSpec`, which already binds the configuration: a box that moves
 image comes back with the mount and the check finds nothing left to do. The
 other order would recreate the same container twice.
 
-Deleting a set is not blocked. Sessions that named it keep running and keep
+Deleting a set is not blocked. Boxes that named it keep running and keep
 what is installed in them; the foreign key clears the column and they fall back
 to the global set alone at their next start.
 
 ## Code review
 
-The review surface browses a session's workspace, shows a file highlighted,
+The review surface browses a box's workspace, shows a file highlighted,
 takes a comment on a line, and writes all of it to `/workspace/REVIEW.md`. The
 format is the desktop [`review`](https://github.com/splitbrain/review) tool's —
 `orchestrator/src/review/fixtures/` holds files that tool wrote, and the tests
@@ -1959,13 +1958,13 @@ and the thread close a loop rather than being two applications.
 
 **REVIEW.md is the single source of truth.** There is no annotation table.
 Every mutation is read → parse → apply → serialize → write-tmp-then-rename,
-under a per-session lock, with the file's hash checked between the read and the
+under a per-box lock, with the file's hash checked between the read and the
 write. A moved hash means the agent edited the file mid-mutation, and the whole
 thing is re-read and re-applied once. A lost race costs one visible refresh
 rather than data, because every write re-serializes the whole parsed file. What
-is written is chowned to `SESSION_UID`, so the agent can edit or delete it.
+is written is chowned to `BOX_UID`, so the agent can edit or delete it.
 
-**The workspace is the review.** A session's workspace is not one repository:
+**The workspace is the review.** A box's workspace is not one repository:
 the agent clones what it was pointed at, forks and clones a second thing to
 compare against, checks a dependency out beside it, and sometimes ends up with
 a repository inside a repository. So the root is always `/workspace`, there is
@@ -1983,7 +1982,7 @@ repositories (`review/repos.ts`):
 
 A nested repository needs no special case — it is a longer prefix that wins —
 and a file no repository claims is shown without git, which is the old
-no-git-for-the-whole-session behaviour narrowed to the one file.
+no-git-for-the-whole-box behaviour narrowed to the one file.
 
 **Discovery** walks the workspace pruning a list of its own — the dependency
 and build directories a repository is not expected to be found in — never
@@ -1991,7 +1990,7 @@ following a symlink, bounded by a depth limit and a cap on directories
 scanned. A directory holding a `.git` entry — file *or* directory, so
 submodules and linked worktrees count — is a candidate, confirmed by comparing
 `rev-parse --show-toplevel` **realpath to realpath**: git resolves symlinks, so
-comparing its answer against a raw path silently loses git for every session of
+comparing its answer against a raw path silently loses git for every box of
 any deployment whose workspace path has a linked component. Pruning that list
 means a repository deliberately cloned into `vendor/` is not found, which is
 the right trade against an agent's `npm install`; the files in it are still
@@ -2017,7 +2016,7 @@ large, and says when it hit it.
 **Git's answer is taken once and shared.** The repositories, what they are
 compared against and the status of every path are one snapshot per review,
 retaken when the reader arrives rather than when a folder is opened. Git is a
-`docker exec` into the session's container, so a status per folder click would
+`docker exec` into the box's container, so a status per folder click would
 be a round trip per click; a snapshot makes opening a folder cost one directory
 read and nothing else. Writing a file or moving the base takes a fresh one,
 because both change what git would say.
@@ -2056,10 +2055,10 @@ asked of the one path rather than looked up in a listing, so `REVIEW.md`
 itself, a binary and a symlink out are all the same 404 they were.
 
 **A review needs the box.** File content is read here, but git runs inside the
-session's own container, so any endpoint that asks git something starts a
-stopped session and marks it active. Reviewing is use of the box, and the
+box's own container, so any endpoint that asks git something starts a
+stopped box and marks it active. Reviewing is use of the box, and the
 reaper stopping one under its reader would take the next request's answer with
-it. What this costs is the old property that reviewing an idled-out session was
+it. What this costs is the old property that reviewing an idled-out box was
 free; what it buys is that a repository can only ever run its own code in its
 own box.
 
@@ -2106,7 +2105,7 @@ the agent controls:
   the check is, along with what closing it would cost.
 - Where git runs lives in `review/git.ts`, which is the one place a git command
   line is built and the one place it is handed somewhere to run. It goes to the
-  session's container over `docker exec`, as the agent, against the workspace
+  box's container over `docker exec`, as the agent, against the workspace
   path inside it. The flags that remain are there for the parsers rather than
   for safety — unquoted paths, literal pathspecs, and the diff flags that keep
   hunk output byte-compatible with the desktop tool — because a repository
@@ -2116,14 +2115,14 @@ the agent controls:
 
 ### The review view
 
-`/sessions/:id/review`, with the open file in the search string
+`/boxes/:id/review`, with the open file in the search string
 (`?path=src/app.ts`) so a file is linkable — and on a phone it is a step of the
-navigation stack too: sessions → thread → file list → file, out of each by the
+navigation stack too: boxes → thread → file list → file, out of each by the
 header's own control or by the phone's back gesture, which do the same thing
 rather than each adding to what the other has to walk back through (see *Going
 back*). From `md` up the list and the file are one view, so the file is not a
 step there and back leaves the review. Entry points: a
-Review action in the thread header next to Fork, and one on the session card,
+Review action in the thread header next to Fork, and one on the box card,
 where it works whether or not the box is running. The view owns the whole
 viewport the way the thread view does.
 
@@ -2243,8 +2242,8 @@ text nodes only.
 Two legs, both in Docker's own primitives. Nothing touches the host firewall
 and no service needs `NET_ADMIN`.
 
-Every session network is created `internal`: no NAT, no default route. An agent
-has no L3 path to the LAN, the internet, or another session. The egress proxy
+Every box network is created `internal`: no NAT, no default route. An agent
+has no L3 path to the LAN, the internet, or another box. The egress proxy
 is then attached to that network under the alias `proxy`, and the container
 gets `HTTP_PROXY` and `HTTPS_PROXY` pointing at it. Every proxy-aware client
 honours those; anything else has no route out, which is the intended failure
@@ -2254,7 +2253,7 @@ The proxy itself (`proxy/src/`) runs three listeners:
 
 | Listener | Bound to | Role |
 |---|---|---|
-| front door | `0.0.0.0:3128` | Faces the sessions: allowlist, vetting, and the choice between an opaque tunnel and interception |
+| front door | `0.0.0.0:3128` | Faces the boxes: allowlist, vetting, and the choice between an opaque tunnel and interception |
 | interception engine | loopback, ephemeral | Terminates TLS for translated hosts and swaps the credential (`inject.ts`, on mockttp) |
 | upstream tunnel | loopback, ephemeral | The one place a connection leaves, so both routes out are vetted identically |
 
@@ -2268,7 +2267,7 @@ connect with a private one. `cidr.ts` holds the range checks; v4-mapped and
 v4-compatible IPv6 forms are vetted as the IPv4 address they reach, and
 unparseable input fails closed.
 
-The design fails closed. If the proxy is down or detached, sessions have no
+The design fails closed. If the proxy is down or detached, boxes have no
 egress at all, because there is no direct route to fall back to.
 
 ### The allowlist
@@ -2286,7 +2285,7 @@ as pure functions.
 
 ### Token translation
 
-A session holds placeholders. Real credentials exist only in the credential
+A box holds placeholders. Real credentials exist only in the credential
 store on the orchestrator's data volume and in the proxy's memory.
 
 **Every box holds a placeholder for every credential, always**, and is given
@@ -2317,9 +2316,9 @@ TLS under the deployment CA and `decideCredentials` rules on the request:
 
 A *credential header* is one the credential set names: `Authorization` for
 both of them, and `X-Api-Key` for Anthropic as well. Nothing else is read as a
-credential. A request that authenticates some other way — a session cookie is
+credential. A request that authenticates some other way — a box cookie is
 the case worth naming — is forwarded as it stands, which is what keeps logging
-in to a translated host from inside a session working. The refusal above is
+in to a translated host from inside a box working. The refusal above is
 about the deployment's own credentials, not about every way to reach an
 account at that host.
 
@@ -2339,7 +2338,7 @@ than two.
 Codex's built-in provider opens its transport with one, against
 `wss://api.openai.com/v1/responses`, retries a few times, and only then falls
 back to HTTPS — with a warning in the thread that nothing in the proxy can
-silence. So the session image tells it not to try: `/etc/codex/config.toml`,
+silence. So the box image tells it not to try: `/etc/codex/config.toml`,
 the lowest of Codex's configuration layers, names a copy of the built-in
 provider without WebSocket support, and Codex goes straight to HTTPS, which
 is swapped and works. The built-in provider itself cannot be changed, which
@@ -2388,8 +2387,8 @@ empty and the orchestrator pushes it a policy — the allowlist, the CA key and
 certificate, and the credential map — over an HTTP endpoint on the compose
 network, held in memory only.
 
-Two things keep it out of a session's reach. It binds to the compose network
-alone: sessions sit on internal networks with no route to that address, because
+Two things keep it out of a box's reach. It binds to the compose network
+alone: boxes sit on internal networks with no route to that address, because
 the proxy bridges them at L7 and does not route. `control.ts` finds that
 address by asking the kernel which local address the default route uses, which
 is an exact description of the compose interface, since internal networks
@@ -2401,7 +2400,7 @@ channel and every later push must match it.
 The orchestrator's side is `egress.ts`. The CA and the placeholders are
 generated once and persisted in `DATA_DIR` at mode 0600, beside the generated
 WebSocket token — regenerating them per boot would strand every running
-session, which holds the old certificate in its trust file. Rotation is
+box, which holds the old certificate in its trust file. Rotation is
 deleting that file.
 
 The channel's port is named on both sides: `EGRESS_CONTROL_PORT` for the
@@ -2418,11 +2417,11 @@ applies migrations tracked by `user_version`.
 
 | Table | Holds |
 |---|---|
-| `sessions` | One row per session: names, Docker object names, where its workspace and home are, status, which thread is the default, timestamps |
-| `threads` | One row per conversation: which session owns it, which harness runs it, the adapter's id for it, the mode and the config map it is meant to be in, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
+| `boxes` | One row per box: names, Docker object names, where its workspace and home are, status, which thread is the default, timestamps |
+| `threads` | One row per conversation: which box owns it, which harness runs it, the adapter's id for it, the mode and the config map it is meant to be in, the agent's title, its ordinal, whether a turn is running on it, whether the reader has marked it done |
 | `pending_requests` | Permission requests waiting for a browser, each recording the thread that asked |
 | `push_subscriptions` | One row per browser registered for Web Push, keyed by the push service's endpoint |
-| `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every session |
+| `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every box |
 | `agent_items` | The skills and slash commands of a set, keyed by set, kind and name |
 | `credentials` | One row per credential the deployment holds: the secret as the harness needs it, the account it is shown as, when it expires, when it was last refreshed, and whether it is believed to work |
 | `settings` | Plain configuration a person sets on the settings page: the git identity, and each thread dialog's last choice |
@@ -2439,14 +2438,14 @@ stderr, and no API route ever answers with a secret — only with an account, a
 status and a time.
 
 Two kinds of state deliberately stay out. Thread transcripts live in the
-session's home directory and are read back by the adapter, so Boxes stores no
+box's home directory and are read back by the adapter, so Boxes stores no
 transcript of its own. And the tap of forwarded ACP messages is a log rather
 than a table: at `LOG_LEVEL=debug` each one is a line on stderr, where
 `docker logs` has it alongside everything else, with an image or audio block's
 base64 payload replaced by its size and the line truncated. At any other level
 the tap does not even serialize the message. A log nobody can read without the
 process's own output is a log in the wrong place, and writing one to disk on
-the hot path cost every session a synchronous write per message.
+the hot path cost every box a synchronous write per message.
 
 Pending requests are the one place where the database and memory both matter.
 The row lets the dashboard show that something is waiting and survives a
@@ -2457,16 +2456,16 @@ restart; the resolver that answers the request is in memory only, so
 
 | Loop | Interval | Does |
 |---|---|---|
-| Reaper (`reaper.ts`) | 60s | Stops sessions that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes, and it never waits: a session with an operation already in flight is skipped and tried again next tick. The turn count is derived from the threads; the rest stay session-scoped, because they are about the box rather than the conversation |
-| Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running session's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
-| Maintenance | 60s, with the reaper | Prunes each session's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
-| Orphan sweep (`sessions.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with sessions that no longer exist. See below |
+| Reaper (`reaper.ts`) | 60s | Stops boxes that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes, and it never waits: a box with an operation already in flight is skipped and tried again next tick. The turn count is derived from the threads; the rest stay box-scoped, because they are about the box rather than the conversation |
+| Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running box's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
+| Maintenance | 60s, with the reaper | Prunes each box's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
+| Orphan sweep (`boxes.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with boxes that no longer exist. See below |
 | Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login whose access token is within the hour of expiring, or which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
 
-The list screen polls `GET /api/sessions` every 5 seconds while it is up and
+The list screen polls `GET /api/boxes` every 5 seconds while it is up and
 its tab is visible. A view watching one box — its thread, its review, its info
-— polls that session alone at the same cadence, so a browser reading one
-conversation is not asking for every session in the deployment.
+— polls that box alone at the same cadence, so a browser reading one
+conversation is not asking for every box in the deployment.
 
 ## Configuration and secrets
 
@@ -2489,7 +2488,7 @@ resolves a substitution from `./.env` or the shell, never from a `BOXES_ENV`
 file. Setting either one there changes nothing. Where compose has to agree with a default
 — `/data`
 for the volume mount, `boxes-egress-proxy` for the container the orchestrator
-attaches to session networks — it agrees by using the same value, not by
+attaches to box networks — it agrees by using the same value, not by
 restating it as configuration, and the comment at each site says which
 default it is matching.
 
@@ -2498,19 +2497,19 @@ outside a container, under `npm run dev` and in its own tests. Inside the
 image every default is already the right answer, which is why compose passes
 an env file and otherwise stays out of it.
 
-An empty value counts as unset. `SESSION_MEM_LIMIT=` in an env file arrives
+An empty value counts as unset. `BOX_MEM_LIMIT=` in an env file arrives
 as an empty string, and failing the boot on a setting nobody set would be a
 poor way to read it.
 
 Secrets are the exception, because a shipped default for one would be a
-published password. A session's gateway token is not configured at all: it is
-minted with the session and stored in its row.
+published password. A box's gateway token is not configured at all: it is
+minted with the box and stored in its row.
 
 The same reasoning covers the egress material. `egress.ts` generates the CA,
 the placeholders and the control-channel bearer on first boot and stores them
 in `DATA_DIR/egress-secrets.json` at mode 0600. They are generated rather than
 configured, and they persist rather than being regenerated, because running
-sessions hold them.
+boxes hold them.
 
 **The credentials themselves are rows, not settings.** `credentials.ts` owns
 the table and `settings.ts` the plain configuration beside it — the git
@@ -2520,7 +2519,7 @@ page, because a credential has to be enterable without a restart and a
 subscription login has no static form to write down at all. Every write calls
 the store's `onChange`, which recomposes the egress policy and pushes it.
 
-What reaches a session container is a placeholder for each of them, built by
+What reaches a box container is a placeholder for each of them, built by
 `credentialEnv` from every harness's `env()` plus `GH_TOKEN`, `GITLAB_TOKEN`,
 `GITLAB_HOST`, `GIT_NAME` and `GIT_EMAIL`, and fixed into the container at
 create time. The real value never enters a box and never reaches a filesystem
@@ -2540,8 +2539,8 @@ both variables itself and needs no login.
 ## Build-time pins
 
 The agents, the ACP adapters and the browser CLI are pinned in
-`session-image/Dockerfile` rather than in configuration, so what runs in a
-session is what this commit names and no `.env` entry can change it. Claude
+`box-image/Dockerfile` rather than in configuration, so what runs in a
+box is what this commit names and no `.env` entry can change it. Claude
 Code, its adapter and the browser CLI are pinned to a major line rather than
 to an exact release, so a rebuild takes fixes on that line and a new major is
 an edit to that file; below 1.0 a caret pins the minor, which is where a
@@ -2580,7 +2579,7 @@ orchestrator/src/
   app.ts                REST routes and the static bundle
   bodies.ts             A schema per route that takes a JSON body, and the 400 a body that fails one gets
   http-error.ts         The one error that carries an HTTP status, thrown wherever a request is refused
-  attachments.ts        Files a prompt carries, written into the session's own workspace
+  attachments.ts        Files a prompt carries, written into the box's own workspace
   config.ts             Environment parsing, and the translatable credential set
   harness.ts            The registry: one record per harness, and every value that varies between them
   credentials.ts        The credential store, and the refresh that keeps a login true
@@ -2591,14 +2590,14 @@ orchestrator/src/
   push.ts               VAPID and RFC 8291 payload encryption, on node:crypto
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log
-  sessions.ts           Session lifecycle, the owner of every UpstreamSession
+  boxes.ts              Box lifecycle, the owner of every UpstreamBox
   workspaces.ts         Workspace and home directories on the data volume: paths, ownership
   diskusage.ts          How big each workspace has got, measured off the request path
   agents.ts             Agent sets: AGENTS.md, skills, commands; the merge and the materialized bundle
   docker.ts             Containers, networks, volumes, the adapter exec
   images.ts             Which build of the three images is running, cached off the health probe
   review/
-    service.ts          Per-session façade: the repo map, the REVIEW.md read-modify-write, the routing
+    service.ts          Per-box façade: the repo map, the REVIEW.md read-modify-write, the routing
     repos.ts            Which repositories the workspace holds, and which owns a path
     store.ts            REVIEW.md: parse, serialize, mutate, drift (pure)
     gitstatus.ts        Porcelain and name-status parsing, base resolution, the merged workspace layer
@@ -2606,13 +2605,13 @@ orchestrator/src/
     tree.ts             One directory read, with git status and comment counts merged into it
     fs.ts               Contained reads and writes under the workspace: the symlink invariant
     git.ts              The one place a git process is spawned: fixed argv, scrubbed env
-  subnet.ts             Per-session /24 allocation
+  subnet.ts             Per-box /24 allocation
   reaper.ts             The idle reaper and the proxy reconciler
   log.ts                Structured stderr logging with secret redaction
   gateway/
     activity.ts         Whether the agent is talking on a thread, which silence is the only evidence of
-    background.ts       What a session left running in the background, so the reaper waits for it
-    upstream.ts         What belongs to a session: browsers, threads, the box, and the connections it owns
+    background.ts       What a box left running in the background, so the reaper waits for it
+    upstream.ts         What belongs to a box: browsers, threads, the box, and the connections it owns
     adapter.ts          One adapter process: spawn, initialize, load, mint, config replay, tasks, teardown
     downstream.ts       One ACP agent connection per browser, pinned to one thread
     broadcast.ts        Which browsers each adapter update goes to, routed by thread
@@ -2638,7 +2637,7 @@ dashboard/
     globals.css         The whole design system: tokens and the @theme bridge
     api.ts              Typed fetch client
     stores/
-      sessions.ts       Polled session list and health, read by useSyncExternalStore
+      boxes.ts          Polled box list and health, read by useSyncExternalStore
       harnesses.ts      Which agents this deployment can run, what each last advertised, and the dialog's last choice
       push.ts           Web Push registration: the service worker, the subscription, the toggle's state
       review.ts         The review view's whole state: the tree and the open file, fetched on arrival
@@ -2656,8 +2655,8 @@ dashboard/
       staged-prompt.ts  A prompt handed from one view to another, consumed once, out of history's reach
       harness.ts        What only a reader needs about a harness: why one cannot run, and the caveat on a mode
       terminal-socket.ts  The browser's end of a terminal: bytes out, bytes in, a size
-    views/              SessionList, SessionCreate, SessionThread, SessionInfo,
-                        SessionReview, SessionTerminal, AgentSets, AgentSetEditor,
+    views/              BoxList, BoxCreate, BoxThread, BoxInfo,
+                        BoxReview, BoxTerminal, AgentSets, AgentSetEditor,
                         Settings, Playground, Shell
     components/
       ThreadOptions.tsx The agent, mode, model and effort block both dialogs ask with
@@ -2672,8 +2671,8 @@ shared/
   acp.ts                The ACP subprotocol, method names and update kinds, spelled once
   terminal.ts           The terminal subprotocol and its one control message
   task-notifications.ts How a background task reports in, read by both sides
-session-image/          The per-session container image, in four files
-  Dockerfile            What a session has installed, and the uid it runs as
+box-image/              The per-box container image, in four files
+  Dockerfile            What a box has installed, and the uid it runs as
   entrypoint.sh         Identity, the CA and the agent configuration install; then it holds the container open
   playwright-cli.config.json  Browser defaults for a container with no Chrome and no sandbox
   profile-image-path.sh Puts the image's PATH back after /etc/profile has replaced it
@@ -2683,9 +2682,9 @@ scripts/                Security smoke test and credentialed live test
 ## Testing
 
 `scripts/smoke-test.sh` is the security gate and needs no credentials. It
-creates two throwaway sessions and asserts the isolation properties from inside
+creates two throwaway boxes and asserts the isolation properties from inside
 one of them: no proxy-bypassing egress, no private-range access through the
-proxy, no cross-session reachability, no docker socket, a read-only root
+proxy, no cross-box reachability, no docker socket, a read-only root
 filesystem, a contained fork bomb, and that the intended egress and writes do
 work. Every probe passes `curl -f`, so a 403 from the proxy leaves a non-zero
 exit status.
@@ -2710,9 +2709,9 @@ sources asserting that none of them can spawn a process, which is what keeps
 git in the box it belongs to. The seven routes are driven over their real
 handlers, a real database and a real git repository in a temp directory, with
 git itself supplied through the one seam it is started from, so the suite needs
-no Docker; every invocation is checked to be addressed to a session's container
+no Docker; every invocation is checked to be addressed to a box's container
 and a path inside its workspace. They cover root resolution, drift, concurrent
-writes, and that reading a review marks the session active, since git now runs
+writes, and that reading a review marks the box active, since git now runs
 in the box.
 
 The second harness added suites of its own, each about one of the things it
@@ -2730,7 +2729,7 @@ secrets, a placeholder for every entry whether or not it is configured, the CA
 present unconditionally, a recompose on change, and the OpenAI credential's
 hosts and headers; `docker.test.ts` that a box's environment carries both
 harnesses' variables and the CA. `upstream.test.ts` puts two connections in one
-session: a thread routed to its own, a failure in one leaving the other up,
+box: a thread routed to its own, a failure in one leaving the other up,
 `initialize` answered per harness, an `auth_required` not retried, and the
 config map replayed with the mode category excluded. `background.test.ts`
 covers the task translation and the stop, and the box reading with two adapters
@@ -2744,9 +2743,9 @@ update for one must not reach the other, reading one in must not silence the
 other's live updates, and an update nobody is watching is dropped — the
 per-thread log a browser opens a thread from, and what it drops past its cap,
 the exec
-limits, the schema migrations that turned one thread per session into several
+limits, the schema migrations that turned one thread per box into several
 and then moved the running turn onto them, the spawn path against a stand-in
-adapter — a forgotten thread costing the session only that thread, a turn
+adapter — a forgotten thread costing the box only that thread, a turn
 recorded against its own thread, a permission request reaching only a browser
 on the asking thread, a turn announced only when nobody was watching it, and a
 respawn reloading every watched thread — and the translation of ACP
@@ -2765,7 +2764,7 @@ real git repositories in them. What the suite proves is therefore the same
 code a deployment runs, and a change to the API cannot pass here by being
 matched in a second implementation. Only the agent is stubbed, because there
 is no agent to talk to: a stub ACP gateway speaks that side from canned
-scripts, including its own several threads per session with each socket
+scripts, including its own several threads per box with each socket
 pinned to one by its upgrade path, so a fresh thread starting empty, a fork
 carrying the source's messages,
 a switch bringing the first thread's transcript back, and two tabs on two
@@ -2786,7 +2785,7 @@ because nothing changed there — comment on a line and see the write reach the
 API, edit and delete it, set a base revision, and hand the review to the agent
 with the prompt staged unsent.
 The degraded shapes are there as well — no git, an empty workspace, and a
-session whose workspace is still a volume.
+box whose workspace is still a volume.
 The back button has a file of its own (`e2e/back.test.ts`), because it is the
 navigation control on the platform this is driven from. Every assertion there
 is a `page.goBack()` or a control the app calls back, checked against where it

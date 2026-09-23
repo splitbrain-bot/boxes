@@ -35,7 +35,7 @@ test('wraps when the pool is exhausted', () => {
 });
 
 test('steps over the subnets that are taken', () => {
-  // The wrap the counter produces lands on the first session's subnet, which
+  // The wrap the counter produces lands on the first box's subnet, which
   // is the collision this set exists to prevent.
   const taken = new Set(['10.200.0.0/24', '10.200.1.0/24']);
   assert.equal(allocateSubnet('10.200.0.0/16', 256, taken), '10.200.2.0/24');
@@ -48,7 +48,7 @@ test('steps over the subnets that are taken', () => {
 });
 
 test('says so when every subnet in the pool is taken', () => {
-  // /20 holds 16 /24s, and all of them are on a session.
+  // /20 holds 16 /24s, and all of them are on a box.
   const all = new Set(Array.from({ length: 16 }, (_, i) => `172.31.${i}.0/24`));
   assert.equal(allocateSubnet('172.31.0.0/20', 0, all), null);
 });

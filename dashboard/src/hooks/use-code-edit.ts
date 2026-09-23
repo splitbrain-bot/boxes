@@ -9,7 +9,7 @@ import type { OpenFile } from '../stores/review.ts';
  * editing: null is the reading state, and there is no copy of the file lying
  * around to go stale the rest of the time.
  *
- * Nothing here is in the review store. The store holds what the session has —
+ * Nothing here is in the review store. The store holds what the box has —
  * the tree, the open file, the comments — and a half-typed line is not that.
  * What the store does need to know is whether there is one, because refetching
  * over unsaved work would throw it away; the view tells it.

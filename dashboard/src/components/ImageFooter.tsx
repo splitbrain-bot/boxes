@@ -9,12 +9,12 @@ import type { DeploymentImages, ImageInfo } from '../../../shared/types.ts';
  * than when a person does, so which build is answering is a thing nobody was
  * told. That is the question this line exists for, and the digest is the
  * whole of the answer — the build time beside it is what makes a stale
- * deployment obvious at a glance, and the size is what makes a session image
+ * deployment obvious at a glance, and the size is what makes a box image
  * that has quietly doubled obvious in the same way.
  */
 
 /** The images, in the order the line names them, and under the name it uses. */
-const ORDER: Array<keyof DeploymentImages> = ['orchestrator', 'proxy', 'session'];
+const ORDER: Array<keyof DeploymentImages> = ['orchestrator', 'proxy', 'box'];
 
 /** How much of a digest is shown, in hex characters. */
 const SHORT_DIGEST = 12;

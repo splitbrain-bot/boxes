@@ -7,24 +7,24 @@
  *
  * Naming the thread is what lets two tabs watch two conversations of one box:
  * the connection is pinned to it for its whole life. Naming none asks for
- * whichever thread the session has current, which is what every link from
+ * whichever thread the box has current, which is what every link from
  * before this existed — and every external ACP client — still gets.
  */
-export function wsUrlFor(sessionId: string, threadId?: string | null): string {
+export function wsUrlFor(boxId: string, threadId?: string | null): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const path = threadId
-    ? `/ws/sessions/${sessionId}/threads/${threadId}/acp`
-    : `/ws/sessions/${sessionId}/acp`;
+    ? `/ws/boxes/${boxId}/threads/${threadId}/acp`
+    : `/ws/boxes/${boxId}/acp`;
   return `${scheme}//${window.location.host}${path}`;
 }
 
 /**
- * A session's terminal endpoint on the current origin.
+ * A box's terminal endpoint on the current origin.
  *
  * Names a box and never a thread: a terminal is the box seen directly, and
  * every one opened on it attaches to the same shell.
  */
-export function terminalUrlFor(sessionId: string): string {
+export function terminalUrlFor(boxId: string): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${window.location.host}/ws/sessions/${sessionId}/terminal`;
+  return `${scheme}//${window.location.host}/ws/boxes/${boxId}/terminal`;
 }

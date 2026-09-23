@@ -23,11 +23,11 @@ export function writeSecretFile(path: string, content: string): void {
   renameSync(temp, path);
 }
 
-/** Bytes of randomness behind one session's WebSocket token. */
+/** Bytes of randomness behind one box's WebSocket token. */
 const WS_TOKEN_BYTES = 32;
 
 /**
- * Returns a fresh WebSocket auth token for one session to keep.
+ * Returns a fresh WebSocket auth token for one box to keep.
  *
  * Hex of WS_TOKEN_BYTES random bytes, from the same source as every other
  * secret this deployment generates.

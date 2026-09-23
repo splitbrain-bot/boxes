@@ -50,7 +50,7 @@ export class PendingStore {
    * holdMs unless the entry is settled first.
    */
   add(
-    sessionId: string,
+    boxId: string,
     acpSessionId: string | null,
     method: string,
     params: unknown,
@@ -65,14 +65,14 @@ export class PendingStore {
     const info = this.db
       .prepare(
         `INSERT INTO pending_requests
-           (session_id, acp_session_id, method, params, created_at)
+           (box_id, acp_session_id, method, params, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(sessionId, acpSessionId, method, serialized, createdAt);
+      .run(boxId, acpSessionId, method, serialized, createdAt);
     const id = Number(info.lastInsertRowid);
     const row: PendingRequestRow = {
       id,
-      session_id: sessionId,
+      box_id: boxId,
       acp_session_id: acpSessionId,
       method,
       params: serialized,
@@ -96,7 +96,7 @@ export class PendingStore {
       clearTimeout(entry.timer);
       // Whoever else is still showing this question is told it is over,
       // however it was settled: an answer from another browser, the hold
-      // running out, or the session stopping.
+      // running out, or the box stopping.
       for (const delivery of entry.deliveries) delivery.abort();
       entry.deliveries.clear();
       this.entries.delete(id);
@@ -105,9 +105,9 @@ export class PendingStore {
     return entry;
   }
 
-  /** The answerable entries of one session, across every thread. */
-  listForSession(sessionId: string): PendingEntry[] {
-    return [...this.entries.values()].filter((e) => e.row.session_id === sessionId);
+  /** The answerable entries of one box, across every thread. */
+  listForBox(boxId: string): PendingEntry[] {
+    return [...this.entries.values()].filter((e) => e.row.box_id === boxId);
   }
 
   /**
@@ -115,48 +115,48 @@ export class PendingStore {
    * that thread is given. A request from another conversation is not this
    * browser's to answer.
    */
-  listForThread(sessionId: string, acpSessionId: string): PendingEntry[] {
-    return this.listForSession(sessionId).filter(
+  listForThread(boxId: string, acpSessionId: string): PendingEntry[] {
+    return this.listForBox(boxId).filter(
       (e) => e.row.acp_session_id === acpSessionId,
     );
   }
 
-  /** How many requests of one session are waiting. */
-  countForSession(sessionId: string): number {
+  /** How many requests of one box are waiting. */
+  countForBox(boxId: string): number {
     const row = this.db
-      .prepare('SELECT COUNT(*) AS n FROM pending_requests WHERE session_id = ?')
-      .get(sessionId) as { n: number } | undefined;
+      .prepare('SELECT COUNT(*) AS n FROM pending_requests WHERE box_id = ?')
+      .get(boxId) as { n: number } | undefined;
     return row?.n ?? 0;
   }
 
   /**
-   * Waiting request counts of one session, keyed by the adapter's thread id.
+   * Waiting request counts of one box, keyed by the adapter's thread id.
    *
    * A column rather than the stored params: the params carry the thread too,
    * but a query wants a column, and this is what the per-thread badge counts.
    */
-  countsByThread(sessionId: string): Map<string, number> {
+  countsByThread(boxId: string): Map<string, number> {
     const rows = this.db
       .prepare(
         `SELECT acp_session_id, COUNT(*) AS n FROM pending_requests
-          WHERE session_id = ? AND acp_session_id IS NOT NULL
+          WHERE box_id = ? AND acp_session_id IS NOT NULL
           GROUP BY acp_session_id`,
       )
-      .all(sessionId) as Array<{ acp_session_id: string; n: number }>;
+      .all(boxId) as Array<{ acp_session_id: string; n: number }>;
     return new Map(rows.map((r) => [r.acp_session_id, r.n]));
   }
 
-  /** Waiting request counts, keyed by session id. */
-  countsBySession(): Map<string, number> {
+  /** Waiting request counts, keyed by box id. */
+  countsByBox(): Map<string, number> {
     const rows = this.db
-      .prepare('SELECT session_id, COUNT(*) AS n FROM pending_requests GROUP BY session_id')
-      .all() as Array<{ session_id: string; n: number }>;
-    return new Map(rows.map((r) => [r.session_id, r.n]));
+      .prepare('SELECT box_id, COUNT(*) AS n FROM pending_requests GROUP BY box_id')
+      .all() as Array<{ box_id: string; n: number }>;
+    return new Map(rows.map((r) => [r.box_id, r.n]));
   }
 
-  /** Fail everything outstanding for a session (container stop / delete). */
-  failSession(sessionId: string, reason: string): void {
-    for (const entry of this.listForSession(sessionId)) {
+  /** Fail everything outstanding for a box (container stop / delete). */
+  failBox(boxId: string, reason: string): void {
+    for (const entry of this.listForBox(boxId)) {
       this.settle(entry.row.id);
       entry.reject(new Error(reason));
     }
@@ -167,8 +167,8 @@ export class PendingStore {
    * with the thread still asking. Its other threads, and the box's other
    * adapter, keep their questions.
    */
-  failThread(sessionId: string, acpSessionId: string, reason: string): void {
-    for (const entry of this.listForThread(sessionId, acpSessionId)) {
+  failThread(boxId: string, acpSessionId: string, reason: string): void {
+    for (const entry of this.listForThread(boxId, acpSessionId)) {
       this.settle(entry.row.id);
       entry.reject(new Error(reason));
     }

@@ -1,19 +1,19 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage } from './browser.ts';
-import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply } from './stub-gateway.ts';
 
 /**
- * Several conversations on one session, and two of them watched at once.
+ * Several conversations on one box, and two of them watched at once.
  *
- * A session shares its container and both volumes across its threads, so the
+ * A box shares its container and both volumes across its threads, so the
  * difference between them is the transcript and nothing else. What is asserted
  * here is that difference: a fresh thread starts empty, a fork starts from
  * what the source had, going back to a thread brings its own transcript back,
  * and two tabs on two threads each keep to their own.
  */
 
-const ID = DEFAULT_SESSION.id;
+const ID = DEFAULT_BOX.id;
 
 /** The `text-decoration-line` the browser computed for one element. */
 function decoration(target: import('playwright').Locator): Promise<string> {
@@ -49,7 +49,7 @@ async function startThread(page: import('playwright').Page): Promise<void> {
   await page.getByRole('button', { name: 'Start thread' }).click();
 }
 
-/** Opens the session, asks one question, and waits for the answer. */
+/** Opens the box, asks one question, and waits for the answer. */
 async function askOnce(page: import('playwright').Page): Promise<void> {
   await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
   const input = page.getByLabel('Message input');
@@ -58,15 +58,15 @@ async function askOnce(page: import('playwright').Page): Promise<void> {
   await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
 }
 
-test('a new thread starts empty on the same session', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}`);
+test('a new thread starts empty on the same box', async () => {
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
   try {
     await askOnce(page);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await startThread(page);
     // Opening a thread is a navigation to that thread's own route.
-    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The second thread has a transcript of its own, which is empty.
@@ -80,20 +80,20 @@ test('a new thread starts empty on the same session', async () => {
 });
 
 test('a fork carries the source thread messages into the new one', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
   try {
     await askOnce(page);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     // Exact, because a name matches by substring and the thread header's own
     // "Fork this thread" is still on the page for a moment after the list has
     // taken the URL. That button forks without leaving the thread, so the one
     // this test means is the card's, once the card is there.
     await page.getByRole('button', { name: 'Fork', exact: true }).click();
-    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // A branch of the first conversation, not a copy of the session: the
+    // A branch of the first conversation, not a copy of the box: the
     // replay comes back on a thread of its own.
     await expect.poll(() => page.getByText('Thread 2').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
@@ -105,19 +105,19 @@ test('a fork carries the source thread messages into the new one', async () => {
 });
 
 test('switching back to the first thread returns its transcript', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
   try {
     await askOnce(page);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await startThread(page);
-    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('Thread 2').isVisible()).toBe(true);
     expect(await page.getByText('First answer.').count()).toBe(0);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await page.getByRole('link', { name: 'Thread 1' }).click();
-    await page.waitForURL(`**/sessions/${ID}/threads/th1`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The first thread was left where it was, and comes back whole.
@@ -129,11 +129,11 @@ test('switching back to the first thread returns its transcript', async () => {
   }
 });
 
-test('the thread names itself even when the session has only one', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}`);
+test('the thread names itself even when the box has only one', async () => {
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
-    // Two tabs on one session are otherwise indistinguishable, which is the
+    // Two tabs on one box are otherwise indistinguishable, which is the
     // whole point of putting the thread in the URL.
     await expect.poll(() => page.getByText('Thread 1').isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -143,7 +143,7 @@ test('the thread names itself even when the session has only one', async () => {
 });
 
 test('a fork from inside the thread leaves it where it is and offers a new tab', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/th1`);
   try {
     await askOnce(page);
 
@@ -153,12 +153,12 @@ test('a fork from inside the thread leaves it where it is and offers a new tab',
     // await is what popup blockers exist to stop.
     const link = page.getByRole('link', { name: 'Open it in a new tab' });
     await expect.poll(() => link.isVisible()).toBe(true);
-    expect(await link.getAttribute('href')).toBe(`/sessions/${ID}/threads/th2`);
+    expect(await link.getAttribute('href')).toBe(`/boxes/${ID}/threads/th2`);
     expect(await link.getAttribute('target')).toBe('_blank');
 
     // This thread stayed exactly where it was: same route, same transcript,
     // same connection. Nothing was switched out from under it.
-    expect(page.url()).toContain(`/sessions/${ID}/threads/th1`);
+    expect(page.url()).toContain(`/boxes/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -178,7 +178,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
     ],
   });
 
-  const working = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
+  const working = await openPage(stub.url, `/boxes/${ID}/threads/th1`);
   try {
     await expect.poll(() => working.page.getByText('connected').isVisible()).toBe(true);
     const first = working.page.getByLabel('Message input');
@@ -193,7 +193,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
       working.page.getByRole('link', { name: 'Open it in a new tab' }).isVisible(),
     ).toBe(true);
 
-    const exploring = await openPage(stub.url, `/sessions/${ID}/threads/th2`);
+    const exploring = await openPage(stub.url, `/boxes/${ID}/threads/th2`);
     try {
       await expect.poll(() => exploring.page.getByText('connected').isVisible()).toBe(true);
       // Both sockets are up at once, on two threads of one box.
@@ -239,7 +239,7 @@ test('forking is not offered when the adapter does not advertise it', async () =
 });
 
 test('marking a thread done crosses it out on the list, and the mark comes off again', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${ID}/threads/th1`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/th1`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -247,7 +247,7 @@ test('marking a thread done crosses it out on the list, and the mark comes off a
     // The same button, now saying what it would undo.
     await expect.poll(() => page.getByLabel('Mark this thread not done').isVisible()).toBe(true);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     const name = page.getByRole('link', { name: 'Thread 1' }).getByText('Thread 1');
     await expect.poll(() => name.isVisible()).toBe(true);
     await expect.poll(() => decoration(name)).toBe('line-through');
@@ -255,13 +255,13 @@ test('marking a thread done crosses it out on the list, and the mark comes off a
     // Struck through and nothing else: the row is still a link into the
     // conversation, which still connects.
     await name.click();
-    await page.waitForURL(`**/sessions/${ID}/threads/th1`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     await page.getByLabel('Mark this thread not done').click();
     await expect.poll(() => page.getByLabel('Mark this thread done').isVisible()).toBe(true);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await expect.poll(() => name.isVisible()).toBe(true);
     await expect.poll(() => decoration(name)).toBe('none');
     expect(errors).toEqual([]);

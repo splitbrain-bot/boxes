@@ -88,7 +88,7 @@ self.addEventListener('push', (event) => {
 
   const title = payload.title || 'Boxes';
   const options = {
-    body: payload.body || 'A session wants your attention.',
+    body: payload.body || 'A box wants your attention.',
     // Same tag replaces rather than stacks: a thread that asks twice should
     // not leave two notifications to dismiss.
     tag: payload.tag || 'boxes',

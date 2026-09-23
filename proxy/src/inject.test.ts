@@ -11,12 +11,12 @@ import { Interceptor } from './inject.ts';
 /**
  * The swap and the refusal, driven through the real interception engine.
  *
- * A session reaches a credential host over TLS, so that is how these tests
+ * A box reaches a credential host over TLS, so that is how these tests
  * reach the engine. The engine's own upstream is pointed at a stand-in for the
  * vetting tunnel, so they need no network: what is under test is what the
  * proxy adds — that a placeholder becomes the real credential, that anything
  * else is refused here rather than forwarded, and that the certificate a
- * session sees is the deployment's.
+ * box sees is the deployment's.
  */
 
 const PLACEHOLDER = 'ghp_PLACEHOLDERPLACEHOLDER';
@@ -137,7 +137,7 @@ function githubPolicy(over: Partial<EgressPolicy> = {}): EgressPolicy {
   };
 }
 
-/** Opens a tunnel through the engine to one host, as a session's client does. */
+/** Opens a tunnel through the engine to one host, as a box's client does. */
 function tunnelThroughEngine(
   port: number,
   authority: string,
@@ -298,7 +298,7 @@ describe('the interception engine', () => {
 
   it('refuses a caller that did not come through the front door', async () => {
     // The engine's own listener takes every interface, and the proxy sits on
-    // every session network, so a box can open this port directly. Reaching it
+    // every box network, so a box can open this port directly. Reaching it
     // that way skips the front door's rules about which hosts and ports may be
     // intercepted at all, so the engine refuses anything not from loopback.
     const outward = Object.values(networkInterfaces())
@@ -379,7 +379,7 @@ describe('the interception engine', () => {
     policy = githubPolicy();
     await interceptor.apply();
 
-    // The shape of a real session: CONNECT, then TLS under the deployment CA.
+    // The shape of a real box: CONNECT, then TLS under the deployment CA.
     const socket = await tunnelThroughEngine(interceptor.port()!, 'api.github.com:443');
     const secure = connectTls({ socket, servername: 'api.github.com', ca: ca.cert });
     await new Promise<void>((resolve, reject) => {

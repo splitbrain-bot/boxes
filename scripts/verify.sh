@@ -130,7 +130,7 @@ lacks() {
   fi
 }
 
-# The same, run as the agent inside the session container.
+# The same, run as the agent inside the box container.
 sx()  { docker exec -u agent "$CONTAINER" "$@"; }
 sxs() { docker exec -u agent "$CONTAINER" bash -lc "$1"; }
 
@@ -164,8 +164,8 @@ write_env() {
 EGRESS_ALLOWED_HOSTS=$1
 GITLAB_HOST=$GITLAB_HOST
 IDLE_STOP_MINUTES=60
-SESSION_IMAGE=boxes-session:latest
-SESSION_IMAGE_PULL_MINUTES=0
+BOX_IMAGE=boxes-box:latest
+BOX_IMAGE_PULL_MINUTES=0
 ENV
 }
 write_env "$ALLOWLIST"
@@ -173,10 +173,10 @@ write_env "$ALLOWLIST"
 # Everything compose is run with, so no invocation can forget one of them.
 up() { BOXES_ENV="$ENV_FILE" HOST_PORT="$HOST_PORT" BIND_ADDR=127.0.0.1 "${COMPOSE[@]}" "$@"; }
 
-SESSION_ID=""
+BOX_ID=""
 CONTAINER=""
-CFG_SESSION=""
-OVR_SESSION=""
+CFG_BOX=""
+OVR_BOX=""
 STACK_UP=0
 
 dump_logs() {
@@ -189,9 +189,9 @@ dump_logs() {
 
 cleanup() {
   local status=$? id
-  for id in "$SESSION_ID" "$CFG_SESSION" "$OVR_SESSION"; do
+  for id in "$BOX_ID" "$CFG_BOX" "$OVR_BOX"; do
     [ -n "$id" ] && [ "$id" != null ] && \
-      curl -sS -m 15 -X DELETE "$API_BASE/api/sessions/$id" >/dev/null 2>&1
+      curl -sS -m 15 -X DELETE "$API_BASE/api/boxes/$id" >/dev/null 2>&1
   done
   if [ "$STACK_UP" = 1 ]; then
     if [ "${KEEP_UP:-0}" = 1 ]; then
@@ -227,7 +227,7 @@ wait_insync() {
   return 1
 }
 
-# Asserts a string appears nowhere in a session's environment or volumes. The
+# Asserts a string appears nowhere in a box's environment or volumes. The
 # needle is a real credential, so only its absence is ever printed.
 absent() {
   local id="$1" desc="$2" needle="$3" hits
@@ -280,11 +280,11 @@ fi
 
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   head1 "building images"
-  if docker build -q -t boxes-session:latest "$REPO/session-image/" > "$LOG_DIR/session.log" 2>&1; then
-    ok "build-session" "boxes-session:latest"
+  if docker build -q -t boxes-box:latest "$REPO/box-image/" > "$LOG_DIR/box.log" 2>&1; then
+    ok "build-box" "boxes-box:latest"
   else
-    bad "build-session" "session image build failed"
-    tail -20 "$LOG_DIR/session.log" | sed 's/^/          | /'
+    bad "build-box" "box image build failed"
+    tail -20 "$LOG_DIR/box.log" | sed 's/^/          | /'
   fi
   if up build > "$LOG_DIR/compose-build.log" 2>&1; then
     ok "build-compose" "orchestrator and egress-proxy images"
@@ -360,17 +360,17 @@ absent_from_log "A8" "no real credential appears in the orchestrator log" boxes-
 matches "A9" "the stored egress material is owner-only" '^600$' \
   docker exec boxes-orchestrator stat -c '%a' /data/egress-secrets.json
 
-# ----------------------------------------------------------- B. the session ---
+# ----------------------------------------------------------- B. the box ---
 
-head1 "B. a session, and what it holds"
+head1 "B. a box, and what it holds"
 
-SESSION_ID=$(curl -sS -m 60 -X POST "$API_BASE/api/sessions" \
+BOX_ID=$(curl -sS -m 60 -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' -d '{"name":"verify"}' | jq -r '.id')
-if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = null ]; then
-  bad "B0" "could not create a session"; dump_logs; exit 1
+if [ -z "$BOX_ID" ] || [ "$BOX_ID" = null ]; then
+  bad "B0" "could not create a box"; dump_logs; exit 1
 fi
-CONTAINER="session-$SESSION_ID"
-ok "B0" "session $SESSION_ID created"
+CONTAINER="box-$BOX_ID"
+ok "B0" "box $BOX_ID created"
 
 ready=0
 for _ in $(seq 1 40); do
@@ -396,7 +396,7 @@ done
 # Unconditional: a box holds a placeholder for every credential whether or not
 # one is stored, because its environment is fixed when it is created and a
 # token entered afterwards has to reach it.
-matches "B5" "the session holds a Claude-shaped value" '^sk-ant-oat01-' \
+matches "B5" "the box holds a Claude-shaped value" '^sk-ant-oat01-' \
   sx printenv CLAUDE_CODE_OAUTH_TOKEN
 if [ -n "$REAL_CLAUDE" ]; then
   lacks "B6" "that value is not the deployment's own token" "^$(printf '%s' "$REAL_CLAUDE" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" \
@@ -404,11 +404,11 @@ if [ -n "$REAL_CLAUDE" ]; then
 else
   skipped "B6" "no Claude token was passed to compare against"
 fi
-matches "B7" "the session holds a GitHub-shaped value" '^ghp_' \
+matches "B7" "the box holds a GitHub-shaped value" '^ghp_' \
   sx printenv GH_TOKEN
 # The Codex half of the same unconditional delivery: the key the adapter logs
 # itself in with, and the three variables that make it do so.
-matches "B7a" "the session holds an OpenAI-shaped value" '^sk-' \
+matches "B7a" "the box holds an OpenAI-shaped value" '^sk-' \
   sx printenv CODEX_API_KEY
 matches "B7b" "the adapter is told to log in with it" '^\{"methodId":"api-key"\}$' \
   sx printenv DEFAULT_AUTH_REQUEST
@@ -427,12 +427,12 @@ fi
 lacks "B8" "that value is not the deployment's own PAT" "^$(printf '%s' "$REAL_GH" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" \
   sx printenv GH_TOKEN
 
-absent "B9"  "the real Claude token is nowhere in the session" "$REAL_CLAUDE"
-absent "B10" "the real GitHub token is nowhere in the session" "$REAL_GH"
-absent "B10a" "the real OpenAI key is nowhere in the session" "$REAL_OPENAI"
+absent "B9"  "the real Claude token is nowhere in the box" "$REAL_CLAUDE"
+absent "B10" "the real GitHub token is nowhere in the box" "$REAL_GH"
+absent "B10a" "the real OpenAI key is nowhere in the box" "$REAL_OPENAI"
 
-matches "B11" "the proxy is attached to the session network" '^true$' \
-  bash -c "curl -fsS -m 5 '$API_BASE/api/sessions/$SESSION_ID' | jq -r '.proxyAttached'"
+matches "B11" "the proxy is attached to the box network" '^true$' \
+  bash -c "curl -fsS -m 5 '$API_BASE/api/boxes/$BOX_ID' | jq -r '.proxyAttached'"
 
 # One box, one checkout, a thread of each agent in it. The thread is a row and
 # an adapter of its own rather than a second container, so this costs nothing
@@ -442,7 +442,7 @@ if [ -z "$REAL_OPENAI" ]; then
   skipped "B11b" "no OpenAI key, so a Codex thread could not run"
 else
   matches "B11a" "the box takes a Codex thread beside its Claude one" '^codex$' \
-    bash -c "curl -fsS -m 30 -X POST '$API_BASE/api/sessions/$SESSION_ID/threads' \
+    bash -c "curl -fsS -m 30 -X POST '$API_BASE/api/boxes/$BOX_ID/threads' \
       -H 'Content-Type: application/json' -d '{\"options\":{\"harness\":\"codex\"}}' | jq -r '.harness'"
   matches "B11b" "and /healthz says a Codex thread can run a turn" '^true$' \
     bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.harnesses[] | select(.id==\"codex\") | .runnable'"
@@ -472,14 +472,14 @@ api PUT "/api/agent-sets/$SET_ID/items" \
   '{"kind":"skill","name":"verifyskill","content":"---\nname: verifyskill\ndescription: x\n---\n"}' \
   >/dev/null
 
-CFG_SESSION=$(curl -sS -m 60 -X POST "$API_BASE/api/sessions" \
+CFG_BOX=$(curl -sS -m 60 -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' \
   -d "{\"name\":\"verify-agents\",\"agentSet\":\"$SET_ID\"}" | jq -r '.id')
-if [ -z "$CFG_SESSION" ] || [ "$CFG_SESSION" = null ]; then
-  bad "B12" "could not create a session against an agent set"
-  for id in B13 B14 B15 B16 B17 B18; do skipped "$id" "no session to inspect"; done
+if [ -z "$CFG_BOX" ] || [ "$CFG_BOX" = null ]; then
+  bad "B12" "could not create a box against an agent set"
+  for id in B13 B14 B15 B16 B17 B18; do skipped "$id" "no box to inspect"; done
 else
-  CFG_CONTAINER="session-$CFG_SESSION"
+  CFG_CONTAINER="box-$CFG_BOX"
   installed=0
   for _ in $(seq 1 40); do
     docker exec "$CFG_CONTAINER" test -f /home/agent/.boxes/managed >/dev/null 2>&1 \
@@ -516,7 +516,7 @@ else
   matches "B17a" "and Codex gets its copy of that skill too" 'name: playwright-cli' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.agents/skills/playwright-cli/SKILL.md
 
-  curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$CFG_SESSION" >/dev/null 2>&1
+  curl -sS -m 30 -X DELETE "$API_BASE/api/boxes/$CFG_BOX" >/dev/null 2>&1
 
   # And a set that does claim the name wins, because the editor showed that
   # version as the effective one. An override the operator cannot see is the
@@ -524,13 +524,13 @@ else
   api PUT "/api/agent-sets/$SET_ID/items" \
     '{"kind":"skill","name":"playwright-cli","content":"---\nname: playwright-cli\ndescription: y\n---\nthe set overrides the image\n"}' \
     >/dev/null
-  OVR_SESSION=$(curl -sS -m 60 -X POST "$API_BASE/api/sessions" \
+  OVR_BOX=$(curl -sS -m 60 -X POST "$API_BASE/api/boxes" \
     -H 'Content-Type: application/json' \
     -d "{\"name\":\"verify-agents-override\",\"agentSet\":\"$SET_ID\"}" | jq -r '.id')
-  if [ -z "$OVR_SESSION" ] || [ "$OVR_SESSION" = null ]; then
-    skipped "B18" "could not create the overriding session"
+  if [ -z "$OVR_BOX" ] || [ "$OVR_BOX" = null ]; then
+    skipped "B18" "could not create the overriding box"
   else
-    OVR_CONTAINER="session-$OVR_SESSION"
+    OVR_CONTAINER="box-$OVR_BOX"
     for _ in $(seq 1 40); do
       docker exec "$OVR_CONTAINER" test -f /home/agent/.boxes/managed >/dev/null 2>&1 \
         && break
@@ -541,7 +541,7 @@ else
       docker exec -u agent "$OVR_CONTAINER" cat /home/agent/.claude/skills/playwright-cli/SKILL.md
     matches "B18a" "in both layouts" 'the set overrides the image' \
       docker exec -u agent "$OVR_CONTAINER" cat /home/agent/.agents/skills/playwright-cli/SKILL.md
-    curl -sS -m 30 -X DELETE "$API_BASE/api/sessions/$OVR_SESSION" >/dev/null 2>&1
+    curl -sS -m 30 -X DELETE "$API_BASE/api/boxes/$OVR_BOX" >/dev/null 2>&1
   fi
 fi
 [ -n "${SET_ID:-}" ] && [ "$SET_ID" != null ] && \
@@ -722,28 +722,28 @@ mustnot "E9" "a public name that resolves into private space is denied" \
 
 # -------------------------------------------------------- F. control channel --
 
-head1 "F. the control channel is out of a session's reach"
+head1 "F. the control channel is out of a box's reach"
 
-PROXY_SESSION_IP=$(docker inspect \
-  -f "{{with index .NetworkSettings.Networks \"sn-$SESSION_ID\"}}{{.IPAddress}}{{end}}" \
+PROXY_BOX_IP=$(docker inspect \
+  -f "{{with index .NetworkSettings.Networks \"bn-$BOX_ID\"}}{{.IPAddress}}{{end}}" \
   boxes-egress-proxy 2>/dev/null)
-if [ -n "$PROXY_SESSION_IP" ]; then
-  grey "the proxy is $PROXY_SESSION_IP on this session's network"
-  mustnot "F1" "the control port is closed on the session network" \
-    sx nc -w5 -z "$PROXY_SESSION_IP" 3129
+if [ -n "$PROXY_BOX_IP" ]; then
+  grey "the proxy is $PROXY_BOX_IP on this box's network"
+  mustnot "F1" "the control port is closed on the box network" \
+    sx nc -w5 -z "$PROXY_BOX_IP" 3129
 else
-  skipped "F1" "could not read the proxy's address on the session network"
+  skipped "F1" "could not read the proxy's address on the box network"
 fi
 mustnot "F2" "the control port is closed on the proxy alias" \
   sx nc -w5 -z proxy 3129
-mustnot "F3" "the proxy will not forward a session to its own control port" \
+mustnot "F3" "the proxy will not forward a box to its own control port" \
   sxs 'curl -fsS -m 8 -o /dev/null http://proxy:3129/status'
 matches "F4" "the control channel refuses a wrong bearer" '^401$' \
   docker exec boxes-orchestrator node -e \
     'fetch("http://boxes-egress-proxy:3129/status",{headers:{authorization:"Bearer wrong"}}).then(r=>console.log(r.status)).catch(e=>console.log(e.message))'
 
 # The compose network is an ordinary bridge, so the host can address the proxy
-# directly. That is a smaller surface than a session's, but not an empty one.
+# directly. That is a smaller surface than a box's, but not an empty one.
 PROXY_COMPOSE_IP=$(docker inspect \
   -f '{{with index .NetworkSettings.Networks "boxes_default"}}{{.IPAddress}}{{end}}' \
   boxes-egress-proxy 2>/dev/null)
@@ -782,7 +782,7 @@ if [ -z "$REAL_CLAUDE" ]; then
   skipped "G2" "no Claude token configured"
 else
   turn "G1" "claude -p answers, on a placeholder the proxy swapped"
-  absent "G2" "the real Claude token is still nowhere in the session after a turn" "$REAL_CLAUDE"
+  absent "G2" "the real Claude token is still nowhere in the box after a turn" "$REAL_CLAUDE"
 fi
 
 # ------------------------------------------------------------- H. restarts ----
@@ -817,7 +817,7 @@ else
   matches "H3" "interception works again after the restart" 'Boxes egress proxy CA' \
     sxs 'curl -sS -m 25 -o /dev/null -v https://api.github.com/ 2>&1 | grep -i "issuer:"'
 
-  # A running session already trusts the CA, so it must not change under it.
+  # A running box already trusts the CA, so it must not change under it.
   CA_BEFORE=$(docker exec boxes-orchestrator sha256sum /data/egress-secrets.json 2>/dev/null | cut -d' ' -f1)
   docker restart boxes-orchestrator >/dev/null 2>&1
   wait_health
@@ -828,7 +828,7 @@ else
     bad "H4" "the egress material changed across an orchestrator restart"
   fi
   wait_insync
-  matches "H5" "the running session still trusts the CA after both restarts" 'Boxes egress proxy CA' \
+  matches "H5" "the running box still trusts the CA after both restarts" 'Boxes egress proxy CA' \
     sxs 'curl -sS -m 25 -o /dev/null -v https://api.github.com/ 2>&1 | grep -i "issuer:"'
 fi
 

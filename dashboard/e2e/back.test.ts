@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import type { Page } from 'playwright';
 import { closeBrowser, openPage, VIEWPORTS } from './browser.ts';
-import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The back button, which on a phone is the navigation control.
@@ -19,7 +19,7 @@ import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orc
  * places push, drill-downs pop, and modal surfaces are entries of their own.
  */
 
-const SESSION = DEFAULT_SESSION.id;
+const BOX = DEFAULT_BOX.id;
 
 let stub: TestOrchestrator;
 
@@ -28,12 +28,12 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // A fresh session and a fresh review per test: one of these deletes the
-  // session for real, and another writes a comment that would change the next
+  // A fresh box and a fresh review per test: one of these deletes the
+  // box for real, and another writes a comment that would change the next
   // test's counts.
-  stub.resetSessions();
-  stub.createSession();
-  stub.review(SESSION);
+  stub.resetBoxes();
+  stub.createBox();
+  stub.review(BOX);
   stub.reviewCalls.length = 0;
 });
 
@@ -63,17 +63,17 @@ test('the thread header pops the thread rather than pushing the list over it', a
     expect(await stackIndex(page)).toBe(0);
 
     await page.getByText('refactor auth').click();
-    await page.waitForURL(`**/sessions/${SESSION}`);
+    await page.waitForURL(`**/boxes/${BOX}`);
     expect(await stackIndex(page)).toBe(1);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await page.waitForURL(`${stub.url}/`);
     // The list it left, not a second copy of it: one entry, not three.
     await expect.poll(() => stackIndex(page)).toBe(0);
 
     // And the thread is where forward goes, which is only true of a pop.
     await page.goForward();
-    await page.waitForURL(`**/sessions/${SESSION}`);
+    await page.waitForURL(`**/boxes/${BOX}`);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -81,10 +81,10 @@ test('the thread header pops the thread rather than pushing the list over it', a
 });
 
 test('a file is a step on a phone: back to the tree, then to the thread', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}`);
   try {
-    await page.getByLabel("Review this session's code").click();
-    await page.waitForURL(`**/sessions/${SESSION}/review`);
+    await page.getByLabel("Review this box's code").click();
+    await page.waitForURL(`**/boxes/${BOX}/review`);
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await page.getByRole('button', { name: /boot\.ts/ }).click();
@@ -99,7 +99,7 @@ test('a file is a step on a phone: back to the tree, then to the thread', async 
     await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
 
     await page.goBack();
-    await page.waitForURL(`**/sessions/${SESSION}`);
+    await page.waitForURL(`**/boxes/${BOX}`);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -109,13 +109,13 @@ test('a file is a step on a phone: back to the tree, then to the thread', async 
 test('a file is not a step on a pointer, where the tree never left', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}`,
+    `/boxes/${BOX}`,
     'dark',
     'desktop',
   );
   try {
-    await page.getByLabel("Review this session's code").click();
-    await page.waitForURL(`**/sessions/${SESSION}/review`);
+    await page.getByLabel("Review this box's code").click();
+    await page.waitForURL(`**/boxes/${BOX}/review`);
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await page.getByRole('button', { name: /boot\.ts/ }).click();
@@ -129,7 +129,7 @@ test('a file is not a step on a pointer, where the tree never left', async () =>
     // says it does.
     expect(await stackIndex(page)).toBe(1);
     await page.goBack();
-    await page.waitForURL(`**/sessions/${SESSION}`);
+    await page.waitForURL(`**/boxes/${BOX}`);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -137,10 +137,10 @@ test('a file is not a step on a pointer, where the tree never left', async () =>
 });
 
 test('leaving the review leaves none of its files behind to fall into', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}`);
   try {
-    await page.getByLabel("Review this session's code").click();
-    await page.waitForURL(`**/sessions/${SESSION}/review`);
+    await page.getByLabel("Review this box's code").click();
+    await page.waitForURL(`**/boxes/${BOX}/review`);
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await page.getByRole('button', { name: /boot\.ts/ }).click();
@@ -154,7 +154,7 @@ test('leaving the review leaves none of its files behind to fall into', async ()
     await expect.poll(() => page.getByLabel('Back to the thread').isVisible()).toBe(true);
     await page.getByLabel('Back to the thread').click();
 
-    await page.waitForURL(`**/sessions/${SESSION}`);
+    await page.waitForURL(`**/boxes/${BOX}`);
     await expect.poll(() => stackIndex(page)).toBe(0);
     expect(errors).toEqual([]);
   } finally {
@@ -165,7 +165,7 @@ test('leaving the review leaves none of its files behind to fall into', async ()
 test('a pasted link with nothing beneath it steps up instead of out of the app', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     await expect.poll(() => page.getByText('wire the router').isVisible()).toBe(true);
@@ -179,7 +179,7 @@ test('a pasted link with nothing beneath it steps up instead of out of the app',
     expect(await stackIndex(page)).toBe(0);
 
     await page.getByLabel('Back to the thread').click();
-    await page.waitForURL(`**/sessions/${SESSION}/threads/th1`);
+    await page.waitForURL(`**/boxes/${BOX}/threads/th1`);
     // Still the one entry. The parent took this one's place, so the browser's
     // own back button still leads out of the app, which is what it is for.
     expect(await stackIndex(page)).toBe(0);
@@ -194,7 +194,7 @@ test('a pasted link with nothing beneath it steps up instead of out of the app',
 test('back closes the hunk sheet and leaves the file where it was', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     await expect.poll(() => page.getByLabel('Show the change at line 2').isVisible()).toBe(true);
@@ -221,7 +221,7 @@ test('back closes the hunk sheet and leaves the file where it was', async () => 
 test('closing a sheet by hand takes its entry back out with it', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     await page.getByLabel('Show the change at line 2').click();
@@ -241,7 +241,7 @@ test('closing a sheet by hand takes its entry back out with it', async () => {
 test('back closes the comment composer without closing the file under it', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
-    `/sessions/${SESSION}/review?path=app%2Fsrc%2Fboot.ts`,
+    `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
     await page.locator('[data-line="2"] code').click();
@@ -264,9 +264,9 @@ test('back closes the comment composer without closing the file under it', async
 });
 
 test('back cancels a confirmation instead of confirming it', async () => {
-  await stub.comment(SESSION, 'app/src/app.ts', 2, 'to be kept');
+  await stub.comment(BOX, 'app/src/app.ts', 2, 'to be kept');
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}/review`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
     await expect.poll(() => page.getByLabel('Start a new review').isVisible()).toBe(true);
     await page.getByLabel('Start a new review').click();
@@ -288,12 +288,12 @@ test('back cancels a confirmation instead of confirming it', async () => {
 
 // --- terminal actions -------------------------------------------------------
 
-test('a deleted session is not what the entry left behind leads to', async () => {
+test('a deleted box is not what the entry left behind leads to', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
     await page.getByLabel('Details and controls for refactor auth').click();
-    await page.waitForURL(`**/sessions/${SESSION}/info`);
+    await page.waitForURL(`**/boxes/${BOX}/info`);
 
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect.poll(() => page.getByText('Delete refactor auth?').isVisible()).toBe(true);
@@ -301,12 +301,12 @@ test('a deleted session is not what the entry left behind leads to', async () =>
 
     // The list, in place of the view that acted rather than on top of it.
     await page.waitForURL(`${stub.url}/`);
-    await expect.poll(() => page.getByText('No sessions yet').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('No boxes yet').isVisible()).toBe(true);
 
     // And it stays there. The dialog was still mounted when the navigation
     // happened, and the entry it had pushed was the one replaced — so the
     // marker it would otherwise have taken back out on the way is somebody
-    // else's entry now, and popping it would land on the session that was
+    // else's entry now, and popping it would land on the box that was
     // just deleted.
     await new Promise((done) => setTimeout(done, 250));
     expect(new URL(page.url()).pathname).toBe('/');
@@ -317,11 +317,11 @@ test('a deleted session is not what the entry left behind leads to', async () =>
 });
 
 test('the handoff prompt is staged once, not replayed by back and forward', async () => {
-  await stub.comment(SESSION, 'app/src/app.ts', 2, 'please fix');
+  await stub.comment(BOX, 'app/src/app.ts', 2, 'please fix');
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}`);
   try {
-    await page.getByLabel("Review this session's code").click();
+    await page.getByLabel("Review this box's code").click();
     // Icon-only at this width, so the title is what names it.
     const handoff = page.getByTitle('Open the thread with a prompt to address these comments');
     await expect.poll(() => handoff.isVisible()).toBe(true);
@@ -330,7 +330,7 @@ test('the handoff prompt is staged once, not replayed by back and forward', asyn
     // Back to the conversation it was opened from — the entry that was
     // already there, which is the route as it was entered rather than a
     // rebuilt one naming the thread.
-    await page.waitForURL(`${stub.url}/sessions/${SESSION}`);
+    await page.waitForURL(`${stub.url}/boxes/${BOX}`);
     await expect
       .poll(() => page.getByLabel('Message input').inputValue())
       .toContain('Read REVIEW.md');
@@ -342,7 +342,7 @@ test('the handoff prompt is staged once, not replayed by back and forward', asyn
     await page.goForward();
     await expect.poll(() => handoff.isVisible()).toBe(true);
     await page.goBack();
-    await page.waitForURL(`${stub.url}/sessions/${SESSION}`);
+    await page.waitForURL(`${stub.url}/boxes/${BOX}`);
     await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
     expect(await page.getByLabel('Message input').inputValue()).toBe('');
     expect(errors).toEqual([]);

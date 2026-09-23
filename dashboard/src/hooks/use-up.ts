@@ -28,8 +28,8 @@ export interface Up {
  * more.
  *
  * This is the rule the whole strategy rests on: a control labelled back or up
- * never pushes. A plain link would leave the stack as sessions, thread,
- * sessions, and the device's own back button would then go into the thread
+ * never pushes. A plain link would leave the stack as boxes, thread,
+ * boxes, and the device's own back button would then go into the thread
  * again.
  *
  * What gets popped is everything this view put on the stack, in one step: the

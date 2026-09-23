@@ -8,11 +8,11 @@
 # One image per process in ARCHITECTURE.md's table:
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
-#   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a session network
-#   ghcr.io/<owner>/boxes/session        what a session container runs
+#   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
+#   ghcr.io/<owner>/boxes/box            what a box container runs
 #
-# The session image is a compose service nowhere -- the orchestrator creates
-# session containers at runtime from SESSION_IMAGE -- which is exactly why it
+# The box image is a compose service nowhere -- the orchestrator creates
+# box containers at runtime from BOX_IMAGE -- which is exactly why it
 # is published here: a deployment cannot build it out of a checkout it does
 # not have.
 #
@@ -140,11 +140,11 @@ jobs:
           - image: egress-proxy
             context: .
             dockerfile: proxy/Dockerfile
-          # The session image copies only files from session-image/, so its
+          # The box image copies only files from box-image/, so its
           # own directory is the whole context.
-          - image: session
-            context: session-image
-            dockerfile: session-image/Dockerfile
+          - image: box
+            context: box-image
+            dockerfile: box-image/Dockerfile
     steps:
       - uses: actions/checkout@v5
 
@@ -183,7 +183,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # linux/amd64 is what the deployment host runs. Adding arm64 is one
-          # more entry here and roughly triples the session image's build,
+          # more entry here and roughly triples the box image's build,
           # which installs an apt toolchain and the GitHub CLI.
           platforms: linux/amd64
           # A cache scope per image: one shared scope has the three builds

@@ -2,7 +2,7 @@
  * What an attachment becomes on its way into a prompt, and how it is read
  * back out of one.
  *
- * Every attachment is uploaded into the session's workspace, whatever it is,
+ * Every attachment is uploaded into the box's workspace, whatever it is,
  * and the prompt then says so in one block of text — the envelope below.
  * Nothing travels inside the message: the agent opens what it was given the
  * path to, with the tools it already has.
@@ -136,7 +136,7 @@ export function isThumbnailable(mimeType: string): boolean {
  * needs; what a browser needs is the endpoint that reads it back, and the
  * name is the only part of the path that varies.
  */
-export function attachmentUrl(sessionId: string, path: string): string {
+export function attachmentUrl(boxId: string, path: string): string {
   const name = path.split('/').pop() ?? path;
-  return `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(name)}`;
+  return `/api/boxes/${encodeURIComponent(boxId)}/attachments/${encodeURIComponent(name)}`;
 }

@@ -6,7 +6,7 @@ import { wsUrlFor } from '@/lib/ws-url';
 /**
  * Mounts one thread's ThreadStore for as long as the view is on screen.
  *
- * `threadId` names which of the session's conversations this is, or is null
+ * `threadId` names which of the box's conversations this is, or is null
  * for the route that means whichever one is current. It is part of the URL
  * the connection opens, so moving between two threads tears one store down
  * and builds the other — two tabs on two threads hold two of these, and
@@ -17,18 +17,18 @@ import { wsUrlFor } from '@/lib/ws-url';
  * orchestrator, not this browser, is the ACP client of record.
  */
 export function useThread(
-  sessionId: string,
+  boxId: string,
   threadId: string | null,
   token: string | null,
 ): { store: ThreadStore | null; state: ThreadSnapshot } {
   const [store, setStore] = useState<ThreadStore | null>(null);
 
-  const url = useMemo(() => wsUrlFor(sessionId, threadId), [sessionId, threadId]);
+  const url = useMemo(() => wsUrlFor(boxId, threadId), [boxId, threadId]);
 
   useEffect(() => {
     if (!token) return undefined;
     const created = new ThreadStore({
-      sessionId,
+      boxId,
       threadId,
       createClient: (handlers) => new AcpClient(url, token, handlers),
     });
@@ -38,7 +38,7 @@ export function useThread(
       created.dispose();
       setStore(null);
     };
-  }, [sessionId, threadId, url, token]);
+  }, [boxId, threadId, url, token]);
 
   const state = useSyncExternalStore(
     store ? store.subscribe : NOOP_SUBSCRIBE,

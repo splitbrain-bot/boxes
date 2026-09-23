@@ -11,9 +11,9 @@ import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 
 /**
- * Sweeping what a session left behind.
+ * Sweeping what a box left behind.
  *
- * Everything Boxes creates carries its session's id as a label, and boot
+ * Everything Boxes creates carries its box's id as a label, and boot
  * reconciliation reads that one way only — for each row, what Docker has. So
  * a container, network or volume whose row is gone was invisible: no card
  * lists it, no teardown will ever be run for it again, and a home volume of
@@ -26,8 +26,8 @@ import * as ws from './workspaces.ts';
 
 /** The daemon this suite pretends to talk to. */
 interface Fake {
-  containers: Map<string, { sessionId: string; running: boolean }>;
-  /** Login containers, which belong to a credential rather than to a session. */
+  containers: Map<string, { boxId: string; running: boolean }>;
+  /** Login containers, which belong to a credential rather than to a box. */
   logins: Map<string, { credentialId: string; createdAt: number }>;
   networks: Map<string, string>;
   volumes: Map<string, string>;
@@ -48,7 +48,7 @@ function install(fake: Fake): void {
       ...[...fake.containers].map(([id, c]) => ({
         Id: id,
         State: c.running ? 'running' : 'exited',
-        Labels: { [dk.LABEL]: c.sessionId },
+        Labels: { [dk.LABEL]: c.boxId },
       })),
       // The daemon answers one listing; each caller's own label filter is
       // what picks its own containers out of it.
@@ -60,16 +60,16 @@ function install(fake: Fake): void {
       })),
     ],
     listNetworks: async () =>
-      [...fake.networks].map(([name, sessionId]) => ({
+      [...fake.networks].map(([name, boxId]) => ({
         Name: name,
-        Labels: { [dk.LABEL]: sessionId },
+        Labels: { [dk.LABEL]: boxId },
       })),
     listVolumes: async () => {
       fake.whileListing?.();
       return {
-        Volumes: [...fake.volumes].map(([name, sessionId]) => ({
+        Volumes: [...fake.volumes].map(([name, boxId]) => ({
           Name: name,
-          Labels: { [dk.LABEL]: sessionId },
+          Labels: { [dk.LABEL]: boxId },
         })),
       };
     },
@@ -104,11 +104,11 @@ let db: Db;
 let orchestrator: Orchestrator;
 let fake: Fake;
 
-/** A session row, and the objects Boxes would have created for it. */
-function insertSession(id: string, status = 'stopped'): void {
+/** A box row, and the objects Boxes would have created for it. */
+function insertBox(id: string, status = 'stopped'): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
        status, current_thread_id, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', ?,
@@ -116,7 +116,7 @@ function insertSession(id: string, status = 'stopped'): void {
   ).run(
     id,
     `c-${id}`,
-    `sn-${id}`,
+    `bn-${id}`,
     `home-${id}`,
     `${dir}/workspaces/${id}`,
     `${dir}/homes/${id}`,
@@ -126,11 +126,11 @@ function insertSession(id: string, status = 'stopped'): void {
   );
 }
 
-/** The Docker objects and the directories one session owns. */
+/** The Docker objects and the directories one box owns. */
 function insertObjects(id: string): void {
-  fake.containers.set(`c-${id}`, { sessionId: id, running: false });
-  fake.networks.set(`sn-${id}`, id);
-  // A session from before homes became directories still has this one, and
+  fake.containers.set(`c-${id}`, { boxId: id, running: false });
+  fake.networks.set(`bn-${id}`, id);
+  // A box from before homes became directories still has this one, and
   // it is labelled the same way.
   fake.volumes.set(`home-${id}`, id);
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
@@ -171,22 +171,22 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('sweeping objects no session owns', () => {
+describe('sweeping objects no box owns', () => {
   it('takes the container, the network, the volume and both directories', async () => {
-    insertSession('live');
+    insertBox('live');
     insertObjects('live');
-    // A session that was deleted, and whose teardown did not finish.
-    insertSession('gone', 'deleted');
+    // A box that was deleted, and whose teardown did not finish.
+    insertBox('gone', 'deleted');
     insertObjects('gone');
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'sn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
     assert.ok(!existsSync(workspaceOf('gone')));
     // The home is the bigger half: the caches and whatever the agent
     // installed at runtime are in it.
     assert.ok(!existsSync(homeOf('gone')));
-    // And nothing of the session that is still there.
+    // And nothing of the box that is still there.
     assert.ok(existsSync(workspaceOf('live')));
     assert.ok(existsSync(homeOf('live')));
     assert.ok(fake.containers.has('c-live'));
@@ -194,21 +194,21 @@ describe('sweeping objects no session owns', () => {
   });
 
   it('removes the container before the network and the volume it holds', async () => {
-    insertSession('keep');
-    insertSession('gone', 'deleted');
+    insertBox('keep');
+    insertBox('gone', 'deleted');
     insertObjects('gone');
 
     await orchestrator.manager.sweepOrphans();
 
     // Docker refuses a network with a container on it, and a volume mounted
     // into one, so the order is the whole of whether this works.
-    assert.deepEqual(fake.removed, ['c-gone', 'sn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
   });
 
-  it('leaves a session that is still being created alone', async () => {
+  it('leaves a box that is still being created alone', async () => {
     // create() inserts the row before it makes anything, so a half-built
-    // session always has one. Its objects are not orphans.
-    insertSession('newborn', 'creating');
+    // box always has one. Its objects are not orphans.
+    insertBox('newborn', 'creating');
     insertObjects('newborn');
 
     await orchestrator.manager.sweepOrphans();
@@ -218,15 +218,15 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(homeOf('newborn')));
   });
 
-  it('leaves a session created while it was reading the daemon alone', async () => {
+  it('leaves a box created while it was reading the daemon alone', async () => {
     // The sweep asks Docker three questions and reads the directories, which
     // takes long enough for a create to run: its row is inserted before it
     // makes anything, so it exists by the time the sweep decides. A snapshot
-    // taken before the readings does not have it, and the session loses its
+    // taken before the readings does not have it, and the box loses its
     // network, its workspace and its home while it is being built.
-    insertSession('keep');
+    insertBox('keep');
     fake.whileListing = (): void => {
-      insertSession('newborn', 'creating');
+      insertBox('newborn', 'creating');
       insertObjects('newborn');
     };
 
@@ -238,23 +238,23 @@ describe('sweeping objects no session owns', () => {
   });
 
   it('keeps going when one object cannot be removed', async () => {
-    insertSession('keep');
-    insertSession('gone', 'deleted');
+    insertBox('keep');
+    insertBox('gone', 'deleted');
     insertObjects('gone');
-    fake.stuck.add('sn-gone');
+    fake.stuck.add('bn-gone');
 
     await orchestrator.manager.sweepOrphans();
 
     // The network stays for the next sweep; nothing behind it is held up.
     assert.deepEqual(fake.removed, ['c-gone', 'home-gone']);
-    assert.ok(fake.networks.has('sn-gone'));
+    assert.ok(fake.networks.has('bn-gone'));
     assert.ok(!existsSync(workspaceOf('gone')));
   });
 
-  it('does nothing at all when every object has a session', async () => {
-    insertSession('a');
+  it('does nothing at all when every object has a box', async () => {
+    insertBox('a');
     insertObjects('a');
-    insertSession('b');
+    insertBox('b');
     insertObjects('b');
 
     await orchestrator.manager.sweepOrphans();
@@ -267,7 +267,7 @@ describe('sweeping objects no session owns', () => {
     // it when the flow ends — but only while the orchestrator is alive to end
     // it. A restart mid-login leaves one holding half a credential in a tmpfs
     // home, on the default bridge, that nothing else would ever look for.
-    insertSession('keep');
+    insertBox('keep');
     const now = Date.now();
     fake.logins.set('login-old', { credentialId: 'openai', createdAt: now - 20 * 60_000 });
     fake.logins.set('login-fresh', { credentialId: 'claude', createdAt: now - 60_000 });
@@ -280,9 +280,9 @@ describe('sweeping objects no session owns', () => {
     assert.ok(fake.logins.has('login-fresh'));
   });
 
-  it('sweeps login containers even where the sessions table is empty', async () => {
-    // The guard below is about session objects a foreign database would take;
-    // a login container belongs to no session and is nobody else's either.
+  it('sweeps login containers even where the boxes table is empty', async () => {
+    // The guard below is about box objects a foreign database would take;
+    // a login container belongs to no box and is nobody else's either.
     fake.logins.set('login-old', { credentialId: 'openai', createdAt: Date.now() - 20 * 60_000 });
     insertObjects('orphan-by-accident');
 
@@ -292,9 +292,9 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(workspaceOf('orphan-by-accident')));
   });
 
-  it('refuses to sweep for a database that knows of no session at all', async () => {
+  it('refuses to sweep for a database that knows of no box at all', async () => {
     // A data volume mounted from the wrong place, or replaced: the rows are
-    // gone but the host's sessions are not, and taking their home volumes is
+    // gone but the host's boxes are not, and taking their home volumes is
     // the one loss here with nothing to recover it from.
     insertObjects('orphan-by-accident');
 
@@ -305,11 +305,11 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(homeOf('orphan-by-accident')));
   });
 
-  it('refuses when the host holds far more sessions than the database knows of', async () => {
+  it('refuses when the host holds far more boxes than the database knows of', async () => {
     // The same wrong database, a minute later: somebody whose dashboard looked
-    // empty created a session in it. One row must not disarm the guard, so it
+    // empty created a box in it. One row must not disarm the guard, so it
     // is a ratio rather than an empty table.
-    insertSession('created-against-the-wrong-database');
+    insertBox('created-against-the-wrong-database');
     for (const id of ['a', 'b', 'c', 'd']) insertObjects(id);
 
     await orchestrator.manager.sweepOrphans();
@@ -318,27 +318,27 @@ describe('sweeping objects no session owns', () => {
     assert.ok(existsSync(homeOf('a')));
   });
 
-  it('still sweeps a handful of strays beside a database that knows its sessions', async () => {
+  it('still sweeps a handful of strays beside a database that knows its boxes', async () => {
     // And the guard is not so wide that it stops the sweep doing its job: a
     // deployment with its rows intact has its failed teardowns taken.
-    for (const id of ['live-1', 'live-2', 'live-3']) insertSession(id);
-    insertSession('gone', 'deleted');
+    for (const id of ['live-1', 'live-2', 'live-3']) insertBox(id);
+    insertBox('gone', 'deleted');
     insertObjects('gone');
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'sn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
     assert.ok(!existsSync(homeOf('gone')));
   });
 
-  it('takes the files of a session whose Docker objects are already gone', async () => {
-    insertSession('keep');
+  it('takes the files of a box whose Docker objects are already gone', async () => {
+    insertBox('keep');
     // The shape a failed teardown leaves: it removes the container, the
-    // network and the volumes first, so a session it gave up on halfway is
+    // network and the volumes first, so a box it gave up on halfway is
     // two directories and nothing else.
     insertObjects('half-torn-down');
     fake.containers.delete('c-half-torn-down');
-    fake.networks.delete('sn-half-torn-down');
+    fake.networks.delete('bn-half-torn-down');
     fake.volumes.delete('home-half-torn-down');
 
     await orchestrator.manager.sweepOrphans();
@@ -347,32 +347,32 @@ describe('sweeping objects no session owns', () => {
     assert.ok(!existsSync(homeOf('half-torn-down')));
   });
 
-  it('sweeps for a deployment whose sessions have all been deleted', async () => {
+  it('sweeps for a deployment whose boxes have all been deleted', async () => {
     // The tombstone is what tells the two cases apart: this database made
     // these objects, and one of its teardowns did not finish.
-    insertSession('gone', 'deleted');
+    insertBox('gone', 'deleted');
     insertObjects('gone');
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'sn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
   });
 });
 
 describe('boot reconciliation', () => {
   it('fails a create that the last orchestrator did not finish', async () => {
-    // create() inserts the row first and fails the session itself if any step
+    // create() inserts the row first and fails the box itself if any step
     // throws, so a row still saying `creating` at boot is one whose creator
     // is gone. Nothing else touches it: the sweep protects every row that
-    // exists, so the session held its subnet and answered 409 to start for
+    // exists, so the box held its subnet and answered 409 to start for
     // as long as the deployment lived.
-    insertSession('newborn', 'creating');
+    insertBox('newborn', 'creating');
     insertObjects('newborn');
     fake.containers.delete('c-newborn');
 
     await orchestrator.manager.reconcile();
 
-    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('newborn') as {
+    const row = db.prepare('SELECT status FROM boxes WHERE id = ?').get('newborn') as {
       status: string;
     };
     assert.equal(row.status, 'error');
@@ -381,14 +381,14 @@ describe('boot reconciliation', () => {
     assert.ok(existsSync(workspaceOf('newborn')));
   });
 
-  it('adopts a half-created session whose container is up', async () => {
-    insertSession('newborn', 'creating');
+  it('adopts a half-created box whose container is up', async () => {
+    insertBox('newborn', 'creating');
     insertObjects('newborn');
-    fake.containers.set('c-newborn', { sessionId: 'newborn', running: true });
+    fake.containers.set('c-newborn', { boxId: 'newborn', running: true });
 
     await orchestrator.manager.reconcile();
 
-    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('newborn') as {
+    const row = db.prepare('SELECT status FROM boxes WHERE id = ?').get('newborn') as {
       status: string;
     };
     assert.equal(row.status, 'running');

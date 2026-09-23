@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'vitest';
-import type { SessionUpdate } from './acp-types.ts';
+import type { ThreadUpdate } from './acp-types.ts';
 import { buildEnvelope } from '../../lib/attachments.ts';
 import {
   applyUpdate,
@@ -14,7 +14,7 @@ import {
 } from './translate.ts';
 
 /** Folds a script of updates into a fresh model, the way a replay arrives. */
-function fold(...updates: SessionUpdate[]): ThreadModel {
+function fold(...updates: ThreadUpdate[]): ThreadModel {
   const model = emptyModel();
   for (const u of updates) applyUpdate(model, u);
   return model;
@@ -25,12 +25,12 @@ function chunk(
   sessionUpdate: 'user_message_chunk' | 'agent_message_chunk' | 'agent_thought_chunk',
   text: string,
   messageId?: string,
-): SessionUpdate {
+): ThreadUpdate {
   return {
     sessionUpdate,
     content: { type: 'text', text },
     ...(messageId ? { messageId } : {}),
-  } as SessionUpdate;
+  } as ThreadUpdate;
 }
 
 beforeEach(() => resetIds());
@@ -202,7 +202,7 @@ test('a command list replaces the previous one', () => {
 });
 
 test('an unknown update kind is noted by name and renders nothing', () => {
-  const model = fold({ sessionUpdate: 'usage_update', tokens: 12 } as unknown as SessionUpdate);
+  const model = fold({ sessionUpdate: 'usage_update', tokens: 12 } as unknown as ThreadUpdate);
   assert.equal(model.messages.length, 0);
   assert.deepEqual([...model.unknown], ['usage_update']);
 });
@@ -212,13 +212,13 @@ test('a kind that arrives over and over is noted once', () => {
   // kept has to be the fact rather than the updates.
   const model = emptyModel();
   for (let i = 0; i < 100; i++) {
-    applyUpdate(model, { sessionUpdate: 'usage_update', tokens: i } as unknown as SessionUpdate);
+    applyUpdate(model, { sessionUpdate: 'usage_update', tokens: i } as unknown as ThreadUpdate);
   }
   assert.equal(model.unknown.size, 1);
 });
 
 test('replaying the same script twice from a fresh model gives the same thread', () => {
-  const script: SessionUpdate[] = [
+  const script: ThreadUpdate[] = [
     chunk('user_message_chunk', 'run the tests'),
     { sessionUpdate: 'tool_call', toolCallId: 't5', title: 'Run tests', status: 'pending' },
     { sessionUpdate: 'tool_call_update', toolCallId: 't5', status: 'completed' },
@@ -237,8 +237,8 @@ function imageChunk(
   sessionUpdate: 'user_message_chunk' | 'agent_message_chunk',
   data: string,
   mimeType = 'image/png',
-): SessionUpdate {
-  return { sessionUpdate, content: { type: 'image', data, mimeType } } as SessionUpdate;
+): ThreadUpdate {
+  return { sessionUpdate, content: { type: 'image', data, mimeType } } as ThreadUpdate;
 }
 
 test('an image chunk becomes its own part, between the prose either side', () => {
@@ -270,11 +270,11 @@ test('an image block with no payload the browser can load is said in words', () 
       // What the adapter sends for a remote image: no payload, and a URL
       // assistant-ui would refuse as a src.
       content: { type: 'image', data: '', mimeType: '', uri: 'http://example.test/a.png' },
-    } as SessionUpdate,
+    } as ThreadUpdate,
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'image', data: '', mimeType: '' },
-    } as SessionUpdate,
+    } as ThreadUpdate,
   );
   assert.deepEqual(model.messages[0]!.parts, [
     { type: 'text', text: '[image: http://example.test/a.png][image]' },
@@ -285,7 +285,7 @@ test('an https image block is passed through as its own src', () => {
   const model = fold({
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'image', uri: 'https://example.test/a.png' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   assert.deepEqual(model.messages[0]!.parts, [
     { type: 'image', src: 'https://example.test/a.png' },
   ]);
@@ -313,7 +313,7 @@ test("a tool call's image result is named in its output rather than left empty",
 /** The envelope for one attachment, as a user chunk. */
 function attached(
   overrides: Partial<Parameters<typeof buildEnvelope>[0][number]> = {},
-): SessionUpdate {
+): ThreadUpdate {
   return chunk(
     'user_message_chunk',
     buildEnvelope([
@@ -376,7 +376,7 @@ test('the envelope is only read in a user or agent message, never as a thought',
         size: '1 B',
       },
     ]) },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   assert.equal(model.messages[0]!.parts[0]!.type, 'reasoning');
 });
 
@@ -450,7 +450,7 @@ test('truncating drops the message named and everything after it', () => {
   const model = fold(
     chunk('user_message_chunk', 'first', 'msg_1'),
     chunk('agent_message_chunk', 'second', 'msg_2'),
-    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as SessionUpdate,
+    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as ThreadUpdate,
     chunk('agent_message_chunk', 'third', 'msg_3'),
   );
 
@@ -473,12 +473,12 @@ test('a truncated model plus the rest is the model the whole thread builds', () 
   const script = [
     chunk('user_message_chunk', 'the first question', 'msg_1'),
     chunk('agent_message_chunk', 'the first answer', 'msg_2'),
-    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as SessionUpdate,
+    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as ThreadUpdate,
     {
       sessionUpdate: 'tool_call_update',
       toolCallId: 'toolu_1',
       status: 'completed',
-    } as SessionUpdate,
+    } as ThreadUpdate,
     chunk('agent_message_chunk', 'and the rest', 'msg_3'),
   ];
   const whole = fold(...script);

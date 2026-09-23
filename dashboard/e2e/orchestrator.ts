@@ -25,7 +25,7 @@ import type {
   ReviewAnnotation,
   ReviewFileResponse,
   BoxWork,
-  SessionSummary,
+  BoxSummary,
   Settings,
   ThreadOptions,
 } from '../../shared/types.ts';
@@ -39,14 +39,14 @@ import {
   setThreadAcpId,
   upsertHarnessCatalog,
   type Db,
-  type SessionRow,
+  type BoxRow,
   type ThreadRow,
 } from '../../orchestrator/src/db.ts';
 import { checkUpgrade } from '../../orchestrator/src/gateway/downstream.ts';
 import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
 import { setLogLevel } from '../../orchestrator/src/log.ts';
 import type { LoginExecSpec } from '../../orchestrator/src/login.ts';
-import type { SessionManager } from '../../orchestrator/src/sessions.ts';
+import type { BoxManager } from '../../orchestrator/src/boxes.ts';
 import * as ws from '../../orchestrator/src/workspaces.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { FAKE_SELF_CONTAINER, installFakeDocker, type FakeDocker } from './fake-docker.ts';
@@ -63,7 +63,7 @@ import {
  * The real orchestrator, driven in a browser over a fake Docker.
  *
  * Everything the dashboard talks to here is the shipped code: the real routes
- * over a real SQLite database, the real session, review and agent-set
+ * over a real SQLite database, the real box, review and agent-set
  * services, and the real static handler serving the production bundle. What
  * is not real is what cannot be: the Docker daemon, git inside a container,
  * and the agent itself.
@@ -75,7 +75,7 @@ import {
  * below instead of a spawned process.
  */
 
-/** The bearer every session's WebSocket upgrade carries in this suite. */
+/** The bearer every box's WebSocket upgrade carries in this suite. */
 const WS_TOKEN = 'e2e-ws-token-0123456789abcdef';
 
 /** The Claude token the deployment holds, as the settings page would have stored it. */
@@ -176,14 +176,14 @@ const CATALOG: Record<
 /** Marks a request this harness made, so setup is not recorded as a test's. */
 const SETUP_HEADER = 'x-boxes-e2e-setup';
 
-/** The session a test gets unless it asks for another. */
-export const DEFAULT_SESSION = {
+/** The box a test gets unless it asks for another. */
+export const DEFAULT_BOX = {
   id: 'a1b2c3d4',
   name: 'refactor auth',
   threadId: 'th1',
 } as const;
 
-/** One conversation of a fixture session. */
+/** One conversation of a fixture box. */
 export interface ThreadSpec {
   /** Named rather than generated, so a test can link straight at it. */
   id?: string;
@@ -202,11 +202,11 @@ export interface ThreadSpec {
   lastActiveAt?: number;
 }
 
-/** A session as a test wants to find it. */
-export interface SessionSpec {
+/** A box as a test wants to find it. */
+export interface BoxSpec {
   id?: string;
   name?: string;
-  status?: SessionRow['status'];
+  status?: BoxRow['status'];
   /** Whether the fake daemon has its container running. */
   containerRunning?: boolean;
   threads?: ThreadSpec[];
@@ -223,14 +223,14 @@ export interface SessionSpec {
    * its own.
    */
   boxWork?: BoxWork[];
-  /** How many browsers the gateway has on this session. */
+  /** How many browsers the gateway has on this box. */
   attachedCount?: number;
   /** Whether the adapter advertises forking, which the list offers. */
   canFork?: boolean;
   /** How big the workspace is made, as a sparse file nothing reads. */
   diskBytes?: number;
   /**
-   * A session still backed by a workspace volume, which this process cannot
+   * A box still backed by a workspace volume, which this process cannot
    * read and the review refuses with an explanation.
    */
   legacy?: boolean;
@@ -293,7 +293,7 @@ interface HookReply {
 /** One review mutation the browser made, as the tests read them back. */
 export interface ReviewCall {
   method: string;
-  sessionId: string;
+  boxId: string;
   body: unknown;
 }
 
@@ -313,11 +313,11 @@ export interface TestOrchestrator {
   gateway: StubGateway;
   state: DeploymentState;
   /** Files uploaded to the attachments endpoint, in order. */
-  attachmentUploads: Array<{ sessionId: string; name: string; bytes: Buffer }>;
+  attachmentUploads: Array<{ boxId: string; name: string; bytes: Buffer }>;
   /** Every thread the browser asked for, with the body it sent. */
-  threadCalls: Array<{ sessionId: string; body: unknown }>;
-  /** Every session the browser asked for, as the body it sent. */
-  sessionCalls: unknown[];
+  threadCalls: Array<{ boxId: string; body: unknown }>;
+  /** Every box the browser asked for, as the body it sent. */
+  boxCalls: unknown[];
   /**
    * Every login the browser started, in order, over a runtime that runs no
    * container: what the CLI is scripted to print goes in through `print`,
@@ -330,31 +330,31 @@ export interface TestOrchestrator {
    * `processId` is absent where the reader asked for all of a thread's work
    * rather than one command of it.
    */
-  backgroundStops: Array<{ sessionId: string; threadId: string; processId?: string }>;
-  /** Every box-wide stop the browser asked for, by session, in order. */
+  backgroundStops: Array<{ boxId: string; threadId: string; processId?: string }>;
+  /** Every box-wide stop the browser asked for, by box, in order. */
   boxStops: string[];
   /** Every review mutation the browser made, in order. */
   reviewCalls: ReviewCall[];
-  /** Adds a session, its directories, its threads and its container. */
-  createSession(spec?: SessionSpec): void;
-  /** Forgets every session, for a test that wants the deployment back. */
-  resetSessions(): void;
-  /** Rebuilds a session's workspace from a fixture. */
-  review(sessionId: string, spec?: WorkspaceSpec): void;
+  /** Adds a box, its directories, its threads and its container. */
+  createBox(spec?: BoxSpec): void;
+  /** Forgets every box, for a test that wants the deployment back. */
+  resetBoxes(): void;
+  /** Rebuilds a box's workspace from a fixture. */
+  review(boxId: string, spec?: WorkspaceSpec): void;
   /** Writes one file of a workspace, as the agent working in it would. */
-  write(sessionId: string, path: string, content: string): void;
+  write(boxId: string, path: string, content: string): void;
   /** Reads one file of a workspace back. */
-  read(sessionId: string, path: string): string;
-  /** Whether the session has a REVIEW.md, which is what a review is. */
-  hasReview(sessionId: string): boolean;
+  read(boxId: string, path: string): string;
+  /** Whether the box has a REVIEW.md, which is what a review is. */
+  hasReview(boxId: string): boolean;
   /** Writes one comment through the real API, as a previous visit would have. */
-  comment(sessionId: string, path: string, line: number, text: string): Promise<void>;
+  comment(boxId: string, path: string, line: number, text: string): Promise<void>;
   /** The comments on one file, as the API reports them. */
-  comments(sessionId: string, path: string): Promise<ReviewAnnotation[]>;
+  comments(boxId: string, path: string): Promise<ReviewAnnotation[]>;
   /** What a terminal in a box answers a typed line with. */
   terminalAnswer: (line: string) => string;
-  /** How many terminals the orchestrator counts as open on one session. */
-  terminalsOpen(sessionId: string): number;
+  /** How many terminals the orchestrator counts as open on one box. */
+  terminalsOpen(boxId: string): number;
   /** Replaces the named agent sets, and fills in the global one. */
   agentSets(global: Omit<AgentSetSpec, 'id' | 'name'>, named: AgentSetSpec[]): Promise<void>;
   /** One agent set as the API reports it, for what a test wrote through the UI. */
@@ -388,21 +388,21 @@ export interface TestLogin {
 }
 
 /**
- * The adapter side of a session, which no test has a real agent for.
+ * The adapter side of a box, which no test has a real agent for.
  *
  * The routes that mint a thread, switch one or kill what a thread left
- * running all go through the session's upstream connection, and a real one
+ * running all go through the box's upstream connection, and a real one
  * spawns an ACP adapter inside the container. This stands in for it: thread
  * ids are minted on the stub gateway, so the conversation a browser opens
  * afterwards is the one the gateway holds and a fork carries what its source
  * had said.
  *
- * The rest is what a session list reads off a live gateway — who is talking,
+ * The rest is what a box list reads off a live gateway — who is talking,
  * what is still running, how many browsers are attached — which lives in
  * memory beside the adapter and nowhere else.
  */
 class TestUpstream {
-  /** Browsers the gateway has on this session, as the list reports it. */
+  /** Browsers the gateway has on this box, as the list reports it. */
   attachedCount = 0;
   /** Whether the adapters advertise forking, which the list offers. */
   canFork = true;
@@ -416,7 +416,7 @@ class TestUpstream {
   workingThreads: string[] = [];
 
   constructor(
-    private readonly sessionId: string,
+    private readonly boxId: string,
     private readonly db: Db,
     private readonly gateway: StubGateway,
   ) {}
@@ -451,13 +451,13 @@ class TestUpstream {
     });
   }
 
-  /** Makes one of the session's threads current. Nobody is dropped. */
+  /** Makes one of the box's threads current. Nobody is dropped. */
   switchThread(threadId: string): ThreadRow {
     const row = getThread(this.db, threadId);
     if (!row) throw new Error('Thread not found');
     this.db
-      .prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?')
-      .run(threadId, this.sessionId);
+      .prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?')
+      .run(threadId, this.boxId);
     if (row.acp_session_id) this.gateway.select(row.acp_session_id);
     return row;
   }
@@ -474,7 +474,7 @@ class TestUpstream {
     return acpSessionId;
   }
 
-  /** Mints this session's first conversation and reports the adapter's id. */
+  /** Mints this box's first conversation and reports the adapter's id. */
   mintFirstThread(): string {
     return (
       this.mint(this.gateway.newThread(), null, { harness: 'claude', modeId: null, config: {} })
@@ -499,20 +499,20 @@ class TestUpstream {
     return undefined;
   }
 
-  /** Forgets the session, on the same terms as {@link stop}. */
+  /** Forgets the box, on the same terms as {@link stop}. */
   close(): void {
     return undefined;
   }
 
-  /** Stores a minted conversation and makes it the session's current one. */
+  /** Stores a minted conversation and makes it the box's current one. */
   private mint(
     acpSessionId: string,
     inheritsFrom: string | null,
     on: { harness: HarnessId; modeId: string | null; config: Record<string, string> },
   ): ThreadRow {
-    const ordinal = listThreads(this.db, this.sessionId).length + 1;
-    return insertThread(this.db, this.sessionId, {
-      id: threadName(this.sessionId, ordinal),
+    const ordinal = listThreads(this.db, this.boxId).length + 1;
+    return insertThread(this.db, this.boxId, {
+      id: threadName(this.boxId, ordinal),
       acpSessionId,
       ordinal,
       inheritsFrom,
@@ -528,25 +528,25 @@ class TestUpstream {
  * reads what a browser sees off the entry it holds, so a stand-in has to be
  * the entry rather than something handed to a caller.
  */
-function upstreamsOf(manager: SessionManager): Map<string, unknown> {
+function upstreamsOf(manager: BoxManager): Map<string, unknown> {
   return (manager as unknown as { upstreams: Map<string, unknown> }).upstreams;
 }
 
 /**
  * What a fixture conversation is called.
  *
- * Short on the session the suite drives, so a route naming a thread can be
- * written out in a test; carrying the session on every other one, because a
- * thread id is unique across the deployment rather than within a session.
+ * Short on the box the suite drives, so a route naming a thread can be
+ * written out in a test; carrying the box on every other one, because a
+ * thread id is unique across the deployment rather than within a box.
  */
-function threadName(sessionId: string, ordinal: number): string {
-  return sessionId === DEFAULT_SESSION.id ? `th${ordinal}` : `${sessionId}-th${ordinal}`;
+function threadName(boxId: string, ordinal: number): string {
+  return boxId === DEFAULT_BOX.id ? `th${ordinal}` : `${boxId}-th${ordinal}`;
 }
 
-/** Inserts one conversation and makes it the session's current one. */
+/** Inserts one conversation and makes it the box's current one. */
 function insertThread(
   db: Db,
-  sessionId: string,
+  boxId: string,
   thread: {
     id: string;
     acpSessionId: string;
@@ -564,7 +564,7 @@ function insertThread(
   const now = Date.now();
   const row: ThreadRow = {
     id: thread.id,
-    session_id: sessionId,
+    box_id: boxId,
     harness: thread.harness ?? 'claude',
     acp_session_id: thread.acpSessionId,
     title: thread.title ?? null,
@@ -579,22 +579,22 @@ function insertThread(
   };
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO threads (id, session_id, harness, acp_session_id, title, ordinal,
+      `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
          turn_active, inherits_from, mode_id, config, done, created_at,
          last_active_at)
-       VALUES (@id, @session_id, @harness, @acp_session_id, @title, @ordinal,
+       VALUES (@id, @box_id, @harness, @acp_session_id, @title, @ordinal,
          @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
          @last_active_at)`,
     ).run(row);
-    db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(row.id, sessionId);
+    db.prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?').run(row.id, boxId);
   })();
   return row;
 }
 
-/** The stored session behind an id, or nothing where the deployment has none. */
-function sessionRow(db: Db, sessionId: string): SessionRow | undefined {
-  return db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as
-    | SessionRow
+/** The stored box behind an id, or nothing where the deployment has none. */
+function boxRow(db: Db, boxId: string): BoxRow | undefined {
+  return db.prepare('SELECT * FROM boxes WHERE id = ?').get(boxId) as
+    | BoxRow
     | undefined;
 }
 
@@ -613,24 +613,24 @@ function writeFile(root: string, path: string, content: string): void {
 }
 
 /**
- * Adds one session: its row, its directories, its conversations, its
+ * Adds one box: its row, its directories, its conversations, its
  * container, and the stand-in adapter the routes reach through.
  */
-function createSession(
+function createBox(
   app: Orchestrator,
   db: Db,
   docker: FakeDocker,
-  upstreamFor: (sessionId: string) => TestUpstream,
-  spec: SessionSpec,
+  upstreamFor: (boxId: string) => TestUpstream,
+  spec: BoxSpec,
 ): void {
   const cfg: Config = app.cfg;
-  const id = spec.id ?? DEFAULT_SESSION.id;
+  const id = spec.id ?? DEFAULT_BOX.id;
   const now = Date.now();
   const legacy = spec.legacy === true;
-  const containerId = `session-${id}`;
-  const index = (db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n;
+  const containerId = `box-${id}`;
+  const index = (db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }).n;
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
        review_base_rev, status, agent_set_id, current_thread_id, ws_token,
        created_at, last_active_at)
@@ -638,10 +638,10 @@ function createSession(
        NULL, ?, NULL, NULL, ?, ?, ?)`,
   ).run(
     id,
-    spec.name ?? DEFAULT_SESSION.name,
-    cfg.SESSION_IMAGE,
+    spec.name ?? DEFAULT_BOX.name,
+    cfg.BOX_IMAGE,
     containerId,
-    `sn-${id}`,
+    `bn-${id}`,
     `10.200.${index}.0/24`,
     legacy ? `ws-${id}` : '',
     legacy ? null : ws.workspacePath(cfg.DATA_DIR, id),
@@ -677,7 +677,7 @@ function createSession(
     if (thread.speaking) upstream.speakingThreads.push(acpSessionId);
     for (let i = 0; i < (thread.pendingCount ?? 0); i++) {
       db.prepare(
-        `INSERT INTO pending_requests (session_id, acp_session_id, method, params, created_at)
+        `INSERT INTO pending_requests (box_id, acp_session_id, method, params, created_at)
          VALUES (?, ?, 'session/request_permission', '{}', ?)`,
       ).run(id, acpSessionId, now);
     }
@@ -686,8 +686,8 @@ function createSession(
   upstream.boxWork = spec.boxWork ?? [];
   upstream.attachedCount = spec.attachedCount ?? 0;
   // The first conversation is the one a connection naming none gets, which is
-  // where a session that has been worked in is left.
-  db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(
+  // where a box that has been worked in is left.
+  db.prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?').run(
     threads[0]?.id ?? threadName(id, 1),
     id,
   );
@@ -698,18 +698,18 @@ function createSession(
 }
 
 /**
- * Lists sessions until every one that asked for a size reports one.
+ * Lists boxes until every one that asked for a size reports one.
  *
  * A workspace is measured off the request path on purpose — a list must never
  * wait for a disk walk — so the first answer carries no size at all. Asking
  * here rather than in the browser keeps the first thing a test sees complete.
  */
-async function measureSessions(app: Orchestrator, specs: SessionSpec[]): Promise<void> {
+async function measureBoxes(app: Orchestrator, specs: BoxSpec[]): Promise<void> {
   const wanted = specs.filter((spec) => spec.diskBytes !== undefined).length;
   if (wanted === 0) return;
   for (let attempt = 0; attempt < 200; attempt++) {
-    const res = await app.app.inject({ url: '/api/sessions' });
-    const listed = res.json() as SessionSummary[];
+    const res = await app.app.inject({ url: '/api/boxes' });
+    const listed = res.json() as BoxSummary[];
     if (listed.filter((s) => s.diskBytes !== null).length >= wanted) return;
     await new Promise((done) => setTimeout(done, 10));
   }
@@ -748,16 +748,16 @@ function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
   });
   app.app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = (req.url ?? '').split('?')[0] ?? '';
-    const path = /^\/ws\/sessions\/([^/]+)\/terminal$/.exec(url);
+    const path = /^\/ws\/boxes\/([^/]+)\/terminal$/.exec(url);
     if (!path) return;
-    const sessionId = path[1]!;
-    const token = sessionRow(db, sessionId)?.ws_token ?? null;
+    const boxId = path[1]!;
+    const token = boxRow(db, boxId)?.ws_token ?? null;
     if (!checkUpgrade(req.headers['sec-websocket-protocol'], token, TERMINAL_SUBPROTOCOL).ok) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => attachTerminal(ws, sessionId, app.manager));
+    wss.handleUpgrade(req, socket, head, (ws) => attachTerminal(ws, boxId, app.manager));
   });
 }
 
@@ -771,7 +771,7 @@ function installHooks(
     | 'boxStops'
     | 'reviewCalls'
     | 'threadCalls'
-    | 'sessionCalls'
+    | 'boxCalls'
   >,
 ): void {
   app.app.addHook('onRequest', async (req: HookRequest, reply: HookReply) => {
@@ -790,44 +790,44 @@ function installHooks(
     const path = req.url.split('?')[0] ?? '';
     const body = req.body as Record<string, unknown> | Buffer | undefined;
 
-    if (path === '/api/sessions' && req.method === 'POST') {
-      calls.sessionCalls.push(body ?? null);
+    if (path === '/api/boxes' && req.method === 'POST') {
+      calls.boxCalls.push(body ?? null);
       return;
     }
-    const thread = /^\/api\/sessions\/([^/]+)\/threads$/.exec(path);
+    const thread = /^\/api\/boxes\/([^/]+)\/threads$/.exec(path);
     if (thread && req.method === 'POST') {
-      calls.threadCalls.push({ sessionId: thread[1]!, body: body ?? null });
+      calls.threadCalls.push({ boxId: thread[1]!, body: body ?? null });
       return;
     }
 
-    const attachment = /^\/api\/sessions\/([^/]+)\/attachments$/.exec(path);
+    const attachment = /^\/api\/boxes\/([^/]+)\/attachments$/.exec(path);
     if (attachment && req.method === 'POST' && Buffer.isBuffer(body)) {
       calls.attachmentUploads.push({
-        sessionId: attachment[1]!,
+        boxId: attachment[1]!,
         name: String((req.query as { name?: string }).name ?? ''),
         bytes: body,
       });
       return;
     }
 
-    const boxStop = /^\/api\/sessions\/([^/]+)\/background\/stop$/.exec(path);
+    const boxStop = /^\/api\/boxes\/([^/]+)\/background\/stop$/.exec(path);
     if (boxStop && req.method === 'POST') {
       calls.boxStops.push(boxStop[1]!);
       return;
     }
 
-    const stop = /^\/api\/sessions\/([^/]+)\/threads\/([^/]+)\/background\/stop$/.exec(path);
+    const stop = /^\/api\/boxes\/([^/]+)\/threads\/([^/]+)\/background\/stop$/.exec(path);
     if (stop && req.method === 'POST') {
       const asked = (body as Record<string, unknown> | undefined)?.['processId'];
       calls.backgroundStops.push({
-        sessionId: stop[1]!,
+        boxId: stop[1]!,
         threadId: stop[2]!,
         ...(asked === undefined ? {} : { processId: String(asked) }),
       });
       return;
     }
 
-    const review = /^\/api\/sessions\/([^/]+)\/review(?:\/(dir|file|annotations|base))?$/.exec(
+    const review = /^\/api\/boxes\/([^/]+)\/review(?:\/(dir|file|annotations|base))?$/.exec(
       path,
     );
     const named = review ? reviewCallOf(req.method, review[2] ?? '') : null;
@@ -836,7 +836,7 @@ function installHooks(
       // which is the shape the tests read back.
       calls.reviewCalls.push({
         method: named,
-        sessionId: review[1]!,
+        boxId: review[1]!,
         body: req.method === 'DELETE' ? deleteSubject(req.query) : (body ?? null),
       });
     }
@@ -918,13 +918,13 @@ function deleteSubject(query: unknown): unknown {
 }
 
 /**
- * Starts the orchestrator on an ephemeral port, with the sessions given.
+ * Starts the orchestrator on an ephemeral port, with the boxes given.
  *
  * `gatewayScript` is the agent's half: what the stub gateway answers prompts
  * with, which modes it advertises, and what it asks permission for.
  */
 export async function startOrchestrator(
-  sessions: SessionSpec[] = [{}],
+  boxes: BoxSpec[] = [{}],
   gatewayScript: Partial<GatewayScript> = {},
 ): Promise<TestOrchestrator> {
   const dataDir = mkdtempSync(join(tmpdir(), 'boxes-e2e-'));
@@ -936,31 +936,31 @@ export async function startOrchestrator(
     DATA_DIR: dataDir,
     // The uid this process already is, so nothing it writes has to be given
     // away and every chown is a no-op.
-    SESSION_UID: String(process.getuid?.() ?? 1020),
-    SESSION_GID: String(process.getgid?.() ?? 1020),
+    BOX_UID: String(process.getuid?.() ?? 1020),
+    BOX_GID: String(process.getgid?.() ?? 1020),
   });
   setConfigForTests(cfg);
 
   // The fake daemon stands the process in a container too, so the
   // orchestrator's own image is read the way a deployment reads it.
-  const docker = installFakeDocker(cfg.SESSION_IMAGE, FAKE_SELF_CONTAINER);
+  const docker = installFakeDocker(cfg.BOX_IMAGE, FAKE_SELF_CONTAINER);
   const db = openDb(dataDir);
   // The bundle this run just built, rather than the copy a built image holds.
   const app = buildApp(cfg, db, { bundleDir: resolve(import.meta.dirname, '../dist') });
-  installLocalGit((sessionId) => ws.workspacePath(dataDir, sessionId));
+  installLocalGit((boxId) => ws.workspacePath(dataDir, boxId));
 
   /**
-   * The stand-in adapter for a session, made on first use.
+   * The stand-in adapter for a box, made on first use.
    *
    * The manager creates a real one the same way, so this is put in its map
-   * rather than handed out: what the session list reports about a live
+   * rather than handed out: what the box list reports about a live
    * gateway is read off the entry it holds.
    */
-  const upstreamFor = (sessionId: string): TestUpstream => {
-    const held = upstreamsOf(app.manager).get(sessionId);
+  const upstreamFor = (boxId: string): TestUpstream => {
+    const held = upstreamsOf(app.manager).get(boxId);
     if (held) return held as TestUpstream;
-    const made = new TestUpstream(sessionId, db, gateway);
-    upstreamsOf(app.manager).set(sessionId, made);
+    const made = new TestUpstream(boxId, db, gateway);
+    upstreamsOf(app.manager).set(boxId, made);
     return made;
   };
 
@@ -1009,7 +1009,7 @@ export async function startOrchestrator(
   const calls = {
     attachmentUploads: [] as TestOrchestrator['attachmentUploads'],
     threadCalls: [] as TestOrchestrator['threadCalls'],
-    sessionCalls: [] as TestOrchestrator['sessionCalls'],
+    boxCalls: [] as TestOrchestrator['boxCalls'],
     backgroundStops: [] as TestOrchestrator['backgroundStops'],
     boxStops: [] as TestOrchestrator['boxStops'],
     reviewCalls: [] as ReviewCall[],
@@ -1030,22 +1030,22 @@ export async function startOrchestrator(
       ...gatewayScript,
     },
     {
-      token: (sessionId) => sessionRow(db, sessionId)?.ws_token ?? null,
-      thread: (sessionId, threadId) => {
-        const row = threadId ? getThread(db, threadId) : currentThread(db, sessionId);
+      token: (boxId) => boxRow(db, boxId)?.ws_token ?? null,
+      thread: (boxId, threadId) => {
+        const row = threadId ? getThread(db, threadId) : currentThread(db, boxId);
         if (row) {
-          if (row.session_id !== sessionId) return null;
+          if (row.box_id !== boxId) return null;
           // A thread a box was created with has a row and no conversation
           // yet: the real gateway mints one as a browser pins to it, and so
           // does the stand-in.
-          return row.acp_session_id ?? upstreamFor(sessionId).adoptThread(row);
+          return row.acp_session_id ?? upstreamFor(boxId).adoptThread(row);
         }
         if (threadId !== null) return null;
         // A box nobody has opened has no conversation yet. The real gateway
-        // mints one as a browser pins to it, which is what makes a session
+        // mints one as a browser pins to it, which is what makes a box
         // just created usable, so the stand-in adapter does the same.
-        if (!sessionRow(db, sessionId)) return null;
-        return upstreamFor(sessionId).mintFirstThread();
+        if (!boxRow(db, boxId)) return null;
+        return upstreamFor(boxId).mintFirstThread();
       },
     },
   );
@@ -1059,7 +1059,7 @@ export async function startOrchestrator(
   installHooks(app, state, calls);
   const logins = installLoginRuntime(app);
 
-  // As boot does, and for the same reason: a session's environment is built
+  // As boot does, and for the same reason: a box's environment is built
   // from the egress policy, so creating one before it exists fails.
   await app.egress.prepare();
   // A deployment a test finds working, which is what all but the warning
@@ -1086,23 +1086,23 @@ export async function startOrchestrator(
       ...(payload === undefined ? {} : { payload }),
     });
 
-  const workspaceOf = (sessionId: string): string => ws.workspacePath(dataDir, sessionId);
+  const workspaceOf = (boxId: string): string => ws.workspacePath(dataDir, boxId);
 
   const harness: TestOrchestrator = {
     url: `http://127.0.0.1:${port}`,
     gateway,
     state,
     ...calls,
-    terminalsOpen: (sessionId) => app.manager.terminalCount(sessionId),
+    terminalsOpen: (boxId) => app.manager.terminalCount(boxId),
     get terminalAnswer() {
       return docker.terminalAnswer;
     },
     set terminalAnswer(fn: TestOrchestrator['terminalAnswer']) {
       docker.terminalAnswer = fn;
     },
-    createSession: (spec = {}) => createSession(app, db, docker, upstreamFor, spec),
-    resetSessions: () => {
-      const rows = db.prepare('SELECT id FROM sessions').all() as Array<{ id: string }>;
+    createBox: (spec = {}) => createBox(app, db, docker, upstreamFor, spec),
+    resetBoxes: () => {
+      const rows = db.prepare('SELECT id FROM boxes').all() as Array<{ id: string }>;
       for (const row of rows) {
         ws.removeWorkspace(dataDir, row.id);
         ws.removeHome(dataDir, row.id);
@@ -1110,23 +1110,23 @@ export async function startOrchestrator(
       }
       db.prepare('DELETE FROM threads').run();
       db.prepare('DELETE FROM pending_requests').run();
-      db.prepare('DELETE FROM sessions').run();
+      db.prepare('DELETE FROM boxes').run();
     },
-    review: (sessionId, spec = reviewWorkspace()) => buildWorkspace(workspaceOf(sessionId), spec),
-    write: (sessionId, path, content) => writeFile(workspaceOf(sessionId), path, content),
-    read: (sessionId, path) => readFileSync(join(workspaceOf(sessionId), path), 'utf8'),
-    hasReview: (sessionId) => existsSync(join(workspaceOf(sessionId), 'REVIEW.md')),
-    comment: async (sessionId, path, line, text) => {
-      await setup('PUT', `/api/sessions/${sessionId}/review/annotations`, {
+    review: (boxId, spec = reviewWorkspace()) => buildWorkspace(workspaceOf(boxId), spec),
+    write: (boxId, path, content) => writeFile(workspaceOf(boxId), path, content),
+    read: (boxId, path) => readFileSync(join(workspaceOf(boxId), path), 'utf8'),
+    hasReview: (boxId) => existsSync(join(workspaceOf(boxId), 'REVIEW.md')),
+    comment: async (boxId, path, line, text) => {
+      await setup('PUT', `/api/boxes/${boxId}/review/annotations`, {
         path,
         line,
         comment: text,
       });
     },
-    comments: async (sessionId, path) => {
+    comments: async (boxId, path) => {
       const res = await setup(
         'GET',
-        `/api/sessions/${sessionId}/review/file?path=${encodeURIComponent(path)}`,
+        `/api/boxes/${boxId}/review/file?path=${encodeURIComponent(path)}`,
       );
       return (res.json() as ReviewFileResponse).annotations;
     },
@@ -1164,7 +1164,7 @@ export async function startOrchestrator(
     },
   };
 
-  for (const spec of sessions) harness.createSession(spec);
-  await measureSessions(app, sessions);
+  for (const spec of boxes) harness.createBox(spec);
+  await measureBoxes(app, boxes);
   return harness;
 }

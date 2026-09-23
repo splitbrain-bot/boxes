@@ -8,7 +8,7 @@ import { refetchOnVisible } from '../lib/poll.ts';
  * deployment can run, and what the last dialog chose for each.
  *
  * A store rather than per-dialog state, because two of them ask the same
- * question — the new-thread dialog and the new-session form — and because the
+ * question — the new-thread dialog and the new-box form — and because the
  * answer is deployment-wide: the last choice is stored on the orchestrator so
  * it is the same on every device, and a phone that has just been used to set
  * one should not have to be the device that opens the next dialog.
@@ -18,7 +18,7 @@ import { refetchOnVisible } from '../lib/poll.ts';
  * an adapter runs, the credential when somebody visits the settings page, and
  * a dialog is a surface that is opened, answered and gone. Mounting one reads
  * the current answer, and coming back to a tab that has been away reads it
- * again; in between there is nothing to poll for. The session list's own
+ * again; in between there is nothing to poll for. The box list's own
  * five-second poll already carries each harness's health for the warning
  * banner, which is the part that has to be noticed without being asked for.
  */
@@ -53,7 +53,7 @@ function subscribe(listener: () => void): () => void {
 /**
  * Reads the list and the stored choices once.
  *
- * Settled apart the way the session store settles its two calls: a failed
+ * Settled apart the way the box store settles its two calls: a failed
  * settings read says nothing about the harnesses, and a dialog with the
  * harnesses and no remembered choice is a dialog on the registry defaults,
  * which is a working dialog.

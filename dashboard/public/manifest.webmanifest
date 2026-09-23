@@ -1,7 +1,7 @@
 {
   "name": "Boxes",
   "short_name": "Boxes",
-  "description": "AI coding-agent sessions in isolated containers.",
+  "description": "AI coding agents in isolated containers.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

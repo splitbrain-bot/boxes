@@ -152,7 +152,7 @@ export class Interceptor {
       // intercepted, so the proxy has one position on protocol upgrades
       // rather than two. A client that wanted one falls back to HTTPS, where
       // the swap works. Codex would, with a warning in the thread each time,
-      // so the session image configures it not to try.
+      // so the box image configures it not to try.
       await server.forAnyWebSocket().thenRejectConnection(501, 'protocol upgrades are not forwarded');
 
       await server.on('tls-client-error', (failure) => {
@@ -230,7 +230,7 @@ export class Interceptor {
 
     // The front door is the only thing meant to reach the engine, and it
     // connects over loopback. The engine's own listener takes every interface,
-    // and the proxy sits on every session network, so a box could otherwise
+    // and the proxy sits on every box network, so a box could otherwise
     // reach it directly and skip the front door's rules about which hosts and
     // which ports may be intercepted at all.
     if (!isLoopback(req.remoteIpAddress)) {

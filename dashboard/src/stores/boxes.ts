@@ -2,17 +2,17 @@ import { useSyncExternalStore } from 'react';
 import type {
   DeploymentImages,
   HarnessHealth,
-  SessionSummary,
+  BoxSummary,
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { pollWhileVisible } from '../lib/poll.ts';
 
 /**
- * The session list, together with the deployment facts a view has to warn
+ * The box list, together with the deployment facts a view has to warn
  * about.
  *
  * The list screen polls the whole of it while it is up. A view watching one
- * session reads that session for itself and takes only the deployment facts
+ * box reads that box for itself and takes only the deployment facts
  * from here.
  *
  * A plain module-level store with a subscriber set: React reads it through
@@ -21,8 +21,8 @@ import { pollWhileVisible } from '../lib/poll.ts';
  */
 
 /** What the views render. */
-export interface SessionsState {
-  sessions: SessionSummary[];
+export interface BoxesState {
+  boxes: BoxSummary[];
   /**
    * Every harness the deployment can run, and whether each has a credential
    * that works.
@@ -43,17 +43,17 @@ export interface SessionsState {
   loading: boolean;
 }
 
-let state: SessionsState = {
-  sessions: [],
+let state: BoxesState = {
+  boxes: [],
   harnesses: [],
-  images: { orchestrator: null, proxy: null, session: null },
+  images: { orchestrator: null, proxy: null, box: null },
   error: null,
   loading: true,
 };
 const listeners = new Set<() => void>();
 
 /** Replaces the state and wakes every subscriber. */
-function set(next: Partial<SessionsState>): void {
+function set(next: Partial<BoxesState>): void {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
@@ -63,8 +63,8 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** Reads the polled session list, re-rendering on every change. */
-export function useSessions(): SessionsState {
+/** Reads the polled box list, re-rendering on every change. */
+export function useBoxes(): BoxesState {
   return useSyncExternalStore(
     subscribe,
     () => state,
@@ -86,17 +86,17 @@ function reachable(error: Error): string {
 }
 
 /**
- * Fetches the session list and the health probe once.
+ * Fetches the box list and the health probe once.
  *
- * The two are settled apart: a failed probe says nothing about the sessions,
+ * The two are settled apart: a failed probe says nothing about the boxes,
  * and neither does a failed list say anything about the credentials, so one
  * failure never discards the other's answer.
  */
 export async function refresh(): Promise<void> {
-  const [list, health] = await Promise.allSettled([api.listSessions(), api.health()]);
+  const [list, health] = await Promise.allSettled([api.listBoxes(), api.health()]);
   set({
     ...(list.status === 'fulfilled'
-      ? { sessions: list.value, error: null }
+      ? { boxes: list.value, error: null }
       : { error: reachable(list.reason as Error) }),
     ...(health.status === 'fulfilled'
       ? {
@@ -111,7 +111,7 @@ export async function refresh(): Promise<void> {
 /**
  * Fetches the health probe alone.
  *
- * For a view that watches one session rather than the list: which harnesses
+ * For a view that watches one box rather than the list: which harnesses
  * can run is a fact about the deployment, so it is asked for once on arrival
  * instead of riding along with a list that view never reads. A probe that did
  * not answer leaves what is held, because a failed probe says nothing about a
@@ -133,7 +133,7 @@ const POLL_MS = 5000;
  * Polls for as long as the tab is visible, and returns the teardown.
  *
  * Started by the screen that shows the list, so a browser reading one
- * conversation is not asking for every session in the deployment every few
+ * conversation is not asking for every box in the deployment every few
  * seconds.
  */
 export function startPolling(): () => void {

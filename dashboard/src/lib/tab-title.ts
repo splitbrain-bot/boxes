@@ -40,9 +40,9 @@ const SYMBOL: Record<TabState, string> = {
  */
 export function threadTitle(
   state: TabState,
-  sessionName: string,
+  boxName: string,
   threadLabel: string | null,
 ): string {
-  const where = [sessionName, threadLabel].filter(Boolean).join(' · ');
+  const where = [boxName, threadLabel].filter(Boolean).join(' · ');
   return `${SYMBOL[state]} ${where}`;
 }

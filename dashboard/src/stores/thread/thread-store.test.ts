@@ -3,9 +3,9 @@ import { expect, test, vi } from 'vitest';
 import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
-  SessionModeState,
-  SessionUpdate,
+  ThreadConfigOption,
+  ThreadModeState,
+  ThreadUpdate,
 } from './acp-types.ts';
 import type { TurnStateParams } from '../../../../shared/types.ts';
 import type { AcpClient, AcpClientHandlers } from './acp-client.ts';
@@ -58,8 +58,8 @@ class FakeClient {
   /** The resume point each load asked for, in order. */
   readonly resumePoints: Array<string | null> = [];
 
-  modes: SessionModeState | null = null;
-  configOptions: SessionConfigOption[] = [];
+  modes: ThreadModeState | null = null;
+  configOptions: ThreadConfigOption[] = [];
 
   request(method: string, params: unknown): Promise<unknown> {
     this.requests.push({ method, params });
@@ -90,7 +90,7 @@ function makeStore(
   resetIds();
   let client!: FakeClient;
   const store = new ThreadStore({
-    sessionId: 'box-1',
+    boxId: 'box-1',
     threadId: 'thread-1',
     createClient: (handlers) => {
       client = new FakeClient(handlers);
@@ -119,7 +119,7 @@ function ask(
 }
 
 /** Pushes one session/update at the store, as the gateway would. */
-function push(client: FakeClient, update: SessionUpdate): void {
+function push(client: FakeClient, update: ThreadUpdate): void {
   client.handlers.onUpdate({ sessionId: 'acp-1', update });
 }
 
@@ -155,13 +155,13 @@ test('a snapshot changes identity when a streamed message grows', () => {
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'Hel' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   const first = store.getSnapshot().messages;
 
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'lo' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   const second = store.getSnapshot().messages;
 
   // A view that memoised on identity has to see a new object, or it would
@@ -177,7 +177,7 @@ test('subscribers are woken on every update', () => {
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'x' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   expect(listener).toHaveBeenCalled();
 });
 
@@ -279,7 +279,7 @@ test('an open permission request is reported as one', async () => {
     toolCallId: 't1',
     title: 'Write a file',
     status: 'pending',
-  } as SessionUpdate);
+  } as ThreadUpdate);
   void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
@@ -300,7 +300,7 @@ test('several ways to say yes is a question, not a gate', async () => {
     toolCallId: 't1',
     title: 'Leave plan mode',
     status: 'pending',
-  } as SessionUpdate);
+  } as ThreadUpdate);
   void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
@@ -322,7 +322,7 @@ test('answering a request leaves nothing waiting', async () => {
     toolCallId: 't1',
     title: 'Write a file',
     status: 'pending',
-  } as SessionUpdate);
+  } as ThreadUpdate);
   void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
@@ -357,12 +357,12 @@ test('cancel notifies the adapter and stops the running state', () => {
 
 test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   const { store, client } = makeStore();
-  const script: SessionUpdate[] = [
-    { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } } as SessionUpdate,
+  const script: ThreadUpdate[] = [
+    { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } } as ThreadUpdate,
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'hello' },
-    } as SessionUpdate,
+    } as ThreadUpdate,
   ];
   for (const u of script) push(client, u);
   assert.equal(store.getSnapshot().messages.length, 2);
@@ -391,7 +391,7 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
   push(client, {
     sessionUpdate: 'user_message_chunk',
     content: { type: 'text', text: 'hi' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   assert.equal(store.getSnapshot().messages.length, 1);
 
   // A refetch is a session/load on a connection that is already up, so nothing
@@ -401,11 +401,11 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
   push(client, {
     sessionUpdate: 'user_message_chunk',
     content: { type: 'text', text: 'hi' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'hello again' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   await done;
 
   assert.deepEqual(
@@ -418,7 +418,7 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: ' and again' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   assert.match(JSON.stringify(store.getSnapshot().messages), /and again/);
 });
 
@@ -479,7 +479,7 @@ test('a refetch whose load fails still gives the view back what arrived', async 
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'still here' },
-  } as SessionUpdate);
+  } as ThreadUpdate);
   assert.equal(store.getSnapshot().messages.length, 1, 'not frozen behind a replay that failed');
 });
 
@@ -599,7 +599,7 @@ test('answering the same approval twice does nothing the second time', async () 
 });
 
 test('the mode switcher sets the mode optimistically and rolls back on failure', async () => {
-  const modes: SessionModeState = {
+  const modes: ThreadModeState = {
     currentModeId: 'default',
     availableModes: [
       { id: 'default', name: 'Default' },
@@ -625,7 +625,7 @@ test('the mode switcher sets the mode optimistically and rolls back on failure',
 });
 
 test('the model selector sets the option optimistically and rolls back on failure', async () => {
-  const configOptions: SessionConfigOption[] = [
+  const configOptions: ThreadConfigOption[] = [
     {
       id: 'model',
       name: 'Model',
@@ -753,7 +753,7 @@ test("a tool call's image is converted as a part beside the card, not inside it"
     content: [
       { type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } },
     ],
-  } as SessionUpdate);
+  } as ThreadUpdate);
 
   const message = store.getSnapshot().messages.at(-1)!;
   const parts = partsOf(message);
@@ -776,7 +776,7 @@ test("an update that replaces a call's content replaces its images with it", () 
     content: [
       { type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } },
     ],
-  } as SessionUpdate);
+  } as ThreadUpdate);
   push(client, {
     sessionUpdate: 'tool_call_update',
     toolCallId: 't-shot2',
@@ -784,7 +784,7 @@ test("an update that replaces a call's content replaces its images with it", () 
     content: [
       { type: 'content', content: { type: 'image', data: 'BBBB', mimeType: 'image/png' } },
     ],
-  } as SessionUpdate);
+  } as ThreadUpdate);
 
   const parts = partsOf(store.getSnapshot().messages.at(-1)!);
   assert.deepEqual(
@@ -798,16 +798,16 @@ function said(
   role: 'user' | 'agent',
   messageId: string,
   text: string,
-): SessionUpdate {
+): ThreadUpdate {
   return {
     sessionUpdate: `${role}_message_chunk`,
     messageId,
     content: { type: 'text', text },
-  } as SessionUpdate;
+  } as ThreadUpdate;
 }
 
 /** The whole conversation these resume tests replay. */
-const TRANSCRIPT: SessionUpdate[] = [
+const TRANSCRIPT: ThreadUpdate[] = [
   said('user', 'msg_1', 'the first question'),
   said('agent', 'msg_2', 'the first answer'),
   said('user', 'msg_3', 'and while you were away'),
@@ -928,7 +928,7 @@ test('a resume gives up the questions the dead connection was showing', async ()
     toolCallId: 'toolu_1',
     title: 'Read',
     status: 'pending',
-  } as SessionUpdate);
+  } as ThreadUpdate);
   push(client, said('agent', 'msg_2', 'and then this'));
   const answer = ask(client, {
     sessionId: 'acp-1',

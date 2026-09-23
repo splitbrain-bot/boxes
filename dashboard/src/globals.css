@@ -38,7 +38,7 @@
   --input: #d8dde7;
   --ring: #2563eb;
 
-  /* Session state, the one vocabulary Tailwind has no name for. */
+  /* Box state, the one vocabulary Tailwind has no name for. */
   --ok: #4ec9a0;
   --warn: #e8c46a;
   --danger: #f2777a;

@@ -6,7 +6,7 @@ import { resolveInRoot } from './review/fs.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
- * Files the user attaches to a prompt, stored in the session's own workspace.
+ * Files the user attaches to a prompt, stored in the box's own workspace.
  *
  * Everything an attachment could be — a screenshot, a PDF, a CSV, a heap
  * dump — is the same thing here: bytes written into the workspace under a
@@ -16,7 +16,7 @@ import { chownToAgent } from './workspaces.ts';
  *
  * The workspace is a plain directory this process owns, so an upload is a
  * file write rather than a copy into a container, and it works while the
- * session is stopped.
+ * box is stopped.
  */
 
 /** Directory attachments live in, relative to the workspace root. */
@@ -132,7 +132,7 @@ export function safeAttachmentName(name: string): string {
  * than one of them overwriting the other.
  *
  * The write itself is asynchronous: an attachment is as large as
- * MAX_ATTACHMENT_MB allows, and one process carries every session's stream,
+ * MAX_ATTACHMENT_MB allows, and one process carries every box's stream,
  * so writing it in one blocking call stops all of them for as long as the
  * disk takes.
  */

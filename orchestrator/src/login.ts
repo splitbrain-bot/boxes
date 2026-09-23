@@ -14,7 +14,7 @@ import { log } from './log.ts';
  * static form of a ChatGPT or Claude account credential at all, and the only
  * thing that knows how to obtain one is the harness's own CLI. So the
  * orchestrator does not speak OAuth. It runs that CLI in a throwaway
- * container built from the session image, reads what it prints, answers what
+ * container built from the box image, reads what it prints, answers what
  * it asks, and stores what it produced. The settings page drives the whole of
  * it by polling one state machine.
  *
@@ -144,7 +144,7 @@ export interface LoginRuntime {
   remove(containerId: string): Promise<void>;
 }
 
-/** The real thing: a container from the session image, driven over the socket. */
+/** The real thing: a container from the box image, driven over the socket. */
 export function dockerLoginRuntime(image: string): LoginRuntime {
   return {
     async start(credentialId) {

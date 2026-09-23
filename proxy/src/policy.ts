@@ -147,7 +147,7 @@ function headerValue(
  *
  * A request that authenticates some other way is not a credential to this and
  * passes through. A session cookie is the case that matters: logging in to a
- * translated host from inside a session is a flow this keeps working, and the
+ * translated host from inside a box is a flow this keeps working, and the
  * refusal above is about the deployment's credentials rather than about every
  * way to reach an account.
  */

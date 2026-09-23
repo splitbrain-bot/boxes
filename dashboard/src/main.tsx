@@ -24,23 +24,23 @@ const AgentSets = lazy(async () => ({
 const Playground = lazy(async () => ({
   default: (await import('./views/Playground.tsx')).Playground,
 }));
-const SessionCreate = lazy(async () => ({
-  default: (await import('./views/SessionCreate.tsx')).SessionCreate,
+const BoxCreate = lazy(async () => ({
+  default: (await import('./views/BoxCreate.tsx')).BoxCreate,
 }));
-const SessionInfo = lazy(async () => ({
-  default: (await import('./views/SessionInfo.tsx')).SessionInfo,
+const BoxInfo = lazy(async () => ({
+  default: (await import('./views/BoxInfo.tsx')).BoxInfo,
 }));
-const SessionList = lazy(async () => ({
-  default: (await import('./views/SessionList.tsx')).SessionList,
+const BoxList = lazy(async () => ({
+  default: (await import('./views/BoxList.tsx')).BoxList,
 }));
-const SessionReview = lazy(async () => ({
-  default: (await import('./views/SessionReview.tsx')).SessionReview,
+const BoxReview = lazy(async () => ({
+  default: (await import('./views/BoxReview.tsx')).BoxReview,
 }));
-const SessionTerminal = lazy(async () => ({
-  default: (await import('./views/SessionTerminal.tsx')).SessionTerminal,
+const BoxTerminal = lazy(async () => ({
+  default: (await import('./views/BoxTerminal.tsx')).BoxTerminal,
 }));
-const SessionThread = lazy(async () => ({
-  default: (await import('./views/SessionThread.tsx')).SessionThread,
+const BoxThread = lazy(async () => ({
+  default: (await import('./views/BoxThread.tsx')).BoxThread,
 }));
 const Settings = lazy(async () => ({
   default: (await import('./views/Settings.tsx')).Settings,
@@ -50,7 +50,7 @@ const Shell = lazy(async () => ({
 }));
 
 /**
- * One app, one origin. The session list is the thread list, and a session's
+ * One app, one origin. The box list is the thread list, and a box's
  * conversation is a route inside this same dashboard.
  */
 function App() {
@@ -66,15 +66,15 @@ function App() {
 
               Two routes onto the same view: one naming a thread, which is what
               makes two tabs on two conversations of one box possible, and one
-              naming none, which means whichever thread the session has current
+              naming none, which means whichever thread the box has current
               — so every link and bookmark from before survives. */}
-          <Route path="/sessions/:id" element={<SessionThread />} />
-          <Route path="/sessions/:id/threads/:threadId" element={<SessionThread />} />
+          <Route path="/boxes/:id" element={<BoxThread />} />
+          <Route path="/boxes/:id/threads/:threadId" element={<BoxThread />} />
           {/* Reviewing owns the whole viewport too: a code pane in the reading
               column is not a code pane. The open file is in the search string,
               so a file is linkable and the back button works. */}
           <Route
-            path="/sessions/:id/review"
+            path="/boxes/:id/review"
             element={
               <Suspense
                 fallback={
@@ -83,7 +83,7 @@ function App() {
                   </Loading>
                 }
               >
-                <SessionReview />
+                <BoxReview />
               </Suspense>
             }
           />
@@ -93,7 +93,7 @@ function App() {
               conversations it holds, and every terminal on it is the same
               shell. */}
           <Route
-            path="/sessions/:id/terminal"
+            path="/boxes/:id/terminal"
             element={
               <Suspense
                 fallback={
@@ -102,7 +102,7 @@ function App() {
                   </Loading>
                 }
               >
-                <SessionTerminal />
+                <BoxTerminal />
               </Suspense>
             }
           />
@@ -110,8 +110,8 @@ function App() {
               upgrade is reviewed as a diff and a screenshot. */}
           <Route path="/playground" element={<Playground />} />
           <Route element={<Shell />}>
-            <Route path="/" element={<SessionList />} />
-            <Route path="/new" element={<SessionCreate />} />
+            <Route path="/" element={<BoxList />} />
+            <Route path="/new" element={<BoxCreate />} />
             {/* What the agent is configured with, which belongs to the
                 deployment rather than to any one box. */}
             <Route path="/agents" element={<AgentSets />} />
@@ -119,7 +119,7 @@ function App() {
             {/* The credentials every box runs on, and the identity it commits
                 as: deployment-wide for the same reason. */}
             <Route path="/settings" element={<Settings />} />
-            <Route path="/sessions/:id/info" element={<SessionInfo />} />
+            <Route path="/boxes/:id/info" element={<BoxInfo />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
@@ -142,7 +142,7 @@ if (root) {
   // Then re-register a browser that is already subscribed — a push service
   // may have handed it a new subscription since the last load, and this is
   // the only place the orchestrator hears about that. Never asks for
-  // permission: that needs a click, and the toggle in the session list is
+  // permission: that needs a click, and the toggle in the box list is
   // where it happens.
   void refreshPush();
 }

@@ -7,28 +7,28 @@ import type { DockerState, ImageInfo } from '../../shared/types.ts';
 import type { Config } from './config.ts';
 import { HARNESSES } from './harness.ts';
 import { log } from './log.ts';
-import { sessionOwner } from './workspaces.ts';
+import { boxOwner } from './workspaces.ts';
 
 /**
  * Container, network and volume lifecycle, plus the long-lived adapter exec.
  *
  * The HostConfig below is a fixed template that user input never reaches. The
- * caller supplies only the server-generated session id and the values a
- * session is to hold in place of the deployment's credentials.
+ * caller supplies only the server-generated box id and the values a
+ * box is to hold in place of the deployment's credentials.
  */
 
-/** Docker label carrying the session id on every object Boxes creates. */
-export const LABEL = 'boxes.session';
+/** Docker label carrying the box id on every object Boxes creates. */
+export const LABEL = 'boxes.box';
 
 /**
- * Label on the short-lived helper containers that copy a session's files.
- * They carry the session label too, so the orphan sweep takes them, and this
- * one so boot reconciliation never adopts one as the session's container.
+ * Label on the short-lived helper containers that copy a box's files.
+ * They carry the box label too, so the orphan sweep takes them, and this
+ * one so boot reconciliation never adopts one as the box's container.
  */
 export const HELPER_LABEL = 'boxes.helper';
 
 /**
- * Label the session image carries, so a superseded copy of it can be
+ * Label the box image carries, so a superseded copy of it can be
  * recognised after it has lost its tag.
  *
  * A pull that moves `:latest` leaves the image it replaced untagged and on
@@ -39,38 +39,38 @@ export const HELPER_LABEL = 'boxes.helper';
  */
 export const IMAGE_LABEL = 'boxes.image';
 
-/** The value of that label on the session image. */
-export const SESSION_IMAGE_KIND = 'session';
+/** The value of that label on the box image. */
+export const BOX_IMAGE_KIND = 'box';
 
 /**
  * Docker label carrying the credential a throwaway login container belongs to.
  *
  * A login runs the harness's own CLI in a container of its own, for the
- * minutes a person takes to authorise it in a browser. It is nobody's session,
- * so it carries no session label and `sweepOrphans` would never see it; this
+ * minutes a person takes to authorise it in a browser. It is nobody's box,
+ * so it carries no box label and `sweepOrphans` would never see it; this
  * is what it is found by instead, both to sweep one a crash mid-flow left
  * behind and to tell it apart from a box at a glance.
  */
 export const LOGIN_LABEL = 'boxes.login';
 
 /**
- * The `uid:gid` every session process runs as, as Docker wants it written.
+ * The `uid:gid` every box process runs as, as Docker wants it written.
  *
- * Numbers rather than the image's `agent`, so SESSION_UID alone decides who a
- * session is and the image needs no rebuild to be read differently. The two
+ * Numbers rather than the image's `agent`, so BOX_UID alone decides who a
+ * box is and the image needs no rebuild to be read differently. The two
  * still have to agree about the home volume, which Docker initialises from
- * the image; ensureSessionImage() reads the image's user back.
+ * the image; ensureBoxImage() reads the image's user back.
  */
-function sessionUser(): string {
-  const { uid, gid } = sessionOwner();
+function boxUser(): string {
+  const { uid, gid } = boxOwner();
   return `${uid}:${gid}`;
 }
 
-/** The session's writable workspace, and the working directory of everything in it. */
+/** The box's writable workspace, and the working directory of everything in it. */
 export const WORKSPACE_DIR = '/workspace';
 
 /**
- * Where the session's merged agent configuration is mounted, read-only.
+ * Where the box's merged agent configuration is mounted, read-only.
  *
  * The entrypoint copies it out of here into `$HOME`, in each harness's own
  * layout: `.claude/` for one, `.codex/` and `.agents/skills/` for the other,
@@ -96,20 +96,20 @@ export function setDockerForTests(d: Docker | null): void {
 }
 
 /**
- * Docker object names derived from a session id.
+ * Docker object names derived from a box id.
  *
  * A workspace and a home are both directories on the orchestrator's data
  * volume, so there is no volume name to derive. The `ws-<id>` or `home-<id>`
- * volume of a session from before those changes is read off its row.
+ * volume of a box from before those changes is read off its row.
  */
 export const names = {
-  container: (id: string) => `session-${id}`,
-  network: (id: string) => `sn-${id}`,
+  container: (id: string) => `box-${id}`,
+  network: (id: string) => `bn-${id}`,
 };
 
-/** Everything createContainer needs to know about one session. */
+/** Everything createContainer needs to know about one box. */
 export interface CreateContainerSpec {
-  sessionId: string;
+  boxId: string;
   image: string;
   networkName: string;
   subnet: string;
@@ -120,15 +120,15 @@ export interface CreateContainerSpec {
    */
   workspaceSource: string;
   /**
-   * Host-side path of the session's materialized agent configuration, bound
-   * read-only at AGENT_CONFIG_DIR. Always present: a session with nothing
+   * Host-side path of the box's materialized agent configuration, bound
+   * read-only at AGENT_CONFIG_DIR. Always present: a box with nothing
    * configured gets an empty manifest, which is how the entrypoint learns to
    * remove what a previous start installed.
    */
   agentConfigSource: string;
   /**
-   * What is mounted at `/home/agent`: the host-side path of the session's
-   * home directory, or — for a session created before homes became
+   * What is mounted at `/home/agent`: the host-side path of the box's
+   * home directory, or — for a box created before homes became
    * directories — the name of its volume. A bind source and a volume name are
    * the same field to Docker, and which one this is is the caller's business.
    */
@@ -187,21 +187,21 @@ export function credentialEnv(
   return env;
 }
 
-/** The agent user's home inside a session container, where its own files and caches live. */
+/** The agent user's home inside a box container, where its own files and caches live. */
 export const HOME_DIR = '/home/agent';
 
 /** Where the entrypoint writes the CA, and where the CA env vars point. */
 const CA_PATH = `${HOME_DIR}/.boxes/proxy-ca.crt`;
 
 /**
- * Environment of a session container.
+ * Environment of a box container.
  *
  * This is the only delivery path for what a box holds in place of the
  * deployment's credentials, and it never carries a real one. The CA travels
  * here too, as a PEM rather than a mount, so the proxy's trust anchor needs no
  * volume and no file on the host.
  */
-export function sessionEnv(spec: CreateContainerSpec, cfg: Config): string[] {
+export function boxEnv(spec: CreateContainerSpec, cfg: Config): string[] {
   const proxyUrl = `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
   const env: Record<string, string> = {
     ...spec.env,
@@ -252,36 +252,36 @@ function memoryBytes(limit: string): number {
   return value * scale;
 }
 
-/** Creates a session network. Internal, so it has no NAT and no default route. */
-export async function createNetwork(networkName: string, subnet: string, sessionId: string): Promise<void> {
+/** Creates a box network. Internal, so it has no NAT and no default route. */
+export async function createNetwork(networkName: string, subnet: string, boxId: string): Promise<void> {
   await docker().createNetwork({
     Name: networkName,
     Driver: 'bridge',
     Internal: true,
     CheckDuplicate: true,
     IPAM: { Driver: 'default', Config: [{ Subnet: subnet }] },
-    Labels: { [LABEL]: sessionId },
+    Labels: { [LABEL]: boxId },
   });
 }
 
 /**
- * Creates a session's network if the daemon no longer has it, and says
+ * Creates a box's network if the daemon no longer has it, and says
  * whether it had to.
  *
- * For rebuilding a session Docker has forgotten. A network with no containers
+ * For rebuilding a box Docker has forgotten. A network with no containers
  * on it is "unused" to `docker network prune` and to `docker system prune`,
  * so the network usually goes at the same moment the container does — and a
  * container cannot be created into a network that is not there. Everything
- * needed to make it again is on the session's row.
+ * needed to make it again is on the box's row.
  */
 export async function ensureNetwork(
   networkName: string,
   subnet: string,
-  sessionId: string,
+  boxId: string,
 ): Promise<boolean> {
   const existing = await inspecting(() => docker().getNetwork(networkName).inspect());
   if (existing) return false;
-  await createNetwork(networkName, subnet, sessionId);
+  await createNetwork(networkName, subnet, boxId);
   return true;
 }
 
@@ -298,7 +298,7 @@ function proxyOn(info: Docker.NetworkInspectInfo, cfg: Config): boolean {
 }
 
 /**
- * Attaches the egress proxy to a session network under its alias, and reports
+ * Attaches the egress proxy to a box network under its alias, and reports
  * whether it is attached. The check runs every time, because compose can
  * recreate the proxy container and drop its dynamic attachments.
  */
@@ -316,7 +316,7 @@ export async function ensureProxyAttached(networkName: string, cfg: Config): Pro
       Container: cfg.EGRESS_PROXY_CONTAINER,
       EndpointConfig: { Aliases: [cfg.EGRESS_PROXY_ALIAS] },
     });
-    log.info('attached egress proxy to session network', { network: networkName });
+    log.info('attached egress proxy to box network', { network: networkName });
     return true;
   } catch (err) {
     log.warn('could not attach egress proxy', {
@@ -327,7 +327,7 @@ export async function ensureProxyAttached(networkName: string, cfg: Config): Pro
   }
 }
 
-/** Whether the egress proxy is attached to a session network right now. */
+/** Whether the egress proxy is attached to a box network right now. */
 export async function isProxyAttached(networkName: string, cfg: Config): Promise<boolean> {
   try {
     return proxyOn(await docker().getNetwork(networkName).inspect(), cfg);
@@ -382,7 +382,7 @@ export function selfContainerId(): string | null {
 /**
  * Pulls an image, resolving once the daemon has finished with it.
  *
- * Pulling here is what lets SESSION_IMAGE name a published tag rather than
+ * Pulling here is what lets BOX_IMAGE name a published tag rather than
  * something every deployment builds out of a checkout.
  *
  * No auth is passed: a deployment that needs a private registry configures
@@ -502,7 +502,7 @@ export async function resolveHostMountSource(destination: string): Promise<strin
  * Copies a named volume's content into a host directory, through a one-shot
  * container that can see both.
  *
- * This is how a session created before workspaces were directories moves
+ * This is how a box created before workspaces were directories moves
  * onto one. The orchestrator has no path to a named volume, so the copy has
  * to run somewhere both are mounted.
  */
@@ -510,19 +510,19 @@ export async function copyVolumeToDirectory(
   volumeName: string,
   hostDirectory: string,
   image: string,
-  sessionId: string,
+  boxId: string,
 ): Promise<void> {
   await oneShot({
     what: `copy of ${volumeName}`,
     image,
-    sessionId,
+    boxId,
     binds: [`${volumeName}:/from:ro`, `${hostDirectory}:/to`],
     script: 'cp -a /from/. /to/',
   });
 }
 
 /**
- * Fills a session's empty home directory from the image's own `/home/agent`.
+ * Fills a box's empty home directory from the image's own `/home/agent`.
  *
  * Docker seeds a named volume from the image once, when it is created. A
  * bind mount instead covers whatever the image put there, so a fresh home
@@ -542,31 +542,31 @@ export async function copyVolumeToDirectory(
 export async function seedHomeFromImage(
   hostDirectory: string,
   image: string,
-  sessionId: string,
+  boxId: string,
 ): Promise<void> {
-  const { uid, gid } = sessionOwner();
+  const { uid, gid } = boxOwner();
   await oneShot({
     what: 'home seed',
     image,
-    sessionId,
+    boxId,
     binds: [`${hostDirectory}:/to`],
     script: `cp -a ${HOME_DIR}/. /to/ && chown ${uid}:${gid} /to`,
   });
 }
 
 /**
- * Runs one short-lived container over a session's files and waits for it.
+ * Runs one short-lived container over a box's files and waits for it.
  *
  * `cp -a` preserves ownership, which keeps the agent's files the agent's;
  * that needs root in the helper, so these are the containers Boxes creates
- * that do not drop to the session user. They have no network and a read-only
+ * that do not drop to the box user. They have no network and a read-only
  * rootfs, and the script is fixed at each call site — no part of it comes
  * from anything a user typed.
  */
 async function oneShot(spec: {
   what: string;
   image: string;
-  sessionId: string;
+  boxId: string;
   binds: string[];
   script: string;
 }): Promise<void> {
@@ -577,7 +577,7 @@ async function oneShot(spec: {
     // and exits, so the entrypoint is replaced rather than run.
     Entrypoint: ['sh', '-c'],
     Cmd: [spec.script],
-    Labels: { [LABEL]: spec.sessionId, [HELPER_LABEL]: spec.what },
+    Labels: { [LABEL]: spec.boxId, [HELPER_LABEL]: spec.what },
     HostConfig: {
       Binds: spec.binds,
       NetworkMode: 'none',
@@ -604,22 +604,22 @@ async function oneShot(spec: {
   }
 }
 
-/** Creates a session container from the fixed, hardened HostConfig template. */
+/** Creates a box container from the fixed, hardened HostConfig template. */
 export async function createContainer(spec: CreateContainerSpec, cfg: Config): Promise<string> {
   const container = await docker().createContainer({
-    name: names.container(spec.sessionId),
+    name: names.container(spec.boxId),
     Image: spec.image,
-    User: sessionUser(),
+    User: boxUser(),
     WorkingDir: WORKSPACE_DIR,
-    Env: sessionEnv(spec, cfg),
+    Env: boxEnv(spec, cfg),
     Labels: {
-      [LABEL]: spec.sessionId,
-      // A session container is the orchestrator's, and only the
+      [LABEL]: spec.boxId,
+      // A box container is the orchestrator's, and only the
       // orchestrator's: it is tracked by the id returned here, attached to
       // its network after the fact, and recreated on a new image at start.
       // An outside updater that stopped and recreated one would leave the id
       // in the database pointing at nothing and drop the proxy attachment
-      // that is the session's only way out, so the opt-out every such tool
+      // that is the box's only way out, so the opt-out every such tool
       // reads is part of the template rather than something each deployment
       // has to remember. Watchtower honours it; nothing else minds it.
       'com.centurylinklabs.watchtower.enable': 'false',
@@ -633,9 +633,9 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       NetworkMode: spec.networkName,
       Binds: [
         // Both are directories on the orchestrator's data volume, so that
-        // reviewing a session's files needs no exec and no running container,
-        // and so that what a session is costing can be read by walking two
-        // paths. A session from before homes became directories names its
+        // reviewing a box's files needs no exec and no running container,
+        // and so that what a box is costing can be read by walking two
+        // paths. A box from before homes became directories names its
         // volume here instead, and Docker takes either.
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeSource}:${HOME_DIR}`,
@@ -650,12 +650,12 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       // closed target rather than as anything about memory. Playwright's
       // answer, on by default on every Chromium it launches, is
       // --disable-dev-shm-usage, which only moves that traffic to TMPDIR; the
-      // session image points TMPDIR at the home volume so that large temporary
+      // box image points TMPDIR at the home volume so that large temporary
       // files stop competing with the memory limit, and a browser's shared
       // memory is the one thing that wants the opposite. So the container gets
       // a /dev/shm worth using and the image turns the flag back off, which
       // takes ignoreDefaultArgs rather than an args list -- see
-      // session-image/playwright-cli.config.json.
+      // box-image/playwright-cli.config.json.
       //
       // The two halves travel together: without the flag suppressed this is
       // unused, and without this the suppression leaves the browser on 64 MB.
@@ -666,9 +666,9 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       ShmSize: 512 * 1024 * 1024,
       CapDrop: ['ALL'],
       SecurityOpt: ['no-new-privileges:true'],
-      Memory: memoryBytes(cfg.SESSION_MEM_LIMIT),
-      NanoCpus: Math.round(cfg.SESSION_CPUS * 1e9),
-      PidsLimit: cfg.SESSION_PIDS_LIMIT,
+      Memory: memoryBytes(cfg.BOX_MEM_LIMIT),
+      NanoCpus: Math.round(cfg.BOX_CPUS * 1e9),
+      PidsLimit: cfg.BOX_PIDS_LIMIT,
       RestartPolicy: { Name: 'no' },
       // The kernel discards default-disposition signals for PID 1, so the
       // entrypoint's sleep never sees SIGTERM. docker-init forwards the signal
@@ -733,7 +733,7 @@ export async function createLoginContainer(spec: {
 }): Promise<string> {
   const container = await docker().createContainer({
     Image: spec.image,
-    User: sessionUser(),
+    User: boxUser(),
     WorkingDir: '/home/agent',
     Env: Object.entries(spec.env ?? {}).map(([k, v]) => `${k}=${v}`),
     Labels: {
@@ -752,7 +752,7 @@ export async function createLoginContainer(spec: {
       // `exec` because the image puts tools on the home's own PATH, and a
       // login CLI is one of the things that runs from there; `mode=1777`
       // because a tmpfs is created empty and root-owned otherwise, and
-      // everything in here runs as the session user.
+      // everything in here runs as the box user.
       Tmpfs: {
         '/home/agent': 'rw,exec,size=256m,mode=1777',
         '/tmp': 'rw,size=64m,mode=1777',
@@ -814,7 +814,7 @@ export async function spawnLoginExec(
     AttachStderr: true,
     Tty: tty,
     Env: Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
-    User: sessionUser(),
+    User: boxUser(),
     WorkingDir: '/home/agent',
   });
 
@@ -876,7 +876,7 @@ export async function listLoginContainers(): Promise<
   });
 }
 
-/** Removes a session network, detaching the egress proxy first. */
+/** Removes a box network, detaching the egress proxy first. */
 export async function removeNetwork(networkName: string, cfg: Config): Promise<void> {
   const net = docker().getNetwork(networkName);
   // Disconnect the proxy first, else Docker refuses to remove the network.
@@ -1034,7 +1034,7 @@ export async function containerProcesses(containerId: string): Promise<Container
  * in there at the moment it is used, which is also the freshest it can be:
  * a process that ended in between is not in it.
  *
- * `ps` is the session image's, which is why the image installs procps and
+ * `ps` is the box image's, which is why the image installs procps and
  * asserts it. A box without it throws, and a stop that cannot find its target
  * says so rather than killing something else.
  */
@@ -1168,7 +1168,7 @@ async function runExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
-    User: sessionUser(),
+    User: boxUser(),
     WorkingDir: opts.workingDir,
     Env: opts.env && Object.entries(opts.env).map(([name, value]) => `${name}=${value}`),
   });
@@ -1186,7 +1186,7 @@ async function runExec(
 /**
  * Whether a container has a mount at `destination`.
  *
- * A container's mounts are fixed when it is created, so this is how a session
+ * A container's mounts are fixed when it is created, so this is how a box
  * from before a mount existed is recognised and recreated with it. A container
  * that cannot be inspected answers true: a missing one has nothing to fix, and
  * recreating on a transient inspect failure would be the more destructive
@@ -1202,24 +1202,24 @@ export async function hasMount(containerId: string, destination: string): Promis
 }
 
 /**
- * Every labelled session container Docker knows about, for boot
+ * Every labelled box container Docker knows about, for boot
  * reconciliation and the orphan sweep. `helper` marks a copy container that
- * outlived its job rather than the session's own.
+ * outlived its job rather than the box's own.
  */
-export async function listSessionContainers(): Promise<
-  Array<{ id: string; sessionId: string; running: boolean; helper: boolean }>
+export async function listBoxContainers(): Promise<
+  Array<{ id: string; boxId: string; running: boolean; helper: boolean }>
 > {
   const containers = await docker().listContainers({
     all: true,
     filters: { label: [LABEL] },
   });
   return containers.flatMap((c) => {
-    const sessionId = c.Labels?.[LABEL];
-    if (!sessionId) return [];
+    const boxId = c.Labels?.[LABEL];
+    if (!boxId) return [];
     return [
       {
         id: c.Id,
-        sessionId,
+        boxId,
         running: c.State === 'running',
         helper: c.Labels?.[HELPER_LABEL] !== undefined,
       },
@@ -1227,28 +1227,28 @@ export async function listSessionContainers(): Promise<
   });
 }
 
-/** Session networks Boxes created, by the session each is labelled with. */
-export async function listSessionNetworks(): Promise<Array<{ name: string; sessionId: string }>> {
+/** Box networks Boxes created, by the box each is labelled with. */
+export async function listBoxNetworks(): Promise<Array<{ name: string; boxId: string }>> {
   const networks = await docker().listNetworks({ filters: { label: [LABEL] } });
   return networks.flatMap((n) => {
-    const sessionId = (n.Labels as Record<string, string> | undefined)?.[LABEL];
-    return sessionId && n.Name ? [{ name: n.Name, sessionId }] : [];
+    const boxId = (n.Labels as Record<string, string> | undefined)?.[LABEL];
+    return boxId && n.Name ? [{ name: n.Name, boxId }] : [];
   });
 }
 
-/** Session volumes Boxes created, by the session each is labelled with. */
-export async function listSessionVolumes(): Promise<Array<{ name: string; sessionId: string }>> {
+/** Box volumes Boxes created, by the box each is labelled with. */
+export async function listBoxVolumes(): Promise<Array<{ name: string; boxId: string }>> {
   const { Volumes } = await docker().listVolumes({ filters: { label: [LABEL] } });
   return (Volumes ?? []).flatMap((v) => {
-    const sessionId = v.Labels?.[LABEL];
-    return sessionId && v.Name ? [{ name: v.Name, sessionId }] : [];
+    const boxId = v.Labels?.[LABEL];
+    return boxId && v.Name ? [{ name: v.Name, boxId }] : [];
   });
 }
 
 /**
- * Ids of session images on this host that have lost their tag.
+ * Ids of box images on this host that have lost their tag.
  *
- * Untagged and labelled as ours: an old copy of the session image, left
+ * Untagged and labelled as ours: an old copy of the box image, left
  * behind by a pull that moved the tag off it. The label is the whole of what
  * keeps this from being `docker image prune` — an image Boxes never fetched
  * does not carry it, and is never listed here however unused it is.
@@ -1256,15 +1256,15 @@ export async function listSessionVolumes(): Promise<Array<{ name: string; sessio
  * `RepoTags` is checked as well as the filter, so a removal never rests on a
  * filter string alone.
  *
- * The caller excludes what SESSION_IMAGE resolves to now. One case is left:
- * a second Boxes deployment on the same host whose SESSION_IMAGE pins a
+ * The caller excludes what BOX_IMAGE resolves to now. One case is left:
+ * a second Boxes deployment on the same host whose BOX_IMAGE pins a
  * digest has a current image with no tag either, which looks superseded from
  * here. It costs that deployment a re-pull, and any container of its own on
  * the image makes the daemon refuse the removal.
  */
-export async function listSupersededSessionImages(): Promise<string[]> {
+export async function listSupersededBoxImages(): Promise<string[]> {
   const images = await docker().listImages({
-    filters: { dangling: ['true'], label: [`${IMAGE_LABEL}=${SESSION_IMAGE_KIND}`] },
+    filters: { dangling: ['true'], label: [`${IMAGE_LABEL}=${BOX_IMAGE_KIND}`] },
   });
   return images
     .filter((i) => (i.RepoTags ?? []).filter((t) => t !== '<none>:<none>').length === 0)
@@ -1275,10 +1275,10 @@ export async function listSupersededSessionImages(): Promise<string[]> {
 /**
  * Removes an image, and says whether it went.
  *
- * Never forced. A container still created from this image — a session that
+ * Never forced. A container still created from this image — a box that
  * has not been started since the tag moved — makes the daemon refuse with a
  * 409, and that refusal is the safety property rather than an error to work
- * around: the session is moved onto the current image at its next start, and
+ * around: the box is moved onto the current image at its next start, and
  * the image goes on the sweep after that. 404 is somebody else having removed
  * it, which is the outcome this wanted anyway.
  */
@@ -1373,7 +1373,7 @@ export async function spawnAdapterExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
-    User: sessionUser(),
+    User: boxUser(),
     WorkingDir: workingDir,
   });
 
@@ -1397,7 +1397,7 @@ export async function spawnAdapterExec(
 
 
 /**
- * A pty inside a session container, as the terminal endpoint holds one.
+ * A pty inside a box container, as the terminal endpoint holds one.
  *
  * Tty is true, so Docker does no framing: the stream is the pty's bytes in
  * both directions, and there is nothing to demux.
@@ -1440,7 +1440,7 @@ function terminalShell(client: string): string {
 }
 
 /**
- * Opens a pty in a session container, running the shell a reader types into.
+ * Opens a pty in a box container, running the shell a reader types into.
  *
  * The pty runs inside the container's existing isolation — internal network,
  * read-only rootfs, capabilities dropped, non-root user — so this reaches no
@@ -1458,7 +1458,7 @@ export async function openTerminalExec(
   cols: number,
   rows: number,
 ): Promise<TerminalExec> {
-  // A duplicate name is a session that refuses to start, and a counter
+  // A duplicate name is a box that refuses to start, and a counter
   // starting again would collide with a client an earlier process left behind.
   const client = `web-${randomBytes(4).toString('hex')}`;
 
@@ -1468,7 +1468,7 @@ export async function openTerminalExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: true,
-    User: sessionUser(),
+    User: boxUser(),
     WorkingDir: workingDir,
     // Without this an editor, a pager and everything else that draws degrade
     // to plain scrolling text.

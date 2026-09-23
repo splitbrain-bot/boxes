@@ -90,12 +90,12 @@ export type Logger = ReturnType<typeof levels>;
 export const log = {
   ...levels(),
   wants,
-  /** Child logger that stamps every line with a session id. */
-  session: (id: string): Logger => levels({ session: id }),
+  /** Child logger that stamps every line with a box id. */
+  box: (id: string): Logger => levels({ box: id }),
   /**
    * Child logger stamping whatever the caller is distinguishing lines by.
    *
-   * One session runs an adapter per harness, so a session id alone no longer
+   * One box runs an adapter per harness, so a box id alone no longer
    * says which process a line came from.
    */
   tagged: (fields: Record<string, unknown>): Logger => levels(fields),

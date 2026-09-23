@@ -5,18 +5,18 @@ import { join } from 'node:path';
 import type {
   HarnessCatalog,
   HarnessId,
-  SessionConfigOption,
-  SessionModeState,
-  SessionStatus,
+  ThreadConfigOption,
+  ThreadModeState,
+  BoxStatus,
 } from '../../shared/types.ts';
 
 /**
- * SQLite persistence in WAL mode. The database holds session metadata only:
+ * SQLite persistence in WAL mode. The database holds box metadata only:
  * Docker is the runtime truth, and thread replay belongs to the adapter.
  */
 
-/** A row of the sessions table. */
-export interface SessionRow {
+/** A row of the boxes table. */
+export interface BoxRow {
   id: string;
   name: string;
   profile: string;
@@ -25,28 +25,28 @@ export interface SessionRow {
   network_name: string;
   subnet: string;
   /**
-   * The named volume holding the workspace of a session created before
-   * workspaces became directories. Empty on a directory-backed session,
+   * The named volume holding the workspace of a box created before
+   * workspaces became directories. Empty on a directory-backed box,
    * which every new one is.
    */
   ws_volume: string;
   /**
-   * The named volume holding the home of a session created before homes
-   * became directories. Empty on a directory-backed session, which every new
+   * The named volume holding the home of a box created before homes
+   * became directories. Empty on a directory-backed box, which every new
    * one is.
    */
   home_volume: string;
   /**
-   * Where the session's files are, as this process saw them when the session
-   * was created or migrated, and null while the session is still
+   * Where the box's files are, as this process saw them when the box
+   * was created or migrated, and null while the box is still
    * volume-backed. The path used is derived from the current DATA_DIR, so
    * moving the data volume moves the workspaces with it; this column decides
-   * only whether the session has a directory.
+   * only whether the box has a directory.
    */
   workspace_dir: string | null;
   /**
-   * Where the session's home is, on the same terms as `workspace_dir`, and
-   * null for a session from before homes became directories — which keeps its
+   * Where the box's home is, on the same terms as `workspace_dir`, and
+   * null for a box from before homes became directories — which keeps its
    * `home_volume` and goes on running from it.
    */
   home_dir: string | null;
@@ -61,21 +61,21 @@ export interface SessionRow {
    * than stored.
    */
   review_base_rev: string | null;
-  status: SessionStatus;
+  status: BoxStatus;
   /**
-   * The extra agent set this session was created with, or null for the global
+   * The extra agent set this box was created with, or null for the global
    * set alone. Cleared by the database if that set is later deleted.
    */
   agent_set_id: string | null;
   /**
    * The thread a connection that names none gets, or null before one exists.
    * A default rather than the truth: a connection may pin itself to any of
-   * the session's threads instead.
+   * the box's threads instead.
    */
   current_thread_id: string | null;
   /**
-   * The bearer token a WebSocket upgrade to this session has to present. Its
-   * own: it opens this session and no other one in the deployment.
+   * The bearer token a WebSocket upgrade to this box has to present. Its
+   * own: it opens this box and no other one in the deployment.
    */
   ws_token: string;
   created_at: number;
@@ -83,7 +83,7 @@ export interface SessionRow {
 }
 
 /**
- * One conversation of a session, as stored.
+ * One conversation of a box, as stored.
  *
  * `acp_session_id` is the adapter's own id for it, and is null while the row
  * exists but the adapter has forgotten the thread — a thread minted and never
@@ -91,11 +91,11 @@ export interface SessionRow {
  */
 export interface ThreadRow {
   id: string;
-  session_id: string;
+  box_id: string;
   /**
    * Which agent runs this conversation, by its id in the harness registry.
    *
-   * On the thread rather than on the session because a box holds one checkout
+   * On the thread rather than on the box because a box holds one checkout
    * and may run both agents over it, and because a transcript can only be
    * loaded back by the adapter that wrote it.
    */
@@ -107,10 +107,10 @@ export interface ThreadRow {
    * a thread that has never been prompted.
    */
   title: string | null;
-  /** Per session and never reused; what an untitled thread is called. */
+  /** Per box and never reused; what an untitled thread is called. */
   ordinal: number;
   /**
-   * 1 while a prompt turn is running on this thread. The session's own
+   * 1 while a prompt turn is running on this thread. The box's own
    * "a turn is running" is derived from its threads rather than stored
    * beside them.
    */
@@ -155,7 +155,7 @@ export interface ThreadRow {
 /** A permission request the adapter is still blocked on. */
 export interface PendingRequestRow {
   id: number;
-  session_id: string;
+  box_id: string;
   /**
    * The ACP thread that asked, so a browser is given only the requests for
    * the thread it is watching. Null on a row from before the column existed,
@@ -201,8 +201,8 @@ export interface PushSubscriptionRow {
  * of skills and slash commands.
  *
  * The row with id `global` is seeded by the migration that creates the table
- * and is applied to every session. Every other set is optional and is chosen
- * when a session is created, and its contents are merged over the global ones.
+ * and is applied to every box. Every other set is optional and is chosen
+ * when a box is created, and its contents are merged over the global ones.
  */
 export interface AgentSetRow {
   id: string;
@@ -280,8 +280,8 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE sessions DROP COLUMN repo_url;
   `,
-  // A session owns several threads. The single acp_session_id column becomes
-  // one row per thread, and the session points at the one that is current.
+  // A box owns several threads. The single acp_session_id column becomes
+  // one row per thread, and the box points at the one that is current.
   `
   CREATE TABLE threads (
     id             TEXT PRIMARY KEY,
@@ -304,7 +304,7 @@ export const MIGRATIONS: string[] = [
 
   ALTER TABLE sessions DROP COLUMN acp_session_id;
   `,
-  // Threads run in parallel, so what was session-wide moves onto the thread
+  // Threads run in parallel, so what was box-wide moves onto the thread
   // it is about. Nothing needs moving with it: a turn cannot survive the
   // restart that applies this, and pending_requests is cleared at every boot,
   // so every thread correctly starts at 0.
@@ -330,7 +330,7 @@ export const MIGRATIONS: string[] = [
   );
   `,
   // A workspace becomes a directory on the orchestrator's data volume,
-  // bind-mounted into the session container, so the orchestrator can read the
+  // bind-mounted into the box container, so the orchestrator can read the
   // agent's files without an exec. Nothing is moved here: an existing row
   // keeps its ws_volume and a null workspace_dir, and migrates at its next
   // start — which is the only moment its container can be recreated with the
@@ -352,9 +352,9 @@ export const MIGRATIONS: string[] = [
   // seeded here, so every deployment has exactly one always-applied set from
   // its first boot.
   //
-  // A session names at most one further set. Deleting that set is not blocked
-  // — the session's files are already materialized — so the reference clears
-  // itself, and the session falls back to the global set alone at its next
+  // A box names at most one further set. Deleting that set is not blocked
+  // — the box's files are already materialized — so the reference clears
+  // itself, and the box falls back to the global set alone at its next
   // start.
   `
   CREATE TABLE agent_sets (
@@ -406,7 +406,7 @@ export const MIGRATIONS: string[] = [
   // repository the workspace holds there is no single commit to store either —
   // only the expression, which `review_base_rev` already is.
   //
-  // Existing sessions are not migrated. An old REVIEW.md under a subdirectory
+  // Existing boxes are not migrated. An old REVIEW.md under a subdirectory
   // stays where it is and is no longer the review; it remains a file of the
   // tree, readable and deletable like any other.
   `
@@ -414,17 +414,17 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE sessions DROP COLUMN review_base_commit;
   `,
   // The home follows the workspace out of a named volume and into a directory
-  // on the data volume, so that everything a session is made of is in one
+  // on the data volume, so that everything a box is made of is in one
   // place and can be measured, backed up and read as ordinary files.
   //
-  // Nothing is moved, here or later: an existing session keeps its
+  // Nothing is moved, here or later: an existing box keeps its
   // home_volume and a null home_dir, and goes on mounting the volume for as
-  // long as it lives. Only a session created after this gets a directory.
+  // long as it lives. Only a box created after this gets a directory.
   `
   ALTER TABLE sessions ADD COLUMN home_dir TEXT;
   `,
   // A local command belongs to the thread it was typed in. The log was
-  // per-session, so every thread replayed all of it and a command run in one
+  // per-box, so every thread replayed all of it and a command run in one
   // conversation showed up in every other one. The stored rows name no thread
   // and nothing can say which conversation each was typed in, so they go.
   `
@@ -443,12 +443,12 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE exec_log ADD COLUMN after_id TEXT;
   `,
-  // The token a WebSocket upgrade presents belongs to one session, so it
-  // opens that session alone rather than every session of the deployment.
+  // The token a WebSocket upgrade presents belongs to one box, so it
+  // opens that box alone rather than every box of the deployment.
   //
   // Every existing row is given a token here rather than at its first read:
-  // this is the one moment that reaches all of them, and it leaves no session
-  // without one. SQLite draws randomblob per row, so no two sessions share a
+  // this is the one moment that reaches all of them, and it leaves no box
+  // without one. SQLite draws randomblob per row, so no two boxes share a
   // token.
   `
   ALTER TABLE sessions ADD COLUMN ws_token TEXT NOT NULL DEFAULT '';
@@ -516,7 +516,7 @@ export const MIGRATIONS: string[] = [
   UPDATE threads SET config = json_object('model', model_id) WHERE model_id IS NOT NULL;
   ALTER TABLE threads DROP COLUMN model_id;
 
-  -- The argv comes from the harness registry now, so a session no longer
+  -- The argv comes from the harness registry now, so a box no longer
   -- carries the adapter it was created with: the thread says which adapter it
   -- needs, and a box may need either.
   ALTER TABLE sessions DROP COLUMN agent_cmd;
@@ -529,6 +529,19 @@ export const MIGRATIONS: string[] = [
     config_options TEXT NOT NULL,
     seen_at        INTEGER NOT NULL
   );
+  `,
+  // A container is called a box everywhere else, so the schema says so too.
+  // The old name collided with the ACP session a thread is, which is the
+  // confusion this removes. `acp_session_id` keeps its name: that column
+  // holds the adapter's own id, and ACP is where that word belongs.
+  `
+  ALTER TABLE sessions RENAME TO boxes;
+  ALTER TABLE threads RENAME COLUMN session_id TO box_id;
+  ALTER TABLE pending_requests RENAME COLUMN session_id TO box_id;
+  DROP INDEX IF EXISTS idx_pending_session;
+  DROP INDEX IF EXISTS idx_threads_session;
+  CREATE INDEX idx_pending_box ON pending_requests(box_id);
+  CREATE INDEX idx_threads_box ON threads(box_id, ordinal);
   `,
 ];
 
@@ -579,16 +592,16 @@ function migrate(db: Db): void {
 }
 
 /**
- * The subnets the sessions that still exist are on.
+ * The subnets the boxes that still exist are on.
  *
  * What the allocator has to skip: the counter behind nextSubnetIndex only
  * rises, so it wraps back onto subnets that are still held once the pool has
- * been round once. A deleted session gives its subnet back with its network,
+ * been round once. A deleted box gives its subnet back with its network,
  * so its tombstone is not counted.
  */
 export function takenSubnets(db: Db): Set<string> {
   const rows = db
-    .prepare("SELECT subnet FROM sessions WHERE status != 'deleted'")
+    .prepare("SELECT subnet FROM boxes WHERE status != 'deleted'")
     .all() as Array<{ subnet: string }>;
   return new Set(rows.map((row) => row.subnet));
 }
@@ -606,29 +619,29 @@ export function nextSubnetIndex(db: Db): number {
 }
 
 /**
- * Marks a session active now, which is what holds the idle reaper off.
+ * Marks a box active now, which is what holds the idle reaper off.
  *
- * A deleted session is left alone: an upstream still settling when the session
+ * A deleted box is left alone: an upstream still settling when the box
  * was removed reports afterwards, and that must not stir a row that is on its
  * way out.
  */
-export function touchSession(db: Db, sessionId: string): void {
-  db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ? AND status != 'deleted'").run(
+export function touchBox(db: Db, boxId: string): void {
+  db.prepare("UPDATE boxes SET last_active_at = ? WHERE id = ? AND status != 'deleted'").run(
     Date.now(),
-    sessionId,
+    boxId,
   );
 }
 
 // --- threads ----------------------------------------------------------------
 
-/** Every thread of a session, oldest first. */
-export function listThreads(db: Db, sessionId: string): ThreadRow[] {
+/** Every thread of a box, oldest first. */
+export function listThreads(db: Db, boxId: string): ThreadRow[] {
   return db
-    .prepare('SELECT * FROM threads WHERE session_id = ? ORDER BY ordinal ASC')
-    .all(sessionId) as ThreadRow[];
+    .prepare('SELECT * FROM threads WHERE box_id = ? ORDER BY ordinal ASC')
+    .all(boxId) as ThreadRow[];
 }
 
-/** One thread by id, whichever session it belongs to. */
+/** One thread by id, whichever box it belongs to. */
 export function getThread(db: Db, threadId: string): ThreadRow | undefined {
   return db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as
     | ThreadRow
@@ -636,7 +649,7 @@ export function getThread(db: Db, threadId: string): ThreadRow | undefined {
 }
 
 /**
- * One thread by the adapter's own id for it, within a session and a harness.
+ * One thread by the adapter's own id for it, within a box and a harness.
  *
  * The gateway knows a conversation by that id and nothing else, so this is
  * how a message about it finds the row a link or a name has to come from.
@@ -646,26 +659,26 @@ export function getThread(db: Db, threadId: string): ThreadRow | undefined {
  */
 export function threadByAcpId(
   db: Db,
-  sessionId: string,
+  boxId: string,
   harness: HarnessId,
   acpSessionId: string,
 ): ThreadRow | undefined {
   return db
     .prepare(
-      'SELECT * FROM threads WHERE session_id = ? AND harness = ? AND acp_session_id = ?',
+      'SELECT * FROM threads WHERE box_id = ? AND harness = ? AND acp_session_id = ?',
     )
-    .get(sessionId, harness, acpSessionId) as ThreadRow | undefined;
+    .get(boxId, harness, acpSessionId) as ThreadRow | undefined;
 }
 
-/** The thread a session's gateway is currently answering for, or undefined. */
-export function currentThread(db: Db, sessionId: string): ThreadRow | undefined {
+/** The thread a box's gateway is currently answering for, or undefined. */
+export function currentThread(db: Db, boxId: string): ThreadRow | undefined {
   return db
     .prepare(
       `SELECT t.* FROM threads t
-         JOIN sessions s ON s.current_thread_id = t.id
+         JOIN boxes s ON s.current_thread_id = t.id
         WHERE s.id = ?`,
     )
-    .get(sessionId) as ThreadRow | undefined;
+    .get(boxId) as ThreadRow | undefined;
 }
 
 /** What a thread is created as. Everything but the harness has a default. */
@@ -682,9 +695,9 @@ export interface NewThread {
 }
 
 /**
- * Inserts a thread and makes it the session's current one.
+ * Inserts a thread and makes it the box's current one.
  *
- * The ordinal is one past the highest the session has ever used, so a name
+ * The ordinal is one past the highest the box has ever used, so a name
  * like "Thread 2" stays that thread's for good.
  *
  * The harness, the mode and the config are given here rather than written
@@ -693,15 +706,15 @@ export interface NewThread {
  * second statement to run, and the first thread of a box is created before
  * any adapter has been started.
  */
-export function insertThread(db: Db, sessionId: string, thread: NewThread): ThreadRow {
+export function insertThread(db: Db, boxId: string, thread: NewThread): ThreadRow {
   const now = Date.now();
   const id = `t${randomBytes(6).toString('hex')}`;
   const next = db
-    .prepare('SELECT COALESCE(MAX(ordinal), 0) + 1 AS n FROM threads WHERE session_id = ?')
-    .get(sessionId) as { n: number };
+    .prepare('SELECT COALESCE(MAX(ordinal), 0) + 1 AS n FROM threads WHERE box_id = ?')
+    .get(boxId) as { n: number };
   const row: ThreadRow = {
     id,
-    session_id: sessionId,
+    box_id: boxId,
     harness: thread.harness,
     acp_session_id: thread.acpSessionId ?? null,
     title: null,
@@ -716,14 +729,14 @@ export function insertThread(db: Db, sessionId: string, thread: NewThread): Thre
   };
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO threads (id, session_id, harness, acp_session_id, title, ordinal,
+      `INSERT INTO threads (id, box_id, harness, acp_session_id, title, ordinal,
          turn_active, inherits_from, mode_id, config, done, created_at,
          last_active_at)
-       VALUES (@id, @session_id, @harness, @acp_session_id, @title, @ordinal,
+       VALUES (@id, @box_id, @harness, @acp_session_id, @title, @ordinal,
          @turn_active, @inherits_from, @mode_id, @config, @done, @created_at,
          @last_active_at)`,
     ).run(row);
-    db.prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?').run(id, sessionId);
+    db.prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?').run(id, boxId);
   })();
   return row;
 }
@@ -820,59 +833,59 @@ export function setThreadDone(db: Db, threadId: string, done: boolean): void {
   db.prepare('UPDATE threads SET done = ? WHERE id = ?').run(done ? 1 : 0, threadId);
 }
 
-/** Marks a thread active now, alongside its session. */
+/** Marks a thread active now, alongside its box. */
 export function touchThread(db: Db, threadId: string): void {
   db.prepare('UPDATE threads SET last_active_at = ? WHERE id = ?').run(Date.now(), threadId);
 }
 
 /**
  * Records whether a prompt turn is running on the thread the adapter knows by
- * `acpSessionId`, and marks both it and its session active.
+ * `acpSessionId`, and marks both it and its box active.
  *
  * Addressed by the adapter's own id because that is what a prompt's params
  * carry, so the row is found by which conversation the turn is on.
  */
 export function setThreadTurnActive(
   db: Db,
-  sessionId: string,
+  boxId: string,
   acpSessionId: string,
   active: boolean,
 ): void {
   db.transaction(() => {
     db.prepare(
       `UPDATE threads SET turn_active = ?, last_active_at = ?
-        WHERE session_id = ? AND acp_session_id = ?`,
-    ).run(active ? 1 : 0, Date.now(), sessionId, acpSessionId);
-    touchSession(db, sessionId);
+        WHERE box_id = ? AND acp_session_id = ?`,
+    ).run(active ? 1 : 0, Date.now(), boxId, acpSessionId);
+    touchBox(db, boxId);
   })();
 }
 
 /**
- * Clears the running-turn flag on every thread of a session.
+ * Clears the running-turn flag on every thread of a box.
  *
  * None of the callers leaves a turn running: a deliberate stop, an adapter
  * exit, boot reconciliation.
  */
-export function clearSessionTurns(db: Db, sessionId: string): void {
-  db.prepare('UPDATE threads SET turn_active = 0 WHERE session_id = ?').run(sessionId);
+export function clearBoxTurns(db: Db, boxId: string): void {
+  db.prepare('UPDATE threads SET turn_active = 0 WHERE box_id = ?').run(boxId);
 }
 
-/** Whether any of a session's threads has a turn running. */
-export function sessionTurnActive(db: Db, sessionId: string): boolean {
+/** Whether any of a box's threads has a turn running. */
+export function boxTurnActive(db: Db, boxId: string): boolean {
   const row = db
     .prepare(
-      'SELECT 1 AS hit FROM threads WHERE session_id = ? AND turn_active = 1 LIMIT 1',
+      'SELECT 1 AS hit FROM threads WHERE box_id = ? AND turn_active = 1 LIMIT 1',
     )
-    .get(sessionId) as { hit: number } | undefined;
+    .get(boxId) as { hit: number } | undefined;
   return row !== undefined;
 }
 
-/** The session ids that have a turn running on any of their threads. */
-export function sessionsWithActiveTurns(db: Db): Set<string> {
+/** The box ids that have a turn running on any of their threads. */
+export function boxesWithActiveTurns(db: Db): Set<string> {
   const rows = db
-    .prepare('SELECT DISTINCT session_id FROM threads WHERE turn_active = 1')
-    .all() as Array<{ session_id: string }>;
-  return new Set(rows.map((r) => r.session_id));
+    .prepare('SELECT DISTINCT box_id FROM threads WHERE turn_active = 1')
+    .all() as Array<{ box_id: string }>;
+  return new Set(rows.map((r) => r.box_id));
 }
 
 // --- push subscriptions -----------------------------------------------------
@@ -942,10 +955,10 @@ export function touchPushSubscription(db: Db, endpoint: string): void {
   );
 }
 
-/** How many sessions exist that have not been deleted. */
-export function countLiveSessions(db: Db): number {
+/** How many boxes exist that have not been deleted. */
+export function countLiveBoxes(db: Db): number {
   const row = db
-    .prepare("SELECT COUNT(*) AS n FROM sessions WHERE status != 'deleted'")
+    .prepare("SELECT COUNT(*) AS n FROM boxes WHERE status != 'deleted'")
     .get() as { n: number };
   return row.n;
 }
@@ -982,8 +995,8 @@ export interface HarnessCatalogRow {
 export function upsertHarnessCatalog(
   db: Db,
   harness: HarnessId,
-  modes: SessionModeState | null | undefined,
-  configOptions: SessionConfigOption[] | null | undefined,
+  modes: ThreadModeState | null | undefined,
+  configOptions: ThreadConfigOption[] | null | undefined,
 ): void {
   const previous = readHarnessCatalog(db, harness);
   const next: HarnessCatalog = {
@@ -1014,8 +1027,8 @@ export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog |
   if (!row) return null;
   try {
     return {
-      modes: JSON.parse(row.modes) as SessionModeState | null,
-      configOptions: JSON.parse(row.config_options) as SessionConfigOption[],
+      modes: JSON.parse(row.modes) as ThreadModeState | null,
+      configOptions: JSON.parse(row.config_options) as ThreadConfigOption[],
       seenAt: row.seen_at,
     };
   } catch {

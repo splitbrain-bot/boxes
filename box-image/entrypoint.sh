@@ -15,7 +15,7 @@ log() { printf '[entrypoint] %s\n' "$*" >&2; }
 # have the directory, and a missing TMPDIR fails oddly and far from its cause.
 # Emptied because the tmpfs it replaces was discarded on every restart for free,
 # and a directory on a persistent volume would instead keep every temporary file
-# the session ever made.
+# the box ever made.
 #
 # The contents go rather than the directory itself, so nothing has to re-create
 # it, and so a bad TMPDIR can never turn this into a recursive delete of a path
@@ -49,7 +49,7 @@ fi
 # treats a CODEX_HOME naming a missing directory as an error rather than
 # creating it. The image carries both, but a home filled from an image that
 # predates either does not have it: a home is copied out of the image when its
-# session is created and never refreshed.
+# box is created and never refreshed.
 if ! mkdir -p /home/agent/.local/bin; then
   log "WARNING: could not create /home/agent/.local/bin; installing tools will fail"
 fi
@@ -170,7 +170,7 @@ fi
 # Three things the CLI cannot work out for itself.
 #
 # First, where the browsers are. The image keeps them at BOXES_IMAGE_BROWSERS,
-# which is read-only in a session; PLAYWRIGHT_BROWSERS_PATH points instead at a
+# which is read-only in a box; PLAYWRIGHT_BROWSERS_PATH points instead at a
 # directory in the home, which is writable and which Playwright therefore
 # treats as somewhere it may install. Linking the image's builds into it is
 # what lets both be true at once: the browser the image already carries
@@ -178,10 +178,10 @@ fi
 # own lands beside the links.
 #
 # Every start, rather than once when the home was filled. A home is copied out
-# of the image at session creation and never refreshed, so links written then
+# of the image at box creation and never refreshed, so links written then
 # would name whichever revision that image carried, and an image rebuilt onto a
 # newer Playwright would leave every one of them dangling. Relinking against
-# the image that is running is what keeps a long-lived session working across
+# the image that is running is what keeps a long-lived box working across
 # an upgrade, and the sweep below is what clears out what the upgrade orphaned.
 #
 # Only links are swept. A real directory here is a browser some project
@@ -224,10 +224,10 @@ link_image_browsers() {
 link_image_browsers
 
 # Its global config, at ~/.playwright/cli.config.json, carries which browser to
-# use and the launch options a session container needs; the image ships that
+# use and the launch options a box container needs; the image ships that
 # much, and the only piece missing at build time is the egress proxy, which is
 # added here. Written on every start rather than once, so a corrected base
-# config reaches a session whose home already exists. A project's own
+# config reaches a box whose home already exists. A project's own
 # .playwright/cli.config.json still overrides all of it.
 cli_base=/usr/local/share/boxes/playwright-cli.config.json
 cli_config=/home/agent/.playwright/cli.config.json
@@ -254,7 +254,7 @@ fi
 # anywhere rather than for this image: which browsers are already here, which
 # are a download away, and which command to reach for.
 #
-# Written for whoever is in the session rather than for whoever runs the
+# Written for whoever is in the box rather than for whoever runs the
 # deployment. An agent that does
 # not know Chromium is already linked reaches for `npx playwright install`,
 # which is the one form that still costs something: npx never consults PATH, so
@@ -334,9 +334,9 @@ copy_skill_to_agents() {
 
 # And its skill, which the CLI installs itself. --global puts it in
 # ~/.claude/skills rather than in the workspace, which is a git checkout that
-# is none of our business. Re-run every start so the copy in the session's home
+# is none of our business. Re-run every start so the copy in the box's home
 # follows the image rather than being frozen at whatever the home was filled
-# with when the session was created.
+# with when the box was created.
 #
 # Runs after install_agent_config, and defers to it: a skill of this name in
 # the box's merged set is the one the box gets. The dashboard showed that

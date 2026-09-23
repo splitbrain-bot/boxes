@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
-import type { SessionUpdate } from '../src/stores/thread/acp-types.ts';
+import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { DEFAULT_SESSION, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
@@ -13,7 +13,7 @@ import { reply, type GatewayScript } from './stub-gateway.ts';
  * session/cancel the way the real gateway does.
  */
 
-const SESSION = DEFAULT_SESSION;
+const BOX = DEFAULT_BOX;
 
 /**
  * A real PNG, small enough to sit in the source: two bands and a diagonal, so
@@ -51,7 +51,7 @@ test('a prompt streams back and renders as it arrives', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -81,7 +81,7 @@ test('a prompt streams back and renders as it arrives', async () => {
 test('an attached image is uploaded, named in the prompt, and shown from the workspace', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('The margin is wrong.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -97,10 +97,10 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
     await input.fill('what is wrong here?');
     await input.press('Control+Enter');
 
-    // Uploaded into the session's workspace, before the prompt that names it.
+    // Uploaded into the box's workspace, before the prompt that names it.
     await expect.poll(() => stub.attachmentUploads.length).toBe(1);
     expect(stub.attachmentUploads[0]!.name).toBe('shot.png');
-    expect(stub.attachmentUploads[0]!.sessionId).toBe(SESSION.id);
+    expect(stub.attachmentUploads[0]!.boxId).toBe(BOX.id);
 
     // The note saying where it was saved, then what was typed. No bytes: the
     // picture is in the workspace, and the prompt carries the path to it.
@@ -111,12 +111,12 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
     expect(blocks[0]!.text).toContain('image/png');
     expect(blocks[1]!.text).toBe('what is wrong here?');
 
-    // What the thread shows is the picture — fetched back from the session's
+    // What the thread shows is the picture — fetched back from the box's
     // workspace — and not the note that went with it.
     const picture = page.locator('[data-slot="aui_user-message-image"] img').first();
     await expect.poll(() => picture.count()).toBe(1);
     expect(await picture.getAttribute('src')).toBe(
-      `/api/sessions/${SESSION.id}/attachments/shot.png`,
+      `/api/boxes/${BOX.id}/attachments/shot.png`,
     );
     // Loaded, rather than merely pointed at something.
     await expect
@@ -141,7 +141,7 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
 test('an attached SVG is shown as the drawing it is', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('A box and an arrow.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -181,7 +181,7 @@ test('an attached SVG is shown as the drawing it is', async () => {
 test('an attached file that is not an image travels as a path, and reads as a chip', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('It is a receipt.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -213,7 +213,7 @@ test('an attached file that is not an image travels as a path, and reads as a ch
     await expect.poll(() => page.getByText('report.pdf').isVisible()).toBe(true);
     const link = page.locator('[data-slot="aui_user-message-file"] a').first();
     const href = await link.getAttribute('href');
-    expect(href).toBe(`/api/sessions/${SESSION.id}/attachments/report.pdf`);
+    expect(href).toBe(`/api/boxes/${BOX.id}/attachments/report.pdf`);
     expect(await link.getAttribute('target')).toBe('_blank');
     expect(await link.getAttribute('rel')).toContain('noopener');
 
@@ -235,7 +235,7 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
     prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually.') }],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -273,7 +273,7 @@ test('reloading mid-conversation replays the whole thread', async () => {
     prompts: [{ match: () => true, updates: reply('First answer.') }],
   });
 
-  const first = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const first = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => first.page.getByText('connected').isVisible()).toBe(true);
     const input = first.page.getByLabel('Message input');
@@ -286,7 +286,7 @@ test('reloading mid-conversation replays the whole thread', async () => {
 
   // A fresh browser gets the same thread back, because session/load replays
   // it as notifications.
-  const second = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const second = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => second.page.getByText('First answer.').isVisible()).toBe(true);
     await expect.poll(() => second.page.getByText('question one').isVisible()).toBe(true);
@@ -303,8 +303,8 @@ test('a second tab sees updates live', async () => {
     prompts: [{ match: () => true, updates: reply('Shared answer.') }],
   });
 
-  const a = await openPage(stub.url, `/sessions/${SESSION.id}`);
-  const b = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const a = await openPage(stub.url, `/boxes/${BOX.id}`);
+  const b = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => a.page.getByText('connected').isVisible()).toBe(true);
     await expect.poll(() => b.page.getByText('connected').isVisible()).toBe(true);
@@ -332,7 +332,7 @@ test('cancelling stops the run state', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -374,7 +374,7 @@ test('a turn held open for background work still hands the composer back', async
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -411,8 +411,8 @@ test('a turn held open for background work still hands the composer back', async
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(() => stub.backgroundStops.length).toBe(1);
     assert.deepEqual(stub.backgroundStops[0], {
-      sessionId: SESSION.id,
-      threadId: SESSION.threadId,
+      boxId: BOX.id,
+      threadId: BOX.threadId,
     });
 
     // And when the work is over, the bar goes with it — on the gateway's own
@@ -460,7 +460,7 @@ test('the bar names the work by kind, and offers no stop for a task that says it
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -481,8 +481,8 @@ test('the bar names the work by kind, and offers no stop for a task that says it
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(() => stub.backgroundStops.length).toBe(1);
     assert.deepEqual(stub.backgroundStops[0], {
-      sessionId: SESSION.id,
-      threadId: SESSION.threadId,
+      boxId: BOX.id,
+      threadId: BOX.threadId,
       processId: 'bg-2',
     });
 
@@ -502,14 +502,14 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     stub.gateway.emit({
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text: `asking about ${text}` },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: `answering about ${text}` },
-    } as SessionUpdate);
+    } as ThreadUpdate);
   }
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     // The browser has asked for its history and the stub is sitting on the
     // answer. Waited for rather than assumed: releasing frees the loads that
@@ -566,7 +566,7 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -577,8 +577,8 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     const thread = (await page.locator('.aui-thread-root').boundingBox())!;
     expect(header.height).toBeGreaterThan(0);
     expect(thread.y).toBeGreaterThanOrEqual(header.y + header.height);
-    await expect.poll(() => page.getByLabel('Back to sessions').isVisible()).toBe(true);
-    await expect.poll(() => page.getByLabel("Review this session's code").isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel("Review this box's code").isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -591,14 +591,14 @@ test('an update the dashboard does not know about does not break the thread', as
       {
         match: () => true,
         updates: [
-          { sessionUpdate: 'usage_update', tokens: 42 } as unknown as SessionUpdate,
+          { sessionUpdate: 'usage_update', tokens: 42 } as unknown as ThreadUpdate,
           ...reply('Still fine.'),
         ],
       },
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -614,7 +614,7 @@ test('an update the dashboard does not know about does not break the thread', as
 test('an image renders wherever it arrives — a tool result, or what the agent said', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -627,16 +627,16 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
       kind: 'read',
       status: 'completed',
       content: [{ type: 'content', content: { type: 'image', mimeType: 'image/png', data: PNG } }],
-    } as SessionUpdate);
+    } as ThreadUpdate);
     // And the other way one can arrive: in the message itself.
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'Here is the page:' },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'image', mimeType: 'image/png', data: PNG },
-    } as SessionUpdate);
+    } as ThreadUpdate);
 
     // Both of them, as loaded images rather than as parts that merely exist:
     // a broken src renders an <img> too.
@@ -662,7 +662,7 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
 test('a background task reporting in is a row of its own, not the user talking', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/sessions/${SESSION.id}`);
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -683,7 +683,7 @@ test('a background task reporting in is a row of its own, not the user talking',
           '</task-notification>',
         ].join('\n'),
       },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'user_message_chunk',
       messageId: 'note-2',
@@ -700,11 +700,11 @@ test('a background task reporting in is a row of its own, not the user talking',
           '</task-notification>',
         ].join('\n'),
       },
-    } as SessionUpdate);
+    } as ThreadUpdate);
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'The crawl is being rate limited; the backoff is holding.' },
-    } as SessionUpdate);
+    } as ThreadUpdate);
 
     // Two rows, neither of them a message on the user's side of the thread.
     const rows = page.locator('[data-role="task-notification"]');

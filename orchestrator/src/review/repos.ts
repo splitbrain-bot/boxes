@@ -5,7 +5,7 @@ import { isTopLevel, type GitBox, type GitTarget } from './git.ts';
 /**
  * Which repositories a workspace holds, and which of them owns a path.
  *
- * A session's workspace is not one repository. The agent clones what it was
+ * A box's workspace is not one repository. The agent clones what it was
  * pointed at, forks and clones a second thing to compare against, checks a
  * dependency out beside it, and sometimes ends up with a repository inside a
  * repository. So the review is over the workspace and a repository is an
@@ -32,7 +32,7 @@ export interface Repo {
   path: string;
   /** What to call it: its last path segment, or the workspace's own name. */
   name: string;
-  /** Where its git runs: the session's container, and its root inside it. */
+  /** Where its git runs: the box's container, and its root inside it. */
   git: GitTarget;
 }
 

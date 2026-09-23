@@ -22,7 +22,7 @@ import {
   agentItemBody,
   backgroundStopBody,
   createAgentSetBody,
-  createSessionBody,
+  createBoxBody,
   createThreadBody,
   loginCodeBody,
   parseBody,
@@ -44,7 +44,7 @@ import {
   type CredentialId,
 } from './credentials.ts';
 import {
-  countLiveSessions,
+  countLiveBoxes,
   countPushSubscriptions,
   deletePushSubscription,
   readHarnessCatalog,
@@ -61,9 +61,9 @@ import { log } from './log.ts';
 import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
-import { SessionManager } from './sessions.ts';
+import { BoxManager } from './boxes.ts';
 import { patchSettings, readSettings } from './settings.ts';
-import { setSessionOwner } from './workspaces.ts';
+import { setBoxOwner } from './workspaces.ts';
 
 /** The HTTP surface: the REST API and the static bundle. */
 
@@ -190,7 +190,7 @@ export interface BuildOptions {
 /** What one orchestrator process hands its boot and its tests, wired together. */
 export interface Orchestrator {
   app: ReturnType<typeof Fastify>;
-  manager: SessionManager;
+  manager: BoxManager;
   cfg: Config;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
@@ -198,7 +198,7 @@ export interface Orchestrator {
   credentials: CredentialStore;
   /** The logins in flight, one per credential at most. */
   logins: LoginManager;
-  /** Session ids whose network is missing the egress proxy. */
+  /** Box ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
 
@@ -213,7 +213,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
   // Before anything creates a workspace directory or a container: everything
   // that writes files for the agent, or runs a process as it, reads this.
-  setSessionOwner(cfg.SESSION_UID, cfg.SESSION_GID);
+  setBoxOwner(cfg.BOX_UID, cfg.BOX_GID);
 
   // The store and the manager each need the other: the policy is composed
   // from the store's rows, and every write to the store re-pushes it. The
@@ -237,13 +237,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     });
   }
   // A login runs the harness's own CLI in a throwaway container built from
-  // the session image, so the one thing it needs from the deployment is which
+  // the box image, so the one thing it needs from the deployment is which
   // image that is.
-  const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.SESSION_IMAGE));
+  const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.BOX_IMAGE));
   const agents = new AgentStore(db, cfg.DATA_DIR);
-  const manager = new SessionManager(db, cfg, egress, notifier, agents);
+  const manager = new BoxManager(db, cfg, egress, notifier, agents);
   // The review surface reaches the files and the box through the manager,
-  // which is the one thing that knows whether a session is directory-backed
+  // which is the one thing that knows whether a box is directory-backed
   // yet and how to get a container of it running.
   const review = new ReviewService(db, {
     workspacePath: (id) => manager.workspacePathOf(id),
@@ -307,11 +307,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * merely misconfigured. What is wrong with the deployment is in the body.
    */
   app.get('/healthz', async (): Promise<HealthResponse> => {
-    const sessions = countLiveSessions(db);
+    const boxes = countLiveBoxes(db);
     return {
       ok: true,
       version: VERSION,
-      sessions,
+      boxes,
       proxyWarnings,
       egress: egress.status(),
       harnesses: harnessHealth(),
@@ -325,17 +325,17 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Readiness: whether this deployment can serve sessions, as a status code.
+   * Readiness: whether this deployment can serve boxes, as a status code.
    *
-   * Three things decide it, because a session cannot be created or started
+   * Three things decide it, because a box cannot be created or started
    * without all three: the database answers, the proxy holds the egress
    * policy this orchestrator composed, and the Docker daemon is reachable. An
-   * egress policy that is not in sync counts because a session started
+   * egress policy that is not in sync counts because a box started
    * against a stale one reaches hosts the deployment has stopped allowing.
    *
    * What /healthz also reports stays out of this. A harness with no
-   * credential is a deployment that serves sessions nobody has given a
-   * credential, and a proxy warning names one session's network rather than
+   * credential is a deployment that serves boxes nobody has given a
+   * credential, and a proxy warning names one box's network rather than
    * the instance — a probe that took the instance out of service for either
    * would be answering about the wrong thing.
    */
@@ -408,42 +408,42 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     }),
   );
 
-  app.get('/api/sessions', async () => manager.list());
+  app.get('/api/boxes', async () => manager.list());
 
-  app.post('/api/sessions', async (req, reply) => {
-    const created = await manager.create(parseBody(createSessionBody, req.body));
+  app.post('/api/boxes', async (req, reply) => {
+    const created = await manager.create(parseBody(createBoxBody, req.body));
     return reply.code(201).send(created);
   });
 
-  app.get('/api/sessions/:id', async (req) => {
+  app.get('/api/boxes/:id', async (req) => {
     const { id } = req.params as { id: string };
     return manager.detail(id);
   });
 
-  app.post('/api/sessions/:id/start', async (req) => {
+  app.post('/api/boxes/:id/start', async (req) => {
     const { id } = req.params as { id: string };
     return manager.start(id);
   });
 
-  app.post('/api/sessions/:id/stop', async (req) => {
+  app.post('/api/boxes/:id/stop', async (req) => {
     const { id } = req.params as { id: string };
     return manager.stop(id);
   });
 
-  app.delete('/api/sessions/:id', async (req, reply) => {
+  app.delete('/api/boxes/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     await manager.remove(id);
-    // The review service caches per session; a deleted one has nothing to cache.
+    // The review service caches per box; a deleted one has nothing to cache.
     review.forget(id);
     return reply.code(204).send();
   });
 
   /**
-   * The conversations a session owns. A session shares its container, its
+   * The conversations a box owns. A box shares its container, its
    * volumes and its egress policy across all of them, so an extra one costs
    * nothing but its own transcript.
    */
-  app.get('/api/sessions/:id/threads', async (req) => {
+  app.get('/api/boxes/:id/threads', async (req) => {
     const { id } = req.params as { id: string };
     return manager.threads(id);
   });
@@ -452,18 +452,18 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * Adds a conversation and makes it current: empty, or carrying the context of
    * the thread named by `from`.
    */
-  app.post('/api/sessions/:id/threads', async (req, reply) => {
+  app.post('/api/boxes/:id/threads', async (req, reply) => {
     const { id } = req.params as { id: string };
     const created = await manager.createThread(id, parseBody(createThreadBody, req.body));
     return reply.code(201).send(created);
   });
 
   /**
-   * Makes one of a session's threads current: what a connection naming no
+   * Makes one of a box's threads current: what a connection naming no
    * thread gets. An ordinary write — every live connection is pinned to its
    * own thread, so nobody is dropped and nothing reconnects.
    */
-  app.post('/api/sessions/:id/threads/:threadId/select', async (req) => {
+  app.post('/api/boxes/:id/threads/:threadId/select', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
     return manager.selectThread(id, threadId);
   });
@@ -475,7 +475,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * finished with. It changes how the thread is drawn in a list, and the
    * thread still runs, still answers, and can be marked undone.
    */
-  app.post('/api/sessions/:id/threads/:threadId/done', async (req) => {
+  app.post('/api/boxes/:id/threads/:threadId/done', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
     const { done } = parseBody(threadDoneBody, req.body);
     return manager.setThreadDone(id, threadId, done);
@@ -494,7 +494,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * ordinary one — a task that had already finished answers that it had, and
    * the thread's state is re-sent either way so the bar catches up.
    */
-  app.post('/api/sessions/:id/threads/:threadId/background/stop', async (req) => {
+  app.post('/api/boxes/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
     const { processId } = parseBody(backgroundStopBody, req.body);
     return manager.stopBackgroundWork(id, threadId, processId);
@@ -510,13 +510,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    *
    * The answer says how many processes were signalled.
    */
-  app.post('/api/sessions/:id/background/stop', async (req) => {
+  app.post('/api/boxes/:id/background/stop', async (req) => {
     const { id } = req.params as { id: string };
     return manager.stopBoxWork(id);
   });
 
   /**
-   * Stores one file the user attached to a prompt, in the session's own
+   * Stores one file the user attached to a prompt, in the box's own
    * workspace.
    *
    * Raw bytes rather than a multipart form: there is one file per request and
@@ -525,11 +525,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    *
    * The upload happens before the prompt that mentions it, and is what makes
    * the mention true. It needs no container: a workspace is a directory this
-   * process owns, so a session that is stopped — or has never been started —
+   * process owns, so a box that is stopped — or has never been started —
    * takes attachments the same way a running one does.
    */
   app.post(
-    '/api/sessions/:id/attachments',
+    '/api/boxes/:id/attachments',
     { bodyLimit: cfg.MAX_ATTACHMENT_MB * 1024 * 1024 },
     async (req): Promise<StoredAttachment> => {
       const { id } = req.params as { id: string };
@@ -542,16 +542,16 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       }
 
       const workspace = manager.workspacePathOf(id);
-      if (!workspace) throw new HttpError(404, 'Session not found');
+      if (!workspace) throw new HttpError(404, 'Box not found');
 
       const stored = await storeAttachment(workspace, name, body);
-      // The same touch every other thing a user does to a session makes: an
+      // The same touch every other thing a user does to a box makes: an
       // upload is somebody working here, and the reaper counts idleness.
       manager.touch(id);
       // And the one way a workspace grows with nothing running in it, which
       // is the case the size cache stops measuring.
       manager.workspaceChanged(id);
-      log.session(id).info('attachment stored', { path: stored.path, size: stored.size });
+      log.box(id).info('attachment stored', { path: stored.path, size: stored.size });
       return stored;
     },
   );
@@ -570,7 +570,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * no origin, and an SVG behind an `<img>` is inert. A PDF is served
    * unsandboxed so the browser's viewer takes it.
    */
-  app.get('/api/sessions/:id/attachments/:name', async (req, reply) => {
+  app.get('/api/boxes/:id/attachments/:name', async (req, reply) => {
     const { id, name } = req.params as { id: string; name: string };
     // Stored names are a single path component by construction, so anything
     // shaped otherwise is not looked for.
@@ -579,7 +579,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     }
 
     const workspace = manager.workspacePathOf(id);
-    if (!workspace) throw new HttpError(404, 'Session not found');
+    if (!workspace) throw new HttpError(404, 'Box not found');
 
     const resolved = resolveInRoot(join(workspace, ATTACHMENTS_DIR), name);
     if (!resolved.ok) throw new HttpError(404, 'Attachment not found');
@@ -606,11 +606,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return createReadStream(resolved.path);
   });
 
-  // --- Code review over a session's workspace ---------------------------------
+  // --- Code review over a box's workspace ---------------------------------
 
   /**
    * The review surface. Files come off the workspace directory this process
-   * can read; git runs in the session's own container, over repositories the
+   * can read; git runs in the box's own container, over repositories the
    * agent controls. So a route that asks git something starts a stopped box,
    * and reviewing keeps it running.
    *
@@ -618,7 +618,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * directory endpoint carries a folder and everything the left panel needs
    * around it, the file endpoint the whole file view.
    *
-   * A route that asks git something marks the session active, the same way a
+   * A route that asks git something marks the box active, the same way a
    * local command does: running git in the box is use of the box, and the
    * reaper stopping one under an open review would only be followed by the
    * next request starting it again.
@@ -636,13 +636,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * saying it has arrived rather than opened a folder: it takes git's answer
    * for the workspace again and runs the drift check.
    */
-  app.get('/api/sessions/:id/review/dir', async (req) => {
+  app.get('/api/boxes/:id/review/dir', async (req) => {
     const { id } = req.params as { id: string };
     const { path, fresh } = req.query as { path?: string; fresh?: string };
     return review.dir(id, path ?? '', fresh === '1');
   });
 
-  app.get('/api/sessions/:id/review/file', async (req) => {
+  app.get('/api/boxes/:id/review/file', async (req) => {
     const { id } = req.params as { id: string };
     const { path } = req.query as { path?: string };
     if (!path) throw new HttpError(400, 'path is required');
@@ -657,7 +657,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * file endpoint's, so the view repaints from one round trip.
    */
   app.put(
-    '/api/sessions/:id/review/file',
+    '/api/boxes/:id/review/file',
     // Above the display limit the service enforces, because a file that size
     // grows when it is JSON-encoded, and a save must not fail before that
     // check is reached.
@@ -674,14 +674,14 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * because REVIEW.md holds at most one comment per line and the reviewer
    * editing one is not a different operation from writing it.
    */
-  app.put('/api/sessions/:id/review/annotations', async (req) => {
+  app.put('/api/boxes/:id/review/annotations', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(reviewAnnotationBody, req.body);
     const annotations = await review.setAnnotation(id, body.path, body.line, body.comment);
     return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
   });
 
-  app.delete('/api/sessions/:id/review/annotations', async (req) => {
+  app.delete('/api/boxes/:id/review/annotations', async (req) => {
     const { id } = req.params as { id: string };
     const { path, line } = req.query as { path?: string; line?: string };
     if (!path) throw new HttpError(400, 'path is required');
@@ -694,14 +694,14 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * to each repository's working tree. The answer says where it landed, since
    * one expression resolves separately in every repository.
    */
-  app.put('/api/sessions/:id/review/base', async (req) => {
+  app.put('/api/boxes/:id/review/base', async (req) => {
     const { id } = req.params as { id: string };
     const { rev } = parseBody(reviewBaseBody, req.body);
     return review.setBase(id, rev ?? null);
   });
 
   /** Deletes REVIEW.md — the "New review" button. The file is the review. */
-  app.delete('/api/sessions/:id/review', async (req, reply) => {
+  app.delete('/api/boxes/:id/review', async (req, reply) => {
     const { id } = req.params as { id: string };
     await review.deleteReview(id);
     return reply.code(204).send();
@@ -710,10 +710,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // --- Agent configuration ----------------------------------------------------
 
   /**
-   * The AGENTS.md, skills and slash commands a session is given.
+   * The AGENTS.md, skills and slash commands a box is given.
    *
-   * `global` is applied to every session and always exists; any other set is
-   * chosen when a session is created and merged over it. Every mutation
+   * `global` is applied to every box and always exists; any other set is
+   * chosen when a box is created and merged over it. Every mutation
    * answers with the whole set rather than the piece that changed.
    *
    * What is written here reaches a box when that box next starts.
@@ -755,7 +755,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * What a session selecting this set gets, global set included.
+   * What a box selecting this set gets, global set included.
    *
    * A merge of two sets is not obvious from either half, so the editor shows
    * the result.

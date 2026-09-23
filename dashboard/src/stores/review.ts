@@ -23,7 +23,7 @@ import { refetchOnVisible } from '../lib/poll.ts';
  * to the tree, and the tab becoming visible again. Each of them calls
  * {@link loadTree}, which is what tells the orchestrator to ask git again.
  *
- * The store is a singleton keyed by session id rather than one per mount, so
+ * The store is a singleton keyed by box id rather than one per mount, so
  * navigating between files does not lose the tree, and remounting the route
  * does not refetch what has not changed.
  */
@@ -38,7 +38,7 @@ export interface OpenFile extends ReviewFileResponse {
 }
 
 export interface ReviewState {
-  sessionId: string | null;
+  boxId: string | null;
   /**
    * What the review is, apart from its files. Carried by every directory
    * answer, so it is whatever the last one said.
@@ -70,7 +70,7 @@ export interface ReviewState {
 }
 
 const EMPTY: ReviewState = {
-  sessionId: null,
+  boxId: null,
   facts: null,
   dirs: {},
   expanded: [],
@@ -91,7 +91,7 @@ export const useReview = create<ReviewState>(() => EMPTY);
  * Outside the store's state because nothing renders from it: the pane writes
  * it on scroll and reads it once when a file opens, and putting it in the
  * state would re-render the whole view on every scroll frame. Cleared with
- * the rest when the store points at another session, so "not opened in this
+ * the rest when the store points at another box, so "not opened in this
  * review" and "opened at the top" stay different answers.
  */
 const scrollOffsets = new Map<string, number>();
@@ -117,15 +117,15 @@ function get(): ReviewState {
 }
 
 /**
- * Points the store at a session, discarding another session's state.
+ * Points the store at a box, discarding another box's state.
  *
- * Called on every mount. Re-entering the same session keeps what is loaded,
+ * Called on every mount. Re-entering the same box keeps what is loaded,
  * which is what makes the back button from a file to the tree instant.
  */
-export function open(sessionId: string): void {
-  if (get().sessionId === sessionId) return;
+export function open(boxId: string): void {
+  if (get().boxId === boxId) return;
   scrollOffsets.clear();
-  set({ ...EMPTY, sessionId });
+  set({ ...EMPTY, boxId });
 }
 
 /**
@@ -134,16 +134,16 @@ export function open(sessionId: string): void {
  *
  * `fresh` says the browser has arrived rather than opened a folder, which is
  * what makes the orchestrator ask git about the workspace again. An answer for
- * a session the store has since left is dropped: a slow directory landing after
+ * a box the store has since left is dropped: a slow directory landing after
  * the route moved on would paint another box's files.
  */
 export async function loadDir(path: string, fresh = false): Promise<void> {
-  const { sessionId } = get();
-  if (!sessionId) return;
+  const { boxId } = get();
+  if (!boxId) return;
   if (path === '' && !get().dirs['']) set({ loadingTree: true });
   try {
-    const dir = await api.reviewDir(sessionId, path, fresh);
-    if (get().sessionId !== sessionId) return;
+    const dir = await api.reviewDir(boxId, path, fresh);
+    if (get().boxId !== boxId) return;
     const first = get().dirs[path] === undefined;
     set({
       dirs: { ...get().dirs, [path]: dir },
@@ -153,7 +153,7 @@ export async function loadDir(path: string, fresh = false): Promise<void> {
     });
     if (first) unwrap(dir);
   } catch (err) {
-    if (get().sessionId !== sessionId) return;
+    if (get().boxId !== boxId) return;
     set({ error: (err as Error).message, loadingTree: false });
   }
 }
@@ -220,8 +220,8 @@ export function toggleDir(path: string): void {
 let requestedPath: string | null = null;
 
 /** Whether a fetch's answer is still the one the store is waiting for. */
-function stillWanted(sessionId: string, path: string): boolean {
-  return get().sessionId === sessionId && requestedPath === path;
+function stillWanted(boxId: string, path: string): boolean {
+  return get().boxId === boxId && requestedPath === path;
 }
 
 /**
@@ -236,17 +236,17 @@ function stillWanted(sessionId: string, path: string): boolean {
  * and the tree both say the second.
  */
 export async function loadFile(path: string): Promise<void> {
-  const { sessionId } = get();
-  if (!sessionId) return;
+  const { boxId } = get();
+  if (!boxId) return;
   requestedPath = path;
   set({ loadingFile: true, composing: null });
   try {
-    const file = await api.reviewFile(sessionId, path);
-    if (!stillWanted(sessionId, path)) return;
+    const file = await api.reviewFile(boxId, path);
+    if (!stillWanted(boxId, path)) return;
     set({ error: null, loadingFile: false });
     await show(file);
   } catch (err) {
-    if (!stillWanted(sessionId, path)) return;
+    if (!stillWanted(boxId, path)) return;
     set({ error: (err as Error).message, loadingFile: false, file: null });
   }
 }
@@ -301,12 +301,12 @@ export async function saveFile(
   content: string,
   hash: string | null,
 ): Promise<SaveResult> {
-  const { sessionId } = get();
-  if (!sessionId) return { ok: false, conflict: false };
+  const { boxId } = get();
+  if (!boxId) return { ok: false, conflict: false };
   set({ saving: true });
   try {
-    const against = hash ?? (await api.reviewFile(sessionId, path)).hash;
-    const saved = await api.saveReviewFile(sessionId, { path, content, hash: against });
+    const against = hash ?? (await api.reviewFile(boxId, path)).hash;
+    const saved = await api.saveReviewFile(boxId, { path, content, hash: against });
     set({ saving: false, error: null });
     await show(saved);
     void loadTree();
@@ -330,8 +330,8 @@ export async function saveFile(
  * by whatever the server answers with, and by the previous list on a failure.
  */
 export async function saveComment(path: string, line: number, comment: string): Promise<void> {
-  const { sessionId, file } = get();
-  if (!sessionId) return;
+  const { boxId, file } = get();
+  if (!boxId) return;
   const previous = file?.annotations ?? [];
   set({ saving: true });
 
@@ -344,7 +344,7 @@ export async function saveComment(path: string, line: number, comment: string): 
   }
 
   try {
-    const answer = await api.setAnnotation(sessionId, { path, line, comment });
+    const answer = await api.setAnnotation(boxId, { path, line, comment });
     applyAnnotations(path, answer.annotations, countDelta(previous, answer.annotations));
     set({ saving: false, error: null });
   } catch (err) {
@@ -355,8 +355,8 @@ export async function saveComment(path: string, line: number, comment: string): 
 
 /** Deletes a comment, likewise optimistically. */
 export async function deleteComment(path: string, line: number): Promise<void> {
-  const { sessionId, file } = get();
-  if (!sessionId) return;
+  const { boxId, file } = get();
+  if (!boxId) return;
   const previous = file?.annotations ?? [];
   set({ saving: true });
 
@@ -368,7 +368,7 @@ export async function deleteComment(path: string, line: number): Promise<void> {
   }
 
   try {
-    const answer = await api.deleteAnnotation(sessionId, path, line);
+    const answer = await api.deleteAnnotation(boxId, path, line);
     applyAnnotations(path, answer.annotations, countDelta(previous, answer.annotations));
     set({ saving: false, error: null });
   } catch (err) {
@@ -377,13 +377,13 @@ export async function deleteComment(path: string, line: number): Promise<void> {
   }
 }
 
-/** Deletes REVIEW.md — every comment of the session at once. */
+/** Deletes REVIEW.md — every comment of the box at once. */
 export async function newReview(): Promise<void> {
-  const { sessionId, file } = get();
-  if (!sessionId) return;
+  const { boxId, file } = get();
+  if (!boxId) return;
   set({ saving: true });
   try {
-    await api.deleteReview(sessionId);
+    await api.deleteReview(boxId);
     if (file) set({ file: { ...file, annotations: [] } });
     set({ saving: false, error: null, composing: null });
     await loadTree();
@@ -472,11 +472,11 @@ function countDelta(before: ReviewAnnotation[], after: ReviewAnnotation[]): numb
  * answers to "compared against what".
  */
 export async function setBase(rev: string | null): Promise<void> {
-  const { sessionId, file } = get();
-  if (!sessionId) return;
+  const { boxId, file } = get();
+  if (!boxId) return;
   set({ saving: true });
   try {
-    await api.setReviewBase(sessionId, rev);
+    await api.setReviewBase(boxId, rev);
     set({ saving: false, error: null });
     await loadTree();
     if (file) await loadFile(file.path);
@@ -497,8 +497,8 @@ export async function setBase(rev: string | null): Promise<void> {
  * whole file of work, and coming back to the tab is how a phone returns.
  */
 export async function refresh(): Promise<void> {
-  const { sessionId, file, saving, composing, dirty } = get();
-  if (!sessionId || saving || dirty || composing !== null) return;
+  const { boxId, file, saving, composing, dirty } = get();
+  if (!boxId || saving || dirty || composing !== null) return;
   await loadTree();
   if (file) await loadFile(file.path);
 }

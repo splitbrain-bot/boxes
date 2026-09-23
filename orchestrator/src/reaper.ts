@@ -1,9 +1,9 @@
 import type { Config } from './config.ts';
 import { refreshCredentials, type CredentialStore } from './credentials.ts';
-import { sessionTurnActive, sessionsWithActiveTurns, type Db, type SessionRow } from './db.ts';
+import { boxTurnActive, boxesWithActiveTurns, type Db, type BoxRow } from './db.ts';
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
-import type { SessionManager } from './sessions.ts';
+import type { BoxManager } from './boxes.ts';
 
 /**
  * The interval every background loop here runs on. Each one re-asserts
@@ -40,32 +40,32 @@ function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop:
 
 /**
  * Starts the idle reaper and returns a handle that stops it. Every minute it
- * stops each session that has no running turn, no waiting permission request,
+ * stops each box that has no running turn, no waiting permission request,
  * no attached browser, no open terminal, no background task still believed to
  * be running, and no activity for IDLE_STOP_MINUTES. It never deletes a
- * session.
+ * box.
  *
- * It does delete what a session left: the same tick sweeps the containers,
- * networks, volumes and workspace directories labelled with sessions that no
+ * It does delete what a box left: the same tick sweeps the containers,
+ * networks, volumes and workspace directories labelled with boxes that no
  * longer exist. An orphan is something no row names, so reconcile() at boot
  * cannot find it.
  */
 export function startReaper(
   db: Db,
   cfg: Config,
-  manager: SessionManager,
+  manager: BoxManager,
 ): { stop: () => void } {
   const idleMs = cfg.IDLE_STOP_MINUTES * 60_000;
 
   const tick = async (): Promise<void> => {
     const rows = db
-      .prepare("SELECT * FROM sessions WHERE status = 'running'")
-      .all() as SessionRow[];
-    const pendingCounts = manager.pending.countsBySession();
-    // A turn runs on a thread, so "is this session busy" is any of its
-    // threads being busy. The other three counts stay session-scoped: they
+      .prepare("SELECT * FROM boxes WHERE status = 'running'")
+      .all() as BoxRow[];
+    const pendingCounts = manager.pending.countsByBox();
+    // A turn runs on a thread, so "is this box busy" is any of its
+    // threads being busy. The other three counts stay box-scoped: they
     // are about the box, not the conversation.
-    const running = sessionsWithActiveTurns(db);
+    const running = boxesWithActiveTurns(db);
     const now = Date.now();
 
     for (const row of rows) {
@@ -78,41 +78,41 @@ export function startReaper(
       if (manager.terminalCount(row.id) > 0) continue;
       // A box with a command still running in it, or a monitor still watching
       // something, is not idle however quiet it has gone. Any of the
-      // session's threads holds the box.
+      // box's threads holds the box.
       // Null is a box that has not been read yet, which is not a box known
       // to be empty: it is held for this tick, and the reading behind it
       // lands before the next one.
       if (upstream.backgroundActive !== false) continue;
       if (now - row.last_active_at < idleMs) continue;
 
-      // Asked again for this one session, immediately before it is stopped.
+      // Asked again for this one box, immediately before it is stopped.
       // The counts above are one reading of the whole deployment, and a
       // sweep that stops many boxes takes ten seconds over each of them, so
       // by here they are minutes old — long enough for a turn to have
       // started on a box nobody is watching.
-      if (sessionTurnActive(db, row.id)) continue;
-      if (manager.pending.countForSession(row.id) > 0) continue;
+      if (boxTurnActive(db, row.id)) continue;
+      if (manager.pending.countForBox(row.id) > 0) continue;
       if (manager.terminalCount(row.id) > 0) continue;
 
       try {
-        // Never waits for the session's own queue: a box something else is
+        // Never waits for the box's own queue: a box something else is
         // already working on is not idle, whatever the counts above said, and
-        // this tick has other sessions to get to.
+        // this tick has other boxes to get to.
         if (!(await manager.stopUnlessBusy(row.id))) {
-          log.session(row.id).info('not reaping a session that is busy; trying again next tick');
+          log.box(row.id).info('not reaping a box that is busy; trying again next tick');
           continue;
         }
-        log.session(row.id).info('reaped idle session', {
+        log.box(row.id).info('reaped idle box', {
           idleMinutes: Math.round((now - row.last_active_at) / 60_000),
         });
       } catch (err) {
-        log.session(row.id).warn('reap failed', { error: (err as Error).message });
+        log.box(row.id).warn('reap failed', { error: (err as Error).message });
       }
     }
 
     manager.maintenance();
     // Docker read the other way round from reconcile(): what is labelled with
-    // a session that no longer exists, and is therefore nobody's.
+    // a box that no longer exists, and is therefore nobody's.
     await manager.sweepOrphans();
   };
 
@@ -120,32 +120,32 @@ export function startReaper(
 }
 
 /**
- * Starts the loop that pulls the session image again every
- * SESSION_IMAGE_PULL_MINUTES, and returns a handle that stops it. Returns a
+ * Starts the loop that pulls the box image again every
+ * BOX_IMAGE_PULL_MINUTES, and returns a handle that stops it. Returns a
  * no-op handle when the setting is 0.
  *
- * How the session image stays current while the orchestrator runs, boot
+ * How the box image stays current while the orchestrator runs, boot
  * having pulled it once already: the pull puts the new image on the host, and
- * each session moves onto it the next time it is started. Nothing running is
+ * each box moves onto it the next time it is started. Nothing running is
  * disturbed, and a failed pull is a log line — the image already here still
  * works.
  */
 export function startImageRefresher(
   cfg: Config,
-  manager: SessionManager,
+  manager: BoxManager,
 ): { stop: () => void } {
-  if (cfg.SESSION_IMAGE_PULL_MINUTES === 0) {
-    log.info('session image refresh is off', { image: cfg.SESSION_IMAGE });
+  if (cfg.BOX_IMAGE_PULL_MINUTES === 0) {
+    log.info('box image refresh is off', { image: cfg.BOX_IMAGE });
     return { stop: () => {} };
   }
 
   // The one loop whose failure is a warning rather than an error.
-  return loop('session image refresh', cfg.SESSION_IMAGE_PULL_MINUTES * 60_000, async () => {
+  return loop('box image refresh', cfg.BOX_IMAGE_PULL_MINUTES * 60_000, async () => {
     try {
-      await manager.refreshSessionImage();
+      await manager.refreshBoxImage();
     } catch (err) {
-      log.warn('could not refresh the session image', {
-        image: cfg.SESSION_IMAGE,
+      log.warn('could not refresh the box image', {
+        image: cfg.BOX_IMAGE,
         error: (err as Error).message,
       });
     }
@@ -154,7 +154,7 @@ export function startImageRefresher(
 
 /**
  * Starts the loop that re-asserts the proxy's state every minute: its
- * attachment to each session network, and the policy it is running.
+ * attachment to each box network, and the policy it is running.
  *
  * Both need re-asserting for the same reason. The proxy holds nothing at
  * rest, so a restart leaves it with no policy at all, and compose can
@@ -162,7 +162,7 @@ export function startImageRefresher(
  * windows.
  */
 export function startProxyReconciler(
-  manager: SessionManager,
+  manager: BoxManager,
   egress: EgressManager,
   onWarnings: (ids: string[]) => void,
 ): { stop: () => void } {
@@ -170,7 +170,7 @@ export function startProxyReconciler(
     const warnings = await manager.reconcileProxyAttachments();
     onWarnings(warnings);
     if (warnings.length > 0) {
-      log.warn('sessions missing egress proxy attachment', { sessions: warnings });
+      log.warn('boxes missing egress proxy attachment', { boxes: warnings });
     }
     try {
       await egress.sync();

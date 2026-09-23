@@ -28,9 +28,9 @@ test('every harness fills in every field, in the right shape', () => {
       assert.equal(typeof option, 'string');
       assert.equal(typeof value, 'string', `${h.id}: defaultConfig.${option}`);
     }
-    if (h.sessionMeta !== undefined) {
-      assert.equal(typeof h.sessionMeta, 'object', `${h.id}: sessionMeta`);
-      assert.notEqual(h.sessionMeta, null, `${h.id}: sessionMeta`);
+    if (h.threadMeta !== undefined) {
+      assert.equal(typeof h.threadMeta, 'object', `${h.id}: threadMeta`);
+      assert.notEqual(h.threadMeta, null, `${h.id}: threadMeta`);
     }
     assert.ok(['claude', 'openai', 'github'].includes(h.credentialId), `${h.id}: credentialId`);
     assert.equal(typeof h.env, 'function', `${h.id}: env`);
@@ -103,7 +103,7 @@ test('the Claude entry says what the orchestrator does today', () => {
   assert.equal(h.defaultModeId, 'auto');
   assert.equal(h.forkModeId, 'plan');
   assert.deepEqual(h.defaultConfig, { model: 'opus' });
-  assert.deepEqual(h.sessionMeta, {
+  assert.deepEqual(h.threadMeta, {
     claudeCode: {
       options: {
         model: 'fable',
@@ -124,7 +124,7 @@ test('the Codex entry matches what codex-acp reads', () => {
   assert.equal(h.defaultModeId, 'agent-full-access');
   assert.equal(h.forkModeId, 'read-only');
   assert.deepEqual(h.defaultConfig, {});
-  assert.equal(h.sessionMeta, undefined);
+  assert.equal(h.threadMeta, undefined);
   assert.deepEqual(h.env('key'), {
     CODEX_API_KEY: 'key',
     CODEX_HOME: '/home/agent/.codex',
@@ -132,7 +132,7 @@ test('the Codex entry matches what codex-acp reads', () => {
     INITIAL_AGENT_MODE: 'agent-full-access',
     DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
   });
-  // The mode the adapter is told to start every session in is the same one a
+  // The mode the adapter is told to start every box in is the same one a
   // fresh thread is switched into; two answers here would fight each other.
   assert.equal(h.env('key')['INITIAL_AGENT_MODE'], h.defaultModeId);
   assert.equal(h.alwaysBackground.size, 0);

@@ -6,18 +6,18 @@
  * state, which the browser replays: back and then forward would otherwise
  * re-stage the prompt. Taking it clears it.
  *
- * Per session, because two tabs on two boxes are a thing this app supports.
+ * Per box, because two tabs on two boxes are a thing this app supports.
  */
 const staged = new Map<string, string>();
 
-/** Leaves a prompt for the given session's thread to open with. */
-export function stagePrompt(sessionId: string, prompt: string): void {
-  staged.set(sessionId, prompt);
+/** Leaves a prompt for the given box's thread to open with. */
+export function stagePrompt(boxId: string, prompt: string): void {
+  staged.set(boxId, prompt);
 }
 
 /** Takes it, if there is one. A second call gets nothing. */
-export function takeStagedPrompt(sessionId: string): string | null {
-  const prompt = staged.get(sessionId);
-  staged.delete(sessionId);
+export function takeStagedPrompt(boxId: string): string | null {
+  const prompt = staged.get(boxId);
+  staged.delete(boxId);
   return prompt ?? null;
 }

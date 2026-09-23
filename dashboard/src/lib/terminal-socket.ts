@@ -1,7 +1,7 @@
 import { TERMINAL_SUBPROTOCOL, type TerminalResize } from '../../../shared/terminal.ts';
 
 /**
- * The browser's end of a session's terminal.
+ * The browser's end of a box's terminal.
  *
  * Binary frames are the pty's bytes in both directions. Text frames are
  * control this end sends, which is a window size and nothing else so far.

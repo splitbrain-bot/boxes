@@ -77,12 +77,12 @@ export interface FakeDocker {
   close(): void;
 }
 
-/** The session image every session container is created from. */
-const SESSION_IMAGE: FakeImage = {
+/** The box image every box container is created from. */
+const BOX_IMAGE: FakeImage = {
   repoDigest: 'sha256:0011223344556677889900aabbccddeeff00112233445566778899aabbccddee',
   id: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
   builtAt: '2026-08-12T22:40:00.000Z',
-  // Gigabytes, because the session image is: a language toolchain apiece and
+  // Gigabytes, because the box image is: a language toolchain apiece and
   // a browser. Which is the reason the dashboard says so at all.
   sizeBytes: 4_509_715_661,
 };
@@ -125,11 +125,11 @@ function notFound(what: string): Error & { statusCode: number } {
  * Installs a Docker client that answers from memory, and returns the handles
  * a test drives it with.
  *
- * Container ids are derived from the session label every object Boxes creates
- * carries, so a container can be addressed by the session it belongs to,
+ * Container ids are derived from the box label every object Boxes creates
+ * carries, so a container can be addressed by the box it belongs to,
  * which is what the review's git runner needs.
  */
-export function installFakeDocker(sessionImage: string, selfContainerId?: string): FakeDocker {
+export function installFakeDocker(boxImage: string, selfContainerId?: string): FakeDocker {
   /** Containers by id, including the ones the orchestrator creates itself. */
   const containers = new Map<string, FakeContainer>();
   // The proxy, which the health probe reads the deployment's proxy image off.
@@ -139,7 +139,7 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
   let terminalAnswer: FakeDocker['terminalAnswer'] = (line) => `ran: ${line}`;
 
   const images = new Map<string, FakeImage>([
-    [SESSION_IMAGE.id, SESSION_IMAGE],
+    [BOX_IMAGE.id, BOX_IMAGE],
     [PROXY_IMAGE.id, PROXY_IMAGE],
     [ORCHESTRATOR_IMAGE.id, ORCHESTRATOR_IMAGE],
   ]);
@@ -172,7 +172,7 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
       return {
         Image: container.image,
         State: { Running: container.running },
-        // Both binds of a current session container. The orchestrator
+        // Both binds of a current box container. The orchestrator
         // recreates one that is missing the agent configuration mount.
         Mounts: [{ Destination: dk.AGENT_CONFIG_DIR }, { Destination: dk.WORKSPACE_DIR }],
       };
@@ -209,28 +209,28 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
     getVolume: () => ({ remove: async () => undefined }),
     getImage: (name: string) => ({
       inspect: async () => {
-        // Either an id read off a container, or the configured session image
+        // Either an id read off a container, or the configured box image
         // by the tag that names it.
-        const found = images.get(name) ?? (name === sessionImage ? SESSION_IMAGE : null);
+        const found = images.get(name) ?? (name === boxImage ? BOX_IMAGE : null);
         if (!found) throw notFound(`image: ${name}`);
         return {
           Id: found.id,
           RepoDigests: [`boxes@${found.repoDigest}`],
           Created: found.builtAt,
           Size: found.sizeBytes,
-          // The uid the session image was built on, which the orchestrator
-          // compares against SESSION_UID and warns about a drift in.
+          // The uid the box image was built on, which the orchestrator
+          // compares against BOX_UID and warns about a drift in.
           Config: { User: String(process.getuid?.() ?? 0) },
         };
       },
       remove: async () => undefined,
     }),
     createContainer: async (spec: { name?: string; Labels?: Record<string, string> }) => {
-      // Named after the session it belongs to, so the review's git runner can
+      // Named after the box it belongs to, so the review's git runner can
       // find the workspace a container id stands for.
-      const session = spec.Labels?.[dk.LABEL] ?? '';
-      const id = spec.name ?? `helper-${session}-${containers.size}`;
-      containers.set(id, { image: SESSION_IMAGE.id, running: false });
+      const box = spec.Labels?.[dk.LABEL] ?? '';
+      const id = spec.name ?? `helper-${box}-${containers.size}`;
+      containers.set(id, { image: BOX_IMAGE.id, running: false });
       return handle(id);
     },
     getContainer: (id: string) => handle(id),
@@ -251,7 +251,7 @@ export function installFakeDocker(sessionImage: string, selfContainerId?: string
       terminalAnswer = fn;
     },
     addContainer: (id, running) => {
-      containers.set(id, { image: SESSION_IMAGE.id, running });
+      containers.set(id, { image: BOX_IMAGE.id, running });
     },
     close: () => dk.setDockerForTests(null),
   };

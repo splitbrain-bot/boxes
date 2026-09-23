@@ -8,13 +8,13 @@ import {
   type TurnStateParams,
 } from '../../../../shared/types.ts';
 import type {
-  LoadSessionResponse,
-  NewSessionResponse,
+  LoadThreadResponse,
+  NewThreadResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
-  SessionModeState,
-  SessionNotification,
+  ThreadConfigOption,
+  ThreadModeState,
+  ThreadNotification,
 } from './acp-types.ts';
 
 /**
@@ -37,7 +37,7 @@ export type ThreadTurnState = Pick<TurnStateParams, 'speaking' | 'background'>;
 /** Everything the store hands the client to react to. */
 export interface AcpClientHandlers {
   /** A session/update notification, live or from a replay. */
-  onUpdate(params: SessionNotification): void;
+  onUpdate(params: ThreadNotification): void;
   /**
    * The adapter asking permission. The promise resolves with the user's
    * answer, which is what unblocks the agent's turn.
@@ -51,7 +51,7 @@ export interface AcpClientHandlers {
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse>;
   /** The handshake finished; a replay, if any, has been requested. */
-  onReady(modes: SessionModeState | null, configOptions: SessionConfigOption[]): void;
+  onReady(modes: ThreadModeState | null, configOptions: ThreadConfigOption[]): void;
   /** The connection state changed. */
   onState(state: ConnectionState): void;
   /**
@@ -146,7 +146,7 @@ class RpcError extends Error {
   }
 }
 
-/** One session's connection, which reconnects on its own until closed. */
+/** One box's connection, which reconnects on its own until closed. */
 export class AcpClient {
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -277,7 +277,7 @@ export class AcpClient {
         clientCapabilities: {},
       });
 
-      const created = await this.request<NewSessionResponse>(ACP_METHOD.sessionNew, {
+      const created = await this.request<NewThreadResponse>(ACP_METHOD.sessionNew, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -291,7 +291,7 @@ export class AcpClient {
       // only the gateway knows whether the point was there.
       if (!resumeFrom) this.handlers.onReplay(false);
 
-      const loaded = await this.request<LoadSessionResponse>(
+      const loaded = await this.request<LoadThreadResponse>(
         ACP_METHOD.sessionLoad,
         loadParams(created.sessionId, resumeFrom),
       );
@@ -349,7 +349,7 @@ export class AcpClient {
     }
 
     if (msg.method === ACP_METHOD.sessionUpdate) {
-      this.handlers.onUpdate(msg.params as SessionNotification);
+      this.handlers.onUpdate(msg.params as ThreadNotification);
       return;
     }
 

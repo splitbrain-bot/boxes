@@ -22,7 +22,7 @@ import {
  * Git statuses and base resolution, ported from the Go implementation's.
  *
  * The parsers take a string and are driven directly. What runs git is driven
- * through a runner that starts it on this machine instead of in a session
+ * through a runner that starts it on this machine instead of in a box
  * container: these repositories are the test's own, and real git output is the
  * point of them.
  */
@@ -270,7 +270,7 @@ describe('over a workspace of several repositories', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The session box these repositories would be reviewed in. */
+  /** The box these repositories would be reviewed in. */
   function box(): { containerId: string; workspaceDir: string } {
     return { containerId: 'box-1', workspaceDir: dir };
   }

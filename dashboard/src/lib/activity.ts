@@ -17,7 +17,7 @@
  * What a box with work still in it is called, wherever there is only room for
  * a phrase.
  *
- * No count, because the places that use it — a card in the session list — are
+ * No count, because the places that use it — a card in the box list — are
  * about the box rather than one conversation, and a box's total is not a
  * number anybody acts on. The thread that owns the work gets the list.
  */

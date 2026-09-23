@@ -123,7 +123,7 @@ function imagePart(src: string) {
  * An attached file as a part the thread can draw.
  *
  * An image becomes the picture itself, loaded from the endpoint that serves
- * the session's workspace — which is what makes a screenshot readable in the
+ * the box's workspace — which is what makes a screenshot readable in the
  * thread that sent it without the bytes ever going through the transcript.
  * Everything else becomes a chip naming the file, and carrying the same
  * endpoint so it can be opened: a PDF in the browser's viewer, anything else
@@ -131,18 +131,18 @@ function imagePart(src: string) {
  * rather than the bytes, which is what stops assistant-ui offering a
  * download of something the browser never had.
  *
- * Without a session there is nothing to fetch from, so everything is a chip.
+ * Without a box there is nothing to fetch from, so everything is a chip.
  * That is the shape a test reads, and it loses only the picture.
  */
-function attachmentPart(part: AttachmentPart, sessionId?: string) {
-  if (sessionId && isThumbnailable(part.mimeType)) {
-    return { type: 'image' as const, image: attachmentUrl(sessionId, part.path) };
+function attachmentPart(part: AttachmentPart, boxId?: string) {
+  if (boxId && isThumbnailable(part.mimeType)) {
+    return { type: 'image' as const, image: attachmentUrl(boxId, part.path) };
   }
   return {
     type: 'file' as const,
-    // The endpoint when there is a session to read it from, which is what
+    // The endpoint when there is a box to read it from, which is what
     // the chip opens; otherwise the path, which at least says where it went.
-    data: sessionId ? attachmentUrl(sessionId, part.path) : part.path,
+    data: boxId ? attachmentUrl(boxId, part.path) : part.path,
     mimeType: part.mimeType,
     filename: part.name,
     sourceType: 'id' as const,
@@ -199,10 +199,10 @@ type ConvertedPart = ThreadMessageLike['content'][number] & object;
 /**
  * One of our messages, as the runtime reads it.
  *
- * `sessionId` is what an attachment is fetched back from; a caller with none
+ * `boxId` is what an attachment is fetched back from; a caller with none
  * gets the same message with its attachments named rather than shown.
  */
-export function convertMessage(message: Message, sessionId?: string): ThreadMessageLike {
+export function convertMessage(message: Message, boxId?: string): ThreadMessageLike {
   return {
     id: message.id,
     role: message.role,
@@ -210,7 +210,7 @@ export function convertMessage(message: Message, sessionId?: string): ThreadMess
       if (part.type === 'text') return [{ type: 'text' as const, text: part.text }];
       if (part.type === 'reasoning') return [{ type: 'reasoning' as const, text: part.text }];
       if (part.type === 'image') return [imagePart(part.src)];
-      if (part.type === 'attachment') return [attachmentPart(part, sessionId)];
+      if (part.type === 'attachment') return [attachmentPart(part, boxId)];
       if (part.type === 'task') return [taskPart(part)];
       return [toolPart(part), ...toolImages(part)];
     }),

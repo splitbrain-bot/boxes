@@ -1,6 +1,6 @@
 /**
- * Per-session /24 allocation out of SESSION_SUBNET_POOL. Docker requires each
- * session network to have a subnet of its own.
+ * Per-box /24 allocation out of BOX_SUBNET_POOL. Docker requires each
+ * box network to have a subnet of its own.
  */
 
 /** An IPv4 CIDR in the form the allocator works with. */
@@ -45,8 +45,8 @@ export function formatIpv4(value: number): string {
  *
  * Wrapping is what keeps a long-lived deployment allocating: the counter the
  * index comes from only ever rises, while the subnets it named are given back
- * as sessions are deleted. `taken` is what the wrap needs — a pool of 256
- * slots would otherwise hand the 257th session the subnet the first is on.
+ * as boxes are deleted. `taken` is what the wrap needs — a pool of 256
+ * slots would otherwise hand the 257th box the subnet the first is on.
  */
 export function allocateSubnet(
   pool: string,

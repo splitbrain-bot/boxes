@@ -29,7 +29,7 @@ beforeAll(async () => {
       // Which of its conversations is doing what is the row's own bullet,
       // and the only place a list says which thread is holding the box awake:
       // one with a build still running in it, and one the agent is talking
-      // on, which is what the session's own badge goes by.
+      // on, which is what the box's own badge goes by.
       threads: [
         { turnActive: true, backgroundBusy: true, lastActiveAt: Date.now() - 12_000 },
         { title: 'flaky retry logic', speaking: true, lastActiveAt: Date.now() - 5 * 3_600_000 },
@@ -46,7 +46,7 @@ afterAll(async () => {
 });
 
 for (const scheme of ['light', 'dark'] as const) {
-  test(`session list renders in ${scheme}`, async () => {
+  test(`box list renders in ${scheme}`, async () => {
     const { page, errors, close } = await openPage(stub.url, '/', scheme);
     try {
       await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
@@ -86,8 +86,8 @@ for (const scheme of ['light', 'dark'] as const) {
     }
   });
 
-  test(`session info renders in ${scheme}`, async () => {
-    const { page, errors, close } = await openPage(stub.url, '/sessions/a1b2c3d4/info', scheme);
+  test(`box info renders in ${scheme}`, async () => {
+    const { page, errors, close } = await openPage(stub.url, '/boxes/a1b2c3d4/info', scheme);
     try {
       await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
       await expect
@@ -102,7 +102,7 @@ for (const scheme of ['light', 'dark'] as const) {
 }
 
 test('a deep link into the SPA is served by the index fallback', async () => {
-  const { page, errors, close } = await openPage(stub.url, '/sessions/a1b2c3d4/info');
+  const { page, errors, close } = await openPage(stub.url, '/boxes/a1b2c3d4/info');
   try {
     await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -111,12 +111,12 @@ test('a deep link into the SPA is served by the index fallback', async () => {
   }
 });
 
-test('tapping a card opens that session thread', async () => {
+test('tapping a card opens that box thread', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     await page.getByText('refactor auth').click();
-    await page.waitForURL('**/sessions/a1b2c3d4');
-    expect(new URL(page.url()).pathname).toBe('/sessions/a1b2c3d4');
+    await page.waitForURL('**/boxes/a1b2c3d4');
+    expect(new URL(page.url()).pathname).toBe('/boxes/a1b2c3d4');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -127,21 +127,21 @@ test('the info corner opens the ops route instead', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     await page.getByLabel('Details and controls for refactor auth').click();
-    await page.waitForURL('**/sessions/a1b2c3d4/info');
-    expect(new URL(page.url()).pathname).toBe('/sessions/a1b2c3d4/info');
+    await page.waitForURL('**/boxes/a1b2c3d4/info');
+    expect(new URL(page.url()).pathname).toBe('/boxes/a1b2c3d4/info');
     expect(errors).toEqual([]);
   } finally {
     await close();
   }
 });
 
-test('a link to a session that is gone says so instead of offering a composer', async () => {
-  const { page, errors, close } = await openPage(stub.url, '/sessions/deadbeef');
+test('a link to a box that is gone says so instead of offering a composer', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/boxes/deadbeef');
   try {
     // What a bookmark for a deleted box lands on. Nothing can connect without
-    // the session's token, so a composer would be an invitation to type into
+    // the box's token, so a composer would be an invitation to type into
     // a void.
-    await expect.poll(() => page.getByText('Back to sessions').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Back to boxes').isVisible()).toBe(true);
     expect(await page.getByRole('textbox', { name: 'Message input' }).isVisible()).toBe(false);
     await expect.poll(() => page.getByText('disconnected').isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -150,7 +150,7 @@ test('a link to a session that is gone says so instead of offering a composer', 
   }
 });
 
-test('the session list says which build of each image is running', async () => {
+test('the box list says which build of each image is running', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     // The digest abbreviated the way Docker abbreviates an id, then the build
@@ -168,9 +168,9 @@ test('the session list says which build of each image is running', async () => {
       .toBe(true);
     const proxy = page.getByText(/^proxy 9f8e7d6c5b4a · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 180 MB$/);
     await expect.poll(() => proxy.isVisible()).toBe(true);
-    // In gigabytes, which is the size a session image is and the reason the
+    // In gigabytes, which is the size a box image is and the reason the
     // line carries one at all.
-    await expect.poll(() => page.getByText(/^session 001122334455 · .* · 4.2 GB$/).isVisible())
+    await expect.poll(() => page.getByText(/^box 001122334455 · .* · 4.2 GB$/).isVisible())
       .toBe(true);
     // The whole digest is on hover: too long for the line, and the only form
     // worth pasting into a comparison.
@@ -184,11 +184,11 @@ test('the session list says which build of each image is running', async () => {
 });
 
 test('a box busy with work no conversation claims offers to stop all of it', async () => {
-  // The case the session-level kill exists for: the box says it is busy, no
+  // The case the box-level kill exists for: the box says it is busy, no
   // thread of it has a task, and so nothing in the thread's own bar can stop
   // what is running. After a respawn that is every orphaned build in the box,
   // because an adapter knows nothing about the shells the one before it left.
-  stub.createSession({
+  stub.createBox({
     id: 'orphan01',
     name: 'orphaned build',
     backgroundBusy: true,
@@ -247,14 +247,14 @@ test('the info view lists what the box is running, whoever left it there', async
   // The ops side of the same question, for looking rather than for deciding:
   // the card's offer is behind a confirmation, and a reader who only wants to
   // know what is holding a box awake should not have to open a kill to see it.
-  stub.createSession({
+  stub.createBox({
     id: 'orphan02',
     name: 'leaked server',
     backgroundBusy: true,
     threads: [{ backgroundBusy: false }],
     boxWork: [{ pid: 2184, command: 'james -config conf/james.yaml', elapsedSeconds: 16_741 }],
   });
-  const { page, errors, close } = await openPage(stub.url, '/sessions/orphan02/info');
+  const { page, errors, close } = await openPage(stub.url, '/boxes/orphan02/info');
   try {
     await expect.poll(() => page.getByText('Running in the box').isVisible()).toBe(true);
     await expect
@@ -267,7 +267,7 @@ test('the info view lists what the box is running, whoever left it there', async
   }
 });
 
-test('the session list offers to notify this browser', async () => {
+test('the box list offers to notify this browser', async () => {
   const { page, errors, close } = await openPage(stub.url, '/', 'dark');
   try {
     // A browser that can subscribe is offered the choice rather than
@@ -291,10 +291,10 @@ test('a box is created from the form and is on the list afterwards', async () =>
 
     // Straight into the conversation of the box that was just made, which is
     // the point of creating one.
-    await page.waitForURL(/\/sessions\/[0-9a-f]{8}$/);
+    await page.waitForURL(/\/boxes\/[0-9a-f]{8}$/);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await expect.poll(() => page.getByText('a brand new box').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
@@ -303,7 +303,7 @@ test('a box is created from the form and is on the list afterwards', async () =>
 });
 
 test('a stopped box is started from its info view, and stopped again', async () => {
-  const { page, errors, close } = await openPage(stub.url, '/sessions/e5f6a7b8/info');
+  const { page, errors, close } = await openPage(stub.url, '/boxes/e5f6a7b8/info');
   try {
     // The box the fixture left down, which is why the control offered is the
     // one that brings it up.
@@ -312,7 +312,7 @@ test('a stopped box is started from its info view, and stopped again', async () 
     await page.getByRole('button', { name: 'Start' }).click();
 
     // The container really is running now: the view is redrawn from the
-    // session the orchestrator answers with, not from anything optimistic.
+    // box the orchestrator answers with, not from anything optimistic.
     await expect.poll(() => page.getByRole('button', { name: 'Stop' }).isVisible()).toBe(true);
     await expect.poll(() => page.getByText('up', { exact: true }).isVisible()).toBe(true);
 

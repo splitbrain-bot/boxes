@@ -1,6 +1,6 @@
 import type { Config } from '../config.ts';
 import {
-  clearSessionTurns,
+  clearBoxTurns,
   clearThreadInheritance,
   currentThread,
   getThread,
@@ -10,10 +10,10 @@ import {
   setThreadTurnActive,
   threadByAcpId,
   threadConfig,
-  touchSession,
+  touchBox,
   touchThread,
   type Db,
-  type SessionRow,
+  type BoxRow,
   type ThreadRow,
 } from '../db.ts';
 import * as dk from '../docker.ts';
@@ -37,19 +37,19 @@ import {
   type BackgroundProcess,
   type BoxWork,
   type LoadMeta,
-  type SessionConfigOption,
+  type ThreadConfigOption,
   type ThreadOptions,
   type TurnStateParams,
 } from '../../../shared/types.ts';
 
 /**
- * Everything about one session that is not one adapter process: the browsers
+ * Everything about one box that is not one adapter process: the browsers
  * attached to it, what is running in its box, which conversation each message
  * is about, and the container all of that happens in.
  *
- * `SessionManager` creates one of these per session on first use and keeps it
+ * `BoxManager` creates one of these per box on first use and keeps it
  * for the process's life. It owns one {@link AdapterConnection} per harness a
- * thread of the session runs, started when a thread of that harness first needs
+ * thread of the box runs, started when a thread of that harness first needs
  * one, and routes every message to the connection whose adapter holds the
  * conversation it names. A box with only Claude threads never starts a second
  * adapter; a box with both has two processes over one checkout, and an adapter
@@ -58,7 +58,7 @@ import {
  * The orchestrator owns the connections, not a browser, so a turn runs to
  * completion whoever is watching. Each browser connection is pinned to a single
  * thread, chosen at the handshake, so two tabs can watch two conversations of
- * one box at once — and the session's `current_thread_id` is the default a
+ * one box at once — and the box's `current_thread_id` is the default a
  * connection that names none gets rather than the truth about what any browser
  * has loaded.
  */
@@ -84,7 +84,7 @@ function withoutMediaPayloads(this: unknown, key: string, value: unknown): unkno
   return `[${value.length} base64 chars omitted]`;
 }
 
-/** A browser attached to this session, as seen from the upstream side. */
+/** A browser attached to this box, as seen from the upstream side. */
 export interface DownstreamHandle {
   readonly id: number;
   /**
@@ -190,15 +190,15 @@ function nameFromPrompt(params: unknown): string | null {
   return null;
 }
 
-/** The orchestrator's own ACP connections to one session's adapters. */
-export class UpstreamSession implements AdapterHost {
-  /** One adapter process per harness a thread of this session runs. */
+/** The orchestrator's own ACP connections to one box's adapters. */
+export class UpstreamBox implements AdapterHost {
+  /** One adapter process per harness a thread of this box runs. */
   private readonly connections = new Map<HarnessId, AdapterConnection>();
   /** The container start, shared by every connection that wants one. */
   private containerStarting: Promise<string> | null = null;
   /** Who each adapter update goes to. */
   private readonly downstreams: Broadcast;
-  /** Whether this session still has work running in it. */
+  /** Whether this box still has work running in it. */
   private readonly background: BackgroundProbe;
   /** Whether the agent is talking on each thread. */
   private readonly activity: Activity;
@@ -219,37 +219,37 @@ export class UpstreamSession implements AdapterHost {
   private readonly announcedApprovals = new Map<string, number>();
   /**
    * KILL escalations armed and not yet fired. Held so a stop can cancel
-   * them: each names a container, and one that fires after the session has
+   * them: each names a container, and one that fires after the box has
    * gone reads processes in a box that is not there.
    */
   private readonly escalations = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(
-    readonly sessionId: string,
+    readonly boxId: string,
     readonly db: Db,
     private readonly cfg: Config,
     private readonly pending: PendingStore,
     private readonly notifier: Notifier,
-    private readonly onStatusChange: (status: SessionRow['status']) => void,
+    private readonly onStatusChange: (status: BoxRow['status']) => void,
     /**
      * Run, and awaited, just before the container is started: it brings the
-     * session's container up to date, which is everything from writing out
+     * box's container up to date, which is everything from writing out
      * the agent configuration to rebuilding a box Docker no longer has.
      *
      * Opening a thread on a stopped box is the other way a container starts,
-     * so the repairs cannot live only in `SessionManager.start`. The
+     * so the repairs cannot live only in `BoxManager.start`. The
      * entrypoint installs whatever is on disk at that moment, so the
      * configuration has to be current here too — and a box something pruned
      * has to be made again here too, or opening a thread on one is a 404 from
      * the daemon with nothing to do about it.
      *
-     * It may therefore change the session's container id, which is why the
+     * It may therefore change the box's container id, which is why the
      * row is read again below rather than before.
      */
     private readonly beforeStart: () => Promise<void>,
   ) {
-    this.slog = log.session(sessionId);
-    this.downstreams = new Broadcast(sessionId, (thread) => this.threadState(thread));
+    this.slog = log.box(boxId);
+    this.downstreams = new Broadcast(boxId, (thread) => this.threadState(thread));
     this.background = new BackgroundProbe({
       list: () => this.containerProcesses(),
       // Every harness, because the answer is about the box and not about one
@@ -258,7 +258,7 @@ export class UpstreamSession implements AdapterHost {
       harnesses: ALL_HARNESSES,
       ttlMs: cfg.BACKGROUND_POLL_SECONDS * 1_000,
       // A probe that cannot read its box holds whatever it last believed, and
-      // what it last believed holds the reaper off. Silence here is a session
+      // what it last believed holds the reaper off. Silence here is a box
       // that never stops for a reason nobody can see.
       onTrouble: (error) =>
         error
@@ -308,7 +308,7 @@ export class UpstreamSession implements AdapterHost {
       conn = new AdapterConnection(
         harness(id),
         this,
-        log.tagged({ session: this.sessionId, harness: id }),
+        log.tagged({ box: this.boxId, harness: id }),
       );
       this.connections.set(id, conn);
     }
@@ -316,7 +316,7 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * Starts the adapter a session needs by default: the one its current thread
+   * Starts the adapter a box needs by default: the one its current thread
    * runs on, or Claude's before it has a thread at all.
    *
    * Every other path names the harness it wants — a pin resolves the thread
@@ -327,7 +327,7 @@ export class UpstreamSession implements AdapterHost {
     await this.connection(harnessId ?? this.defaultHarness()).ensureStarted();
   }
 
-  /** The harness of the session's current thread, or the registry's default. */
+  /** The harness of the box's current thread, or the registry's default. */
   private defaultHarness(): HarnessId {
     return this.current?.harness ?? DEFAULT_HARNESS;
   }
@@ -356,7 +356,7 @@ export class UpstreamSession implements AdapterHost {
    * holding the thread that browser is pinned to.
    *
    * The two adapters advertise different things — different modes, different
-   * session capabilities — so answering with either would tell half the
+   * box capabilities — so answering with either would tell half the
    * browsers something untrue about the conversation they are watching.
    */
   initializeFor(acpThreadId: string): unknown {
@@ -373,7 +373,7 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * One of this session's threads by the adapter's own id for it, whichever
+   * One of this box's threads by the adapter's own id for it, whichever
    * harness it belongs to.
    *
    * The lookup takes the harness, and here it is not known: an update has come
@@ -383,7 +383,7 @@ export class UpstreamSession implements AdapterHost {
    */
   private rowOfAcp(acpThreadId: string): ThreadRow | undefined {
     for (const id of HARNESS_IDS) {
-      const row = threadByAcpId(this.db, this.sessionId, id, acpThreadId);
+      const row = threadByAcpId(this.db, this.boxId, id, acpThreadId);
       if (row) return row;
     }
     return undefined;
@@ -392,10 +392,10 @@ export class UpstreamSession implements AdapterHost {
   /**
    * The connection a forwarded message belongs on: the one holding the
    * conversation it names, else the one for that conversation's stored
-   * harness, else the browser's own thread, else the session's default.
+   * harness, else the browser's own thread, else the box's default.
    *
    * A message about a thread has to reach the adapter that has that thread —
-   * routing it to the other one would be a session id the adapter has never
+   * routing it to the other one would be a thread id the adapter has never
    * heard of — and a message about nothing in particular (`authenticate`,
    * `session/list`) belongs to whoever asked.
    */
@@ -410,7 +410,7 @@ export class UpstreamSession implements AdapterHost {
     return this.connection(this.defaultHarness());
   }
 
-  // --- what the connections ask of the session -------------------------------
+  // --- what the connections ask of the box -------------------------------
 
   /**
    * Starts the box once, however many adapters want it.
@@ -430,13 +430,13 @@ export class UpstreamSession implements AdapterHost {
 
   /** Brings the box up and makes sure the egress proxy is on its network. */
   private async startContainer(): Promise<string> {
-    if (!this.row().container_id) throw new Error('Session has no container');
+    if (!this.row().container_id) throw new Error('Box has no container');
 
     // Awaited, and the row read after it: this may have rebuilt the container
     // the row named, and the id to start is the one it left behind.
     await this.beforeStart();
     const row = this.row();
-    if (!row.container_id) throw new Error('Session has no container');
+    if (!row.container_id) throw new Error('Box has no container');
 
     await dk.startContainer(row.container_id);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
@@ -451,7 +451,7 @@ export class UpstreamSession implements AdapterHost {
   /**
    * The log hooks a connection reaches the broadcast through.
    *
-   * A thread's log belongs to the session rather than to the process that
+   * A thread's log belongs to the box rather than to the process that
    * filled it: a browser opening the thread is served from it, and it has to
    * outlive the adapter restarts that rebuild the conversation behind it.
    */
@@ -476,7 +476,7 @@ export class UpstreamSession implements AdapterHost {
     this.pollWhileWatched();
   }
 
-  /** A connection's outcome, which is the session's status. */
+  /** A connection's outcome, which is the box's status. */
   onStatus(status: 'running' | 'error'): void {
     this.onStatusChange(status);
   }
@@ -493,25 +493,25 @@ export class UpstreamSession implements AdapterHost {
    */
   onThreadsLost(acpThreadIds: readonly string[]): void {
     for (const acpThreadId of acpThreadIds) {
-      setThreadTurnActive(this.db, this.sessionId, acpThreadId, false);
+      setThreadTurnActive(this.db, this.boxId, acpThreadId, false);
       this.activity.reset(acpThreadId);
       // The adapter that asked is gone, so no answer can reach it any more.
-      // Left queued, each question holds its session out of the reaper and
+      // Left queued, each question holds its box out of the reaper and
       // shows a browser a question nobody can answer.
-      this.pending.failThread(this.sessionId, acpThreadId, 'The agent adapter exited');
+      this.pending.failThread(this.boxId, acpThreadId, 'The agent adapter exited');
     }
     this.downstreams.refreshThreadStates();
   }
 
   // --- the box ---------------------------------------------------------------
 
-  /** How many browsers are attached to this session. */
+  /** How many browsers are attached to this box. */
   get attachedCount(): number {
     return this.downstreams.size;
   }
 
   /**
-   * Whether this session has work running in the background, which holds the
+   * Whether this box has work running in the background, which holds the
    * idle reaper off the way an attached browser or a running turn does.
    *
    * The box first, because that is the answer that holds when no adapter is
@@ -522,7 +522,7 @@ export class UpstreamSession implements AdapterHost {
    * the box it is watching.
    *
    * Null until the box has been read and no adapter has a task: the reaper
-   * holds a session it has no answer for, and a card shows it as nothing
+   * holds a box it has no answer for, and a card shows it as nothing
    * running.
    */
   get backgroundActive(): boolean | null {
@@ -560,7 +560,7 @@ export class UpstreamSession implements AdapterHost {
       [...this.connections.values()].every((conn) => conn.holdsNothing) &&
       this.containerStarting === null &&
       this.escalations.size === 0 &&
-      this.pending.countForSession(this.sessionId) === 0
+      this.pending.countForBox(this.boxId) === 0
     );
   }
 
@@ -614,7 +614,7 @@ export class UpstreamSession implements AdapterHost {
    *
    * An adapter that is no longer up has nothing to stop this way: the tasks it
    * announced went with the process, and what it left running in the box is
-   * the session-level stop's to kill.
+   * the box-level stop's to kill.
    *
    * @returns How many tasks the adapter said it stopped. Zero is a normal
    *   answer: a task that was already over answers `stopped: false`, and the
@@ -708,12 +708,12 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * What is running in this session's container, for the probe.
+   * What is running in this box's container, for the probe.
    *
-   * A session with no container, or one that is not up, has nothing running
+   * A box with no container, or one that is not up, has nothing running
    * in it. That is null rather than an empty table: an empty table is what a
    * box that could not be read looks like, which counts as busy, and a
-   * stopped session was answering "still running" forever because of it.
+   * stopped box was answering "still running" forever because of it.
    */
   private async containerProcesses(): Promise<dk.ContainerProcess[] | null> {
     const containerId = this.row().container_id;
@@ -722,13 +722,13 @@ export class UpstreamSession implements AdapterHost {
     return dk.containerProcesses(containerId);
   }
 
-  /** The threads of this session the agent is talking on. */
+  /** The threads of this box the agent is talking on. */
   get speakingThreads(): string[] {
     return this.activity.speakingThreads;
   }
 
   /**
-   * The threads of this session with work still running in them, across every
+   * The threads of this box with work still running in them, across every
    * adapter the box is holding.
    *
    * From the adapters rather than from the box: what a person sees named is
@@ -785,12 +785,12 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * Settles which of the session's conversations a connection is for, and
+   * Settles which of the box's conversations a connection is for, and
    * answers with the adapter's own id for it.
    *
-   * `threadId` names one of the session's threads, or is null for a
+   * `threadId` names one of the box's threads, or is null for a
    * connection that named none, as an external ACP client does, which gets
-   * the session's current one.
+   * the box's current one.
    *
    * The thread's own harness decides which adapter has to be up: a thread
    * minted and never prompted has no adapter-side conversation until one is
@@ -805,10 +805,10 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * The live adapter id for one of the session's threads, bringing the thread
+   * The live adapter id for one of the box's threads, bringing the thread
    * up first when its adapter is not already holding it.
    *
-   * The spawn path brings back the session's current thread and the ones
+   * The spawn path brings back the box's current thread and the ones
    * browsers were already watching, which is every thread it can know about.
    * Opening any other one lands here, and is loaded on the same terms as at
    * spawn, so the connection is never pinned to a conversation the adapter
@@ -817,13 +817,13 @@ export class UpstreamSession implements AdapterHost {
   private async resolveThread(threadId: string | null): Promise<string> {
     let row = threadId ? getThread(this.db, threadId) : this.current;
     if (!row && !threadId) {
-      // A session with no thread at all: its first one is minted by the
+      // A box with no thread at all: its first one is minted by the
       // default adapter coming up, which is the one path that creates a row
       // rather than bringing one up.
       await this.ensureStarted();
       row = this.current;
     }
-    if (!row || row.session_id !== this.sessionId) throw new Error(THREAD_NOT_FOUND);
+    if (!row || row.box_id !== this.boxId) throw new Error(THREAD_NOT_FOUND);
     const conn = this.connection(row.harness);
     if (row.acp_session_id && conn.holds(row.acp_session_id)) return row.acp_session_id;
     // Two tabs opening the same thread at once share one bring-up, so the
@@ -849,7 +849,7 @@ export class UpstreamSession implements AdapterHost {
    *
    * The only caller is the respawn path, for a thread whose adapter id did
    * not survive. A connection is pinned to its own thread, so neither
-   * switching the session's default nor adding a thread drops a browser.
+   * switching the box's default nor adding a thread drops a browser.
    */
   dropWatchers(acpThreadId: string): void {
     for (const handle of this.downstreams.byRecency(acpThreadId)) {
@@ -861,27 +861,27 @@ export class UpstreamSession implements AdapterHost {
     }
   }
 
-  /** This session's stored row. Throws once the session is gone. */
-  private row(): SessionRow {
+  /** This box's stored row. Throws once the box is gone. */
+  private row(): BoxRow {
     const row = this.db
-      .prepare('SELECT * FROM sessions WHERE id = ?')
-      .get(this.sessionId) as SessionRow | undefined;
-    if (!row) throw new Error(`Session ${this.sessionId} not found`);
+      .prepare('SELECT * FROM boxes WHERE id = ?')
+      .get(this.boxId) as BoxRow | undefined;
+    if (!row) throw new Error(`Box ${this.boxId} not found`);
     return row;
   }
 
-  /** Marks the session as active now, which holds off the reaper. */
+  /** Marks the box as active now, which holds off the reaper. */
   private touch(): void {
-    touchSession(this.db, this.sessionId);
+    touchBox(this.db, this.boxId);
   }
 
   /**
-   * Forgets everything this session was in the middle of, across every adapter.
+   * Forgets everything this box was in the middle of, across every adapter.
    * None of the callers leaves anything running: a deliberate stop, or the
-   * session being closed.
+   * box being closed.
    */
   private clearThreadStates(): void {
-    clearSessionTurns(this.db, this.sessionId);
+    clearBoxTurns(this.db, this.boxId);
     this.activity.clear();
     this.downstreams.refreshThreadStates();
   }
@@ -889,21 +889,21 @@ export class UpstreamSession implements AdapterHost {
   // --- threads --------------------------------------------------------------
 
   /**
-   * The session's default conversation: what a connection naming no thread is
-   * pinned to. Null before the session has one.
+   * The box's default conversation: what a connection naming no thread is
+   * pinned to. Null before the box has one.
    */
   get current(): ThreadRow | null {
-    return currentThread(this.db, this.sessionId) ?? null;
+    return currentThread(this.db, this.boxId) ?? null;
   }
 
-  /** The session's current thread, for the connections. */
+  /** The box's current thread, for the connections. */
   currentThread(): ThreadRow | null {
     return this.current;
   }
 
   /**
    * Starts a fresh, empty conversation on the same workspace and makes it the
-   * session's default. Nobody is moved onto it: a browser already watching
+   * box's default. Nobody is moved onto it: a browser already watching
    * another thread keeps watching it, and the new one is opened by following
    * a link to it.
    *
@@ -916,7 +916,7 @@ export class UpstreamSession implements AdapterHost {
    */
   async newThread(options?: ThreadOptions): Promise<ThreadRow> {
     const wanted = harness(options?.harness ?? DEFAULT_HARNESS);
-    const thread = insertThread(this.db, this.sessionId, {
+    const thread = insertThread(this.db, this.boxId, {
       harness: wanted.id,
       modeId: options?.modeId ?? null,
       config: options?.config ?? { ...wanted.defaultConfig },
@@ -928,7 +928,7 @@ export class UpstreamSession implements AdapterHost {
     });
     try {
       // Through the same resolution a pin uses, because the row is already the
-      // session's current thread: an adapter coming up for it mints its
+      // box's current thread: an adapter coming up for it mints its
       // conversation on the way, and asking for one again would leave two
       // behind.
       const acpSessionId = await this.resolveThread(thread.id);
@@ -944,7 +944,7 @@ export class UpstreamSession implements AdapterHost {
 
   /**
    * Branches one conversation into a second carrying its context, and makes
-   * the new one the session's default. The source is left exactly as it was,
+   * the new one the box's default. The source is left exactly as it was,
    * still streaming to whoever is watching it.
    *
    * A fork stays on its source's harness and keeps what the source is
@@ -958,7 +958,7 @@ export class UpstreamSession implements AdapterHost {
    */
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
     const source = getThread(this.db, sourceThreadId);
-    if (!source || source.session_id !== this.sessionId) {
+    if (!source || source.box_id !== this.boxId) {
       throw new Error(THREAD_NOT_FOUND);
     }
     if (!source.acp_session_id) throw new Error(NOTHING_TO_FORK);
@@ -980,7 +980,7 @@ export class UpstreamSession implements AdapterHost {
     // a fresh thread is in its harness's default, which is what an empty
     // column already means, where a fork is somewhere the default would not
     // put it back.
-    const thread = insertThread(this.db, this.sessionId, {
+    const thread = insertThread(this.db, this.boxId, {
       harness: wanted.id,
       acpSessionId,
       modeId: wanted.forkModeId,
@@ -992,7 +992,7 @@ export class UpstreamSession implements AdapterHost {
   }
 
   /**
-   * Makes another of this session's threads its default: what a connection
+   * Makes another of this box's threads its default: what a connection
    * naming no thread gets.
    *
    * An ordinary write, and nothing more. No live connection is pinned to the
@@ -1000,12 +1000,12 @@ export class UpstreamSession implements AdapterHost {
    */
   switchThread(threadId: string): ThreadRow {
     const thread = getThread(this.db, threadId);
-    if (!thread || thread.session_id !== this.sessionId) {
+    if (!thread || thread.box_id !== this.boxId) {
       throw new Error(THREAD_NOT_FOUND);
     }
     this.db
-      .prepare('UPDATE sessions SET current_thread_id = ? WHERE id = ?')
-      .run(thread.id, this.sessionId);
+      .prepare('UPDATE boxes SET current_thread_id = ? WHERE id = ?')
+      .run(thread.id, this.boxId);
     this.slog.info('thread selected', { threadId: thread.id });
     return thread;
   }
@@ -1069,7 +1069,7 @@ export class UpstreamSession implements AdapterHost {
   private recordThreadInfo(harnessId: HarnessId, params: unknown, replaying: boolean): void {
     const acpSessionId = (params as { sessionId?: string })?.sessionId;
     if (!acpSessionId) return;
-    const row = threadByAcpId(this.db, this.sessionId, harnessId, acpSessionId);
+    const row = threadByAcpId(this.db, this.boxId, harnessId, acpSessionId);
     if (!row) return;
     if (!replaying) touchThread(this.db, row.id);
 
@@ -1079,7 +1079,7 @@ export class UpstreamSession implements AdapterHost {
           sessionUpdate?: string;
           title?: unknown;
           currentModeId?: unknown;
-          configOptions?: SessionConfigOption[];
+          configOptions?: ThreadConfigOption[];
         };
       }
     )?.update;
@@ -1143,7 +1143,7 @@ export class UpstreamSession implements AdapterHost {
   private queuePermission(params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const entry = this.pending.add(
-        this.sessionId,
+        this.boxId,
         threadOf(params) ?? null,
         ACP_METHOD.sessionRequestPermission,
         params,
@@ -1207,7 +1207,7 @@ export class UpstreamSession implements AdapterHost {
 
   /**
    * Tells the notifier that a thread wants somebody, naming the conversation
-   * rather than only the box: with two threads live, "your session needs you"
+   * rather than only the box: with two threads live, "your box needs you"
    * is not enough to act on from a lock screen.
    *
    * Fire and forget: a turn already waiting on a human must not also wait on
@@ -1215,18 +1215,18 @@ export class UpstreamSession implements AdapterHost {
    */
   private announce(kind: NotifyKind, acpThreadId: string | null): void {
     const thread = acpThreadId ? this.rowOfAcp(acpThreadId) : undefined;
-    let sessionName: string;
+    let boxName: string;
     try {
-      sessionName = this.row().name;
+      boxName = this.row().name;
     } catch {
-      // The session was deleted between the event and this call; there is
+      // The box was deleted between the event and this call; there is
       // nothing left to notify anybody about.
       return;
     }
     void this.notifier.notify({
       kind,
-      sessionId: this.sessionId,
-      sessionName,
+      boxId: this.boxId,
+      boxName,
       threadId: thread?.id ?? null,
       // The same name the dashboard shows, so a notification and the list
       // agree about which conversation this is.
@@ -1255,7 +1255,7 @@ export class UpstreamSession implements AdapterHost {
     // the queued questions are — a client rebuilds from the replay and drops
     // whatever it held before it landed.
     this.downstreams.threadStateTo(handle);
-    for (const entry of this.pending.listForThread(this.sessionId, thread)) {
+    for (const entry of this.pending.listForThread(this.boxId, thread)) {
       const params = JSON.parse(entry.row.params) as unknown;
       // This browser's own copy of the question, withdrawn when another
       // browser answers it first. Dropped as soon as this browser has
@@ -1298,8 +1298,8 @@ export class UpstreamSession implements AdapterHost {
     this.tap('down', method, params);
 
     // Which conversation this is about, taken from the message itself: two
-    // threads of one session share this gateway, so nothing here may be
-    // decided by which of them is the session's default.
+    // threads of one box share this gateway, so nothing here may be
+    // decided by which of them is the box's default.
     const thread = threadOf(params);
     const isPrompt = method === ACP_METHOD.sessionPrompt && thread !== undefined;
     const isLoad = method === ACP_METHOD.sessionLoad && thread !== undefined && from !== undefined;
@@ -1382,7 +1382,7 @@ export class UpstreamSession implements AdapterHost {
     params: unknown,
     result: unknown,
   ): void {
-    const answered = (result as { configOptions?: SessionConfigOption[] } | null)?.configOptions;
+    const answered = (result as { configOptions?: ThreadConfigOption[] } | null)?.configOptions;
     if (Array.isArray(answered)) {
       conn.recordConfigOptions(acpThreadId, answered);
       return;
@@ -1395,14 +1395,14 @@ export class UpstreamSession implements AdapterHost {
 
   /**
    * Records whether a prompt turn is running on one thread, and marks the
-   * session active.
+   * box active.
    *
    * The thread comes from the prompt's own params, so a turn is recorded
-   * against the conversation it is on rather than against the session's
+   * against the conversation it is on rather than against the box's
    * default.
    */
   private setTurnActive(acpThreadId: string, active: boolean): void {
-    setThreadTurnActive(this.db, this.sessionId, acpThreadId, active);
+    setThreadTurnActive(this.db, this.boxId, acpThreadId, active);
   }
 
   /** Forwards a browser notification to the adapter its thread is on. */
@@ -1411,7 +1411,7 @@ export class UpstreamSession implements AdapterHost {
     await conn.ensureStarted();
     this.tap('down', method, params);
     // Only the cancelled thread's turn ends. Another thread of the same
-    // session may still be mid-turn.
+    // box may still be mid-turn.
     const thread = threadOf(params);
     if (method === ACP_METHOD.sessionCancel && thread) {
       this.setTurnActive(thread, false);
@@ -1438,20 +1438,20 @@ export class UpstreamSession implements AdapterHost {
   /** Stops every connection deliberately, which suppresses the reconnects. */
   stop(): void {
     this.stopPolling();
-    // Each one names a container this session may not have by the time it
+    // Each one names a container this box may not have by the time it
     // fires, and reads the box it named.
     for (const timer of this.escalations) clearTimeout(timer);
     this.escalations.clear();
     // The box is going away, and what was in it went with it. Said now rather
     // than at the next reading, so a card does not carry "still running" over
-    // the moment its session was shut down.
+    // the moment its box was shut down.
     this.background.clear();
     for (const conn of this.connections.values()) conn.stop();
     this.clearThreadStates();
     // A question this box's adapters asked cannot be answered any more, so
     // the next one a fresh adapter asks is news again.
     this.announcedApprovals.clear();
-    this.pending.failSession(this.sessionId, 'Session stopped');
+    this.pending.failBox(this.boxId, 'Box stopped');
   }
 
   /** Stops for good and forgets every attached browser. */

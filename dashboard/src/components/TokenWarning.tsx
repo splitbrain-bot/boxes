@@ -1,7 +1,7 @@
 import { Link } from 'react-router';
 import type { HarnessHealth } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
-import { useSessions } from '../stores/sessions.ts';
+import { useBoxes } from '../stores/boxes.ts';
 
 /**
  * One line per harness that cannot run a turn.
@@ -15,7 +15,7 @@ import { useSessions } from '../stores/sessions.ts';
  * health probe has answered, since nothing is known to be wrong then.
  */
 export function TokenWarning({ className }: { className?: string }) {
-  const { harnesses } = useSessions();
+  const { harnesses } = useBoxes();
   const broken = harnesses.filter((h) => !h.runnable);
   if (broken.length === 0) return null;
 

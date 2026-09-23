@@ -4,7 +4,7 @@ import type { AnyNotification } from '@agentclientprotocol/sdk';
 import { expect, test } from 'vitest';
 import type { WebSocket } from 'ws';
 import { setLogLevel } from '../log.ts';
-import type { SessionManager } from '../sessions.ts';
+import type { BoxManager } from '../boxes.ts';
 import { attachDownstream, wsStream } from './downstream.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -13,7 +13,7 @@ import type { DownstreamHandle } from './upstream.ts';
  * what it refuses to pass on, and how far behind it lets a browser fall.
  *
  * The upstream is a stand-in, so what is under test is the connection's own
- * rules rather than anything the session does with what it forwards.
+ * rules rather than anything the box does with what it forwards.
  */
 
 // These tests drive the paths the connection narrates, so only failures are
@@ -23,7 +23,7 @@ setLogLevel('error');
 /** The thread this connection is pinned to. */
 const T1 = 'acp-1';
 
-/** Another thread of the same session, which this connection may not touch. */
+/** Another thread of the same box, which this connection may not touch. */
 const T2 = 'acp-2';
 
 /** The ceiling the gateway puts on one socket's unsent bytes. */
@@ -91,7 +91,7 @@ class FakeSocket extends EventEmitter {
 }
 
 /**
- * The session's upstream, answering everything and recording what the
+ * The box's upstream, answering everything and recording what the
  * connection asked of it.
  *
  * Its `pin` hands back the promise the test holds, which is the window every
@@ -164,7 +164,7 @@ function connect(pinned: Promise<string> = Promise.resolve(T1)): {
 } {
   const ws = new FakeSocket();
   const up = new FakeUpstream(pinned);
-  const manager = { upstream: () => up } as unknown as SessionManager;
+  const manager = { upstream: () => up } as unknown as BoxManager;
   attachDownstream(ws as unknown as WebSocket, 's1', 't1', manager);
   return { ws, up };
 }
@@ -180,7 +180,7 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-/** One JSON-RPC message written to the socket, as a session's updates are. */
+/** One JSON-RPC message written to the socket, as a box's updates are. */
 async function write(ws: FakeSocket, msg: AnyNotification): Promise<void> {
   const writer = wsStream(ws as unknown as WebSocket, 's1').writable.getWriter();
   await writer.write(msg);
@@ -228,7 +228,7 @@ test('a request about the pinned thread, or about none, is forwarded with the ha
     method: 'session/load',
     params: { sessionId: T1, cwd: '/workspace', mcpServers: [] },
   });
-  // A request about the session rather than about one of its conversations.
+  // A request about the box rather than about one of its conversations.
   ws.receive({ jsonrpc: '2.0', id: 3, method: 'session/list', params: {} });
 
   for (const id of [1, 2, 3]) assert.deepEqual((await answer(ws, id)).result, {});
@@ -290,7 +290,7 @@ test('session/new answers with the pinned thread', async () => {
     params: { cwd: '/workspace', mcpServers: [] },
   });
 
-  // The browser is on one conversation of the session, so it is handed that
+  // The browser is on one conversation of the box, so it is handed that
   // one rather than a second conversation on every reconnect.
   assert.deepEqual((await answer(ws, 1)).result, { sessionId: T1 });
 });
@@ -333,7 +333,7 @@ test('a browser past the buffer ceiling is closed on the send that takes it ther
   await write(ws, UPDATE);
 
   // A phone asleep with the tab open would grow this buffer for as long as the
-  // session keeps talking. Closing costs it nothing it cannot get back.
+  // box keeps talking. Closing costs it nothing it cannot get back.
   assert.equal(ws.sent.length, 1);
   assert.deepEqual(ws.closes, [{ code: 1008, reason: 'too far behind' }]);
 });

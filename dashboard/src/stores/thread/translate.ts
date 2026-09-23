@@ -7,9 +7,9 @@ import {
   type ContentBlock,
   type PermissionOption,
   type PlanEntry,
-  type SessionConfigOption,
-  type SessionModeState,
-  type SessionUpdate,
+  type ThreadConfigOption,
+  type ThreadModeState,
+  type ThreadUpdate,
   type ToolCallContent,
   type ToolCallLocation,
   type ToolCallStatus,
@@ -31,7 +31,7 @@ import {
  */
 
 /** The member of the update union that carries one kind. */
-type UpdateOf<K extends UpdateKind> = Extract<SessionUpdate, { sessionUpdate: K }>;
+type UpdateOf<K extends UpdateKind> = Extract<ThreadUpdate, { sessionUpdate: K }>;
 
 /** A run of assistant or user prose. */
 interface TextPart {
@@ -136,9 +136,9 @@ export interface Message {
 export interface ThreadModel {
   messages: Message[];
   /** The adapter's advertised modes, or null when it advertises none. */
-  modes: SessionModeState | null;
+  modes: ThreadModeState | null;
   /** The options the adapter lets a client set, such as the model. */
-  configOptions: SessionConfigOption[];
+  configOptions: ThreadConfigOption[];
   /** The agent's current plan, or null when it has published none. */
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
@@ -321,7 +321,7 @@ export function messageOfTool(model: ThreadModel, toolCallId: string): Message |
  * An unknown kind is kept and otherwise ignored: a newer adapter must be able
  * to talk to an older dashboard without the thread breaking.
  */
-export function applyUpdate(model: ThreadModel, update: SessionUpdate): Message | null {
+export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message | null {
   switch (update.sessionUpdate) {
     case UPDATE_KIND.userMessageChunk: {
       const u = update as UpdateOf<typeof UPDATE_KIND.userMessageChunk>;

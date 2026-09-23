@@ -2,10 +2,10 @@ import type { WebSocket } from 'ws';
 import { parseTerminalControl } from '../../../shared/terminal.ts';
 import * as dk from '../docker.ts';
 import { log } from '../log.ts';
-import type { SessionManager } from '../sessions.ts';
+import type { BoxManager } from '../boxes.ts';
 
 /**
- * The terminal endpoint: one WebSocket, one pty in the session's container.
+ * The terminal endpoint: one WebSocket, one pty in the box's container.
  *
  * Binary frames are the pty's bytes, in both directions, and nothing else.
  * Text frames are control from the browser — only a window size so far — so
@@ -62,19 +62,19 @@ const CLOSE = {
 } as const;
 
 /**
- * Attaches one browser to a pty in the session's container.
+ * Attaches one browser to a pty in the box's container.
  *
  * The box is started first, which runs the same repairs a start does and is
- * what opens a terminal on a session the reaper took. That takes seconds, so
+ * what opens a terminal on a box the reaper took. That takes seconds, so
  * frames arriving in the meantime are held and replayed into the pty once it
  * is there.
  *
  * One teardown serves whichever end goes first: the socket closing ends the
  * shell, and the shell ending closes the socket.
  */
-export function attachTerminal(ws: WebSocket, sessionId: string, manager: SessionManager): void {
-  const slog = log.session(sessionId);
-  const release = manager.holdTerminal(sessionId);
+export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager): void {
+  const slog = log.box(boxId);
+  const release = manager.holdTerminal(boxId);
 
   /** The pty, once it is open. Null while the box is still being started. */
   let terminal: dk.TerminalExec | null = null;
@@ -115,7 +115,7 @@ export function attachTerminal(ws: WebSocket, sessionId: string, manager: Sessio
     if (isBinary) {
       // Typing is what says somebody is using the box, and it is what holds
       // the reaper off once the terminal is closed again.
-      manager.touchThrottled(sessionId);
+      manager.touchThrottled(boxId);
       if (terminal) terminal.stream.write(data);
       else queued.push(Buffer.from(data));
       return;
@@ -167,7 +167,7 @@ export function attachTerminal(ws: WebSocket, sessionId: string, manager: Sessio
   void (async () => {
     let target;
     try {
-      target = await manager.execTarget(sessionId);
+      target = await manager.execTarget(boxId);
     } catch (err) {
       slog.warn('could not reach the box for a terminal', { error: (err as Error).message });
       close(CLOSE.unavailable, (err as Error).message);

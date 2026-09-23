@@ -7,7 +7,7 @@ import { Screen } from './screen.ts';
 /**
  * The renderer, against the movements a redrawing UI actually makes.
  *
- * The fixture is a recording of `claude setup-token` in a session container,
+ * The fixture is a recording of `claude setup-token` in a box container,
  * taken with a code it refused, because the refusal is the one message whose
  * every character is known and whose rendering was provably wrong before.
  */
@@ -32,7 +32,7 @@ test('a character the UI did not resend is still on the screen', () => {
   assert.match(screen.text, /the full code was copied/);
 });
 
-test('the real session reads as the sentences it drew', () => {
+test('the real box reads as the sentences it drew', () => {
   const raw = readFileSync(FIXTURE, 'latin1');
   const screen = new Screen();
   // Read the way the flow reads it: the screen after every chunk, because

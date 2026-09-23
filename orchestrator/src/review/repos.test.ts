@@ -19,13 +19,13 @@ import {
 /**
  * Discovery over real temporary repositories rather than a mocked git.
  *
- * Every shape here is a way resolution can lose git for a whole session — two
+ * Every shape here is a way resolution can lose git for a whole box — two
  * clones side by side, a stray directory beside one, a clone a level deeper, a
  * repository inside a repository, a symlinked workspace path — so they are the
  * cases worth paying a `git init` for.
  *
  * Discovery confirms a candidate by asking git, which the orchestrator does in
- * the session's container. Here a runner starts it on this machine instead,
+ * the box's container. Here a runner starts it on this machine instead,
  * over the test's own repositories.
  */
 
@@ -50,7 +50,7 @@ const localGit: GitRunner = async (target, argv, env) => {
   }
 };
 
-/** The session box a workspace would be reviewed in. */
+/** The box a workspace would be reviewed in. */
 function box(workspaceDir: string): GitBox {
   return { containerId: 'box-1', workspaceDir };
 }
@@ -132,7 +132,7 @@ describe('discovery', () => {
 
   test('a workspace reached through a symlink still resolves its repositories', async () => {
     // `rev-parse --show-toplevel` resolves symlinks, so comparing its answer
-    // against the raw path fails here — which lost git for every session of
+    // against the raw path fails here — which lost git for every box of
     // any deployment whose workspace path had a linked component.
     repo('project');
     const link = join(tmpdir(), `boxes-link-${process.pid}-${Math.random().toString(36).slice(2)}`);

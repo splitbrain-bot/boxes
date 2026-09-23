@@ -27,10 +27,10 @@ const BLOCKED: Record<PushBlocker, string> = {
 };
 
 /**
- * Subscribes this browser to notifications about sessions that want
+ * Subscribes this browser to notifications about boxes that want
  * something, and says why it cannot when it cannot.
  *
- * Deployment-wide rather than per session: a subscription is this browser's,
+ * Deployment-wide rather than per box: a subscription is this browser's,
  * and every box notifies through it.
  */
 export function PushToggle() {
@@ -56,7 +56,7 @@ export function PushToggle() {
         title={
           subscribed
             ? 'Stop notifying this browser'
-            : 'Notify this browser when a session needs you'
+            : 'Notify this browser when a box needs you'
         }
       >
         {subscribed ? <Bell /> : <BellOff />}

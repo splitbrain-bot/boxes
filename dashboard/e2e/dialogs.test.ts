@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startOrchestrator, type SessionSpec, type TestOrchestrator } from './orchestrator.ts';
+import { startOrchestrator, type BoxSpec, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * The two dialogs that start a conversation, driven in a real browser.
@@ -24,8 +24,8 @@ let stub: TestOrchestrator;
  * A deployment running both agents, which is what the dialogs are for: a
  * credential for each, and each adapter's catalogue for the dialog to read.
  */
-async function twoHarnesses(sessions: SessionSpec[] = [{}]): Promise<void> {
-  stub = await startOrchestrator(sessions);
+async function twoHarnesses(boxes: BoxSpec[] = [{}]): Promise<void> {
+  stub = await startOrchestrator(boxes);
   stub.state.openaiCredential = 'ok';
   stub.state.catalogued = ['claude', 'codex'];
 }
@@ -71,7 +71,7 @@ test('the new-thread dialog posts the agent, mode and model it was set to', asyn
 
     await expect.poll(() => stub.threadCalls.length).toBe(1);
     expect(stub.threadCalls[0]).toEqual({
-      sessionId: ID,
+      boxId: ID,
       body: {
         options: {
           harness: 'codex',
@@ -82,14 +82,14 @@ test('the new-thread dialog posts the agent, mode and model it was set to', asyn
     });
 
     // And the thread it made is the one the browser lands in.
-    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     expect(errors).toEqual([]);
   } finally {
     await close();
   }
 });
 
-test('the new-session form creates the box and its first thread in one request', async () => {
+test('the new-box form creates the box and its first thread in one request', async () => {
   await twoHarnesses();
   const { page, errors, close } = await openPage(stub.url, '/new');
   try {
@@ -102,8 +102,8 @@ test('the new-session form creates the box and its first thread in one request',
 
     // One request: a box is made to be worked in, so it is made with a
     // conversation in it, on the agent the same form chose.
-    await expect.poll(() => stub.sessionCalls.length).toBe(1);
-    expect(stub.sessionCalls[0]).toEqual({
+    await expect.poll(() => stub.boxCalls.length).toBe(1);
+    expect(stub.boxCalls[0]).toEqual({
       name: 'second box',
       agentSet: null,
       thread: {
@@ -207,11 +207,11 @@ test('the dialog opens on what the last one chose, from the deployment', async (
       config: { model: 'sonnet' },
     });
 
-    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     // The thread's own chrome arrives with its connection; the way back is
     // part of it.
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
-    await page.getByLabel('Back to sessions').click();
+    await page.getByLabel('Back to boxes').click();
     await page.getByRole('button', { name: 'New thread' }).click();
 
     await expect.poll(() => page.getByLabel('Agent mode').inputValue()).toBe('plan');
@@ -237,7 +237,7 @@ test('a thread says which agent runs it, on its row and in its header', async ()
       .toBe(true);
 
     await second.click();
-    await page.waitForURL(`**/sessions/${ID}/threads/th2`);
+    await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     // And it is in the header too, because it is what the settings behind the
     // button next to it mean.
     await expect.poll(() => page.getByText('· Codex').isVisible()).toBe(true);
@@ -264,7 +264,7 @@ for (const scheme of ['light', 'dark'] as const) {
     }
   });
 
-  test(`the new-session form renders its agent block in ${scheme}`, async () => {
+  test(`the new-box form renders its agent block in ${scheme}`, async () => {
     await twoHarnesses();
     const { page, errors, close } = await openPage(stub.url, '/new', scheme);
     try {

@@ -24,7 +24,7 @@ import type {
 import { buildApp, type Orchestrator } from '../app.ts';
 import { loadConfig, setConfigForTests } from '../config.ts';
 import { openDb, type Db } from '../db.ts';
-import { SessionManager } from '../sessions.ts';
+import { BoxManager } from '../boxes.ts';
 import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 
 /**
@@ -33,9 +33,9 @@ import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
  *
  * Files are read off the workspace directory, which is why the API can be
  * driven end to end in a unit test at all. Git is the other half: the routes
- * ask the session for a running container and address every invocation at a
+ * ask the box for a running container and address every invocation at a
  * path inside it, so both of those are stubbed here — the box by a manager
- * that hands out the session id, and git by a runner that starts it on this
+ * that hands out the box id, and git by a runner that starts it on this
  * machine over the workspace the box would have held.
  *
  * The review is over the *workspace*, so most of what is worth pinning down
@@ -44,7 +44,7 @@ import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
  * review into a plain file browser with no git in it when it goes wrong.
  */
 
-/** Invocations addressed at anything but a session's own workspace. */
+/** Invocations addressed at anything but a box's own workspace. */
 let misaddressed: GitTarget[] = [];
 
 /** How many times git has been run, for the paths that must not run it. */
@@ -55,7 +55,7 @@ let invocations = 0;
  * path names.
  *
  * The workspace is at `/workspace` inside a box, and the stubbed container id
- * is the session's own, so the two together say which directory on this
+ * is the box's own, so the two together say which directory on this
  * machine an invocation means. One addressed anywhere else is recorded and
  * refused rather than run.
  */
@@ -89,36 +89,36 @@ let dir: string;
 let db: Db;
 let orchestrator: Orchestrator;
 
-/** The workspace directory the routes will read, for session `id`. */
+/** The workspace directory the routes will read, for box `id`. */
 function workspace(id: string): string {
   return join(dir, 'workspaces', id);
 }
 
-/** A directory-backed session row, which is all the review routes need. */
-function insertSession(id: string): string {
+/** A directory-backed box row, which is all the review routes need. */
+function insertBox(id: string): string {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir,
        review_base_rev, status, current_thread_id, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', '', ?, ?, NULL, 'running', NULL, ?, ?)`,
-  ).run(id, `sn-${id}`, `home-${id}`, workspace(id), now, now);
+  ).run(id, `bn-${id}`, `home-${id}`, workspace(id), now, now);
   const path = workspace(id);
   mkdirSync(path, { recursive: true });
   return path;
 }
 
-/** A session whose workspace is still a named volume, as a legacy row is. */
-function insertVolumeSession(id: string): void {
+/** A box whose workspace is still a named volume, as a legacy row is. */
+function insertVolumeBox(id: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO sessions (id, name, profile, image, container_id,
+    `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, ws_volume, home_volume, workspace_dir,
        review_base_rev, status, current_thread_id, created_at, last_active_at)
      VALUES (?, 'legacy', 'DEFAULT', 'img', 'c1',
        ?, '10.200.0.0/24', ?, ?, NULL, NULL, 'stopped', NULL, ?, ?)`,
-  ).run(id, `sn-${id}`, `ws-${id}`, `home-${id}`, now, now);
+  ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, now, now);
 }
 
 /** Runs git in a directory with the ambient binary. */
@@ -151,11 +151,11 @@ beforeEach(() => {
   misaddressed = [];
   invocations = 0;
   // The box a review runs git in: no container is started here, so the
-  // session id stands in for one and the workspace is where it always is.
-  // Asking for the box marks the session active, as the real one does, because
+  // box id stands in for one and the workspace is where it always is.
+  // Asking for the box marks the box active, as the real one does, because
   // that is the half of it these tests are about.
-  vi.spyOn(SessionManager.prototype, 'execTarget').mockImplementation(async function (
-    this: SessionManager,
+  vi.spyOn(BoxManager.prototype, 'execTarget').mockImplementation(async function (
+    this: BoxManager,
     id: string,
   ) {
     this.touch(id);
@@ -171,7 +171,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   setConfigForTests(null as never);
   rmSync(dir, { recursive: true, force: true });
-  // Every invocation the requests above made was addressed to the session's
+  // Every invocation the requests above made was addressed to the box's
   // own container and to a path inside its workspace.
   assert.deepEqual(misaddressed, []);
 });
@@ -197,7 +197,7 @@ async function openDir(
   fresh = true,
 ): Promise<{ status: number; body: ReviewDirResponse }> {
   const query = `path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`;
-  return get<ReviewDirResponse>(`/api/sessions/${id}/review/dir?${query}`);
+  return get<ReviewDirResponse>(`/api/boxes/${id}/review/dir?${query}`);
 }
 
 /** The entries of a directory, as `d:name` or `f:name`, in the order they came. */
@@ -212,7 +212,7 @@ function entry(body: ReviewDirResponse, name: string): ReviewDirEntry | undefine
 
 describe('the directory endpoint', () => {
   test('a cloned project is browsable under its own prefix, with git on', async () => {
-    const ws = insertSession('aaa');
+    const ws = insertBox('aaa');
     // The shape a clone actually leaves: /workspace holds one directory and
     // that is the repository.
     const repo = join(ws, 'project');
@@ -242,7 +242,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a workspace that is itself a repository claims every path in it', async () => {
-    const ws = insertSession('bbb');
+    const ws = insertBox('bbb');
     initRepo(ws);
     write(ws, 'a.txt', 'x\n');
     git(ws, 'add', '.');
@@ -255,7 +255,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a workspace with no repository browses without the git features', async () => {
-    const ws = insertSession('ccc');
+    const ws = insertBox('ccc');
     write(ws, 'notes/todo.txt', 'x\n');
 
     const { body } = await openDir('ccc');
@@ -269,7 +269,7 @@ describe('the directory endpoint', () => {
   });
 
   test('two clones side by side both keep their git', async () => {
-    const ws = insertSession('ddd');
+    const ws = insertBox('ddd');
     for (const name of ['one', 'two']) {
       const repo = join(ws, name);
       mkdirSync(repo);
@@ -292,7 +292,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a clone beside a stray directory keeps its git, and the stray shows too', async () => {
-    const ws = insertSession('str');
+    const ws = insertBox('str');
     const repo = join(ws, 'project');
     mkdirSync(repo);
     initRepo(repo);
@@ -311,7 +311,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a clone one level deeper is found', async () => {
-    const ws = insertSession('dpt');
+    const ws = insertBox('dpt');
     const repo = join(ws, 'projects', 'foo');
     mkdirSync(repo, { recursive: true });
     initRepo(repo);
@@ -324,7 +324,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a repository inside a repository is listed, with no ghost row', async () => {
-    const ws = insertSession('nst');
+    const ws = insertBox('nst');
     initRepo(ws);
     write(ws, 'a.txt', 'x\n');
     const inner = join(ws, 'inner');
@@ -343,7 +343,7 @@ describe('the directory endpoint', () => {
   });
 
   test('the repository roots are marked in the listing', async () => {
-    const ws = insertSession('mrk');
+    const ws = insertBox('mrk');
     const repo = join(ws, 'project');
     mkdirSync(repo);
     initRepo(repo);
@@ -355,8 +355,8 @@ describe('the directory endpoint', () => {
     assert.equal(entry(body, 'notes')!.repo, undefined);
   });
 
-  test('nothing about a root is stored on the session row', async () => {
-    const ws = insertSession('eee');
+  test('nothing about a root is stored on the box row', async () => {
+    const ws = insertBox('eee');
     const repo = join(ws, 'project');
     mkdirSync(repo);
     initRepo(repo);
@@ -365,7 +365,7 @@ describe('the directory endpoint', () => {
     await openDir('eee');
     // There is no root to remember: /workspace is the root, and which
     // repository a path belongs to is derived from the path.
-    const columns = (db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map(
+    const columns = (db.prepare('PRAGMA table_info(boxes)').all() as { name: string }[]).map(
       (c) => c.name,
     );
     assert.ok(!columns.includes('review_root'));
@@ -373,7 +373,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a repository that appears later is picked up by the next arrival', async () => {
-    const ws = insertSession('ggg');
+    const ws = insertBox('ggg');
     // What a curious user does: open the review on a fresh box, before the
     // agent has fetched anything.
     const empty = await openDir('ggg');
@@ -397,14 +397,14 @@ describe('the directory endpoint', () => {
   });
 
   test('opening a folder runs no git at all', async () => {
-    const ws = insertSession('cch');
+    const ws = insertBox('cch');
     initRepo(ws);
     write(ws, 'src/a.txt', 'x\n');
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
     await openDir('cch');
 
-    // Git is a `docker exec` into the session container, so a status per
+    // Git is a `docker exec` into the box container, so a status per
     // folder tap would be an exec per tap. The whole workspace is asked once
     // and a folder is a slice of the answer.
     const before = invocations;
@@ -414,11 +414,11 @@ describe('the directory endpoint', () => {
   });
 
   test('a review written before a clone stays the workspace review', async () => {
-    const ws = insertSession('hhh');
+    const ws = insertBox('hhh');
     write(ws, 'notes.txt', 'x\n');
     await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/hhh/review/annotations',
+      url: '/api/boxes/hhh/review/annotations',
       payload: { path: 'notes.txt', line: 1, comment: 'before the clone' },
     });
 
@@ -440,14 +440,14 @@ describe('the directory endpoint', () => {
   });
 
   test('the workspace REVIEW.md is neither listed nor given a status', async () => {
-    const ws = insertSession('out');
+    const ws = insertBox('out');
     initRepo(ws);
     write(ws, 'code.ts', 'x\n');
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
     await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/out/review/annotations',
+      url: '/api/boxes/out/review/annotations',
       payload: { path: 'code.ts', line: 1, comment: 'x' },
     });
 
@@ -460,7 +460,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a file the change deleted is still listed, in its own directory', async () => {
-    const ws = insertSession('iii');
+    const ws = insertBox('iii');
     initRepo(ws);
     write(ws, 'src/keep.txt', 'x\n');
     write(ws, 'src/gone.txt', 'y\n');
@@ -470,7 +470,7 @@ describe('the directory endpoint', () => {
     git(ws, 'commit', '-q', '-m', 'drop it');
     await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/iii/review/base',
+      url: '/api/boxes/iii/review/base',
       payload: { rev: 'HEAD~1' },
     });
 
@@ -484,7 +484,7 @@ describe('the directory endpoint', () => {
   });
 
   test('a directory the change emptied is listed, and can be opened', async () => {
-    const ws = insertSession('emp');
+    const ws = insertBox('emp');
     initRepo(ws);
     write(ws, 'doomed/a.txt', 'x\n');
     write(ws, 'keep.txt', 'x\n');
@@ -494,7 +494,7 @@ describe('the directory endpoint', () => {
     git(ws, 'commit', '-q', '-m', 'drop it');
     await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/emp/review/base',
+      url: '/api/boxes/emp/review/base',
       payload: { rev: 'HEAD~1' },
     });
 
@@ -507,7 +507,7 @@ describe('the directory endpoint', () => {
   });
 
   test('statuses come back on the files they belong to', async () => {
-    const ws = insertSession('fff');
+    const ws = insertBox('fff');
     initRepo(ws);
     write(ws, 'tracked.txt', 'x\n');
     git(ws, 'add', '.');
@@ -521,38 +521,38 @@ describe('the directory endpoint', () => {
   });
 
   test('a directory the review does not offer is a 404', async () => {
-    const ws = insertSession('bad');
+    const ws = insertBox('bad');
     write(ws, 'src/a.txt', 'x\n');
     for (const path of ['nosuch', '../..', 'src/a.txt', '.git']) {
       const res = await orchestrator.app.inject({
-        url: `/api/sessions/bad/review/dir?path=${encodeURIComponent(path)}`,
+        url: `/api/boxes/bad/review/dir?path=${encodeURIComponent(path)}`,
       });
       assert.equal(res.statusCode, 404, path);
     }
   });
 
-  test('an unknown session is a 404, a deleted one too', async () => {
-    insertSession('ggg');
-    db.prepare("UPDATE sessions SET status = 'deleted' WHERE id = ?").run('ggg');
-    assert.equal((await orchestrator.app.inject({ url: '/api/sessions/ggg/review/dir' })).statusCode, 404);
-    assert.equal((await orchestrator.app.inject({ url: '/api/sessions/nope/review/dir' })).statusCode, 404);
+  test('an unknown box is a 404, a deleted one too', async () => {
+    insertBox('ggg');
+    db.prepare("UPDATE boxes SET status = 'deleted' WHERE id = ?").run('ggg');
+    assert.equal((await orchestrator.app.inject({ url: '/api/boxes/ggg/review/dir' })).statusCode, 404);
+    assert.equal((await orchestrator.app.inject({ url: '/api/boxes/nope/review/dir' })).statusCode, 404);
   });
 
-  test('a volume-backed session says what to do about it', async () => {
-    insertVolumeSession('hhh');
-    const res = await orchestrator.app.inject({ url: '/api/sessions/hhh/review/dir' });
-    // 409, not 404: the session is real and the fix is one start.
+  test('a volume-backed box says what to do about it', async () => {
+    insertVolumeBox('hhh');
+    const res = await orchestrator.app.inject({ url: '/api/boxes/hhh/review/dir' });
+    // 409, not 404: the box is real and the fix is one start.
     assert.equal(res.statusCode, 409);
-    assert.match((res.json() as { error: string }).error, /Start the session once/);
+    assert.match((res.json() as { error: string }).error, /Start the box once/);
   });
 });
 
 // --- the file ---------------------------------------------------------------
 
 describe('the file endpoint', () => {
-  /** A session with a repository at the workspace root and one commit. */
-  function repoSession(id: string): string {
-    const ws = insertSession(id);
+  /** A box with a repository at the workspace root and one commit. */
+  function repoBox(id: string): string {
+    const ws = insertBox(id);
     initRepo(ws);
     write(ws, 'code.ts', 'one\ntwo\nthree\nfour\nfive\nsix\n');
     write(ws, 'binary.dat', 'x');
@@ -563,9 +563,9 @@ describe('the file endpoint', () => {
   }
 
   test('a file arrives as plain text with its line count and language', async () => {
-    repoSession('aaa');
+    repoBox('aaa');
     const { status, body } = await get<ReviewFileResponse>(
-      '/api/sessions/aaa/review/file?path=code.ts',
+      '/api/boxes/aaa/review/file?path=code.ts',
     );
     assert.equal(status, 200);
     // Plain text, never render markup: the browser tokenizes, which is what
@@ -579,11 +579,11 @@ describe('the file endpoint', () => {
   });
 
   test('diff markers come with the file, in one response', async () => {
-    const ws = repoSession('bbb');
+    const ws = repoBox('bbb');
     // two -> TWO, four and five removed, seven appended.
     write(ws, 'code.ts', 'one\nTWO\nthree\nsix\nseven\n');
 
-    const { body } = await get<ReviewFileResponse>('/api/sessions/bbb/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/bbb/review/file?path=code.ts');
     assert.equal(body.status, 'modified');
     assert.equal(body.diff.lines['2'], 'modified');
     assert.equal(body.diff.lines['5'], 'added');
@@ -593,9 +593,9 @@ describe('the file endpoint', () => {
   });
 
   test('a binary file is reported as one rather than refused', async () => {
-    repoSession('ccc');
+    repoBox('ccc');
     const { status, body } = await get<ReviewFileResponse>(
-      '/api/sessions/ccc/review/file?path=binary.dat',
+      '/api/boxes/ccc/review/file?path=binary.dat',
     );
     // The tree legitimately lists files the viewer cannot show.
     assert.equal(status, 200);
@@ -604,7 +604,7 @@ describe('the file endpoint', () => {
   });
 
   test('a path outside the root is a 404, however it is spelled', async () => {
-    const ws = repoSession('ddd');
+    const ws = repoBox('ddd');
     writeFileSync(join(dir, 'boxes.db.copy'), 'the deployment token');
     // A traversal, a link out, and a link through a directory all look like an
     // unknown file, so an attempt learns nothing.
@@ -621,33 +621,33 @@ describe('the file endpoint', () => {
       'nosuch.txt',
     ]) {
       const res = await orchestrator.app.inject({
-        url: `/api/sessions/ddd/review/file?path=${encodeURIComponent(path)}`,
+        url: `/api/boxes/ddd/review/file?path=${encodeURIComponent(path)}`,
       });
       assert.equal(res.statusCode, 404, path);
     }
   });
 
   test('a file the tree leaves out is not served either', async () => {
-    const ws = repoSession('eee');
+    const ws = repoBox('eee');
     write(ws, 'logo.png', 'x\n');
     write(ws, 'REVIEW.md', '# Code Review\n');
     // The API serves what the browser was offered and nothing more.
     for (const path of ['logo.png', 'REVIEW.md']) {
       const res = await orchestrator.app.inject({
-        url: `/api/sessions/eee/review/file?path=${encodeURIComponent(path)}`,
+        url: `/api/boxes/eee/review/file?path=${encodeURIComponent(path)}`,
       });
       assert.equal(res.statusCode, 404, path);
     }
   });
 
   test('a directory is not a file', async () => {
-    repoSession('fff');
-    const res = await orchestrator.app.inject({ url: '/api/sessions/fff/review/file?path=.' });
+    repoBox('fff');
+    const res = await orchestrator.app.inject({ url: '/api/boxes/fff/review/file?path=.' });
     assert.equal(res.statusCode, 404);
   });
 
   test('a file the change deleted answers as deleted, not as missing', async () => {
-    const ws = insertSession('del');
+    const ws = insertBox('del');
     initRepo(ws);
     write(ws, 'gone.txt', 'y\n');
     git(ws, 'add', '.');
@@ -655,7 +655,7 @@ describe('the file endpoint', () => {
     rmSync(join(ws, 'gone.txt'));
 
     const { status, body } = await get<ReviewFileResponse>(
-      '/api/sessions/del/review/file?path=gone.txt',
+      '/api/boxes/del/review/file?path=gone.txt',
     );
     assert.equal(status, 200);
     assert.equal(body.deleted, true);
@@ -664,15 +664,15 @@ describe('the file endpoint', () => {
   });
 
   test('a missing path parameter is a 400', async () => {
-    repoSession('ggg');
-    const res = await orchestrator.app.inject({ url: '/api/sessions/ggg/review/file' });
+    repoBox('ggg');
+    const res = await orchestrator.app.inject({ url: '/api/boxes/ggg/review/file' });
     assert.equal(res.statusCode, 400);
   });
 
   test('an untracked file is entirely new', async () => {
-    const ws = repoSession('hhh');
+    const ws = repoBox('hhh');
     write(ws, 'fresh.ts', 'a\nb\n');
-    const { body } = await get<ReviewFileResponse>('/api/sessions/hhh/review/file?path=fresh.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/hhh/review/file?path=fresh.ts');
     assert.equal(body.status, 'untracked');
     assert.deepEqual(body.diff.lines, { 1: 'added', 2: 'added' });
   });
@@ -681,9 +681,9 @@ describe('the file endpoint', () => {
 // --- saving an edited file --------------------------------------------------
 
 describe('saving a file', () => {
-  /** A session with a repository, one committed file and one binary. */
+  /** A box with a repository, one committed file and one binary. */
   function editable(id: string): string {
-    const ws = insertSession(id);
+    const ws = insertBox(id);
     initRepo(ws);
     write(ws, 'code.ts', 'one\ntwo\nthree\n');
     writeFileSync(join(ws, 'binary.dat'), Buffer.from([0x41, 0x00, 0x42]));
@@ -699,7 +699,7 @@ describe('saving a file', () => {
   ): Promise<{ status: number; body: ReviewFileResponse }> {
     const res = await orchestrator.app.inject({
       method: 'PUT',
-      url: `/api/sessions/${id}/review/file`,
+      url: `/api/boxes/${id}/review/file`,
       payload,
     });
     return { status: res.statusCode, body: res.json() as ReviewFileResponse };
@@ -708,7 +708,7 @@ describe('saving a file', () => {
   /** The hash the browser would be holding, from the file endpoint itself. */
   async function hashOf(id: string, path: string): Promise<string> {
     const { body } = await get<ReviewFileResponse>(
-      `/api/sessions/${id}/review/file?path=${encodeURIComponent(path)}`,
+      `/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`,
     );
     return body.hash;
   }
@@ -764,7 +764,7 @@ describe('saving a file', () => {
     editable('ddd');
     await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/ddd/review/annotations',
+      url: '/api/boxes/ddd/review/annotations',
       payload: { path: 'code.ts', line: 3, comment: 'this one' },
     });
 
@@ -827,9 +827,9 @@ describe('saving a file', () => {
 // --- annotations ------------------------------------------------------------
 
 describe('annotations', () => {
-  /** A session with a repository and one file to comment on. */
+  /** A box with a repository and one file to comment on. */
   function commentable(id: string): string {
-    const ws = insertSession(id);
+    const ws = insertBox(id);
     initRepo(ws);
     write(ws, 'code.ts', 'one\ntwo\nthree\nfour\nfive\nsix\n');
     git(ws, 'add', '.');
@@ -844,7 +844,7 @@ describe('annotations', () => {
   ): Promise<{ status: number; body: ReviewAnnotationsResponse }> {
     const res = await orchestrator.app.inject({
       method: 'PUT',
-      url: `/api/sessions/${id}/review/annotations`,
+      url: `/api/boxes/${id}/review/annotations`,
       payload,
     });
     return { status: res.statusCode, body: res.json() as ReviewAnnotationsResponse };
@@ -878,7 +878,7 @@ describe('annotations', () => {
     await put('bbb', { path: 'code.ts', line: 2, comment: 'second' });
     await put('bbb', { path: 'code.ts', line: 5, comment: 'fifth' });
 
-    const { body } = await get<ReviewFileResponse>('/api/sessions/bbb/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/bbb/review/file?path=code.ts');
     assert.deepEqual(body.annotations, [
       { line: 2, comment: 'second', outdated: false },
       { line: 5, comment: 'fifth', outdated: false },
@@ -905,7 +905,7 @@ describe('annotations', () => {
 
     const first = await orchestrator.app.inject({
       method: 'DELETE',
-      url: '/api/sessions/ddd/review/annotations?path=code.ts&line=3',
+      url: '/api/boxes/ddd/review/annotations?path=code.ts&line=3',
     });
     assert.equal(first.statusCode, 200);
     assert.deepEqual((first.json() as ReviewAnnotationsResponse).annotations, [
@@ -914,7 +914,7 @@ describe('annotations', () => {
 
     await orchestrator.app.inject({
       method: 'DELETE',
-      url: '/api/sessions/ddd/review/annotations?path=code.ts&line=4',
+      url: '/api/boxes/ddd/review/annotations?path=code.ts&line=4',
     });
     const written = readFileSync(join(ws, 'REVIEW.md'), 'utf8');
     // The document stays valid with nothing in it.
@@ -928,7 +928,7 @@ describe('annotations', () => {
     const ws = commentable('lll');
     const res = await orchestrator.app.inject({
       method: 'DELETE',
-      url: '/api/sessions/lll/review/annotations?path=nosuch.txt&line=1',
+      url: '/api/boxes/lll/review/annotations?path=nosuch.txt&line=1',
     });
     assert.equal(res.statusCode, 200);
     assert.deepEqual((res.json() as ReviewAnnotationsResponse).annotations, []);
@@ -962,7 +962,7 @@ describe('annotations', () => {
     // Two lines inserted above it.
     write(ws, 'code.ts', 'new\nnew\none\ntwo\nthree\nfour\nfive\nsix\n');
 
-    const { body } = await get<ReviewFileResponse>('/api/sessions/fff/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/fff/review/file?path=code.ts');
     assert.deepEqual(body.annotations, [{ line: 5, comment: 'about three', outdated: false }]);
     // Relocation is persisted, so the agent reads the right line too.
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 5/);
@@ -973,7 +973,7 @@ describe('annotations', () => {
     await put('ggg', { path: 'code.ts', line: 3, comment: 'about three' });
     write(ws, 'code.ts', 'completely\ndifferent\ncontent\n');
 
-    const { body } = await get<ReviewFileResponse>('/api/sessions/ggg/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/ggg/review/file?path=code.ts');
     assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: true }]);
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 3 \(outdated\)/);
   });
@@ -1019,7 +1019,7 @@ describe('annotations', () => {
     await openDir('mmm');
     assert.ok(!readFileSync(join(ws, 'REVIEW.md'), 'utf8').includes('(outdated)'));
 
-    const { body } = await get<ReviewFileResponse>('/api/sessions/mmm/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/mmm/review/file?path=code.ts');
     assert.equal(body.binary, true);
     // The listing counts the comment, so the file view shows it: it is where
     // the reviewer reads and deletes it.
@@ -1034,7 +1034,7 @@ describe('annotations', () => {
     const listing = await openDir('nnn');
     assert.equal(entry(listing.body, 'code.ts')!.comments, 1);
 
-    const { body } = await get<ReviewFileResponse>('/api/sessions/nnn/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/nnn/review/file?path=code.ts');
     assert.equal(body.deleted, true);
     assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: true }]);
   });
@@ -1051,7 +1051,7 @@ describe('annotations', () => {
     ]) {
       const res = await orchestrator.app.inject({
         method: 'PUT',
-        url: '/api/sessions/iii/review/annotations',
+        url: '/api/boxes/iii/review/annotations',
         payload,
       });
       assert.equal(res.statusCode, 400, JSON.stringify(payload));
@@ -1060,7 +1060,7 @@ describe('annotations', () => {
   });
 
   test('a comment on a file the change deleted is refused', async () => {
-    const ws = insertSession('rip');
+    const ws = insertBox('rip');
     initRepo(ws);
     write(ws, 'gone.txt', 'y\n');
     git(ws, 'add', '.');
@@ -1069,7 +1069,7 @@ describe('annotations', () => {
 
     const res = await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/rip/review/annotations',
+      url: '/api/boxes/rip/review/annotations',
       payload: { path: 'gone.txt', line: 1, comment: 'x' },
     });
     // The file is in the tree, so this is not a 404 — there is simply no line
@@ -1083,7 +1083,7 @@ describe('annotations', () => {
     for (const path of ['../escape.txt', 'nosuch.ts', 'logo.png']) {
       const res = await orchestrator.app.inject({
         method: 'PUT',
-        url: '/api/sessions/jjj/review/annotations',
+        url: '/api/boxes/jjj/review/annotations',
         payload: { path, line: 1, comment: 'x' },
       });
       assert.equal(res.statusCode, 404, path);
@@ -1093,12 +1093,12 @@ describe('annotations', () => {
 
   test('concurrent comments all survive', async () => {
     commentable('kkk');
-    // Every write re-serializes the whole parsed file under the session's
+    // Every write re-serializes the whole parsed file under the box's
     // lock, so a burst cannot lose one.
     await Promise.all(
       [1, 2, 3, 4, 5, 6].map((line) => put('kkk', { path: 'code.ts', line, comment: `c${line}` })),
     );
-    const { body } = await get<ReviewFileResponse>('/api/sessions/kkk/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/kkk/review/file?path=code.ts');
     assert.deepEqual(
       body.annotations.map((a) => a.line),
       [1, 2, 3, 4, 5, 6],
@@ -1110,20 +1110,20 @@ describe('annotations', () => {
 
 describe('deleting the review', () => {
   test('REVIEW.md is removed, and the counts go with it', async () => {
-    const ws = insertSession('aaa');
+    const ws = insertBox('aaa');
     initRepo(ws);
     write(ws, 'a.ts', 'x\n');
     git(ws, 'add', '.');
     git(ws, 'commit', '-q', '-m', 'init');
     await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/aaa/review/annotations',
+      url: '/api/boxes/aaa/review/annotations',
       payload: { path: 'a.ts', line: 1, comment: 'x' },
     });
 
     const res = await orchestrator.app.inject({
       method: 'DELETE',
-      url: '/api/sessions/aaa/review',
+      url: '/api/boxes/aaa/review',
     });
     assert.equal(res.statusCode, 204);
     assert.equal(existsSync(join(ws, 'REVIEW.md')), false);
@@ -1134,10 +1134,10 @@ describe('deleting the review', () => {
   });
 
   test('deleting a review that is not there is not an error', async () => {
-    insertSession('bbb');
+    insertBox('bbb');
     const res = await orchestrator.app.inject({
       method: 'DELETE',
-      url: '/api/sessions/bbb/review',
+      url: '/api/boxes/bbb/review',
     });
     assert.equal(res.statusCode, 204);
   });
@@ -1163,9 +1163,9 @@ describe('the base revision', () => {
     return repo;
   }
 
-  /** A session whose workspace is itself such a repository. */
+  /** A box whose workspace is itself such a repository. */
   function branched(id: string): string {
-    return branchRepo(insertSession(id));
+    return branchRepo(insertBox(id));
   }
 
   /** PUT the base. */
@@ -1175,7 +1175,7 @@ describe('the base revision', () => {
   ): Promise<{ status: number; body: ReviewBaseResponse }> {
     const res = await orchestrator.app.inject({
       method: 'PUT',
-      url: `/api/sessions/${id}/review/base`,
+      url: `/api/boxes/${id}/review/base`,
       payload: { rev },
     });
     return { status: res.statusCode, body: res.json() as ReviewBaseResponse };
@@ -1191,7 +1191,7 @@ describe('the base revision', () => {
     // Only the expression is stored: what it resolves to is a different commit
     // in every repository, so it is derived rather than kept.
     const row = db
-      .prepare('SELECT review_base_rev FROM sessions WHERE id = ?')
+      .prepare('SELECT review_base_rev FROM boxes WHERE id = ?')
       .get('aaa') as { review_base_rev: string };
     assert.equal(row.review_base_rev, 'main');
   });
@@ -1217,11 +1217,11 @@ describe('the base revision', () => {
   test('a base changes what a file diff is against', async () => {
     branched('ccc');
     // Without a base, a committed file is not a change.
-    const before = await get<ReviewFileResponse>('/api/sessions/ccc/review/file?path=mine.txt');
+    const before = await get<ReviewFileResponse>('/api/boxes/ccc/review/file?path=mine.txt');
     assert.deepEqual(before.body.diff.lines, {});
 
     await setBase('ccc', 'main');
-    const after = await get<ReviewFileResponse>('/api/sessions/ccc/review/file?path=mine.txt');
+    const after = await get<ReviewFileResponse>('/api/boxes/ccc/review/file?path=mine.txt');
     assert.deepEqual(after.body.diff.lines, { 1: 'added' });
   });
 
@@ -1238,7 +1238,7 @@ describe('the base revision', () => {
     branched('eee');
     const res = await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/eee/review/base',
+      url: '/api/boxes/eee/review/base',
       payload: { rev: 'no-such-branch' },
     });
     assert.equal(res.statusCode, 400);
@@ -1246,7 +1246,7 @@ describe('the base revision', () => {
   });
 
   test('one expression means the same branch in each repository', async () => {
-    const ws = insertSession('two');
+    const ws = insertBox('two');
     branchRepo(ws, 'repo-a');
     branchRepo(ws, 'repo-b');
 
@@ -1261,7 +1261,7 @@ describe('the base revision', () => {
   });
 
   test('a repository the revision names nothing in falls back to its working tree', async () => {
-    const ws = insertSession('mix');
+    const ws = insertBox('mix');
     git(branchRepo(ws, 'repo-a'), 'branch', 'release');
     const other = join(ws, 'repo-b');
     mkdirSync(other, { recursive: true });
@@ -1291,11 +1291,11 @@ describe('the base revision', () => {
   });
 
   test('a workspace with no repository cannot have a base', async () => {
-    const ws = insertSession('fff');
+    const ws = insertBox('fff');
     write(ws, 'a.txt', 'x\n');
     const res = await orchestrator.app.inject({
       method: 'PUT',
-      url: '/api/sessions/fff/review/base',
+      url: '/api/boxes/fff/review/base',
       payload: { rev: 'main' },
     });
     assert.equal(res.statusCode, 409);
@@ -1306,17 +1306,17 @@ describe('the base revision', () => {
 
 describe('freshness is the fetch', () => {
   test('there is no fingerprint endpoint to poll', async () => {
-    const ws = insertSession('aaa');
+    const ws = insertBox('aaa');
     write(ws, 'a.txt', 'x\n');
     // The poll is gone, and with it the idle cost of an open review. Every
     // fetch below reads the filesystem on the spot, which is what makes
     // freshness-on-arrival enough.
-    const res = await orchestrator.app.inject({ url: '/api/sessions/aaa/review/status' });
+    const res = await orchestrator.app.inject({ url: '/api/boxes/aaa/review/status' });
     assert.equal(res.statusCode, 404);
   });
 
   test('an arrival sees what changed since the last one', async () => {
-    const ws = insertSession('ccc');
+    const ws = insertBox('ccc');
     initRepo(ws);
     write(ws, 'code.ts', 'one\ntwo\n');
     git(ws, 'add', '.');
@@ -1331,7 +1331,7 @@ describe('freshness is the fetch', () => {
   });
 
   test('a file fetch sees an edit the agent made to it', async () => {
-    const ws = insertSession('ddd');
+    const ws = insertBox('ddd');
     initRepo(ws);
     write(ws, 'code.ts', 'one\ntwo\n');
     git(ws, 'add', '.');
@@ -1339,24 +1339,24 @@ describe('freshness is the fetch', () => {
     await openDir('ddd');
 
     write(ws, 'code.ts', 'one\nTWO\n');
-    const { body } = await get<ReviewFileResponse>('/api/sessions/ddd/review/file?path=code.ts');
+    const { body } = await get<ReviewFileResponse>('/api/boxes/ddd/review/file?path=code.ts');
     assert.equal(body.content, 'one\nTWO\n');
   });
 
   test('reading a review keeps the box it is read from alive', async () => {
-    const ws = insertSession('bbb');
+    const ws = insertBox('bbb');
     write(ws, 'a.txt', 'x\n');
-    db.prepare('UPDATE sessions SET last_active_at = 0 WHERE id = ?').run('bbb');
+    db.prepare('UPDATE boxes SET last_active_at = 0 WHERE id = ?').run('bbb');
 
     await openDir('bbb');
-    await get<ReviewFileResponse>('/api/sessions/bbb/review/file?path=a.txt');
+    await get<ReviewFileResponse>('/api/boxes/bbb/review/file?path=a.txt');
 
-    // A review asks git about the workspace, and git runs in the session's own
+    // A review asks git about the workspace, and git runs in the box's own
     // container, so reading one is use of the box. The reaper stopping it under
     // the reader would take the next request's answer with it.
-    const row = db.prepare('SELECT last_active_at FROM sessions WHERE id = ?').get('bbb') as {
+    const row = db.prepare('SELECT last_active_at FROM boxes WHERE id = ?').get('bbb') as {
       last_active_at: number;
     };
-    assert.ok(row.last_active_at > 0, 'reading a review should mark the session active');
+    assert.ok(row.last_active_at > 0, 'reading a review should mark the box active');
   });
 });

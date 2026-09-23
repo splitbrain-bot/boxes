@@ -141,9 +141,9 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
  * Whether the entry the surface is sitting on is still the marker it pushed.
  *
  * The index alone is not enough, because a replace keeps it. A confirmation
- * that acts and leaves does exactly that — deleting a session replaces the
+ * that acts and leaves does exactly that — deleting a box replaces the
  * entry with the list while its dialog is still mounted — and popping then
- * would take the visitor back to the session they just deleted, which is the
+ * would take the visitor back to the box they just deleted, which is the
  * kind of surprise this whole strategy is against. Both have to match: the
  * index says nothing was pushed over it, and the URL says nothing took its
  * place.

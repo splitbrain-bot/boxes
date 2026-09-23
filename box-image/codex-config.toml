@@ -6,7 +6,7 @@
 # credential it swaps, because the swap is a header rewrite and it cannot
 # follow an upgrade. Codex's built-in provider opens its transport with one,
 # retries a few times, and only then falls back to HTTPS -- and warns in the
-# thread about it every session. The built-in provider cannot be changed, so
+# thread about it every box. The built-in provider cannot be changed, so
 # this is a copy of it without WebSocket support: Codex goes straight to HTTPS,
 # which is swapped and works.
 #
