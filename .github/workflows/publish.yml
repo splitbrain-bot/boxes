@@ -61,11 +61,11 @@ jobs:
       matrix:
         package: [orchestrator, proxy, dashboard]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
           # Every lock file, because the dashboard job installs the
           # orchestrator's dependencies as well as its own.
@@ -146,7 +146,7 @@ jobs:
             context: box-image
             dockerfile: box-image/Dockerfile
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 

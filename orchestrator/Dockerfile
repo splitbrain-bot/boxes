@@ -5,7 +5,7 @@
 # Type-checking runs before every bundle step, so an image cannot be built
 # from code that fails it.
 
-FROM node:22-bookworm AS dashboard-build
+FROM node:26-bookworm AS dashboard-build
 WORKDIR /build
 COPY shared/ ./shared/
 COPY dashboard/package.json dashboard/package-lock.json* ./dashboard/
@@ -20,7 +20,7 @@ COPY dashboard/ ./
 RUN npm run check:app && npm run build
 
 # --- orchestrator ------------------------------------------------------------
-FROM node:22-bookworm AS orchestrator-build
+FROM node:26-bookworm AS orchestrator-build
 WORKDIR /build
 COPY shared/ ./shared/
 COPY orchestrator/package.json orchestrator/package-lock.json* ./orchestrator/
@@ -29,7 +29,7 @@ RUN npm ci
 COPY orchestrator/ ./
 RUN npm run check && npm run build
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 

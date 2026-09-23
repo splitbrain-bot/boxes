@@ -9,12 +9,12 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@types/node": "^22.13.1",
-    "typescript": "^5.7.3",
-    "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
   },
   "dependencies": {
-    "mockttp": "^4.6.1"
+    "mockttp": "^4.6.3"
   }
 }

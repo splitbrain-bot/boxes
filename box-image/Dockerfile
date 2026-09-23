@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # key is ASCII-armoured, so a .asc name is all `signed-by` needs and there is
 # no gnupg to install for a dearmor. `nodistro` is NodeSource's one
 # distribution-independent suite, so nothing here names a codename.
-ARG NODE_MAJOR=22
+ARG NODE_MAJOR=26
 RUN install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       -o /etc/apt/keyrings/nodesource.asc \
@@ -80,9 +80,9 @@ RUN install -d -m 0755 /usr/share/keyrings \
 # architecture, so the version and each package's checksum are pinned here,
 # and a bump is an edit to these three lines. The package depends on git
 # alone, which is already installed, so dpkg can take it directly.
-ARG GLAB_VERSION=1.118.0
-ARG GLAB_SHA256_AMD64=2a4a6413594cfaf9b84af33780d32098ee5011092607389a57a8452efa33c698
-ARG GLAB_SHA256_ARM64=633adef24092ae9406d114e8daa4fcbe87b1c32fab2fbba8e2a55dd217975392
+ARG GLAB_VERSION=1.119.0
+ARG GLAB_SHA256_AMD64=95a9ca105518dec7f70ee403d98501402a5fda154c406f4f4cd6696928d3a098
+ARG GLAB_SHA256_ARM64=70987a8bab6970d0d042d73d0f06b9d56ecb9abb88c7137c742f1c11b19350e0
 RUN arch="$(dpkg --print-architecture)" \
  && case "$arch" in \
       amd64) sha="$GLAB_SHA256_AMD64" ;; \
@@ -198,7 +198,7 @@ RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
 # asserts the adapter resolves to.
 RUN npm install -g --prefix /usr/local \
       @anthropic-ai/claude-code@^2 \
-      @agentclientprotocol/claude-agent-acp@^0.78.0 \
+      @agentclientprotocol/claude-agent-acp@^0.81.0 \
  && npm cache clean --force
 
 # The second harness: the Codex CLI and the adapter that drives it, pinned here
@@ -218,10 +218,10 @@ RUN npm install -g --prefix /usr/local \
 # types in the box is the same build the adapter is driving. The identity check
 # further down is what proves it, and what would catch npm resolving the
 # optional dependency differently than this expects.
-ARG CODEX_VERSION=0.154.0
+ARG CODEX_VERSION=0.156.1
 RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
  && npm install -g --prefix /usr/local --omit=optional \
-      @agentclientprotocol/codex-acp@1.11.0 \
+      @agentclientprotocol/codex-acp@1.13.0 \
  && npm cache clean --force
 ENV CODEX_PATH=/usr/local/bin/codex
 
