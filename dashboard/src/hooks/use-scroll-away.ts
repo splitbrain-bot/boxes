@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useMediaQuery } from '@/hooks/use-media-query';
 import { scrollAway, scrollAwayStart, type ScrollAwayState } from '@/lib/scroll-away.ts';
 
 /**
@@ -16,6 +17,10 @@ import { scrollAway, scrollAwayStart, type ScrollAwayState } from '@/lib/scroll-
  * Nothing about either view is in here — a thread and a code pane are the
  * same shape of thing, and both call it the same way.
  *
+ * Only a narrow screen puts the header away. A phone needs every row it has
+ * for the content; a wide screen has room for both, and a header that moves
+ * there is only in the way.
+ *
  * @param scroller Selector for the one scroller that counts. A view has
  *   others — a wide table or a code block inside a message, the file tree
  *   beside a pane — and scrolling those is not reading the thing the header
@@ -31,6 +36,7 @@ export function useScrollAway(scroller: string): {
 } {
   const container = useRef<HTMLDivElement>(null);
   const [away, setAway] = useState(false);
+  const narrow = useMediaQuery('(max-width: 767px)');
 
   /**
    * The decision's own state, which is a render ahead of `away`: the listener
@@ -74,5 +80,5 @@ export function useScrollAway(scroller: string): {
     return () => root.removeEventListener('scroll', onScroll, true);
   }, [scroller]);
 
-  return { away, container, reset };
+  return { away: away && narrow, container, reset };
 }

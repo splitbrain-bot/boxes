@@ -989,6 +989,49 @@ test('the review header gives way to reading the file, and returns', async () =>
   }
 });
 
+test('the review header stays where it is on a wide screen', async () => {
+  stub.review(BOX, {
+    files: {
+      'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
+    },
+    repos: [''],
+  });
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review`,
+    'dark',
+    'desktop',
+  );
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    const shelf = page.locator('[data-slot="shelf"]');
+
+    await page.getByRole('button', { name: /long\.ts/ }).click();
+    await expect.poll(() => pane.isVisible()).toBe(true);
+
+    // The same reading down that puts it away on a phone, a frame at a time.
+    await pane.evaluate(
+      (el) =>
+        new Promise<void>((done) => {
+          let left = 4;
+          const step = (): void => {
+            if (left-- <= 0) return done();
+            el.scrollTop += 100;
+            requestAnimationFrame(step);
+          };
+          requestAnimationFrame(step);
+        }),
+    );
+    await expect.poll(() => pane.evaluate((el) => el.scrollTop)).toBeGreaterThan(300);
+    expect(await shelf.evaluate((el) => el.hasAttribute('data-away'))).toBe(false);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 // --- the entry points -------------------------------------------------------
 
 test('the review is reachable from the box card and the thread header', async () => {

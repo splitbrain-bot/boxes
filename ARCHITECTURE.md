@@ -411,7 +411,8 @@ so the working thread stays where it is and the new tab is opened by a real
 click. A `window.open` after the await is the thing to reach for, and it is
 what popup blockers exist to stop.
 
-That header gets out of the way while you read, and so does the review's —
+On a narrow screen that header gets out of the way while you read, and so
+does the review's —
 one hook and one wrapper serve both, because a thread and a code pane are the
 same shape of thing: a full-viewport route whose one scroller is the thing you
 came for. A downward run of thirty-odd pixels collapses the row, and two dozen
@@ -420,7 +421,9 @@ below it. Going is a decision about the reading you are doing and coming back
 is a request that should not have to be repeated, so the two distances are not
 the same. Runs are measured from the last change of direction rather than the
 last event, which is what makes a pixel of finger jitter mean nothing and a
-slow drift down mean something. The notices under the header do not collapse:
+slow drift down mean something. From md up the header stays where it is: a
+wide screen has room for both, and a header that moves there is only in the
+way. The notices under the header do not collapse:
 a missing token, a fork to open, an error to read are things to act on rather
 than things in the way.
 
