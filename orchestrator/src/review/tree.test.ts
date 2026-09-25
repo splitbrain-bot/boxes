@@ -59,20 +59,25 @@ function named(entries: ReviewDirEntry[]): string[] {
 
 describe('listedFile', () => {
   test('an ordinary file of any project is listed', () => {
-    for (const path of ['a.txt', 'src/main.ts', 'node_modules/pkg/index.js', 'dist/out.js']) {
+    for (const path of [
+      'a.txt',
+      'src/main.ts',
+      'node_modules/pkg/index.js',
+      'dist/out.js',
+      'logo.PNG',
+      'tool.exe',
+    ]) {
       assert.equal(listedFile(path), true, path);
     }
   });
 
-  test('metadata, the review file and binaries are not', () => {
+  test('metadata and the review file are not', () => {
     // The same rule the listing applies, asked of one path — which is what the
     // file endpoint serves by, so it offers exactly what a directory offered.
     for (const path of ['.git/config', 'repo/.git/HEAD', '.boxes/attached.txt']) {
       assert.equal(listedFile(path), false, path);
     }
     assert.equal(listedFile('REVIEW.md'), false);
-    assert.equal(listedFile('logo.PNG'), false);
-    assert.equal(listedFile('tool.exe'), false);
   });
 
   test("a REVIEW.md deeper in the tree is a file of the project", () => {
@@ -80,9 +85,8 @@ describe('listedFile', () => {
   });
 
   test('a directory is judged on its segments alone', () => {
-    // `assets.zip` is a fine name for a folder, and a folder is never the
-    // review's own file.
-    assert.equal(listedDir('assets.zip'), true);
+    // A folder is never the review's own file.
+    assert.equal(listedDir('REVIEW.md'), true);
     assert.equal(listedDir('src/util'), true);
     assert.equal(listedDir('.git'), false);
     assert.equal(listedDir('repo/.git/objects'), false);
@@ -123,7 +127,7 @@ describe('readDir', () => {
     ]);
   });
 
-  test('git metadata and binaries stay out, and nothing else does', () => {
+  test('git metadata stays out, and nothing else does', () => {
     file('keep.ts');
     file('node_modules/pkg/index.js');
     file('dist/bundle.js');
@@ -137,6 +141,8 @@ describe('readDir', () => {
       'd:dist',
       'd:node_modules',
       'f:keep.ts',
+      'f:logo.png',
+      'f:tool.exe',
     ]);
   });
 
@@ -255,13 +261,16 @@ describe('dirEntries', () => {
     assert.equal(entries[0]!.path, 'src/gone.ts');
   });
 
-  test('a deleted review file or binary stays out all the same', () => {
+  test('a deleted review file stays out all the same', () => {
     const statuses: Record<string, ReviewFileStatus> = {
       'REVIEW.md': 'deleted',
       'logo.png': 'deleted',
       'a.ts': 'deleted',
     };
-    assert.deepEqual(named(dirEntries('', [], statuses, new Map(), noRepos())), ['f:a.ts']);
+    assert.deepEqual(named(dirEntries('', [], statuses, new Map(), noRepos())), [
+      'f:a.ts',
+      'f:logo.png',
+    ]);
   });
 
   test('a folder the change emptied is listed, so its files can be reached', () => {
@@ -271,8 +280,8 @@ describe('dirEntries', () => {
   });
 
   test('a file with a status but no entry is not invented', () => {
-    // A binary one, say: it has a status and the listing leaves it out, and
-    // only a deletion is worth putting back.
+    // One that went between git's answer and the directory read, say: only a
+    // deletion is worth putting back.
     assert.deepEqual(dirEntries('', [], { 'logo.png': 'modified' }, new Map(), noRepos()), []);
   });
 });

@@ -35,19 +35,18 @@ export const ATTACHMENTS_DIR = '.boxes/attachments';
 const GITIGNORE = '*\n';
 
 /**
- * Content types an attachment may be served back as itself.
+ * Content types a workspace file may be served back as itself.
  *
- * Images, SVG included, and PDFs — the formats a browser shows rather than
- * saves. An SVG can carry script, and these are files the agent can write,
- * served from the same origin as the dashboard, so both ways of opening one
- * are shut: through an `<img>`, which is how the thread shows it, a browser
- * runs nothing in an SVG and fetches nothing it references, and opened as a
- * document it gets `default-src 'none'; sandbox`, which leaves it no script,
- * no origin and no network.
+ * Images, SVG included, PDFs, audio and video — the formats a browser shows
+ * rather than saves. An SVG can carry script, and these are files the agent
+ * can write, served from the same origin as the dashboard, so both ways of
+ * opening one are shut: through an `<img>`, which is how the thread shows it,
+ * a browser runs nothing in an SVG and fetches nothing it references, and
+ * opened as a document it gets `default-src 'none'; sandbox`, which leaves it
+ * no script, no origin and no network.
  *
- * Everything not here is a download of unknown type. HTML is the deliberate
- * omission: a page served as one runs as this origin, and there is no way to
- * show it that does not.
+ * HTML is the deliberate omission: a page served as one runs as this origin,
+ * and there is no way to show it that does not.
  */
 const SERVABLE_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -55,36 +54,94 @@ const SERVABLE_TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
+  '.avif': 'image/avif',
   '.svg': 'image/svg+xml',
   '.pdf': 'application/pdf',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/opus',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
 };
 
 /**
- * Types served without the `sandbox` CSP directive.
+ * Content types a workspace file is downloaded as.
  *
- * A PDF is not rendered by the page but by the browser's own viewer, and a
- * sandboxed document is one a browser may refuse to hand to a viewer at all
- * — which turns "open it in a tab" back into a download, the one thing
- * serving it as `application/pdf` was for. The rest of the policy stays:
- * `default-src 'none'` still applies, and the viewer is browser-internal
- * rather than something the response can reach.
+ * Formats a browser does not show but an app on the device may: a download
+ * that says what it is can be handed to that app, where one of unknown type
+ * cannot. Everything on neither list is a download of unknown type.
  */
-const UNSANDBOXED = new Set(['application/pdf']);
+const DOWNLOAD_TYPES: Record<string, string> = {
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.epub': 'application/epub+zip',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.tgz': 'application/gzip',
+  '.tar': 'application/x-tar',
+  '.7z': 'application/x-7z-compressed',
+};
 
-/** How one stored file is served: as itself, or as a download of bytes. */
-export interface ServedType {
-  contentType: string;
-  /** False for anything not on the list above, which is then never rendered. */
-  inline: boolean;
-  /** Whether the CSP sandboxes it; see UNSANDBOXED. */
-  sandbox: boolean;
+/**
+ * The content security policy every workspace file is served under.
+ *
+ * `sandbox` leaves a document no script, no origin and no network, which is
+ * what makes serving an SVG as itself safe.
+ */
+const SANDBOXED_CSP = "default-src 'none'; sandbox";
+
+/**
+ * The policy for a file a browser shows with a player or viewer of its own,
+ * rather than as a document the file's bytes could script.
+ *
+ * A PDF is rendered by the browser's own viewer, and a sandboxed document is
+ * one a browser may refuse to hand to a viewer at all — which turns "open it
+ * in a tab" back into a download, the one thing serving it as
+ * `application/pdf` was for. Audio and video are played by a media element
+ * the browser builds around the file, and a sandboxed document has no origin
+ * that element could load the file from. `media-src 'self'` is what lets it
+ * load the file, and `default-src 'none'` still refuses everything else.
+ */
+const VIEWER_CSP = "default-src 'none'; media-src 'self'";
+
+/** Whether a content type is shown by a viewer or player; see VIEWER_CSP. */
+function viewed(type: string): boolean {
+  return type === 'application/pdf' || type.startsWith('audio/') || type.startsWith('video/');
 }
 
-/** What to serve a stored attachment as, from its name alone. */
+/** How one workspace file is served: as itself, or as a download. */
+export interface ServedType {
+  contentType: string;
+  /** False for anything not in SERVABLE_TYPES, which is then never rendered. */
+  inline: boolean;
+  /** The content security policy it is served under. */
+  csp: string;
+}
+
+/** What to serve a workspace file as, from its name alone. */
 export function servedTypeFor(name: string): ServedType {
-  const type = SERVABLE_TYPES[extname(name).toLowerCase()];
-  if (!type) return { contentType: 'application/octet-stream', inline: false, sandbox: true };
-  return { contentType: type, inline: true, sandbox: !UNSANDBOXED.has(type) };
+  const ext = extname(name).toLowerCase();
+  const type = SERVABLE_TYPES[ext];
+  if (type) {
+    return { contentType: type, inline: true, csp: viewed(type) ? VIEWER_CSP : SANDBOXED_CSP };
+  }
+  return {
+    contentType: DOWNLOAD_TYPES[ext] ?? 'application/octet-stream',
+    inline: false,
+    csp: SANDBOXED_CSP,
+  };
 }
 
 /** Longest a stored name may be, extension included. */

@@ -337,6 +337,22 @@ export class ReviewService {
     };
   }
 
+  /**
+   * Resolves a client-supplied path to a file on disk the review offers, for
+   * serving its bytes.
+   *
+   * The same two rules as {@link resolveFile}, and no git: a file the change
+   * deleted has no bytes to serve, so it is the same 404 as any other path
+   * the review does not offer.
+   */
+  rawFile(id: string, relPath: string): string {
+    const workspace = this.workspace(id);
+    if (!listedFile(relPath)) throw new HttpError(404, 'File not found');
+    const resolved = resolveInRoot(workspace, relPath);
+    if (!resolved.ok) throw new HttpError(404, 'File not found');
+    return resolved.path;
+  }
+
   // --- mutation -------------------------------------------------------------
 
   /**
@@ -693,9 +709,9 @@ export class ReviewService {
    * Resolves a client-supplied path to a file the review offers.
    *
    * Two rules. {@link listedFile} is the one a directory listing applies, so
-   * the API serves what the browser was offered and no binary or metadata a
-   * listing leaves out — asked of the one path, rather than by rebuilding a
-   * listing to look in. `resolveInRoot` is the security boundary, against
+   * the API serves what the browser was offered and no metadata a listing
+   * leaves out — asked of the one path, rather than by rebuilding a listing
+   * to look in. `resolveInRoot` is the security boundary, against
    * `/workspace`, so a contained path may be in any repository it holds or in
    * none. Every refusal is the same 404, so an escape attempt learns nothing an
    * unknown file would not have told it.

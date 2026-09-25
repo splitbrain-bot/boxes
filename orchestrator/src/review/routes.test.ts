@@ -629,10 +629,9 @@ describe('the file endpoint', () => {
 
   test('a file the tree leaves out is not served either', async () => {
     const ws = repoBox('eee');
-    write(ws, 'logo.png', 'x\n');
     write(ws, 'REVIEW.md', '# Code Review\n');
     // The API serves what the browser was offered and nothing more.
-    for (const path of ['logo.png', 'REVIEW.md']) {
+    for (const path of ['.git/config', 'REVIEW.md']) {
       const res = await orchestrator.app.inject({
         url: `/api/boxes/eee/review/file?path=${encodeURIComponent(path)}`,
       });
@@ -675,6 +674,80 @@ describe('the file endpoint', () => {
     const { body } = await get<ReviewFileResponse>('/api/boxes/hhh/review/file?path=fresh.ts');
     assert.equal(body.status, 'untracked');
     assert.deepEqual(body.diff.lines, { 1: 'added', 2: 'added' });
+  });
+});
+
+// --- a file's bytes ---------------------------------------------------------
+
+describe('the raw endpoint', () => {
+  /** GET one file's bytes. */
+  function raw(id: string, path: string) {
+    return orchestrator.app.inject({
+      url: `/api/boxes/${id}/review/raw?path=${encodeURIComponent(path)}`,
+    });
+  }
+
+  test('a file is served as its bytes, typed by its name', async () => {
+    const ws = insertBox('raw');
+    writeFileSync(join(ws, 'logo.png'), Buffer.from([0x89, 0x50, 0x00, 0x47]));
+    writeFileSync(join(ws, 'report.docx'), Buffer.from([0x50, 0x4b, 0x00]));
+    writeFileSync(join(ws, 'blob.dat'), Buffer.from([0x41, 0x00, 0x42]));
+
+    const image = await raw('raw', 'logo.png');
+    assert.equal(image.statusCode, 200);
+    assert.equal(image.headers['content-type'], 'image/png');
+    assert.match(image.headers['content-disposition'] as string, /^inline/);
+    assert.equal(image.headers['x-content-type-options'], 'nosniff');
+    assert.deepEqual(image.rawPayload, Buffer.from([0x89, 0x50, 0x00, 0x47]));
+
+    // Not something a browser shows, but a download that says what it is can
+    // be handed to an app that does.
+    const document = await raw('raw', 'report.docx');
+    assert.equal(
+      document.headers['content-type'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+    assert.match(document.headers['content-disposition'] as string, /^attachment/);
+
+    const unknown = await raw('raw', 'blob.dat');
+    assert.equal(unknown.headers['content-type'], 'application/octet-stream');
+    assert.match(unknown.headers['content-disposition'] as string, /^attachment/);
+  });
+
+  test('serving bytes asks git nothing', async () => {
+    const ws = insertBox('rag');
+    initRepo(ws);
+    write(ws, 'notes.txt', 'x\n');
+    const before = invocations;
+    assert.equal((await raw('rag', 'notes.txt')).statusCode, 200);
+    assert.equal(invocations, before);
+  });
+
+  test('a path the review does not offer is a 404, however it is spelled', async () => {
+    const ws = insertBox('rno');
+    initRepo(ws);
+    write(ws, 'REVIEW.md', '# Code Review\n');
+    writeFileSync(join(dir, 'boxes.db.copy'), 'the deployment token');
+    symlinkSync(join(dir, 'boxes.db.copy'), join(ws, 'stolen.png'));
+    mkdirSync(join(ws, 'sub'));
+
+    for (const path of [
+      '../boxes.db.copy',
+      '/etc/passwd',
+      'stolen.png',
+      'REVIEW.md',
+      '.git/config',
+      'sub',
+      'nosuch.png',
+    ]) {
+      assert.equal((await raw('rno', path)).statusCode, 404, path);
+    }
+  });
+
+  test('a missing path parameter is a 400', async () => {
+    insertBox('rmp');
+    const res = await orchestrator.app.inject({ url: '/api/boxes/rmp/review/raw' });
+    assert.equal(res.statusCode, 400);
   });
 });
 
@@ -1079,8 +1152,7 @@ describe('annotations', () => {
 
   test('a comment on a path outside the root is a 404', async () => {
     const ws = commentable('jjj');
-    write(ws, 'logo.png', 'x\n');
-    for (const path of ['../escape.txt', 'nosuch.ts', 'logo.png']) {
+    for (const path of ['../escape.txt', 'nosuch.ts', '.git/config']) {
       const res = await orchestrator.app.inject({
         method: 'PUT',
         url: '/api/boxes/jjj/review/annotations',
