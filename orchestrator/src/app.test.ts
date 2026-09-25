@@ -342,16 +342,36 @@ test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
   assert.equal(res.headers['content-type'], 'application/pdf');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
   // No `sandbox`: a sandboxed document is one a browser may decline to hand
-  // to its PDF viewer, which would make opening it a download again. The
-  // rest of the policy still applies.
-  assert.equal(res.headers['content-security-policy'], "default-src 'none'");
+  // to its PDF viewer, which would make opening it a download again. Nothing
+  // but media may still be loaded.
+  assert.equal(res.headers['content-security-policy'], "default-src 'none'; media-src 'self'");
+});
+
+test('a video is served as one, unsandboxed, so the player can load it', async () => {
+  insertWorkspaceBox('abc123');
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/boxes/abc123/attachments?name=clip.mp4',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('x'),
+  });
+
+  const res = await orchestrator.app.inject({
+    url: '/api/boxes/abc123/attachments/clip.mp4',
+  });
+
+  assert.equal(res.headers['content-type'], 'video/mp4');
+  assert.match(res.headers['content-disposition'] as string, /^inline/);
+  // A sandboxed document has no origin, and the player the browser builds
+  // around the file could not load it from one.
+  assert.equal(res.headers['content-security-policy'], "default-src 'none'; media-src 'self'");
 });
 
 test('a format nothing renders is served as a download of unknown type', async () => {
   insertWorkspaceBox('abc123');
   // HTML above all: served as itself it would run as this origin, and unlike
   // an SVG there is no way to show it that does not.
-  for (const name of ['page.html', 'notes.txt', 'archive.zip']) {
+  for (const name of ['page.html', 'notes.txt', 'data.bin']) {
     await orchestrator.app.inject({
       method: 'POST',
       url: `/api/boxes/abc123/attachments?name=${name}`,
@@ -366,6 +386,26 @@ test('a format nothing renders is served as a download of unknown type', async (
     assert.match(res.headers['content-disposition'] as string, /^attachment/);
     assert.equal(res.headers['content-security-policy'], "default-src 'none'; sandbox");
   }
+});
+
+test('a format an app opens is served as a download of its own type', async () => {
+  insertWorkspaceBox('abc123');
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/boxes/abc123/attachments?name=sheet.xlsx',
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Buffer.from('x'),
+  });
+
+  const res = await orchestrator.app.inject({
+    url: '/api/boxes/abc123/attachments/sheet.xlsx',
+  });
+  assert.equal(
+    res.headers['content-type'],
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  );
+  assert.match(res.headers['content-disposition'] as string, /^attachment/);
+  assert.equal(res.headers['content-security-policy'], "default-src 'none'; sandbox");
 });
 
 test('a link planted in the attachments directory serves nothing', async () => {

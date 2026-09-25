@@ -2,7 +2,7 @@ import compress from '@fastify/compress';
 import Fastify from 'fastify';
 import type { FastifyReply } from 'fastify';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { dirname, join, normalize, resolve } from 'node:path';
+import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   CredentialSummary,
@@ -158,6 +158,35 @@ function documentCsp(host: string | undefined): string {
  * cost more than the saving.
  */
 const COMPRESS_THRESHOLD_BYTES = 1024;
+
+/**
+ * Sends one file out of a workspace, typed by its name rather than its bytes.
+ *
+ * What a browser can show is sent as itself, a format an app on the device
+ * may open as a download of that type, and everything else as a download of
+ * unknown type — see servedTypeFor. The caller has already resolved the path
+ * inside the workspace and made sure it is a file.
+ */
+function sendWorkspaceFile(reply: FastifyReply, path: string, name: string, size: number) {
+  const served = servedTypeFor(name);
+  void reply.headers({
+    'Content-Type': served.contentType,
+    'Content-Length': String(size),
+    // The name is percent-encoded: it comes from a directory the agent
+    // writes to, and a quote or a newline in it must not reach the header.
+    'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
+    // The type is decided here rather than sniffed from the bytes, so a
+    // download is never treated as a document.
+    'X-Content-Type-Options': 'nosniff',
+    // What lets an SVG be served as an SVG: nothing in one may run or
+    // fetch anything.
+    'Content-Security-Policy': served.csp,
+    // Short, rather than immutable: the name is stable but the file under
+    // it belongs to a workspace the agent can rewrite.
+    'Cache-Control': 'private, max-age=60',
+  });
+  return createReadStream(path);
+}
 
 /** Whether the database answers a query, for the readiness probe. */
 function databaseAnswers(db: Db): boolean {
@@ -554,11 +583,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * attachments directory could otherwise serve whatever the orchestrator's
    * own uid can read. `resolveInRoot` holds the containment.
    *
-   * What a browser can show — images, SVG, PDF — is served as itself, and
-   * everything else as a download of unknown type. `sandbox` and
+   * What a browser can show — images, SVG, PDF, audio, video — is served as
+   * itself, and everything else as a download. `sandbox` and
    * `default-src 'none'` leave an SVG opened as a document with no script and
-   * no origin, and an SVG behind an `<img>` is inert. A PDF is served
-   * unsandboxed so the browser's viewer takes it.
+   * no origin, and an SVG behind an `<img>` is inert. A PDF, audio and video
+   * are served unsandboxed so the browser's viewer or player takes them.
    */
   app.get('/api/boxes/:id/attachments/:name', async (req, reply) => {
     const { id, name } = req.params as { id: string; name: string };
@@ -576,24 +605,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const stat = statSync(resolved.path);
     if (!stat.isFile()) throw new HttpError(404, 'Attachment not found');
 
-    const served = servedTypeFor(name);
-    void reply.headers({
-      'Content-Type': served.contentType,
-      'Content-Length': String(stat.size),
-      // The name is percent-encoded: it comes from a directory the agent
-      // writes to, and a quote or a newline in it must not reach the header.
-      'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
-      // The type is decided here rather than sniffed from the bytes, so a
-      // download is never treated as a document.
-      'X-Content-Type-Options': 'nosniff',
-      // What lets an SVG be served as an SVG: nothing in one may run or
-      // fetch anything.
-      'Content-Security-Policy': served.sandbox ? "default-src 'none'; sandbox" : "default-src 'none'",
-      // Short, rather than immutable: the name is stable but the file under
-      // it belongs to a workspace the agent can rewrite.
-      'Cache-Control': 'private, max-age=60',
-    });
-    return createReadStream(resolved.path);
+    return sendWorkspaceFile(reply, resolved.path, name, stat.size);
   });
 
   // --- Code review over a box's workspace ---------------------------------
@@ -637,6 +649,21 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const { path } = req.query as { path?: string };
     if (!path) throw new HttpError(400, 'path is required');
     return review.file(id, path);
+  });
+
+  /**
+   * One file of the workspace as its bytes, for a file the view cannot show
+   * as text to be opened in a tab of its own. Served the way an attachment
+   * is, so a browser or an app on the device can take it from there.
+   */
+  app.get('/api/boxes/:id/review/raw', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path } = req.query as { path?: string };
+    if (!path) throw new HttpError(400, 'path is required');
+    const file = review.rawFile(id, path);
+    const stat = statSync(file);
+    if (!stat.isFile()) throw new HttpError(404, 'File not found');
+    return sendWorkspaceFile(reply, file, basename(path), stat.size);
   });
 
   /**

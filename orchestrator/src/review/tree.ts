@@ -11,11 +11,10 @@ import type { RepoMap } from './repos.ts';
  * cost of a folder is the size of that folder, and a dependency tree beside the
  * code costs nothing until somebody opens it.
  *
- * What is listed is every file under the workspace that a person could read,
- * whether git tracks it, ignores it, or has never seen it. The listing steps
- * over version-control metadata and Boxes' own scratch and leaves out binaries.
- * Git contributes only what a directory cannot show, which is a file the change
- * deleted.
+ * What is listed is every file under the workspace, whether git tracks it,
+ * ignores it, or has never seen it. The listing steps over version-control
+ * metadata and Boxes' own scratch. Git contributes only what a directory
+ * cannot show, which is a file the change deleted.
  */
 
 /** The annotation file, written at the workspace root. Not part of the review. */
@@ -27,24 +26,6 @@ export const REVIEW_FILE = 'REVIEW.md';
  * a workspace, which holds the files the user attached to a prompt.
  */
 const SKIPPED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
-
-/**
- * File extensions taken as binary, lowercased and with the dot. A file with
- * one of them is left out of the listing.
- */
-const IGNORED_EXTS = new Set([
-  '.exe',
-  '.bin',
-  '.so',
-  '.dylib',
-  '.png',
-  '.jpg',
-  '.gif',
-  '.pdf',
-  '.zip',
-  '.tar',
-  '.gz',
-]);
 
 /**
  * How many entries one directory may hold before the rest are left out.
@@ -63,16 +44,6 @@ export interface DirChild {
   isDir: boolean;
 }
 
-/**
- * Whether a file is binary by its extension, and so not worth listing. A
- * reviewer cannot read it, and the view cannot show it.
- */
-function isBinary(path: string): boolean {
-  const name = path.slice(path.lastIndexOf('/') + 1);
-  const dot = name.lastIndexOf('.');
-  return dot > 0 && IGNORED_EXTS.has(name.slice(dot).toLowerCase());
-}
-
 /** Whether any segment of a path names a directory the listing steps over. */
 function inSkippedDir(path: string): boolean {
   return path.split('/').some((segment) => SKIPPED_DIRS.has(segment));
@@ -82,21 +53,18 @@ function inSkippedDir(path: string): boolean {
  * Whether the review lists a file at this workspace-relative path.
  *
  * The listing's own rule, asked about one path: not inside version-control
- * metadata or Boxes' scratch, not the review's own file at the workspace root,
- * and not a binary nobody can read. This is what the file endpoint serves by,
- * so it offers exactly what a directory offered. Containment is fs.ts's and
- * this says nothing about it.
+ * metadata or Boxes' scratch, and not the review's own file at the workspace
+ * root. This is what the file endpoint serves by, so it offers exactly what a
+ * directory offered. Containment is fs.ts's and this says nothing about it.
  */
 export function listedFile(relPath: string): boolean {
-  return !inSkippedDir(relPath) && relPath !== REVIEW_FILE && !isBinary(relPath);
+  return !inSkippedDir(relPath) && relPath !== REVIEW_FILE;
 }
 
 /**
  * Whether the review browses a directory at this workspace-relative path.
  *
- * The same rule without the file parts: a directory is not the review file,
- * and its name is not read for an extension — `assets.zip` is a fine name for
- * a folder.
+ * The same rule without the part about the review file.
  */
 export function listedDir(relDir: string): boolean {
   return !inSkippedDir(relDir);
@@ -128,7 +96,6 @@ export function readDir(root: string, relDir: string): DirChild[] {
       // Only the one at the root: a REVIEW.md deeper in the tree is a file of
       // the project under review like any other.
       if (relDir === '' && name === REVIEW_FILE) continue;
-      if (isBinary(name)) continue;
       children.push({ name, isDir: false });
     }
     // Anything else — a symlink, a socket, a device — is not listed.

@@ -239,6 +239,36 @@ test('a file the change deleted is listed, and says it is gone', async () => {
   }
 });
 
+test('a binary is listed, and opens in a tab of its own with its own type', async () => {
+  const base = reviewWorkspace();
+  stub.review(BOX, reviewWorkspace({ files: { ...base.files, 'notes/chart.png': 'PNG\0bytes' } }));
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=notes%2Fchart.png`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect
+      .poll(() => page.getByText('This file is binary, so it cannot be shown here.').isVisible())
+      .toBe(true);
+    await page.getByRole('button', { name: /^notes/ }).click();
+    await expect.poll(() => page.getByRole('button', { name: /chart\.png/ }).isVisible()).toBe(true);
+    await shoot(page, 'review-binary-desktop');
+
+    // A real link, so the tab is the browser's and the type is the server's.
+    const link = page.getByRole('link', { name: 'Open in a new tab' });
+    const [tab] = await Promise.all([page.context().waitForEvent('page'), link.click()]);
+    await expect.poll(() => tab.url()).toContain('/review/raw?path=notes%2Fchart.png');
+    const res = await page.request.get(new URL((await link.getAttribute('href'))!, stub.url).href);
+    expect(res.headers()['content-type']).toBe('image/png');
+    expect(await res.body()).toEqual(Buffer.from('PNG\0bytes'));
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a file past the line limit is one plain block with nothing to tap', async () => {
   // Long enough that a row per line is tens of thousands of elements, which is
   // what freezes a phone — and one line of it changed, so the toolbar has

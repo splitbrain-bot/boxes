@@ -168,9 +168,10 @@ were.
 | `POST /api/boxes/:id/threads/:threadId/done` | Marks a conversation done, or takes the mark off: `{"done":true}` |
 | `POST /api/boxes/:id/threads/:threadId/background/stop` | Kills one thing the thread left running, or everything it has; answers with how many were signalled |
 | `POST /api/boxes/:id/attachments?name=` | Stores one file, raw bytes, in the box's workspace |
-| `GET /api/boxes/:id/attachments/:name` | Serves one back; images and PDFs as themselves, everything else as a download |
+| `GET /api/boxes/:id/attachments/:name` | Serves one back; images, PDFs, audio and video as themselves, everything else as a download |
 | `GET /api/boxes/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
 | `GET /api/boxes/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
+| `GET /api/boxes/:id/review/raw?path=` | One file's bytes, typed by its name the way an attachment is, for opening a binary in a tab of its own |
 | `PUT /api/boxes/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
 | `PUT /api/boxes/:id/review/annotations` | Creates or replaces one line's comment |
 | `DELETE /api/boxes/:id/review/annotations?path=&line=` | Deletes one comment |
@@ -297,23 +298,28 @@ the attachments directory would otherwise serve whatever the orchestrator's
 own uid can read, `/data` included.
 
 What it serves is declared rather than sniffed. What a browser can show is
-served as itself — images, SVG included, and PDF — and everything else as an
-`application/octet-stream` download. HTML is the deliberate omission: served
-as itself it runs as this origin, and unlike an SVG there is no way to show
-it that does not.
+served as itself — images, SVG included, PDF, audio and video. A format an
+app on the device may open, such as an office document or an archive, is a
+download of its own type, so the device can hand it to that app. Everything
+else is an `application/octet-stream` download. HTML is the deliberate
+omission: served as itself it runs as this origin, and unlike an SVG there is
+no way to show it that does not.
 
 Every response carries `nosniff` and `default-src 'none'`, with `sandbox` on
-all but the PDF. That CSP is load-bearing rather than decorative: it is what
+all but the PDF, audio and video. That CSP is load-bearing rather than decorative: it is what
 lets an SVG — which can carry script, and which an agent can write — be
 served as an SVG. Opened as a document it has no script, no origin and no
 network; behind the `<img>` the thread draws it with, a browser runs nothing
 in it anyway. The PDF is the exception because it is rendered by the
 browser's own viewer rather than by the page, and a sandboxed document is one
 a browser may decline to hand over — which would turn opening it into a
-download, the one thing serving it inline was for.
+download, the one thing serving it inline was for. Audio and video are
+played by a media element the browser builds around the file. A sandboxed
+document has no origin to load the file from, so these get `media-src 'self'`
+instead of `sandbox`, and nothing in them can run script.
 
 Non-image attachments read as a chip in the thread, and the chip is a link to
-that endpoint: a PDF opens in a tab, anything else downloads.
+that endpoint: a PDF, audio or video opens in a tab, anything else downloads.
 
 **Text, and not ACP's `resource_link`.** The protocol has a block for naming
 a file, and the Claude adapter renders it as `[@name](file://…)` — a bare
@@ -2005,10 +2011,12 @@ of. A directory the change emptied still lists the files it removed, merged in
 from that same map, because a deleted file has no entry on disk to be found
 under.
 
-One read of the workspace is one `readdirSync` of one directory. Every file a
-person could read is listed wherever it sits: binaries are left out, and so is
-a version control system's own metadata and the review's own file at the root,
-and nothing else. A directory carries its own cap, so no single answer can be
+One read of the workspace is one `readdirSync` of one directory. Every file is
+listed wherever it sits, binaries included: a version control system's own
+metadata and the review's own file at the root are left out, and nothing
+else. A binary cannot be shown as text, so the view offers to open it in a tab
+of its own through `GET /review/raw`, which serves it the way an attachment is
+served. A directory carries its own cap, so no single answer can be
 large, and says when it hit it.
 
 **Git's answer is taken once and shared.** The repositories, what they are
@@ -2050,7 +2058,8 @@ against: the box runs while the review is open, and 412 plus "save anyway" is
 the whole mechanism. Editing needs no new containment — the path goes through
 the same rule about what may be listed and the same `resolveInRoot` as a read,
 asked of the one path rather than looked up in a listing, so `REVIEW.md`
-itself, a binary and a symlink out are all the same 404 they were.
+itself and a symlink out are the same 404 they were, and a binary is refused
+like a truncated file.
 
 **A review needs the box.** File content is read here, but git runs inside the
 box's own container, so any endpoint that asks git something starts a

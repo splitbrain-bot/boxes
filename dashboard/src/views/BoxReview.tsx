@@ -1,4 +1,4 @@
-import { ArrowLeft, FilePlus2, Send } from 'lucide-react';
+import { ArrowLeft, ExternalLink, FilePlus2, Send } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
@@ -681,7 +681,22 @@ export function BoxReview() {
               {file.deleted ? (
                 <Empty>This file was deleted, so there is nothing left to read.</Empty>
               ) : file.binary ? (
-                <Empty>This file is binary, so there is nothing to show.</Empty>
+                <Empty>
+                  <p>This file is binary, so it cannot be shown here.</p>
+                  {/* A real link rather than a fetch, so the new tab gets the
+                      file with its own type, and the browser or an app on
+                      the device decides what to do with it. */}
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href={`/api/boxes/${encodeURIComponent(id)}/review/raw?path=${encodeURIComponent(file.path)}`}
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      <ExternalLink />
+                      Open in a new tab
+                    </a>
+                  </Button>
+                </Empty>
               ) : (
                 <>
                   {file.truncated ? (
@@ -845,7 +860,7 @@ function plainClick(event: React.MouseEvent): boolean {
 /** The centred message a pane with nothing in it shows. */
 function Empty({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-1 items-center justify-center px-6 py-10 text-center text-sm text-muted-foreground">
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center text-sm text-muted-foreground">
       {children}
     </div>
   );
