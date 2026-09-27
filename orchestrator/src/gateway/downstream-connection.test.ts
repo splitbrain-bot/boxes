@@ -96,8 +96,6 @@ class FakeSocket extends EventEmitter {
  * for that promise.
  */
 class FakeUpstream {
-  /** The initialize answer handed to the browser. */
-  readonly cachedInitialize: unknown = { protocolVersion: 1, agentCapabilities: {} };
   /** The handles attached, in order. */
   readonly attached: DownstreamHandle[] = [];
   /** The handles detached, in order. */

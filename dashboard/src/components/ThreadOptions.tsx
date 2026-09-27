@@ -48,7 +48,7 @@ export interface ThreadOptionsState {
   setConfig: (optionId: string, value: string) => void;
   /**
    * Stores the choice as this harness's dialog default, so the next dialog on
-   * any device opens on it. Callers call it on submit.
+   * any device opens on it. Callers call it once the thread exists.
    */
   remember: () => void;
 }

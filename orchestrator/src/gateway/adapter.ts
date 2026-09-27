@@ -39,7 +39,7 @@ const EXTENSION_UPDATE = /^async_task_/;
 const MAX_SPAWN_ATTEMPTS = 3;
 
 /** Wait before each retry, in milliseconds, by retry number. */
-const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
+const SPAWN_BACKOFF_MS = [1000, 3000];
 
 /** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
 const RESOURCE_NOT_FOUND = -32002;
@@ -370,7 +370,7 @@ export class AdapterConnection {
     for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
       if (this.stopping) return;
       if (attempt > 0) {
-        const wait = SPAWN_BACKOFF_MS[attempt - 1] ?? 8000;
+        const wait = SPAWN_BACKOFF_MS[attempt - 1]!;
         this.slog.warn('retrying adapter spawn', { attempt, waitMs: wait });
         await new Promise((r) => setTimeout(r, wait));
       }
@@ -472,7 +472,7 @@ export class AdapterConnection {
     if (!latest) {
       await this.mintFirstThread();
     } else if (latest.harness === this.harness.id) {
-      const replayed = latest.acp_session_id ? await this.loadBox(latest) : false;
+      const replayed = latest.acp_session_id ? await this.loadThread(latest) : false;
       if (!replayed) await this.mintInto(latest.id);
     }
 
@@ -481,7 +481,7 @@ export class AdapterConnection {
       const row = threadByAcpId(this.host.db, this.host.boxId, this.harness.id, acpThreadId);
       if (!row && this.heldElsewhere(acpThreadId)) continue;
       try {
-        if (row?.acp_session_id && (await this.loadBox(row))) continue;
+        if (row?.acp_session_id && (await this.loadThread(row))) continue;
       } catch (err) {
         if (isAuthRequired(err)) throw err;
         // A fault on a watched thread does not fail the spawn.
@@ -529,7 +529,7 @@ export class AdapterConnection {
     const row = getThread(this.host.db, threadId);
     if (!row) throw new Error(THREAD_NOT_FOUND);
     if (row.acp_session_id && this.live.has(row.acp_session_id)) return row.acp_session_id;
-    if (row.acp_session_id && (await this.loadBox(row))) return row.acp_session_id;
+    if (row.acp_session_id && (await this.loadThread(row))) return row.acp_session_id;
     return this.mintInto(threadId);
   }
 
@@ -581,7 +581,7 @@ export class AdapterConnection {
   async hold(thread: ThreadRow): Promise<boolean> {
     if (!thread.acp_session_id) return false;
     if (this.live.has(thread.acp_session_id)) return true;
-    return this.loadBox(thread);
+    return this.loadThread(thread);
   }
 
   /**
@@ -630,7 +630,7 @@ export class AdapterConnection {
    *
    * @returns False when the adapter no longer holds the thread.
    */
-  private async loadBox(thread: ThreadRow): Promise<boolean> {
+  private async loadThread(thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;
     this.host.beginFill(acpSessionId);
     try {
@@ -650,7 +650,7 @@ export class AdapterConnection {
       this.host.endFill(acpSessionId, optionsOf(res));
       this.live.add(acpSessionId);
       this.noteCatalog(res ?? {});
-      this.slog.info('acp box loaded', { threadId: thread.id, acpSessionId });
+      this.slog.info('acp thread loaded', { threadId: thread.id, acpSessionId });
       // A load restores only the conversation. The mode and settings come
       // from the row.
       await this.applyMode(

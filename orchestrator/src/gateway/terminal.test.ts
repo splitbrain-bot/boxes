@@ -322,7 +322,7 @@ test('the browser closing ends this terminal shell and lets the box go', async (
   dk.setDockerForTests(null);
 });
 
-test('two terminals on one box get shells of their own to end', async () => {
+test('two terminals on one box get tmux client sessions of their own', async () => {
   const first = fakeDocker();
   const ws1 = new FakeSocket();
   await attach(ws1, fakeManager().manager);

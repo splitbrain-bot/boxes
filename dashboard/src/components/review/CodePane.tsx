@@ -5,10 +5,10 @@ import { withinLineLimit, type Token } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
-/** The gutter bar class, row background class and label for each kind of changed line. */
-const CHANGE: Record<ReviewLineChange, { bar: string; row: string; label: string }> = {
-  added: { bar: 'bg-ok', row: 'bg-ok/8', label: 'added' },
-  modified: { bar: 'bg-warn', row: 'bg-warn/8', label: 'modified' },
+/** The gutter bar class and row background class for each kind of changed line. */
+const CHANGE: Record<ReviewLineChange, { bar: string; row: string }> = {
+  added: { bar: 'bg-ok', row: 'bg-ok/8' },
+  modified: { bar: 'bg-warn', row: 'bg-warn/8' },
 };
 
 /**

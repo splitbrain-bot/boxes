@@ -271,7 +271,7 @@ test('a refresh with no file open asks only for the tree', async () => {
   assert.equal(hits('/review/dir'), 2);
 });
 
-test('there is no fingerprint request at all', async () => {
+test('a refresh sends no status request', async () => {
   await loadTree();
   await loadFile('a.ts');
   await refresh();

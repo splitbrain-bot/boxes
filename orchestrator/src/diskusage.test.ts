@@ -280,7 +280,7 @@ test('a box that comes back up is measured again', async () => {
   assert.equal(walks, 2);
 });
 
-test('a box that stops while its walk is queued is measured again after it lands', async () => {
+test('a size measured while the box was up is measured again once it is down', async () => {
   let finish: (bytes: number) => void = () => {};
   let walks = 0;
   const { cache } = usage({

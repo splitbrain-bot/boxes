@@ -639,7 +639,7 @@ describe('starting a box whose files are gone', () => {
     );
   });
 
-  it('says nothing about a box whose halves are still volumes', async () => {
+  it('says nothing about a box whose home is still a volume', async () => {
     // The home of an older box is a named volume. The orchestrator has no
     // path to check it.
     insertBox('a4', 'c1', 'sha256:one', 'volume');

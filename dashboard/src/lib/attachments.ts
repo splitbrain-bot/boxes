@@ -111,6 +111,7 @@ const THUMBNAIL_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/webp',
+  'image/avif',
   'image/gif',
   'image/svg+xml',
 ]);

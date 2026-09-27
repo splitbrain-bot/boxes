@@ -69,7 +69,7 @@ test('an attachment is fetched back by name, from its box', () => {
   );
 });
 
-test('only the types the endpoint serves as themselves are shown as pictures', () => {
+test('only the image types the endpoint serves inline are shown as pictures', () => {
   assert.equal(isThumbnailable('image/png'), true);
   assert.equal(isThumbnailable('IMAGE/JPEG'), true);
   // The endpoint serves SVG inline under a sandboxing CSP.

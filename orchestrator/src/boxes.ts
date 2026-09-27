@@ -297,7 +297,7 @@ export class BoxManager {
     if (imageUid === null || imageUid === this.cfg.BOX_UID) return;
     log.warn(
       'the box image was built on a different uid than BOX_UID; ' +
-        "a box's home volume will not be writable by the agent",
+        "a box's home will not be writable by the agent",
       {
         image: this.cfg.BOX_IMAGE,
         imageUid,

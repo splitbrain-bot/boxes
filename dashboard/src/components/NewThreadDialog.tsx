@@ -26,8 +26,11 @@ export function NewThreadDialog({
   busy: boolean;
   /** Called when the dialog closes without starting a thread. */
   onCancel: () => void;
-  /** Starts the thread. Undefined options start it on the orchestrator's defaults. */
-  onCreate: (options: ThreadOptionsBody | undefined) => void;
+  /**
+   * Starts the thread and resolves with whether it started. Undefined options
+   * start it on the orchestrator's defaults.
+   */
+  onCreate: (options: ThreadOptionsBody | undefined) => Promise<boolean>;
 }) {
   const state = useThreadOptions();
 
@@ -54,8 +57,9 @@ export function NewThreadDialog({
             // the orchestrator's defaults.
             disabled={busy || !state.ready}
             onClick={() => {
-              state.remember();
-              onCreate(state.value ?? undefined);
+              void onCreate(state.value ?? undefined).then((created) => {
+                if (created) state.remember();
+              });
             }}
           >
             {busy ? 'Starting…' : 'Start thread'}

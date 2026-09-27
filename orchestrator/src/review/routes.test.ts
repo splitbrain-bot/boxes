@@ -1266,7 +1266,7 @@ describe('the base revision', () => {
     assert.deepEqual(after.body.diff.lines, { 1: 'added' });
   });
 
-  test('null clears the base back to the working tree', async () => {
+  test('null clears the base back to HEAD', async () => {
     branched('ddd');
     await setBase('ddd', 'main');
     const { body } = await setBase('ddd', null);
@@ -1301,7 +1301,7 @@ describe('the base revision', () => {
     assert.equal(entry((await openDir('two', 'repo-b')).body, 'mine.txt')!.status, 'added');
   });
 
-  test('a repository the revision names nothing in falls back to its working tree', async () => {
+  test('a repository the revision names nothing in falls back to its HEAD', async () => {
     const ws = insertBox('mix');
     git(branchRepo(ws, 'repo-a'), 'branch', 'release');
     const other = join(ws, 'repo-b');

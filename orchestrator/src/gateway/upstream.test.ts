@@ -123,7 +123,7 @@ class FakeAdapter extends Duplex {
 const BASE_PROCESSES: string[][] = [
   ['1', '0', '/sbin/docker-init'],
   ['19', '1', 'node /usr/local/bin/claude-agent-acp'],
-  ['100', '19', 'claude --output-format stream-json --box-id=acp-gone'],
+  ['100', '19', 'claude --output-format stream-json --session-id=acp-gone'],
 ];
 
 /** The box as this test is pretending to find it. Reset for every one. */
@@ -386,7 +386,7 @@ test('a thread the adapter has forgotten is re-minted, and the others are left a
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     // The stored thread was never prompted, so the SDK wrote no transcript.
     // The adapter reports that as a missing resource.
-    if (msg.method === 'session/load') return new Error('Box not found');
+    if (msg.method === 'session/load') return new Error('Session not found');
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
   });
@@ -450,7 +450,7 @@ test('every conversation is created asking for Fable and readable thinking', asy
     }
     // The stored thread is gone, so both paths run: a load that fails and
     // the fresh conversation that replaces it.
-    if (msg.method === 'session/load') return new Error('Box not found');
+    if (msg.method === 'session/load') return new Error('Session not found');
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
   });
@@ -789,7 +789,7 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
           // The default thread always comes back; the watched one is gone by
           // the time the adapter restarts.
           if (msg.params?.['sessionId'] === 'acp-kept' && firstLoadDone) {
-            return new Error('Box not found');
+            return new Error('Session not found');
           }
           return {};
         }
@@ -824,7 +824,7 @@ test('a respawn that re-mints the latest thread drops the browsers on its old id
           // adapter restarts, so its stored id is re-minted rather than
           // loaded back.
           if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
-            return new Error('Box not found');
+            return new Error('Session not found');
           }
           return {};
         }
@@ -897,7 +897,7 @@ test('pinning to a thread the adapter has forgotten mints one for it', async () 
 });
 
 test('a fork starts in plan mode where a fresh thread starts in auto', async () => {
-  const modeSet: Array<{ box: unknown; mode: unknown }> = [];
+  const modeSet: Array<{ session: unknown; mode: unknown }> = [];
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') {
       return {
@@ -912,7 +912,7 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh', modes };
     if (msg.method === 'session/fork') return { sessionId: 'acp-branch', modes };
     if (msg.method === 'session/set_mode') {
-      modeSet.push({ box: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
+      modeSet.push({ session: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
       return {};
     }
     return {};
@@ -925,8 +925,8 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
   // The fork shares the source's checkout, so it starts somewhere that reads
   // rather than writes. It is the user's choice from then on.
   assert.deepEqual(modeSet, [
-    { box: 'acp-fresh', mode: 'auto' },
-    { box: 'acp-branch', mode: 'plan' },
+    { session: 'acp-fresh', mode: 'auto' },
+    { session: 'acp-branch', mode: 'plan' },
   ]);
 });
 
@@ -1073,20 +1073,20 @@ function twoThreadAdapter(asked: string[], gone: Set<string> = new Set()): () =>
   });
   return () =>
     new FakeAdapter((msg) => {
-      const box = String(msg.params?.['sessionId'] ?? '');
+      const session = String(msg.params?.['sessionId'] ?? '');
       if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
       if (msg.method === 'session/new') return { sessionId: 'acp-minted', ...state() };
       if (msg.method === 'session/load') {
-        if (gone.has(box)) return new Error('no transcript for that box');
-        asked.push(`load ${box}`);
+        if (gone.has(session)) return new Error('no transcript for that session');
+        asked.push(`load ${session}`);
         return state();
       }
       if (msg.method === 'session/set_mode') {
-        asked.push(`mode ${box} ${String(msg.params?.['modeId'])}`);
+        asked.push(`mode ${session} ${String(msg.params?.['modeId'])}`);
         return {};
       }
       if (msg.method === 'session/set_config_option') {
-        asked.push(`model ${box} ${String(msg.params?.['value'])}`);
+        asked.push(`model ${session} ${String(msg.params?.['value'])}`);
         return {};
       }
       return {};
@@ -1290,7 +1290,7 @@ test('a fork whose source is gone too is started empty rather than left unpinnab
       branches += 1;
       // The first branch is the fork itself. By the second the adapter has
       // restarted, and the source turns out to have had no transcript either.
-      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Box not found');
+      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Session not found');
     }
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
@@ -2085,7 +2085,7 @@ test('the box-level stop kills everything the box is running, leaves first', asy
     ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
     ['7', '1', 'sleep infinity'],
     ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
-    ['13', '12', 'claude --output-format stream-json --box-id=acp-gone'],
+    ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
     ['14', '13', shell('npm run build')],
     ['15', '14', 'node .../vite build'],
     // The other harness's tree, in the same box: its adapter, the app-server
@@ -2370,10 +2370,10 @@ function harnessAdapter(
 ): () => FakeAdapter {
   return () =>
     new FakeAdapter((msg) => {
-      const box = String(msg.params?.['sessionId'] ?? '');
+      const session = String(msg.params?.['sessionId'] ?? '');
       const answer = answers(msg);
       if (answer !== undefined) {
-        seen.push(`${tag} ${String(msg.method)} ${box}`.trim());
+        seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
         return answer;
       }
       if (msg.method === 'initialize') {
@@ -2383,7 +2383,7 @@ function harnessAdapter(
           _meta: { adapter: tag },
         };
       }
-      seen.push(`${tag} ${String(msg.method)} ${box}`.trim());
+      seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
       if (msg.method === 'session/new') return { sessionId: `${tag}-minted` };
       if (msg.method === 'session/fork') return { sessionId: `${tag}-branch` };
       return {};

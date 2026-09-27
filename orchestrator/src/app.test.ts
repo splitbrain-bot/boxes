@@ -906,7 +906,7 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
     '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
     '    7     1 sleep infinity',
     '   12     1 node /usr/local/bin/claude-agent-acp',
-    '   13    12 claude --output-format stream-json --box-id=acp-1',
+    '   13    12 claude --output-format stream-json --session-id=acp-1',
     "   14    13 /bin/bash -c eval 'npm run build'",
     '   20     1 node /usr/local/bin/codex-acp',
     '   21    20 codex app-server',

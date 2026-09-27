@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { parseTaskNotifications } from '../../../shared/task-notifications.ts';
+import {
+  parseTaskNotifications,
+  type TaskNotification,
+} from '../../../shared/task-notifications.ts';
 
 /** A monitor's event, as the harness sends it. */
 const MONITOR = [
@@ -39,7 +42,7 @@ const AGENT = [
 ].join('\n');
 
 /** The one notification in a block, which every fixture here holds. */
-function only(text: string) {
+function only(text: string): TaskNotification | null {
   const segments = parseTaskNotifications(text);
   assert.equal(segments?.length, 1);
   assert.equal(segments![0]!.type, 'notification');

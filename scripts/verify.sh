@@ -242,11 +242,12 @@ absent() {
   if [ "$hits" = 1 ]; then bad "$id" "$desc"; else ok "$id" "$desc"; fi
 }
 
-# Asserts that no real GitHub, Claude or OpenAI credential is in a
+# Asserts that no real GitHub, GitLab, Claude or OpenAI credential is in a
 # container's log.
 absent_from_log() {
   local id="$1" desc="$2" container="$3" hits=0
   docker logs "$container" 2>&1 | grep -qF -- "$REAL_GH" && hits=1
+  docker logs "$container" 2>&1 | grep -qF -- "$REAL_GITLAB" && hits=1
   [ -n "$REAL_CLAUDE" ] && docker logs "$container" 2>&1 | grep -qF -- "$REAL_CLAUDE" && hits=1
   [ -n "$REAL_OPENAI" ] && docker logs "$container" 2>&1 | grep -qF -- "$REAL_OPENAI" && hits=1
   if [ "$hits" = 1 ]; then bad "$id" "$desc"; else ok "$id" "$desc"; fi
@@ -427,6 +428,7 @@ lacks "B8" "that value is not the deployment's own PAT" "^$(printf '%s' "$REAL_G
 absent "B9"  "the real Claude token is nowhere in the box" "$REAL_CLAUDE"
 absent "B10" "the real GitHub token is nowhere in the box" "$REAL_GH"
 absent "B10a" "the real OpenAI key is nowhere in the box" "$REAL_OPENAI"
+absent "B10b" "the real GitLab token is nowhere in the box" "$REAL_GITLAB"
 
 matches "B11" "the proxy is attached to the box network" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/api/boxes/$BOX_ID' | jq -r '.proxyAttached'"
@@ -650,19 +652,19 @@ fi
 
 # git sends its credential as Basic auth after a 401. The proxy must swap it
 # there too, so the refusal must not come from the proxy.
-lacks "D6" "git's Basic-auth framing is swapped, not refused by the proxy" 'egress denied|error: 403' \
+lacks "D9" "git's Basic-auth framing is swapped, not refused by the proxy" 'egress denied|error: 403' \
   sxs 'git ls-remote https://github.com/boxes-verify/no-such-repo.git 2>&1 | head -3'
 
 if [ -n "$REAL_CLAUDE" ]; then
   # The Claude credential may also travel in x-api-key.
-  lacks "D7" "the placeholder is swapped in x-api-key too, not refused" 'egress denied' \
+  lacks "D10" "the placeholder is swapped in x-api-key too, not refused" 'egress denied' \
     sxs 'curl -sS -m 25 -H "x-api-key: $CLAUDE_CODE_OAUTH_TOKEN" https://api.anthropic.com/v1/messages'
   # One host's placeholder is a foreign credential at another host.
-  matches "D8" "a placeholder for another host is refused" 'egress denied' \
+  matches "D11" "a placeholder for another host is refused" 'egress denied' \
     sxs 'curl -sS -m 25 -H "Authorization: Bearer $GH_TOKEN" https://api.anthropic.com/v1/messages'
 else
-  skipped "D7" "api.anthropic.com is not intercepted without a Claude token"
-  skipped "D8" "api.anthropic.com is not intercepted without a Claude token"
+  skipped "D10" "api.anthropic.com is not intercepted without a Claude token"
+  skipped "D11" "api.anthropic.com is not intercepted without a Claude token"
 fi
 
 # ------------------------------------------------------------- E. allowlist ---

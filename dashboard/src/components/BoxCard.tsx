@@ -308,14 +308,14 @@ export function BoxCard({ box }: { box: BoxSummary }) {
             onCancel={() => setStarting(false)}
             // Closes only on failure. Closing first would pop the dialog's
             // history entry after the navigation and undo it.
-            onCreate={(options) => {
-              void open(
-                () => api.createThread(box.id, options ? { options } : {}),
-                true,
-              ).then((opened) => {
-                if (!opened) setStarting(false);
-              });
-            }}
+            onCreate={(options) =>
+              open(() => api.createThread(box.id, options ? { options } : {}), true).then(
+                (opened) => {
+                  if (!opened) setStarting(false);
+                  return opened;
+                },
+              )
+            }
           />
         ) : null}
       </div>

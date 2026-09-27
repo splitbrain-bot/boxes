@@ -355,7 +355,7 @@ describe('over a workspace of several repositories', () => {
     assert.equal(merged['repo-b/feature.txt'], 'added');
   });
 
-  test('a repository the revision names nothing in falls back to its working tree', async () => {
+  test('a repository the revision names nothing in falls back to its HEAD', async () => {
     repo('repo-a');
     repo('repo-b');
     git('repo-a', 'branch', 'release');
