@@ -752,7 +752,7 @@ test('the base picker sets a revision and says which one is active', async () =>
   );
   try {
     // The status line without a base.
-    await expect.poll(() => page.getByText(/vs working tree/).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText(/vs HEAD/).isVisible()).toBe(true);
 
     await page.getByRole('button', { name: /HEAD/ }).click();
     await page.getByRole('textbox', { name: 'Base revision' }).fill('main');
@@ -790,7 +790,7 @@ test('a revision that names nothing in one repository is reported, not refused',
     // header counts it, and the picker names the one that fell back to its HEAD.
     await expect.poll(() => page.getByText(/vs only-app \(1 of 2\)/).isVisible()).toBe(true);
     await page.getByRole('button', { name: /only-app/ }).click();
-    await expect.poll(() => page.getByText('working tree').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('HEAD', { exact: true }).isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();

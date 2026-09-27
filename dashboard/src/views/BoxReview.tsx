@@ -467,7 +467,7 @@ export function BoxReview() {
               {facts?.base.rev
                 ? ` · vs ${facts.base.rev}${resolvedIn(facts.repos)}`
                 : facts?.hasGit
-                  ? ' · vs working tree'
+                  ? ' · vs HEAD'
                   : ''}
             </span>
           </div>

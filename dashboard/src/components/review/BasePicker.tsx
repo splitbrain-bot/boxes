@@ -58,7 +58,7 @@ export function BasePicker({
           title={
             active
               ? `Comparing against ${base.rev}${whereLanded(landed.length, repos.length)}`
-              : 'Comparing against the working tree'
+              : 'Comparing against HEAD'
           }
         >
           <GitCompareArrows className="size-3.5" />
@@ -120,7 +120,7 @@ export function BasePicker({
                   {/* The orchestrator compares a repository the revision does not
                       resolve in against its own HEAD instead of failing. */}
                   <span className={repo.baseCommit === '' ? 'text-warn' : undefined}>
-                    {repo.baseCommit === '' ? 'working tree' : repo.baseCommit.slice(0, 8)}
+                    {repo.baseCommit === '' ? 'HEAD' : repo.baseCommit.slice(0, 8)}
                   </span>
                 </li>
               ))}

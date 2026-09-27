@@ -173,7 +173,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
           {box.diskBytes === null ? null : (
             <span
               className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-              title="Workspace and home on disk"
+              title="Disk use of workspace, home and Nix store"
             >
               <HardDrive className="size-3" aria-hidden />
               {shortSize(box.diskBytes)}
@@ -274,7 +274,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
           <ConfirmDialog
             title="Stop everything running in this box?"
             description={
-              'Kills every command still running in it, whoever started it, and anything ' +
+              'Kills every command still running in it, except the agents, and anything ' +
               'those commands started. Half-done work stays half-done, and nothing will ' +
               'report back. The box itself keeps running.'
             }
