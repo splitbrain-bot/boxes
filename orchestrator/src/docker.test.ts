@@ -85,6 +85,7 @@ async function envFor(
     workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
     agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
     homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
+    nixSource: '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234',
     env: credentialEnv((id) => egress.placeholderFor(id), settings, cfg.GITLAB_HOST),
     caCertificate: egress.caCertificate(),
   };
@@ -203,6 +204,7 @@ describe('the container template', () => {
           workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
           agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
           homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
+          nixSource: '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234',
           env: {},
           caCertificate: '',
         },
@@ -214,15 +216,18 @@ describe('the container template', () => {
     return opts;
   }
 
-  it('binds the workspace and the home from host paths', async () => {
+  it('binds the workspace, the home and the nix store from host paths', async () => {
     const opts = await capture();
     const host = opts['HostConfig'] as { Binds: string[] };
     // Paths, not volume names: the orchestrator has to read these files
     // itself, which is what the whole review surface rests on — and what
-    // lets a box's size be read by walking two directories.
+    // lets a box's size be read by walking three directories.
     assert.deepEqual(host.Binds, [
       '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234:/workspace',
       '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234:/home/agent',
+      // At /nix and nowhere else: the binary cache is built against that
+      // path, and nothing in it would substitute anywhere else.
+      '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234:/nix',
       // The agent configuration is read-only: what the dashboard says a box is
       // configured with is not the agent's to rewrite.
       '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234:/boxes/agent:ro',

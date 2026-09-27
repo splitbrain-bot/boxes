@@ -11,16 +11,18 @@ import { join, posix } from 'node:path';
 import { log } from './log.ts';
 
 /**
- * What a box is made of on disk: its workspace, and its home.
+ * What a box is made of on disk: its workspace, its home, and its Nix store.
  *
- * Both are directories under DATA_DIR, bind-mounted into the box
+ * All three are directories under DATA_DIR, bind-mounted into the box
  * container, so the orchestrator reads and writes them as ordinary files,
  * runs git over a workspace with no container running, and measures what a
- * box costs by walking two directories.
+ * box costs by walking three directories.
  *
  * A home holds thread transcripts, the tool caches an agent installs at
  * runtime, and whatever credential a login inside the box wrote, so `homes/`
- * is 0700, the same as `workspaces/`.
+ * is 0700, the same as `workspaces/`. A Nix store holds what the agent
+ * installed with nix, and is mounted at /nix because that is the one path
+ * Nix's binary cache is built against.
  */
 
 /**
@@ -66,6 +68,9 @@ const WORKSPACES_SUBDIR = 'workspaces';
 /** Directory under DATA_DIR holding one directory per box home. */
 const HOMES_SUBDIR = 'homes';
 
+/** Directory under DATA_DIR holding one directory per box Nix store. */
+const NIX_SUBDIR = 'nix';
+
 /** The parent of every workspace directory. */
 export function workspacesRoot(dataDir: string): string {
   return join(dataDir, WORKSPACES_SUBDIR);
@@ -105,8 +110,23 @@ export function hostHomePath(hostDataDir: string, boxId: string): string {
   return posix.join(hostDataDir, HOMES_SUBDIR, boxId);
 }
 
+/** The parent of every Nix store directory. */
+export function nixRoot(dataDir: string): string {
+  return join(dataDir, NIX_SUBDIR);
+}
+
+/** Where a box's Nix store lives, as this process sees it. */
+export function nixPath(dataDir: string, boxId: string): string {
+  return join(nixRoot(dataDir), boxId);
+}
+
+/** A box's Nix store as the Docker daemon sees it, for the bind source. */
+export function hostNixPath(hostDataDir: string, boxId: string): string {
+  return posix.join(hostDataDir, NIX_SUBDIR, boxId);
+}
+
 /**
- * Creates the workspaces and homes parents, mode 0700.
+ * Creates the workspaces, homes and nix parents, mode 0700.
  *
  * One box's files must not be readable from another box, and the only
  * thing that reads across all of them is this process. 0700 on the parents
@@ -116,6 +136,7 @@ export function hostHomePath(hostDataDir: string, boxId: string): string {
 export function ensureWorkspacesRoot(dataDir: string): void {
   mkdirSync(workspacesRoot(dataDir), { recursive: true, mode: 0o700 });
   mkdirSync(homesRoot(dataDir), { recursive: true, mode: 0o700 });
+  mkdirSync(nixRoot(dataDir), { recursive: true, mode: 0o700 });
 }
 
 /**
@@ -149,6 +170,25 @@ export function createHome(dataDir: string, boxId: string): string {
 }
 
 /**
+ * Creates a box's Nix store directory and hands it to the agent user, or
+ * leaves one that is already there as it is. Returns the path as this
+ * process sees it.
+ *
+ * Empty is usable, unlike a home: nix lays the store out underneath on first
+ * use. Called at every start rather than only at create, because a box from
+ * before the store existed has none, and Docker would otherwise create the
+ * bind source itself, empty and owned by root.
+ */
+export function createNix(dataDir: string, boxId: string): string {
+  ensureWorkspacesRoot(dataDir);
+  const path = nixPath(dataDir, boxId);
+  // 0755 like the workspace: a package store holds nothing secret.
+  mkdirSync(path, { recursive: true, mode: 0o755 });
+  chownToAgent(path);
+  return path;
+}
+
+/**
  * Whether a path is there and is a directory.
  *
  * Asked before a box's workspace or home is bind-mounted. Docker creates
@@ -162,16 +202,16 @@ export function directoryExists(path: string): boolean {
 }
 
 /**
- * The box ids that have a workspace or a home directory on disk.
+ * The box ids that have a workspace, a home or a Nix store directory on disk.
  *
- * Read from the two roots rather than from the database, which is what makes
- * it an answer about what is there: a teardown that removed a box's
+ * Read from the three roots rather than from the database, which is what
+ * makes it an answer about what is there: a teardown that removed a box's
  * Docker objects and then failed leaves these behind with nothing naming
  * them. A root that does not exist yet contributes nothing.
  */
 export function boxDirectoryIds(dataDir: string): string[] {
   const ids = new Set<string>();
-  for (const root of [workspacesRoot(dataDir), homesRoot(dataDir)]) {
+  for (const root of [workspacesRoot(dataDir), homesRoot(dataDir), nixRoot(dataDir)]) {
     let entries: Dirent[];
     try {
       entries = readdirSync(root, { withFileTypes: true });
@@ -195,6 +235,11 @@ export function removeWorkspace(dataDir: string, boxId: string): void {
 /** Removes a box's home directory and everything in it. */
 export function removeHome(dataDir: string, boxId: string): void {
   rmSync(homePath(dataDir, boxId), { recursive: true, force: true });
+}
+
+/** Removes a box's Nix store directory and everything in it. */
+export function removeNix(dataDir: string, boxId: string): void {
+  rmSync(nixPath(dataDir, boxId), { recursive: true, force: true });
 }
 
 /**

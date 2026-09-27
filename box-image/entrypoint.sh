@@ -44,6 +44,32 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
+# --- a CA bundle for the tool that reads one file and nothing else ------------
+# Most TLS clients here take the deployment CA as a file and keep the system
+# authorities from their default directory. Nix does not: its static build
+# knows no directory, and the one file it is given is the whole of what it
+# trusts. So it gets a bundle of both, written every start so it follows the
+# system store and the CA alike, and written without the CA too, since
+# /etc/nix/nix.conf names the file whether or not a proxy is configured.
+bundle=/home/agent/.boxes/ca-bundle.crt
+if mkdir -p /home/agent/.boxes \
+   && cat /etc/ssl/certs/ca-certificates.crt > "$bundle.tmp" \
+   && { [ ! -f /home/agent/.boxes/proxy-ca.crt ] || cat /home/agent/.boxes/proxy-ca.crt >> "$bundle.tmp"; } \
+   && mv "$bundle.tmp" "$bundle"; then
+  log "wrote the CA bundle for nix to $bundle"
+else
+  rm -f "$bundle.tmp"
+  log "WARNING: could not write $bundle; nix downloads will fail TLS"
+fi
+
+# --- the nix store -----------------------------------------------------------
+# /nix is a directory of the box's own, bound in by the orchestrator. Nix
+# lays the store out underneath on first use, so all there is to check is
+# that it can.
+if [ ! -w /nix ]; then
+  log "WARNING: /nix is not writable; nix will not work in this box"
+fi
+
 # --- directories an agent needs to find already there ------------------------
 # npm's prefix has to exist before `npm install -g` will use it, and Codex
 # treats a CODEX_HOME naming a missing directory as an error rather than
@@ -361,6 +387,31 @@ elif command -v playwright-cli >/dev/null 2>&1; then
     log "WARNING: could not install the playwright-cli skill"
   fi
 fi
+
+# --- skills the image carries -------------------------------------------------
+# What the image knows that an agent cannot find out from a --help: that nix
+# is here, where its store lives and what survives a restart. Installed into
+# both layouts on every start, so a rebuilt image's copy reaches a home that
+# already exists, and left out where the box's configured set claims the
+# name, for the reason the playwright-cli skill above is left out: the
+# dashboard showed that version as the effective one.
+install_image_skill() {
+  name=$1
+  src=/usr/local/share/boxes/skills/$name
+  [ -d "$src" ] || return 0
+  if [ -f "$AGENT_SRC/manifest" ] && grep -qxF ".claude/skills/$name" "$AGENT_SRC/manifest"; then
+    log "the $name skill is configured for this box; leaving the image's copy out"
+    return 0
+  fi
+  for dst in "/home/agent/.claude/skills/$name" "/home/agent/.agents/skills/$name"; do
+    # The destination goes first, for the reason install_agent_config gives.
+    if ! { mkdir -p "$(dirname -- "$dst")" && rm -rf -- "$dst" && cp -R -- "$src" "$dst"; }; then
+      log "WARNING: could not install the $name skill into $dst"
+    fi
+  done
+  log "installed the image's $name skill"
+}
+install_image_skill nix
 
 # --- git identity -----------------------------------------------------------
 if [ -n "${GIT_NAME:-}" ]; then

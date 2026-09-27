@@ -14,9 +14,9 @@ import { afterEach, beforeEach, test } from 'vitest';
 import * as ws from './workspaces.ts';
 
 /**
- * The directories a box is made of on the data volume — its workspace and
- * its home — where they are, who may see them, and that removing one cannot
- * reach out of it.
+ * The directories a box is made of on the data volume — its workspace, its
+ * home and its Nix store — where they are, who may see them, and that
+ * removing one cannot reach out of it.
  */
 
 let dir: string;
@@ -126,6 +126,54 @@ test('removing a home takes its content and no more', () => {
   assert.ok(!existsSync(path));
   assert.ok(existsSync(keep));
   assert.ok(existsSync(ws.homesRoot(dir)));
+});
+
+test('the nix parent is created 0700 alongside the other two', () => {
+  ws.ensureWorkspacesRoot(dir);
+  assert.equal(statSync(ws.nixRoot(dir)).mode & 0o777, 0o700);
+});
+
+test('a nix store is created 0755, because a package store holds nothing secret', () => {
+  const path = ws.createNix(dir, 'abcd1234');
+  assert.equal(path, join(dir, 'nix', 'abcd1234'));
+  assert.equal(statSync(path).mode & 0o777, 0o755);
+});
+
+test('creating a nix store that is there keeps what is in it', () => {
+  // Made at every start, so a box from before the store existed gets one;
+  // the second time through must not touch the first time's contents.
+  const path = ws.createNix(dir, 'abcd1234');
+  writeFileSync(join(path, 'kept'), 'what the agent installed');
+
+  ws.createNix(dir, 'abcd1234');
+
+  assert.ok(existsSync(join(path, 'kept')));
+});
+
+test('the host path of a nix store is the daemon-side path, joined POSIX-style', () => {
+  assert.equal(
+    ws.hostNixPath('/var/lib/docker/volumes/boxes-data/_data', 'abcd1234'),
+    '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234',
+  );
+});
+
+test('removing a nix store takes its content and no more', () => {
+  const path = ws.createNix(dir, 'abcd1234');
+  writeFileSync(join(path, 'store'), 'paths');
+  const keep = join(outside, 'secret.txt');
+  writeFileSync(keep, 'not the agent business');
+  symlinkSync(outside, join(path, 'escape'));
+
+  ws.removeNix(dir, 'abcd1234');
+
+  assert.ok(!existsSync(path));
+  assert.ok(existsSync(keep));
+  assert.ok(existsSync(ws.nixRoot(dir)));
+});
+
+test('a box with only a nix store on disk is still reported', () => {
+  ws.createNix(dir, 'abcd1234');
+  assert.deepEqual(ws.boxDirectoryIds(dir), ['abcd1234']);
 });
 
 // Only root can give a file away, so a test user that is not root cannot see

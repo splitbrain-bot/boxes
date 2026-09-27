@@ -246,6 +246,10 @@ must_pass "write to /workspace" \
   sh -c 'echo ok > /workspace/.smoke && rm /workspace/.smoke'
 must_pass "write to /home/agent" \
   sh -c 'echo ok > /home/agent/.smoke && rm /home/agent/.smoke'
+must_pass "write to /nix" \
+  sh -c 'echo ok > /nix/.smoke && rm /nix/.smoke'
+must_pass "nix --version" \
+  nix --version
 must_pass "write to /tmp (tmpfs)" \
   sh -c 'echo ok > /tmp/.smoke && rm /tmp/.smoke'
 

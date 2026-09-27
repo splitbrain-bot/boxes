@@ -172,9 +172,13 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
       return {
         Image: container.image,
         State: { Running: container.running },
-        // Both binds of a current box container. The orchestrator
-        // recreates one that is missing the agent configuration mount.
-        Mounts: [{ Destination: dk.AGENT_CONFIG_DIR }, { Destination: dk.WORKSPACE_DIR }],
+        // The binds of a current box container that the orchestrator
+        // checks for at start, and recreates one without.
+        Mounts: [
+          { Destination: dk.AGENT_CONFIG_DIR },
+          { Destination: dk.WORKSPACE_DIR },
+          { Destination: dk.NIX_DIR },
+        ],
       };
     },
     // A terminal asks for a pty; every other exec the orchestrator runs by
