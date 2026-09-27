@@ -102,7 +102,7 @@ test('the composer is focused on arrival and stays focused after a send', async 
   }
 });
 
-test('a send that fails still leaves the composer focused', async () => {
+test('a send the agent does not answer still leaves the composer focused', async () => {
   // No prompt script, so the stub ends the turn without an answer.
   await start({ prompts: [] });
   const { page, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);

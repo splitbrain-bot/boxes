@@ -181,7 +181,7 @@ describe('composePolicy', () => {
     expect(allowedHosts).toContain('platform.claude.com');
     expect(allowedHosts).toContain('codeload.github.com');
     // The credential's own hosts are implied by the proxy, not listed here.
-    expect(allowedHosts).not.toContain('evil.com');
+    expect(allowedHosts).not.toContain('api.github.com');
   }, 30_000);
 
   it('intercepts the GitLab the deployment names, and only that one', async () => {

@@ -934,7 +934,8 @@ test('a resume gives up the questions the dead connection was showing', async ()
   // after the replay if the question is still open.
   assert.deepEqual(await answer, { outcome: { outcome: 'cancelled' } });
   assert.equal(store.getSnapshot().awaiting, null);
-  const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool');
-  assert.equal(tool?.approval, undefined);
+  const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool-call');
+  assert.ok(tool);
+  assert.equal(tool.approval, undefined);
 });
 
