@@ -1,38 +1,40 @@
 import { TERMINAL_SUBPROTOCOL, type TerminalResize } from '../../../shared/terminal.ts';
 
-/**
- * The browser's end of a box's terminal.
- *
- * Binary frames are the pty's bytes in both directions. Text frames are
- * control this end sends, which is a window size and nothing else so far.
- *
- * The bytes are handed on undecoded: a multi-byte character can arrive split
- * across two frames, and the terminal emulator is what reassembles it.
- */
-
 /** Where a connection is in its life, as the view draws it. */
 export type TerminalStatus = 'connecting' | 'ready' | 'closed';
 
 /** What the view gives the socket to call back into. */
 export interface TerminalSocketHandlers {
-  /** The pty wrote something, still as bytes. */
+  /**
+   * Receives the pty's output as raw bytes. A multi-byte character can be
+   * split across two calls, and the terminal emulator joins it.
+   */
   onData: (bytes: Uint8Array) => void;
-  /** The connection changed state. `detail` says why a close happened. */
+  /** Receives each change of state. `detail` is the server's reason for a close. */
   onStatus: (status: TerminalStatus, detail?: string) => void;
 }
 
-/** One connection to one box's shell. */
+/**
+ * One connection to one box's shell.
+ *
+ * Binary frames carry the pty's bytes in both directions. Text frames carry
+ * the window size this end sends.
+ */
 export class TerminalSocket {
+  /** The WebSocket to the orchestrator. */
   private readonly ws: WebSocket;
-  /** False once this end asked to close, which reports no reason to the view. */
+  /** False once this end asked to close, so the close is not reported to the view. */
   private wanted = true;
 
   /**
    * Opens the connection.
    *
-   * The token travels as a subprotocol entry because a browser cannot set a
-   * header on a WebSocket, and the server checks it on the upgrade itself.
-   * The thread's connection makes the same handshake with the same token.
+   * The token travels as a subprotocol entry, because a browser cannot set a
+   * header on a WebSocket.
+   *
+   * @param url The terminal endpoint.
+   * @param token The box's WebSocket token.
+   * @param handlers The view's callbacks.
    */
   constructor(url: string, token: string, handlers: TerminalSocketHandlers) {
     this.ws = new WebSocket(url, [TERMINAL_SUBPROTOCOL, `bearer.${token}`]);
@@ -56,11 +58,7 @@ export class TerminalSocket {
     this.ws.send(new TextEncoder().encode(data));
   }
 
-  /**
-   * Tells the pty how large the window onto it is.
-   *
-   * Sent on connect before anything is typed, and again on every resize.
-   */
+  /** Tells the pty the size of the window, in columns and rows. */
   resize(cols: number, rows: number): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
     const message: TerminalResize = { type: 'resize', cols, rows };

@@ -38,6 +38,7 @@ export type ToolFallbackRootProps = Omit<
   defaultOpen?: boolean;
 };
 
+/** The collapsible root of one tool call, with the viewport scroll locked while it animates. */
 function ToolFallbackRoot({
   className,
   open: controlledOpen,
@@ -48,8 +49,7 @@ function ToolFallbackRoot({
 }: ToolFallbackRootProps) {
   const collapsibleRef = useRef<HTMLDivElement>(null);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
-  // Boxes edit: the lock, minus the fight with a thread following its own
-  // output. See hooks/use-disclosure-lock.ts.
+  // Boxes edit: skips the lock while the thread follows its output.
   const lockScroll = useDisclosureLock(collapsibleRef, ANIMATION_DURATION);
 
   const isControlled = controlledOpen !== undefined;
@@ -90,8 +90,7 @@ function ToolFallbackRoot({
 
 type ToolStatus = ToolCallMessagePartStatus["type"];
 
-// Boxes edit: one spinner for everything that is running, here and in the
-// group above these calls and in the message that has not begun answering.
+/** The trigger icon for each tool status. Boxes edit: a running call shows the shared spinner. */
 const statusIconMap: Record<ToolStatus, React.ElementType> = {
   running: Spinner,
   complete: CheckIcon,
@@ -128,6 +127,7 @@ function ToolFallbackDuration({
   );
 }
 
+/** The row that names the tool call and its status, and opens its details. */
 function ToolFallbackTrigger({
   toolName,
   status,
@@ -146,14 +146,9 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  // A call waiting on a permission question has not run, and one still
-  // running has not finished, so neither reads as "Used tool".
-  //
-  // Boxes edit: requires-action alone does not mean "wants to run". A call
-  // with no result inherits its message's status, so every unfinished call in
-  // a message that is waiting for something reads as requires-action.
-  // `asking` is the narrower fact: there is an unanswered approval on this
-  // call.
+  // Boxes edit: a call with no result inherits its message's status, so
+  // requires-action alone does not mean the call wants to run. `asking` tells
+  // the two apart.
   const label = isCancelled
     ? "Cancelled tool"
     : statusType === "requires-action"
@@ -173,9 +168,7 @@ function ToolFallbackTrigger({
       )}
       {...props}
     >
-      {/* Boxes edit: no animate-spin for a running call. The icon it names
-          is the shared spinner now and carries its own animation; rotating
-          that on top of it is a second spinner over the first. */}
+      {/* Boxes edit: no animate-spin, because the shared spinner animates itself. */}
       <Icon
         data-slot="tool-fallback-trigger-icon"
         className={cn(
@@ -360,17 +353,17 @@ const offersInterruptAction = (
   interrupt != null;
 
 /**
- * Whether this call is putting a question to the user right now.
+ * Tells whether this call is putting a question to the user right now.
  *
- * Boxes edit. The runtime derives a part's status from its message's, and a
- * message with any result-less tool call in it is requires-action, so a call
- * that never reported back is indistinguishable from one blocked on a
- * permission decision. Allow and Deny would be unanswerable on it: a tool of
- * this deployment runs in the box container, and its result cannot come
- * from a browser.
+ * Boxes edit. The runtime derives a part's status from its message, so a call
+ * that never reported back looks the same as one blocked on a permission
+ * decision. The tool runs in the box container, so Allow and Deny in the
+ * browser cannot answer the first kind. A click settles only an unanswered
+ * approval or an interrupt the runtime can resume.
  *
- * An unanswered approval, or an interrupt the runtime can resume, are the two
- * things a click here settles.
+ * @param approval The call's approval request, if any.
+ * @param interrupt The call's interrupt, if any.
+ * @returns True when the call waits on the user.
  */
 const isAskingUser = (
   approval: ToolCallMessagePart["approval"],
@@ -591,6 +584,7 @@ function ToolFallbackApproval({
   );
 }
 
+/** One tool call: its row, arguments, result, and the approval controls when it asks the user. */
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
   argsText,
@@ -605,14 +599,13 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
   const isRequiresAction = status?.type === "requires-action";
-  // Boxes edit: a question, not merely a status. See isAskingUser.
+  // Boxes edit: whether the call waits on the user, which the status alone does not tell.
   const asking = isAskingUser(approval, interrupt);
   const shouldRenderApproval =
     isRequiresAction && asking && offersInterruptAction(status, approval, interrupt);
 
-  // Boxes edit: opened by the question rather than by the status, for the
-  // same reason. A card that unfolds itself claims to hold something to act
-  // on, and an unfinished call does not.
+  // Boxes edit: the card opens when the call asks the user, not on the status
+  // alone, because an unfinished call holds nothing to act on.
   const [open, setOpen] = useState(asking);
   const [prevAsking, setPrevAsking] = useState(asking);
   if (asking !== prevAsking) {

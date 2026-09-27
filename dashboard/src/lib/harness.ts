@@ -1,30 +1,17 @@
 import type { HarnessHealth, HarnessId, ThreadModeState } from '../../../shared/types.ts';
 
 /**
- * What the dashboard knows about a harness beyond what the API sends it.
- *
- * Almost nothing, deliberately: the label, the defaults and the catalogue all
- * come from `GET /api/harnesses`, because the registry is the orchestrator's
- * and a second copy of it here would be a second thing to keep in step. What
- * is left is what only a reader needs — why a harness cannot run, said in
- * three words rather than a sentence, and the one caveat a mode carries that
- * no adapter can know about itself.
+ * Display helpers for harnesses. The orchestrator sends the labels, defaults
+ * and catalogues.
  */
 
 /**
  * Whether the settings page offers the Codex login.
  *
- * It is implemented and it works: the orchestrator runs `codex login
- * --device-auth`, stores the document it writes and keeps it refreshed. What
- * it produces cannot run a turn, though. A subscription is a document rather
- * than a string, and the traffic it authenticates goes to a host the proxy
- * deliberately does not intercept, so a box is handed nothing and the
- * harness stays unrunnable — an account asked for and a credential that does
- * not work given back.
- *
- * The card offers the API key alone until a box can be given an `auth.json`
- * of its own. Turning this on is what that change ends with: the flow and
- * the tests that drive it are still here.
+ * The orchestrator can run the login and store its result. That credential
+ * cannot run a turn yet: its traffic goes to a host the proxy does not
+ * intercept, so a box gets nothing. Until a box can receive an `auth.json` of
+ * its own, the card offers the API key alone.
  */
 export const CODEX_LOGIN_OFFERED = false;
 
@@ -32,20 +19,16 @@ export const CODEX_LOGIN_OFFERED = false;
  * Codex modes whose sandbox a box refuses.
  *
  * Both run every command under bubblewrap, which needs an unprivileged user
- * namespace, and a box cannot make one: `CapDrop: ALL` takes `CAP_SYS_ADMIN`
- * with the rest, so `unshare -U` and `bwrap` are refused even on a host
- * whose kernel allows them. It is the container template that does it, and
- * that answers to no setting.
+ * namespace. A box cannot create one, because `CapDrop: ALL` removes
+ * `CAP_SYS_ADMIN`.
  *
- * The caveat is still worded as a doubt rather than a refusal. The adapter
- * advertises these modes whatever the box allows — it cannot know what it
- * was started in — and a template that grows an option, or a Codex that
- * stops needing bubblewrap, should leave this reading as too careful rather
- * than as wrong. So the picker offers them with the caveat beside them.
+ * The picker still offers them, with a caveat worded as a doubt. The adapter
+ * cannot know what container it runs in, and a later Codex or container
+ * template may lift the limit.
  */
 const SANDBOXED_CODEX_MODES: ReadonlySet<string> = new Set(['read-only', 'agent']);
 
-/** The caveat itself, in the words the plan settled on. */
+/** The caveat shown beside those modes. */
 export const MAY_BE_UNAVAILABLE = 'May be unavailable in this deployment.';
 
 /** Whether a mode carries that caveat. */
@@ -57,19 +40,15 @@ function modeIsDoubtful(harness: HarnessId | null, modeId: string): boolean {
 type Mode = ThreadModeState['availableModes'][number];
 
 /**
- * What a mode is called in the picker.
- *
- * The adapter's own name, which says what the mode does — "Ask for approval"
- * rather than `read-only` — with the deployment's caveat appended where there
- * is one. Falls back to the id for an adapter that names nothing, which is
- * worse than the name and better than an empty row.
+ * What a mode is called in the picker: the adapter's name for it, or its id
+ * when the adapter gives none, with a short caveat for a doubtful mode.
  */
 export function modeLabel(harness: HarnessId | null, mode: Mode): string {
   const name = mode.name ?? mode.id;
   return modeIsDoubtful(harness, mode.id) ? `${name} (may be unavailable here)` : name;
 }
 
-/** What the picker says the mode does, with the caveat spelled out under it. */
+/** What the picker says the mode does, with the caveat appended for a doubtful mode. */
 export function modeDescription(harness: HarnessId | null, mode: Mode): string | null {
   const doubtful = modeIsDoubtful(harness, mode.id);
   if (!doubtful) return mode.description ?? null;
@@ -77,11 +56,8 @@ export function modeDescription(harness: HarnessId | null, mode: Mode): string |
 }
 
 /**
- * Why this harness cannot run a turn, in the fewest words that are still an
- * instruction. Null when it can.
- *
- * The same three cases the settings page describes at length, shortened to
- * what fits beside a greyed-out agent in a dialog.
+ * Why this harness cannot run a turn, in a few words that fit beside a
+ * disabled agent in a dialog. Null when it can.
  */
 export function unavailableReason(harness: HarnessHealth): string | null {
   if (harness.runnable) return null;
@@ -89,9 +65,8 @@ export function unavailableReason(harness: HarnessHealth): string | null {
   if (!credential) return 'no credential';
   if (credential.status === 'expired') return 'credential expired';
   if (credential.status === 'failing') return 'credential failing';
-  // Runnable is the orchestrator's answer and this is only its reason, so a
-  // credential that looks fine and a harness that says it is not means the
-  // reason is something this build has not heard of.
+  // The orchestrator decides `runnable`, and it may have a reason this build
+  // does not know.
   return 'cannot run';
 }
 

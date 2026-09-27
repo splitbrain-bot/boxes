@@ -8,16 +8,6 @@ import { openDb, type Db } from './db.ts';
 import { startReaper } from './reaper.ts';
 import type { BoxManager } from './boxes.ts';
 
-/**
- * What the idle reaper leaves alone.
- *
- * Every condition here is a different answer to "is anybody or anything still
- * using this box", and each is the only thing standing between a box and
- * being stopped under whoever is using it. They are asserted one at a time,
- * because a reaper that honoured four of the five would look healthy in a
- * suite that only ever set up one.
- */
-
 /** How long a box must be quiet before the reaper stops it. */
 const IDLE_MINUTES = 30;
 
@@ -65,10 +55,15 @@ function insertThread(id: string, boxId: string, turnActive = false): void {
   ).run(id, boxId, `acp-${id}`, turnActive ? 1 : 0);
 }
 
-/** What one tick of the reaper did, over a manager that answers as told. */
+/**
+ * Runs one tick of the reaper over a manager that answers as told, and
+ * returns the ids of the boxes it stopped.
+ */
 async function tick(
   over: {
+    /** Permission requests waiting on box s1. */
     pending?: number;
+    /** Browsers attached to each box. */
     attachedCount?: number;
     /** Null is a box whose work has not been read yet. */
     backgroundActive?: boolean | null;
@@ -195,9 +190,8 @@ test('a permission request that arrives mid-sweep holds its box', async () => {
 });
 
 test('a terminal opened mid-sweep holds its box', async () => {
-  // The same window a permission request arriving mid-sweep falls into: the
-  // counts are one reading of the whole deployment, and stopping many boxes
-  // takes long enough for somebody to have opened a shell in one of them.
+  // Stopping many boxes takes long enough for somebody to open a shell in one
+  // of them.
   insertBox('s1', IDLE_MINUTES + 1);
   insertBox('s2', IDLE_MINUTES + 1);
   const opened = new Set<string>();
@@ -211,9 +205,8 @@ test('a terminal opened mid-sweep holds its box', async () => {
 });
 
 test('a tick still running when the next one is due is not joined by it', async () => {
-  // Every tick re-asserts the same thing, and stopping many boxes takes
-  // longer than the interval. Two of them at once sweep each other's
-  // half-finished work.
+  // Stopping many boxes can take longer than the interval. Two ticks at once
+  // would sweep each other's half-finished work.
   insertBox('s1', IDLE_MINUTES + 1);
   let sweeps = 0;
   let finish: () => void = () => {};

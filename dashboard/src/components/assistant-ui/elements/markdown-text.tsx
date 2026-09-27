@@ -147,9 +147,8 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  // Boxes edit: a link in chat output opens in a new tab, and cannot reach
-  // back into this one. A thread survives the browser going away, and
-  // following a link out of it in place would take the composer with it.
+  // Boxes edit: a link in chat output opens in a new tab, so following it
+  // does not leave the thread and its composer.
   a: ({ className, target, rel, ...props }) => (
     <a
       className={cn(
@@ -157,7 +156,8 @@ const defaultComponents = memoizeMarkdownComponents({
         className,
       )}
       target={target ?? "_blank"}
-      // noreferrer implies noopener; both, because the model wrote the href.
+      // noreferrer implies noopener. The model wrote the href, so the new tab
+      // gets no handle on this one.
       rel={rel ?? "noreferrer"}
       {...props}
     />
@@ -195,10 +195,9 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  // Boxes edit: a table is the archetypal thing that does not fit a reading
-  // column. The wrapper is what bleeds and what scrolls (see .aui-md-bleed in
-  // globals.css); the table itself takes the width its content asks for and
-  // falls back to filling the wrapper when that is narrower.
+  // Boxes edit: the wrapper grows past the reading column and scrolls, so a
+  // wide table can use the window. The table takes the width its content
+  // needs, and at least the wrapper's width.
   table: ({ className, ...props }) => (
     <div className="aui-md-table-wrap aui-md-bleed my-3">
       <table
@@ -252,10 +251,9 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  // Boxes edit: bleeds with the same rule the tables use, so a wide line of
-  // code uses the window rather than wrapping the reading column's width.
-  // The header above it bleeds by the same amount, which is what keeps the
-  // two halves of one card lined up.
+  // Boxes edit: grows past the reading column like the tables, so a wide line
+  // of code can use the window. The code header grows by the same amount, so
+  // the two stay lined up.
   pre: ({ className, ...props }) => (
     <pre
       className={cn(

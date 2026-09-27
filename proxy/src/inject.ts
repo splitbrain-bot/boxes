@@ -4,23 +4,16 @@ import type { EgressPolicy } from '../../shared/types.ts';
 import { PLAINTEXT_CREDENTIAL_REASON, type DenialCategory } from './forward.ts';
 import { credentialsForHost, decideCredentials, injectionPatterns } from './policy.ts';
 
-/**
- * The TLS interception engine, and the one place a real credential is written
- * onto the wire.
- *
- * It runs on loopback and is fed by the front door, which hands it only a host
- * that has a credential configured. Everything else stays an opaque tunnel
- * this process cannot read.
- *
- * Every request it forwards goes back out through the upstream tunnel, so the
- * resolved-address vetting still governs the connection that leaves.
- */
+/** The TLS interception engine, the one place a real credential goes onto the wire. */
 
 /** What the interceptor needs from the process around it. */
 export interface InterceptorOptions {
   /** The live policy. */
   policy: () => EgressPolicy;
-  /** Loopback URL of the tunnel every upstream connection must go through. */
+  /**
+   * Loopback URL of the tunnel every upstream connection goes through, so the
+   * address vetting also covers what the engine forwards.
+   */
   upstreamProxyUrl: () => string;
   /** Records a denial, by category. */
   denied: (category: DenialCategory) => void;
@@ -29,24 +22,20 @@ export interface InterceptorOptions {
 }
 
 /**
- * Whether an address is this machine talking to itself.
- *
- * Covers the forms a loopback connection is reported in: IPv4, IPv6, and the
- * IPv4-mapped shape a dual-stack listener hands back.
+ * Whether a peer address is loopback, in its IPv4, IPv6 or IPv4-mapped form.
  */
 function isLoopback(address: string | undefined): boolean {
   if (!address) return false;
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
-/** Headers the engine derives from the request URL, so a copy must not pin them. */
+/** Headers the engine derives from the request URL, so a copied set leaves them out. */
 const URL_LINKED_HEADERS = ['host', ':authority'];
 
 /**
  * What this proxy tells the engine to do with a request: leave it alone,
- * forward it with a rewritten header set, or answer it with a refusal. Stated
- * structurally because the engine's callback result type is not part of its
- * public surface.
+ * forward it with a rewritten header set, or answer it with a refusal. Written
+ * out here because the engine does not export its callback result type.
  */
 type RequestDecision =
   | void
@@ -59,11 +48,15 @@ type RequestDecision =
       };
     };
 
-/** Starts, restarts and stops the engine as the policy requires. */
+/**
+ * Controller of the interception engine: starts, restarts and stops it as the
+ * policy requires.
+ */
 export class Interceptor {
+  /** The running engine, or null when nothing is intercepted. */
   private server: mockttp.Mockttp | null = null;
 
-  /** Fingerprint of the CA the running server was started with. */
+  /** The CA certificate the running server was started with. */
   private runningCert: string | null = null;
 
   /** The call in flight, so starts and stops never overlap. */
@@ -90,13 +83,13 @@ export class Interceptor {
   /**
    * Brings the engine in line with the current policy.
    *
-   * A policy with no CA or no credential stops it, so a deployment that
-   * configures no credential decrypts nothing. A changed CA restarts it,
-   * because the certificates it mints are derived from that key. A changed
-   * credential needs neither, since the rule reads the policy per request.
+   * A policy with no CA or no credential stops it, so nothing is decrypted. A
+   * changed CA restarts it, because it mints certificates from that key. A
+   * changed credential needs neither, because the rule reads the policy per
+   * request.
    *
-   * Calls run one after another, and a replacement listens before the server
-   * it replaces goes, so port() never reads null while a policy asks for
+   * Calls run one after another. A replacement listens before the server it
+   * replaces stops, so port() never returns null while a policy asks for
    * interception.
    */
   apply(): Promise<void> {
@@ -137,22 +130,9 @@ export class Interceptor {
           proxyConfig: { proxyUrl: this.opts.upstreamProxyUrl() },
         });
 
-      // An upgrade on an intercepted host is refused, deliberately.
-      //
-      // The swap cannot follow a request there: the engine's websocket
-      // passthrough rewrites the host, the path, the query and the protocol,
-      // and no header at all, so a forwarded upgrade would carry the box's
-      // placeholder to the far end and be refused there as a bad credential —
-      // after sending it, which is worse than not sending it. Without a rule
-      // of its own the engine answers an upgrade with its own "no rules
-      // matched", which is the same refusal by accident and reads as a fault
-      // in the deployment.
-      //
-      // The same answer `forward.ts` gives an upgrade on a host that is not
-      // intercepted, so the proxy has one position on protocol upgrades
-      // rather than two. A client that wanted one falls back to HTTPS, where
-      // the swap works. Codex would, with a warning in the thread each time,
-      // so the box image configures it not to try.
+      // The websocket passthrough cannot rewrite headers, so a forwarded
+      // upgrade would carry the placeholder to the host. This rule gives the
+      // same 501 as the front door, in place of the engine's "no rules matched".
       await server.forAnyWebSocket().thenRejectConnection(501, 'protocol upgrades are not forwarded');
 
       await server.on('tls-client-error', (failure) => {
@@ -228,11 +208,9 @@ export class Interceptor {
       };
     };
 
-    // The front door is the only thing meant to reach the engine, and it
-    // connects over loopback. The engine's own listener takes every interface,
-    // and the proxy sits on every box network, so a box could otherwise
-    // reach it directly and skip the front door's rules about which hosts and
-    // which ports may be intercepted at all.
+    // The engine listens on every interface, and the proxy sits on every box
+    // network. Only the front door, over loopback, may reach it, so a box
+    // cannot skip the front door's checks.
     if (!isLoopback(req.remoteIpAddress)) {
       return refuse('blocked-address', 'the interception engine is reachable from the proxy only');
     }

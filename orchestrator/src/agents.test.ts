@@ -7,16 +7,6 @@ import { AgentStore, agentConfigPath } from './agents.ts';
 import { openDb, type Db } from './db.ts';
 import { HttpError } from './http-error.ts';
 
-/**
- * Agent sets: what merges, what overrides, and what the container is handed.
- *
- * The materialized directory is the contract with the box image, so these
- * assert its bytes and its manifest rather than only the store's own answers —
- * the entrypoint copies what is written here and interprets nothing. That
- * includes writing one copy per harness: the box is what holds a set, and
- * which agent will read it is a per-thread question nobody asks here.
- */
-
 let dir: string;
 let db: Db;
 let store: AgentStore;
@@ -155,9 +145,8 @@ test('a merged set is written in every harness layout the entrypoint copies', ()
 });
 
 test('every manifest path is home-relative and inside a layout', () => {
-  // The entrypoint installs these relative to $HOME and checks each line
-  // against the same six prefixes before it deletes anything, so a path that
-  // is not in one is a path that silently never arrives.
+  // The entrypoint installs these relative to $HOME and skips any line
+  // outside these six prefixes.
   store.updateSet('global', { agentsMd: 'House rules.' });
   store.putItem('global', { kind: 'skill', name: 'review', content: 'x' });
   store.putItem('global', { kind: 'command', name: 'ship', content: 'y' });
@@ -173,8 +162,6 @@ test('every manifest path is home-relative and inside a layout', () => {
 });
 
 test('a box with nothing configured still gets a manifest', () => {
-  // An empty manifest is not the same as no mount: it is what tells the
-  // entrypoint to remove whatever a previous start installed.
   store.materialize('s1', null);
   assert.deepEqual(manifest('s1'), []);
   assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')), ['manifest']);
@@ -189,8 +176,8 @@ test('materializing again removes what the previous set left, in both layouts', 
   store.putItem('global', { kind: 'skill', name: 'review', content: 'two' });
   store.materialize('s1', null);
 
-  // Gone from the manifest, so the container removes it from both homes at its
-  // next start, and gone from the directory the container reads.
+  // Gone from the manifest and from the directory the container reads, so the
+  // next start removes it from both layouts in the home.
   assert.deepEqual(manifest('s1').sort(), ['.agents/skills/review', '.claude/skills/review']);
   assert.deepEqual(readdirSync(join(agentConfigPath(dir, 's1'), '.claude')), ['skills']);
   assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')).sort(), [
@@ -227,8 +214,7 @@ test('an item name that is not a safe path component is refused', () => {
 });
 
 test('a name is lowercased rather than refused for its case alone', () => {
-  // Typing "Review" and getting /review is a convenience; what is stored is
-  // the safe form, and it is the only form anything downstream sees.
+  // Only the lowercase form is stored.
   const set = store.putItem('global', { kind: 'command', name: 'Review', content: 'x' });
   assert.equal(set.items[0]!.name, 'review');
 });

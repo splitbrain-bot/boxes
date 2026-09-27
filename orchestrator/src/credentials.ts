@@ -6,29 +6,9 @@ import type {
 } from '../../shared/types.ts';
 import type { Db } from './db.ts';
 
-/**
- * The credential store: the deployment's secrets, owned by the orchestrator
- * and managed from the settings page rather than from the environment.
- *
- * A credential is a row rather than a string because more than the secret has
- * to be remembered. A login records when it expires and which account it
- * belongs to; a refresh records when it last happened; a request that failed
- * records why, so the settings page can say what is wrong instead of leaving
- * a turn to fail with a 401 nobody sees.
- *
- * Secrets are stored as-is, which puts them on the data volume and therefore
- * in any backup of it. That is a deliberate trade — the orchestrator has to
- * be able to hand a credential to the proxy on every boot, so there is nobody
- * to ask for a passphrase — and it is why the reverse proxy in front of the
- * dashboard is a requirement rather than a suggestion.
- */
+/** The credential store, and the refresh that keeps its secrets valid. */
 
-/**
- * The three credential types, re-exported from the shared API shapes.
- *
- * They are declared there because the settings page names them, and every
- * orchestrator module reads them from here, which is where the store is.
- */
+/** The three credential types, re-exported from the shared API shapes. */
 export type { CredentialId, CredentialMethod, CredentialStatus };
 
 /** Every credential id, in the order the settings page lists them. */
@@ -49,10 +29,12 @@ export function isCredentialMethod(method: string): method is CredentialMethod {
 
 /** One row of the credentials table. */
 export interface CredentialRow {
+  /** Which credential this is. */
   id: CredentialId;
+  /** How the secret was obtained. */
   method: CredentialMethod;
   /**
-   * The material, as the harness needs it: a token or an API key for a pasted
+   * The material, stored unencrypted: a token or an API key for a pasted
    * secret, and the whole JSON document the CLI wrote for an `oauth` one, so
    * a refresh has the refresh token beside the access token.
    */
@@ -63,28 +45,28 @@ export interface CredentialRow {
   expires_at: number | null;
   /** Epoch milliseconds, or null until something has refreshed it. */
   refreshed_at: number | null;
+  /** Whether the credential worked the last time it was used or refreshed. */
   status: CredentialStatus;
+  /** Why it failed, for the settings page, or null. */
   last_error: string | null;
+  /** Epoch milliseconds of the first store. */
   created_at: number;
+  /** Epoch milliseconds of the last write. */
   updated_at: number;
 }
 
 /** How much of a pasted secret is shown, from the end. */
 const ACCOUNT_TAIL = 4;
 
-/**
- * Owns the credentials table.
- *
- * Every write calls `onChange`, which is how the egress policy is recomposed
- * and re-pushed the moment a credential is entered: a box holds a placeholder
- * for a credential that does not exist yet, and the push is what makes that
- * placeholder mean something. Waiting for the reconciler's minute tick would
- * leave a freshly pasted token failing for up to a minute with nothing to
- * explain it.
- */
+/** Owns the credentials table. */
 export class CredentialStore {
   constructor(
+    /** The database that holds the credentials table. */
     private readonly db: Db,
+    /**
+     * Called after every write, so the egress policy is pushed at once rather
+     * than at the reconciler's next tick.
+     */
     private readonly onChange: () => void,
   ) {}
 
@@ -106,12 +88,9 @@ export class CredentialStore {
   /**
    * Stores a credential, replacing whatever was there.
    *
-   * The account is derived from the secret unless the caller knows better: a
-   * pasted secret is recognised by its last four characters, and a login
-   * passes the account name the CLI reported instead. Storing a credential is
-   * also a statement that it is expected to work, so the status goes back to
-   * `ok` and the last error is cleared — a person pasting a new token has
-   * answered whatever the old one's error said.
+   * Unless `extra` names an account, the account is the secret's last four
+   * characters. Unless `extra` says otherwise, the status goes back to `ok`
+   * and the last error is cleared.
    */
   put(
     id: CredentialId,
@@ -158,10 +137,8 @@ export class CredentialStore {
 
   /**
    * Records what happened the last time the credential was used or refreshed.
-   *
-   * The secret is left alone: a token that is failing is still the token the
-   * proxy has to send, and the page needs the account to say which one it is
-   * talking about.
+   * The secret and the account stay, as a failing token is still the one the
+   * proxy sends.
    */
   markStatus(id: CredentialId, status: CredentialStatus, error: string | null): void {
     this.db
@@ -186,42 +163,22 @@ export class CredentialStore {
 }
 
 /**
- * The part of a credential a box can actually be given, or null when there is
- * none.
+ * The secret the egress proxy can swap into a header for a box, or null for
+ * an `oauth` row.
  *
- * Delivery to a box is one mechanism: the box holds a placeholder, and the
- * egress proxy swaps the real secret into a header on the way out. That works
- * for anything that *is* a header value — a pasted token, an API key — and it
- * does not work for a subscription obtained by logging in, for two reasons
- * read out of section 5.2 and Appendix A:
- *
- * - The material is not a string but a document: an access token, a refresh
- *   token and an id token, which Codex reads from `$CODEX_HOME/auth.json`
- *   rather than from any environment variable.
- * - The traffic it authenticates does not pass through the swap at all.
- *   ChatGPT inference goes to `chatgpt.com`, which is deliberately *not*
- *   intercepted — that is what lets a deployment's API key and a person's
- *   subscription coexist in one box, since the two endpoints reject each
- *   other's credentials.
- *
- * So an `oauth` row is stored, refreshed and reported, and is not delivered.
- * Making it reach a box means minting a short-lived `auth.json` into the box
- * instead of swapping a header, and that is not built. Until it is, the
- * harness whose only credential is an `oauth` one reports `runnable: false`
- * and says why.
- *
- * Everything else is the secret itself, whatever it was pasted as.
+ * An `oauth` row is a document that Codex reads from `$CODEX_HOME/auth.json`,
+ * not a header value. Its traffic goes to `chatgpt.com`, which the proxy does
+ * not intercept. Such a row is stored, refreshed and reported, but never
+ * reaches a box. Every other row delivers its secret as stored.
  */
 export function deliverableSecret(row: CredentialRow): string | null {
   return row.method === 'oauth' ? null : row.secret;
 }
 
 /**
- * Why a stored credential still cannot reach a box, or null when it can.
- *
- * What the settings page and the health probe show beside a harness that has
- * a credential and is not runnable, so that "logged in, still greyed out"
- * reads as a missing piece of Boxes rather than as a broken login.
+ * Why a stored credential cannot reach a box, or null when it can. The text
+ * is shown beside the harness, so a working login that cannot run does not
+ * look broken.
  */
 export function undeliverableReason(row: CredentialRow): string | null {
   if (deliverableSecret(row) !== null) return null;
@@ -232,11 +189,8 @@ export function undeliverableReason(row: CredentialRow): string | null {
 }
 
 /**
- * What a pasted secret is shown as: its last four characters.
- *
- * Enough to tell two tokens apart when one is being replaced, and not enough
- * to be worth anything on its own. A secret too short to have four characters
- * to spare is shown as nothing rather than as most of itself.
+ * What a pasted secret is shown as: its last four characters. A secret of
+ * four characters or fewer is shown as null, so it is never shown whole.
  */
 function accountOf(secret: string): string | null {
   return secret.length > ACCOUNT_TAIL ? secret.slice(-ACCOUNT_TAIL) : null;
@@ -255,14 +209,11 @@ export interface AuthDocument {
 }
 
 /**
- * Reads a Codex `auth.json` far enough to describe it, or null when it is not
- * one.
+ * Reads a Codex `auth.json` far enough to describe it, or null when it has no
+ * access token.
  *
- * Nothing is verified. The orchestrator is not the audience of either token
- * and holds none of the keys they are signed with — it is the holder, and the
- * service it sends them to is the verifier. So the claims are decoded for two
- * facts worth showing a person, an expiry and an email, and a token whose
- * payload will not decode costs those two facts and nothing else.
+ * The token signatures are not verified; the service that receives the tokens
+ * does that. A payload that does not decode only loses the expiry or email.
  */
 export function parseAuthDocument(document: string): AuthDocument | null {
   let parsed: unknown;
@@ -304,11 +255,8 @@ export function jwtClaims(token: string): Record<string, unknown> | null {
 }
 
 /**
- * The email in a set of id-token claims, wherever the issuer put it.
- *
- * OpenAI's id token carries the profile under a namespaced claim as well as,
- * sometimes, a plain `email`. Both are read, because which one is present is
- * the issuer's business and neither is promised.
+ * The email in a set of id-token claims: the plain `email` claim, or else the
+ * first `email` inside a nested claim object, where OpenAI puts the profile.
  */
 function emailIn(claims: Record<string, unknown> | null): string | null {
   if (!claims) return null;
@@ -326,43 +274,36 @@ function emailIn(claims: Record<string, unknown> | null): string | null {
 // --- keeping an account credential alive ------------------------------------
 
 /**
- * Codex's own OAuth client id and token endpoint.
- *
- * Neither is a stable API. Both are read out of the Codex CLI's source
- * (`codex-rs/login/src/auth/manager.rs`), which is also where the refresh
- * cadence below comes from, and a Codex release is free to move either. They
- * are written down here because the alternative — running the CLI again for
- * every refresh — costs a container a day per credential, and because a
- * refresh is one POST. If OpenAI moves them, this is the pair to re-read.
+ * Codex's own OAuth client id. It is taken from the Codex CLI and is not a
+ * stable API, so a Codex release may change it.
  */
 export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+
+/** Codex's OAuth token endpoint. It is not a stable API either. */
 export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 
-/** How close to expiry an access token is refreshed. */
+/** How close to expiry an access token is refreshed, in milliseconds. */
 const REFRESH_WINDOW_MS = 60 * 60_000;
 
-/** How old a login is allowed to get before it is refreshed anyway. */
+/** How old a login may get before it is refreshed anyway, as Codex does. */
 const REFRESH_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
 
-/** How long the token endpoint gets to answer. */
+/** How long the token endpoint gets to answer, in milliseconds. */
 const REFRESH_TIMEOUT_MS = 15_000;
 
-/** What the token endpoint answers with, of which everything is optional. */
+/** What the token endpoint answers with. Every field is optional. */
 export interface TokenAnswer {
+  /** The new access token. */
   access_token?: string;
+  /** The rotated refresh token, when the endpoint rotates it. */
   refresh_token?: string;
+  /** The new id token. */
   id_token?: string;
   /** Seconds, as OAuth writes it. Only used when the token carries no `exp`. */
   expires_in?: number;
 }
 
-/**
- * One POST to a token endpoint.
- *
- * A function rather than a call so the refresh can be tested without a network
- * and without OpenAI: the loop is the part with the rules in it, and the HTTP
- * is the part that cannot run here.
- */
+/** One POST to a token endpoint. A type, so tests can pass a fake. */
 export type TokenPost = (url: string, body: Record<string, string>) => Promise<TokenAnswer>;
 
 /** The real POST, as the Codex CLI makes it. */
@@ -379,20 +320,15 @@ export const postToken: TokenPost = async (url, body) => {
 };
 
 /**
- * Keeps the stored credentials true, once a minute.
+ * Refreshes or checks every stored credential once.
  *
- * Two jobs, and only one of them can do anything about what it finds. A Codex
- * `oauth` row is refreshed the way the CLI would have refreshed it — while the
- * orchestrator holds the only copy, so nothing else is rotating the token
- * under it, and a copy handed to a box is never refreshed there. Everything
- * else that expires can only be reported: a Claude `setup-token` token has no
- * refresh token at all, so at expiry the row is marked `expired` and the
- * settings page asks for another login.
+ * A Codex `oauth` row is refreshed the way the CLI would refresh it. The
+ * orchestrator holds the only copy, so nothing else rotates the token. Any
+ * other row with a past expiry, such as a Claude `setup-token` token, is
+ * marked `expired`, as it cannot be renewed.
  *
- * A failure marks the row `failing` with the reason rather than removing it.
- * A network that was down for a minute is the common case, and the next tick
- * is the retry; a refresh token that has been revoked keeps saying so until
- * somebody logs in again.
+ * A failed refresh marks the row `failing` with the reason and keeps it. The
+ * next call retries.
  */
 export async function refreshCredentials(
   store: CredentialStore,
@@ -404,23 +340,21 @@ export async function refreshCredentials(
       if (row.id === 'openai') await refreshCodex(store, row, post, now);
       continue;
     }
-    // Nothing here can be renewed, so the only honest thing to do with an
-    // expiry that has passed is to say so.
     if (row.expires_at !== null && row.expires_at <= now && row.status !== 'expired') {
       store.markStatus(row.id, 'expired', 'the credential has expired: log in again');
     }
   }
 }
 
-/** Whether an `oauth` row is due a refresh, and for which of the two reasons. */
+/**
+ * Whether an `oauth` row is due a refresh: its access token is close to
+ * expiry, or its last refresh is REFRESH_MAX_AGE_MS old.
+ */
 export function refreshDue(row: CredentialRow, doc: AuthDocument | null, now: number): boolean {
-  // A document this does not understand cannot say when it expires, and a
-  // refresh is how that is found out: the answer is written back in a shape
-  // this does understand, so it settles after one round rather than looping.
+  // An unreadable document is refreshed, and the answer is written back in a
+  // shape this can read.
   if (doc === null) return true;
   if (doc.expiresAt !== null && doc.expiresAt - now <= REFRESH_WINDOW_MS) return true;
-  // Codex refreshes a login that has simply sat for eight days, whatever its
-  // access token says, and the refresh token is what goes stale otherwise.
   const last = doc.lastRefresh ?? row.updated_at;
   return now - last >= REFRESH_MAX_AGE_MS;
 }
@@ -428,11 +362,8 @@ export function refreshDue(row: CredentialRow, doc: AuthDocument | null, now: nu
 /**
  * Refreshes one Codex subscription, writing the answer back into the document.
  *
- * The whole document is rewritten rather than the access token alone, because
- * the document is what the credential *is*: the refresh token rotates with the
- * access token, and `last_refresh` is what the eight-day rule reads next time.
- * Writing through the store is also what pushes the new material to the proxy,
- * through the same `onChange` a pasted secret goes out on.
+ * The whole document is rewritten, because the refresh token rotates with the
+ * access token, and refreshDue reads `last_refresh` next time.
  */
 async function refreshCodex(
   store: CredentialStore,
@@ -447,7 +378,7 @@ async function refreshCodex(
     : undefined;
 
   if (typeof refreshToken !== 'string' || refreshToken === '') {
-    // Nothing a retry can fix, so it is said once and then left alone.
+    // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
       store.markStatus(row.id, 'failing', 'the stored login carries no refresh token: log in again');
     }
@@ -484,8 +415,7 @@ async function refreshCodex(
 
   const described = parseAuthDocument(JSON.stringify(updated));
   store.put(row.id, 'oauth', JSON.stringify(updated), {
-    // The account rarely changes and the fresh id token is the better source
-    // when there is one; the stored account is what is kept otherwise.
+    // The new id token names the account, if it came back.
     account: described?.account ?? row.account,
     expires_at:
       described?.expiresAt ??

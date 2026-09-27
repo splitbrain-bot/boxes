@@ -1,21 +1,11 @@
 import { UPDATE_KIND } from '../../../../shared/acp.ts';
 
 /**
- * The slice of the ACP schema the browser speaks, written out rather than
- * imported.
- *
- * The orchestrator depends on @agentclientprotocol/sdk because it runs a real
- * ACP client; the browser only reads notification payloads and builds two
- * request bodies, and pulling a Node-shaped SDK into the bundle to name a
- * dozen object types would cost more than it explains. These match the
- * generated schema field for field.
- *
- * The names the wire uses come from `shared/acp.ts`, which is plain strings
- * and is shared with the orchestrator; the shapes under them are written out
- * here.
+ * The part of the ACP schema the browser reads and sends, written out by hand
+ * so the SDK stays out of the bundle.
  */
 
-/** A displayable block: text, an image, a link or an embedded resource. */
+/** A displayable block: text, an image, audio, a link or an embedded resource. */
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; mimeType?: string; data?: string; uri?: string }
@@ -41,7 +31,9 @@ export type ToolKind =
 
 /** A file the tool touched, and where in it. */
 export interface ToolCallLocation {
+  /** The file's path. */
   path: string;
+  /** The line in the file, when the tool names one. */
   line?: number | null;
 }
 
@@ -53,14 +45,23 @@ export type ToolCallContent =
 
 /** A tool call the model asked for. */
 interface ToolCall {
+  /** The adapter's id for the call. */
   toolCallId: string;
+  /** The human-readable title. */
   title: string;
+  /** The programmatic tool name, when the adapter sends one. */
   name?: string | null;
+  /** The category of the tool. */
   kind?: ToolKind;
+  /** How far along the call is. */
   status?: ToolCallStatus;
+  /** What the call produced so far. */
   content?: ToolCallContent[] | null;
+  /** The files the call touches. */
   locations?: ToolCallLocation[] | null;
+  /** The arguments the tool received. */
   rawInput?: unknown;
+  /** The tool's raw result. */
   rawOutput?: unknown;
 }
 
@@ -69,46 +70,62 @@ export type ToolCallUpdate = Partial<ToolCall> & { toolCallId: string };
 
 /** One mode the adapter can operate in. */
 interface ThreadMode {
+  /** The mode's id. */
   id: string;
+  /** The display name. */
   name: string;
+  /** A longer explanation, when the adapter sends one. */
   description?: string | null;
 }
 
 /** The modes an adapter advertises, and the one it is in. */
 export interface ThreadModeState {
+  /** The id of the mode the adapter is in. */
   currentModeId: string;
+  /** Every mode the adapter offers. */
   availableModes: ThreadMode[];
 }
 
 /** One selectable value of a thread configuration option. */
 interface ThreadConfigSelectOption {
+  /** The value sent when this option is chosen. */
   value: string;
+  /** The display name. */
   name: string;
+  /** A longer explanation, when the adapter sends one. */
   description?: string | null;
 }
 
 /**
- * One thing about a thread the adapter lets a client set — the model, the
- * effort level, the permission mode — together with its current value.
- *
- * `category` says what the option is for, so a client can place a known one
- * deliberately rather than depend on the adapter's own id for it.
+ * One setting of a thread that the adapter lets a client change, such as the
+ * model, the effort level or the permission mode, with its current value.
  */
 export interface ThreadConfigOption {
+  /** The adapter's id for the option. */
   id: string;
+  /** The display name. */
   name: string;
+  /** A longer explanation, when the adapter sends one. */
   description?: string | null;
-  /** `model`, `mode`, `model_config`, `thought_level`, or an unknown label. */
+  /**
+   * What the option is for: `model`, `mode`, `model_config`, `thought_level`,
+   * or an unknown label. A client can place a known option by it without
+   * relying on the adapter's id.
+   */
   category?: string | null;
   /** `select` carries an options list; other kinds carry none. */
   type?: string;
+  /** The value in effect. */
   currentValue?: string;
+  /** The values a `select` offers. */
   options?: ThreadConfigSelectOption[];
 }
 
 /** One slash command the adapter accepts at the start of a prompt. */
 export interface AvailableCommand {
+  /** The command name. */
   name: string;
+  /** What the command does. */
   description?: string | null;
   /** What the command expects after its name, when it takes anything. */
   input?: { hint?: string } | null;
@@ -116,14 +133,19 @@ export interface AvailableCommand {
 
 /** A step of the agent's plan. */
 export interface PlanEntry {
+  /** What the step does. */
   content: string;
+  /** The step's priority, as the adapter labels it. */
   priority?: string;
+  /** How far along the step is, as the adapter labels it. */
   status?: string;
 }
 
 /** A chunk of a streamed message. Chunks sharing a messageId are one message. */
 interface ContentChunk {
+  /** The block this chunk carries. */
   content: ContentBlock;
+  /** The message the chunk belongs to, when the adapter names one. */
   messageId?: string | null;
 }
 
@@ -143,7 +165,9 @@ export type ThreadUpdate =
 
 /** The params of a session/update notification. */
 export interface ThreadNotification {
+  /** The ACP thread the update is about. */
   sessionId: string;
+  /** The update itself. */
   update: ThreadUpdate;
 }
 
@@ -156,31 +180,41 @@ export type PermissionOptionKind =
 
 /** One answer the user may give to a permission request. */
 export interface PermissionOption {
+  /** The id sent back when the user picks this option. */
   optionId: string;
+  /** The button label. */
   name: string;
+  /** What the option would do. */
   kind: PermissionOptionKind;
 }
 
 /** The adapter asking whether a tool call may proceed. It blocks until answered. */
 export interface RequestPermissionRequest {
+  /** The ACP thread that asks. */
   sessionId: string;
+  /** The tool call the request is about. */
   toolCall: ToolCallUpdate;
+  /** The answers the user may give. */
   options: PermissionOption[];
 }
 
 /** The answer to a permission request. */
 export interface RequestPermissionResponse {
+  /** The option the user picked, or a cancellation. */
   outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
 }
 
 /** What session/new answers with: the thread the connection is pinned to. */
 export interface NewThreadResponse {
+  /** The id of the ACP thread. */
   sessionId: string;
 }
 
 /** What session/load answers with. */
 export interface LoadThreadResponse {
+  /** The modes the adapter offers, if any. */
   modes?: ThreadModeState | null;
+  /** The settings the adapter lets a client change, if any. */
   configOptions?: ThreadConfigOption[] | null;
 }
 
@@ -194,22 +228,12 @@ export function blockText(block: ContentBlock | undefined): string {
 }
 
 /**
- * An image block as a `src` the browser can load, or null when it carries
- * none.
+ * An image block as a `src` the browser can load, or null when it has none.
  *
- * Two forms reach us. A block with a payload becomes a data URL, which is
- * what an image the agent produced always is — a screenshot it read back, a
- * tool's image result — because ACP carries those inline as base64. A block
- * with only a `uri` is a remote image, and is passed through as itself.
- *
- * Both halves of that are narrower than they look. The payload branch needs
- * the mime type as well as the data: it goes into the URL, and the adapter
- * sends a block with both empty when what it has is a remote URL, so the
- * emptiness is the signal to fall through rather than build
- * `data:;base64,`. And the uri branch admits only https and blob, because
- * assistant-ui drops an image part whose src is anything else — plain http
- * included — with a console warning. Saying so here is what lets the caller
- * show the link instead.
+ * A block with data and a mime type becomes a data URL. The adapter sends
+ * both empty for a remote image, so that block falls through to its `uri`.
+ * A `uri` passes only as https or blob, because assistant-ui drops an image
+ * with any other src. A null result lets the caller show the link instead.
  */
 export function imageSrc(block: ContentBlock | undefined): string | null {
   if (block?.type !== 'image') return null;
@@ -219,11 +243,10 @@ export function imageSrc(block: ContentBlock | undefined): string | null {
 }
 
 /**
- * What to say in place of an image that cannot be shown: the link, when
- * there is one to follow, and otherwise that there was an image at all.
+ * The text shown in place of an image that cannot render: the link when there
+ * is one, otherwise a bare marker.
  *
- * The wording is the ACP adapter's own for the same case, which is the
- * closest thing to a convention there is.
+ * The wording matches the ACP adapter's own for the same case.
  */
 export function imageFallbackText(block: ContentBlock | undefined): string {
   if (block?.type !== 'image') return '';

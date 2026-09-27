@@ -10,44 +10,32 @@ import { ApiError, api } from '../api.ts';
 import { tokenizeLines, type Token } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
-/**
- * The review view's whole state: the tree, folder by folder, and the open file.
- *
- * The tree is fetched a directory at a time, so opening a folder is one small
- * request and a workspace with a dependency tree in it costs nothing until
- * somebody opens that. Each answer carries the review-wide facts with it, so
- * the first screen is one request.
- *
- * Freshness is the fetch, and there is no poll. What matters is being fresh on
- * arrival, and arrival is three moments: the view mounting, a file closing back
- * to the tree, and the tab becoming visible again. Each of them calls
- * {@link loadTree}, which is what tells the orchestrator to ask git again.
- *
- * The store is a singleton keyed by box id rather than one per mount, so
- * navigating between files does not lose the tree, and remounting the route
- * does not refetch what has not changed.
- */
+/** Store for the review view: the tree, folder by folder, and the open file. */
 
 /** The file the pane is showing, with its tokens once they arrive. */
 export interface OpenFile extends ReviewFileResponse {
   /**
-   * One token list per line, or null when the file is rendered plain: no
-   * grammar for its language, or lines too long to tokenize without janking.
+   * One token list per line, or null when the file renders plain. That
+   * happens before the tokens arrive, without a grammar for the language, or
+   * when the file or a line is too long to tokenize.
    */
   tokens: Token[][] | null;
 }
 
+/** What the review view renders. */
 export interface ReviewState {
+  /** The box the store holds, or null before the first `open`. */
   boxId: string | null;
   /**
-   * What the review is, apart from its files. Carried by every directory
-   * answer, so it is whatever the last one said.
+   * What the review is, apart from its files. Every directory answer carries
+   * it, so it holds what the last answer said.
    */
   facts: ReviewFacts | null;
   /** Each loaded directory by its path; the workspace root is ''. */
   dirs: Record<string, ReviewDirResponse>;
   /** The folders standing open, by path. */
   expanded: string[];
+  /** The open file, or null. */
   file: OpenFile | null;
   /** True while the root of the tree is being fetched for the first time. */
   loadingTree: boolean;
@@ -60,15 +48,15 @@ export interface ReviewState {
   /** True while an annotation write is in flight. */
   saving: boolean;
   /**
-   * True while the pane holds edits nobody has saved.
+   * True while the pane holds unsaved edits.
    *
-   * The buffer itself is the view's, but freshness is the store's, and a
-   * refetch landing on top of half-typed work would throw it away. Switching
-   * tabs is the common way that happens on a phone.
+   * The view holds the buffer. The store reads this flag so that a refetch
+   * does not throw half-typed work away.
    */
   dirty: boolean;
 }
 
+/** The state before any box is open. */
 const EMPTY: ReviewState = {
   boxId: null,
   facts: null,
@@ -83,16 +71,14 @@ const EMPTY: ReviewState = {
   dirty: false,
 };
 
+/** The review store, as a hook. */
 export const useReview = create<ReviewState>(() => EMPTY);
 
 /**
- * How far down each file was read, by path.
+ * How far down each file was scrolled, by path.
  *
- * Outside the store's state because nothing renders from it: the pane writes
- * it on scroll and reads it once when a file opens, and putting it in the
- * state would re-render the whole view on every scroll frame. Cleared with
- * the rest when the store points at another box, so "not opened in this
- * review" and "opened at the top" stay different answers.
+ * Kept outside the state, so a scroll does not re-render the view. Cleared
+ * when the store points at another box.
  */
 const scrollOffsets = new Map<string, number>();
 
@@ -106,7 +92,7 @@ export function recallScroll(path: string): number {
   return scrollOffsets.get(path) ?? 0;
 }
 
-/** Replaces part of the state. */
+/** Merges `next` into the state. */
 function set(next: Partial<ReviewState>): void {
   useReview.setState(next);
 }
@@ -119,8 +105,8 @@ function get(): ReviewState {
 /**
  * Points the store at a box, discarding another box's state.
  *
- * Called on every mount. Re-entering the same box keeps what is loaded,
- * which is what makes the back button from a file to the tree instant.
+ * The store is a singleton, so re-entering the same box keeps what is loaded
+ * and paints at once.
  */
 export function open(boxId: string): void {
   if (get().boxId === boxId) return;
@@ -132,10 +118,10 @@ export function open(boxId: string): void {
  * Fetches one directory: its children, their statuses and their comment
  * counts, and the review-wide facts around them.
  *
- * `fresh` says the browser has arrived rather than opened a folder, which is
- * what makes the orchestrator ask git about the workspace again. An answer for
- * a box the store has since left is dropped: a slow directory landing after
- * the route moved on would paint another box's files.
+ * `fresh` says the browser has arrived rather than opened a folder. It makes
+ * the orchestrator ask git again and check every comment for drift. An answer
+ * for a box the store has since left is dropped, so it cannot paint another
+ * box's files.
  */
 export async function loadDir(path: string, fresh = false): Promise<void> {
   const { boxId } = get();
@@ -159,12 +145,11 @@ export async function loadDir(path: string, fresh = false): Promise<void> {
 }
 
 /**
- * Loads the root of the tree and every folder standing open, with git's answer
- * for the workspace taken again.
+ * Loads the root of the tree fresh, then every open folder.
  *
- * What the three arrivals call. The root asks for that fresh answer and the
- * folders under it are slices of the one it leaves behind, so this is one run
- * of git however many folders are open.
+ * The view calls it on each arrival: on mount, when a file closes back to the
+ * tree, and when the tab becomes visible. Only the root asks for a fresh git
+ * snapshot, and the folders reuse it.
  */
 export async function loadTree(): Promise<void> {
   const open = get().expanded;
@@ -179,11 +164,10 @@ function factsOf(dir: ReviewDirResponse): ReviewFacts {
 }
 
 /**
- * Follows a chain of single-child folders open, loading each.
+ * Opens a chain of single-child folders, loading each.
  *
- * A `src/main/java/com/…` prefix is noise rather than structure, and opening it
- * saves four taps on a phone. Only on a directory's first answer, so a folder
- * the reviewer closed stays closed when the tree is refetched.
+ * `loadDir` calls it only on a directory's first answer, so a folder the
+ * reviewer closed stays closed when the tree is refetched.
  */
 function unwrap(dir: ReviewDirResponse): void {
   if (dir.entries.length !== 1) return;
@@ -196,9 +180,8 @@ function unwrap(dir: ReviewDirResponse): void {
 /**
  * Opens or closes one folder of the tree, fetching it the first time.
  *
- * A folder that has been loaded keeps what it holds when it is closed and
- * opened again: what it says is as fresh as the last arrival, and asking again
- * for every tap is the cost this view is built to avoid.
+ * A loaded folder keeps its content when it is closed and opened again. The
+ * next arrival refreshes it.
  */
 export function toggleDir(path: string): void {
   const { expanded, dirs } = get();
@@ -211,11 +194,8 @@ export function toggleDir(path: string): void {
 }
 
 /**
- * What the last loadFile call asked for, so an answer something else has
- * overtaken can be dropped.
- *
- * Outside the state because nothing renders from it: it says what was asked
- * for rather than what the pane is showing.
+ * The path the last `loadFile` call asked for, or null. An answer for any
+ * other path is dropped.
  */
 let requestedPath: string | null = null;
 
@@ -228,12 +208,8 @@ function stillWanted(boxId: string, path: string): boolean {
  * Opens one file: content, diff markers and comments in one request, then the
  * tokens once the grammar has loaded.
  *
- * The content is shown before the tokens arrive rather than after, so a slow
- * grammar import never delays reading the code. The token pass then checks the
- * file is still the open one, because a fast tap through the tree can outrun
- * it — and so does the content itself, because two taps whose answers land
- * out of order would otherwise leave the pane on the first file while the URL
- * and the tree both say the second.
+ * An answer is dropped when a later call has asked for another file, so two
+ * answers that land out of order cannot leave the pane on the first file.
  */
 export async function loadFile(path: string): Promise<void> {
   const { boxId } = get();
@@ -251,7 +227,11 @@ export async function loadFile(path: string): Promise<void> {
   }
 }
 
-/** Puts a file in the pane, and its colours there once they arrive. */
+/**
+ * Puts a file in the pane at once, and adds its tokens once they arrive.
+ *
+ * The tokens are dropped when another file has opened in the meantime.
+ */
 async function show(file: ReviewFileResponse): Promise<void> {
   set({ file: { ...file, tokens: null } });
   if (file.binary || file.content === '') return;
@@ -279,22 +259,18 @@ export function compose(line: number | null): void {
 
 // --- editing ----------------------------------------------------------------
 
-/** What came of a save. A conflict is the one failure the reviewer can answer. */
+/** What came of a save. A conflict is the one failure the reviewer can resolve. */
 export type SaveResult = { ok: true } | { ok: false; conflict: boolean };
 
 /**
  * Writes the edited file back to the workspace.
  *
- * `hash` is what the pane was opened against, and the server refuses a save
- * when the file has moved past it — which is the agent having written the same
- * file while the reviewer was typing. Passing null instead asks for whatever is
- * on disk now, which is how the reviewer overrules that refusal once they have
- * been told about it.
+ * `hash` is the version the pane opened. The server refuses the save when the
+ * file on disk has changed since. Passing null saves against the current
+ * version on disk, which overrules that refusal.
  *
- * The answer is the whole file view, so the pane repaints from the save alone:
- * new content, new diff, and the comments where drift has moved them to. The
- * tree follows separately, because an edit changes a file's status and its
- * colour in the list.
+ * The server answers with the whole file view, so the pane repaints from it.
+ * The tree reloads as well, because an edit changes the file's status.
  */
 export async function saveFile(
   path: string,
@@ -313,8 +289,8 @@ export async function saveFile(
     return { ok: true };
   } catch (err) {
     const conflict = err instanceof ApiError && err.status === 412;
-    // A conflict is the view's to explain, because it comes with a choice.
-    // Anything else is a plain failure and belongs in the error line.
+    // The view explains a conflict, because it offers a choice. Other
+    // failures go to the error line.
     set({ saving: false, error: conflict ? null : (err as Error).message });
     return { ok: false, conflict };
   }
@@ -325,9 +301,8 @@ export async function saveFile(
 /**
  * Writes a comment, showing it before the server has confirmed it.
  *
- * Optimistic because the alternative is a spinner on every comment over a
- * phone connection, and the rollback is cheap: the annotation list is replaced
- * by whatever the server answers with, and by the previous list on a failure.
+ * The server's answer then replaces the annotation list. A failure restores
+ * the previous list.
  */
 export async function saveComment(path: string, line: number, comment: string): Promise<void> {
   const { boxId, file } = get();
@@ -353,7 +328,7 @@ export async function saveComment(path: string, line: number, comment: string): 
   }
 }
 
-/** Deletes a comment, likewise optimistically. */
+/** Deletes a comment, removing it before the server has confirmed it. */
 export async function deleteComment(path: string, line: number): Promise<void> {
   const { boxId, file } = get();
   if (!boxId) return;
@@ -377,7 +352,7 @@ export async function deleteComment(path: string, line: number): Promise<void> {
   }
 }
 
-/** Deletes REVIEW.md — every comment of the box at once. */
+/** Deletes REVIEW.md, which removes every comment of the box. */
 export async function newReview(): Promise<void> {
   const { boxId, file } = get();
   if (!boxId) return;
@@ -393,12 +368,8 @@ export async function newReview(): Promise<void> {
 }
 
 /**
- * Records a file's annotations, keeping the tree's badges in step.
- *
- * The tree is not refetched for a comment: the count is the one thing that
- * changed, and a round trip per badge is exactly the cost this view is trying
- * not to pay. The badge lives on the file's entry in the directory that lists
- * it, so patching it means finding that directory.
+ * Records a file's annotations and patches the comment counts in the tree
+ * without a refetch.
  */
 function applyAnnotations(path: string, annotations: ReviewAnnotation[], delta: number): void {
   const { file, facts } = get();
@@ -412,13 +383,12 @@ function applyAnnotations(path: string, annotations: ReviewAnnotation[], delta: 
 }
 
 /**
- * Moves a file's comment count where its directory holds it, and lights the
- * folders on the way down to it.
+ * Moves a file's comment count in the directory that lists it, and marks the
+ * folders above it as commented.
  *
- * A folder's badge says its subtree holds a comment. It goes on as soon as one
- * is written, and comes off again when the server answers for that folder on
- * the next arrival — whether a subtree still holds a comment after a deletion
- * is a question only the whole review can answer.
+ * A folder's mark says its subtree holds a comment. A new comment sets it at
+ * once. Only the server clears it, on the next arrival, because only the whole
+ * review tells whether a subtree still holds a comment.
  */
 function patchCounts(
   dirs: Record<string, ReviewDirResponse>,
@@ -465,11 +435,11 @@ function countDelta(before: ReviewAnnotation[], after: ReviewAnnotation[]): numb
 // --- the base revision ------------------------------------------------------
 
 /**
- * Sets the revision the review is compared against, or clears it back to HEAD.
+ * Sets the revision the review is compared against. Null clears it, so each
+ * repository compares against its own HEAD.
  *
- * Everything the base touches is refetched, because it changes what a status
- * and a diff mean: the tree's colours and the open file's markers are both
- * answers to "compared against what".
+ * The tree and the open file reload, because the base changes their statuses
+ * and diff markers.
  */
 export async function setBase(rev: string | null): Promise<void> {
   const { boxId, file } = get();
@@ -490,11 +460,9 @@ export async function setBase(rev: string | null): Promise<void> {
 /**
  * Refetches what is on screen: the tree, and the open file if there is one.
  *
- * Not while a write is in flight, a composer is open, or the pane holds
- * unsaved edits — refetching would fight the optimistic annotation list, or
- * drop what is being typed. That guard is the one piece of the poll's logic
- * worth keeping, and edit mode is the case it matters most for: an edit is a
- * whole file of work, and coming back to the tab is how a phone returns.
+ * Skips while a write is in flight, a composer is open, or the pane holds
+ * unsaved edits. A refetch then would overwrite the optimistic annotation
+ * list or drop what is being typed.
  */
 export async function refresh(): Promise<void> {
   const { boxId, file, saving, composing, dirty } = get();
@@ -504,17 +472,11 @@ export async function refresh(): Promise<void> {
 }
 
 /**
- * Refetches whenever the tab comes back to the front, and returns the
- * teardown.
+ * Refetches whenever the tab becomes visible again, and returns the teardown.
  *
- * On a phone, switching apps and coming back is the dominant shape of
- * returning to a review — the browser's own back button is the other, and that
- * remounts. Nothing fires while the tab is open and still, so an idle review
- * costs nothing at all.
- *
- * The residual is that a background task can be working while the review is
- * open. Drift already covers the consequence: a comment whose code moved
- * follows it, and one whose code is gone is marked outdated.
+ * Nothing fires while the tab stays visible. An agent may change files in
+ * that time, and the drift check on the next arrival moves or outdates the
+ * comments it affects.
  */
 export function refreshOnReturn(): () => void {
   return refetchOnVisible(() => void refresh());

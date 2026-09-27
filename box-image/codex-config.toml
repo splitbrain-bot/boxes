@@ -1,23 +1,18 @@
-# Codex's system configuration, the lowest of its config layers: everything an
-# agent puts in its own $CODEX_HOME/config.toml still wins.
-#
-# The egress proxy refuses a protocol upgrade on a host whose
-# credential it swaps, because the swap is a header rewrite and it cannot
-# follow an upgrade. Codex's built-in provider opens its transport with one,
-# retries a few times, and only then falls back to HTTPS -- and warns in the
-# thread about it every box. The built-in provider cannot be changed, so
-# this is a copy of it without WebSocket support: Codex goes straight to HTTPS,
-# which is swapped and works.
-#
-# The name is the built-in's on purpose. Codex recognises its own provider by
-# the name rather than by the id, and the endpoint is left unset so it is
-# chosen by how the box is logged in, as the built-in does: api.openai.com for
-# an API key, chatgpt.com for a subscription.
+# Codex system configuration for a box. An agent's own
+# $CODEX_HOME/config.toml overrides it.
+
+# A copy of the built-in OpenAI provider without WebSocket support. The egress
+# proxy refuses a protocol upgrade on a host whose credential it swaps. With
+# the built-in provider, Codex retries the upgrade, falls back to HTTPS and
+# warns in every thread.
 model_provider = "openai-https"
 
 # No attribution trailer naming Codex in the commits an agent makes.
 commit_attribution = ""
 
+# Codex recognises its own provider by this name. No base URL is set, so the
+# login decides the endpoint: api.openai.com for an API key, chatgpt.com for
+# a subscription.
 [model_providers.openai-https]
 name = "OpenAI"
 wire_api = "responses"

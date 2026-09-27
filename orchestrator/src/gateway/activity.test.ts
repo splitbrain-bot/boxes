@@ -2,13 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { Activity, type Delay } from './activity.ts';
 
-/**
- * Whether the agent is talking, which is a question about silence — so every
- * test here is about time passing, and time is injected rather than waited
- * for. A real second of waiting proves nothing a fake one does not.
- */
-
+/** Silence in milliseconds after which the agent counts as stopped. */
 const QUIET = 3_000;
+/** Silence in milliseconds after which a turn counts as settled. */
 const SETTLE = 30_000;
 
 /** A clock the test moves, and the timers armed against it. */
@@ -23,8 +19,7 @@ function clock(): { delay: Delay; pass: (ms: number) => void } {
   };
   return {
     delay,
-    // One level of chaining per call, which is what makes the two thresholds
-    // legible in a test: pass the quiet window, then pass the rest.
+    // A timer armed while this call fires the due ones waits for the next call.
     pass: (ms) => {
       now += ms;
       for (const [id, timer] of [...timers]) {
@@ -78,7 +73,7 @@ test('the agent is talking while it says things, and stops when it stops', () =>
   assert.equal(a.speaking('t1'), true);
   assert.deepEqual(changes, [['t1', true]]);
 
-  // Still going: every chunk restarts the clock on its silence.
+  // Every chunk restarts the quiet timer.
   pass(QUIET - 1);
   a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'there' } }), 'claude');
   pass(QUIET - 1);
@@ -95,7 +90,7 @@ test('the agent is talking while it says things, and stops when it stops', () =>
 test('a tool call the agent is waiting on is not silence', () => {
   const { a, pass } = activity();
   a.observe('t1', toolCall('call_1'), 'claude');
-  // Two minutes of a test suite running, which says nothing at all.
+  // Two minutes of a silent test run.
   for (let i = 0; i < 40; i++) pass(QUIET);
   assert.equal(a.speaking('t1'), true);
 
@@ -106,7 +101,7 @@ test('a tool call the agent is waiting on is not silence', () => {
 
 test('a call that runs in the background is not the agent working', () => {
   const { a, pass } = activity();
-  // Announcing it is: the agent just made the call. Waiting for it is not.
+  // Making the call counts as work. Waiting for it does not.
   a.observe('t1', toolCall('call_1', { rawInput: { command: 'npm run build', run_in_background: true } }), 'claude');
   assert.equal(a.speaking('t1'), true);
   pass(QUIET);
@@ -118,10 +113,8 @@ test('a call that runs in the background is not the agent working', () => {
 });
 
 test("the adapter's own marker is what says a Codex call was backgrounded", () => {
-  // Codex has no `run_in_background` flag and puts no tool name on a call, so
-  // the marker both adapters add to the call's own update is the only thing
-  // that can say one. Without reading it, a Codex thread would sit "speaking"
-  // for as long as a backgrounded command ran.
+  // Codex sends no `run_in_background` flag and no tool name, so the marker is
+  // its only sign of a backgrounded call.
   const { a, pass } = activity();
   a.observe(
     't1',
@@ -138,8 +131,7 @@ test("the adapter's own marker is what says a Codex call was backgrounded", () =
   pass(QUIET);
   assert.equal(a.speaking('t1'), false);
 
-  // And a Codex call that is *not* backgrounded is one the agent is waiting
-  // on, whatever its silence says.
+  // The agent waits on a Codex call without the marker.
   a.observe(
     't1',
     update('tool_call', { toolCallId: 'call_2', status: 'in_progress', kind: 'execute' }),
@@ -153,7 +145,7 @@ test('a turn is settled once, a while after it has actually stopped', () => {
   const { a, pass, settled } = activity();
   a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(QUIET);
-  // Quiet, but not for long enough to tell anybody who is not looking.
+  // Quiet, but not yet settled.
   assert.deepEqual(settled, []);
   pass(SETTLE - QUIET);
   assert.deepEqual(settled, ['t1']);
@@ -183,8 +175,6 @@ test('a prompt forwarded is the agent working, before it has said anything', () 
 
 test('an update that is not the agent talking is not read as one', () => {
   const { a } = activity();
-  // The user setting a mode, and the adapter listing its commands at
-  // startup: things about the thread, not from the agent.
   a.observe('t1', update('current_mode_update', { currentModeId: 'plan' }), 'claude');
   a.observe('t1', update('available_commands_update', { availableCommands: [] }), 'claude');
   assert.equal(a.speaking('t1'), false);
@@ -213,7 +203,7 @@ test('a cancelled thread stops talking and announces nothing afterwards', () => 
   a.reset('t1');
   assert.equal(a.speaking('t1'), false);
   pass(SETTLE * 2);
-  // The caller publishes the new state itself; nothing here fires late.
+  // The caller of reset() publishes the new state, so no change fires.
   assert.deepEqual(changes, [['t1', true]]);
   assert.deepEqual(settled, []);
 });
@@ -228,7 +218,10 @@ test('an adapter that has gone takes every thread with it', () => {
   assert.deepEqual(settled, []);
 });
 
-/** The update the adapter sends when a processing cycle is over. */
+/**
+ * The usage_update with a cost, which the Claude adapter sends when a
+ * processing cycle is over.
+ */
 function cycleEnd(over: Record<string, unknown> = {}): unknown {
   return update('usage_update', {
     used: 41_000,
@@ -241,8 +234,7 @@ function cycleEnd(over: Record<string, unknown> = {}): unknown {
 test('the adapter saying the cycle is over is taken at its word', () => {
   const { a, changes, settled, pass } = activity();
   a.observe('t1', update('agent_message_chunk'), 'claude');
-  // No timer runs out: the agent said so itself, which is what this adapter's
-  // cost-bearing usage_update is (see the file's own header).
+  // No timer runs out: the usage_update with a cost ends the cycle.
   a.observe('t1', cycleEnd(), 'claude');
   assert.equal(a.speaking('t1'), false);
   assert.deepEqual(changes, [
@@ -259,9 +251,7 @@ test('the adapter saying the cycle is over is taken at its word', () => {
 test('a running total is not the end of anything', () => {
   const { a } = activity();
   a.observe('t1', update('agent_message_chunk'), 'claude');
-  // The same update kind, sent as a message streams: tokens and a window, no
-  // cost. Reading this one as an ending would end every turn at its first
-  // paragraph.
+  // The usage_update sent while a message streams carries no cost.
   a.observe('t1', update('usage_update', { used: 12_000, size: 200_000 }), 'claude');
   assert.equal(a.speaking('t1'), true);
 });
@@ -269,8 +259,7 @@ test('a running total is not the end of anything', () => {
 test('a cycle that ends with a call still open ends anyway', () => {
   const { a } = activity();
   a.observe('t1', toolCall('call_1'), 'claude');
-  // A cancelled turn: the call never completes, and waiting on it would leave
-  // the thread speaking for good.
+  // In a cancelled turn the call never completes.
   a.observe('t1', cycleEnd(), 'claude');
   assert.equal(a.speaking('t1'), false);
 });

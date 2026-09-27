@@ -3,18 +3,13 @@ import { closeBrowser, getBrowser, launchProfile } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
- * Installing the dashboard: what a browser has to be able to fetch, and read,
- * before it will offer to.
+ * Browser tests for installing the dashboard as an app.
  *
- * This is asked of the built bundle in a real Chromium because none of it is
- * visible from the source. The manifest is correct either way; whether the
- * browser ever gets to read it depends on how the page asks for it, and the
- * answer only differs in the deployment shape the README requires — an
- * authenticating reverse proxy in front of an orchestrator that has no auth
- * of its own. So the deployment is put behind one here.
+ * The deployment sits behind a stand-in authenticating proxy, because only
+ * there does it matter how the page fetches its manifest.
  */
 
-/** What the proxy in front of this deployment is imagined to check. */
+/** The cookie the stand-in proxy checks. */
 const COOKIE = 'boxes_proxy_session';
 
 let stub: TestOrchestrator;
@@ -32,8 +27,7 @@ afterAll(async () => {
 test('Chrome will install the app from behind an authenticating proxy', async () => {
   const { context, close } = await launchProfile();
   try {
-    // Signed in, the way the browser would be by the time anybody thinks
-    // about installing: every request the page makes is answered.
+    // Signed in, so the proxy answers every request that carries the cookie.
     await context.addCookies([{ name: COOKIE, value: 'signed-in', url: stub.url }]);
     const page = await context.newPage();
     const manifestStatus: number[] = [];
@@ -42,9 +36,8 @@ test('Chrome will install the app from behind an authenticating proxy', async ()
     });
     await page.goto(stub.url, { waitUntil: 'networkidle' });
 
-    // The fetch itself, which is the one that goes out without credentials
-    // unless the link says otherwise. A 302 to the login page here is the
-    // whole bug: everything else on the page still loads.
+    // A browser fetches the manifest without credentials unless the link asks
+    // for them. A 302 to the login page here breaks the install alone.
     expect(manifestStatus).toEqual([200]);
 
     const cdp = await context.newCDPSession(page);
@@ -57,8 +50,7 @@ test('Chrome will install the app from behind an authenticating proxy', async ()
       start_url: '/',
     });
 
-    // And the verdict, from the same check that decides whether the browser
-    // offers the install at all.
+    // The same check decides whether Chrome offers the install.
     const { installabilityErrors } = await cdp.send('Page.getInstallabilityErrors');
     expect(installabilityErrors).toEqual([]);
   } finally {
@@ -67,10 +59,8 @@ test('Chrome will install the app from behind an authenticating proxy', async ()
 });
 
 test('iOS is told to install even where the manifest never arrives', async () => {
-  // Safari offers Add to Home Screen whether or not it read a manifest, and
-  // an installed icon that opens a browser tab has the Push API of a browser
-  // tab — which is to say none. These say standalone where nothing can fail
-  // to fetch them, and name the app before the title starts tracking threads.
+  // Safari installs without a manifest, and an icon that opens a tab gets no
+  // Push API. The meta tags are in the page itself, so no fetch can fail.
   const { context, close } = await launchProfile();
   try {
     await context.addCookies([{ name: COOKIE, value: 'signed-in', url: stub.url }]);
@@ -86,10 +76,7 @@ test('iOS is told to install even where the manifest never arrives', async () =>
 });
 
 test('the service worker registers on a browser that cannot subscribe', async () => {
-  // An iPhone in a tab, which is the browser the install matters most to: no
-  // Push API until it has one. Registering the worker only where push already
-  // works would leave it out of exactly that case, and out of every browser
-  // whose user has declined notifications.
+  // Like an iPhone in a tab, which has no Push API until the app is installed.
   const context = await (await getBrowser()).newContext();
   try {
     await context.addCookies([{ name: COOKIE, value: 'signed-in', url: stub.url }]);

@@ -1,11 +1,9 @@
 import { Outlet } from 'react-router';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 
-/** The reading column every route but the thread sits in. */
+/** Layout with the reading column for the routes that do not fill the viewport. */
 export function Shell() {
-  // The plain app title, which is also what leaving a thread puts back: the
-  // symbol and the box's name belong to the thread that was open, not to the
-  // list of them.
+  // Resets the tab title that a thread view set.
   useDocumentTitle('Boxes');
 
   return (

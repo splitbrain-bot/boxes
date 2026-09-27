@@ -13,12 +13,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import * as ws from './workspaces.ts';
 
-/**
- * The directories a box is made of on the data volume — its workspace, its
- * home and its Nix store — where they are, who may see them, and that
- * removing one cannot reach out of it.
- */
-
 let dir: string;
 let outside: string;
 
@@ -34,9 +28,9 @@ afterEach(() => {
 test('the workspaces parent is created 0700', () => {
   ws.ensureWorkspacesRoot(dir);
   const mode = statSync(ws.workspacesRoot(dir)).mode & 0o777;
-  // One box's files must not be readable from another, and the only thing
-  // that reads across all of them is the orchestrator. A stray
-  // `docker run -v boxes-data:/x` sees nothing through this.
+  // One box must not read another box's files. Only the orchestrator reads
+  // across all of them. A stray `docker run -v boxes_boxes-data:/x` sees
+  // nothing through this.
   assert.equal(mode, 0o700);
 });
 
@@ -75,7 +69,7 @@ test('removing a workspace takes its content and no more', () => {
 
   assert.ok(!existsSync(path));
   assert.ok(existsSync(keep));
-  // And the parent survives to hold the next box's workspace.
+  // The parent stays for the next box's workspace.
   assert.ok(existsSync(ws.workspacesRoot(dir)));
 });
 
@@ -140,8 +134,7 @@ test('a nix store is created 0755, because a package store holds nothing secret'
 });
 
 test('creating a nix store that is there keeps what is in it', () => {
-  // Made at every start, so a box from before the store existed gets one;
-  // the second time through must not touch the first time's contents.
+  // Every start creates the store, so a second call must keep its contents.
   const path = ws.createNix(dir, 'abcd1234');
   writeFileSync(join(path, 'kept'), 'what the agent installed');
 
@@ -176,9 +169,8 @@ test('a box with only a nix store on disk is still reported', () => {
   assert.deepEqual(ws.boxDirectoryIds(dir), ['abcd1234']);
 });
 
-// Only root can give a file away, so a test user that is not root cannot see
-// what this does; the orchestrator runs as root in the deployment that needs
-// it.
+// Only root can change a file's owner. The orchestrator runs as root in the
+// deployment.
 test.skipIf(process.getuid?.() !== 0)(
   'giving a path away acts on the link, not on what it points at',
   () => {
@@ -196,7 +188,7 @@ test.skipIf(process.getuid?.() !== 0)(
 );
 
 test('a directory that is there is reported, and one that is gone is not', () => {
-  // What a start asks before it binds either half of a box: Docker would
+  // A start checks this before it binds the workspace or home. Docker would
   // create a missing bind source itself, empty and owned by root.
   const path = ws.createWorkspace(dir, 's1');
   assert.equal(ws.directoryExists(path), true);

@@ -20,30 +20,6 @@ import { Button } from '@/components/ui/button';
 import { unavailableReason } from '@/lib/harness';
 import { rememberDialog, useHarnesses } from '../stores/harnesses.ts';
 
-/**
- * What a conversation is started as: which agent runs it, and what that agent
- * is set to before its first prompt.
- *
- * One block, used by both dialogs — the one that adds a thread to a box and
- * the form that makes the box — because they ask the identical question and a
- * second copy would drift. A fork asks nothing: a transcript can only be
- * loaded by the adapter that wrote it, so a fork stays on its source's
- * harness and keeps its settings.
- *
- * Nothing here can ask an adapter what it offers, because the thread it would
- * ask about does not exist yet. What it offers instead is the catalogue: what
- * that harness's adapter advertised the last time one ran, cached by the
- * orchestrator. A harness whose adapter has never run in this deployment has
- * none, and then the agent choice is the whole of the block and the thread
- * starts on the registry's defaults — which is also why a value chosen here
- * is a request rather than a promise. The adapter's own answer corrects it on
- * the thread's first turn.
- *
- * The mode is not among the config options, although both adapters also echo
- * it as one: it travels through `session/set_mode` and the thread's `modeId`,
- * and a client that set both would put the thread in its mode twice.
- */
-
 /** The block's state, held by the hook and rendered by the component. */
 export interface ThreadOptionsState {
   /** Every harness, or null while the list is still loading. */
@@ -53,10 +29,9 @@ export interface ThreadOptionsState {
   /** What the last load failed with, or null. */
   error: string | null;
   /**
-   * Whether the block has an answer to give — a list, or a failure to read
-   * one. A submit before that would create a thread on the orchestrator's
-   * default agent rather than on the one the block is about to offer, so the
-   * two callers hold their submit until this is true.
+   * Whether the harness list has loaded or failed. Callers hold their submit
+   * until then, because an earlier submit would start the thread on the
+   * orchestrator's default agent.
    */
   ready: boolean;
   /** The mode chosen, or null for a harness whose catalogue has no modes. */
@@ -65,24 +40,29 @@ export interface ThreadOptionsState {
   config: Record<string, string>;
   /** What a create request should carry, or null while nothing is chosen. */
   value: ThreadOptionsBody | null;
+  /** Picks a harness and resets the mode and settings to its start values. */
   setHarness: (id: HarnessId) => void;
+  /** Picks a mode. */
   setMode: (modeId: string) => void;
+  /** Sets one config option by its id. */
   setConfig: (optionId: string, value: string) => void;
   /**
-   * Writes the choice back as this harness's dialog default, so the next
-   * dialog on any device opens on it. Called by the submit, not by every
-   * change: what is remembered is what was started, not what was passed
-   * through on the way to it.
+   * Stores the choice as this harness's dialog default, so the next dialog on
+   * any device opens on it. Callers call it once the thread exists.
    */
   remember: () => void;
 }
 
 /**
- * What a harness starts the block on: the last dialog's answer for it, over
- * the registry's defaults.
+ * Returns the start values for a harness: the last dialog's choice for it,
+ * laid over the registry's defaults.
  *
- * Merged rather than replaced, so an option added to the adapter since the
- * last choice arrives at its default instead of missing.
+ * The merge gives an option that the adapter added since the last choice its
+ * default value.
+ *
+ * @param info The harness.
+ * @param saved The last dialog's choice for it, if any.
+ * @returns The mode, or null without modes, and the config values.
  */
 function prefill(
   info: HarnessInfo,
@@ -101,7 +81,7 @@ function prefill(
   return { modeId, config: { ...info.defaultConfig, ...saved?.config } };
 }
 
-/** Everything the block needs, wired to the harness store. */
+/** Holds the block's state, wired to the harness store. */
 export function useThreadOptions(): ThreadOptionsState {
   const { harnesses, dialogs, error } = useHarnesses();
   const [harnessId, setHarnessId] = useState<HarnessId | null>(null);
@@ -120,11 +100,9 @@ export function useThreadOptions(): ThreadOptionsState {
     [],
   );
 
-  // The first answer picks the agent: the first that can run, because
-  // offering a box an agent whose credential is missing is offering a thread
-  // that fails at its first prompt. A deployment where none can run still
-  // shows one chosen, so the block says what would happen rather than
-  // nothing.
+  // The first harness list picks the first harness that can run. An agent
+  // without a working credential fails at its first prompt. When none can
+  // run, the first harness is still chosen.
   useEffect(() => {
     if (!harnesses || harnessId !== null) return;
     const first = harnesses.find((harness) => harness.runnable) ?? harnesses[0];
@@ -134,9 +112,8 @@ export function useThreadOptions(): ThreadOptionsState {
   const setHarness = useCallback(
     (id: HarnessId) => {
       const info = harnesses?.find((harness) => harness.id === id);
-      // A mode and a model belong to one adapter and mean nothing to another,
-      // so switching agents starts that agent's own answer over rather than
-      // carrying this one's across.
+      // Modes and models belong to one adapter, so a switch starts from the new
+      // harness's own values.
       if (info) choose(info, dialogs[info.id]);
     },
     [harnesses, dialogs, choose],
@@ -176,12 +153,15 @@ export function useThreadOptions(): ThreadOptionsState {
 }
 
 /**
- * What a select shows for one option.
+ * Returns the value a select shows for one option.
  *
- * The block's own answer where it has one the adapter still offers; the
- * adapter's current value where it does not — a model that was dropped
- * between one thread and the next would otherwise leave a select with nothing
- * selected in it.
+ * The block's choice wins while the adapter still offers it. Otherwise the
+ * adapter's current value or the first offered value keeps the select from
+ * showing nothing, for example after a model was dropped.
+ *
+ * @param option The config option.
+ * @param config The block's chosen values.
+ * @returns The value to select, or an empty string without choices.
  */
 function valueOf(option: ThreadConfigOption, config: Record<string, string>): string {
   const offered = (value: string | undefined): boolean =>
@@ -192,7 +172,15 @@ function valueOf(option: ThreadConfigOption, config: Record<string, string>): st
   return option.options?.[0]?.value ?? '';
 }
 
-/** The block itself. State comes from `useThreadOptions`; see above. */
+/**
+ * Block that picks the agent and its settings for a new thread.
+ *
+ * The modes and options come from the harness catalogue. The orchestrator
+ * caches what the adapter advertised the last time it ran. A value chosen here
+ * is a request, and the adapter corrects it on the thread's first turn.
+ *
+ * @param state The state from `useThreadOptions`.
+ */
 export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
   const { harnesses, chosen, config } = state;
 
@@ -204,17 +192,18 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
     );
   }
 
-  // The catalogue's modes with the block's own answer in them: the cached
-  // `currentModeId` is whatever the last thread of this harness was in, and
-  // what the picker has to show is what this thread would start in.
+  // The cached `currentModeId` is the last thread's mode, so the block's
+  // choice replaces it.
   const cached = chosen?.catalog?.modes ?? null;
   const modes = cached ? { ...cached, currentModeId: state.modeId ?? cached.currentModeId } : null;
   const hasModes = (modes?.availableModes.length ?? 0) > 1;
+  // The mode travels through `session/set_mode`, so its config option is left
+  // out. Setting both would set the mode twice.
   const options = (chosen?.catalog?.configOptions ?? []).filter(
     (option) => option.category !== 'mode' && isSelectable(option),
   );
-  // The model first among them, by category rather than by id: what an option
-  // is for is part of the protocol, the name the adapter gives it is not.
+  // The model comes first, found by category, because the protocol defines
+  // categories and each adapter picks its own ids.
   const ordered = [
     ...options.filter((option) => option.category === 'model'),
     ...options.filter((option) => option.category !== 'model'),
@@ -223,11 +212,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Which agent, always — including on a deployment that runs one, where
-          it is what the dialog says the thread will be. A harness whose
-          credential is missing or broken is shown greyed out with the reason
-          rather than left out: a list that silently loses an agent looks like
-          a deployment that never had it. */}
+      {/* A harness that cannot run stays in the list, disabled, with its reason. */}
       <div className="flex flex-col gap-1 text-xs">
         <span className="font-medium">Agent</span>
         <div role="group" aria-label="Agent" className="flex flex-wrap gap-1.5">
@@ -261,8 +246,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         ) : null}
       </div>
 
-      {/* The mode next: of everything here it is the one that decides what
-          the agent may do without asking. */}
+      {/* The mode comes next, because it decides what the agent may do without asking. */}
       {modes && hasModes ? (
         <Setting
           name="Agent mode"
@@ -277,11 +261,8 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         </Setting>
       ) : null}
 
-      {/* Then the model and whatever else the adapter offered the last time
-          one ran — an effort level, a fast mode, anything a later version
-          adds. Codex advertises its efforts per model, so what is offered
-          here is what was last seen rather than what this model supports;
-          the adapter corrects the thread on its first answer. */}
+      {/* Codex advertises its efforts per model, so these show what was last
+          seen, which can differ from what the chosen model supports. */}
       {ordered.map((option) => (
         <Setting key={option.id} name={optionName(option)} description={option.description}>
           <ConfigSelect
@@ -293,9 +274,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         </Setting>
       ))}
 
-      {/* A deployment that has never run this agent has nothing cached to
-          offer, and starting a box to find out would cost a container per
-          dialog. The thread starts on the registry's defaults instead. */}
+      {/* A harness that has never run here has no cached catalogue. */}
       {chosen && !chosen.catalog ? (
         <p className="text-xs text-muted-foreground">
           {chosen.label} has not run here yet, so its modes and models are not known. The thread

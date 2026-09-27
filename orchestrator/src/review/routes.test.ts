@@ -27,23 +27,6 @@ import { openDb, type Db } from '../db.ts';
 import { BoxManager } from '../boxes.ts';
 import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 
-/**
- * The review routes over their real handlers, a real database and a real git
- * repository in a temp directory — no Docker anywhere.
- *
- * Files are read off the workspace directory, which is why the API can be
- * driven end to end in a unit test at all. Git is the other half: the routes
- * ask the box for a running container and address every invocation at a
- * path inside it, so both of those are stubbed here — the box by a manager
- * that hands out the box id, and git by a runner that starts it on this
- * machine over the workspace the box would have held.
- *
- * The review is over the *workspace*, so most of what is worth pinning down
- * here is a workspace shape: two clones side by side, a clone beside a stray
- * directory, a repository inside a repository. Each of those turns the whole
- * review into a plain file browser with no git in it when it goes wrong.
- */
-
 /** Invocations addressed at anything but a box's own workspace. */
 let misaddressed: GitTarget[] = [];
 
@@ -126,7 +109,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, stdio: 'pipe', encoding: 'utf8' });
 }
 
-/** Initialises a repository with a first commit. */
+/** Initialises a repository on `main` and sets its commit identity. */
 function initRepo(root: string): void {
   git(root, 'init', '-q', '-b', 'main');
   git(root, 'config', 'user.email', 'test@example.com');
@@ -150,10 +133,8 @@ beforeEach(() => {
   orchestrator = buildApp(cfg, db);
   misaddressed = [];
   invocations = 0;
-  // The box a review runs git in: no container is started here, so the
-  // box id stands in for one and the workspace is where it always is.
-  // Asking for the box marks the box active, as the real one does, because
-  // that is the half of it these tests are about.
+  // No container starts here, so the box id stands in for the container id.
+  // The stub marks the box active, as the real execTarget does.
   vi.spyOn(BoxManager.prototype, 'execTarget').mockImplementation(async function (
     this: BoxManager,
     id: string,
@@ -171,8 +152,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   setConfigForTests(null as never);
   rmSync(dir, { recursive: true, force: true });
-  // Every invocation the requests above made was addressed to the box's
-  // own container and to a path inside its workspace.
+  // Every git invocation of the test went to its box's own workspace.
   assert.deepEqual(misaddressed, []);
 });
 
@@ -187,9 +167,8 @@ async function get<T>(url: string): Promise<{ status: number; body: T }> {
 /**
  * One directory of a review, at the workspace root unless a path is given.
  *
- * `fresh` is what the browser sends on arrival: it takes git's answer for the
- * workspace again. The tests that watch something change over two requests
- * need it, which is exactly the shape the browser has.
+ * `fresh` is what the browser sends on arrival: it takes a new git snapshot of
+ * the workspace. Tests that watch a change across two requests need it.
  */
 async function openDir(
   id: string,
@@ -213,8 +192,7 @@ function entry(body: ReviewDirResponse, name: string): ReviewDirEntry | undefine
 describe('the directory endpoint', () => {
   test('a cloned project is browsable under its own prefix, with git on', async () => {
     const ws = insertBox('aaa');
-    // The shape a clone actually leaves: /workspace holds one directory and
-    // that is the repository.
+    // A clone leaves one directory in /workspace, and that is the repository.
     const repo = join(ws, 'project');
     mkdirSync(repo);
     initRepo(repo);
@@ -261,8 +239,7 @@ describe('the directory endpoint', () => {
     const { body } = await openDir('ccc');
     assert.equal(body.hasGit, false);
     assert.deepEqual(body.repos, []);
-    // Everything still works but the git features, the way the desktop tool
-    // degrades outside a repository.
+    // Everything but the git features still works.
     assert.deepEqual(named(body), ['d:notes']);
     assert.equal(entry(body, 'notes')!.changed, undefined);
     assert.deepEqual(named((await openDir('ccc', 'notes')).body), ['f:todo.txt']);
@@ -279,8 +256,6 @@ describe('the directory endpoint', () => {
       git(repo, 'commit', '-q', '-m', 'init');
       write(repo, 'a.txt', 'changed\n');
     }
-    // The most common multi-repository shape, and the one that used to get
-    // the worst mode: a filesystem walk with no statuses and no diffs.
     const { body } = await openDir('ddd');
     assert.equal(body.hasGit, true);
     assert.deepEqual(body.repos.map((r) => r.path), ['one', 'two']);
@@ -387,9 +362,8 @@ describe('the directory endpoint', () => {
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'init');
 
-    // Opening a folder answers from the git the review already has, and an
-    // arrival takes it again — so there is no root decided before the
-    // repository existed.
+    // Opening a folder reuses the held git snapshot. An arrival takes a new
+    // one.
     assert.equal((await openDir('ggg', '', false)).body.hasGit, false);
     const { body } = await openDir('ggg');
     assert.equal(body.hasGit, true);
@@ -474,10 +448,8 @@ describe('the directory endpoint', () => {
       payload: { rev: 'HEAD~1' },
     });
 
-    // Committed and removed, so nowhere a directory read can find it. Only the
-    // status map knows the path, which is why listing and status are one
-    // answer. A review that cannot show a deletion is missing one of the three
-    // things a change can do.
+    // Committed and removed, so no directory read can find it. Only the
+    // status map knows the path.
     const { body } = await openDir('iii', 'src');
     assert.deepEqual(named(body), ['f:gone.txt', 'f:keep.txt']);
     assert.equal(entry(body, 'gone.txt')!.status, 'deleted');
@@ -568,8 +540,7 @@ describe('the file endpoint', () => {
       '/api/boxes/aaa/review/file?path=code.ts',
     );
     assert.equal(status, 200);
-    // Plain text, never render markup: the browser tokenizes, which is what
-    // keeps the orchestrator out of presentation and every line addressable.
+    // Plain text: the browser does the highlighting.
     assert.equal(body.content, 'one\ntwo\nthree\nfour\nfive\nsix\n');
     assert.equal(body.lines, 6);
     assert.equal(body.language, 'typescript');
@@ -935,8 +906,6 @@ describe('annotations', () => {
       { line: 3, comment: 'this needs a name', outdated: false },
     ]);
 
-    // The file is the review, and it is where the agent works — which is what
-    // makes "address the comments in REVIEW.md" a one-line prompt.
     const written = readFileSync(join(ws, 'REVIEW.md'), 'utf8');
     assert.match(written, /^# Code Review\n/);
     assert.match(written, /## `code\.ts`/);
@@ -1056,8 +1025,8 @@ describe('annotations', () => {
     await put('hhh', { path: 'code.ts', line: 3, comment: 'about three' });
     rmSync(join(ws, 'code.ts'));
 
-    // Opening a folder does not run drift — it never touches a file it is not
-    // listing — so an arrival is what checks every annotated file.
+    // Opening a folder runs no drift check. An arrival checks every annotated
+    // file.
     await openDir('hhh', '', false);
     assert.ok(!readFileSync(join(ws, 'REVIEW.md'), 'utf8').includes('(outdated)'));
 
@@ -1297,7 +1266,7 @@ describe('the base revision', () => {
     assert.deepEqual(after.body.diff.lines, { 1: 'added' });
   });
 
-  test('null clears the base back to the working tree', async () => {
+  test('null clears the base back to HEAD', async () => {
     branched('ddd');
     await setBase('ddd', 'main');
     const { body } = await setBase('ddd', null);
@@ -1332,7 +1301,7 @@ describe('the base revision', () => {
     assert.equal(entry((await openDir('two', 'repo-b')).body, 'mine.txt')!.status, 'added');
   });
 
-  test('a repository the revision names nothing in falls back to its working tree', async () => {
+  test('a repository the revision names nothing in falls back to its HEAD', async () => {
     const ws = insertBox('mix');
     git(branchRepo(ws, 'repo-a'), 'branch', 'release');
     const other = join(ws, 'repo-b');
@@ -1344,7 +1313,7 @@ describe('the base revision', () => {
     write(other, 'b.txt', 'changed\n');
 
     // Resolved in one, unknown in the other. A 400 would refuse an ordinary
-    // shape, so the one it does not name is compared against its own tree.
+    // shape, so the other is compared against its own HEAD.
     const { status, body } = await setBase('mix', 'release');
     assert.equal(status, 200);
     assert.deepEqual(
@@ -1380,9 +1349,7 @@ describe('freshness is the fetch', () => {
   test('there is no fingerprint endpoint to poll', async () => {
     const ws = insertBox('aaa');
     write(ws, 'a.txt', 'x\n');
-    // The poll is gone, and with it the idle cost of an open review. Every
-    // fetch below reads the filesystem on the spot, which is what makes
-    // freshness-on-arrival enough.
+    // Every fetch reads the filesystem on the spot, so no poll is needed.
     const res = await orchestrator.app.inject({ url: '/api/boxes/aaa/review/status' });
     assert.equal(res.statusCode, 404);
   });

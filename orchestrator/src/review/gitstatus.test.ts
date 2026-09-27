@@ -19,15 +19,9 @@ import {
 } from './gitstatus.ts';
 
 /**
- * Git statuses and base resolution, ported from the Go implementation's.
- *
- * The parsers take a string and are driven directly. What runs git is driven
- * through a runner that starts it on this machine instead of in a box
- * container: these repositories are the test's own, and real git output is the
- * point of them.
+ * A runner that starts git on this machine, in the directory the target names,
+ * over repositories the tests build themselves.
  */
-
-/** A runner that starts git here, in the directory the target names. */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
     const stdout = execFileSync(argv[0]!, argv.slice(1), {
@@ -181,9 +175,7 @@ describe('over a real repository', () => {
   });
 
   test('a rename is reported as a deletion and an addition', async () => {
-    // Renames are turned off, so the path the file was moved away from is
-    // named too: the tree can only show a file the change removed when
-    // something reports it gone.
+    // The tree can show a removed file only when something reports it gone.
     run('mv', 'tracked.txt', 'moved.txt');
 
     const statuses = await fileStatuses(at(dir), NO_BASE);
@@ -194,8 +186,8 @@ describe('over a real repository', () => {
   test('a directory that is no repository has no statuses at all', async () => {
     const bare = mkdtempSync(join(tmpdir(), 'boxes-nogit-'));
     try {
-      // Null rather than empty: it is what turns the git features off, and is
-      // a different answer from "a repository with nothing changed".
+      // Null rather than empty, which is a different answer from a repository
+      // with nothing changed.
       assert.equal(await fileStatuses(at(bare), NO_BASE), null);
     } finally {
       rmSync(bare, { recursive: true, force: true });
@@ -303,7 +295,10 @@ describe('over a workspace of several repositories', () => {
     writeFileSync(full, content);
   }
 
-  /** The merged statuses of the workspace, against each repository's HEAD. */
+  /**
+   * The merged statuses of the workspace, against `rev` in each repository or,
+   * without one, against HEAD.
+   */
   async function statuses(rev = ''): Promise<Record<string, string>> {
     const map = await discoverRepos(dir, box());
     return workspaceStatuses(box(), map, await resolveBases(box(), map, rev));
@@ -360,7 +355,7 @@ describe('over a workspace of several repositories', () => {
     assert.equal(merged['repo-b/feature.txt'], 'added');
   });
 
-  test('a repository the revision names nothing in falls back to its working tree', async () => {
+  test('a repository the revision names nothing in falls back to its HEAD', async () => {
     repo('repo-a');
     repo('repo-b');
     git('repo-a', 'branch', 'release');

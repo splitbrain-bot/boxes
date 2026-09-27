@@ -1,18 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { parseTaskNotifications } from '../../../shared/task-notifications.ts';
+import {
+  parseTaskNotifications,
+  type TaskNotification,
+} from '../../../shared/task-notifications.ts';
 
-/**
- * The block the harness wakes the agent with when a background task reports
- * in, read back out of the transcript — shared/task-notifications.ts, tested
- * from the side that acts on it.
- *
- * The fixtures are the shapes the harness actually sends: a monitor's event,
- * a background command that finished, and a subagent's answer with what it
- * cost. What these cover is that each is read, and that anything else is left
- * as the text it is.
- */
-
+/** A monitor's event, as the harness sends it. */
 const MONITOR = [
   '<task-notification>',
   '<task-id>bnztwmmw5</task-id>',
@@ -22,6 +15,7 @@ const MONITOR = [
   '</task-notification>',
 ].join('\n');
 
+/** A background command that finished, as the harness reports it. */
 const COMMAND = [
   '<task-notification>',
   '<task-id>bm74el4o7</task-id>',
@@ -32,6 +26,7 @@ const COMMAND = [
   '</task-notification>',
 ].join('\n');
 
+/** A subagent's answer and what it cost, as the harness reports it. */
 const AGENT = [
   '<task-notification>',
   '<task-id>agent-a1b</task-id>',
@@ -47,7 +42,7 @@ const AGENT = [
 ].join('\n');
 
 /** The one notification in a block, which every fixture here holds. */
-function only(text: string) {
+function only(text: string): TaskNotification | null {
   const segments = parseTaskNotifications(text);
   assert.equal(segments?.length, 1);
   assert.equal(segments![0]!.type, 'notification');
@@ -118,7 +113,7 @@ test('a block that cannot be read costs only itself', () => {
     segments?.map((s) => s.type),
     ['text', 'notification'],
   );
-  // The block nobody could read is prose now, kept where it was said.
+  // The unreadable block stays as text, in its place.
   assert.equal(segments?.[0]?.type === 'text' && segments[0].text, noSummary);
   assert.deepEqual(
     segments?.[1]?.type === 'notification' && segments[1].notification,

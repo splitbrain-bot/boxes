@@ -20,13 +20,6 @@ import * as dk from './docker.ts';
 import type { LoginExecSpec } from './login.ts';
 import * as ws from './workspaces.ts';
 
-/**
- * Installs a fake Docker client that answers everything the routes touch.
- *
- * Every exec here is a probe the manager runs while it prepares a box — the
- * repository check, the process list — and each produces nothing.
- */
-
 /** One frame of a demuxable Docker stream. */
 function frame(text: string): Buffer {
   const payload = Buffer.from(text, 'utf8');
@@ -85,12 +78,7 @@ let dir: string;
 let db: Db;
 let orchestrator: Orchestrator;
 
-/**
- * A running box row with one thread, made current.
- *
- * The thread is what a local command is logged against, so a box without
- * one runs commands nobody is ever shown.
- */
+/** Inserts a running box row with one thread. */
 function insertBox(id: string): void {
   const now = Date.now();
   db.prepare(
@@ -103,7 +91,7 @@ function insertBox(id: string): void {
   insertThread(id, `${id}-t1`, 1);
 }
 
-/** One conversation of a box. Which one is current is set on the box. */
+/** Inserts one thread of a box. */
 function insertThread(boxId: string, threadId: string, ordinal: number): void {
   const now = Date.now();
   db.prepare(
@@ -124,8 +112,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // See insertWorkspaceBox: workspaces are written under the config's
-  // DATA_DIR, which outlives this test's own directory.
+  // Workspaces and homes are written under the config's DATA_DIR, which
+  // outlives this test's own directory.
   rmSync(ws.workspacesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   rmSync(ws.homesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   await orchestrator.app.close();
@@ -134,7 +122,10 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** A directory-backed box, which is what an attachment needs. */
+/**
+ * Inserts a box whose workspace and home are directories, as an attachment
+ * needs, and returns the workspace path.
+ */
 function insertWorkspaceBox(id: string): string {
   insertBox(id);
   // config() is memoised for the process, so the app's DATA_DIR is whatever
@@ -167,11 +158,8 @@ test('an attachment is stored in the workspace and its path reported back', asyn
 });
 
 /**
- * Lists boxes until one reports a workspace size, or gives up.
- *
- * A measurement happens off the request path on purpose — the list must never
- * wait for a disk walk — so a test that wants one has to ask again. See
- * diskusage.ts.
+ * Lists boxes until the box reports a size, or returns null after 100 tries.
+ * The list never waits for a disk walk, so a test that wants a size asks again.
  */
 async function measuredSize(id: string): Promise<number | null> {
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -217,9 +205,8 @@ test('an upload is what says a workspace grew, since nothing else can say it', a
     payload: Buffer.alloc(2048),
   });
 
-  // A measurement stands for a quarter of an hour, and a stopped box's stands
-  // for as long as it is stopped — so the one thing that puts bytes in a
-  // workspace from out here has to drop it rather than wait for it to expire.
+  // A measurement stands for a quarter of an hour, and for a stopped box as
+  // long as it is stopped. So the upload drops it.
   const after = await measuredSize('abc123');
   assert.ok(after !== null && after >= 4096 + 2048, `grew to ${String(after)}`);
 });
@@ -320,9 +307,8 @@ test('an SVG is served as one, inert, so a diagram can be looked at', async () =
 
   assert.equal(res.headers['content-type'], 'image/svg+xml');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
-  // This is what makes the line above safe: an SVG opened as a document has
-  // no script, no origin and no network. Behind the <img> the thread uses it
-  // is inert regardless.
+  // This makes the inline disposition safe: an SVG opened as a document has
+  // no script, no origin and no network.
   assert.equal(res.headers['content-security-policy'], "default-src 'none'; sandbox");
 });
 
@@ -341,9 +327,8 @@ test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
 
   assert.equal(res.headers['content-type'], 'application/pdf');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
-  // No `sandbox`: a sandboxed document is one a browser may decline to hand
-  // to its PDF viewer, which would make opening it a download again. Nothing
-  // but media may still be loaded.
+  // No `sandbox`: a browser may refuse to hand a sandboxed document to its
+  // PDF viewer and offer a download instead.
   assert.equal(res.headers['content-security-policy'], "default-src 'none'; media-src 'self'");
 });
 
@@ -369,8 +354,8 @@ test('a video is served as one, unsandboxed, so the player can load it', async (
 
 test('a format nothing renders is served as a download of unknown type', async () => {
   insertWorkspaceBox('abc123');
-  // HTML above all: served as itself it would run as this origin, and unlike
-  // an SVG there is no way to show it that does not.
+  // Served as itself, HTML would run as this origin, and no policy makes it
+  // safe to show.
   for (const name of ['page.html', 'notes.txt', 'data.bin']) {
     await orchestrator.app.inject({
       method: 'POST',
@@ -444,11 +429,9 @@ test('an attachment that was never stored is a 404', async () => {
 });
 
 /**
- * The static handler, over a fixture bundle laid out the way the runtime
- * image lays out the dashboard's build output.
+ * Writes a minimal bundle where the static handler looks for one, laid out
+ * like the dashboard build in the runtime image.
  */
-
-/** Writes a minimal bundle next to where the handler looks for one. */
 function writeBundle(): string {
   // The handler resolves the bundle relative to its own module, which is
   // src/ in a checkout and dist/ in the image. Both sit one level under the
@@ -461,8 +444,7 @@ function writeBundle(): string {
   );
   writeFileSync(join(bundle, 'assets', 'index-abc.js'), 'console.log(1)');
   writeFileSync(join(bundle, 'assets', 'index-abc.css'), 'body{}');
-  // Vite copies public/ to the bundle root, which is where these two have to
-  // stay: see the service worker test below.
+  // Vite copies public/ to the bundle root, where these two must stay.
   writeFileSync(join(bundle, 'sw.js'), 'self.addEventListener("push", () => {})');
   writeFileSync(join(bundle, 'manifest.webmanifest'), '{"name":"Boxes"}');
   return bundle;
@@ -507,10 +489,8 @@ test('the dashboard bundle is served, with a single-page fallback', async () => 
 test('the service worker and the manifest are served from the bundle root', async () => {
   const bundle = writeBundle();
   try {
-    // A service worker may only control the scope it is served from, so this
-    // has to be /sw.js and not an asset path — and it must be the file rather
-    // than the single-page fallback, which would register an HTML document as
-    // a worker and take push out silently.
+    // A service worker controls only the scope it is served from, so it must
+    // be /sw.js. The single-page fallback here would break push silently.
     const sw = await orchestrator.app.inject({ url: '/sw.js' });
     assert.equal(sw.statusCode, 200);
     assert.match(sw.headers['content-type'] as string, /text\/javascript/);
@@ -548,7 +528,7 @@ test('the hashed assets are cached for good and the page never is', async () => 
     // copy would go on naming the ones it was built with.
     const page = await orchestrator.app.inject({ url: '/boxes/abc123' });
     assert.equal(page.headers['cache-control'], 'no-cache');
-    // And so is everything else that keeps its name across builds.
+    // The same holds for every other file that keeps its name across builds.
     const worker = await orchestrator.app.inject({ url: '/sw.js' });
     assert.equal(worker.headers['cache-control'], 'no-cache');
   } finally {
@@ -611,12 +591,12 @@ test('a deployment that cannot serve boxes is live but not ready', async () => {
   assert.equal(ready.statusCode, 503);
   const body = ready.json() as { ready: boolean; checks: Record<string, boolean> };
   assert.equal(body.ready, false);
-  // The database is the one of the three that is there.
+  // Of the three checks, only the database passes here.
   assert.equal(body.checks['database'], true);
   assert.equal(body.checks['egress'], false);
 
-  // Liveness is about this process serving, and it is: a probe reading the
-  // status code must not restart an orchestrator that is merely unconfigured.
+  // Liveness says this process serves. A probe must not restart an
+  // orchestrator that is only unconfigured.
   const live = await orchestrator.app.inject({ url: '/healthz' });
   assert.equal(live.statusCode, 200);
 });
@@ -645,8 +625,8 @@ test('every response is logged with what was asked and what came back', async ()
   assert.equal(ok?.['path'], '/api/boxes');
   assert.equal(typeof ok?.['ms'], 'number');
 
-  // A refusal is the caller's problem rather than the deployment's, so it is
-  // a warning and not an error.
+  // A refusal is the caller's problem, not the deployment's, so it is logged
+  // as a warning.
   const refused = logged.find((line) => line['status'] === 404);
   assert.equal(refused?.['level'], 'warn');
 });
@@ -864,8 +844,7 @@ test('creating a box against an unknown set is refused before anything is built'
 
 test('starting a container to reach into writes the current configuration first', async () => {
   // Opening a thread and opening a terminal both start a stopped box without
-  // going through /start, and the entrypoint installs whatever is on disk at
-  // that moment — so the box must not be started against a stale set.
+  // /start. The entrypoint installs what is on disk at that moment.
   insertBox('abc123');
   fakeDocker();
   await orchestrator.app.inject({
@@ -897,9 +876,8 @@ test('stopping background work names a thread, and 404s for one that is not ther
   });
   assert.equal(missing.statusCode, 404);
 
-  // A thread with no conversation upstream cannot have announced a task: a
-  // task is named by the adapter's own id for the conversation it is on, and
-  // this thread has none. Said without reaching Docker at all.
+  // A task is named by the adapter's id for its conversation, and this
+  // thread has none. The route answers without reaching Docker.
   const now = Date.now();
   db.prepare(
     `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
@@ -907,9 +885,8 @@ test('stopping background work names a thread, and 404s for one that is not ther
      VALUES ('t1', 'abc123', NULL, NULL, 1, ?, ?)`,
   ).run(now, now);
 
-  // `processId` is the adapter's async task id now, not a hash of a command
-  // line. The body keeps its shape, so a browser from before this is wrong
-  // about what the id means rather than about how to send it.
+  // `processId` is the adapter's async task id. This thread has announced no
+  // task, so nothing stops.
   const unminted = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes/abc123/threads/t1/background/stop',
@@ -920,7 +897,7 @@ test('stopping background work names a thread, and 404s for one that is not ther
 });
 
 test('stopping everything in a box signals the work and nothing of Boxes own', async () => {
-  // The floor's own stop, for work no conversation can name: after an adapter
+  // The box-wide stop, for work no conversation can name: after an adapter
   // restart the bars are empty and the box is still compiling something.
   insertBox('abc123');
   fakeDocker();
@@ -929,7 +906,7 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
     '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
     '    7     1 sleep infinity',
     '   12     1 node /usr/local/bin/claude-agent-acp',
-    '   13    12 claude --output-format stream-json --box-id=acp-1',
+    '   13    12 claude --output-format stream-json --session-id=acp-1',
     "   14    13 /bin/bash -c eval 'npm run build'",
     '   20     1 node /usr/local/bin/codex-acp',
     '   21    20 codex app-server',
@@ -971,8 +948,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   });
   assert.equal(missing.statusCode, 404);
 
-  // A mark is a boolean or it is nothing: a body that says neither would
-  // otherwise unmark whatever it was sent about.
+  // A body without a boolean would otherwise unmark the thread.
   const empty = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes/abc123/threads/abc123-t1/done',
@@ -998,7 +974,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
     [['abc123-t1', true]],
   );
 
-  // And the mark comes off the same way it went on.
+  // The mark comes off the same way.
   const unmarked = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes/abc123/threads/abc123-t1/done',
@@ -1034,9 +1010,8 @@ test('a listed box carries its own WebSocket token', async () => {
 
 // --- request bodies over the real routes --------------------------------------
 //
-// Every route that takes a JSON body checks it before it acts, so a body that
-// is wrong is a 400 saying which field is wrong rather than a cast that
-// misbehaves further in.
+// Every route that takes a JSON body checks it before it acts. A wrong body
+// gets a 400 that names the field.
 
 test('a body missing a required field is refused, and the answer names it', async () => {
   const res = await orchestrator.app.inject({
@@ -1059,7 +1034,7 @@ test('a field of the wrong type is refused rather than read as one', async () =>
   assert.equal(res.statusCode, 400);
   assert.match((res.json() as { error: string }).error, /^done: /);
 
-  // And nothing was written on the way to the refusal.
+  // Nothing was written before the refusal.
   const row = db.prepare("SELECT done FROM threads WHERE id = 'abc123-t1'").get() as {
     done: number;
   };
@@ -1148,12 +1123,9 @@ test('a credential nobody can use is refused rather than stored', async () => {
 });
 
 /**
- * A login, over its real routes and a scripted CLI.
- *
- * The container and the exec are injected — a daemon is the one thing these
- * tests cannot have — so what is exercised here is the shape the settings page
- * consumes: one call to start, a poll that answers with a state, a code posted
- * back, and a cancel that takes the container with it.
+ * Installs a scripted login runtime and returns what it ran and removed. The
+ * container and the exec are faked, so the tests exercise only the routes the
+ * settings page calls.
  */
 function fakeLogins(): {
   execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> ;
@@ -1257,8 +1229,7 @@ test("a code is posted back into Claude's flow, and refused where none is wanted
 
   await untilTrue('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
-  // Nothing is waiting for a code yet, and saying so beats writing into a
-  // stream nobody is reading.
+  // Nothing waits for a code yet, so the route refuses it.
   const early = await orchestrator.app.inject({
     method: 'POST',
     url: `/api/credentials/claude/login/${loginId}/code`,
@@ -1327,8 +1298,8 @@ test('an account credential is reported, and says why it cannot run a box yet', 
   const codex = health.harnesses.find((h) => h.id === 'codex');
   assert.equal(codex?.credential?.account, 'someone@example.com');
   assert.equal(codex?.credential?.status, 'ok');
-  // Stored, refreshed, and still not something a box can be handed: the proxy
-  // swaps a header and this authenticates traffic nobody intercepts.
+  // The proxy swaps a header value, and this document authenticates traffic
+  // the proxy does not intercept.
   assert.equal(codex?.runnable, false);
   assert.match(codex?.credential?.lastError ?? '', /cannot hand a subscription login to a box/);
 });

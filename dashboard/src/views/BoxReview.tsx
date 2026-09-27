@@ -45,32 +45,17 @@ import {
 /**
  * The prompt "Hand to agent" stages in the thread's composer.
  *
- * One line, because that is the whole point: the review lives in the
- * workspace, so pointing the agent at it needs no export, no paste, and no
- * copy of the comments anywhere. And it is the same line however many
- * repositories the workspace holds, because there is exactly one REVIEW.md and
- * it is at the top of the workspace the agent works in.
+ * The workspace holds one REVIEW.md at its root, so the prompt stays the same
+ * for any number of repositories.
  */
 const HANDOFF_PROMPT = 'Read REVIEW.md and address the comments in it.';
 
 /**
- * Reviewing a box's code, at `/boxes/:id/review`.
+ * Page that reviews a box's code, at `/boxes/:id/review`.
  *
- * The open file is in the search string, so a file is linkable and the
- * browser's own back button works — which on a phone is also one step of the
- * stack: boxes → thread → file list → file, out of each by the same back
- * button in the header and by no other control. That button pops the step; it
- * never pushes one, so the header's arrow and the phone's own back gesture
- * always agree with each other.
- *
- * The layout collapses the desktop tool's three panels into patterns that work
- * at both sizes rather than two parallel UIs: the tree is a column beside the
- * pane from `md` up and the screen before it below, and the same components
- * render in both. That is why the stack is a step shorter on a pointer — the
- * list and the file are one view there, so back leaves the review.
- *
- * The view owns the whole viewport the way the thread view does, because a code
- * pane in a reading column is not a code pane.
+ * The open file is in the search string, so a file is linkable. On a phone the
+ * stack is boxes, thread, file list, file. From `md` up the tree and the file
+ * share one view, so the stack is one step shorter.
  */
 export function BoxReview() {
   const { id = '' } = useParams();
@@ -80,18 +65,12 @@ export function BoxReview() {
 
   const { facts, dirs, expanded, file, loadingTree, loadingFile, error, composing, saving } =
     useReview();
-  // This box, polled: its name for the header. One box off the wire rather
-  // than the whole list.
+  // Polls this one box for the name in the header.
   const { box } = useBox(id);
 
   /**
-   * Long lines wrap unless the reader turns it off.
-   *
-   * A phone is narrower than most source files, so the alternative default is
-   * a pane where the end of every long line is off screen and reading it means
-   * scrolling the code sideways under a sticky gutter. Wrapping keeps a line
-   * addressable — it is still one row, one number, one tap to comment — and
-   * the toggle is there for the times the columns matter.
+   * Whether long lines wrap. On by default, because a phone is narrower than
+   * most source files. A wrapped line is still one row with one number.
    */
   const [wrap, setWrap] = useState(true);
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
@@ -100,83 +79,56 @@ export function BoxReview() {
   const [confirmNew, setConfirmNew] = useState(false);
   /** The comment a tap on a bin is asking to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
-  /** The buffer behind edit mode, and what to colour it with. */
+  /** The edit-mode buffer and its syntax tokens. */
   const edit = useCodeEdit(file);
   /**
-   * True once a save has been refused because the file moved under it, until
-   * the reviewer answers. What they are being asked is whose version wins, so
-   * the buffer is kept either way.
+   * True from a save refused because the file changed on disk until the
+   * reviewer picks a version. The buffer stays meanwhile.
    */
   const [conflict, setConflict] = useState(false);
   /**
-   * Something to do once the reviewer has agreed to lose what they typed, or
-   * null. Every way out of a file goes through this, because all of them end
-   * the edit.
+   * The exit waiting for the reviewer to agree to lose unsaved edits, or null.
    */
   const [leaving, setLeaving] = useState<{ go: () => void } | null>(null);
-  /** What they agreed to, waiting for the question to be out of the way. */
+  /** The agreed exit, waiting for the dialog's history entry to go. */
   const agreed = useRef<(() => void) | null>(null);
   /** The pane's scroller, for holding the reader's line across a mode switch. */
   const paneRef = useRef<HTMLDivElement>(null);
   /** An anchor taken before a switch, to be put back after it. */
   const held = useRef<ScrollAnchor | null>(null);
   /**
-   * The conversation this review was opened from, so leaving it goes back
-   * there. After a fork a box has two conversations on one checkout, and the
-   * fork cannot act on the comments while it is in plan mode.
+   * The thread this review was opened from, or null. A box can hold several
+   * threads on one checkout, and leaving goes back to this one.
    *
-   * Read once: opening a file is a navigation of this same route, which keeps
-   * the component mounted but carries no state of its own. A review opened
-   * from the box list has none, and neither has a reload: both lead back to
-   * the list.
+   * Read once, because opening a file navigates within this route and carries
+   * no state. A review opened from the box list, or reloaded, has no origin.
    */
   const [origin] = useState<string | null>(
     () => (location.state as { threadId?: string } | null)?.threadId ?? null,
   );
   const name = box?.name ?? id;
-  /**
-   * The way out of the review: the conversation it was opened from.
-   *
-   * A pop, so the thread is the one that is already on the stack rather than
-   * a second copy of it pushed on top — and one pop, however many files were
-   * opened on the way, because every one of those is an entry this view
-   * pushed. The path is what a deep link falls back to, and what the link's
-   * href says for a middle click.
-   */
+  /** The parent route: the origin thread, or the box list without one. */
   const threadPath = origin ? `/boxes/${id}/threads/${origin}` : '/';
   const up = useUp(threadPath);
   const navigate = useNavigate();
   /**
-   * Whether the tree and the pane are side by side, which decides what the
-   * back button steps out to and which composer arrangement to mount.
+   * Whether the tree and the pane are side by side. It decides what back steps
+   * out to and which composer is mounted.
    *
-   * A media query in JavaScript rather than in CSS because both are decisions
-   * about what to mount, not how to paint it: a Sheet renders into a portal a
-   * `md:hidden` wrapper cannot reach, and two back buttons behind two
-   * visibility classes would be two back buttons to anything not looking at
-   * the screen.
+   * A query in script, because a Sheet renders into a portal that a
+   * `md:hidden` wrapper cannot reach.
    */
   const wide = useMediaQuery('(min-width: 768px)');
 
-  // Point the store at this box and load it. The store is a singleton, so
-  // re-entering the same box paints instantly from what is already there
-  // and updates when the fetch lands.
-  //
-  // The mount is one of the three moments a review refetches; coming back to
-  // the tab is the second, and closing a file back to the tree is the third.
-  // Nothing polls the workspace, so a review left open costs nothing.
+  // The store is a singleton, so re-entering the same box paints from what it
+  // holds and updates when the fetch lands. Nothing polls the workspace.
   useEffect(() => {
     openReview(id);
     void loadTree();
     return refreshOnReturn();
   }, [id]);
 
-  // The URL is the source of truth for which file is open, so a back button, a
-  // pasted link and a tree tap all go through the same path.
-  //
-  // The hunk sheet goes with the file it belongs to. It is the one surface
-  // here that is not the store's, and it must not be left up over a file that
-  // has closed, or over the next file showing the last one's lines.
+  // The URL decides which file is open. The hunk sheet closes with its file.
   useEffect(() => {
     setHunk(null);
     if (path) void loadFile(path);
@@ -184,13 +136,11 @@ export function BoxReview() {
   }, [path]);
 
   /**
-   * Runs something that ends the edit, asking first when that would lose work.
+   * Runs an exit from the open file, asking first when it would lose unsaved
+   * edits.
    *
-   * Every way out of an open file is one of these: the mode toggle, another
-   * file from the tree, the step back to the list, and the way out of the
-   * review altogether. A comment is a sentence with a composer of its own; a
-   * buffer is a whole file of work with no undo behind it once it is gone, so
-   * it is worth the question.
+   * The mode toggle, another file, the step back to the list and leaving the
+   * review all go through this.
    */
   const guard = useCallback(
     (go: () => void) => {
@@ -201,14 +151,10 @@ export function BoxReview() {
   );
 
   /**
-   * Does what the reviewer agreed to, once the question is off the stack.
+   * Runs the agreed exit once the dialog's history entry is gone.
    *
-   * A dialog is a history entry of its own, so that the phone's back gesture
-   * closes it rather than the screen behind it. Most of what is waiting here
-   * is a navigation, and one made while that entry is still on top would be
-   * spent on the dialog instead of the file. So the intent waits for the
-   * first location that is not the dialog's own — and where a dialog pushed
-   * no entry at all, that is this one, and it goes at once.
+   * A navigation made while that entry is on top would act on the dialog's
+   * entry instead of the file's.
    */
   useEffect(() => {
     const go = agreed.current;
@@ -219,14 +165,11 @@ export function BoxReview() {
   }, [leaving, location]);
 
   /**
-   * Opens a file — a step of the stack on a phone, and not one on a pointer.
+   * Opens a file.
    *
-   * Below md the file takes the screen from the tree, so it is somewhere the
-   * visitor went and back is how they leave it. From md up the tree stays
-   * beside it and picking a file is selecting in a sidebar, not travelling;
-   * an entry per file there would have back walking a reading history nobody
-   * asked it to keep, while the header's own button says it leaves the
-   * review. Replacing keeps those two answers the same.
+   * Below md this pushes an entry, because the file replaces the tree on
+   * screen. From md up it replaces the entry, so back leaves the review, as
+   * the header's button does.
    */
   const openPath = useCallback(
     (next: string) => {
@@ -246,13 +189,10 @@ export function BoxReview() {
   );
 
   /**
-   * Closes the open file, back to the tree.
+   * Closes the open file and returns to the tree.
    *
-   * By popping the entry that opened it, so the header's arrow and the
-   * phone's back gesture do the same thing rather than each adding to what
-   * the other has to walk through. Where there is no such entry — a pasted
-   * link straight to a file, or the pointer arrangement, which replaces — the
-   * search string is rewritten in place instead.
+   * Pops the entry that opened the file. Without one, as after a pasted link
+   * or a file opened from md up, it rewrites the search string in place.
    */
   const closeOpenFile = useCallback(() => {
     guard(() => {
@@ -266,21 +206,20 @@ export function BoxReview() {
           },
           { replace: true },
         );
-      // File → tree does not remount, so without this nothing would refetch and
-      // the tree would keep the statuses and counts it was painted with.
+      // Closing a file does not remount the view, so the tree refetches here.
       void loadTree();
     });
   }, [guard, up.entry, navigate, setParams]);
 
   /**
-   * Switches between commenting and editing, holding the reader's line.
+   * Switches between commenting and editing, and keeps the reader's line in
+   * place.
    *
-   * The comment cards and the deletion markers between the rows fold away on
-   * the way into edit mode and come back on the way out, so without this the
-   * line somebody was looking at would be somewhere else afterwards — and the
-   * line they were looking at is the one they went in to fix. The anchor is
-   * taken here rather than in an effect because by the time the new mode has
-   * painted, the layout it was measured against is gone.
+   * Edit mode hides the comment cards and deletion markers, which moves the
+   * rows. The anchor is taken here, because after the new mode paints the old
+   * layout is gone.
+   *
+   * @param next True to enter edit mode.
    */
   const switchMode = useCallback(
     (next: boolean) => {
@@ -300,23 +239,17 @@ export function BoxReview() {
 
   const editing = edit.text !== null;
   /**
-   * Whether the pane shows this file as one plain block rather than as rows.
-   *
-   * Past the line limit it does, so there is no line to step to, none to
-   * comment on and nothing to edit — see CodePane.
+   * Whether the file is past the line limit. The pane then shows one plain
+   * block without rows to step to, comment on or edit.
    */
   const tooLong = file !== null && !withinLineLimit(file.content);
   /**
-   * Whether this file can be edited at all.
-   *
-   * What the pane cannot show a line at a time it must not write back: there
-   * is nothing to edit in a deleted file, nothing readable in a binary one,
-   * saving a truncated one would delete everything past where the read
-   * stopped, and a file past the line limit has no rows to edit.
+   * Whether this file can be edited. A save of a truncated file would delete
+   * everything past where the read stopped.
    */
   const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
 
-  // Put the reader back on their line, before the new mode is painted.
+  // Restores the reader's line before the new mode paints.
   useLayoutEffect(() => {
     const element = paneRef.current;
     const anchor = held.current;
@@ -329,9 +262,8 @@ export function BoxReview() {
   /**
    * Writes the buffer to the workspace.
    *
-   * `force` is the answer to a refused save: the file moved under the edit,
-   * the reviewer has been told so, and they are saying their version is the
-   * one to keep.
+   * @param force Overwrites the file even when it changed on disk since it was
+   *   read.
    */
   const save = useCallback(
     (force: boolean) => {
@@ -343,22 +275,22 @@ export function BoxReview() {
     [file, edit.text],
   );
 
-  // Freshness is the store's, so it has to know there is unsaved work in the
-  // pane: a refetch on the way back to the tab would otherwise take it.
+  // Tells the store about unsaved edits, so a refetch on return to the tab
+  // does not replace them.
   useEffect(() => {
     setDirty(edit.dirty);
   }, [edit.dirty]);
   useEffect(() => () => setDirty(false), []);
 
   /**
-   * Opening or closing the composer on a line, with an identity that never
-   * changes — the pane's rows are memoized against typing, and a fresh
-   * function each render would undo that.
+   * Opens or closes the composer on a line. Its identity is stable, because the
+   * pane's rows are memoized against typing.
    */
   const selectLine = useCallback((line: number) => {
     compose(useReview.getState().composing === line ? null : line);
   }, []);
 
+  /** Opens the hunk sheet for a hunk index of the open file. */
   const showHunk = useCallback(
     (index: number) => setHunk(file?.diff.hunks[index] ?? null),
     [file?.diff.hunks],
@@ -369,19 +301,17 @@ export function BoxReview() {
     () => new Map((file?.diff.deletions ?? []).map((d) => [d.afterLine, d.hunkIndex])),
     [file?.diff.deletions],
   );
+  /** Comments of the open file by line, for the pane. */
   const annotations = useMemo(
     () => new Map((file?.annotations ?? []).map((a) => [a.line, a])),
     [file?.annotations],
   );
   /**
-   * The hunk each line sits in, which is what a tap on the gutter opens.
+   * The hunk index of each line, which a tap on the gutter opens.
    *
-   * A hunk's range covers the context git printed around the change as well as
-   * the change itself, so the lines either side of one answer "what happened
-   * here" with the same hunk — a change is read with its surroundings, and on a
-   * phone that is the difference between a target and a sliver. A hunk that
-   * only removed lines covers nothing in the file that survived; its deletion
-   * marker is the way in, and always was.
+   * A hunk's range includes its context lines, which gives a phone a larger
+   * target. A hunk that only removed lines covers no line, so its deletion
+   * marker opens it.
    */
   const hunkByLine = useMemo(() => {
     const map = new Map<number, number>();
@@ -391,12 +321,10 @@ export function BoxReview() {
     return map;
   }, [file?.diff.hunks]);
   /**
-   * The changed lines, in order, for counting and stepping through them.
+   * The changed lines in order, for counting and stepping through them.
    *
-   * A deletion has no line of its own, and its marker sits under the line it
-   * followed — so that line is where stepping stops and what the count
-   * counts. Without it a file whose only change is a deletion reports none,
-   * while the tree calls it modified and the gutter marks it.
+   * A deletion counts as the line its marker follows, so a file whose only
+   * change is a deletion still has a changed line.
    */
   const changedLines = useMemo(() => {
     const lines = new Set(Object.keys(file?.diff.lines ?? {}).map(Number));
@@ -405,17 +333,17 @@ export function BoxReview() {
     }
     return [...lines].sort((a, b) => a - b);
   }, [file?.diff.lines, file?.diff.deletions]);
+  /** The commented lines in order, for counting and stepping through them. */
   const commentedLines = useMemo(
     () => (file?.annotations ?? []).map((a) => a.line).sort((a, b) => a - b),
     [file?.annotations],
   );
 
   /**
-   * The card and the composer that sit under a line.
+   * Renders the comment card and the inline composer under a line.
    *
-   * The pane calls this for every rendered line, so it answers null for almost
-   * all of them; what it returns is what makes comments inline on every screen
-   * size rather than a sidebar that a phone has to fold away.
+   * The pane calls this for every rendered line. It returns null for a line
+   * without either.
    */
   const underLine = useCallback(
     (line: number) => {
@@ -430,14 +358,13 @@ export function BoxReview() {
               annotation={annotation}
               busy={saving}
               onEdit={() => compose(line)}
-              // Asked about first: a comment is typed prose with no undo, and
-              // the bin sits a thumb's width from the pencil.
+              // Asks first, because a deleted comment has no undo and the bin
+              // sits close to the pencil.
               onDelete={() => setConfirmDelete(line)}
             />
           ) : null}
-          {/* On touch the composer is a bottom sheet instead — the keyboard is
-              coming up anyway, and a textarea in a scrolling code pane ends up
-              behind it. */}
+          {/* Below md the composer is a bottom sheet, because the keyboard
+              would hide a textarea in the scrolling pane. */}
           {open && wide ? (
             <InlineComposer
               line={line}
@@ -454,12 +381,8 @@ export function BoxReview() {
   );
 
   /**
-   * Hands the review to the agent: stage the prompt, then go back to the
-   * thread the review was opened from.
-   *
-   * Only offered when there is such a thread. A review opened from the box
-   * list names none, and the box has no thread that would be the right one
-   * on its own.
+   * Stages the handoff prompt and goes back to the thread the review was
+   * opened from.
    */
   const handoff = useCallback((): void => {
     stagePrompt(id, HANDOFF_PROMPT);
@@ -474,51 +397,32 @@ export function BoxReview() {
       direction === 1
         ? (lines.find((line) => line > from) ?? lines[0]!)
         : ([...lines].reverse().find((line) => line < from) ?? lines.at(-1)!);
-    // Every press is its own request, because a file with one change in it
-    // and a step that wrapped round both land on the line already showing —
-    // and the pane has to take the reader back to it either way.
+    // The nonce makes every press a new request, so the pane scrolls even when
+    // the target line has not changed.
     setScrollTo((current) => ({ line: next, nonce: (current?.nonce ?? 0) + 1 }));
   };
 
-  // The code pane is the scroller here, the same way the thread is in a
-  // thread: the document must not acquire one of its own.
+  // The code pane is the scroller, so the document must not scroll.
   useViewportLock();
 
-  // And the same header behaviour as the thread's, called the same way:
-  // reading down a file puts the chrome away, a flick back up returns it.
+  // Hides the header while reading down and shows it on a scroll back up.
   const { away, container, reset } = useScrollAway('[data-slot="review-code-pane"]');
 
-  // The pane that put the header away goes with the file, and what follows it
-  // — the file list, or the next file — is read from its top. So the header
-  // comes back whenever the open file changes: there is no pane left to flick
-  // up, and below md the list's only way out is the button in that header.
+  // Shows the header again when the open file changes. Below md, the list's
+  // only way out is the button in that header.
   useEffect(reset, [reset, path]);
 
-  // No state symbol: a review is something being done rather than something
-  // waiting. What it needs to say is which box, and which file of it.
   useDocumentTitle(
     [file ? shortPath(file.path) : null, 'Review', name].filter(Boolean).join(' · '),
   );
 
   return (
     <div ref={container} className="flex h-dvh flex-col">
-      {/* The header stands aside for reading, and stays put for editing: the
-          toolbar under it carries Save, and a phone with its keyboard up has
-          no room to go looking for a control that has scrolled away. */}
+      {/* The header stays while editing, because the toolbar under it holds Save. */}
       <Shelf away={away && !editing}>
         <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-          {/* One back button, one step out, wherever it is pressed.
-              On a phone the stack is boxes → thread → file list → file, so
-              a file's parent is the list and the list's parent is the thread.
-              From md up the list and the file are one view side by side, so
-              there is nothing between the review and the thread.
-
-              Neither branch can be caught out by a phone turned since the
-              file was opened. Closing the file pops the entry that opened it
-              when there is one and rewrites the search string when there is
-              not, and leaving pops every entry this view pushed in one step
-              — so whichever control the breakpoint puts here, it steps out
-              once and lands where it says. */}
+          {/* Below md with a file open, back returns to the file list.
+              Otherwise it leaves the review. */}
           {file && !wide ? (
             <Button
               type="button"
@@ -535,8 +439,7 @@ export function BoxReview() {
               <a
                 href={up.href}
                 onClick={(event) => {
-                  // Unsaved work is worth the question here too, and the link
-                  // has to be stopped before the step out rather than after.
+                  // Stops the link before the step out when there are unsaved edits.
                   if (edit.dirty && plainClick(event)) {
                     event.preventDefault();
                     setLeaving({ go: up.go });
@@ -557,25 +460,18 @@ export function BoxReview() {
             </span>
             <span className="truncate text-xs text-muted-foreground">
               {name}
-              {/* Which repository the open file belongs to, rather than a root
-                  the review no longer has. A file no repository claims says
-                  so, since that is why it has no statuses and no markers. */}
+              {/* The repository of the open file. */}
               {file ? ` · ${whichRepo(file.repo, facts?.repos ?? [])}` : ''}
               {facts && !facts.hasGit ? ' · no git' : ''}
-              {/* Which base is active belongs in the status line, the way the
-                  desktop tool's does: it changes what every colour in the tree
-                  and every marker in the gutter means. One expression resolves
-                  separately in each repository, so where it landed is part of
-                  what it means. */}
+              {/* The active base, with the share of repositories it resolved in. */}
               {facts?.base.rev
                 ? ` · vs ${facts.base.rev}${resolvedIn(facts.repos)}`
                 : facts?.hasGit
-                  ? ' · vs working tree'
+                  ? ' · vs HEAD'
                   : ''}
             </span>
           </div>
 
-          {/* Only where there is a repository to compare in. */}
           {facts?.hasGit ? (
             <BasePicker
               base={facts.base}
@@ -585,19 +481,13 @@ export function BoxReview() {
             />
           ) : null}
 
-          {/* The reason this feature belongs inside Boxes at all: the review is
-              a file of the project the agent is working on, so handing it over is
-              one line of prompt rather than an export. Staged in the composer,
-              not sent — the reviewer decides when to ask. */}
+          {/* Stages the prompt in the thread's composer without sending it. */}
           {origin && facts && facts.commentCount > 0 ? (
             <Button
               type="button"
               variant="outline"
               size="sm"
               className="shrink-0"
-              // Back to the conversation, not a second copy of it pushed on
-              // top — and the prompt handed over beside the router rather
-              // than in the entry's state, which back and forward replay.
               // Guarded, because this leaves the review like any other exit.
               onClick={() => guard(handoff)}
               title="Open the thread with a prompt to address these comments"
@@ -627,12 +517,8 @@ export function BoxReview() {
       {error ? <Notice className="shrink-0 border-b px-3 py-2">{error}</Notice> : null}
 
       <div className="flex min-h-0 flex-1">
-        {/* One tree in the document, two arrangements.
-            From md up it is the left column, whatever is open. Below md it is
-            the whole screen until a file is picked and gone once one is —
-            one step of the stack, which the header's back button returns to.
-            Rendering it twice and hiding one would put two of every row in
-            the page. */}
+        {/* One tree for both layouts. From md up it is the left column. Below
+            md it fills the screen until a file is open. */}
         <aside
           className={cn(
             'shrink-0 overflow-auto md:block md:w-72 md:border-r lg:w-80',
@@ -650,9 +536,7 @@ export function BoxReview() {
           ) : loadingTree ? (
             <p className="px-3 py-4 text-sm text-muted-foreground">Loading…</p>
           ) : error ? null : (
-            // Only where the tree came back empty. A fetch that failed has the
-            // banner above to say so, and "nothing to show" under it reads as
-            // an answer about the workspace rather than about the failure.
+            // A failed fetch shows the error banner instead.
             <p className="px-3 py-4 text-sm text-muted-foreground">Nothing to show.</p>
           )}
         </aside>
@@ -663,8 +547,7 @@ export function BoxReview() {
               <ReviewToolbar
                 changeCount={changedLines.length}
                 commentCount={commentedLines.length}
-                // A file shown as one block has no rows, so the counts are
-                // still worth saying and there is nowhere to step to.
+                // A file shown as one block has no rows to step to.
                 steppable={!tooLong}
                 wrap={wrap}
                 editable={editable}
@@ -683,9 +566,7 @@ export function BoxReview() {
               ) : file.binary ? (
                 <Empty>
                   <p>This file is binary, so it cannot be shown here.</p>
-                  {/* A real link rather than a fetch, so the new tab gets the
-                      file with its own type, and the browser or an app on
-                      the device decides what to do with it. */}
+                  {/* A plain link, so the browser handles the file by its type. */}
                   <Button asChild variant="outline" size="sm">
                     <a
                       href={`/api/boxes/${encodeURIComponent(id)}/review/raw?path=${encodeURIComponent(file.path)}`}
@@ -705,10 +586,8 @@ export function BoxReview() {
                       it cannot be edited.
                     </Notice>
                   ) : null}
-                  {/* The agent works while the review is open, so a save can
-                      land on a file that has moved on. Both versions still
-                      exist at this point — theirs on disk, the reviewer's in
-                      the pane — so the choice is the reviewer's to make. */}
+                  {/* The agent works while the review is open, so a save can hit a
+                      file that changed on disk. The reviewer picks a version. */}
                   {conflict ? (
                     <Notice tone="warn" className="shrink-0 border-b px-3 py-1.5 text-xs">
                       <span className="flex flex-wrap items-center gap-2">
@@ -728,9 +607,7 @@ export function BoxReview() {
                           size="sm"
                           disabled={saving}
                           onClick={() => {
-                            // Asked plainly enough already, so no second
-                            // question — and the file is read again, because
-                            // what is on screen is no longer what is on disk.
+                            // No second question. The reload shows the file on disk.
                             switchMode(false);
                             void loadFile(file.path);
                           }}
@@ -762,8 +639,7 @@ export function BoxReview() {
               )}
             </>
           ) : (
-            // Below md the tree above has the screen, so this belongs to the
-            // pointer arrangement only.
+            // Below md the tree fills the screen, so this shows from md up only.
             <div className="hidden min-h-0 flex-1 md:flex">
               <Empty>
                 {loadingFile ? 'Loading…' : 'Pick a file from the tree to start reading.'}
@@ -811,8 +687,7 @@ export function BoxReview() {
           busy={saving}
           onCancel={() => setLeaving(null)}
           onConfirm={() => {
-            // Out of edit mode here, because that is what was agreed to; what
-            // to do next waits for the dialog's own history entry to go.
+            // Leaves edit mode now. The exit waits for the dialog's history entry to go.
             agreed.current = leaving.go;
             edit.stop();
             setConflict(false);
@@ -840,11 +715,11 @@ export function BoxReview() {
 }
 
 /**
- * Whether a click is the plain one a link's own handler should answer.
+ * Whether a click is a plain left click. A modified click opens a tab or a
+ * window and leaves the buffer here untouched.
  *
- * A modified click is the browser being asked for a tab or a window, which
- * leaves this one where it is — and the buffer in it untouched, so there is
- * nothing to ask about.
+ * @param event The click.
+ * @returns True for a plain click.
  */
 function plainClick(event: React.MouseEvent): boolean {
   return (
@@ -857,7 +732,7 @@ function plainClick(event: React.MouseEvent): boolean {
   );
 }
 
-/** The centred message a pane with nothing in it shows. */
+/** Centred message for a pane without content. */
 function Empty({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center text-sm text-muted-foreground">
@@ -867,18 +742,27 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * What to call the repository an open file belongs to.
+ * Names the repository an open file belongs to.
  *
- * A file outside every repository is not a failure — it is the workspace's own
- * loose files, or a directory nobody cloned — but it is worth saying, because
- * it explains a pane with no gutter markers in it.
+ * A file outside every repository gets "no repository", which explains a pane
+ * without gutter markers.
+ *
+ * @param repo The repository path of the file, or null.
+ * @param repos Every repository of the workspace.
+ * @returns The repository name, or its path when no repository matches.
  */
 function whichRepo(repo: string | null, repos: ReviewRepo[]): string {
   if (repo === null) return 'no repository';
   return repos.find((r) => r.path === repo)?.name ?? repo;
 }
 
-/** " (2 of 3)" when a base landed in some repositories but not all of them. */
+/**
+ * Formats in how many repositories the base resolved, for example " (2 of 3)".
+ *
+ * @param repos Every repository of the workspace.
+ * @returns The note, or an empty string for one repository or when the base
+ *   resolved in all of them.
+ */
 function resolvedIn(repos: ReviewRepo[]): string {
   if (repos.length <= 1) return '';
   const landed = repos.filter((repo) => repo.baseCommit !== '').length;
@@ -886,8 +770,11 @@ function resolvedIn(repos: ReviewRepo[]): string {
 }
 
 /**
- * A path shortened from the left, so the filename — the part that identifies
- * it — survives a narrow header.
+ * Shortens a path from the left to its last two parts, so the filename fits a
+ * narrow header.
+ *
+ * @param path The workspace path.
+ * @returns The path, or "…/" and its last two parts.
  */
 function shortPath(path: string): string {
   const parts = path.split('/');

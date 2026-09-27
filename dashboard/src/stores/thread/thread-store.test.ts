@@ -13,24 +13,27 @@ import { ThreadStore, type ThreadStoreDeps } from './thread-store.ts';
 import { convertMessage } from './convert.ts';
 import { resetIds, type Message } from './translate.ts';
 
-/**
- * The store against a fake client, which is the whole protocol surface it
- * touches: notifications in, requests out.
- */
-
 /** A stand-in AcpClient that records what the store asks of it. */
 class FakeClient {
+  /** The ACP thread id the store reads. */
   sessionId: string | null = 'acp-1';
+  /** Every request the store sent, in order. */
   readonly requests: Array<{ method: string; params: unknown }> = [];
+  /** Every notification the store sent, in order. */
   readonly notifications: Array<{ method: string; params: unknown }> = [];
   /** Resolvers for requests the test wants to hold open. */
   private readonly held: Array<(v: unknown) => void> = [];
+  /** True to hold every request open until `settle`. */
   hold = false;
+  /** The message every request fails with, or null. */
   fail: string | null = null;
+  /** True once the store has disposed the client. */
   disposed = false;
 
+  /** @param handlers The store's callbacks, which the tests call directly. */
   constructor(readonly handlers: AcpClientHandlers) {}
 
+  /** Runs a handshake: a load, then ready. */
   start(): void {
     this.load();
     this.handlers.onState('ready');
@@ -38,9 +41,9 @@ class FakeClient {
   }
 
   /**
-   * A session/load, as the handshake and a reconnect run one: the store is
-   * asked how much it has, and the gateway answers whether the replay picks
-   * up there. `resumes` is that answer.
+   * A session/load, as the handshake and a reconnect run one. The store names
+   * its resume point, and `resumes` decides whether the replay picks up
+   * there.
    */
   load(): void {
     const from = this.handlers.resumePoint();
@@ -48,7 +51,7 @@ class FakeClient {
     this.handlers.onReplay(this.resumes && from !== null);
   }
 
-  /** The replay is over, which is what publishes what it built. */
+  /** Ends the replay, which publishes what it built. */
   finish(): void {
     this.handlers.onReady(this.modes, this.configOptions);
   }
@@ -58,9 +61,12 @@ class FakeClient {
   /** The resume point each load asked for, in order. */
   readonly resumePoints: Array<string | null> = [];
 
+  /** The modes the handshake reports. */
   modes: ThreadModeState | null = null;
+  /** The config options the handshake reports. */
   configOptions: ThreadConfigOption[] = [];
 
+  /** Records a request and answers it, holds it, or fails it. */
   request(method: string, params: unknown): Promise<unknown> {
     this.requests.push({ method, params });
     if (this.fail) return Promise.reject(new Error(this.fail));
@@ -73,10 +79,12 @@ class FakeClient {
     this.held.shift()?.({});
   }
 
+  /** Records a notification. */
   notify(method: string, params: unknown): void {
     this.notifications.push({ method, params });
   }
 
+  /** Marks the client as disposed. */
   dispose(): void {
     this.disposed = true;
   }
@@ -106,9 +114,8 @@ function makeStore(
 /**
  * Puts a permission request to the store, as the gateway would.
  *
- * `withdrawn` is the signal the gateway aborts when somebody else answers the
- * question first; a test that does not care about that gets one nobody
- * aborts.
+ * `withdrawn` is the signal the gateway aborts when another browser answers
+ * first. By default nothing aborts it.
  */
 function ask(
   client: FakeClient,
@@ -146,7 +153,7 @@ type ConvertedPart = {
     approved?: boolean;
     resolution?: string;
   };
-  /** The src of an image part, which is a data URL or a remote https one. */
+  /** The src of an image part. */
   image?: string;
 };
 
@@ -164,8 +171,7 @@ test('a snapshot changes identity when a streamed message grows', () => {
   } as ThreadUpdate);
   const second = store.getSnapshot().messages;
 
-  // A view that memoised on identity has to see a new object, or it would
-  // keep rendering "Hel" after the rest arrived.
+  // A view that memoises on identity would keep showing "Hel" otherwise.
   assert.notEqual(first[0], second[0]);
   assert.deepEqual(partsOf(second[0]!), [{ type: 'text', text: 'Hello' }]);
 });
@@ -206,18 +212,15 @@ test('a prompt of this browser\'s own does not claim the agent is talking', asyn
     method: 'session/prompt',
     params: { sessionId: 'acp-1', prompt: [{ type: 'text', text: 'hello' }] },
   });
-  // A request being open says nothing about the agent: the adapter holds one
-  // open for as long as the background work a turn started takes to settle.
-  // The gateway marks the thread as working when it forwards the prompt, and
-  // that is what the view goes by.
+  // An open request says nothing about the agent. The gateway's turn state
+  // decides.
   assert.equal(store.getSnapshot().isRunning, false);
   client.handlers.onTurnState(threadState({ active: true, speaking: true }));
   assert.equal(store.getSnapshot().isRunning, true);
 
   client.settle();
   await sent;
-  // Still talking: the prompt coming back is not the agent stopping, and the
-  // gateway has not said it has.
+  // Still talking, because the gateway has not said otherwise.
   assert.equal(store.getSnapshot().isRunning, true);
   client.handlers.onTurnState(threadState());
   assert.equal(store.getSnapshot().isRunning, false);
@@ -227,8 +230,7 @@ test("the gateway's turn state runs the thread a browser did not prompt", () => 
   const { store, client } = makeStore();
   assert.equal(store.getSnapshot().isRunning, false);
 
-  // What a browser is told after its replay when it re-opens a thread that
-  // is mid-turn: nothing is in flight from here, and the turn is real.
+  // What a browser hears after its replay when it opens a thread mid-turn.
   client.handlers.onTurnState(threadState({ speaking: true }));
   assert.equal(store.getSnapshot().isRunning, true);
 
@@ -238,8 +240,7 @@ test("the gateway's turn state runs the thread a browser did not prompt", () => 
 
 test('a thread that has stopped talking with work still in it is not running', () => {
   const { store, client } = makeStore();
-  // The state this whole vocabulary exists for: the agent has finished, the
-  // composer is yours, and a build is still going in the box.
+  // The agent has finished, and a build still runs in the box.
   client.handlers.onTurnState(
     threadState({ active: true, speaking: false, background: [BUILD] }),
   );
@@ -254,9 +255,7 @@ test('a replay drops the turn state it was told before it', () => {
   );
   assert.equal(store.getSnapshot().isRunning, true);
 
-  // A reconnect: the gateway re-states the thread after the replay, so
-  // holding the old answer over one would claim a turn nobody has confirmed
-  // and a task nobody has said is still running.
+  // A reconnect. The gateway states the thread again after the replay.
   client.handlers.onReplay(false);
   assert.equal(store.getSnapshot().isRunning, false);
   assert.deepEqual(store.getSnapshot().background, []);
@@ -367,20 +366,17 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   for (const u of script) push(client, u);
   assert.equal(store.getSnapshot().messages.length, 2);
 
-  // What a fresh connection with nothing to resume from does: the gateway
-  // says the thread is coming whole, and the same history follows.
+  // A fresh connection with nothing to resume from: the whole history follows.
   client.handlers.onReplay(false);
-  // The conversation somebody is reading is not blanked to do that: the model
-  // is what went stale, and the socket dropping is not news about the thread.
+  // The published conversation stays on screen.
   assert.equal(store.getSnapshot().messages.length, 2);
 
-  // Nor is the rebuild published on its way past, message by message.
+  // The rebuild is not published message by message.
   const during = store.getSnapshot().messages;
   for (const u of script) push(client, u);
   assert.equal(store.getSnapshot().messages, during);
 
-  // The replay answered: what is on screen is what it said, once, and not
-  // both copies of it.
+  // The replay is published once, without doubling.
   client.handlers.onReady(null, []);
   assert.equal(store.getSnapshot().messages.length, 2);
   assert.notEqual(store.getSnapshot().messages, during);
@@ -394,9 +390,7 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
   } as ThreadUpdate);
   assert.equal(store.getSnapshot().messages.length, 1);
 
-  // A refetch is a session/load on a connection that is already up, so nothing
-  // reports itself ready afterwards the way a handshake does. The store has to
-  // end its own replay window, or the model never reaches the view again.
+  // No onReady follows a refetch, so the store has to end the replay itself.
   const done = store.refetch();
   push(client, {
     sessionUpdate: 'user_message_chunk',
@@ -414,7 +408,7 @@ test('a refetch publishes what the replay it asked for rebuilt', async () => {
     'the replay is published once, and not doubled onto what was there',
   );
 
-  // And the thread is live again: an update after the refetch still lands.
+  // An update after the refetch still lands.
   push(client, {
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: ' and again' },
@@ -435,8 +429,7 @@ test('a refetch keeps an open question rather than refusing the call it is about
     settled = true;
   });
 
-  // The connection is up, so an answer sent here reaches the agent: a refetch
-  // that cancelled would refuse the tool call the user is being asked about.
+  // The connection is up, so a cancel here would reach the agent.
   const done = store.refetch();
   push(client, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write a file' });
   await done;
@@ -464,8 +457,7 @@ test('a question the gateway withdraws stops waiting', async () => {
     withdrawn.signal,
   );
 
-  // Another browser on the thread answered first, so this card has nothing
-  // left to decide.
+  // Another browser on the thread answered first.
   withdrawn.abort();
 
   assert.deepEqual(await answered, { outcome: { outcome: 'cancelled' } });
@@ -731,8 +723,6 @@ test('a turn blocked on a permission request is not reported as running', async 
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
   });
 
-  // The turn is paused for the user, not progressing. Saying otherwise
-  // would hide the very question that is holding it up.
   assert.equal(store.getSnapshot().isRunning, false);
 
   store.respondToApproval('approval-1', 'yes');
@@ -831,8 +821,7 @@ test('a reconnect resumes from the last message the adapter named', () => {
 
   client.resumes = true;
   client.load();
-  // What the browser holds up to is what it names, so the gateway can send
-  // the rest and nothing before it.
+  // The resume point is the last message the browser holds.
   assert.deepEqual(client.resumePoints, [null, 'msg_2']);
 
   // The tail as the gateway sends it: the message named, then what followed.
@@ -910,8 +899,7 @@ test('nothing is published while a resumed replay is being read', () => {
 
   client.resumes = true;
   client.load();
-  // What is on screen stays on screen: the socket dropping is not news about
-  // the conversation, and the tail is published in one go at the end.
+  // The tail is published in one go at the end.
   assert.equal(store.getSnapshot().messages, before);
   for (const u of TRANSCRIPT.slice(1)) push(client, u);
   assert.equal(store.getSnapshot().messages, before);
@@ -942,11 +930,12 @@ test('a resume gives up the questions the dead connection was showing', async ()
   push(client, said('agent', 'msg_2', 'and then this'));
   client.finish();
 
-  // Nobody is listening for the answer on the socket that has gone, and the
-  // gateway puts a question that is still open back after the replay.
+  // The socket that carried the question has gone. The gateway asks again
+  // after the replay if the question is still open.
   assert.deepEqual(await answer, { outcome: { outcome: 'cancelled' } });
   assert.equal(store.getSnapshot().awaiting, null);
-  const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool');
-  assert.equal(tool?.approval, undefined);
+  const tool = partsOf(store.getSnapshot().messages[0]!).find((p) => p.type === 'tool-call');
+  assert.ok(tool);
+  assert.equal(tool.approval, undefined);
 });
 

@@ -3,7 +3,7 @@ import type { ReviewDirResponse, ReviewFileStatus } from '../../../../shared/typ
 import { Notice } from '@/components/Notice';
 import { cn } from '@/lib/utils';
 
-/** What a status colours its row, and the single letter that names it. */
+/** The text colour class, the letter and the label for each git status. */
 const STATUS: Record<ReviewFileStatus, { className: string; mark: string; label: string }> = {
   modified: { className: 'text-warn', mark: 'M', label: 'modified' },
   staged: { className: 'text-primary', mark: 'S', label: 'staged' },
@@ -14,23 +14,10 @@ const STATUS: Record<ReviewFileStatus, { className: string; mark: string; label:
 };
 
 /**
- * The workspace's files, with git status and comment counts on them.
+ * The tree of the workspace's files, with git status and comment counts on them.
  *
- * One tree over the whole workspace, not over one repository in it: paths are
- * workspace-relative, and the directory a repository is rooted at is marked,
- * so the boundaries are visible while scrolling across them. Which repository
- * a file belongs to is what decides its status letter and its gutter markers,
- * and there is nothing to switch between.
- *
- * A folder is fetched when it is opened, so what is on screen is what has been
- * asked for. Which folders are open is the store's, because refetching the tree
- * has to bring back the same shape the reviewer left.
- *
- * One component for both arrangements: a column beside the pane from `md` up,
- * and below it a full-width step of the navigation stack that the open file
- * takes the screen from. The desktop tool's three panels do not survive a
- * phone, but the tree does — what changes is where it is mounted, not what it
- * renders.
+ * One tree covers the whole workspace, and it marks the folder each repository
+ * is rooted at.
  */
 export function ReviewTree({
   dirs,
@@ -41,11 +28,16 @@ export function ReviewTree({
 }: {
   /** Each loaded directory by its path; the workspace root is ''. */
   dirs: Record<string, ReviewDirResponse>;
-  /** The folders standing open, by path. */
+  /**
+   * The folders standing open, by path. The store holds them, so a refetch of
+   * the tree keeps the shape the reviewer left.
+   */
   expanded: string[];
   /** The file the pane is showing, so the tree can mark it. */
   activePath: string | null;
+  /** Called with the path when the user opens a file. */
   onOpen: (path: string) => void;
+  /** Called with the path when the user opens or closes a folder. */
   onToggle: (path: string) => void;
 }) {
   const root = dirs[''];
@@ -85,12 +77,19 @@ function Level({
   onOpen,
   onToggle,
 }: {
+  /** The directory to list. */
   dir: ReviewDirResponse;
+  /** How deep the directory sits, 0 for the workspace root. */
   depth: number;
+  /** Each loaded directory by its path. */
   dirs: Record<string, ReviewDirResponse>;
+  /** The folders standing open, by path. */
   expanded: string[];
+  /** The file the pane is showing. */
   activePath: string | null;
+  /** Called with the path when the user opens a file. */
   onOpen: (path: string) => void;
+  /** Called with the path when the user opens or closes a folder. */
   onToggle: (path: string) => void;
 }) {
   return (
@@ -112,8 +111,7 @@ function Level({
                 onClick={() => (entry.isDir ? onToggle(entry.path) : onOpen(entry.path))}
                 aria-expanded={entry.isDir ? isOpen : undefined}
                 aria-current={entry.path === activePath ? 'true' : undefined}
-                // 44px of tap target on touch, less on a pointer where rows can
-                // be dense without being unusable.
+                // 44px tap targets on narrow screens, denser rows from md up.
                 className={cn(
                   'flex w-full items-center gap-1.5 rounded-md px-2 text-left text-sm',
                   'min-h-11 md:min-h-8',
@@ -135,9 +133,8 @@ function Level({
                   className={cn(
                     'min-w-0 flex-1 truncate',
                     entry.status && STATUS[entry.status].className,
-                    // A repository root reads as a heading rather than a folder:
-                    // it is where one project's statuses and diffs stop meaning
-                    // anything and the next one's start.
+                    // A repository root stands out, because each repository has
+                    // its own statuses and diffs.
                     entry.repo && 'font-medium',
                   )}
                   title={entry.path}
@@ -163,8 +160,7 @@ function Level({
                     {STATUS[entry.status].mark}
                   </span>
                 ) : entry.changed && !isOpen ? (
-                  // Closed, with changed files inside: the letters belong to
-                  // the files, but a branch that hides one has to say so.
+                  // A closed folder shows a dot when a file inside it changed.
                   <span
                     role="img"
                     aria-label="contains changes"
@@ -183,8 +179,7 @@ function Level({
                     {entry.comments}
                   </span>
                 ) : entry.commented && !isOpen ? (
-                  // A closed branch still says there is something in it,
-                  // which is what makes the tree usable as a to-do list.
+                  // A closed folder shows an icon when a file inside it has comments.
                   <MessageSquare
                     className="size-3 shrink-0 text-primary"
                     role="img"

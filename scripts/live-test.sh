@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
-# Live tests that need a real credential to run a turn on.
+# Live tests that run real agent turns, and so cost real inference.
 #
-# These are the checks only a real inference call can prove, so they are kept
-# apart from the credential-free scripts/smoke-test.sh and never run by
-# default.
-#
-# The deployment needs a Claude token from `claude setup-token`. It is
-# normally entered on the settings page; pass it here and this script seeds it
-# through the API before it creates anything:
+# The deployment needs a Claude token from `claude setup-token`. Pass it here,
+# and the script stores it through the API before it creates a box:
 #
 #   docker compose up -d
 #   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... \
 #     API_BASE=http://localhost:3000 ./scripts/live-test.sh
 #
-# Without it, the deployment has to already hold one, and the two checks that
-# compare the box's placeholder against the real token are skipped.
+# Without it, the deployment must already hold a token, and the script skips
+# the check that compares the box's placeholder against the real token.
 #
 # Pass an OpenAI API key as well and the box also gets a Codex thread beside
 # the Claude one, and runs a turn on it:
 #
 #   PROFILE_DEFAULT_OPENAI_API_KEY=sk-... ./scripts/live-test.sh
 #
-# Without one the Codex half is skipped entirely. Both threads live in the
-# same box, on the same checkout, which is the point of a per-thread harness.
+# Without one, the script skips the Codex checks.
+#
+# API_USER and API_PASS add HTTP basic auth to every API call.
 #
 # Needs: curl, jq, docker, and node 22 or newer (for the WebSocket client).
 set -uo pipefail
@@ -32,14 +28,17 @@ CURL_AUTH=()
 if [ -n "${API_USER:-}" ]; then CURL_AUTH=(-u "${API_USER}:${API_PASS:-}"); fi
 
 pass=0; fail=0
+# Prints the arguments in colour, or records a pass (ok) or a failure (no).
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
 ok()    { green "ok   $*"; pass=$((pass+1)); }
 no()    { red   "FAIL $*"; fail=$((fail+1)); }
 
+# Sends one API request with the optional basic auth.
 api() { curl -sS "${CURL_AUTH[@]}" "$@"; }
 
+# Deletes the box this run created.
 cleanup() {
   if [ -n "${BOX_ID:-}" ]; then
     grey "cleaning up box $BOX_ID"
@@ -48,14 +47,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Read under the name the deployment used to take, for the convenience of
-# whoever already exports it, and seeded into the store rather than read back
-# out of the orchestrator's environment, where it no longer is.
+# The real credentials this run seeds into the deployment.
 REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
 REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
 
-# The method is how the secret was obtained, which is what the settings page
-# would have recorded: a pasted OpenAI key is an `api_key`.
+# Stores one credential in the deployment, and exits if the deployment
+# refuses it. $3 is how the settings page would record the secret: api_key
+# for a pasted OpenAI key.
 seed_credential() {
   local id="$1" secret="$2" method="${3:-token}"
   [ -z "$secret" ] && return 0
@@ -76,7 +74,7 @@ BOX_ID=$(api -X POST "$API_BASE/api/boxes" \
 [ -n "$BOX_ID" ] && [ "$BOX_ID" != "null" ] || { red "could not create box"; exit 1; }
 CONTAINER="box-$BOX_ID"
 WS_TOKEN=$(api "$API_BASE/api/boxes/$BOX_ID" | jq -r '.wsToken')
-# Same origin as the API, the way the dashboard derives it.
+# Same origin as the API, as the dashboard derives it.
 LOCAL_WS="${API_BASE/http/ws}/ws/boxes/$BOX_ID/acp"
 grey "box=$BOX_ID  ws=$LOCAL_WS"
 
@@ -93,8 +91,8 @@ fi
 
 echo
 echo "== the turn above ran on a placeholder, not on the real token =="
-# The same turn, seen from the credential's side: the container holds something
-# that is not the stored token, and the proxy is what made it work.
+# The container holds a value other than the stored token, so the proxy made
+# the turn above work.
 IN_BOX=$(docker exec "$CONTAINER" printenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)
 if [ -z "$REAL_CLAUDE" ]; then
   grey "skipped: this run was passed no token, so there is nothing to compare against"
@@ -108,9 +106,7 @@ fi
 
 echo
 echo "== a Codex thread beside the Claude one, in the same box =="
-# The per-thread harness, end to end: a second conversation in the box that
-# already holds a Claude one, running the other agent on the same checkout,
-# authenticated by the key the settings page holds and swapped by the proxy.
+# A second thread in the same box runs Codex on the same checkout.
 if [ -z "$REAL_OPENAI" ]; then
   grey "skipped: no OpenAI key was passed, so nothing can run a Codex turn"
 else
@@ -125,8 +121,8 @@ else
     no "the box would not take a Codex thread"
   fi
 
-  # The box holds a placeholder, never the key. Same proof as the Claude one
-  # above, on the variable the Codex adapter logs itself in with.
+  # The box holds a placeholder in the variable the Codex adapter logs in
+  # with, never the key.
   IN_BOX_KEY=$(docker exec "$CONTAINER" printenv CODEX_API_KEY 2>/dev/null || true)
   if [ -z "$IN_BOX_KEY" ]; then
     no "the box has no CODEX_API_KEY at all"
@@ -138,9 +134,8 @@ else
 
   CODEX_WS="${API_BASE/http/ws}/ws/boxes/$BOX_ID/threads/$CODEX_THREAD/acp"
   grey "codex thread=$CODEX_THREAD"
-  # One turn on the other adapter. `session/new` hands back the pinned
-  # thread's own conversation rather than starting a second one, so this is
-  # the Codex thread created above and no other.
+  # One turn on the Codex thread. On a thread URL, session/new returns that
+  # thread's conversation instead of starting a new one.
   node --input-type=module - "$CODEX_WS" "$WS_TOKEN" <<'NODE'
 const [url, token] = process.argv.slice(2);
 const ws = new WebSocket(url, ['acp.v1', `bearer.${token}`]);
@@ -185,7 +180,7 @@ NODE
     no "the Codex turn produced no answer - check the OpenAI credential in Settings"
   fi
 
-  # And the real key is still nowhere in the box after a turn has carried it.
+  # The real key is still not in the box after the turn.
   if docker exec "$CONTAINER" env 2>/dev/null | grep -qF -- "$REAL_OPENAI"; then
     no "the real OpenAI key is in the box's environment"
   else
@@ -257,8 +252,8 @@ await sleep(20000);
 const b = connect();
 await b.open;
 await b.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
-// A reattaching browser clears its messages and calls session/load, expecting the replay to
-// arrive as session/update notifications.
+// A reattaching browser calls session/load and receives the replay as
+// session/update notifications.
 await b.rpc('session/load', { boxId, cwd: '/workspace', mcpServers: [] });
 await sleep(5000);
 

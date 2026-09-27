@@ -17,12 +17,9 @@ export interface WatchedBox {
 }
 
 /**
- * Reads one box and keeps it fresh while the tab is visible.
+ * Reads one box and polls it while the tab is visible.
  *
- * A view showing a single box asks for that box: one row off the wire instead
- * of the whole list, and a render only when this box is the one that
- * moved. The box list has a poll of its own, which runs while that screen
- * is up.
+ * A view renders again only when the box changed.
  */
 export function useBox(id: string): WatchedBox {
   const [box, setBox] = useState<BoxDetail | null>(null);
@@ -31,8 +28,7 @@ export function useBox(id: string): WatchedBox {
   const reload = useCallback(async (): Promise<void> => {
     try {
       const next = await api.getBox(id);
-      // The same answer as the last one keeps the same object, so a poll that
-      // brings back what is already on screen renders nothing.
+      // Keeps the old object for an unchanged answer, so React does not render again.
       setBox((current) => (current && same(current, next) ? current : next));
       setError(null);
     } catch (err) {

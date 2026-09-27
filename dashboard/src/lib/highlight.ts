@@ -3,29 +3,23 @@ import type { HighlighterCore, ThemedToken } from 'shiki/core';
 /**
  * Client-side syntax highlighting for the review's code pane.
  *
- * The API ships plain text and the browser tokenizes it. That keeps render
- * markup off the wire, keeps the orchestrator out of the presentation
- * business, and — the reason it is not just a preference — makes every line an
- * addressable, tappable row rather than a fragment of one HTML blob.
- *
- * Everything here is lazily imported: the engine, the two themes and each
- * grammar. The thread view must not carry any of it, so nothing in this module
- * is reachable from a static import chain outside the review route.
+ * The API sends plain text, so each line can be its own row. The engine, the
+ * themes and the grammars are imported lazily, so only the review route loads
+ * them.
  */
 
-/** How the two themes' colours reach the DOM; see globals.css. */
+/** The Shiki themes for light and dark mode. */
 const THEMES = { light: 'github-light-default', dark: 'github-dark-default' } as const;
 
-/**
- * One line, as the pane renders it: a run of coloured spans.
- *
- * `color` is a CSS declaration list rather than a colour, because Shiki's dual
- * theme emits both themes at once as `--shiki-light` and `--shiki-dark` custom
- * properties. One tokenize pass then covers light and dark, and switching
- * theme needs no re-tokenize at all.
- */
+/** One coloured span of a line, as the pane renders it. */
 export interface Token {
+  /** The text of the span. */
   content: string;
+  /**
+   * CSS properties for the span. They hold the colour of both themes as
+   * `--shiki-light` and `--shiki-dark`, so switching theme needs no new
+   * tokenize pass.
+   */
   style: Record<string, string>;
 }
 
@@ -72,16 +66,15 @@ function canHighlight(language: string): boolean {
   return language in GRAMMARS;
 }
 
+/** The shared highlighter, once {@link highlighter} has started creating it. */
 let core: Promise<HighlighterCore> | null = null;
 
 /**
  * The shared highlighter, created on first use.
  *
- * The JavaScript regex engine rather than the oniguruma one: it needs no wasm
- * fetch, which is a whole extra request on a phone. `forgiving` skips a pattern
- * it cannot compile instead of throwing, which is the right trade for
- * decoration — a grammar the engine only partly supports still colours most of
- * the file.
+ * Uses the JavaScript regex engine, which needs no wasm download. In
+ * `forgiving` mode it skips a pattern it cannot compile, so a grammar it
+ * supports only in part still colours most of the file.
  */
 async function highlighter(): Promise<HighlighterCore> {
   if (!core) {
@@ -123,30 +116,23 @@ async function loadGrammar(language: string): Promise<void> {
 }
 
 /**
- * How long a line may be before the file is rendered un-tokenized.
+ * The longest line, in characters, a file may have and still be tokenized.
  *
- * A minified bundle is one line of a hundred thousand characters, and
- * tokenizing it would jank the tab for seconds. Rendering it as plain text is
- * both faster and no less readable.
+ * A minified bundle is one very long line, and tokenizing it would block the
+ * tab for seconds.
  */
 const MAX_LINE = 2000;
 
 /**
- * How many lines a file may have before the review stops working line by
- * line.
- *
- * Past this, tokenizing janks the tab for seconds and a row per line is tens
- * of thousands of elements for a phone to lay out. Such a file is shown as
- * one plain block instead, so the number is the pane's limit as well as the
- * tokenizer's.
+ * The most lines a file may have and still be coloured and rendered one row
+ * per line. The pane shows a longer file as one plain block.
  */
 const MAX_LINES = 8000;
 
 /**
  * Whether a file is short enough to colour and to render one row per line.
  *
- * Counts no further than the limit, so rejecting a huge file costs nothing
- * and allocates nothing.
+ * Stops counting at the limit and allocates nothing.
  */
 export function withinLineLimit(content: string): boolean {
   let lines = 1;
@@ -157,13 +143,11 @@ export function withinLineLimit(content: string): boolean {
 }
 
 /**
- * Tokenizes a file into one token list per line, or null when it should be
- * rendered plain — no grammar for the language, a file past the line limit, a
- * pathological line, or a failure in the grammar itself.
+ * Tokenizes a file into one token list per line.
  *
- * Returning null rather than throwing is deliberate: highlighting is
- * decoration, and a file that cannot be coloured still has to be readable and
- * commentable.
+ * Returns null, and never throws, when the file should be rendered plain: no
+ * grammar for the language, too many lines, a line that is too long, or a
+ * failure in the grammar.
  */
 export async function tokenizeLines(
   content: string,
@@ -179,8 +163,7 @@ export async function tokenizeLines(
     const { tokens } = core.codeToTokens(content, {
       lang: language,
       themes: THEMES,
-      // Both themes as custom properties and no committed default, so the
-      // page's own light/dark class decides which one paints.
+      // No default colour, so the page's .dark class picks the theme.
       defaultColor: false,
     });
     return tokens.map(toLine);

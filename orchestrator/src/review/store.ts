@@ -1,15 +1,8 @@
 /**
- * The REVIEW.md contract: parsing, serialization, mutation and drift.
+ * The REVIEW.md format: parsing, serialization, mutation and drift.
  *
- * A port of the desktop tool's `internal/store` (parse.go, write.go,
- * drift.go), which is the specification for the format. The format is kept
- * exactly, so a review started in one tool is continued in the other, and the
- * Go round-trip and drift test tables are ported alongside it.
- *
- * Everything here is pure. Nothing in this file reads or writes a file, spawns
- * a process or looks at a clock, so the whole contract is testable without a
- * filesystem — and the one place that does touch disk (service.ts) has the
- * read-modify-write and the locking, and nothing else.
+ * The format matches the desktop review tool's byte for byte, so either tool
+ * can continue a review the other started. This module does no I/O.
  */
 
 /**
@@ -19,13 +12,14 @@
 const CONTEXT_RADIUS = 3;
 
 /**
- * Appears in the info string of a context block's fence and tells it apart
- * from a code sample written in the comment above it.
+ * The word in a context block's fence info string that tells the block apart
+ * from a code sample in the comment above it.
  */
 const CONTEXT_MARKER = 'context';
 
 /** One review comment with the source context it was written against. */
 export interface Annotation {
+  /** The reviewer's comment, trimmed. */
   comment: string;
   /** Stored context lines, without their line-number prefix. */
   context: string[];
@@ -40,29 +34,34 @@ type ReviewData = Map<string, Map<number, Annotation>>;
 
 /** A whole parsed REVIEW.md. */
 export interface Review {
+  /** The annotations, by file path and line number. */
   data: ReviewData;
   /** The date the review was started, or '' for a file that records none. */
   started: string;
 }
 
+/** A file section heading, which holds the path in backticks. */
 const FILE_HEADER = /^## `(.+)`$/;
+/** An annotation heading with its line number and an optional marker. */
 const LINE_HEADER = /^#### Line (\d+)(.*)$/;
+/** One numbered source line of a context block. */
 const CONTEXT_LINE = /^(\d+):(?: (.*))?$/;
+/** The line that records the date the review was started. */
 const STARTED = /^_Started: (.+)_$/;
+/** The run of backticks or tildes that opens a code fence. */
 const FENCE = /^(`{3,}|~{3,})/;
 
 /**
- * How far a code fence may be indented before it is content of an enclosing
- * block rather than a fence of its own.
+ * The most spaces a code fence may be indented. A line indented further is
+ * content, not a fence.
  */
 const MAX_FENCE_INDENT = 3;
 
 // --- parsing ----------------------------------------------------------------
 
 /**
- * Splits a document into lines the way the Go implementation's scanner does:
- * without terminators, tolerating CRLF, and with no trailing empty line for a
- * file that ends in a newline.
+ * Splits a document into lines without terminators, tolerating CRLF. A final
+ * newline adds no empty last line.
  */
 function toLines(text: string): string[] {
   if (text === '') return [];
@@ -74,18 +73,17 @@ function toLines(text: string): string[] {
 /**
  * Reads a REVIEW.md into its annotations and the date the review was started.
  *
- * Comments are kept as the reviewer wrote them, so the document's own
- * structure is only recognised outside fenced code blocks: a heading in a
- * comment's code sample is part of the comment. A horizontal rule separates
- * sections only where a file heading follows it.
+ * Headings count as structure only outside fenced code blocks, so a heading in
+ * a comment's code sample stays part of the comment. A horizontal rule
+ * separates sections only when a file heading follows it.
  */
 export function parseReview(text: string): Review {
   const lines = toLines(text);
   const data: ReviewData = new Map();
 
   // A document that marks its context blocks is read strictly, so a code
-  // sample closing a comment is never taken for one. Files written before the
-  // marker carry none; there the numbered source lines identify it.
+  // sample closing a comment is not taken for context. In a document without
+  // markers, numbered source lines identify a context block.
   const marked = usesContextMarker(lines);
 
   let started = '';
@@ -206,8 +204,8 @@ function joinComment(lines: string[]): string {
 }
 
 /**
- * Reads numbered source lines, the form the context block takes, and reports
- * whether the lines are such a block at all.
+ * Parses the numbered source lines of a context block, or returns null when
+ * the lines are not one.
  */
 function parseContext(lines: string[]): { context: string[]; from: number } | null {
   if (lines.length === 0) return null;
@@ -292,8 +290,8 @@ function looksStructural(line: string): boolean {
 }
 
 /**
- * Removes the backslash escapeComment puts in front of a comment line which
- * would otherwise read as a heading.
+ * Removes the backslash that `escapeComment` puts in front of a comment line
+ * which would otherwise read as a heading.
  */
 function unescapeStructure(line: string): string {
   if (line.startsWith('\\') && looksStructural(line.slice(1))) return line.slice(1);
@@ -305,9 +303,8 @@ function unescapeStructure(line: string): string {
 /**
  * Converts a review to its markdown form.
  *
- * Context blocks are written from the context stored with each annotation,
- * which is the code as it looked when the annotation was last in sync with the
- * source — not the code as it is now.
+ * Context blocks hold the context stored with each annotation: the code as it
+ * was when the annotation last matched the source.
  */
 export function serializeReview(review: Review): string {
   const out: string[] = ['# Code Review\n\n', `_Started: ${review.started}_\n`];
@@ -322,8 +319,8 @@ export function serializeReview(review: Review): string {
       const { text, openFence } = escapeComment(ann.comment);
       out.push(text);
       if (ann.context.length > 0) {
-        // A fence the comment left open would swallow the context block, which
-        // reads back as part of the comment and takes the block with it.
+        // Close a fence the comment left open, or the context block would read
+        // back as part of the comment.
         if (openFence !== '') out.push(openFence, '\n');
         out.push(`\n\`\`\`${contextFenceInfo(path)}\n`);
         out.push(formatContext(ann.context, ann.contextFrom));
@@ -338,10 +335,9 @@ export function serializeReview(review: Review): string {
 /**
  * The annotated file paths, in the order the document lists them.
  *
- * Go sorts strings by their bytes; JavaScript's default sort compares UTF-16
- * code units, which disagrees above the BMP. Comparing the UTF-8 bytes keeps a
- * file written here byte-identical to one written by the desktop tool even
- * where a path is not ASCII.
+ * Paths are sorted by their UTF-8 bytes, as the desktop tool sorts them. The
+ * default sort compares UTF-16 code units, which gives a different order for
+ * characters outside the BMP.
  */
 function sortedPaths(data: ReviewData): string[] {
   return [...data.entries()]
@@ -354,10 +350,9 @@ function sortedPaths(data: ReviewData): string[] {
  * Writes a comment as the reviewer wrote it, and reports the code fence it
  * left open, if any.
  *
- * Only a line that would be read back as one of the document's own headings is
- * prefixed with a backslash, which markdown renders as the plain text that was
- * meant. Lines inside the comment's own code fences are left alone, as nothing
- * in them is read as structure.
+ * A line that would read back as one of the document's own headings gets a
+ * backslash in front, which markdown renders as the intended text. Lines inside
+ * the comment's own code fences stay unchanged.
  */
 function escapeComment(comment: string): { text: string; openFence: string } {
   const out: string[] = [];
@@ -395,15 +390,12 @@ function formatContext(lines: string[], from: number): string {
 }
 
 /**
- * A language identifier for a context block's fence, by file extension.
+ * A language identifier for a context block's fence, by file name or
+ * extension, or '' when none is known.
  *
- * The desktop tool asks Chroma to match the filename and shortens the handful
- * of names below. This covers the languages it shortens plus what a Boxes
- * workspace holds. An extension neither knows falls through to no
- * language, which changes only how a context block is syntax-coloured when the
- * markdown is rendered: both tools take the language from the first word of
- * the info string and both find the `context` marker after it, so a file one
- * writes still round-trips through the other.
+ * The language only affects syntax colouring when the markdown is rendered.
+ * Both tools find the `context` marker after it, so a review still reads back
+ * in the other tool when the two pick different languages.
  */
 export function detectLang(path: string): string {
   const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
@@ -471,7 +463,10 @@ export function detectLang(path: string): string {
   return byExt[ext] ?? '';
 }
 
-/** Today, in the format REVIEW.md records a review's start date in. */
+/**
+ * Formats a date, today by default, as REVIEW.md records a start date:
+ * YYYY-MM-DD in local time.
+ */
 export function todayStamp(now: Date = new Date()): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
@@ -554,10 +549,10 @@ export function annotationCounts(review: Review): Map<string, number> {
  * Brings one file's annotations back in line with its source, and reports
  * whether that changed anything.
  *
- * An annotation whose context has moved is relocated; one whose context is
- * gone is marked outdated; one recorded before context was stored adopts the
- * current source as its reference. `sourceLines` is null for a file that no
- * longer exists, which makes every annotation on it outdated.
+ * An annotation whose context has moved is relocated. One whose context is
+ * gone is marked outdated. One without stored context adopts the current
+ * source as its reference. `sourceLines` is null for a file that no longer
+ * exists, which makes every annotation on it outdated.
  */
 export function checkDrift(
   annotations: Map<number, Annotation>,
@@ -581,8 +576,7 @@ export function checkDrift(
 
   for (const [lineNum, ann] of annotations) {
     if (ann.context.length === 0) {
-      // Nothing recorded to compare against, as in files written before the
-      // context was stored: adopt the current source as reference.
+      // No stored context to compare against: adopt the current source.
       const { context, from } = contextAround(sourceLines, lineNum, CONTEXT_RADIUS);
       if (context.length > 0) {
         ann.context = context;
@@ -622,21 +616,22 @@ export function checkDrift(
 
 /** An annotation that moved, with the lines it moved from and to. */
 interface Relocation {
+  /** The line the annotation is on. */
   oldLine: number;
+  /** The line its context now points to. */
   newLine: number;
+  /** The annotation that moves. */
   ann: Annotation;
 }
 
 /**
  * Moves relocated annotations onto their new lines, in place.
  *
- * A move is taken only where its line is free of every annotation that is
- * staying put and is wanted by no other move. One that is not taken leaves
- * its annotation where it was, which frees nothing and can therefore block a
- * move that looked safe a moment ago — so the set is settled by refusing one
- * at a time until the rest hold. The result keeps every annotation and puts
- * no two on one line, which is all REVIEW.md can hold. The map is rebuilt in
- * line order, the order the document lists lines in.
+ * A move goes ahead only when no staying annotation holds its target line and
+ * no earlier move claims it. A refused move leaves its annotation in place,
+ * which can block another move, so the loop refuses one move at a time until
+ * the rest hold. No annotation is lost and no two share a line. The map is
+ * rebuilt in line order.
  */
 function relocate(annotations: Map<number, Annotation>, relocations: Relocation[]): void {
   const moves = new Map(relocations.map((r) => [r.oldLine, r]));
@@ -673,9 +668,8 @@ function contextMatchesAt(fileLines: string[], context: string[], fromLine: numb
  * 1-based line number, or 0 when there is none.
  *
  * The search runs outwards from `near`, so the match closest to where the
- * context was written wins. Code that repeats itself — a run of closing
- * braces, blank lines, boilerplate — would otherwise pull an annotation to
- * whichever copy comes first in the file.
+ * context was written wins. Code that repeats, such as closing braces or
+ * boilerplate, then keeps its annotations on the right copy.
  */
 function findContext(fileLines: string[], context: string[], near: number): number {
   const limit = fileLines.length - context.length + 1;

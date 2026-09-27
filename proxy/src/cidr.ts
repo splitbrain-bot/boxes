@@ -1,9 +1,6 @@
 /**
- * Resolved-IP vetting for the egress proxy, and the only thing between an
- * agent and the owner's LAN.
- *
- * Every address a hostname resolves to has to pass, and the caller then
- * connects to one vetted address without resolving a second time.
+ * Address vetting for the egress proxy: which resolved addresses an agent may
+ * connect to.
  */
 
 /** IPv4 ranges an agent must never reach through the proxy. */
@@ -104,10 +101,9 @@ function hexGroup(text: string): number | null {
 /**
  * The IPv4 address an IPv6 address reaches, or null when it embeds none.
  *
- * Several IPv6 forms carry an IPv4 address inside them: v4-mapped
- * (::ffff:a.b.c.d), v4-translated (::ffff:0:a.b.c.d), v4-compatible
- * (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4 (2002::/16). Each is vetted as
- * the IPv4 address it reaches, so none of them is a way past the IPv4 ranges.
+ * Covers v4-mapped (::ffff:a.b.c.d), v4-translated (::ffff:0:a.b.c.d),
+ * v4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4 (2002::/16), so
+ * that none of these forms gets past the IPv4 ranges.
  */
 function embeddedV4(groups: readonly number[]): number | null {
   const at = (i: number): number => groups[i] ?? 0;
@@ -124,10 +120,7 @@ function embeddedV4(groups: readonly number[]): number | null {
   return null;
 }
 
-/**
- * Whether an address is one an agent must not reach. Unparseable input counts
- * as blocked: this check fails closed.
- */
+/** Whether an agent must not reach an address. Unparseable input counts as blocked. */
 export function isBlockedAddress(address: string): boolean {
   const text = address.trim();
   if (text === '') return true;

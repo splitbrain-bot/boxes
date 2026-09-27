@@ -5,23 +5,9 @@ import { log } from '../log.ts';
 import type { BoxManager } from '../boxes.ts';
 
 /**
- * The terminal endpoint: one WebSocket, one pty in the box's container.
- *
- * Binary frames are the pty's bytes, in both directions, and nothing else.
- * Text frames are control from the browser — only a window size so far — so
- * the bytes never have to carry an envelope of their own.
- *
- * The connection belongs to the box rather than to a conversation. A thread
- * is where the agent is talked to; a terminal is the same box seen directly,
- * and every browser that opens one lands in the same shell.
- */
-
-/**
  * How many bytes one browser's socket may have waiting on it.
  *
- * A pty produces far faster than a browser draws, and what the socket cannot
- * take is buffered in this process. Past this the pty is paused, which holds
- * up the program writing into it the way a real terminal does.
+ * Past this the pty is paused, which blocks the program writing into it.
  */
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 
@@ -32,12 +18,10 @@ const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
 /**
- * How often the server asks whether the browser is still there, in
- * milliseconds.
+ * How often the server pings the browser, in milliseconds.
  *
- * An open terminal holds its box running, so a socket nobody is on the other
- * end of — a laptop that slept, a phone that locked — would pin a container
- * until TCP gave up on its own, which takes far longer.
+ * An open terminal keeps its box running, so a dead socket must be found
+ * sooner than TCP would find it.
  */
 const PING_MS = 30_000;
 
@@ -45,32 +29,29 @@ const PING_MS = 30_000;
 const MISSED_PINGS = 2;
 
 /**
- * How long the browser may stay silent about its size before the pty opens
- * anyway, in milliseconds.
- *
- * The dashboard sends its size as its first frame. This is what gets a client
- * that sends none a shell regardless.
+ * How long to wait for the browser's size before the pty opens at the
+ * default size, in milliseconds. The dashboard sends its size first.
  */
 const SIZE_WAIT_MS = 2_000;
 
-/** Close codes this endpoint uses, past the ones the standard spends. */
+/** WebSocket close codes this endpoint uses besides 1000. */
 const CLOSE = {
-  /** The connection broke a rule of the endpoint rather than hit a fault. */
+  /** Policy violation, such as a browser that stopped answering pings. */
   policy: 1008,
-  /** The box could not be reached, which is the endpoint's own failure. */
+  /** Internal error, such as a box or pty that could not be reached. */
   unavailable: 1011,
 } as const;
 
 /**
  * Attaches one browser to a pty in the box's container.
  *
- * The box is started first, which runs the same repairs a start does and is
- * what opens a terminal on a box the reaper took. That takes seconds, so
- * frames arriving in the meantime are held and replayed into the pty once it
- * is there.
+ * Binary frames carry the pty's bytes in both directions. Text frames carry
+ * control messages from the browser, such as the window size. Every browser
+ * that opens a terminal on a box gets the same shell.
  *
- * One teardown serves whichever end goes first: the socket closing ends the
- * shell, and the shell ending closes the socket.
+ * The box is started first, which can take seconds, so input that arrives
+ * meanwhile is queued. The socket closing ends the shell, and the shell
+ * ending closes the socket.
  */
 export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager): void {
   const slog = log.box(boxId);
@@ -80,14 +61,16 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   let terminal: dk.TerminalExec | null = null;
   /** Bytes the browser sent before the pty was there. */
   const queued: Buffer[] = [];
-  /** The size the browser last reported, which the pty is opened at. */
+  /** The width the browser last reported. */
   let cols = DEFAULT_COLS;
+  /** The height the browser last reported. */
   let rows = DEFAULT_ROWS;
-  /** True once the browser has said what size it is, or the wait has run out. */
+  /** True once the browser has reported its size. */
   let sized = false;
+  /** True once the teardown has run. */
   let closed = false;
 
-  /** Ends the wait below, once the promise has handed over its resolve. */
+  /** Ends the size wait early. */
   let resolveSize: () => void = () => {};
   /** Resolves once the size is known, so the pty opens at the right width. */
   const knownSize = new Promise<void>((resolve) => {
@@ -99,12 +82,12 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     };
   });
 
+  /** Tears down both ends once, whichever goes first. */
   const close = (code: number, reason: string): void => {
     if (closed) return;
     closed = true;
     release();
-    // Ending the shell reaches into the box, so it is not waited for: the
-    // socket is closed now, and the client in there goes when it goes.
+    // Not awaited, so the socket closes without waiting on the box.
     void terminal?.close();
     if (ws.readyState === ws.OPEN) ws.close(code, reason);
   };
@@ -113,8 +96,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
 
   ws.on('message', (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
-      // Typing is what says somebody is using the box, and it is what holds
-      // the reaper off once the terminal is closed again.
+      // Typing marks the box as used, which holds off the reaper later.
       manager.touchThrottled(boxId);
       if (terminal) terminal.stream.write(data);
       else queued.push(Buffer.from(data));
@@ -141,8 +123,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     close(CLOSE.unavailable, 'socket error');
   });
 
-  // The browser answers a ping below every application protocol, so nothing
-  // the page is doing can stall the reply.
+  // The browser answers pings itself, so a busy page cannot stall the reply.
   let missed = 0;
   ws.on('pong', () => {
     missed = 0;
@@ -150,8 +131,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   const pings = setInterval(() => {
     if (missed >= MISSED_PINGS) {
       slog.info('dropping a terminal whose browser stopped answering');
-      // terminate() rather than close(): there is nobody to complete a
-      // closing handshake with.
+      // Nobody is there to complete a closing handshake.
       ws.terminate();
       close(CLOSE.policy, 'gone');
       return;
@@ -183,8 +163,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
       close(CLOSE.unavailable, (err as Error).message);
       return;
     }
-    // The socket can go while the pty is opening, and the teardown above then
-    // has nothing to end.
+    // The socket closed while the pty was opening, before close() could end it.
     if (closed) {
       void terminal.close();
       return;
@@ -198,8 +177,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
       if (ws.readyState !== ws.OPEN) return;
       ws.send(chunk, { binary: true });
       if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return;
-      // The pty stops being read, so the program writing into it blocks, and
-      // both start again once the browser has caught up.
+      // Pauses the pty until the browser has caught up.
       terminal?.stream.pause();
       const resume = (): void => {
         if (closed) return;

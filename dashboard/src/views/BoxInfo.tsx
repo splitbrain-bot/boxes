@@ -30,16 +30,10 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * What a box is made of and what can be done to it: the ops side of a box,
- * beside its conversations.
+ * Page with the details of one box and its start, stop and delete controls.
  *
- * Back goes where the visitor came from, by going back: the entry this view
- * was opened from is still on the stack, whether it was the list or a thread
- * that opened it, so there is nothing to remember and nothing to get wrong.
- * Pushing the sender instead is how a back control ends up pointing the same
- * way as the browser's own. Where there is nothing to pop — a pasted link, a
- * notification, a shortcut on a home screen — the box list is the parent
- * that replaces this entry.
+ * Back returns to the list or thread that opened the page. Without an app
+ * entry below, the box list replaces this entry.
  */
 export function BoxInfo() {
   const { id = '' } = useParams();
@@ -65,6 +59,7 @@ export function BoxInfo() {
     return pollWhileVisible(() => void load(), POLL_MS);
   }, [load]);
 
+  /** Runs one action on the box, then reloads the box and the box list. */
   const act = async (fn: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
     setError(null);
@@ -80,9 +75,8 @@ export function BoxInfo() {
   };
 
   /**
-   * Deletes the box and leaves for the list. Not through act, which
-   * reloads the box it just acted on: there is nothing left to reload,
-   * and asking for it again would only answer 404.
+   * Deletes the box and leaves for the list. It bypasses `act`, because a
+   * reload of the deleted box would answer 404.
    */
   const remove = async (): Promise<void> => {
     setBusy(true);
@@ -90,11 +84,7 @@ export function BoxInfo() {
     try {
       await api.deleteBox(id);
       await refresh();
-      // The list takes this entry's place rather than sitting on top of it:
-      // the view that acted is gone with what it acted on, and one back press
-      // out of a list is not a press back into a box that no longer
-      // exists. Entries further down may still name it — history belongs to
-      // the browser — and those land on the page that says so.
+      // Replaces this entry, so back from the list does not open the deleted box.
       void navigate('/', { replace: true });
     } catch (err) {
       setError((err as Error).message);
@@ -150,31 +140,25 @@ export function BoxInfo() {
               value={box.containerId ? box.containerId.slice(0, 12) : '—'}
             />
             <Meta label="Network" value={`${box.networkName} (${box.subnet})`} />
-            {/* Which agent set this box was created with. The global one is
-                applied on top of it either way, so "global only" is the
-                truthful reading of no set rather than "none". */}
+            {/* Every box gets the global set, so no named set reads as "global only". */}
             <Meta label="Agent set" value={box.agentSetName ?? 'global only'} />
             <Meta label="Last active" value={new Date(box.lastActiveAt).toLocaleString()} />
-            {/* What the card shows, with the reason it can be absent said out
-                loud: a box still on a named volume has no directory for
-                the orchestrator to measure. */}
+            {/* Null before the first measurement, or when the box has no directory
+                to measure, such as a box on named volumes. */}
             <Meta
               label="On disk"
               value={
                 box.diskBytes === null
                   ? 'not measured'
-                  : `${shortSize(box.diskBytes)} of workspace and home`
+                  : shortSize(box.diskBytes)
               }
             />
           </dl>
         </CardContent>
       </Card>
 
-      {/* Only where there is something to list. The badge on the card can be
-          true with nothing here — a task an adapter announced is named on its
-          own thread's bar, and one that is not a process of its own is in no
-          process table at all — and a card headed "running in the box" over an
-          empty list would read as a fault. */}
+      {/* Hidden when empty. The card's badge can show work that is not listed
+          here, such as a task an adapter announced on its thread's bar. */}
       {box.boxWork.length > 0 ? (
         <Card>
           <CardHeader>

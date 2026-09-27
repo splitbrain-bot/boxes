@@ -1,18 +1,9 @@
 import type { Db, PendingRequestRow } from '../db.ts';
 import { log } from '../log.ts';
 
-/**
- * Permission requests the adapter is blocked on while no browser is attached.
- * The turn pauses until a human answers, or until PERMISSION_HOLD_MINUTES
- * expires and PERMISSION_FALLBACK applies.
- *
- * Each request gets a row, so the dashboard can show that something is waiting
- * and a restart does not lose that fact. The resolver that answers the request
- * lives in memory, so a row that outlives its process cannot be answered.
- */
-
 /** One queued permission request and the handlers waiting on its answer. */
 export interface PendingEntry {
+  /** The stored row of this request. */
   row: PendingRequestRow;
   /** Resolves the upstream request with the browser's chosen outcome. */
   resolve: (result: unknown) => void;
@@ -23,21 +14,27 @@ export interface PendingEntry {
   /**
    * One per browser this request has been put to and not yet heard from.
    *
-   * The same question goes to every browser that opens the thread, and only
-   * the first answer counts. Aborting the rest is what tells those browsers
-   * the question is over, so a card is not left waiting for an answer that
-   * would be discarded.
+   * Every browser that opens the thread gets the question, and only the first
+   * answer counts. Aborting a delivery tells that browser the question is over.
    */
   readonly deliveries: Set<AbortController>;
 }
 
-/** The queue of unanswered permission requests, in memory and in the database. */
+/**
+ * The queue of unanswered permission requests, in memory and in the database.
+ *
+ * The adapter blocks until a human answers, or until PERMISSION_HOLD_MINUTES
+ * expires and PERMISSION_FALLBACK applies. The row lets the dashboard show
+ * that something is waiting. The resolver lives in memory only, so a row left
+ * by an earlier process cannot be answered.
+ */
 export class PendingStore {
+  /** The answerable entries, by row id. */
   private readonly entries = new Map<number, PendingEntry>();
 
   constructor(private readonly db: Db) {}
 
-  /** Drop rows left behind by a previous orchestrator process. */
+  /** Drops rows left behind by a previous orchestrator process. */
   clearStale(): void {
     const removed = this.db.prepare('DELETE FROM pending_requests').run();
     if (removed.changes > 0) {
@@ -46,8 +43,9 @@ export class PendingStore {
   }
 
   /**
-   * Queues a request and returns its entry. The timeout callback fires after
-   * holdMs unless the entry is settled first.
+   * Queues a request and returns its entry.
+   *
+   * @param onTimeout Runs after holdMs unless the entry is settled first.
    */
   add(
     boxId: string,
@@ -59,8 +57,7 @@ export class PendingStore {
     onTimeout: (entry: PendingEntry) => void,
   ): PendingEntry {
     const createdAt = Date.now();
-    // Serialized once: the row handed back has to be the row that was stored,
-    // and stringifying twice made that a coincidence rather than a fact.
+    // Serialized once, so the returned row matches the stored one.
     const serialized = JSON.stringify(params ?? null);
     const info = this.db
       .prepare(
@@ -82,21 +79,22 @@ export class PendingStore {
       const entry = this.entries.get(id);
       if (entry) onTimeout(entry);
     }, holdMs);
-    // Do not keep the process alive purely for a hold timer.
     timer.unref?.();
     const entry: PendingEntry = { row, ...handlers, timer, deliveries: new Set() };
     this.entries.set(id, entry);
     return entry;
   }
 
-  /** Removes the entry and its DB row; safe to call twice. */
+  /**
+   * Removes the entry and its DB row. Safe to call twice.
+   *
+   * @returns The entry, or undefined when it was already settled.
+   */
   settle(id: number): PendingEntry | undefined {
     const entry = this.entries.get(id);
     if (entry) {
       clearTimeout(entry.timer);
-      // Whoever else is still showing this question is told it is over,
-      // however it was settled: an answer from another browser, the hold
-      // running out, or the box stopping.
+      // Withdraws the question from every browser still showing it.
       for (const delivery of entry.deliveries) delivery.abort();
       entry.deliveries.clear();
       this.entries.delete(id);
@@ -110,11 +108,7 @@ export class PendingStore {
     return [...this.entries.values()].filter((e) => e.row.box_id === boxId);
   }
 
-  /**
-   * The answerable entries of one thread, which is what a browser watching
-   * that thread is given. A request from another conversation is not this
-   * browser's to answer.
-   */
+  /** The answerable entries of one thread. */
   listForThread(boxId: string, acpSessionId: string): PendingEntry[] {
     return this.listForBox(boxId).filter(
       (e) => e.row.acp_session_id === acpSessionId,
@@ -129,12 +123,7 @@ export class PendingStore {
     return row?.n ?? 0;
   }
 
-  /**
-   * Waiting request counts of one box, keyed by the adapter's thread id.
-   *
-   * A column rather than the stored params: the params carry the thread too,
-   * but a query wants a column, and this is what the per-thread badge counts.
-   */
+  /** Waiting request counts of one box, keyed by the adapter's thread id. */
   countsByThread(boxId: string): Map<string, number> {
     const rows = this.db
       .prepare(
@@ -154,7 +143,7 @@ export class PendingStore {
     return new Map(rows.map((r) => [r.box_id, r.n]));
   }
 
-  /** Fail everything outstanding for a box (container stop / delete). */
+  /** Rejects every queued request of a box, for a box that stops or is deleted. */
   failBox(boxId: string, reason: string): void {
     for (const entry of this.listForBox(boxId)) {
       this.settle(entry.row.id);
@@ -162,11 +151,7 @@ export class PendingStore {
     }
   }
 
-  /**
-   * Rejects every queued request of one thread, for an adapter that has gone
-   * with the thread still asking. Its other threads, and the box's other
-   * adapter, keep their questions.
-   */
+  /** Rejects every queued request of one thread, for an adapter that has exited. */
   failThread(boxId: string, acpSessionId: string, reason: string): void {
     for (const entry of this.listForThread(boxId, acpSessionId)) {
       this.settle(entry.row.id);

@@ -5,15 +5,7 @@ import type { EgressPolicy } from '../../shared/types.ts';
 import { allAddressesAllowed, isBlockedAddress } from './cidr.ts';
 import { hostAllowed, isInjectionHost } from './policy.ts';
 
-/**
- * The forwarding half of the proxy: allowlist, address vetting, and the pinned
- * connection out.
- *
- * The proxy runs two of these. The front door faces the box networks and
- * may hand an intercepted host to the TLS engine; the upstream tunnel listens
- * on loopback and vets every connection the TLS engine makes, so decrypting a
- * host buys no way around the checks below.
- */
+/** The forward proxy server, which vets every destination before it connects. */
 
 /** Destination ports an agent may reach. */
 export const ALLOWED_PORTS = new Set([80, 443]);
@@ -45,7 +37,9 @@ const NO_POLICY_REASON = 'the proxy has no policy yet';
 
 /** Where a request wants to go. */
 export interface Target {
+  /** Hostname or IP literal, without brackets. */
   host: string;
+  /** Destination port. */
   port: number;
 }
 
@@ -77,9 +71,9 @@ export type Verdict =
 
 /**
  * Vets a target and returns the single address to pin the connection to. An IP
- * literal is checked as it stands; a hostname is resolved first and every
- * answer has to pass. The allowlist is checked first, so a denied host is
- * never looked up.
+ * literal is checked as it stands. A hostname is resolved, and every answer
+ * has to pass. The allowlist is checked before DNS, so a denied host is never
+ * looked up.
  */
 export async function vetTarget(target: Target, policy: EgressPolicy): Promise<Verdict> {
   if (!ALLOWED_PORTS.has(target.port)) {
@@ -151,7 +145,7 @@ function deny(res: http.ServerResponse, reason: string): void {
   res.end(`egress denied: ${reason}\n`);
 }
 
-/** Headers that describe one hop rather than the request, so are not passed on. */
+/** Headers that describe one hop rather than the request, and so stop here. */
 const HOP_BY_HOP_HEADERS = [
   'connection',
   'keep-alive',
@@ -199,8 +193,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
 
   server.on('request', (req, res) => {
     if (!opts.applied()) {
-      // An empty policy allows every public host, so nothing may pass before
-      // the orchestrator has said what this proxy is for.
+      // An empty policy allows every public host, so nothing passes before the first push.
       opts.denied('no-policy');
       opts.log('denied http request', { reason: NO_POLICY_REASON });
       deny(res, NO_POLICY_REASON);
@@ -244,9 +237,8 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
 
     const policy = opts.policy();
     if (opts.interceptPort() !== null && isInjectionHost(target.host, policy)) {
-      // A credential host reached in the clear would leak the placeholder, or
-      // invite injecting the real secret into plaintext. These hosts serve
-      // https anyway.
+      // In the clear, a credential host would get the placeholder, or the real
+      // secret as plaintext. These hosts serve https anyway.
       opts.denied('plaintext-credential-host');
       opts.log('denied http request', {
         host: target.host,
@@ -315,8 +307,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
     };
 
     if (!opts.applied()) {
-      // An empty policy allows every public host, so nothing may pass before
-      // the orchestrator has said what this proxy is for.
+      // An empty policy allows every public host, so nothing passes before the first push.
       opts.denied('no-policy');
       opts.log('denied CONNECT', { reason: NO_POLICY_REASON });
       refuse(403, 'Forbidden');
@@ -345,8 +336,8 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       const enginePort = opts.interceptPort();
       if (enginePort !== null && isInjectionHost(target.host, policy)) {
         if (target.port !== 443) {
-          // Whatever a tunnel to another port carries is not https, so the
-          // engine would meet plaintext and swap the real credential into it.
+          // A tunnel to another port does not carry https, so the engine would
+          // swap the real credential into plaintext.
           opts.denied('plaintext-credential-host');
           opts.log('denied CONNECT', {
             host: target.host,
@@ -416,8 +407,8 @@ function connectToEngine(
     engine.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
   });
 
-  // Once the tunnel is established the client is speaking TLS, so a late
-  // failure has to close it rather than write a status line into the stream.
+  // Once the tunnel is established the client speaks TLS, so a late failure
+  // closes it rather than writing a status line into the stream.
   let established = false;
   const failed = (reason: string): void => {
     clearTimeout(handshake);

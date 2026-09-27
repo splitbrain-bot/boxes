@@ -7,13 +7,7 @@ import {
 import { createContext, useContext, useMemo, type FC, type ReactNode } from 'react';
 import type { AvailableCommand } from '../stores/thread/acp-types.ts';
 
-/**
- * Completion for the slash commands the adapter advertises.
- *
- * The commands come from the thread's session/update stream, so what the
- * composer offers is what this agent accepts, and it changes with the agent
- * rather than with this build.
- */
+/** Composer completion for the slash commands the adapter advertises. */
 
 /** The commands the composer completes, published by the thread route. */
 const CommandsContext = createContext<AvailableCommand[]>([]);
@@ -23,17 +17,17 @@ export function SlashCommandsProvider({
   commands,
   children,
 }: {
+  /** The commands from the thread's session/update stream. */
   commands: AvailableCommand[];
+  /** The tree that holds the composer. */
   children: ReactNode;
 }) {
   return <CommandsContext.Provider value={commands}>{children}</CommandsContext.Provider>;
 }
 
 /**
- * Matches only a slash the prompt starts with.
- *
- * A slash command is the whole instruction or none of it, so a slash further
- * in is part of a path and must not open the list.
+ * Matches only a slash at the start of the prompt, while the cursor is in the
+ * command name. A slash further in is part of a path.
  */
 const atStartOfPrompt: Unstable_TriggerMatcher = (text, char, cursorPosition) => {
   if (!text.startsWith(char)) return null;
@@ -43,9 +37,8 @@ const atStartOfPrompt: Unstable_TriggerMatcher = (text, char, cursorPosition) =>
 };
 
 /**
- * Writes the picked command back as the line it was typed as, which is what
- * the agent reads. Nothing here parses one out of the composer again, so the
- * parse half hands the text back whole.
+ * Writes the picked command as `/name`, the text the agent reads. The parse
+ * half returns the text unchanged, because nothing parses commands back out.
  */
 const asTypedCommand: Unstable_DirectiveFormatter = {
   serialize: (item) => `/${item.id}`,
@@ -53,12 +46,14 @@ const asTypedCommand: Unstable_DirectiveFormatter = {
 };
 
 /**
- * The command list as a trigger adapter.
+ * Wraps the command list as a trigger adapter.
  *
- * It offers no categories, and with none the popover searches from the
- * first keystroke: a bare slash lists every command and each further
- * character narrows it. Only the name is matched — a description here is a
- * paragraph, and matching one would answer with commands that look unrelated.
+ * Without categories the popover searches from the first keystroke, so a bare
+ * slash lists every command. The search matches names only, because a
+ * description match would list commands that look unrelated.
+ *
+ * @param commands The advertised commands.
+ * @returns The adapter.
  */
 function commandAdapter(commands: AvailableCommand[]) {
   const items: Unstable_TriggerItem[] = commands.map((command) => ({
@@ -73,7 +68,7 @@ function commandAdapter(commands: AvailableCommand[]) {
     search: (query: string) => {
       const lower = query.toLowerCase();
       const named = items.filter((item) => item.id.toLowerCase().includes(lower));
-      // What was typed reads as the start of a name, so those come first.
+      // Names that start with the query come first.
       return [
         ...named.filter((item) => item.id.toLowerCase().startsWith(lower)),
         ...named.filter((item) => !item.id.toLowerCase().startsWith(lower)),
@@ -83,11 +78,10 @@ function commandAdapter(commands: AvailableCommand[]) {
 }
 
 /**
- * The completion list itself, rendered above the composer while a slash
- * command is being typed.
+ * The completion list above the composer while a slash command is typed.
  *
- * Picking one writes its name into the composer rather than sending it: a
- * command often takes arguments, and running it is the agent's job.
+ * Picking a command writes its name into the composer without sending it,
+ * because a command often takes arguments.
  */
 export const SlashCommands: FC = () => {
   const commands = useContext(CommandsContext);
@@ -111,10 +105,8 @@ export const SlashCommands: FC = () => {
               index={index}
               className="flex w-full min-w-0 flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left data-[highlighted]:bg-accent"
             >
-              {/* Both lines break anywhere they have to: a description is
-                  whatever the agent wrote, and one long unbroken word in one
-                  of them would otherwise widen the popover past a phone and
-                  leave the whole list scrolling sideways. */}
+              {/* Both lines break anywhere, so a long word cannot widen the popover
+                  past a phone screen. */}
               <span className="w-full font-mono text-sm break-words">/{item.id}</span>
               {item.description ? (
                 <span className="line-clamp-2 w-full text-xs break-words text-muted-foreground">

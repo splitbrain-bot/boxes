@@ -6,18 +6,16 @@ import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchest
 import { reply, type GatewayScript } from './stub-gateway.ts';
 
 /**
- * The live thread against a stub gateway speaking the agent side of ACP.
- *
- * Everything asserted here is protocol behaviour, not a private arrangement:
- * the stub answers session/new, session/load, session/prompt and
- * session/cancel the way the real gateway does.
+ * Browser tests for the live thread, against a stub gateway that answers ACP
+ * the way the real gateway does.
  */
 
+/** The box every test here drives. */
 const BOX = DEFAULT_BOX;
 
 /**
- * A real PNG, small enough to sit in the source: two bands and a diagonal, so
- * a screenshot of this test shows an image rather than a plausible rectangle.
+ * A real 200 by 120 PNG with two bands and a diagonal, so a screenshot shows a
+ * recognisable image.
  */
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
 
@@ -59,8 +57,7 @@ test('a prompt streams back and renders as it arrives', async () => {
     await input.fill('summarise the proxy');
     await input.press('Control+Enter');
 
-    // The first chunk shows before the last has been sent, which is what
-    // progressive rendering means.
+    // The first chunk shows before the last has been sent.
     await expect.poll(() => page.getByText('The proxy').isVisible()).toBe(true);
     expect(stub.gateway.prompts).toEqual(['summarise the proxy']);
 
@@ -85,8 +82,7 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // The picker is opened by a button that builds its own input, so the file
-    // arrives through the chooser rather than through a locator.
+    // The button builds its own file input, so the file goes through the chooser.
     const chooser = page.waitForEvent('filechooser');
     await page.getByLabel('Add Attachment').click();
     await (
@@ -111,23 +107,21 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
     expect(blocks[0]!.text).toContain('image/png');
     expect(blocks[1]!.text).toBe('what is wrong here?');
 
-    // What the thread shows is the picture — fetched back from the box's
-    // workspace — and not the note that went with it.
+    // The thread shows the picture, fetched from the workspace, not the note.
     const picture = page.locator('[data-slot="aui_user-message-image"] img').first();
     await expect.poll(() => picture.count()).toBe(1);
     expect(await picture.getAttribute('src')).toBe(
       `/api/boxes/${BOX.id}/attachments/shot.png`,
     );
-    // Loaded, rather than merely pointed at something.
+    // Loaded, not only linked.
     await expect
       .poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth))
       .toBeGreaterThan(0);
     expect(await page.getByText('<attachments>').count()).toBe(0);
     await shoot(page, 'thread-attached-image');
 
-    // And again from the transcript rather than from the echo: a reconnect
-    // replays what was said, and the note about the attachment is plain text
-    // that survives that trip, so the thread reads the same both ways.
+    // And the same after a reload, from the replayed transcript: the note is
+    // plain text that survives the replay.
     await page.reload();
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     await expect.poll(() => page.locator('[data-slot="aui_user-message-image"]').count()).toBe(1);
@@ -152,8 +146,8 @@ test('an attached SVG is shown as the drawing it is', async () => {
     ).setFiles({
       name: 'diagram.svg',
       mimeType: 'image/svg+xml',
-      // With a script in it, which is the case the served type is about: an
-      // <img> runs nothing, and the response's CSP covers opening it directly.
+      // With a script in it: an <img> runs no script, and the response's CSP
+      // covers opening the file directly.
       buffer: Buffer.from(
         '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">' +
           '<script>window.parent.alert(1)</script><rect width="80" height="40" fill="teal"/></svg>',
@@ -201,15 +195,14 @@ test('an attached file that is not an image travels as a path, and reads as a ch
 
     await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
     const blocks = stub.gateway.promptBlocks[0]!;
-    // A PDF is read from the workspace by the agent's own tools, and shows
-    // here as a chip: the browser has nothing it could render.
+    // A PDF travels as a path for the agent's own tools, and the thread shows
+    // it as a chip.
     expect(blocks.map((b) => b.type)).toEqual(['text', 'text']);
     expect(blocks[0]!.text).toContain('.boxes/attachments/report.pdf');
     expect(blocks[0]!.text).toContain('application/pdf');
 
-    // The chip stands in for the block of instructions that carried it, and
-    // opens the file: served as application/pdf, so a tab shows it rather
-    // than saving it.
+    // The chip replaces the note that carried it, and opens the file in a tab.
+    // It is served as application/pdf, so the tab shows it.
     await expect.poll(() => page.getByText('report.pdf').isVisible()).toBe(true);
     const link = page.locator('[data-slot="aui_user-message-file"] a').first();
     const href = await link.getAttribute('href');
@@ -229,9 +222,7 @@ test('an attached file that is not an image travels as a path, and reads as a ch
 
 test('a turn with nothing to show yet shows the spinner, and stops once it has', async () => {
   await start({
-    // Long enough that the spinner can be read without racing the answer:
-    // a detached element has no computed style, and the assertions below
-    // would then be measuring the message that replaced it.
+    // Long enough to read the spinner's style before the answer replaces it.
     prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually.') }],
   });
 
@@ -242,9 +233,8 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
     await input.fill('think about it');
     await input.press('Control+Enter');
 
-    // The gap before the first chunk is the whole point of this indicator: it
-    // is often the only thing on the screen, and it has to be visibly moving
-    // rather than a page that has stopped repainting.
+    // Before the first chunk the spinner is often all there is, so it has to
+    // animate.
     const spinner = page.getByRole('img', { name: 'Assistant is working' });
     await expect.poll(() => spinner.isVisible()).toBe(true);
     await expect.poll(() => spinner.locator('rect').count()).toBe(9);
@@ -314,7 +304,7 @@ test('a second tab sees updates live', async () => {
     await input.fill('ask once');
     await input.press('Control+Enter');
 
-    // The gateway broadcasts every update to every attached browser.
+    // The gateway sends every update to every browser watching the thread.
     await expect.poll(() => a.page.getByText('Shared answer.').isVisible()).toBe(true);
     await expect.poll(() => b.page.getByText('Shared answer.').isVisible()).toBe(true);
     expect(a.errors).toEqual([]);
@@ -344,9 +334,8 @@ test('cancelling stops the run state', async () => {
     await expect.poll(() => cancel.isVisible()).toBe(true);
 
     await cancel.click();
-    // The cancel reaches the gateway as an ACP notification, and the turn it
-    // names ends there: nothing is released by hand, and the composer takes
-    // prompts again once the turn state says the thread is idle.
+    // The cancel reaches the gateway as an ACP notification and ends the turn.
+    // The composer takes prompts again once the turn state says idle.
     await expect
       .poll(() => stub.gateway.notifications.some((n) => n.method === 'session/cancel'))
       .toBe(true);
@@ -360,9 +349,8 @@ test('cancelling stops the run state', async () => {
 });
 
 test('a turn held open for background work still hands the composer back', async () => {
-  // The shape the adapter actually produces: the agent answers, spawns
-  // something that runs on, and the prompt stays open until it settles. The
-  // thread is waiting for its reader for the whole of that.
+  // As the adapter does it: the agent answers, spawns work that runs on, and
+  // the prompt stays open until the work settles.
   await start({
     prompts: [
       {
@@ -383,30 +371,27 @@ test('a turn held open for background work still hands the composer back', async
 
     await expect.poll(() => page.getByText('I will report back').isVisible()).toBe(true);
 
-    // The composer is yours again, though the prompt upstream is still open.
+    // The composer takes prompts again, though the prompt upstream is still open.
     await expect
       .poll(() => page.getByLabel('Send message').isVisible(), { timeout: 10_000 })
       .toBe(true);
     expect(await page.getByLabel('Stop generating').count()).toBe(0);
 
-    // And what is still going on says so, above the composer, where the
-    // transcript cannot say it — by name, because the box's own process
-    // carries the command the agent asked for.
+    // A bar above the composer names the running work, by the command the
+    // adapter announced for the task.
     const bar = page.locator('[data-slot="boxes_background-bar"]');
     await expect.poll(() => bar.isVisible()).toBe(true);
     await expect.poll(() => page.getByText('1 command still running').isVisible()).toBe(true);
     await page.getByText('1 command still running').click();
     await expect.poll(() => bar.getByText('npm run build').isVisible()).toBe(true);
 
-    // Including for a browser that arrives afterwards and has only the
-    // replay to go on — it reaches that one with the thread state.
+    // A browser that arrives later gets the bar from the thread state.
     await page.reload();
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     await expect.poll(() => bar.isVisible()).toBe(true);
 
-    // Stopping it is a kill of that process, aimed at the thread it belongs
-    // to and the one command named — not a `session/cancel`, which would
-    // interrupt the conversation and leave the command running.
+    // Stopping everything targets all of the thread's work. A session/cancel
+    // would interrupt the conversation and leave the command running.
     await bar.getByLabel('Stop everything still running').click();
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(() => stub.backgroundStops.length).toBe(1);
@@ -415,8 +400,7 @@ test('a turn held open for background work still hands the composer back', async
       threadId: BOX.threadId,
     });
 
-    // And when the work is over, the bar goes with it — on the gateway's own
-    // next reading of the box, which is the only thing that ever says so.
+    // The bar goes once the gateway's turn state reports no work left.
     stub.gateway.finishTasks();
     await expect.poll(() => bar.isVisible()).toBe(false);
 
@@ -428,11 +412,8 @@ test('a turn held open for background work still hands the composer back', async
 });
 
 test('the bar names the work by kind, and offers no stop for a task that says it cannot be', async () => {
-  // What the adapters announce beyond a command line: a task's kind, which is
-  // the only thing that says what a name like "watch the deploy log" is, and
-  // its `canStop`, which both adapters send true today and neither promises
-  // to. A row that cannot be stopped gets no button rather than one that
-  // would answer nothing.
+  // A task's kind says what a name like "watch the deploy log" is. A task
+  // whose `stoppable` is false gets no stop button.
   await start({
     prompts: [
       {
@@ -511,19 +492,13 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
 
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
-    // The browser has asked for its history and the stub is sitting on the
-    // answer. Waited for rather than assumed: releasing frees the loads that
-    // are parked, so releasing before one arrives frees nothing and holds
-    // this browser for good.
+    // Wait for the load to park, because a release frees only parked loads.
     await expect.poll(() => stub.gateway.loadsHeld()).toBe(1);
 
-    // Which is the box still starting as far as this browser can tell: no
-    // history has arrived and none of it is on screen.
+    // No history has arrived yet, so the placeholder shows.
     await expect.poll(() => page.locator('[data-slot="thread-loading"]').isVisible()).toBe(true);
 
-    // Nothing to type into and nothing that claims the thread is empty. The
-    // greeting was the worse of the two: it says there is nothing here to
-    // read, on arrival at a conversation, moments before being replaced.
+    // No composer, and no greeting that claims the thread is empty.
     expect(await page.getByLabel('Message input').count()).toBe(0);
     expect(await page.getByText('How can I help you today?').count()).toBe(0);
 
@@ -538,8 +513,7 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     // And now there is somewhere to type.
     await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
 
-    // Opened at the end of the conversation, which is where a thread is read
-    // from — not at whichever message the last render happened to leave.
+    // Opened at the end of the conversation.
     const viewport = page.locator('[data-slot="aui_thread-viewport"]');
     await expect
       .poll(() =>
@@ -666,10 +640,8 @@ test('a background task reporting in is a row of its own, not the user talking',
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // What the harness sends when a task started in the background has
-    // something to say: a message in the user's own role, carrying XML
-    // addressed to the model. A monitor's event first, then a subagent's
-    // answer — the two shapes, and the two ways they read.
+    // A background task reports in as a user-role message carrying XML for
+    // the model. First a monitor's event, then a subagent's answer.
     stub.gateway.emit({
       sessionUpdate: 'user_message_chunk',
       messageId: 'note-1',
@@ -717,8 +689,7 @@ test('a background task reporting in is a row of its own, not the user talking',
     await expect.poll(() => page.getByText('Monitor event:', { exact: false }).isVisible()).toBe(true);
     await expect.poll(() => page.getByText('2200/30321', { exact: false }).isVisible()).toBe(true);
 
-    // A finished task has been summarised by its own row, and what is under
-    // it is its whole answer — folded, and opened by a click.
+    // A finished task's row folds its whole answer, which a click opens.
     const answer = page.getByText('The 429s are all from one host', { exact: false });
     expect(await answer.isVisible()).toBe(false);
     await expect.poll(() => page.getByText('48.2k tokens · 6 tool calls · 3m 4s').isVisible()).toBe(true);
@@ -726,8 +697,7 @@ test('a background task reporting in is a row of its own, not the user talking',
     await expect.poll(() => answer.isVisible()).toBe(true);
     await shoot(page, 'task-notification');
 
-    // And the same on a reconnect: the block is text, so it comes back
-    // through the transcript exactly as it arrived, and is read the same way.
+    // And the same after a reload, because the block replays as the same text.
     await page.reload();
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     await expect.poll(() => rows.count()).toBe(2);

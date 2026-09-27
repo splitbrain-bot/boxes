@@ -2,28 +2,18 @@ import { git, gitOut, type GitTarget } from './git.ts';
 import { fileLines } from './fs.ts';
 import { baseRev, type Base } from './gitstatus.ts';
 
-/**
- * Unified diff to the markers a file view draws.
- *
- * A port of the desktop tool's `internal/gitstatus/difflines.go`. `parseDiff`
- * is pure and is where all the behaviour is; `fileDiff` only decides which git
- * output to hand it.
- */
-
 /** What happened to a line of the new file. */
 export type LineChange = 'added' | 'modified';
 
 /** Unchanged lines git includes around a change, shown in the hunk view. */
 const DIFF_CONTEXT = 3;
 
-/** Hunk headers: `@@ -old[,count] +new[,count] @@`. */
+/** Matches a hunk header: `@@ -old[,count] +new[,count] @@`. */
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /**
- * A block of lines deleted between two lines of the new file.
- *
- * How many were removed is not recorded: the hunk the marker points at shows
- * them.
+ * A block of lines deleted between two lines of the new file. The hunk it
+ * points at holds the removed lines.
  */
 interface DiffDeletion {
   /** The deletion sits after this line; 0 means the top of the file. */
@@ -46,7 +36,9 @@ interface DiffHunk {
 export interface FileDiff {
   /** Changed new-file lines, by line number. */
   lines: Record<number, LineChange>;
+  /** The diff's hunks, in file order. */
   hunks: DiffHunk[];
+  /** Where lines were removed and nothing replaced them. */
   deletions: DiffDeletion[];
 }
 
@@ -56,9 +48,8 @@ export function emptyDiff(): FileDiff {
 }
 
 /**
- * Splits diff output into lines without terminators, and without a trailing
- * empty one for output that ends in a newline — which git's does, and a
- * truncated read might not.
+ * Splits diff output into lines without terminators. A final newline adds no
+ * empty last line.
  */
 function diffLines(out: string): string[] {
   if (out === '') return [];
@@ -68,13 +59,12 @@ function diffLines(out: string): string[] {
 }
 
 /**
- * Turns unified diff output for a single file into line markers, hunks and
- * deletion markers.
+ * Turns unified diff output for one file into line markers, hunks and
+ * deletion markers. The function is pure.
  *
- * Added and modified lines are told apart by looking at the diff body rather
- * than the hunk header: with context around a change, one hunk can hold both. A
- * run of removed lines that is not replaced by added ones becomes a deletion
- * marker sitting after the last line that survived.
+ * It tells added lines from modified ones by the diff body, because one hunk
+ * can hold both. A run of removed lines that no added lines replace becomes a
+ * deletion marker after the last line that survived.
  */
 export function parseDiff(out: string): FileDiff {
   const info = emptyDiff();
@@ -94,8 +84,8 @@ export function parseDiff(out: string): FileDiff {
   };
 
   /**
-   * Closes a run of removed lines, recording a deletion marker for those that
-   * nothing was put in place of.
+   * Ends a run of changes. Removed lines that nothing replaced become a
+   * deletion marker.
    */
   const endRun = (): void => {
     if (removed > 0) {
@@ -132,7 +122,7 @@ export function parseDiff(out: string): FileDiff {
     if (!current) continue;
 
     if (line === '') {
-      // An unchanged empty line is written without its leading space.
+      // An unchanged empty line whose leading space was stripped.
       endRun();
       keep('');
       newLine++;
@@ -181,12 +171,12 @@ export function allLinesAdded(content: string): Record<number, LineChange> {
 }
 
 /**
- * The diff markers for one file. With a base commit set, the file is diffed
- * against that commit rather than against HEAD; the file's own content is used
- * to mark up a file git does not track yet.
+ * Computes the diff markers for one file, against the base commit or, without
+ * one, against HEAD. For a file git does not track, every line of `content` is
+ * marked as added.
  *
- * The diff and the untracked check run together, because which of the two
- * answers is needed only shows once the diff is in.
+ * The diff and the untracked check run in parallel, because only the diff
+ * result shows which of the two answers is needed.
  */
 export async function fileDiff(
   target: GitTarget,
@@ -200,7 +190,6 @@ export async function fileDiff(
   ]);
 
   if (diff.ok && diff.stdout.length > 0) return parseDiff(diff.stdout);
-  // The file is new to git, so all of it is new.
   if (untracked.length > 0) return { ...emptyDiff(), lines: allLinesAdded(content) };
   return emptyDiff();
 }

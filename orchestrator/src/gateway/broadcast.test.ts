@@ -9,11 +9,6 @@ import {
 import { Broadcast } from './broadcast.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
-/**
- * Update routing, with two browsers attached — which is the case every rule
- * in the class exists for, whether the two watch one thread or two.
- */
-
 /** The thread most of these tests are about. */
 const T1 = 'acp-1';
 /** A second thread of the same box, watched by nobody unless said. */
@@ -33,9 +28,9 @@ function fakeDownstream(
   const sent: unknown[] = [];
   /** Every thread state this browser was told, in order. */
   const states: TurnStateParams[] = [];
-  /** The prompt-open half of each, which most of these tests are about. */
+  /** The prompt-open flag of each state. */
   const turns: boolean[] = [];
-  /** How each replay this browser read was said to have turned out. */
+  /** Every replay notice this browser was sent. */
   const replays: ReplayParams[] = [];
   return {
     id,
@@ -67,7 +62,7 @@ function update(sessionUpdate: string, text: string, thread = T1): unknown {
   return { sessionId: thread, update: { sessionUpdate, content: { type: 'text', text } } };
 }
 
-/** A session/update the adapter named a message on, which is what a resume points at. */
+/** A session/update with a message id, which a resume can start from. */
 function named(sessionUpdate: string, text: string, messageId: string, thread = T1): unknown {
   return {
     sessionId: thread,
@@ -116,7 +111,6 @@ test('an update for one thread does not reach a browser watching another', () =>
   b.update(update('agent_message_chunk', 'from the long turn', T1));
   b.update(update('agent_message_chunk', 'from the fork', T2));
 
-  // Two tabs, two conversations, one box: neither shows the other's stream.
   assert.equal(working.sent.length, 1);
   assert.equal(exploring.sent.length, 1);
   assert.deepEqual(working.sent, [update('agent_message_chunk', 'from the long turn', T1)]);
@@ -128,8 +122,7 @@ test('an update for a thread nobody watches is dropped', () => {
   const watching = fakeDownstream(1, T1);
   b.add(watching);
 
-  // A thread running in the background with its tab closed. Broadcasting this
-  // is what would put one conversation into another's transcript.
+  // A thread running in the background with its tab closed.
   b.update(update('agent_message_chunk', 'nobody asked for this', T2));
   assert.equal(watching.sent.length, 0);
 });
@@ -148,8 +141,7 @@ test('a browser whose thread is still resolving receives nothing', () => {
   const resolving = fakeDownstream(1, null);
   b.add(resolving);
 
-  // Counted as attached — it holds a socket open — but it has not been told
-  // which thread it is on, so nothing is its.
+  // It holds a socket open, so it counts as attached.
   assert.equal(b.size, 1);
   b.update(update('agent_message_chunk', 'hello'));
   assert.equal(resolving.sent.length, 0);
@@ -163,8 +155,6 @@ test('a forwarded prompt is echoed to every browser on its thread, the sender in
 
   b.beginPrompt({ sessionId: T1, prompt: [{ type: 'text', text: 'run the tests' }] });
 
-  // The adapter only has to replay a prompt, not echo it live, so without
-  // this neither device would show what was just asked.
   assert.deepEqual(userChunks(phone), ['run the tests']);
   assert.deepEqual(userChunks(desktop), ['run the tests']);
 });
@@ -240,8 +230,7 @@ test('a browser opening a thread is sent its log, and told the thread is whole',
   b.update(named('user_message_chunk', 'the question', 'm1'));
   b.update(named('agent_message_chunk', 'the answer', 'm2'));
 
-  // A second tab arrives on the thread. It is sent what the first was, in the
-  // order the first was sent it, and the adapter is not asked for anything.
+  // A second tab opens the thread.
   const late = fakeDownstream(2);
   b.add(late);
   const answer = b.open(late, T1);
@@ -263,9 +252,8 @@ test('a browser that says how much it has is sent only the rest', () => {
   b.update(named('agent_message_chunk', 'the first answer', 'm2'));
   b.update(named('user_message_chunk', 'and then this', 'm3'));
 
-  // The browser holds the thread as far as m2. m2 goes out with the tail: the
-  // browser drops the message it named and takes it again, which is what
-  // makes the result the whole thread's model.
+  // The browser holds the thread up to m2. The tail starts with m2 again,
+  // because a socket can drop partway through a message.
   const back = fakeDownstream(1);
   b.add(back);
   b.open(back, T1, 'm2');
@@ -307,8 +295,7 @@ test('the answer comes before the thread does', () => {
   };
 
   b.open(opening, T1);
-  // A browser rebuilding has to know before the first of it lands, or it
-  // throws away what it has just been sent along with what it held.
+  // A browser that rebuilds must know before the first update lands.
   assert.deepEqual(order, ['answer', 'update']);
 });
 
@@ -328,8 +315,8 @@ test('a transcript being read into the log reaches nobody', () => {
   const watching = fakeDownstream(1);
   b.add(watching);
 
-  // The adapter replaying the thread on its way up. The tab already on it
-  // has the thread; sending it the replay would render it twice.
+  // The adapter replays the thread as it comes up. The tab already on it
+  // has the thread.
   b.beginFill(T1);
   b.update(named('user_message_chunk', 'old question', 'm1'));
   b.update(named('agent_message_chunk', 'old answer', 'm2'));
@@ -369,8 +356,8 @@ test('reading a transcript in replaces what an earlier log held', () => {
   b.openLog(T1, OPTIONS);
   b.update(update('agent_message_chunk', 'from before the adapter restarted'));
 
-  // The adapter is spawned again and says the whole thread back. What the
-  // log held is in that, so keeping it would say it twice.
+  // A respawned adapter replays the whole thread, which includes what the
+  // log held.
   b.beginFill(T1);
   b.update(update('agent_message_chunk', 'from the transcript'));
   b.endFill(T1, OPTIONS);
@@ -387,8 +374,8 @@ test('a prompt is logged where it was made', () => {
   b.beginPrompt(PROMPT);
   b.update(update('agent_message_chunk', 'on it'));
 
-  // The adapter never echoed the prompt, so the gateway's own echo is the
-  // only copy a browser opening the thread later can be shown.
+  // This adapter never echoes the prompt, so the gateway's echo is the only
+  // copy.
   const late = fakeDownstream(1);
   b.add(late);
   b.open(late, T1);
@@ -431,9 +418,8 @@ test('a fork opens on the conversation it came from, under its own thread id', (
   b.update(update('user_message_chunk', 'old question', T1));
   b.update(update('agent_message_chunk', 'old answer', T1));
 
-  // The fork carries the source's context, and the browser reading it is
-  // pinned to the fork, so what it is sent has to name the fork -- an update
-  // naming the source is some other conversation's as far as it is concerned.
+  // The browser on the fork is pinned to T2, so the copied updates must name
+  // T2.
   b.openLog(T2, OPTIONS, T1);
   const exploring = fakeDownstream(2, T2);
   b.add(exploring);
@@ -507,7 +493,7 @@ test('the watched threads are what a respawn has to reload', () => {
 
   assert.deepEqual(b.watchedThreads.sort(), [T1, T2]);
 
-  // The set shrinks as tabs close, so it needs no storage of its own.
+  // The set shrinks as tabs close.
   b.remove(working);
   assert.deepEqual(b.watchedThreads, [T2]);
 });
@@ -593,8 +579,7 @@ test('a browser can be told its own thread state, and only its own', () => {
   assert.deepEqual(a.turns, [false]);
   assert.deepEqual(other.turns, []);
 
-  // A connection whose thread has not been settled yet is told nothing;
-  // it has not asked for anything either.
+  // A connection without a thread yet is told nothing.
   const unpinned = fakeDownstream(3, null);
   b.add(unpinned);
   b.threadStateTo(unpinned);
@@ -613,8 +598,7 @@ test('re-stating every thread reaches every watched one', () => {
 });
 
 test('the state a browser is told is the one the gateway supplies', () => {
-  // What the gateway knows and this class does not: the agent is talking on
-  // T1, and it has a build running in it.
+  // The gateway knows that the agent speaks on T1 and a build runs there.
   const b = new Broadcast('s1', (thread) => ({
     sessionId: thread,
     active: false,

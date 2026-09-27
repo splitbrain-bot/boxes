@@ -3,17 +3,13 @@
 @import "tw-shimmer";
 
 /*
- * The dashboard's whole design system, in one file.
+ * The dashboard's design system.
  *
- * Values are the shadcn convention, because the installed components — ours
- * and assistant-ui's alike — are written against those names. The palette is
- * the one the Preact dashboard used, carried over unchanged.
- *
- * Dark mode is a class, not a media query: index.html sets it from
- * prefers-color-scheme before first paint, which leaves room for a manual
- * toggle later without restyling anything.
+ * The tokens use the shadcn names, because the installed components are
+ * written against them.
  */
 
+/* Dark mode is the .dark class, which index.html sets from prefers-color-scheme. */
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
@@ -69,9 +65,8 @@
 }
 
 /*
- * Mandatory, not theming polish: Tailwind v4 emits a utility only for a
- * colour its theme defines, so without this bridge `bg-background` and every
- * other token utility the installed components use would silently vanish.
+ * Tailwind emits a utility only for a colour its theme defines. This block
+ * maps the tokens into the theme, so utilities like bg-background exist.
  */
 @theme inline {
   --color-background: var(--background);
@@ -133,18 +128,12 @@
 }
 
 /*
- * The document while a full-viewport route is mounted; see use-viewport-lock.
+ * The document while a full-viewport route is mounted.
  *
- * Those routes are `h-dvh` boxes with their own scroller inside, so the
- * document has nothing to scroll by design. Saying so outright is what keeps a
- * phone from disagreeing: a viewport measured against chrome that slides in and
- * out is a few pixels off for as long as it is moving, and a document that can
- * scroll those pixels will — taking the header with it and giving it back only
- * on an overscroll from the very top of the thread.
- *
- * `overscroll-behavior` covers the same ground from the other side: without it
- * a flick past the end of the thread becomes a pull-to-refresh, which is never
- * what was meant by scrolling up through a conversation.
+ * On a phone, the viewport is a few pixels off while the browser chrome
+ * slides. A document that can scroll then scrolls the header away.
+ * overscroll-behavior stops a flick past the end of the thread from
+ * becoming a pull-to-refresh.
  */
 .viewport-locked,
 .viewport-locked body {
@@ -153,19 +142,13 @@
   overscroll-behavior: none;
 }
 
-/*
- * Installed by `npx assistant-ui add`. The elements drive their open and
- * closed styling from data attributes rather than a class.
- */
+/* Installed by `npx assistant-ui add`, for styling open and closed elements. */
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
 @custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
 
 /*
- * The review's code pane.
- *
- * Shiki tokenizes with both themes at once and puts each token's two colours
- * on the span as custom properties, so which one paints is a CSS decision and
- * switching theme costs no re-tokenize at all.
+ * The review's code pane. Shiki puts the light and the dark colour of each
+ * token on its span as custom properties, and these rules pick one.
  */
 [data-line] code span {
   color: var(--shiki-light);
@@ -176,22 +159,15 @@
 }
 
 /*
- * Wide blocks in chat output — tables and code — escape the reading column.
+ * Wide tables and code blocks in chat output, which grow out of the reading
+ * column to the width of the thread and scroll horizontally beyond that.
  *
- * A 44rem column is right for prose and wrong for a table with eight columns
- * in it. These grow to the width of the thread rather than the width of the
- * paragraph above them, and scroll horizontally once even that is not enough.
+ * 100cqw is the width of the thread's scrolling viewport, which is a
+ * container. 100vw would include the vertical scrollbar and cause a
+ * horizontal one. The 2rem inset keeps a margin at the screen edge.
  *
- * `100cqw` is the width of the thread's scrolling viewport, which is marked
- * as a container for this (`@container` in thread.aui.tsx). Not `100vw`: that
- * counts the vertical scrollbar the viewport itself keeps, and a block sized
- * to it overflows by exactly a scrollbar — which puts a horizontal one under
- * the whole thread. The 2rem inset is the reading column's own gutter, kept
- * so a bleeding block still has a margin at the screen edge.
- *
- * The negative margin is what escapes: `100%` is the column, so it is zero
- * while the column already fills the thread — a phone — and grows as the
- * window does. Below it the block is exactly as wide as it always was.
+ * The negative margin is zero while the column fills the thread, as on a
+ * phone, and grows with the window.
  */
 .aui-md-bleed {
   --aui-md-bleed-width: calc(100cqw - 2rem);
@@ -203,9 +179,9 @@
 }
 
 /*
- * Except inside the reasoning preview, which is a bounded box with its own
- * scroller: a block that escaped it would be dragged off its left edge with
- * no way to scroll back. There it is merely scrollable.
+ * Inside the reasoning preview, which has its own scroller, a wide block
+ * only scrolls. A block that grew out of it could not be scrolled back into
+ * view.
  */
 .aui-reasoning-text .aui-md-bleed {
   --aui-md-bleed-width: 100%;
@@ -213,16 +189,10 @@
 }
 
 /*
- * And the render-skipping an assistant message would otherwise carry as
- * utilities, applied here instead so it can be withheld from the messages
- * that bleed.
+ * Skips rendering an assistant message while it is off screen.
  *
- * `content-visibility: auto` lets the browser skip laying out a message that
- * is off screen, which is worth having in a thread hundreds of messages long.
- * It comes with paint containment, though, which clips every descendant to
- * the message's own box — so a message holding a full-bleed block cannot have
- * it, and this is the narrowest way to say that. Everything else keeps it.
- * See the matching note in thread.aui.tsx.
+ * content-visibility brings paint containment, which clips a wide block to
+ * the message. A message with a wide block therefore does not get it.
  */
 [data-slot='aui_assistant-message-root']:not(:has(.aui-md-bleed)) {
   content-visibility: auto;
@@ -230,33 +200,13 @@
 }
 
 /*
- * The rhythm of a turn's quiet rows.
+ * A quiet message: its content is only the chain-of-thought group and, while
+ * the turn runs, the working indicator.
  *
- * A thread is a column of messages 24px apart (`gap-y-6` on the message
- * group), each reserving 30px under itself for an action bar that only
- * appears on the last message or on hover. That is right for prose, where a
- * paragraph needs air and a copy button has something to copy. It is wrong
- * for the rows a working turn is mostly made of: "Reasoning" and "3 tool
- * calls" are single 24px lines, and an adapter that names a message id per
- * block sends every one of them as a message of its own. Each line of a long
- * working stretch then came with 54px of nothing under it, more than twice
- * its own height — and where several shared one message, with the 16px the
- * reasoning row used to carry as well.
- *
- * Two shapes carry rows, and what separates them is what the action bar has
- * to work with. A message that is nothing but rows has nothing to copy, so
- * the bar and every pixel held for it go — that is this rule. A message that
- * speaks and then goes back to work ends in rows as well, and it does have
- * something to copy; only the room under its last row is wrong. The rule
- * after this one moves the bar out of the flow there instead.
- *
- * A quiet message is one whose content is nothing but the chain-of-thought
- * group and, while the turn runs, the working indicator: no prose, no image,
- * no file, no error. `:has()` asks exactly that — "no child of the content
- * that is not one of those two" — so a message becomes loud again the moment
- * it says something, without anything having to label it. The indicator
- * counts as quiet so a row does not change height the moment the spinner
- * under it goes away.
+ * Messages sit 24px apart (gap-y-6), and each reserves 30px below for the
+ * action bar. A quiet message has nothing to copy, so it drops the bar and
+ * the space. The indicator counts as quiet, so a row keeps its height when
+ * the spinner goes away.
  */
 [data-slot='aui_assistant-message-root']:not(
     :has(
@@ -267,11 +217,8 @@
             )
       )
   ) {
-  /* Nothing to reserve: the action bar's copy and export act on the
-     message's text, and a message with no text has neither to offer. The
-     footer goes, and with it the padding that held room for it below the
-     row — and the negative margin that cancelled that padding, which on its
-     own would pull the next row up over this one. */
+  /* The negative margin goes with the padding it cancels. On its own, it
+     would pull the next row up over this one. */
   padding-bottom: 0;
   margin-bottom: 0;
 
@@ -279,9 +226,8 @@
     display: none;
   }
 
-  /* An open row is a block rather than a line, so it keeps a little space
-     under its body — enough that the text belongs to the trigger above it
-     and not to the row below. */
+  /* An open row keeps a little space under its body, so the text reads as
+     part of its own row and not of the row below. */
   &:has(
       :is([data-slot='reasoning-content'], [data-slot='tool-group-content'])[data-state='open']
     ) {
@@ -290,29 +236,17 @@
 }
 
 /*
- * The tail of a message that says something and then goes back to work.
+ * A message that says something and then ends in rows: it has content other
+ * than the chain-of-thought and the indicator, it has a chain-of-thought, and
+ * its last child is the chain-of-thought or the indicator.
  *
- * The band under a message belongs to the action bar, and the bar belongs to
- * the prose above it — but it is held after the message's last part rather
- * than after the last thing said, so a message ending in tool calls held it
- * under the last of them: 30px of nothing, and the group's 24px under that,
- * beneath a 24px line. Which is most of a working turn, because a tool call
- * carries no message id of its own and so joins whatever message is
- * trailing — the one the agent spoke in a moment ago.
+ * Such a message keeps its action bar, but the 30px band for the bar would
+ * sit under its last row. A tool call has no message id of its own, so it
+ * joins the message before it, and this shape is common.
  *
- * Three questions, and a message has to answer all three: it says something
- * (prose, an image, a file, an error — anything the rule above would call
- * loud), it works (a chain-of-thought), and it does not end on what it says.
- * The last is asked of the last child rather than of the chain-of-thought,
- * so a turn still running — rows, then the working indicator under them —
- * answers it too, and the band does not appear for as long as the spinner
- * sits there and then collapse the moment it goes.
- *
- * `position: absolute` puts the bar in the band `pb-7.5` already holds and
- * `-mb-7.5` already cancels. The bar does not move: the bottom of the
- * padding box is where it sat in flow. The 30px it occupied are given back
- * to the run of rows, and the gap left under the row is the group's own 24px
- * — the same as under a quiet one.
+ * position: absolute takes the bar out of the flow at the same place, at the
+ * bottom of the padding box that pb-7.5 holds and -mb-7.5 cancels. The row
+ * then has the same 24px gap under it as a quiet one.
  */
 [data-slot='aui_assistant-message-root']:has(
     > [data-slot='aui_assistant-message-content']
@@ -335,35 +269,22 @@
     inset-inline-start: 0;
   }
 
-  /* Out of the flow, the band is over whatever comes next — and what comes
-     next, in the middle of a thread, is the row the message after this one
-     opens with. So the bar goes to the other end of the line there: a row is
-     a short line and the room beside it is empty, which is the one place a
-     bar can appear over a thread without hiding a word of it. Only the last
-     message has nothing under it, and that is the message whose bar is
-     always showing, so the position anyone actually sees is the one it has
-     always had.
-
-     Nothing is under the bar while it is hidden: the primitive renders no
-     element at all, and the footer left behind is an empty flex box no
-     pixels wide. */
+  /* Out of the flow, the bar covers the first row of the next message. It
+     moves to the right end, where a short row leaves empty space. The last
+     message has nothing under it and keeps the bar on the left. */
   &:not(:last-child) > [data-slot='aui_assistant-message-footer'] {
     inset-inline: auto 0;
     background-color: var(--background);
   }
 
-  /* And painted over that row rather than under it, for the width it does
-     cover. Every message here is a stacking context of its own —
-     `content-visibility: auto` above brings paint containment with it — so
-     without a layer of its own this one is painted in tree order, which is
-     to say first. */
+  /* Without z-index, the next message comes later in the tree and paints
+     over this message's bar. */
   &:hover {
     z-index: 1;
   }
 
-  /* The same space an open row keeps under its body in the rule above, on
-     top of the band, since here the band is no longer in the flow to hold
-     it. */
+  /* The space an open row keeps under its body in the rule above, plus the
+     30px band, which no longer holds space here. */
   &:has(
       :is([data-slot='reasoning-content'], [data-slot='tool-group-content'])[data-state='open']
     ) {
@@ -372,16 +293,9 @@
 }
 
 /*
- * No 24px between a row and whatever carries on the run, which cancels the
- * group's `gap-y-6` for that pair only.
- *
- * The message before does not end on what it says — it ends in rows, or in
- * the indicator under them, whether or not it said anything at all — and the
- * message after opens with rows of its own. Both halves are needed: this is
- * the seam in a run, not the edge of one. What is left between the two rows
- * is the 6px each trigger carries above and below its own text, so they read
- * as one list rather than a column of stranded lines. The gap returns in
- * full on either side of the run, against the prose it belongs to.
+ * Cancels the 24px gap-y-6 between a message that ends in rows and a message
+ * that starts with rows. The two runs then read as one list, spaced by the
+ * 6px padding of each trigger. The gap stays next to prose.
  */
 [data-slot='aui_assistant-message-root']:has(
     > [data-slot='aui_assistant-message-content'] > [data-slot='aui_chain-of-thought']
@@ -402,30 +316,19 @@
 }
 
 /*
- * The space under a chain-of-thought block, set here rather than on the
- * disclosure rows inside it — see the note in reasoning.tsx. It only applies
- * where the block has prose after it in the same message; a block a message
- * ends on is spaced by the rules above instead.
+ * The space under a chain-of-thought block with more content after it in the
+ * same message. The rules above space a block that ends a message.
  */
 [data-slot='aui_chain-of-thought']:not(:last-child) {
   margin-bottom: 1rem;
 }
 
 /*
- * The spinner's blocks: nine of them, each shrinking about its own centre and
- * growing back, a tenth of a second apart down the diagonal. See
- * components/Spinner.tsx, which places the grid and sets each block's delay.
+ * One block of the spinner, which shrinks about its own centre and grows
+ * back. The scale 0.1814 is 1.33 over 7.33, the smallest and the full block
+ * size of the original spinner.
  *
- * `fill-box` is what makes the centre the block's own rather than the whole
- * 24-unit canvas: without it every block would collapse toward the middle of
- * the icon instead of into itself. The scale is upstream's geometry — 1.33
- * over 7.33 — expressed as the one thing all nine of its keyframe pairs were
- * doing.
- *
- * A plain class rather than a utility because the animation is the component,
- * not a decoration a caller chooses; the reduced-motion rule is the same
- * courtesy `motion-reduce:animate-none` buys everywhere else, and here a
- * still grid of blocks is a perfectly good "working".
+ * fill-box makes the centre the block's own, not the centre of the icon.
  */
 @keyframes spinner-block {
   0%,

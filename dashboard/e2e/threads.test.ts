@@ -4,15 +4,13 @@ import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchest
 import { reply } from './stub-gateway.ts';
 
 /**
- * Several conversations on one box, and two of them watched at once.
+ * Browser tests for several threads on one box.
  *
- * A box shares its container and both volumes across its threads, so the
- * difference between them is the transcript and nothing else. What is asserted
- * here is that difference: a fresh thread starts empty, a fork starts from
- * what the source had, going back to a thread brings its own transcript back,
- * and two tabs on two threads each keep to their own.
+ * A box's threads share its container, workspace and home, so only their
+ * transcripts differ.
  */
 
+/** The box the tests drive. */
 const ID = DEFAULT_BOX.id;
 
 /** The `text-decoration-line` the browser computed for one element. */
@@ -36,20 +34,13 @@ afterAll(async () => {
   await closeBrowser();
 });
 
-/**
- * Starts a fresh thread from the list, through the dialog that now asks what
- * it should run.
- *
- * The dialog's own answers are asserted in dialogs.test.ts; what these tests
- * are about is the transcript on the other side of it, so they take the
- * defaults it opens on.
- */
+/** Starts a fresh thread from the list, with the dialog's defaults. */
 async function startThread(page: import('playwright').Page): Promise<void> {
   await page.getByRole('button', { name: 'New thread' }).click();
   await page.getByRole('button', { name: 'Start thread' }).click();
 }
 
-/** Opens the box, asks one question, and waits for the answer. */
+/** Waits for the connection, asks one question, and waits for the answer. */
 async function askOnce(page: import('playwright').Page): Promise<void> {
   await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
   const input = page.getByLabel('Message input');
@@ -65,7 +56,7 @@ test('a new thread starts empty on the same box', async () => {
 
     await page.getByLabel('Back to boxes').click();
     await startThread(page);
-    // Opening a thread is a navigation to that thread's own route.
+    // Each thread has its own route.
     await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -93,8 +84,7 @@ test('a fork carries the source thread messages into the new one', async () => {
     await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // A branch of the first conversation, not a copy of the box: the
-    // replay comes back on a thread of its own.
+    // The fork replays the first thread's messages on a thread of its own.
     await expect.poll(() => page.getByText('Thread 2').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
     expect(await page.getByText('First answer.').count()).toBe(1);
@@ -120,7 +110,6 @@ test('switching back to the first thread returns its transcript', async () => {
     await page.waitForURL(`**/boxes/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // The first thread was left where it was, and comes back whole.
     await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('question one').isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -133,8 +122,7 @@ test('the thread names itself even when the box has only one', async () => {
   const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
-    // Two tabs on one box are otherwise indistinguishable, which is the
-    // whole point of putting the thread in the URL.
+    // Without the name, two tabs on one box look the same.
     await expect.poll(() => page.getByText('Thread 1').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
@@ -156,8 +144,7 @@ test('a fork from inside the thread leaves it where it is and offers a new tab',
     expect(await link.getAttribute('href')).toBe(`/boxes/${ID}/threads/th2`);
     expect(await link.getAttribute('target')).toBe('_blank');
 
-    // This thread stayed exactly where it was: same route, same transcript,
-    // same connection. Nothing was switched out from under it.
+    // This thread keeps its route, transcript and connection.
     expect(page.url()).toContain(`/boxes/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('First answer.').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
@@ -169,8 +156,7 @@ test('a fork from inside the thread leaves it where it is and offers a new tab',
 
 test('two tabs on two threads each keep to their own conversation', async () => {
   await stub.close();
-  // A prompt that never finishes, which is the thread you fork *because* it
-  // is busy.
+  // A prompt that stays open, because a busy thread is the one people fork.
   stub = await startOrchestrator([{}], {
     prompts: [
       { match: (t: string) => t === 'the long job', updates: reply('Working on it.'), hold: true },
@@ -186,8 +172,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
     await first.press('Control+Enter');
     await expect.poll(() => working.page.getByText('Working on it.').isVisible()).toBe(true);
 
-    // Fork it and open the fork in its own tab, which is the motion the whole
-    // change exists for.
+    // Fork it and open the fork in its own tab.
     await working.page.getByLabel('Fork this thread').click();
     await expect.poll(() =>
       working.page.getByRole('link', { name: 'Open it in a new tab' }).isVisible(),
@@ -207,8 +192,7 @@ test('two tabs on two threads each keep to their own conversation', async () => 
       await second.press('Control+Enter');
       await expect.poll(() => exploring.page.getByText('A quick answer.').isVisible()).toBe(true);
 
-      // And none of that reached the thread that is still working: its
-      // transcript is untouched by the other tab.
+      // None of that reached the thread that is still working.
       expect(await working.page.getByText('A quick answer.').count()).toBe(0);
       expect(await working.page.getByText('what are you doing?').count()).toBe(0);
       expect(working.errors).toEqual([]);
@@ -250,8 +234,7 @@ test('marking a thread done crosses it out on the list, and the mark comes off a
     await expect.poll(() => name.isVisible()).toBe(true);
     await expect.poll(() => decoration(name)).toBe('line-through');
 
-    // Struck through and nothing else: the row is still a link into the
-    // conversation, which still connects.
+    // The row is still a link into the thread, which still connects.
     await name.click();
     await page.waitForURL(`**/boxes/${ID}/threads/th1`);
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);

@@ -2,46 +2,13 @@ import { UPDATE_KIND } from '../../../shared/acp.ts';
 import { harness, type HarnessId } from '../harness.ts';
 import { startsBackgroundWork, type ToolCallUpdate } from './background.ts';
 
-/**
- * Whether the agent is producing output on a thread, now.
- *
- * ACP has no word for it: there is no "the agent is done for now"
- * notification and no stop reason on a prompt being deferred. This adapter
- * says it sideways — it sends a `usage_update` at the end of every processing
- * cycle, and that one carries a `cost` where the ones it sends while a
- * message streams do not. Its result handler emits that before deciding
- * whether to settle the turn or hold it open, so a cost-bearing usage_update
- * is the agent stopping, for a held turn and for a cycle the harness woke on
- * its own alike.
- *
- * It is not promised: the adapter sends it only when the backend reported
- * usage, and no other adapter promises anything of the sort — `codex-acp`
- * sends none, so a Codex thread is decided by the timers below and never by
- * the marker. So silence is the fallback — an update says the agent is
- * working, and silence, once it has lasted `quietMs`, says it has stopped.
- *
- * The one exception is a tool call the agent is waiting on. An `npm test`
- * that runs for two minutes emits nothing while it runs, so a thread with an
- * open call stays speaking however quiet it goes. A call that backgrounds its
- * work is the opposite and is not counted, which is why this and
- * `background.ts` share the predicate that decides which those are — the
- * adapters' own `backgrounded` marker first, which is the only one of its
- * answers that speaks for a Codex call.
- *
- * Two thresholds, because the two readers want opposite things. The UI flips
- * at `quietMs`, where an early flip only shows a send button while the model
- * thinks between tool calls. The push waits for `settleMs`, because "your
- * turn has finished" on a lock screen is a claim that cannot be taken back.
- * Neither is consulted when the adapter says the cycle is over.
- */
-
 /** Cancels a delayed call, and is safe to run after it has already fired. */
 type Cancel = () => void;
 
-/** Runs `fn` in `ms`. Injected, so a test can decide when later is. */
+/** Runs `fn` after `ms`. Injected, so a test can control time. */
 export type Delay = (ms: number, fn: () => void) => Cancel;
 
-/** The real one, which never holds the process open at shutdown. */
+/** The timer-based {@link Delay}, which never holds the process open. */
 const realDelay: Delay = (ms, fn) => {
   const timer = setTimeout(fn, ms);
   timer.unref?.();
@@ -49,18 +16,11 @@ const realDelay: Delay = (ms, fn) => {
 };
 
 /**
- * Update kinds that are the agent at work.
+ * Update kinds that show the agent at work.
  *
- * An allowlist rather than "anything that arrives", because some updates are
- * about the thread rather than from the agent — the mode the user just set,
- * the command list the adapter sends at startup — and a thread that flashed
- * as working every time somebody opened the settings would teach its reader
- * to ignore the signal.
- *
- * `user_message_chunk` is in it. That is the prompt somebody sent, or the
- * harness waking the agent with a task's report: either way something has
- * just been given to the agent, and the answer to "is it working" is yes
- * before its first token arrives.
+ * Other kinds, such as a mode change or the command list, are about the
+ * thread and do not come from the agent. `user_message_chunk` counts, because
+ * the agent has just been given a prompt or a task's report to work on.
  */
 const AT_WORK = new Set<string>([
   UPDATE_KIND.userMessageChunk,
@@ -71,11 +31,12 @@ const AT_WORK = new Set<string>([
   UPDATE_KIND.plan,
 ]);
 
-/** Tool call statuses that say the call is over, either way. */
+/** Tool call statuses that mean the call is over. */
 const FINISHED = new Set(['completed', 'failed']);
 
 /** What is known about one thread. */
 interface ThreadState {
+  /** Whether the agent is producing output. */
   speaking: boolean;
   /** Foreground tool calls announced and not yet finished. */
   open: Set<string>;
@@ -83,18 +44,39 @@ interface ThreadState {
   cancel: Cancel | null;
 }
 
+/**
+ * Whether the agent is producing output on each thread.
+ *
+ * ACP has no notification that says the agent is done for now, so this reads
+ * the stream instead. An update from the agent means it is working. Silence
+ * for `quietMs` means it has stopped, unless a foreground tool call is still
+ * open: a long test run emits nothing while it runs. A `usage_update` that
+ * ends a processing cycle stops the thread at once, without a timer.
+ */
 export class Activity {
+  /** What is known about each thread, by the adapter's thread id. */
   private readonly threads = new Map<string, ThreadState>();
+  /**
+   * Silence after which the UI shows the agent as stopped. An early flip only
+   * shows a send button while the model thinks.
+   */
   private readonly quietMs: number;
+  /**
+   * Silence after which a turn counts as finished for a push notification,
+   * which cannot be taken back once sent.
+   */
   private readonly settleMs: number;
+  /** Schedules the quiet and settle timers. */
   private readonly delay: Delay;
+  /** Runs on every change of a thread's speaking state. */
   private readonly onChange: (acpThreadId: string, speaking: boolean) => void;
+  /** Runs once a thread has been quiet for `settleMs`. */
   private readonly onSettled: (acpThreadId: string) => void;
 
   /**
-   * @param onChange Run on every transition, to tell the browsers watching.
-   * @param onSettled Run once a thread has been quiet for `settleMs`, which
-   *   is what a "turn finished" notification is worth sending on.
+   * @param opts.onChange Runs on every transition, to tell the browsers watching.
+   * @param opts.onSettled Runs once a thread has been quiet for `settleMs`, the
+   *   point where a "turn finished" notification is worth sending.
    */
   constructor(opts: {
     quietMs: number;
@@ -115,7 +97,7 @@ export class Activity {
     return this.threads.get(acpThreadId)?.speaking === true;
   }
 
-  /** The threads believed to be working, for a box-wide answer. */
+  /** The threads where the agent is producing output. */
   get speakingThreads(): string[] {
     return [...this.threads]
       .filter(([, state]) => state.speaking)
@@ -123,11 +105,10 @@ export class Activity {
   }
 
   /**
-   * A prompt has just been forwarded on this thread.
+   * Marks a thread as working because a prompt has just been forwarded on it.
    *
-   * The agent is working from here rather than from its first token, so the
-   * browser that sent the prompt gets its spinner in one hop instead of
-   * waiting out the model's own latency.
+   * The browser that sent the prompt gets its spinner before the model's first
+   * token arrives.
    */
   begin(acpThreadId: string): void {
     this.mark(acpThreadId);
@@ -136,14 +117,11 @@ export class Activity {
   /**
    * Reads one live `session/update` for what it says about the agent.
    *
-   * Replayed updates must not reach this — a transcript is a record of work
-   * that has already happened, and reading one would show a working agent for
-   * as long as the replay takes. The caller holds that line, the same one it
-   * holds for `background.ts`.
+   * The caller must not pass replayed updates: a replay would show the agent
+   * working for as long as it takes.
    *
-   * `harnessId` is whose adapter the update came off, which decides what a
-   * tool name means: the calls that background their own work are one
-   * harness's names and not the other's.
+   * @param harnessId The harness whose adapter sent the update. It decides
+   *   which tool names start background work.
    */
   observe(acpThreadId: string, update: unknown, harnessId: HarnessId): void {
     if (!update || typeof update !== 'object') return;
@@ -153,9 +131,7 @@ export class Activity {
       status?: string;
       cost?: unknown;
     };
-    // The end of a processing cycle, said outright. Whatever was open is
-    // over: a turn does not end with the agent still waiting on a call, and a
-    // cancelled one is not waiting for it any more either.
+    // The end of a processing cycle also ends every open tool call.
     if (u.sessionUpdate === UPDATE_KIND.usage && endsCycle(u)) {
       this.stop(acpThreadId);
       return;
@@ -172,12 +148,11 @@ export class Activity {
   }
 
   /**
-   * Follows one tool call, so that the silence while it runs is not read as
+   * Follows one tool call, so that the silence while it runs does not count as
    * the agent having stopped.
    *
-   * A call that backgrounds its work is not followed: that is the whole point
-   * of backgrounding it, and the box stays awake for it either way, which is
-   * `background.ts`'s job.
+   * A call that starts background work is dropped from the open set, because
+   * the agent does not wait for it.
    */
   private track(
     acpThreadId: string,
@@ -194,7 +169,7 @@ export class Activity {
     state.open.add(call.toolCallId);
   }
 
-  /** The agent is working on this thread; the clock on its silence restarts. */
+  /** Marks the agent as working on this thread and restarts the quiet timer. */
   private mark(acpThreadId: string): void {
     const state = this.state(acpThreadId);
     state.cancel?.();
@@ -205,8 +180,8 @@ export class Activity {
   }
 
   /**
-   * The agent has stopped, on the adapter's own say-so rather than on a
-   * timer. Everything a timer would eventually have concluded, concluded now.
+   * Marks the agent as stopped because the adapter said so. Clears the open
+   * calls and the quiet timer, and arms the full settle timer.
    */
   private stop(acpThreadId: string): void {
     const state = this.threads.get(acpThreadId);
@@ -222,9 +197,8 @@ export class Activity {
   }
 
   /**
-   * `quietMs` with nothing said. Either a call the agent is waiting on is
-   * still open — in which case the silence means nothing and the wait starts
-   * again — or the agent has stopped.
+   * Runs after `quietMs` of silence. Restarts the wait while a tool call is
+   * open, and otherwise marks the agent as stopped.
    */
   private quiet(acpThreadId: string): void {
     const state = this.threads.get(acpThreadId);
@@ -237,30 +211,27 @@ export class Activity {
     if (!state.speaking) return;
     state.speaking = false;
     this.onChange(acpThreadId, false);
-    // And now the slower question. The rest of `settleMs` from the last thing
-    // the agent said, so a turn that pauses to think is not announced as
-    // finished to somebody who is not there to see it resume.
+    // The settle timer counts from the last update, so it waits only for
+    // the part of `settleMs` that is left.
     this.armSettle(acpThreadId, Math.max(this.settleMs - this.quietMs, 0));
   }
 
-  /** Waits out the quiet a notification is worth sending on. */
+  /** Arms the timer that forgets a quiet thread and reports it as settled. */
   private armSettle(acpThreadId: string, ms: number): void {
     const state = this.threads.get(acpThreadId);
     if (!state) return;
     state.cancel = this.delay(ms, () => {
       const current = this.threads.get(acpThreadId);
       if (!current || current.speaking) return;
-      // Nothing left worth remembering: a settled thread is quiet, holds no
-      // open call and has no timer armed, which is what a thread this has
-      // never heard of already answers.
+      // A settled thread is in the same state as an unknown one.
       this.threads.delete(acpThreadId);
       this.onSettled(acpThreadId);
     });
   }
 
   /**
-   * Forgets a thread without announcing anything: for a cancelled turn, whose
-   * caller publishes the new state itself.
+   * Forgets a thread without calling `onChange`. The caller publishes the new
+   * state itself.
    */
   reset(acpThreadId: string): void {
     const state = this.threads.get(acpThreadId);
@@ -275,6 +246,7 @@ export class Activity {
     this.threads.clear();
   }
 
+  /** The state of one thread, created on first use. */
   private state(acpThreadId: string): ThreadState {
     let state = this.threads.get(acpThreadId);
     if (!state) {
@@ -287,13 +259,11 @@ export class Activity {
 
 /**
  * Whether a `usage_update` is the one the adapter sends at the end of a
- * processing cycle, rather than one of the running totals it sends while a
- * message streams.
+ * processing cycle.
  *
- * The cost is what tells them apart: the end-of-cycle update carries the
- * cycle's own `total_cost_usd`, and the streaming ones carry only the tokens
- * used and the window size. An adapter that sends neither leaves this false
- * and the timers do the work.
+ * Only that update carries a `cost`. The updates sent while a message streams
+ * carry only token counts. Codex sends no such update, so its threads rely on
+ * the timers.
  */
 function endsCycle(update: { cost?: unknown }): boolean {
   return typeof update.cost === 'object' && update.cost !== null;

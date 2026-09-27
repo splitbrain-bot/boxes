@@ -22,68 +22,65 @@ import {
   type TaskNotification,
 } from '../../../../shared/task-notifications.ts';
 
-/**
- * ACP session/update notifications, folded into an append-only message model.
- *
- * Everything here is pure: the same updates in the same order always produce
- * the same model, which is what makes replay and live streaming the same code
- * path. Replay is just the adapter re-sending the history as notifications.
- */
+/** Folds ACP session/update notifications into the thread's message model. */
 
 /** The member of the update union that carries one kind. */
 type UpdateOf<K extends UpdateKind> = Extract<ThreadUpdate, { sessionUpdate: K }>;
 
 /** A run of assistant or user prose. */
 interface TextPart {
+  /** The part's kind. */
   type: 'text';
+  /** The text so far. */
   text: string;
 }
 
 /** The agent thinking out loud, rendered collapsed. */
 interface ReasoningPart {
+  /** The part's kind. */
   type: 'reasoning';
+  /** The text so far. */
   text: string;
 }
 
 /**
- * An image, as something the browser can load.
+ * An image, as a src the browser can load.
  *
- * The block's own shape does not survive into the model: what a renderer
- * needs is one src, and which of the two ACP forms it came from is settled
- * once, on arrival, by `imageSrc`. A block that yields no src never becomes
- * one of these — it is said in words instead.
+ * `imageSrc` settles the src on arrival. A block without a src becomes text
+ * instead.
  */
 interface ImagePart {
+  /** The part's kind. */
   type: 'image';
+  /** A data URL, or an https or blob URL. */
   src: string;
 }
 
 /**
- * A file the user attached, as a chip under their message.
+ * A file the user attached, shown as a chip under the message.
  *
- * Built from the envelope the composer put in the prompt rather than from
- * anything the adapter says, which is what makes it identical live and on
- * replay: the envelope is text, and text is the one thing that survives a
- * transcript unchanged.
+ * Built from the envelope text the composer put in the prompt. Text survives
+ * a transcript unchanged, so live and replayed threads show the same chip.
  */
 export interface AttachmentPart {
+  /** The part's kind. */
   type: 'attachment';
   /** The file's name, which is what the chip shows. */
   name: string;
-  /** Workspace-relative, and what the agent was given to open. */
+  /** The workspace-relative path the agent was given to open. */
   path: string;
+  /** The file's media type. */
   mimeType: string;
 }
 
 /**
- * A background task reporting in, as a row of its own.
+ * A background task's report, shown as a row of its own.
  *
- * Built from the block of XML the harness wakes the agent with rather than
- * from anything the adapter says, on the same terms as the attachment chip:
- * the text is what survives a transcript, so live and replayed threads draw
- * the same row.
+ * Built from the XML block the harness wakes the agent with, so live and
+ * replayed threads show the same row.
  */
 export interface TaskPart extends TaskNotification {
+  /** The part's kind. */
   type: 'task';
 }
 
@@ -91,26 +88,35 @@ export interface TaskPart extends TaskNotification {
 export interface ApprovalState {
   /** Correlates the user's answer with the JSON-RPC request that is blocked. */
   id: string;
+  /** The answers the request offers. */
   options: PermissionOption[];
-  /** Set once answered, or when the adapter gave up on the question. */
+  /** The option the user picked, once answered. */
   optionId?: string;
+  /** Set when the request was cancelled instead of answered. */
   resolution?: 'cancelled';
 }
 
 /** One tool call, and everything known about it so far. */
 export interface ToolPart {
+  /** The part's kind. */
   type: 'tool';
+  /** The adapter's id for the call. */
   toolCallId: string;
   /** The adapter's human-readable title, which is what the header shows. */
   title: string;
   /** The programmatic name when the adapter sends one. */
   name?: string;
+  /** The category of the tool. */
   kind?: ToolKind;
+  /** How far along the call is. */
   status: ToolCallStatus;
+  /** The arguments the tool received. */
   rawInput?: unknown;
   /** Content blocks, diffs and terminal handles, rendered in order. */
   content: ToolCallContent[];
+  /** The files the call touches. */
   locations: ToolCallLocation[];
+  /** The permission request on this call, while one exists. */
   approval?: ApprovalState;
 }
 
@@ -119,15 +125,17 @@ export type Part = TextPart | ReasoningPart | ImagePart | AttachmentPart | TaskP
 
 /** One message in the thread. */
 export interface Message {
+  /** The adapter's message id, or one this model made up. */
   id: string;
+  /** Who speaks. */
   role: 'user' | 'assistant';
+  /** The message content, in order. */
   parts: Part[];
   /**
-   * True when the id is the adapter's own rather than one this model made up.
+   * True when the id is the adapter's own.
    *
-   * A replay says an adapter's id again, which is what lets a reconnect ask
-   * for the thread from one message on. An id this model numbered itself
-   * names nothing the adapter would repeat.
+   * A replay repeats the adapter's ids, so a reconnect can resume from such
+   * a message.
    */
   named?: boolean;
 }
@@ -146,17 +154,15 @@ export interface ThreadModel {
   /**
    * Kinds of update this build does not know, by name.
    *
-   * The names rather than the updates: what a newer adapter sending something
-   * unrecognised is worth knowing for is that it happened, and a thread can
-   * carry hundreds of thousands of updates.
+   * Only the names are kept, because a thread can carry hundreds of thousands
+   * of updates.
    */
   unknown: Set<string>;
   /**
-   * Every tool call in the thread, by the adapter's id for it.
+   * Every tool call in the thread with the message that holds it, by the
+   * adapter's id for the call.
    *
-   * A tool call is looked up whenever one is updated, answered or refreshed,
-   * and a long thread holds thousands of them, so the lookup is an index
-   * rather than a walk of every message.
+   * A long thread holds thousands of calls, so lookups use this index.
    */
   tools: Map<string, { part: ToolPart; message: Message }>;
 }
@@ -177,12 +183,12 @@ export function emptyModel(): ThreadModel {
 /** Source of message ids for chunks that arrive without one. */
 let nextId = 1;
 
-/** Resets the id counter. Tests only, so ids are predictable per case. */
+/** Resets the id counter, so each test gets predictable ids. */
 export function resetIds(): void {
   nextId = 1;
 }
 
-/** A new empty message, in the given role. */
+/** A new empty message in the given role, named when `id` is given. */
 function newMessage(role: Message['role'], id?: string | null): Message {
   if (id) return { id, role, parts: [], named: true };
   return { id: `m${nextId++}`, role, parts: [] };
@@ -192,9 +198,8 @@ function newMessage(role: Message['role'], id?: string | null): Message {
  * The message a chunk belongs to.
  *
  * ACP marks message boundaries with messageId: chunks sharing one are the
- * same message, and a change starts a new one. An adapter that sends no
- * messageId falls back to the role boundary, which is what streaming looks
- * like in practice.
+ * same message, and a change starts a new one. Without a messageId, a role
+ * change starts a new message.
  */
 function messageFor(
   model: ThreadModel,
@@ -228,14 +233,10 @@ function appendText(message: Message, kind: 'text' | 'reasoning', text: string):
 /**
  * Appends one content block to a message, as a part of the kind it is.
  *
- * An image becomes its own part rather than joining the prose, because it is
- * not prose: two chunks of text on either side of one are two text parts with
- * a picture between them, which is what was said. Everything else is read as
- * text and appended, so a run of chunks still collapses into one part.
- *
- * The same path serves all three chunk kinds, thought included. An image in a
- * thought is not something the adapter sends today, and if it starts, showing
- * it costs nothing and dropping it would be a silence to debug.
+ * An image becomes its own part between the text parts around it.
+ * Everything else is read as text and appended, so a run of chunks
+ * collapses into one part. All three chunk kinds use this path, thoughts
+ * included.
  */
 function appendBlock(message: Message, kind: 'text' | 'reasoning', content: ContentBlock): void {
   if (content?.type === 'image') {
@@ -250,9 +251,9 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
 
   const text = blockText(content);
 
-  // Not the user speaking, however much it looks like it: the harness wakes
-  // the agent in the user's own role when a background task has something to
-  // report. Only in that role — an agent quoting the format is quoting it.
+  // The harness wakes the agent in the user role when a background task
+  // reports. Only that role is checked, so an agent quoting the format stays
+  // text.
   const segments = kind === 'text' && message.role === 'user' ? parseTaskNotifications(text) : null;
   if (segments) {
     for (const segment of segments) {
@@ -262,9 +263,8 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
     return;
   }
 
-  // A block the composer wrote to tell the agent what was attached. It is
-  // addressed to the model, so what is shown in its place is the thing the
-  // reader attached: the picture, or the file's name.
+  // The composer's envelope tells the agent what was attached. The reader sees
+  // the attached files in its place.
   const envelope = kind === 'text' ? parseEnvelope(text) : null;
   if (envelope) {
     appendText(message, kind, envelope.before);
@@ -294,8 +294,7 @@ export function truncateFrom(model: ThreadModel, messageId: string): Message[] {
   const from = model.messages.findIndex((m) => m.id === messageId);
   if (from < 0) return [];
   const dropped = model.messages.splice(from);
-  // The index is what every tool lookup goes through, so a call in a message
-  // that has gone has to go with it.
+  // The tool index loses the calls of the dropped messages.
   for (const message of dropped) {
     for (const part of message.parts) {
       if (part.type === 'tool') model.tools.delete(part.toolCallId);
@@ -318,8 +317,9 @@ export function messageOfTool(model: ThreadModel, toolCallId: string): Message |
  * Applies one update to the model, in place, and returns the message it
  * changed so a caller can refresh just that one.
  *
- * An unknown kind is kept and otherwise ignored: a newer adapter must be able
- * to talk to an older dashboard without the thread breaking.
+ * Replay and live streaming both come through here. An unknown kind is
+ * noted by name and otherwise ignored, so a newer adapter does not break an
+ * older dashboard.
  */
 export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message | null {
   switch (update.sessionUpdate) {
@@ -386,9 +386,8 @@ export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message |
  * Folds a tool_call or a tool_call_update into the thread: merged into the
  * call it is about, or started as a fresh card when there is none yet.
  *
- * One path for both, because the two updates differ in exactly one thing —
- * what a card with no title yet is called — and an adapter is free to send
- * either of them first.
+ * An adapter may send either of the two first, so both take this path. The
+ * caller passes the title for a new card.
  */
 function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message | null {
   const indexed = model.tools.get(u.toolCallId);
@@ -451,7 +450,7 @@ export function toolOutputText(part: ToolPart): string {
     .join('\n');
 }
 
-/** A diff as a unified-looking block, which is all the fallback needs to show. */
+/** A diff as a block in unified style: the removed lines, then the added ones. */
 function diffText(diff: Extract<ToolCallContent, { type: 'diff' }>): string {
   const removed = (diff.oldText ?? '')
     .split('\n')

@@ -1,20 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 
 /**
- * A row that can be put away, taking its height with it.
+ * A row that collapses to zero height when put away, so the content below
+ * gets the space.
  *
- * Collapsed rather than slid out over the content: what is above the thread
- * has to be gone to be worth anything on a phone, and a header floating over
- * the first message would cover the message rather than yield the forty-five
- * pixels. The thread below is `flex-1`, so the space is handed
- * straight to the conversation.
- *
- * The height is measured rather than named. A header with a two-line title,
- * a mode switcher and a model switcher is not a number this file can know,
- * and `height: auto` is not a value CSS will animate from — so a resize
- * observer keeps the real one, and the transition runs between that and zero.
- * Until the first measurement there is no inline height at all, which is what
- * makes the first paint the natural one.
+ * CSS cannot animate from `height: auto`, so a resize observer measures the
+ * real height. Before the first measurement the row has no inline height.
  */
 export function Shelf({
   away,
@@ -22,6 +13,7 @@ export function Shelf({
 }: {
   /** True to put it away. */
   away: boolean;
+  /** The row's content. */
   children: React.ReactNode;
 }) {
   const content = useRef<HTMLDivElement>(null);
@@ -43,15 +35,12 @@ export function Shelf({
   return (
     <div
       data-slot="shelf"
-      // Whether it is away, for a test that has to ask: a row put away by a
-      // parent collapsing around it keeps a box of its own, so measuring the
-      // header says nothing.
+      // For tests, because the collapsed row's content keeps its own size.
       data-away={away ? '' : undefined}
       className="shrink-0 overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none"
       style={height === null ? undefined : { height: away ? 0 : height }}
-      // Nothing in a row that is not on screen should be reachable by tab or
-      // readable by a screen reader. `inert` is both, and it also drops focus
-      // out of a select that was open when the row went away.
+      // Keeps a hidden row out of the tab order and the screen reader, and
+      // drops focus from a select that was open.
       inert={away}
     >
       <div ref={content}>{children}</div>

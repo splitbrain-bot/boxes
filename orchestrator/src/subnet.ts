@@ -1,5 +1,5 @@
 /**
- * Per-box /24 allocation out of BOX_SUBNET_POOL. Docker requires each
+ * Allocation of one /24 per box out of BOX_SUBNET_POOL. Docker requires each
  * box network to have a subnet of its own.
  */
 
@@ -29,7 +29,7 @@ export function parseCidr(cidr: string): ParsedCidr {
     }
     base = ((base << 8) | n) >>> 0;
   }
-  // Normalise to the true network address.
+  // Clear the host bits.
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
   return { base: (base & mask) >>> 0, prefix };
 }
@@ -40,13 +40,12 @@ export function formatIpv4(value: number): string {
 }
 
 /**
- * The first free /24 inside pool, starting at the index-th and wrapping, or
- * null when `taken` holds every one of them.
+ * Returns the first free /24 inside pool, starting at the index-th and
+ * wrapping around, or null when `taken` holds every one of them.
  *
- * Wrapping is what keeps a long-lived deployment allocating: the counter the
- * index comes from only ever rises, while the subnets it named are given back
- * as boxes are deleted. `taken` is what the wrap needs — a pool of 256
- * slots would otherwise hand the 257th box the subnet the first is on.
+ * The index comes from a counter that only rises, while deleted boxes give
+ * their subnets back. The wrap reuses those subnets, and `taken` keeps it
+ * from handing out one that a box still holds.
  */
 export function allocateSubnet(
   pool: string,

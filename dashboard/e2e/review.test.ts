@@ -4,19 +4,14 @@ import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchest
 import { reviewWorkspace } from './workspace.ts';
 
 /**
- * The review pages in a real browser, against the real production bundle and
- * the real orchestrator, over a workspace with real git repositories in it.
+ * Browser tests for the review pages, over a workspace with real git
+ * repositories in it.
  *
- * The path the tests walk is the one the feature exists for: browse the tree,
- * open a file, comment on a line, and hand the review to the agent. Both
- * viewports, because the phone and the pointer arrangements are different
- * enough that one passing says little about the other.
- *
- * The fixture is a workspace, not a repository: two projects side by side and
- * a loose directory beside them. That is the shape the review is designed
- * around, so it is the one the browser walks.
+ * The tests use both viewports, because the phone and desktop layouts differ
+ * too much for one to vouch for the other.
  */
 
+/** The box every test here drives. */
 const BOX = DEFAULT_BOX.id;
 
 let stub: TestOrchestrator;
@@ -26,9 +21,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // A fresh box and a fresh workspace per test: comments are written for
-  // real, one test reviews a box of another shape, and a leftover of
-  // either would make the next test's counts wrong.
+  // Tests write comments and replace the workspace, which would change the
+  // next test's counts.
   stub.resetBoxes();
   stub.createBox();
   stub.review(BOX);
@@ -45,13 +39,11 @@ afterAll(async () => {
 test('the tree is the whole screen on a phone, and a file replaces it', async () => {
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
-    // The workspace's own top level: two repositories and a directory that is
-    // in neither. Every one of them is browsable, which is the whole change.
+    // The workspace's top level: two repositories and a directory in neither.
     await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
     await expect.poll(() => page.getByRole('button', { name: 'lib a git repository' }).isVisible()).toBe(true);
     await expect.poll(() => page.getByRole('button', { name: /^notes/ }).isVisible()).toBe(true);
-    // A repository root says it is one, so the boundaries are visible while
-    // scrolling across them.
+    // A repository root is labelled, so the boundaries stay visible.
     expect(await page.getByLabel('a git repository').count()).toBe(2);
 
     // Directories start closed unless they are a single-child chain from the
@@ -59,8 +51,7 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /app\.ts/ }).isVisible()).toBe(true);
-    // Status marks travel with the tree, in one response with it, and they
-    // come from whichever repository owns the path.
+    // Status marks come with the tree, from the repository that owns the path.
     await expect.poll(() => page.getByLabel('modified').isVisible()).toBe(true);
 
     await page.getByRole('button', { name: /app\.ts/ }).click();
@@ -70,14 +61,13 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
     await expect.poll(() => page.getByText('import { boot }').isVisible()).toBe(true);
     await shoot(page, 'review-file-phone');
 
-    // Back is one step of the stack — file → file list — and it is the
-    // header's own button, the same control every other view goes back with.
+    // Back steps from the file to the file list, through the header's button.
     await page.getByLabel('Back to the file list').click();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
     await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
 
-    // And from the list, the next step out is the box list: a review opened
-    // by a link names no thread to go back to.
+    // From the list, back leads to the boxes: a review opened by a link names
+    // no thread to go back to.
     await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
 
     expect(errors).toEqual([]);
@@ -95,13 +85,12 @@ test('the tree is a column beside the pane on a desktop', async () => {
   );
   try {
     await expect.poll(() => page.getByText('wire the router').isVisible()).toBe(true);
-    // Both at once, which is the whole difference from the phone arrangement.
+    // Tree and file at once, unlike on a phone.
     await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /boot\.ts/ }).isVisible()).toBe(true);
-    // The header says which repository the open file belongs to, in place of
-    // a root the review no longer has.
+    // The header names the repository the open file belongs to.
     await expect.poll(() => page.getByText(/· app/).isVisible()).toBe(true);
     // The list and the file are one view here, so there is no step between
     // the review and what opened it: back leaves, with a file open or without.
@@ -163,8 +152,7 @@ test('a gutter marker opens the hunk, deleted lines included', async () => {
     await expect.poll(() => page.getByText('lines deleted here').isVisible()).toBe(true);
     await page.getByText('lines deleted here').click();
 
-    // The hunk is the only place the removed lines exist, so this is where
-    // hover-on-a-tooltip had to go.
+    // The hunk is the only place that shows the removed lines.
     await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('console.log("boot")').isVisible()).toBe(true);
     await shoot(page, 'review-hunk-phone', 'viewport');
@@ -180,9 +168,6 @@ test('the gutter opens the hunk, and the code opens the comment', async () => {
     `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
-    // The row is split: the gutter is the change, the code is the comment. A
-    // deletion marker is not the only way in, which is what it was reduced to
-    // when the gutter was spent on commenting.
     await expect.poll(() => page.getByLabel('Show the change at line 2').isVisible()).toBe(true);
     await page.getByLabel('Show the change at line 2').click();
     await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
@@ -205,8 +190,7 @@ test('a line with no hunk behind it has no gutter button', async () => {
     `/boxes/${BOX}/review?path=app%2Fsrc%2Fapp.ts`,
   );
   try {
-    // An unchanged file has nothing to show, so its gutter is not a target
-    // that lights up under the thumb and then does nothing.
+    // An unchanged file has no hunk to show.
     await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
     expect(await page.getByLabel('Show the change at line 1').count()).toBe(0);
     expect(errors).toEqual([]);
@@ -216,8 +200,7 @@ test('a line with no hunk behind it has no gutter button', async () => {
 });
 
 test('a file the change deleted is listed, and says it is gone', async () => {
-  // Listed by its status alone: it is on no disk and in no ls-files, which is
-  // exactly why it used to fall out of the tree the moment it mattered.
+  // Listed by its git status alone, because it is not on disk and not in ls-files.
   stub.review(BOX, reviewWorkspace({ deleted: ['app/src/old.ts'] }));
   const { page, errors, close } = await openPage(
     stub.url,
@@ -316,13 +299,11 @@ test('prev/next steps through the changes', async () => {
     'desktop',
   );
   try {
-    // Two changed lines in the fixture and one block deleted between them,
-    // which is three places to step through: a deletion has no line of its
-    // own, so it counts at the line its marker sits under.
+    // Two changed lines and one deleted block at the end make three places to
+    // step through. A deletion counts at the line its marker sits under.
     await expect.poll(() => page.getByLabel('3 changes').isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Next change' }).click();
-    // Comments start at zero, and their buttons are disabled until there are
-    // some — a step button that does nothing is worse than one that is off.
+    // The comment buttons stay disabled until there are comments.
     expect(await page.getByRole('button', { name: 'Next comment' }).isDisabled()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
@@ -338,9 +319,8 @@ test('commenting a line on a phone writes it through the API', async () => {
     `/boxes/${BOX}/review?path=app%2Fsrc%2Fboot.ts`,
   );
   try {
-    // The code half of the row, which is the comment target: it is not
-    // labelled, because a button names itself from its contents and the
-    // contents here are the line of code.
+    // The code half of the row is the comment target. It has no label, so the
+    // test finds it by its line.
     await expect.poll(() => page.locator('[data-line="2"] code').isVisible()).toBe(true);
     await page.locator('[data-line="2"] code').click();
 
@@ -352,7 +332,7 @@ test('commenting a line on a phone writes it through the API', async () => {
     await page.getByRole('textbox', { name: 'Comment on line 2' }).fill('this TODO needs an owner');
     await page.getByRole('button', { name: 'Comment', exact: true }).click();
 
-    // Written where the agent will read it, which is the point of the feature.
+    // Written where the agent will read it.
     await expect.poll(() => stub.reviewCalls.length).toBe(1);
     expect(stub.reviewCalls[0]).toMatchObject({
       method: 'PUT',
@@ -424,8 +404,7 @@ test('a comment can be edited and deleted', async () => {
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(true);
 
     await page.getByRole('button', { name: 'Delete the comment on line 2' }).click();
-    // Asked about first: the bin sits beside the pencil and a comment is
-    // typed prose with no undo.
+    // Confirmed first, because a delete has no undo.
     await expect
       .poll(() => page.getByText('Delete the comment on line 2?').isVisible())
       .toBe(true);
@@ -440,8 +419,7 @@ test('a comment can be edited and deleted', async () => {
 
 test('an outdated comment says the code moved', async () => {
   await stub.comment(BOX, 'app/src/app.ts', 1, 'about the old import');
-  // The agent rewrote the file underneath it, so the lines the comment was
-  // written against are not there any more — which is what makes it outdated.
+  // The agent rewrites the file, so the commented lines are gone.
   stub.write(BOX, 'app/src/app.ts', 'import { start } from "./start";\n\nstart();\n');
 
   const { page, errors, close } = await openPage(
@@ -452,7 +430,7 @@ test('an outdated comment says the code moved', async () => {
   );
   try {
     await expect.poll(() => page.getByText('about the old import').isVisible()).toBe(true);
-    // In words rather than a symbol: what "outdated" means is not guessable.
+    // In words, because a symbol for "outdated" is not guessable.
     expect(
       await page.getByText('The code this was written about has changed').isVisible(),
     ).toBe(true);
@@ -478,14 +456,13 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
     );
     await page.getByRole('button', { name: /Hand to agent/ }).click();
 
-    // Lands in the thread, with the prompt sitting in the composer and no
-    // turn started: what to do with a review is the reviewer's call.
+    // Lands in the thread with the prompt in the composer and no turn started.
+    // The prompt is one line for any number of repositories, because the
+    // workspace has one REVIEW.md at its top.
     await expect.poll(() => page.url()).toContain(`/boxes/${BOX}/threads/th1`);
     await expect
       .poll(() => page.getByText('Read REVIEW.md and address the comments in it.').isVisible())
       .toBe(true);
-    // One line, and the same one however many repositories the workspace
-    // holds: there is exactly one REVIEW.md, at the top of the workspace.
     await shoot(page, 'review-handoff-desktop');
     expect(errors).toEqual([]);
   } finally {
@@ -547,8 +524,7 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
     await expect.poll(() => page.locator('[data-line="2"] code').isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Edit this file' }).click();
 
-    // The same rows, with a textarea over the code: the line numbers and the
-    // highlighting are the pane's own, not a second editor's.
+    // A textarea over the same rows, which keep their line numbers and highlighting.
     const editor = page.getByRole('textbox', { name: 'File contents' });
     await expect.poll(() => editor.isVisible()).toBe(true);
     await expect.poll(() => page.locator('[data-line="2"]').isVisible()).toBe(true);
@@ -568,12 +544,11 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
       boxId: BOX,
       body: { path: 'app/src/boot.ts' },
     });
-    // The file of the workspace the agent is working in, which is the whole
-    // point of the review living here.
+    // The save lands in the workspace the agent works in.
     await expect
       .poll(() => stub.read(BOX, 'app/src/boot.ts'))
       .toContain('wireTheRouter();');
-    // And saved is saved: nothing left to write.
+    // Nothing left to save.
     await expect
       .poll(() => page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
       .toBe(true);
@@ -585,8 +560,7 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
 });
 
 test('the line being read stays put across a switch into editing', async () => {
-  // A comment high up, so the card between the rows is what moves everything
-  // below it when edit mode folds it away.
+  // A comment high up, so folding its card away in edit mode moves every row below it.
   stub.review(BOX, {
     files: { 'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n') },
     repos: [''],
@@ -620,8 +594,7 @@ test('the line being read stays put across a switch into editing', async () => {
     await expect
       .poll(() => page.getByRole('textbox', { name: 'File contents' }).isVisible())
       .toBe(true);
-    // The card folded away, so every pixel offset below it changed — and the
-    // reader is still looking at the line they were looking at.
+    // The card folded away and shifted every row, yet the top line is the same.
     expect(await topLine()).toBe(before);
 
     // And back again, with the card between the rows once more.
@@ -649,8 +622,7 @@ test('a save the agent got in first is refused, and the choice is offered', asyn
     await expect.poll(() => editor.isVisible()).toBe(true);
     await editor.fill('export const version = "2.0.0";\n');
 
-    // The box is running while the review is open, which is allowed: the
-    // agent writes the same file.
+    // The agent writes the same file while the review is open.
     stub.write(BOX, 'lib/index.ts', 'export const version = "9.9.9";\n');
 
     await page.getByRole('button', { name: 'Save', exact: true }).click();
@@ -692,7 +664,7 @@ test('walking away from unsaved edits asks first', async () => {
     await page.getByRole('button', { name: 'Back to the file list' }).click();
     await page.getByRole('button', { name: 'Discard the edits' }).click();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
-    // Nothing was written, which is what discarding means.
+    // Nothing was written.
     expect(stub.read(BOX, 'app/README.md')).toBe('# demo\n\nA project the agent cloned.\n');
     expect(errors).toEqual([]);
   } finally {
@@ -701,11 +673,9 @@ test('walking away from unsaved edits asks first', async () => {
 });
 
 test('the rows and the editor over them wrap in the same places', async () => {
-  // The shapes that decide where a line breaks, and a file long enough for a
-  // disagreement about any of them to add up: what is typed lands where the
-  // caret is only while the rows behind the textarea wrap exactly as it does,
-  // and every line that wraps differently pushes everything below it further
-  // out of step.
+  // Line shapes that decide where a line breaks, repeated so any difference
+  // adds up. Typing lands at the caret only while the rows behind the textarea
+  // wrap exactly as it does.
   const shapes = [
     'The review starts with a file browser over the whole workspace, which is where reading one begins.',
     'The format is the desktop [review](https://github.com/splitbrain/review/blob/main/README.md) tool of the same name.',
@@ -726,18 +696,16 @@ test('the rows and the editor over them wrap in the same places', async () => {
     const editor = page.getByRole('textbox', { name: 'File contents' });
     await expect.poll(() => editor.isVisible()).toBe(true);
 
-    // The whole invariant in one number: the textarea is exactly as tall as
-    // the rows it covers, so it cannot have wrapped the file into a different
-    // number of visual lines than they did.
+    // The textarea is exactly as tall as the rows it covers, so both wrapped
+    // the file into the same number of visual lines.
     const heights = await page.evaluate(() => {
       const ta = document.querySelector('textarea') as HTMLTextAreaElement;
       return { box: ta.clientHeight, content: ta.scrollHeight };
     });
     expect(heights.content).toBe(heights.box);
 
-    // And the behaviour that rests on it, taken at a line far enough down for
-    // any drift above to have shown up: type into the last visual row of a
-    // wrapped line, and the text lands in that line.
+    // Far enough down for any drift to show: text typed into the last visual
+    // row of a wrapped line lands in that line.
     await page.locator('[data-slot="review-code-pane"]').evaluate((pane) => {
       const target = pane.querySelector('[data-line="22"]') as HTMLElement;
       pane.scrollTop = target.offsetTop - 120;
@@ -765,7 +733,7 @@ test('a file the pane cannot show whole cannot be edited', async () => {
   );
   try {
     await expect.poll(() => page.getByText('This file was deleted').isVisible()).toBe(true);
-    // No control rather than one that refuses: there is nothing to edit.
+    // No control at all, because there is nothing to edit.
     expect(await page.getByRole('button', { name: 'Edit this file' }).count()).toBe(0);
     expect(errors).toEqual([]);
   } finally {
@@ -783,24 +751,21 @@ test('the base picker sets a revision and says which one is active', async () =>
     'desktop',
   );
   try {
-    // Without one, the status line says what the diff is actually against.
-    await expect.poll(() => page.getByText(/vs working tree/).isVisible()).toBe(true);
+    // The status line without a base.
+    await expect.poll(() => page.getByText(/vs HEAD/).isVisible()).toBe(true);
 
     await page.getByRole('button', { name: /HEAD/ }).click();
     await page.getByRole('textbox', { name: 'Base revision' }).fill('main');
     await page.getByRole('button', { name: 'Compare' }).click();
 
-    // The status line carries it, because it decides what every colour in the
-    // tree and every marker in the gutter means.
+    // The status line names the base, because it decides what every colour and
+    // gutter marker means.
     await expect.poll(() => page.getByText(/vs main/).isVisible()).toBe(true);
     expect(stub.reviewCalls.at(-1)).toMatchObject({ method: 'PUT base', body: { rev: 'main' } });
 
-    // And the picker says where it landed in each repository, because one
-    // expression resolves separately in every one of them.
+    // The picker shows what the revision resolved to in each repository.
     await page.getByRole('button', { name: /main/ }).click();
-    // The commit it resolved to in each repository, abbreviated. Which commit
-    // that is belongs to the repository the fixture made, so it is read by
-    // shape.
+    // The commit ids differ per fixture run, so the test matches their shape.
     await expect.poll(() => page.getByText(/^[0-9a-f]{8}$/).first().isVisible()).toBe(true);
     await shoot(page, 'review-base-desktop');
     expect(errors).toEqual([]);
@@ -821,12 +786,11 @@ test('a revision that names nothing in one repository is reported, not refused',
     await page.getByRole('textbox', { name: 'Base revision' }).fill('only-app');
     await page.getByRole('button', { name: 'Compare' }).click();
 
-    // Resolved in one repository and not in the other: an ordinary shape, not
-    // a failed request. The header counts it and the picker names the one
-    // that fell back to its own working tree.
+    // Resolved in one repository and not in the other, which is no error. The
+    // header counts it, and the picker names the one that fell back to its HEAD.
     await expect.poll(() => page.getByText(/vs only-app \(1 of 2\)/).isVisible()).toBe(true);
     await page.getByRole('button', { name: /only-app/ }).click();
-    await expect.poll(() => page.getByText('working tree').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('HEAD', { exact: true }).isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -866,12 +830,11 @@ test('a workspace with no repository still browses and comments', async () => {
   );
   try {
     await expect.poll(() => page.getByText('just some notes').isVisible()).toBe(true);
-    // The git features are off and say so, rather than being absent silently.
+    // The git features are off, and the page says so.
     await expect.poll(() => page.getByText(/no git/).isVisible()).toBe(true);
     // No base to pick when there is no repository to pick one in.
     expect(await page.getByRole('button', { name: /HEAD/ }).isVisible()).toBe(false);
-    // Commenting still works, which is the point of degrading rather than
-    // refusing.
+    // Commenting still works.
     await page.locator('[data-line="1"] code').click();
     await page.getByRole('textbox', { name: 'Comment on line 1' }).fill('still reviewable');
     await page.getByRole('button', { name: 'Comment', exact: true }).click();
@@ -883,15 +846,13 @@ test('a workspace with no repository still browses and comments', async () => {
 });
 
 test('a box whose workspace cannot be read says what to do', async () => {
-  // A box from before workspaces became directories, whose files are in a
-  // named volume this process has no way to read.
+  // A legacy box keeps its files in a named volume, which this process cannot read.
   stub.resetBoxes();
   stub.createBox({ legacy: true });
 
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
-    // A legacy box, before its next start migrates it. The message has to
-    // name the fix, since nothing about the view suggests one.
+    // Its next start migrates it, and the message has to name that fix.
     await expect.poll(() => page.getByRole('alert').isVisible()).toBe(true);
     await expect.poll(() => page.getByText(/Start the box once to migrate it/).isVisible()).toBe(true);
     await shoot(page, 'review-legacy-phone');
@@ -942,8 +903,7 @@ test('each file remembers how far it was read, and a new one starts at the top',
     });
     await expect.poll(offset).toBe(1200);
 
-    // One pane serves every file, so without help the next one opens
-    // wherever this one was left.
+    // One pane serves every file, so the next file must be scrolled to the top.
     await page.getByRole('button', { name: /short\.ts/ }).click();
     await expect.poll(() => page.getByText('const one = 1;').isVisible()).toBe(true);
     await expect.poll(offset).toBe(0);
@@ -976,18 +936,10 @@ test('the review header gives way to reading the file, and returns', async () =>
       page.evaluate(() => !!document.elementFromPoint(20, 10)?.closest('header'));
 
     /**
-     * Reads down the pane, a frame's worth of pixels at a time.
+     * Scrolls the pane by `dy` pixels per frame, for `steps` frames.
      *
-     * Driven by the position rather than by a wheel. A notch is not a scroll:
-     * it starts one, which the browser animates out over however many frames
-     * the machine can spare, so a wheeled test is really asking how busy the
-     * box is — and answering differently on a loaded one. A step per frame is
-     * what the listener sees either way, and it sees the same one everywhere.
-     *
-     * What run of steps adds up to which decision is settled in
-     * `src/lib/scroll-away.test.ts`, against no browser at all. What is left
-     * for here is that it is this pane being listened to, and that the header
-     * really does collapse out of reach when it goes.
+     * It sets the position instead of using the wheel. A wheel notch starts an
+     * animation whose frames depend on how busy the machine is.
      */
     const read = (dy: number, steps: number): Promise<void> =>
       pane.evaluate(
@@ -1010,24 +962,16 @@ test('the review header gives way to reading the file, and returns', async () =>
 
     await read(100, 4);
     await expect.poll(away).toBe(true);
-    // And nothing in it is reachable while it is away — `inert`, and a parent
-    // collapsed to nothing. Below md the only way to the file tree is the
-    // button in this header, so switching files from here takes a flick up
-    // first, the same flick as in a thread.
-    //
-    // Polled rather than read once: the decision is a state change and the
-    // collapse is a transition after it, so a single reading right after the
-    // decision is a reading of whichever frame the animation had got to.
+    // Nothing in the header is reachable while it is away. Polled, because the
+    // collapse is a transition that follows the state change.
     await expect.poll(inReach).toBe(false);
 
     await read(-100, 2);
     await expect.poll(away).toBe(false);
     await expect.poll(inReach).toBe(true);
 
-    // And it is back over the file list, after a file left while it was away.
-    // The phone's own back gesture leaves whether the header is in reach or
-    // not, and the pane the decision was read from goes with the file — so a
-    // header still away over the list would be a list with no way out of it.
+    // Back from a file while the header is away brings the header back over
+    // the file list. Otherwise the list would have no way out.
     await read(100, 4);
     await expect.poll(away).toBe(true);
     await page.goBack();
@@ -1061,7 +1005,7 @@ test('the review header stays where it is on a wide screen', async () => {
     await page.getByRole('button', { name: /long\.ts/ }).click();
     await expect.poll(() => pane.isVisible()).toBe(true);
 
-    // The same reading down that puts it away on a phone, a frame at a time.
+    // The same scrolling that puts the header away on a phone.
     await pane.evaluate(
       (el) =>
         new Promise<void>((done) => {

@@ -5,79 +5,69 @@ import { withinLineLimit, type Token } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
-/** What a changed line gets in its gutter and behind its code. */
-const CHANGE: Record<ReviewLineChange, { bar: string; row: string; label: string }> = {
-  added: { bar: 'bg-ok', row: 'bg-ok/8', label: 'added' },
-  modified: { bar: 'bg-warn', row: 'bg-warn/8', label: 'modified' },
+/** The gutter bar class and row background class for each kind of changed line. */
+const CHANGE: Record<ReviewLineChange, { bar: string; row: string }> = {
+  added: { bar: 'bg-ok', row: 'bg-ok/8' },
+  modified: { bar: 'bg-warn', row: 'bg-warn/8' },
 };
 
 /**
- * How wide the gutter is: the line numbers, the two marker bars, and the
- * padding around them, with room to spare.
+ * Computes the gutter width: the line numbers, the two marker bars and their padding.
  *
- * One width for every row rather than each row sizing to its own content,
- * because the editing overlay starts where the code cells do and has to agree
- * with them to the pixel. A gutter that grew by a few pixels at line 100 would
- * put every character of the rows past it out by those pixels. It is also what
- * a comment card indents by, so the cards line up with the code too.
+ * Every row uses the same width, because the edit textarea and the comment
+ * cards start where the code cells do and must line up with them to the pixel.
+ *
+ * @param digits The number of digits the line numbers need.
+ * @returns A CSS length.
  */
 function gutterWidth(digits: number): string {
   return `calc(${digits}ch + 2.75rem)`;
 }
 
-/** The gutter's width, wherever something has to agree with it. */
+/** The gutter width, as the CSS variable the pane sets from {@link gutterWidth}. */
 const GUTTER = 'var(--review-gutter)';
 
-/**
- * A line to bring into view, and which request asked for it.
- *
- * The nonce is what makes each request its own. Prev/next lands on the line
- * that is already the target whenever a file holds one change, and whenever a
- * step wraps round to where it started — and both of those have to scroll.
- */
+/** A line to bring into view, and which request asked for it. */
 export interface ScrollTarget {
+  /** The line to scroll to, counted from 1. */
   line: number;
+  /** Makes each request distinct, so a repeated step to the same line still scrolls. */
   nonce: number;
 }
 
 /** A buffer being edited, and the way to change it. */
 interface CodeEdit {
+  /** The buffer's text. */
   text: string;
+  /** Called with the new text on every change. */
   onChange: (text: string) => void;
 }
 
+/** The props of {@link CodePane}. */
 export interface CodePaneProps {
   /**
-   * The pane's scroller, held by the view because holding the reader's place
-   * across a mode switch means measuring it before the switch and putting it
-   * back after — neither of which is this component's moment.
+   * The pane's scroller. The view holds it, so it can measure the reader's
+   * place before a mode switch and restore it after.
    */
   scrollRef: React.RefObject<HTMLDivElement | null>;
-  /**
-   * The open file's path, which is what the remembered scroll position is
-   * keyed by — and which file this is, when one replaces another in the same
-   * pane.
-   */
+  /** The open file's path. It keys the remembered scroll position. */
   path: string;
+  /** The file's content as last loaded. */
   content: string;
   /** One token list per line, or null to render the file plain. */
   tokens: Token[][] | null;
   /**
-   * The text those tokens were made from, which typing outruns: a line the
-   * tokens no longer describe is rendered plain until they catch up, rather
-   * than painted with the colours of what used to be there.
+   * The text the tokens were made from. A line the tokens no longer match
+   * renders plain until new tokens arrive.
    */
   tokensFor: string;
   /** Changed lines, keyed by line number as the API sends them. */
   diffLines: Record<string, ReviewLineChange>;
-  /** Deletion markers, by the line they sit after. */
+  /** The hunk index of each deletion marker, by the line it sits after. 0 is the top. */
   deletions: Map<number, number>;
-  /**
-   * The hunk each line sits in, by line number, for the gutter to open.
-   * Context lines count: standing next to a change and asking what happened
-   * here has one answer.
-   */
+  /** The hunk index each line sits in, by line number, for the gutter to open. */
   hunkByLine: Map<number, number>;
+  /** The comments, by line number. */
   annotations: Map<number, ReviewAnnotation>;
   /** The line whose composer is open, or null. */
   composing: number | null;
@@ -87,51 +77,28 @@ export interface CodePaneProps {
   scrollTo: ScrollTarget | null;
   /** The buffer being edited, or null when the file is being read. */
   edit: CodeEdit | null;
+  /** Called with the line number when the user taps a line's code. */
   onSelectLine: (line: number) => void;
+  /** Called with the hunk index when the user taps a gutter or a deletion marker. */
   onShowHunk: (hunkIndex: number) => void;
   /** Renders the card and composer that sit under a line. */
   renderUnderLine?: (line: number) => React.ReactNode;
 }
 
 /**
- * The file, one addressable row per line.
+ * The file, one addressable row per line, and the editor over it.
  *
- * A CSS grid rather than a `<pre>`: the line-number gutter is sticky against
- * the pane's horizontal scroll, the code cell scrolls as one block so the
- * numbers stay put, and every line is its own element — which is what makes
- * tapping one to comment possible at all.
+ * Every line is its own grid row, so a tap can address it and the line-number
+ * gutter stays sticky during horizontal scroll. In edit mode a textarea lies
+ * over the same rows, so a switch between reading and editing moves no code.
+ * The comment cards, the composer and the deletion markers fold away while
+ * editing, because nothing can sit between the lines of a textarea.
  *
- * Tap replaces hover throughout, and the row is split between the two things
- * a reader does to a line. The gutter is the change: tapping it opens the hunk
- * around that line, which is where the desktop tool's hover tooltip went and
- * the only place deleted lines exist. The code is the comment: tapping it
- * opens the composer, and comments are inline cards under their line on every
- * screen size.
- *
- * That way round because the code cell is the larger target by far and
- * commenting is the frequent act, while a gutter with no hunk behind it —
- * every line of a file git does not track yet — is not a target at all.
- *
- * These same rows are also the editor. Edit mode floats a transparent
- * textarea over the code column and leaves the rows behind it to do the
- * highlighting: same font, same wrapping, same gutter, so a switch between
- * reading and editing changes no measurement on the screen. An editor
- * component would have brought its own highlighter, its own gutter and its own
- * line heights, and moved the code out from under the reader on the way in.
- *
- * What a switch does move is the comment cards, the composer and the deletion
- * markers, which fold away: the textarea is one run of text and nothing can
- * sit between its lines. The view holds the reader's line across that, with
- * `lib/anchor.ts`.
- *
- * A file past the line limit gets none of this. It is shown as one block of
- * plain text under a notice saying so, because tens of thousands of rows are
- * more than a phone can lay out — and with no rows there is no gutter, no line
- * to tap and nothing to edit.
+ * A file past the line limit renders as one block of plain text, because a
+ * phone cannot lay out tens of thousands of rows.
  *
  * File content and comments are agent-influenced and hostile by assumption, so
- * both are rendered as text nodes only. Highlight tokens become React
- * elements; nothing here goes near `dangerouslySetInnerHTML`.
+ * both render as text nodes only.
  */
 export function CodePane({
   scrollRef,
@@ -163,11 +130,9 @@ export function CodePane({
    * Puts each file back where it was left, and every file this review has not
    * opened at the top.
    *
-   * One pane serves every file, so the scroll offset survives the swap unless
-   * something says otherwise, and a 40-line file would open half way down
-   * after a long one. Before paint, so the reader never sees the wrong
-   * position; keyed on the path, so the poll refetching the open file does
-   * not throw away where they had got to.
+   * It runs before paint, so the reader never sees the previous file's offset.
+   * It positions each path once, so a poll that refetches the open file keeps
+   * the reader's place.
    */
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -176,13 +141,7 @@ export function CodePane({
     element.scrollTop = recallScroll(path);
   }, [scrollRef, path, content]);
 
-  /**
-   * Brings the line prev/next asked for into the middle of the pane.
-   *
-   * Every line of the file is a row of its own, so the row is in the document
-   * by the time this runs; what it waits for is the request, which is a new
-   * object each time even where the line is the one already showing.
-   */
+  /** Brings the line prev/next asked for into the middle of the pane. */
   useEffect(() => {
     if (!scrollTo) return;
     scrollRef.current
@@ -205,12 +164,10 @@ export function CodePane({
     () => (tokensFor === source ? lines : splitLines(tokensFor)),
     [tokensFor, source, lines],
   );
-  // The gutter's width follows the file's size rather than being fixed, so a
-  // 30-line file does not reserve room for five digits.
+  // The gutter fits the highest line number, with room for at least two digits.
   const digits = Math.max(String(lines.length).length, 2);
-  // Editing always wraps. A textarea that scrolls sideways scrolls
-  // independently of the rows behind it, and the two would part company on the
-  // first long line.
+  // Editing always wraps, because a textarea that scrolls sideways would move
+  // apart from the rows behind it.
   const wrapped = wrap || editing;
 
   return (
@@ -218,11 +175,9 @@ export function CodePane({
       ref={scrollRef}
       data-slot="review-code-pane"
       className={cn(
-        // 16px on a phone, because Safari zooms the page when a control below
-        // that takes focus — which is the one thing edit mode cannot afford.
-        // The same size in both modes, so switching moves nothing.
+        // 16px on a phone, because Safari zooms the page when a smaller control
+        // takes focus. Both modes use the same size, so a switch moves nothing.
         'min-h-0 flex-1 overflow-auto font-mono text-[16px] leading-[1.55] md:text-[13px]',
-        // The pane scrolls, not the page: the header and the toolbar stay put.
         wrapped || tooLong ? 'overflow-x-hidden' : 'overflow-x-auto',
       )}
     >
@@ -270,12 +225,10 @@ export function CodePane({
 }
 
 /**
- * One line: its row, whatever was deleted after it, and whatever sits under it.
+ * One line: its row, the deletion marker after it, and whatever sits under it.
  *
- * Memoized because typing re-renders the whole file on every keystroke, and a
- * long file is thousands of rows. Unchanged lines then cost a comparison each
- * rather than a render, which is the difference between a pane that keeps up
- * with a thumb and one that does not.
+ * Memoized, because typing re-renders the whole file on every keystroke.
+ * Unchanged lines then cost a comparison instead of a render.
  */
 const Row = memo(function Row({
   line,
@@ -292,21 +245,31 @@ const Row = memo(function Row({
   onSelectLine,
   onShowHunk,
 }: {
+  /** The line number, counted from 1. */
   line: number;
+  /** The line's text. */
   text: string;
   /** This line's colours, or null while it is rendered plain. */
   tokens: Token[] | null;
+  /** How the line changed, or undefined when it did not. */
   change: ReviewLineChange | undefined;
+  /** The comment on this line, if any. */
   annotation: ReviewAnnotation | undefined;
   /** The composer is open on this line. */
   composing: boolean;
+  /** The hunk this line sits in, or undefined when it sits in none. */
   hunkIndex: number | undefined;
   /** The hunk of the lines deleted after this one, or undefined for none. */
   deletionHunk: number | undefined;
+  /** Wrap the line instead of scrolling it. */
   wrap: boolean;
+  /** The pane is in edit mode. */
   editing: boolean;
+  /** What renders under the line, such as its comment card. */
   under: React.ReactNode;
+  /** Called with the line number when the user taps the code. */
   onSelectLine: (line: number) => void;
+  /** Called with the hunk index when the user taps the gutter or the deletion marker. */
   onShowHunk: (hunkIndex: number) => void;
 }) {
   return (
@@ -325,24 +288,16 @@ const Row = memo(function Row({
           annotated={annotation !== undefined}
           outdated={annotation?.outdated ?? false}
           active={composing || annotation !== undefined}
-          // While editing, the gutter is a label rather than a target: the
-          // hunk sheet would take the keyboard away mid-sentence, and the
-          // markers behind it are the last save's rather than this keystroke's.
+          // While editing, the gutter opens no hunk. The sheet would close the
+          // keyboard, and the markers show the last save, not the current text.
           hunkIndex={editing ? undefined : hunkIndex}
           onShowHunk={onShowHunk}
         />
 
-        {/* Tapping the code is how a comment starts.
-            Not a <button>: WebKit and Firefox make text inside one
-            unselectable, and a line of a review is a line somebody
-            copies out. So a tap and the end of a drag share this
-            element and are told apart below.
-            And no aria-label: a button names itself from what is
-            inside it, so labelling this one would replace the line of
-            code with the word "comment" for anybody listening to the
-            file rather than looking at it. The name is the line.
-            While editing it is none of that — the textarea over it is what
-            takes the taps, and a row behind one must not take the focus. */}
+        {/* Tapping the code starts a comment. A button element would make the
+            text unselectable in WebKit and Firefox, so selecting() tells a tap
+            from the end of a drag. The line of code is the accessible name.
+            While editing, the textarea on top takes the taps. */}
         <code
           role={editing ? undefined : 'button'}
           tabIndex={editing ? undefined : 0}
@@ -365,18 +320,14 @@ const Row = memo(function Row({
           }
           className={cn(
             'block pr-3 pl-2 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset',
-            // Wrapping: `min-w-0` is what makes it wrap at the pane's width.
-            // A grid item is at least as wide as its longest unbreakable run
-            // unless it is told otherwise, and `break-word` does not count as
-            // breakable for that measurement — so one long URL in a line makes
-            // the cell wider than the pane, and the line wraps later than the
-            // textarea over it does, or not at all.
+            // `min-w-0` lets the cell shrink to the pane width. Otherwise one
+            // long unbroken run widens it, and the line wraps later than the
+            // textarea over it.
             wrap ? 'min-w-0 whitespace-pre-wrap break-words' : 'whitespace-pre',
           )}
         >
           {tokens ? <Tokens tokens={tokens} /> : text}
-          {/* A zero-width space keeps an empty line the height of a
-              full one, so the gutter and the code never drift apart. */}
+          {/* A zero-width space gives an empty line its full height. */}
           {text === '' ? '​' : null}
         </code>
       </div>
@@ -396,23 +347,12 @@ const Row = memo(function Row({
 });
 
 /**
- * Edit mode: a textarea over the code, with the rows behind it showing
- * through.
+ * The edit mode textarea, laid over the code column.
  *
- * Transparent text and a visible caret, so what is read is the highlighted
- * rows and what is typed into is the textarea. Everything that decides where a
- * character lands — the font, the size, the line height, the padding, the
- * wrapping — is inherited or matched, because the two have to agree to the
- * pixel or the caret drifts away from the letters.
- *
- * A plain textarea is also what makes the phone's own keyboard, selection
- * handles and undo work, none of which a rewritten editing surface gets for
- * free. Spelling and autocorrect are off: this is code, and a phone keyboard
- * left to itself will capitalize it.
- *
- * It does not take the focus by itself. The keyboard would come up over the
- * file before the reviewer had picked the line they came to fix, and picking
- * it is the tap that puts the caret there.
+ * Its text is transparent, so the reader sees the highlighted rows behind it
+ * and the caret. The font, size, line height, padding and wrapping match the
+ * rows, or the caret would drift away from the letters. It takes no focus on
+ * mount, so the keyboard stays down until the reviewer taps a line.
  */
 function Editor({ text, onChange }: CodeEdit) {
   return (
@@ -431,11 +371,10 @@ function Editor({ text, onChange }: CodeEdit) {
 }
 
 /**
- * One line's numbers and markers, and the way into its hunk.
+ * One line's number and markers, and the way into its hunk.
  *
- * A button only where there is a hunk to open: a file git does not track yet
- * has every line marked added and no hunk anywhere, and a gutter that lights
- * up under the thumb and then does nothing is worse than one that does not.
+ * It is a button only where there is a hunk to open. A file git does not track
+ * has every line marked added, but no hunks.
  */
 function Gutter({
   line,
@@ -446,20 +385,23 @@ function Gutter({
   hunkIndex,
   onShowHunk,
 }: {
+  /** The line number, counted from 1. */
   line: number;
+  /** How the line changed, or undefined when it did not. */
   change: ReviewLineChange | undefined;
+  /** The line carries a comment. */
   annotated: boolean;
+  /** The line's comment is outdated. */
   outdated: boolean;
   /** The line is being commented on, or already carries a comment. */
   active: boolean;
   /** The hunk this line sits in, or undefined when it sits in none. */
   hunkIndex: number | undefined;
+  /** Called with the hunk index when the user taps the gutter. */
   onShowHunk: (hunkIndex: number) => void;
 }) {
   const className = cn(
     'sticky left-0 z-10 flex select-none items-stretch gap-1 overflow-hidden border-r bg-background pr-1.5 pl-2 text-right text-muted-foreground',
-    // 44px of tap target on touch. The line height is smaller than that, so
-    // the padding does the work.
     'min-h-[1.55em] py-0',
     hunkIndex !== undefined && 'hover:bg-accent hover:text-accent-foreground',
     change && CHANGE[change].row,
@@ -506,11 +448,13 @@ function Gutter({
 }
 
 /**
- * Whether a click was the end of selecting text rather than a tap on the line.
+ * Tells whether a click ended a text selection instead of being a tap on the line.
  *
- * A drag leaves a selection behind, and a double click is the browser taking a
- * word — neither is somebody asking for the comment box, and opening it would
- * take the focus off what they were selecting.
+ * A drag leaves a selection behind, and a double click selects a word. Opening
+ * the composer then would take the focus off the selection.
+ *
+ * @param event The click on the line's code.
+ * @returns True when the click selected text.
  */
 function selecting(event: React.MouseEvent): boolean {
   if (event.detail > 1) return true;
@@ -523,8 +467,7 @@ function Tokens({ tokens }: { tokens: Token[] }) {
   return (
     <>
       {tokens.map((token, i) => (
-        // Both themes travel as custom properties on the span, and globals.css
-        // picks which one paints. Switching theme needs no re-tokenize.
+        // The span carries both theme colours, and globals.css picks one.
         <span key={i} style={token.style as React.CSSProperties}>
           {token.content}
         </span>
@@ -533,18 +476,14 @@ function Tokens({ tokens }: { tokens: Token[] }) {
   );
 }
 
-/**
- * A block of lines removed between two that survived.
- *
- * Tapping it opens the hunk, which is the only place the removed lines exist:
- * the marker deliberately does not say how many there were, because the number
- * without the content is not information anybody acts on.
- */
+/** A marker for lines removed between two lines. Tapping it opens the hunk that holds them. */
 function DeletionMarker({
   hunkIndex,
   onShowHunk,
 }: {
+  /** The hunk that holds the removed lines. */
   hunkIndex: number;
+  /** Called with the hunk index when the user taps the marker. */
   onShowHunk: (hunkIndex: number) => void;
 }) {
   return (
@@ -571,7 +510,12 @@ function DeletionMarker({
   );
 }
 
-/** Splits content into the lines the pane renders. */
+/**
+ * Splits content into the lines the pane renders.
+ *
+ * @param content The file text.
+ * @returns One string per line, without the empty line after a final newline.
+ */
 function splitLines(content: string): string[] {
   if (content === '') return [];
   const lines = content.split('\n');

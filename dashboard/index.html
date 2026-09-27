@@ -2,54 +2,37 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <!-- interactive-widget: the on-screen keyboard shrinks the viewport the
-         thread is measured against, rather than sliding over it. Otherwise the
-         browser makes room for a focused composer by scrolling the document —
-         and with the thread already exactly one viewport tall, what that
-         scrolls away is the header. -->
+    <!-- interactive-widget: the on-screen keyboard shrinks the viewport.
+         Otherwise the browser scrolls the one-viewport-tall document to show
+         a focused composer, and the header scrolls out of view. -->
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="color-scheme" content="dark light" />
-    <!-- Installability, which is not decoration here: on iOS the Notification
-         and Push APIs exist only for a page added to the Home Screen.
+    <!-- On iOS, the Notification and Push APIs exist only for a page added
+         to the Home Screen.
 
-         crossorigin, on a same-origin manifest, is not about CORS: a manifest
-         is fetched with credentials omitted unless it says otherwise, so
-         behind the authenticating reverse proxy every deployment past
-         localhost is supposed to have (README, "Behind a reverse proxy"), the
-         request that decides whether Boxes can be installed is the one
-         request that arrives without the cookie. The proxy answers it with a
-         401 or a redirect to a login page, the browser has no manifest, and
-         the install offer never appears — while every other request on the
-         page succeeds, which is what makes it look like nothing is wrong.
-         use-credentials sends the cookie. -->
+         use-credentials sends the cookie with the manifest request. Without
+         it, an authenticating reverse proxy refuses the manifest, and the
+         browser never offers to install the app. -->
     <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <link rel="icon" href="/icon-192.png" type="image/png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
-    <!-- What iOS reads instead of the manifest. Safari has honoured display
-         and short_name since 16.4, but Add to Home Screen is offered whether
-         or not the manifest loaded, and a home screen icon that opens a
-         Safari tab is an install that did not work: standalone is stated here
-         too, where nothing can fail to fetch it.
-
-         The title is stated for the same reason, and against a second
-         problem: the document title tracks what the thread is doing
-         (lib/tab-title.ts), so installing from an open conversation would
-         otherwise propose naming the app something like "⟳ refactor auth". -->
+    <!-- iOS offers Add to Home Screen even when the manifest failed to load.
+         These tags make the app standalone without the manifest. The title
+         tag stops iOS from naming the app after the document title, which
+         follows the open thread. -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Boxes" />
-    <!-- One per scheme, so the browser chrome follows the phone's setting
-         instead of standing dark against a light page. -->
+    <!-- One per scheme, so the browser chrome follows the phone's setting. -->
     <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
     <title>Boxes</title>
-    <!-- The page's one inline script, and the reason its content security
-         policy carries a hash: the orchestrator names this script's SHA-256
-         in THEME_SCRIPT_HASH (orchestrator/src/app.ts), so a character
-         changed here has to be changed there too. -->
+    <!-- The orchestrator's content security policy allows this script by
+         its SHA-256 in THEME_SCRIPT_HASH. Any change to the script, including
+         its comments, needs a new hash there. -->
     <script>
       // Applied before first paint, so the page never flashes the wrong
       // scheme, and again on every change, so switching the phone between

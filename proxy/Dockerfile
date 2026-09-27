@@ -1,7 +1,7 @@
 # The egress proxy: type-checked, bundled, and run as a non-root user.
 #
-# The build mirrors the repository layout so that proxy/src and shared/ resolve
-# each other exactly as they do in a checkout.
+# The build mirrors the repository layout, so imports from proxy/src into
+# shared/ resolve as they do in a checkout.
 FROM node:26-alpine AS build
 WORKDIR /build
 COPY shared/ ./shared/
@@ -15,13 +15,12 @@ RUN npm run check && npm run build
 FROM node:26-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-# mockttp is left external by the bundle, so its tree is installed here rather
-# than flattened into one file.
+# The bundle leaves npm dependencies external, so they are installed here.
 COPY proxy/package.json proxy/package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /build/proxy/dist/main.js ./main.js
 USER node
-# Only the proxy port is advertised. The control port stays unadvertised on
-# purpose: it is for the orchestrator on the shared network, not for publishing.
+# Only the proxy port is advertised. The control port is for the orchestrator
+# on the shared network, not for publishing.
 EXPOSE 3128
 CMD ["node", "main.js"]

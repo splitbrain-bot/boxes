@@ -5,15 +5,7 @@ import { Button } from '@/components/ui/button';
 /**
  * One comment, as a card under the line it is about.
  *
- * Inline on every screen size, GitHub-style, rather than in a right-hand
- * sidebar: a sidebar is the first thing a phone has to reflow away, and once
- * it is gone the comment has to live somewhere anyway. This is that somewhere,
- * so there is only one of it.
- *
- * The comment is agent-influenceable text — the agent can write into
- * REVIEW.md — so it is rendered as a text node and nothing else:
- * `whitespace-pre-wrap` keeps the reviewer's own line breaks without
- * interpreting anything.
+ * The agent can write into REVIEW.md, so the comment renders as a text node only.
  */
 export function CommentCard({
   annotation,
@@ -21,10 +13,13 @@ export function CommentCard({
   onEdit,
   onDelete,
 }: {
+  /** The comment to show. */
   annotation: ReviewAnnotation;
   /** True while a write is in flight, so a double tap cannot act twice. */
   busy: boolean;
+  /** Called when the user asks to edit the comment. */
   onEdit: () => void;
+  /** Called when the user asks to delete the comment. */
   onDelete: () => void;
 }) {
   return (

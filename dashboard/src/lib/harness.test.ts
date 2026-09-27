@@ -2,15 +2,6 @@ import { describe, expect, test } from 'vitest';
 import type { HarnessHealth } from '../../../shared/types.ts';
 import { MAY_BE_UNAVAILABLE, harnessLabel, modeDescription, modeLabel, unavailableReason } from './harness.ts';
 
-/**
- * The little the dashboard knows about a harness on its own.
- *
- * Everything else comes from the API; what is worth a test here is the one
- * thing that does not — the caveat on Codex's two sandboxed modes, which no
- * adapter can say about itself because it is a fact about the container the
- * deployment runs it in.
- */
-
 /** A harness as the health probe reports one. */
 function health(over: Partial<HarnessHealth> = {}): HarnessHealth {
   return {
@@ -79,8 +70,7 @@ describe('why a harness cannot run', () => {
     expect(unavailableReason(health({ credential: { ...stored, status: 'failing' } }))).toBe(
       'credential failing',
     );
-    // A credential that looks fine on a harness that says it cannot run means
-    // a reason this build has not heard of, which is still not runnable.
+    // A reason this build does not know.
     expect(unavailableReason(health({ credential: { ...stored, status: 'ok' } }))).toBe(
       'cannot run',
     );

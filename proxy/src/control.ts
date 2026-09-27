@@ -5,20 +5,7 @@ import os from 'node:os';
 import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { parsePolicy } from './policy.ts';
 
-/**
- * The control channel: how the proxy gets its policy.
- *
- * The proxy boots empty. The orchestrator pushes the allowlist, the CA and the
- * credential map over this endpoint, and the proxy holds all of it in memory
- * for as long as it runs. A restarted proxy has nothing again until the
- * orchestrator's reconciler pushes afresh.
- *
- * Two things keep it out of a box's reach. It binds to the compose network
- * only, and a box sits on an internal network with no route to that
- * address. It also requires a bearer token, which nobody configures: the first
- * push sets it and every later push has to match, and the orchestrator is the
- * only party that can reach the interface to claim it.
- */
+/** The control channel, over which the orchestrator pushes the policy to the proxy. */
 
 /** Largest policy body accepted, in bytes. */
 const MAX_BODY = 1 << 20;
@@ -48,13 +35,11 @@ function tokensMatch(a: string, b: string): boolean {
  * The address to bind the control channel to: this container's own address on
  * the network that carries the default route.
  *
- * Box networks are created internal, so they install no default route.
- * The compose network does, so the interface the default route leaves by is
- * the one the orchestrator is on. Connecting a UDP socket performs that route
+ * Box networks are internal and have no default route, so this is the compose
+ * network, where the orchestrator is. Connecting a UDP socket does the route
  * lookup and sends nothing.
  *
- * Null means the lookup failed, and the caller then binds to loopback: an
- * unreachable control channel is a safe failure and an exposed one is not.
+ * Null when the lookup fails or gives an address this container does not hold.
  */
 export async function resolveControlAddress(): Promise<string | null> {
   const address = await new Promise<string | null>((resolve) => {
@@ -69,8 +54,8 @@ export async function resolveControlAddress(): Promise<string | null> {
     };
     socket.on('error', () => done(null));
     try {
-      // A routable address outside every private range, so the lookup picks
-      // the default route rather than a directly attached network.
+      // A reserved documentation address (TEST-NET-1) outside every private
+      // range, so the lookup picks the default route.
       socket.connect(53, '192.0.2.1', () => {
         try {
           done(socket.address().address);
@@ -91,16 +76,20 @@ export async function resolveControlAddress(): Promise<string | null> {
   return held ? address : null;
 }
 
-/** A control server, and the token it has accepted so far. */
+/** A control server, and whether a push has claimed it. */
 export interface ControlServer {
+  /** The HTTP server, not yet listening. */
   server: http.Server;
   /** True once a push has claimed the channel. */
   claimed: () => boolean;
 }
 
 /**
- * Builds the control server. The server is returned before it listens, and
- * holds no token until the first authenticated push claims the channel.
+ * Builds the control server. The server is returned before it listens.
+ *
+ * Nobody configures the bearer token. The first policy push claims the channel
+ * with its token, and every later call must present the same one. Only the
+ * orchestrator can reach the interface to make that first push.
  */
 export function createControlServer(opts: ControlOptions): ControlServer {
   let token: string | null = null;
@@ -116,8 +105,8 @@ export function createControlServer(opts: ControlOptions): ControlServer {
   };
 
   /**
-   * Checks the bearer. Only a policy push may claim an unclaimed channel, so a
-   * caller that knows no more than the shape of the endpoint cannot take it.
+   * Checks the bearer token. On an unclaimed channel, a POST to /policy claims
+   * it with the token it presents, and every other request is refused.
    */
   const authorize = (req: http.IncomingMessage): boolean => {
     const header = req.headers['authorization'];

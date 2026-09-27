@@ -11,19 +11,11 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 /**
- * Prev/next navigation over a file's changes and comments, and the way in and
- * out of edit mode.
+ * The toolbar over the code pane: prev/next navigation over a file's changes
+ * and comments, and the way in and out of edit mode.
  *
- * The navigation replaces the desktop tool's scrollbar minimap. Annotation
- * markers on a scrollbar are unusable on touch — there is no scrollbar to aim
- * at — and paired step buttons turn out to be better on a pointer too: "the
- * next thing that needs me" is what the minimap was being used for, and this
- * says it directly. A decorative overview rail can come later; it is paint, not
- * function.
- *
- * Editing is a mode rather than a separate screen, and its controls live here
- * rather than over the code, because the toolbar is pinned while the keyboard
- * is up and a control the keyboard covers is a control that is not there.
+ * The edit controls live here because the toolbar stays pinned while the
+ * keyboard is up.
  */
 export function ReviewToolbar({
   changeCount,
@@ -41,10 +33,13 @@ export function ReviewToolbar({
   onSave,
   onRevert,
 }: {
+  /** The number of changes in the file. */
   changeCount: number;
+  /** The number of comments in the file. */
   commentCount: number;
   /** Whether the pane has rows to step to. A file shown as one block has none. */
   steppable: boolean;
+  /** Whether long lines wrap. */
   wrap: boolean;
   /** Whether this file can be edited at all. */
   editable: boolean;
@@ -54,12 +49,17 @@ export function ReviewToolbar({
   dirty: boolean;
   /** Whether a write is in flight. */
   busy: boolean;
+  /** Called when the user toggles wrapping. */
   onWrap: () => void;
-  /** −1 for the previous change, +1 for the next. */
+  /** Called with −1 for the previous change or 1 for the next. */
   onStepChange: (direction: -1 | 1) => void;
+  /** Called with −1 for the previous comment or 1 for the next. */
   onStepComment: (direction: -1 | 1) => void;
+  /** Called when the user switches edit mode on or off. */
   onEdit: () => void;
+  /** Called when the user saves the file. */
   onSave: () => void;
+  /** Called when the user discards the unsaved changes. */
   onRevert: () => void;
 }) {
   return (
@@ -94,16 +94,14 @@ export function ReviewToolbar({
           >
             <Undo2 />
           </Button>
-          {/* Named rather than an icon, and the one filled control on the bar:
-              unsaved work is the only thing here that is lost by walking away
-              from it. */}
+          {/* The only filled control, because unsaved work is the one thing lost
+              by walking away. */}
           <Button type="button" size="sm" disabled={!dirty || busy} onClick={onSave}>
             Save
           </Button>
         </>
       ) : (
-        // Wrapping is forced on while editing, so there is nothing to toggle
-        // there and the button goes rather than sitting on the bar disabled.
+        // Editing always wraps, so the wrap toggle hides while editing.
         <Button
           type="button"
           variant="ghost"
@@ -118,8 +116,6 @@ export function ReviewToolbar({
         </Button>
       )}
 
-      {/* A file the pane cannot show whole is one it must not write back, so
-          there is no control here for it rather than one that refuses. */}
       {editable ? (
         <Button
           type="button"
@@ -146,11 +142,15 @@ function Group({
   steppable,
   onStep,
 }: {
+  /** The icon in front of the count. */
   icon: React.ReactNode;
+  /** The singular noun for what is counted, used in the button labels. */
   label: string;
+  /** How many there are. */
   count: number;
   /** Whether there is a row to step to. */
   steppable: boolean;
+  /** Called with −1 for the previous one or 1 for the next. */
   onStep: (direction: -1 | 1) => void;
 }) {
   const nothingToStepTo = count === 0 || !steppable;

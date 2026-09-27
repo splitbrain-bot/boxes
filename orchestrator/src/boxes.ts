@@ -44,20 +44,12 @@ import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamBox } from './gateway/upstre
 import { allocateSubnet } from './subnet.ts';
 
 /**
- * Box lifecycle and the owner of every UpstreamBox. Docker is the
- * runtime truth; the boxes table is metadata.
- */
-
-/**
  * How many times more boxes the host may hold than the database knows of
  * before the orphan sweep refuses to run.
  *
- * The case worth catching is a database that does not belong to these files —
- * a data volume mounted from the wrong place, or replaced — where the host is
- * full of boxes and the table knows almost none of them. One box
- * created against the wrong database must not disarm that, so the guard is a
- * ratio rather than an empty table; an empty table falls under the same rule,
- * because any stray at all outnumbers nothing.
+ * It catches a database that does not belong to these files, such as a data
+ * volume mounted from the wrong place. A ratio rather than an empty-table
+ * check, so one box created against the wrong database does not disarm it.
  */
 const STRAY_BOX_RATIO = 3;
 
@@ -70,8 +62,12 @@ const STRAY_BOX_RATIO = 3;
  */
 const TOUCH_INTERVAL_MS = 60_000;
 
-/** Creates, starts, stops and describes boxes. */
+/**
+ * Creates, starts, stops and describes boxes, and owns every UpstreamBox.
+ * Docker holds the runtime state; the boxes table holds the metadata.
+ */
 export class BoxManager {
+  /** The gateway connection of each box, created on first use. */
   private readonly upstreams = new Map<string, UpstreamBox>();
 
   /**
@@ -101,9 +97,8 @@ export class BoxManager {
 
   /** How big each box has got, measured off the request path. */
   private readonly usage = new BoxUsage({
-    // Everything a box is on disk. A box still backed by a named home
-    // volume contributes its workspace and its Nix store, there being no
-    // path to the home.
+    // Everything a box is on disk. A box on a named home volume has no home
+    // path, so only its workspace and Nix store count.
     pathsOf: (id) => [this.workspacePathOf(id), this.homePathOf(id), this.nixPathOf(id)],
     ttlMs: BOX_SIZE_TTL_MS,
     onTrouble: (id, error) =>
@@ -121,15 +116,17 @@ export class BoxManager {
   private hostDataDir: string;
 
   constructor(
+    /** Where the boxes and their threads are stored. */
     private readonly db: Db,
+    /** The deployment's configuration. */
     private readonly cfg: Config,
+    /** The egress policy, and the credential placeholders a box is given. */
     private readonly egress: EgressManager,
-    /** Where "a thread wants you" goes; see notify.ts. */
+    /** Sends the push notifications a thread raises. */
     private readonly notifier: Notifier,
     /**
-     * The AGENTS.md, skills and commands a box is given. Owned by the app
-     * so the REST routes and the lifecycle share one, since editing a set and
-     * starting a box are two halves of the same feature.
+     * The AGENTS.md, skills and commands a box is given. The app creates it,
+     * so the REST routes and the lifecycle share one store.
      */
     private readonly agents: AgentStore,
   ) {
@@ -138,29 +135,20 @@ export class BoxManager {
   }
 
   // --- one operation per box at a time -----------------------------------
-  //
-  // Repairing a container is check-then-act: the daemon is asked what it has,
-  // and the answer is acted on a moment later. Three paths reach those
-  // repairs — start, a local command, and the gateway opening a thread on a
-  // stopped box — and the reaper stops boxes under all of them. Two of
-  // them at once would have one remove the container the other is about to
-  // exec into. So every operation that changes a box runs alone, in the
-  // order it arrived; reads are not queued.
 
   /**
    * Runs `fn` with the box to itself, after whatever is already queued
    * for it.
    *
-   * A plain promise chain rather than a mutex library: the queue is per
-   * box, and a rejection must not wedge it — hence the catch on the
-   * stored tail. A request for a busy box waits; it is not refused and
-   * there is no timeout that gives up on it.
+   * Container repairs check the daemon's state and act on it a moment later.
+   * Start, a local command and the gateway all reach them, and the reaper
+   * stops boxes under all three. So every operation that changes a box runs
+   * alone, in arrival order. Reads are not queued. A request for a busy box
+   * waits without a timeout, and a rejection does not block the queue.
    *
-   * Nothing `fn` calls may take a slot for the same box again, or it
-   * would wait for itself forever. That is why each queued method here is a
-   * thin wrapper around a private form that takes no slot of its own: the
-   * repairs and the teardown call those, and only a public entry point ever
-   * calls this.
+   * Nothing `fn` calls may take a slot for the same box again, or it would
+   * wait for itself forever. So each queued public method wraps a private
+   * form that takes no slot, and the repairs and the teardown call those.
    */
   private withSlot<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.slots.get(id) ?? Promise.resolve();
@@ -196,12 +184,11 @@ export class BoxManager {
   /**
    * Resolves the host-side path of DATA_DIR, once, at boot.
    *
-   * Inside a container the orchestrator's own path for its data volume is not
-   * the path the daemon would resolve a bind source against, and getting this
-   * wrong is silent: the daemon would happily create an empty directory at
-   * that path on the host and mount that instead, leaving the agent's files
-   * somewhere the orchestrator cannot see. So a failure here is fatal, and
-   * says which setting fixes it.
+   * Inside a container, the orchestrator's path for its data volume is not
+   * the path the daemon resolves a bind source against. A wrong path fails
+   * silently: the daemon creates an empty directory there and mounts it, and
+   * the agent's files end up where the orchestrator cannot see them. So a
+   * failure here is fatal, and the message names the setting that fixes it.
    */
   async resolveHostDataDir(): Promise<void> {
     ws.ensureWorkspacesRoot(this.cfg.DATA_DIR);
@@ -290,15 +277,14 @@ export class BoxManager {
    * Says so when the box image was built on a different uid than
    * BOX_UID.
    *
-   * A container can be run as any uid, so the workspace bind is fine either
-   * way. The home volume is not: Docker initialises a new one from the image's
-   * own `/home/agent`, so it arrives owned by the uid the image was built on,
-   * and nothing outside the container can chown it afterwards. Mismatched,
-   * the agent cannot write its own home and every turn fails.
+   * A container can run as any uid, so the workspace bind works either way.
+   * The home does not: seedHomeFromImage() fills a new home from the image's
+   * `/home/agent` with `cp -a`, so its files keep the uid the image was built
+   * on. When the two differ, the agent cannot write its own home and every
+   * turn fails.
    *
-   * A warning and not a refusal: the image is the deployment's to fix, the
-   * rest of the orchestrator works, and reviewing an existing box does not
-   * need a container at all.
+   * A warning and not a refusal, because the rest of the orchestrator works
+   * and reviewing an existing box needs no container.
    */
   private async warnOnBoxUidDrift(): Promise<void> {
     let imageUid: number | null;
@@ -311,7 +297,7 @@ export class BoxManager {
     if (imageUid === null || imageUid === this.cfg.BOX_UID) return;
     log.warn(
       'the box image was built on a different uid than BOX_UID; ' +
-        "a box's home volume will not be writable by the agent",
+        "a box's home will not be writable by the agent",
       {
         image: this.cfg.BOX_IMAGE,
         imageUid,
@@ -323,9 +309,8 @@ export class BoxManager {
   /**
    * Pulls the box image again, so a moving tag moves here.
    *
-   * Best-effort: the image already on the host still works. Nothing running
-   * is touched, and a box adopts what arrived the next time it is
-   * started.
+   * Best effort, because the image already on the host still works. A box
+   * moves onto the new image at its next start.
    */
   async refreshBoxImage(): Promise<void> {
     const before = await dk.imageId(this.cfg.BOX_IMAGE);
@@ -344,25 +329,20 @@ export class BoxManager {
   /**
    * Removes copies of the box image that a pull has superseded.
    *
-   * Called after a refresh that moved the tag, which is the only thing that
-   * makes one. `supersededId` is the image the pull replaced, known exactly
-   * because this process watched it happen; the sweep alongside it catches
-   * the ones an earlier process replaced and did not live to clean up, which
-   * the image's own label makes possible.
+   * Called after a refresh that moved the tag. `supersededId` is the image
+   * that pull replaced. The labelled images also include those an earlier
+   * process replaced and did not clean up.
    *
-   * Nothing here is forced. An image a container was created from is refused
-   * by the daemon, and that refusal is what makes this safe to run while
-   * boxes exist: a box that has not been started since the tag moved is
-   * still on the old image, and start recreates it onto the new one. The
-   * image goes on a later sweep.
+   * Nothing is forced. The daemon refuses to remove an image a container was
+   * created from, so a box that has not started since the tag moved keeps
+   * its old image. That image goes on a later sweep, after the box's next
+   * start has moved it onto the new one.
    */
   private async pruneSupersededImages(supersededId: string | null): Promise<void> {
     if (!this.cfg.BOX_IMAGE_PRUNE) return;
     const current = await dk.imageId(this.cfg.BOX_IMAGE);
     const candidates = new Set(await dk.listSupersededBoxImages());
-    // A deployment building its own box image without the label has no
-    // superseded copy this can find later. The one this process just replaced
-    // is known outright.
+    // An image built without the label is found only here, by its id.
     if (supersededId) candidates.add(supersededId);
     candidates.delete(current ?? '');
 
@@ -384,36 +364,30 @@ export class BoxManager {
    * Removes Docker objects and workspace directories belonging to boxes
    * that no longer exist.
    *
-   * Everything Boxes creates is labelled with its box, and reconcile()
-   * reads that one way only: for each row, what Docker has. This reads it the
-   * other way, and so finds what a crash between `docker create` and the
-   * row's own update, or a teardown that failed halfway, left behind.
+   * Everything Boxes creates is labelled with its box. reconcile() looks up
+   * what Docker has for each row; this looks up the row for each labelled
+   * object. It finds what a crash during a create, or a teardown that failed
+   * halfway, left behind.
    *
-   * The rule is exact rather than heuristic because of the order create()
-   * works in: the row is inserted before any Docker object exists, so an
-   * object labelled with a box that has no live row cannot be one on its
-   * way up. A deleted box's tombstone counts as no row, which is what
-   * makes a failed teardown recoverable.
+   * create() inserts the row before any Docker object exists, so an object
+   * whose box has no live row is never one being created. A deleted box's
+   * tombstone counts as no row, so a failed teardown is swept too.
    *
-   * Ordering matters: a network with a container still on it, or a volume
-   * still mounted into one, is refused. Containers go first.
+   * Containers go first, because the daemon refuses to remove a network or a
+   * volume a container still uses.
    */
   async sweepOrphans(): Promise<void> {
-    // First, and whatever the rest of this decides: a login container belongs
-    // to no box at all, so none of the reasoning below reaches it.
+    // A login container belongs to no box, so the rules below do not apply.
     await this.sweepLoginContainers();
 
     const containers = await dk.listBoxContainers();
     const networks = await dk.listBoxNetworks();
     const volumes = await dk.listBoxVolumes();
-    // The files are read separately, because a teardown removes the Docker
-    // objects first: a box it gave up on halfway has nothing left to find
-    // it by except the directories it wrote.
+    // A teardown removes the Docker objects first, so a box it gave up on
+    // halfway may have only its directories left.
     const directories = ws.boxDirectoryIds(this.cfg.DATA_DIR);
-    // Last, after everything it is matched against: create() inserts the row
-    // before it makes anything, so a box created while the readings
-    // above were running has its row by now, and its network, workspace and
-    // home are not orphans.
+    // Read last: a box created while the readings above ran has its row by
+    // now, so its objects are not taken for orphans.
     const live = new Set(this.allRows().map((row) => row.id));
     const orphaned = <T extends { boxId: string }>(all: T[]): T[] =>
       all.filter((o) => !live.has(o.boxId));
@@ -426,15 +400,8 @@ export class BoxManager {
     const boxes = new Set([...strays.map((o) => o.boxId), ...strayDirectories]);
     if (boxes.size === 0) return;
 
-    // A host holding far more boxes than this database knows of is
-    // likelier to be a database these objects do not belong to than a genuine
-    // pile of orphans: a data volume mounted from the wrong place, or
-    // replaced, leaves exactly that, and sweeping would take every box's
-    // home.
-    //
-    // Deleted boxes are counted, tombstones and all, so a deployment whose
-    // boxes have all been deleted still has rows and still gets its failed
-    // teardowns swept.
+    // Tombstones count, so a deployment whose boxes were all deleted still
+    // gets its failed teardowns swept.
     const known = (
       this.db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }
     ).n;
@@ -466,9 +433,6 @@ export class BoxManager {
     for (const volume of strayVolumes) {
       await this.sweeping(volume.boxId, 'volume', () => dk.removeVolume(volume.name));
     }
-    // And the files, which are the size of all of the above put together.
-    // The workspace, home and Nix store of a box with no row are reachable
-    // from nothing Boxes has.
     for (const boxId of boxes) {
       await this.sweeping(boxId, 'workspace', () =>
         Promise.resolve(ws.removeWorkspace(this.cfg.DATA_DIR, boxId)),
@@ -485,16 +449,12 @@ export class BoxManager {
   /**
    * Removes login containers that nothing is waiting on.
    *
-   * A login runs the harness's own CLI in a container of its own and removes
-   * it when the flow ends, but a flow only ends while the orchestrator is
-   * alive to end it: a restart mid-login leaves a container holding a tmpfs
-   * home with half a credential in it, on the default bridge, forever.
+   * A login removes its container when the flow ends. A restart mid-login
+   * leaves the container behind, holding half a credential in a tmpfs home.
    *
-   * Age is the whole rule, because a login container has no other owner to
-   * ask about. The cutoff is longer than the ten minutes a flow is allowed to
-   * take, so a person still in a browser is never swept out from under. A
-   * container whose creation time cannot be read is treated as old, which is
-   * the safe direction: the thing it might interrupt lives for minutes.
+   * Age is the only rule, because a login container has no owner to ask. The
+   * cutoff is longer than the ten minutes a flow may take, so a login in
+   * progress is never swept.
    */
   private async sweepLoginContainers(): Promise<void> {
     const cutoff = Date.now() - LOGIN_CONTAINER_MAX_AGE_MS;
@@ -525,9 +485,7 @@ export class BoxManager {
   /**
    * Runs one removal of the sweep, keeping the rest going when it fails.
    *
-   * A stray object that cannot be removed is worth a line and nothing more:
-   * whatever is holding it will let go eventually, and the next sweep tries
-   * again.
+   * A failure is logged, and the next sweep tries again.
    */
   private async sweeping(
     boxId: string,
@@ -549,24 +507,17 @@ export class BoxManager {
    * Rebuilds a box's container when Docker no longer has the one the row
    * names, and returns the row as it now stands.
    *
-   * Everything a box container is comes from the row and the two
-   * directories the row points at — the image, the network, the mounts, the
-   * environment — so a container is reproducible and losing one costs nothing
-   * durable.
+   * A box container is built entirely from the row and the box's
+   * directories, so losing one costs nothing durable. `docker container
+   * prune` removes every stopped container, which includes every idle box.
+   * `docker system prune` removes the network too, so this recreates the
+   * network as well.
    *
-   * A container goes missing more easily than it sounds. `docker container
-   * prune` takes every stopped container, and an idle box is a
-   * stopped container, since the reaper stops them all day. `docker system
-   * prune` does that and the network too, which is why this makes the network
-   * again as well.
+   * Only for a container the daemon reports as missing. `unknown` means the
+   * daemon did not answer, and the container may be running.
    *
-   * Only for a container the daemon says is not there. `unknown` is a daemon
-   * that would not answer, and rebuilding on that would replace a container
-   * running perfectly well behind a failed inspect.
-   *
-   * A box still on a workspace volume is left to `migrateWorkspace`,
-   * which runs before this and rebuilds the container itself. Its row has no
-   * workspace directory to bind, so `containerSpec` cannot describe it.
+   * A box still on a workspace volume is left to `migrateWorkspace`, which
+   * runs before this and rebuilds the container itself.
    */
   private async restoreMissingContainer(row: BoxRow): Promise<BoxRow> {
     if (!row.container_id || !row.workspace_dir) return row;
@@ -576,9 +527,7 @@ export class BoxManager {
     slog.warn('the container is gone; rebuilding it from the box row', {
       container: row.container_id,
     });
-    // The network goes at the same moment the container does, under any prune
-    // that takes both, and a container cannot be created into one that is not
-    // there.
+    // A prune that removed the container may have removed the network too.
     if (await dk.ensureNetwork(row.network_name, row.subnet, row.id)) {
       slog.info('the box network was gone too; made it again', {
         network: row.network_name,
@@ -597,19 +546,10 @@ export class BoxManager {
    * Moves a box onto the current box image, when what its container
    * was created from is no longer what BOX_IMAGE resolves to.
    *
-   * Recreating is how a box container changes anything about itself —
-   * migrateWorkspace does the same for its mount — and it is cheap: the
-   * rootfs is read-only and everything durable lives in the three mounts,
-   * so the workspace, the adapter's thread history and what the agent
-   * installed come across untouched.
+   * A running box is left alone until its next start.
    *
-   * Start is the only moment this can happen. Under a running container it
-   * would kill the adapter exec mid-turn, so a running box is left alone
-   * and comes through here at its next stop/start cycle — which the idle
-   * reaper produces on its own within IDLE_STOP_MINUTES.
-   *
-   * The comparison is on image ids, not on the tag, because the case worth
-   * catching is `latest` having moved under a name that did not change.
+   * The comparison is on image ids rather than the tag, because a tag such
+   * as `latest` moves without changing its name.
    */
   private async rollOntoCurrentImage(row: BoxRow): Promise<BoxRow> {
     if (!row.container_id) return row;
@@ -621,8 +561,7 @@ export class BoxManager {
       wanted = await dk.imageId(this.cfg.BOX_IMAGE);
       current = await dk.containerImageId(row.container_id);
     } catch (err) {
-      // Whatever the daemon is unhappy about, it is not worth refusing to
-      // start a box that already has a container over.
+      // A box that already has a container can start without the comparison.
       slog.warn('could not compare the box image; starting as it is', {
         error: (err as Error).message,
       });
@@ -657,11 +596,9 @@ export class BoxManager {
 
   // --- recreating a container -----------------------------------------------
   //
-  // A container's image and its mounts are fixed when it is created, so every
-  // change to either replaces the container. That is cheap — the rootfs is
-  // read-only and everything durable lives in the mounts — but it is only
-  // safe while nothing is running in it, hence the guard the three callers
-  // share.
+  // A container's image and mounts are fixed at creation, so changing either
+  // replaces the container. The rootfs is read-only and everything durable
+  // lives in the mounts, so nothing is lost.
 
   /**
    * Whether a change that has to replace the container must wait, because the
@@ -681,12 +618,11 @@ export class BoxManager {
    * Replaces a box's container with a fresh one built from `row`, and
    * returns the new container's id. The row names the new container and the
    * workspace directory it binds before it is started, so a start that fails
-   * cannot leave the row naming the removed container or the mount it no
-   * longer has; the caller records whatever else changed with it.
+   * cannot leave the row naming the removed container. The caller records
+   * whatever else changed.
    *
-   * The old container is stopped before it is removed even where it is known
-   * to be down already: both calls tolerate a container that is gone, and one
-   * order for all three callers is worth more than the saved request.
+   * The old container is stopped before it is removed even when it is
+   * already down; both calls tolerate a container that is gone.
    */
   private async recreateContainer(row: BoxRow): Promise<string> {
     if (row.container_id) {
@@ -719,8 +655,8 @@ export class BoxManager {
 
   /**
    * Records a new status, leaving a deleted box deleted. An upstream spawn
-   * still retrying when the box was removed reports its outcome
-   * afterwards, and that must not resurrect the row.
+   * still retrying when the box was removed reports its outcome later, and
+   * that must not bring the row back.
    */
   private setStatus(id: string, status: BoxRow['status']): void {
     this.db
@@ -730,16 +666,12 @@ export class BoxManager {
 
   /**
    * Everything createContainer needs about a box, built from its stored
-   * row and what the deployment currently holds.
+   * row and what the deployment currently holds. Both a new box and every
+   * recreated container are built from it.
    *
-   * One place rather than two, because a box's container is created twice:
-   * once at create, and once more when a volume-backed workspace migrates to a
-   * directory and the container has to be recreated with the new mount.
-   *
-   * What goes in for the credentials is a placeholder apiece, and the same
-   * ones for every box: a box created before a credential was entered holds
-   * what a box created after it holds, and the proxy is where the difference
-   * is made. So nothing here has to be rebuilt when a credential arrives.
+   * Every box gets the same placeholder for each credential, and the proxy
+   * swaps in the secret. So no container is rebuilt when a credential
+   * arrives.
    */
   private containerSpec(row: BoxRow): dk.CreateContainerSpec {
     const settings = readSettings(this.db);
@@ -751,10 +683,8 @@ export class BoxManager {
       workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
       nixSource: ws.hostNixPath(this.hostDataDir, row.id),
       agentConfigSource: hostAgentConfigPath(this.hostDataDir, row.id),
-      // A directory for every box created since homes became
-      // directories, and the old named volume for one created before, which
-      // goes on mounting it for as long as it lives. There is no migration;
-      // the two arrangements coexist until the last old box is deleted.
+      // A directory for a newer box, and the named volume for an older one.
+      // Homes are never migrated.
       homeSource: row.home_dir
         ? ws.hostHomePath(this.hostDataDir, row.id)
         : row.home_volume,
@@ -779,12 +709,9 @@ export class BoxManager {
         this.notifier,
         (status) => this.setStatus(id, status),
         async () => {
-          // Opening a thread starts a stopped box without going through
-          // start(), so the repairs have to happen here too — and under the
-          // same slot, or they would race a start, a local command or a stop.
-          // They leave the row's container id current, which is what the
-          // caller reads next; the row is read inside the slot, because a
-          // wait here can outlast what it says.
+          // Opening a thread starts a stopped box without start(), so the
+          // repairs run here too, under the same slot. The row is read inside
+          // the slot, because it can change while this waits.
           await this.withSlot(id, async () => {
             const row = this.getRow(id);
             if (!row || row.status === 'deleted') return;
@@ -800,8 +727,8 @@ export class BoxManager {
   // --- create ---------------------------------------------------------------
 
   /**
-   * Creates the network, volumes and container for a new box. Any failed
-   * step tears the whole box down and marks it as an error.
+   * Creates the network, directories and container for a new box. Any
+   * failed step tears the whole box down and marks it as an error.
    */
   async create(body: CreateBoxBody): Promise<BoxDetail> {
     const name = body.name?.trim();
@@ -816,14 +743,11 @@ export class BoxManager {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
 
-    // What the box's first conversation is, settled before anything is
-    // allocated so a request naming an agent nobody has does not build a box on
-    // its way to a 400.
+    // Checked before anything is allocated, so an unknown harness costs no
+    // resources on its way to a 400.
     const thread = threadOptions(body.thread);
 
-    // Before anything is allocated, and after the checks above: a request
-    // naming a set that is not there should not pull an image on its way to a
-    // 400.
+    // After the checks above, so an invalid request pulls no image.
     try {
       await this.ensureBoxImage();
     } catch (err) {
@@ -845,27 +769,23 @@ export class BoxManager {
     const row: BoxRow = {
       id,
       name,
-      // Every box is DEFAULT. The column is what a deployment with named
-      // credential profiles would key on, and there is no such thing: one
-      // global set of credentials is what the settings page manages.
+      // Every box is DEFAULT: the deployment has one set of credentials.
       profile: 'DEFAULT',
       image: this.cfg.BOX_IMAGE,
       container_id: null,
       network_name: dk.names.network(id),
       subnet,
-      // Directory-backed from the start, both of them, so neither volume is
-      // created and the columns that named them stay empty.
+      // Both are directories, so the volume columns stay empty.
       ws_volume: '',
       home_volume: '',
       workspace_dir: ws.workspacePath(this.cfg.DATA_DIR, id),
       home_dir: ws.homePath(this.cfg.DATA_DIR, id),
-      // No base revision until the reviewer picks one: a review compares
-      // against each repository's own working tree by default.
+      // No base revision until the reviewer picks one. A review compares
+      // each repository against its own HEAD by default.
       review_base_rev: null,
       status: 'creating',
       agent_set_id: agentSetId,
-      // Its own from the start: what opens this box's WebSocket opens no
-      // other box.
+      // A token of its own, so it opens this box's WebSocket and no other.
       ws_token: generateWsToken(),
       created_at: now,
       last_active_at: now,
@@ -886,11 +806,8 @@ export class BoxManager {
     try {
       await this.withSlot(id, () => this.createResources(row));
       this.setStatus(id, 'running');
-      // The first conversation, as a row and nothing more. Nothing is minted
-      // here: a thread with no adapter-side conversation is a state the
-      // gateway already handles — it is what an adapter restart leaves behind —
-      // and the first browser to open the box brings it up. So creating a box
-      // costs no adapter spawn, and a box can be created for a harness whose
+      // The first conversation, as a row only. The first browser to open it
+      // starts the adapter, so a box can be created for a harness whose
       // credential has not been entered yet.
       insertThread(this.db, id, {
         harness: thread.harness,
@@ -912,10 +829,8 @@ export class BoxManager {
    * Builds the network, the three directories and the container of a new
    * box, and starts it.
    *
-   * Split out of {@link create} so it can run under the box's slot: this
-   * is the half that touches Docker and the filesystem, and its order is the
-   * one that works — the network before the container that joins it, and
-   * every directory before the container that binds them.
+   * Runs under the box's slot. The network comes before the container that
+   * joins it, and every directory before the container that binds it.
    */
   private async createResources(row: BoxRow): Promise<void> {
     const id = row.id;
@@ -925,10 +840,8 @@ export class BoxManager {
     ws.createNix(this.cfg.DATA_DIR, id);
     // Before the container, because it is one of its mounts.
     this.agents.materialize(id, row.agent_set_id);
-    // A bind mount covers what the image put in /home/agent rather than
-    // being seeded from it the way a named volume is, so seedHomeFromImage
-    // fills it. An empty home costs the agent's own `~/.local/bin` on the
-    // PATH of a login shell.
+    // The bind mount hides the image's /home/agent, so the image's home is
+    // copied in.
     ws.createHome(this.cfg.DATA_DIR, id);
     await dk.seedHomeFromImage(ws.hostHomePath(this.hostDataDir, id), row.image, id);
     const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
@@ -945,38 +858,27 @@ export class BoxManager {
    * it is started, in the one order that is safe. Returns the row as it now
    * stands, which is what names the container to start.
    *
-   * Every repair is a no-op for a box that does not need it, and each is
-   * put off while the container is running, so a box mid-turn is never pulled
-   * out from under its adapter.
+   * Every repair does nothing for a box that does not need it, and each is
+   * put off while the container runs, so a turn is never cut off.
    *
-   * Runs under the caller's slot and takes none of its own, which is what
-   * lets the three paths that start a box share it without any of them
-   * waiting for itself. A stop or a delete arriving meanwhile is honoured
-   * between the repairs rather than inside one.
+   * Runs under the caller's slot and takes none of its own. A stop or a
+   * delete that arrives meanwhile takes effect between the repairs.
    */
   private async prepareContainer(row: BoxRow): Promise<BoxRow> {
     this.giveUpIfPreempted(row.id);
-    // Rewritten on every start, so an edited set reaches the box here — the
-    // entrypoint installs what this leaves behind, and nothing else does.
-    // Before either step below, both of which may create a container that
-    // binds the directory: the daemon would otherwise create it itself, empty
-    // and owned by root.
+    // Before any step that may create a container binding this directory,
+    // which the daemon would otherwise create empty and owned by root.
     this.agents.materialize(row.id, row.agent_set_id);
-    // The Nix store likewise, which a box from before it existed does not
-    // have: made here, the mount check below has a directory to bind.
+    // The Nix store likewise, which an older box may not have yet.
     ws.createNix(this.cfg.DATA_DIR, row.id);
     // Before anything binds the other two, for the same reason.
     this.requireDirectories(row);
     let current = await this.migrateWorkspace(row);
     this.giveUpIfPreempted(row.id);
-    // Before the two below, which both ask the daemon about a container that
-    // may not be there: after this one, there is a container to ask about.
+    // Before the two below, which need a container to ask the daemon about.
     current = await this.restoreMissingContainer(current);
     this.giveUpIfPreempted(row.id);
-    // Before the mount check below: a roll recreates the container from
-    // containerSpec, which already binds everything the template has, so a
-    // box that moves image comes back with every mount and the check that
-    // follows finds nothing to do.
+    // Before the mount check: a recreated container already has every mount.
     current = await this.rollOntoCurrentImage(current);
     this.giveUpIfPreempted(row.id);
     return this.ensureTemplateMounts(current);
@@ -986,20 +888,13 @@ export class BoxManager {
    * Refuses to go on when a box's bind sources are gone, naming what is
    * missing, and marks the box as an error.
    *
-   * Docker creates a bind source it cannot find, empty and owned by root. The
-   * box then starts and looks healthy while the agent cannot write a thing:
-   * every turn fails, and nothing says why. A crash during a delete, a backup
-   * restored in part, or a HOST_DATA_DIR that stopped being right all leave
-   * exactly this.
+   * Docker creates a missing bind source, empty and owned by root. The box
+   * then looks healthy while every turn fails. A crash during a delete, a
+   * partly restored backup, or a wrong HOST_DATA_DIR all cause this.
    *
-   * Nothing is recreated here. The home holds the adapter's thread
-   * transcripts, so seeding a fresh one would erase every conversation while
-   * looking like a repair. Whoever restores the files is the one who can tell
-   * what happened.
-   *
-   * Only the halves the row says are directories are checked. A box from
-   * before either became one still mounts a named volume, which Docker keeps
-   * on its own.
+   * The directories are not recreated, because a fresh home would erase the
+   * adapter's thread transcripts. Only the mounts the row marks as
+   * directories are checked.
    */
   private requireDirectories(row: BoxRow): void {
     const missing: string[] = [];
@@ -1039,27 +934,22 @@ export class BoxManager {
     await dk.startContainer(row.container_id!);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.setStatus(id, 'running');
-    // The upstream reconnects on the next forwarded message, which re-issues
-    // session/load and restores the thread.
+    // The upstream reconnects on the next forwarded message, which sends
+    // session/load again and restores the thread.
     return this.detail(id);
   }
 
   /**
-   * Moves a box created before this change off its workspace volume and
-   * onto a directory, and returns the row as it now stands.
+   * Moves a box that still has a workspace volume onto a directory, and
+   * returns the row as it now stands.
    *
-   * Start is the only moment this can happen: the mount is fixed when a
-   * container is created, so the container has to be replaced. That is cheap
-   * here — a box container has a read-only rootfs and everything durable
-   * lives in its mounts — but it is not free of risk, so the order is
-   * chosen to lose nothing at any step: copy first, recreate second, and drop
-   * the volume only once the new container has started. The row says which
-   * mount it has the moment the container that has it exists, so a crash
-   * cannot leave a running container on the directory beside a row that says
-   * volume, which is what copies the volume over the agent's own work.
+   * The order loses nothing at any step: copy first, recreate the container
+   * second, and drop the volume only once the new container has started. The
+   * row records the directory as soon as the container that binds it exists.
+   * Otherwise a crash could leave a row that says volume, and the next start
+   * would copy the volume over the agent's work.
    *
-   * A running legacy box is left alone. Its container works, and it will
-   * come through here at its next stop/start cycle.
+   * A running box is left alone until its next start.
    */
   private async migrateWorkspace(row: BoxRow): Promise<BoxRow> {
     if (row.workspace_dir) return row;
@@ -1073,12 +963,9 @@ export class BoxManager {
     if (row.ws_volume) {
       await dk.copyVolumeToDirectory(row.ws_volume, hostDirectory, row.image, row.id);
     }
-    // The agent has to own what it works in, and cp -a brought the volume's
-    // own ownership with it, which a Docker-initialised volume gets right.
+    // cp -a kept the ownership of the contents; the directory itself needs it.
     ws.chownToAgent(directory);
 
-    // The directory it is given is the one the new container binds, and
-    // recreateContainer records both together before the start.
     await this.recreateContainer({ ...row, workspace_dir: directory });
     this.db.prepare("UPDATE boxes SET ws_volume = '' WHERE id = ?").run(row.id);
 
@@ -1091,15 +978,10 @@ export class BoxManager {
    * Gives a box created before a mount existed the mounts the template has
    * now, and returns the row as it now stands.
    *
-   * Two mounts arrived after the first boxes did: the agent configuration
-   * and the Nix store. A container from before either is recreated once,
-   * from the template, which binds both.
-   *
-   * Nothing is lost if this fails halfway, because the directories are
-   * already written and the next start tries again.
-   *
-   * A running box is left alone, and gets the mounts at its next
-   * stop/start cycle.
+   * An older container may lack the agent configuration or the Nix store
+   * mount, and is recreated once from the template. A failure halfway loses
+   * nothing, because the directories are already written and the next start
+   * tries again. A running box is left alone until its next start.
    */
   private async ensureTemplateMounts(row: BoxRow): Promise<BoxRow> {
     if (!row.container_id) return row;
@@ -1117,10 +999,9 @@ export class BoxManager {
   /**
    * Stops the container and drops the upstream connection.
    *
-   * Overtakes what the box is in the middle of rather than queueing
-   * behind it: the flag and the upstream's own stop are both set before the
-   * slot is asked for, so the work in flight gives up at its next step and
-   * this gets the slot a step later rather than after a spawn's retries.
+   * Overtakes what the box is in the middle of rather than queueing behind
+   * it. The flag and the upstream's stop are set before the slot is asked
+   * for, so the work in flight gives up at its next step.
    */
   async stop(id: string): Promise<BoxDetail> {
     this.preempted.add(id);
@@ -1132,10 +1013,9 @@ export class BoxManager {
    * Stops a box unless something else is already working on it, and says
    * whether it did.
    *
-   * For the reaper, which must never wait: a box with an operation in
-   * flight is somebody's, so it is left alone and looked at again on the next
-   * tick. The queue is read and taken in the same step, so nothing can slip
-   * in between.
+   * For the reaper, which must never wait. A box with an operation in flight
+   * is in use, so the reaper looks at it again on the next tick. The queue
+   * is checked and taken in the same synchronous step.
    */
   async stopUnlessBusy(id: string): Promise<boolean> {
     if (this.slots.has(id)) return false;
@@ -1145,8 +1025,7 @@ export class BoxManager {
 
   /** The body of {@link stop}, which runs under the box's slot. */
   private async stopHeld(id: string): Promise<BoxDetail> {
-    // Everything queued before this has given up by now, and what was queued
-    // behind it is not this stop's to abandon.
+    // Everything queued before this has given up; what comes after may run.
     this.preempted.delete(id);
     const row = this.mustGet(id);
     if (row.container_id) await dk.stopContainer(row.container_id);
@@ -1169,17 +1048,12 @@ export class BoxManager {
   private async removeHeld(id: string): Promise<void> {
     this.preempted.delete(id);
     const row = this.mustGet(id);
-    // The tombstone goes down first, before a single row is deleted and while
-    // the slot is held. It is what every writer that can still be in flight
-    // checks — the ACP tap, a streaming command that is just finishing, a
-    // touch — so none of them can insert a row for a box that is going
-    // away, and setStatus itself will not move the row out again.
+    // The tombstone goes first. Every writer still in flight checks it, so
+    // none of them inserts a row for a box that is going away.
     this.setStatus(id, 'deleted');
     this.upstreams.delete(id);
     await this.teardownResources(id);
-    // Every table keyed by the box id, so a deleted box leaves nothing
-    // behind: the row itself stays as a tombstone — see setStatus — and these
-    // have no reader once it does.
+    // Every table keyed by the box id. The box row stays as a tombstone.
     for (const table of ['pending_requests', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE box_id = ?`).run(id);
     }
@@ -1188,8 +1062,8 @@ export class BoxManager {
   }
 
   /**
-   * Removes a box's container, network and volumes. Every failure is
-   * logged rather than thrown, so teardown always finishes.
+   * Removes a box's container, network, directories and volumes. Every
+   * failure is logged rather than thrown, so teardown always finishes.
    */
   private async teardownResources(id: string): Promise<void> {
     const row = this.getRow(id);
@@ -1208,9 +1082,6 @@ export class BoxManager {
     } catch (err) {
       slog.warn('network teardown failed', { error: (err as Error).message });
     }
-    // The workspace and the home hold the agent's work and the adapter's
-    // thread history, and nothing refers to either once the box is gone,
-    // so a deleted box takes them with it.
     if (row.workspace_dir) {
       try {
         ws.removeWorkspace(this.cfg.DATA_DIR, row.id);
@@ -1225,8 +1096,7 @@ export class BoxManager {
         slog.warn('home removal failed', { error: (err as Error).message });
       }
     }
-    // The Nix store goes with them. Every box is tried, since no column says
-    // which have one, and removing a directory that is not there is nothing.
+    // No column says which boxes have a Nix store, so every box is tried.
     try {
       ws.removeNix(this.cfg.DATA_DIR, row.id);
     } catch (err) {
@@ -1237,8 +1107,7 @@ export class BoxManager {
     } catch (err) {
       slog.warn('agent configuration removal failed', { error: (err as Error).message });
     }
-    // Only a box from before each of these became a directory still has
-    // a volume.
+    // Only an older box still has volumes.
     if (row.ws_volume) await dk.removeVolume(row.ws_volume);
     if (row.home_volume) await dk.removeVolume(row.home_volume);
   }
@@ -1268,14 +1137,11 @@ export class BoxManager {
   private async execTargetHeld(id: string): Promise<{ containerId: string; workingDir: string }> {
     const stored = this.mustGet(id);
     if (!stored.container_id) throw new HttpError(409, 'Box has no container');
-    // Reaching in starts a stopped container, so it is as good a moment as
-    // any to put the box right: the same repairs start() runs, in the same
-    // order.
+    // This starts a stopped container, so it runs the same repairs start()
+    // runs.
     const row = await this.prepareContainer(stored);
     this.giveUpIfPreempted(id);
     await dk.startContainer(row.container_id!);
-    // Reaching into the box is use of the box, whoever is asking, and it
-    // holds the reaper off for as long as the asking goes on.
     this.touch(id);
     return { containerId: row.container_id!, workingDir: dk.WORKSPACE_DIR };
   }
@@ -1331,9 +1197,8 @@ export class BoxManager {
    * is measured again rather than answered from what a stopped box was left
    * at.
    *
-   * A box that is down cannot grow on its own, which is what lets a stopped
-   * box be measured once and then left alone. An upload is the one
-   * exception, and this is it saying so.
+   * A stopped box is measured once and then left alone, because it cannot
+   * grow on its own. An upload is the exception.
    */
   workspaceChanged(id: string): void {
     this.usage.forget(id);
@@ -1359,11 +1224,9 @@ export class BoxManager {
   ): Promise<BoxSummary> {
     const dockerState = await dk.containerState(row.container_id);
     const pendingByThread = this.pending.countsByThread(row.id);
-    // What the gateway believes about the box right now, which lives in
-    // memory beside the adapter rather than in the database: the agent is
-    // talking on these threads, and these tasks are still running in them.
-    // Read once here so every thread of one summary answers from the same
-    // moment. `upstreams.get` rather than `upstream()`, which would start one.
+    // The gateway's in-memory view of which threads are speaking and which
+    // have tasks running, read once so every thread answers from the same
+    // moment. `upstreams.get` rather than `upstream()`, which would create one.
     const upstream = this.upstreams.get(row.id);
     const speaking = new Set(upstream?.speakingThreads ?? []);
     const working = new Set(upstream?.workingThreads ?? []);
@@ -1373,9 +1236,7 @@ export class BoxManager {
       profile: row.profile,
       status: row.status,
       dockerState,
-      // Derived from the threads rather than stored beside them: a turn runs
-      // on a conversation, and the box's answer is that any of them has
-      // one.
+      // True when any of the box's threads has a turn running.
       turnActive,
       speaking: speaking.size > 0,
       backgroundBusy: upstream?.backgroundActive ?? false,
@@ -1388,10 +1249,8 @@ export class BoxManager {
           pendingByThread,
           speaking,
           working,
-          // Forking is per thread, because the answer is per adapter: a box
-          // may hold two, and each says for itself whether it can branch a
-          // conversation. An adapter that has not been reached is absent from
-          // the set, which is the honest answer rather than an assumed one.
+          // Each adapter says for itself whether it can fork. An adapter not
+          // yet reached is absent from the set.
           upstream?.forkableHarnesses ?? new Set<HarnessId>(),
         ),
       ),
@@ -1429,9 +1288,8 @@ export class BoxManager {
       homeDir: row.home_dir,
       acpSessionId: latestThread(this.db, id)?.acp_session_id ?? null,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
-      // `upstreams.get` rather than `upstream()`, which would start one: a
-      // box nothing holds has nothing read about it, and an empty list is the
-      // honest answer rather than a reason to go and look.
+      // `upstreams.get` rather than `upstream()`, which would create one. A
+      // box without an upstream has no reading, so the list is empty.
       boxWork: [...(this.upstreams.get(id)?.boxWork ?? [])],
     };
   }
@@ -1471,17 +1329,14 @@ export class BoxManager {
    * names one.
    *
    * A fork needs the adapter, because only the adapter can branch a
-   * transcript. A fresh thread does not: its row is written first and its
-   * conversation minted after, so a harness whose credential nobody has
-   * entered still gets a thread — the dialog is what keeps a person from
-   * asking for one, and the API is not a gate.
+   * transcript. A fresh thread's row is written before its conversation is
+   * created, so a harness without a credential still gets a thread.
    */
   async createThread(id: string, body: CreateThreadBody | undefined): Promise<ThreadSummary> {
     this.mustGet(id);
     const from = body?.from?.trim();
-    // A fork's options are its source's: only the adapter that wrote a
-    // transcript can load it, so a fork stays on that harness whatever the
-    // request says.
+    // A fork keeps its source's harness and options, because only the adapter
+    // that wrote a transcript can load it.
     const options = from ? undefined : threadOptions(body?.options);
     const up = this.upstream(id);
     try {
@@ -1496,8 +1351,7 @@ export class BoxManager {
     } catch (err) {
       const message = (err as Error).message;
       if (message === THREAD_NOT_FOUND) throw new HttpError(404, message);
-      // A thread minted and never prompted has no adapter-side conversation
-      // to branch from, which is the caller's timing rather than a fault.
+      // A thread never prompted has no conversation to fork yet.
       if (message === NOTHING_TO_FORK) throw new HttpError(409, message);
       throw new HttpError(500, `Failed to create thread: ${message}`);
     }
@@ -1506,9 +1360,8 @@ export class BoxManager {
   /**
    * Marks one of a box's conversations done, or takes the mark off again.
    *
-   * The reader's own note about which threads they are finished with. Nothing
-   * else changes: the thread keeps its adapter conversation, whatever it is
-   * running goes on running, and a prompt sent to it is answered as always.
+   * The mark is the reader's own note. The thread keeps its conversation, its
+   * tasks go on running, and it still answers prompts.
    */
   setThreadDone(id: string, threadId: string, done: boolean): ThreadSummary {
     this.mustGet(id);
@@ -1524,11 +1377,9 @@ export class BoxManager {
   }
 
   /**
-   * Stops one task that conversation left running, or every task it has.
+   * Stops one task a thread left running, or every task it has.
    *
-   * A thread the adapter has no conversation for cannot have announced a task:
-   * a task is named by the adapter's own id for the conversation it is on, and
-   * this thread has none.
+   * A thread with no adapter conversation has no tasks, so it answers zero.
    */
   async stopBackgroundWork(
     id: string,
@@ -1542,12 +1393,11 @@ export class BoxManager {
   }
 
   /**
-   * Kills everything running in a box, whether or not a conversation claims it.
+   * Kills every process in a box that Boxes did not start itself, whether or
+   * not a thread has a task for it.
    *
-   * The answer to a box that is busy with work no thread has a task for, which
-   * is what every adapter restart leaves behind: the tasks went with the
-   * process that announced them, and a signal is the only thing that reaches
-   * the build they left running.
+   * An adapter restart loses the tasks the old process announced, and a
+   * signal is the only way to reach the work they left running.
    */
   async stopBoxWork(id: string): Promise<{ stopped: number }> {
     this.mustGet(id);
@@ -1570,9 +1420,8 @@ export class BoxManager {
       (await dk.listBoxContainers()).filter((c) => !c.helper).map((c) => [c.boxId, c]),
     );
     for (const row of this.allRows()) {
-      // A turn cannot survive an orchestrator restart: the upstream
-      // connection that owned it is gone, on every thread of the box,
-      // whether or not its container is.
+      // A turn cannot survive an orchestrator restart, because the upstream
+      // connection that owned it is gone.
       clearBoxTurns(this.db, row.id);
       const container = live.get(row.id);
       if (!container) {
@@ -1580,10 +1429,7 @@ export class BoxManager {
           log.box(row.id).warn('container missing at boot; marking stopped');
           this.setStatus(row.id, 'stopped');
         } else if (row.status === 'creating') {
-          // create() fails a box it cannot finish, so a row still saying
-          // this has nobody left to finish it: the process that was creating
-          // it is gone. Nothing is deleted — the sweep takes what it left —
-          // but the row has to stop holding its subnet and refusing a start.
+          // The process that was creating it is gone, so the create cannot finish.
           log.box(row.id).warn('create did not finish before the restart; marking error');
           this.setStatus(row.id, 'error');
         }
@@ -1628,15 +1474,13 @@ export class BoxManager {
   /**
    * Forgets every upstream of a box that is down and holding nothing.
    *
-   * The reaper asks each running box's upstream what is in its box, which
-   * builds one for every box nobody has opened, and nothing else lets go
-   * of them. An upstream with no browser attached, no request waiting and no
-   * connection to an adapter holds nothing a fresh one could not rebuild.
+   * The reaper creates an upstream for every running box it checks, and
+   * nothing else drops them. An upstream with no browser attached, no request
+   * waiting and no adapter connection holds nothing a fresh one could not
+   * rebuild.
    *
-   * Only for a box whose row says it is not running: while a box is up,
-   * the upstream carries the reading of what is running in it, and the reaper
-   * asks for that reading every tick. Dropping one would throw the reading
-   * away a minute after it was taken, and a box with no reading is held.
+   * A running box keeps its upstream, because the upstream holds the reading
+   * of what runs in the box, which the reaper asks for every tick.
    */
   private dropIdleUpstreams(): void {
     for (const [id, up] of this.upstreams) {
@@ -1651,9 +1495,9 @@ export class BoxManager {
 /**
  * One stored thread, as the API reports it.
  *
- * `pendingByThread` is keyed by the adapter's own id, which is what a queued
- * permission request records, and a thread the adapter has forgotten has no
- * queued requests by definition.
+ * The live sets and `pendingByThread` are keyed by the adapter's own id. A
+ * thread without one has nothing running, nobody speaking and no request
+ * waiting.
  */
 function toThreadSummary(
   row: ThreadRow,
@@ -1670,16 +1514,13 @@ function toThreadSummary(
     title: row.title,
     ordinal: row.ordinal,
     turnActive: row.turn_active === 1,
-    // These three are the live gateway's, keyed by the adapter's own id: a
-    // thread the adapter has forgotten has nothing running in it and nobody
-    // talking on it, by definition.
+    // These three come from the live gateway, keyed by the adapter's own id.
     speaking: acp ? speaking.has(acp) : false,
     backgroundBusy: acp ? working.has(acp) : false,
     pendingCount: acp ? (pendingByThread.get(acp) ?? 0) : 0,
     modeId: row.mode_id,
     config: threadConfig(row),
-    // Whether this thread's own adapter advertised the fork capability, and
-    // false while it has not been reached.
+    // False while this thread's adapter has not been reached.
     canFork: forkable.has(row.harness),
     done: row.done === 1,
     createdAt: row.created_at,
@@ -1691,12 +1532,9 @@ function toThreadSummary(
 /**
  * What a request asked a thread to be, checked.
  *
- * An absent body is Claude on its defaults, which is what every client from
- * before harnesses existed means and what the dashboard sends until somebody
- * chooses otherwise. An unknown harness is a 400 rather than a thread on the
- * wrong agent, and a config map is taken as it comes: which options a harness
- * offers is the adapter's to say, and one it does not know is refused by the
- * adapter and logged rather than fatal.
+ * An absent harness means Claude on its defaults. An unknown harness is a
+ * 400. The config map keeps its string values unchecked, because the adapter
+ * decides which options a harness offers.
  */
 function threadOptions(options: ThreadOptions | undefined): ThreadOptions {
   const wanted = options?.harness ?? DEFAULT_HARNESS;

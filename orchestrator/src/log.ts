@@ -1,8 +1,6 @@
 /**
- * Structured stderr logging with mandatory secret redaction.
- *
- * Every field logged passes through redact, so a token in a field cannot
- * reach the log. The message itself is not redacted.
+ * Structured JSON logging to stderr. The fields of every line are redacted,
+ * the message text is not.
  */
 
 /** Field names whose value is replaced whatever it contains. */
@@ -34,25 +32,19 @@ export type Level = 'debug' | 'info' | 'warn' | 'error';
 const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
 /**
- * Lowest severity that is written. `info` until the parsed configuration
- * installs LOG_LEVEL, so a line written on the way to that is not lost.
+ * Lowest severity that is written. It starts at info, so lines logged before
+ * setLogLevel runs are still written.
  */
 let threshold = LEVELS.info;
 
-/**
- * Installs the lowest severity that is written. Called from the boot, once
- * the configuration has been parsed.
- */
+/** Sets the lowest severity that is written. The boot calls it with LOG_LEVEL. */
 export function setLogLevel(level: Level): void {
   threshold = LEVELS[level];
 }
 
 /**
- * Whether a line at this level would be written.
- *
- * For a caller that has to build something expensive to log it: the ACP tap
- * serializes a whole protocol message, which is worth skipping when nothing
- * will read it.
+ * Whether a line at this level would be written. Lets a caller skip building
+ * an expensive log line that nothing will read.
  */
 export function wants(level: Level): boolean {
   return LEVELS[level] >= threshold;
@@ -71,7 +63,7 @@ function emit(level: Level, msg: string, fields?: Record<string, unknown>): void
   process.stderr.write(`${JSON.stringify(line)}\n`);
 }
 
-/** The four level methods, each stamping every line with the same fields. */
+/** Builds the four level methods, each adding tag to the fields of every line. */
 function levels(tag?: Record<string, unknown>): Record<
   Level,
   (msg: string, fields?: Record<string, unknown>) => void
@@ -93,10 +85,9 @@ export const log = {
   /** Child logger that stamps every line with a box id. */
   box: (id: string): Logger => levels({ box: id }),
   /**
-   * Child logger stamping whatever the caller is distinguishing lines by.
-   *
-   * One box runs an adapter per harness, so a box id alone no longer
-   * says which process a line came from.
+   * Child logger that stamps every line with the given fields. One box runs
+   * an adapter per harness, so a box id alone cannot say which process a line
+   * came from.
    */
   tagged: (fields: Record<string, unknown>): Logger => levels(fields),
 };

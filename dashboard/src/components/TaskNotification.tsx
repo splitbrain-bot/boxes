@@ -7,22 +7,9 @@ import type { TaskNotification } from '../../../shared/task-notifications.ts';
 import { formatUsage } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
 
-/**
- * A background task reporting in, drawn where the block of XML it arrived as
- * would otherwise be.
- *
- * Quiet, at the size of the tool rows a working turn is otherwise made of: a
- * task reporting in is news about work going on elsewhere rather than a turn
- * of the conversation, and the thread reads better for not pretending
- * otherwise.
- */
-
-/**
- * How long the body takes to fold, matching the tool rows either side of it.
- * Named twice, because the scroll lock needs the number and the animation
- * needs the utility.
- */
+/** How long the body takes to fold, in milliseconds, as the tool rows do. */
 const ANIMATION_DURATION = 200;
+/** The same duration as utility classes, for the animation. */
 const DURATION = 'duration-200 [--tw-duration:200ms]';
 
 /** The icon and colour for each status the harness reports. */
@@ -34,13 +21,15 @@ const LOOK: Record<string, { Icon: typeof CheckIcon; tone: string }> = {
 };
 
 /**
- * A status with no icon of its own is a task that has not finished — which is
- * what a monitor's event is, and what an unknown status from a newer harness
- * is treated as.
+ * The look for a task without a known status: a running task, such as a
+ * monitor's event, or a status from a newer harness.
  */
 const RUNNING = { Icon: ActivityIcon, tone: 'text-muted-foreground' };
 
-/** The icon says how the task ended, the summary says what happened. */
+/**
+ * A background task's report, drawn in place of the XML block it arrived as.
+ * It is as quiet as the tool rows. The icon shows how the task ended.
+ */
 export const TaskNotificationPart: DataMessagePartComponent<TaskNotification> = ({ data }) => {
   const { Icon, tone } = (data.status ? LOOK[data.status] : undefined) ?? RUNNING;
   const usage = data.usage ? formatUsage(data.usage) : '';
@@ -64,26 +53,26 @@ export const TaskNotificationPart: DataMessagePartComponent<TaskNotification> = 
 };
 
 /**
- * The summary, and what the task said under it.
+ * The summary, with the task's own text folded under it.
  *
- * A task still going has said the thing worth reading — a monitor exists to
- * report its event, and folding one away leaves a row that says a monitor
- * fired and not what it saw. A finished one has already been summarised by
- * the line above, and what is under it is its whole answer, which can be
- * pages. So the first opens and the second is a click.
+ * A running task starts open, because its body is the event worth reading. A
+ * finished task starts closed, because its body can be pages long.
  */
 function TaskBody({
   summary,
   body,
   finished,
 }: {
+  /** The one-line summary. */
   summary: string;
+  /** What the task said. */
   body: string;
+  /** Whether the task reported a status. */
   finished: boolean;
 }) {
   const [open, setOpen] = useState(!finished);
   const ref = useRef<HTMLDivElement>(null);
-  // The lock, minus the fight with a thread following its own output.
+  // Holds the viewport still while the body folds, unless the thread follows its output.
   const lockScroll = useDisclosureLock(ref, ANIMATION_DURATION);
 
   const onOpenChange = useCallback(
@@ -120,9 +109,7 @@ function TaskBody({
           DURATION,
         )}
       >
-        {/* Whatever the task wrote, as it wrote it: a monitor's line of
-            counters is aligned and a subagent's answer holds its paragraphs,
-            and neither is markdown anybody promised to render. */}
+        {/* Shown as written, not rendered as markdown, so alignment and paragraphs survive. */}
         <p className="mt-1 font-mono break-words whitespace-pre-wrap">{body}</p>
       </CollapsibleContent>
     </Collapsible>

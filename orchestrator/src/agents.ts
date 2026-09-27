@@ -16,27 +16,9 @@ import { HttpError } from './http-error.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
- * What the agent is configured with, and how a box gets it.
- *
- * Three things go in: an `AGENTS.md`, skills, and slash commands. They live in
- * named sets. One set — `global` — is applied to every box; a box may
- * name one more, and the two are merged, the named set winning where both
- * define a skill or a command of the same name.
- *
- * The database is the source of truth and the files are derived from it. At
- * every create and every start, a box's merged set is written out as a
- * directory under `${DATA_DIR}/agents/<id>`, bind-mounted read-only into the
- * container, and installed under `$HOME` by the entrypoint. That hop is needed
- * because the home volume is where every harness reads its user configuration
- * from, and a box's home is the box's to write.
- *
- * A set is written once per harness, in each one's own layout, because a box
- * may hold threads of both and nothing here knows which: the merged set is a
- * property of the box, and where it lands is a property of the agent reading
- * it. The content is kilobytes, so two copies cost nothing worth a decision.
- *
- * Editing a set therefore reaches a box at its next start rather than
- * while it runs.
+ * Agent sets: the AGENTS.md, skills and slash commands a box's agent is
+ * configured with. The database holds them, and the files a box gets are
+ * derived from it.
  */
 
 /** Where the merged sets are materialized, under DATA_DIR. */
@@ -68,9 +50,8 @@ export function agentConfigPath(dataDir: string, boxId: string): string {
 }
 
 /**
- * The same directory as the Docker daemon sees it, which is what a bind source
- * has to name. Bind sources are resolved by the daemon rather than by the
- * process asking for the mount.
+ * The same directory as the Docker daemon sees it, which is the path a bind
+ * source names.
  */
 export function hostAgentConfigPath(hostDataDir: string, boxId: string): string {
   return posix.join(hostDataDir, AGENTS_SUBDIR, boxId);
@@ -89,7 +70,9 @@ export function ensureAgentsRoot(dataDir: string): void {
  */
 export class AgentStore {
   constructor(
+    /** Where the sets are stored. */
     private readonly db: Db,
+    /** The DATA_DIR the merged sets are written under. */
     private readonly dataDir: string,
   ) {}
 
@@ -209,12 +192,11 @@ export class AgentStore {
   }
 
   /**
-   * Removes a set. The global one stays, because it is the thing every
-   * box gets.
+   * Removes a set. The global set cannot be removed, because every box gets
+   * it.
    *
-   * Boxes that named it are not blocked and not touched. Their files are
-   * already materialized; the column clears itself and they fall back to the
-   * global set alone at their next start.
+   * The database clears the set from every box that named it. Those boxes
+   * get the global set alone at their next start.
    */
   deleteSet(id: string): void {
     this.mustGet(id);
@@ -319,27 +301,21 @@ export class AgentStore {
   // --- materializing --------------------------------------------------------
 
   /**
-   * Writes a box's merged set to its directory and returns that path.
+   * Writes a box's merged set to its directory and returns that path. The
+   * container mounts the directory read-only, and the entrypoint installs it
+   * into the home at each start, so an edited set reaches a box at its next
+   * start.
    *
-   * Every path here is home-relative and already the one it takes inside the
-   * box, so the entrypoint copies rather than interprets. Each harness in the
-   * registry contributes its own layout — `.claude/CLAUDE.md` and
-   * `.claude/skills/<name>/SKILL.md` for one, `.codex/AGENTS.md` and
-   * `.agents/skills/<name>/SKILL.md` for the other — and the `manifest` names
-   * every one of them. The manifest is what makes the install reversible: the
-   * container records it and, at the next start, removes exactly what it put
-   * there before, so a skill deleted here disappears from the box rather than
-   * staying on its home volume.
+   * The set is written once for each harness, in that harness's layout,
+   * because a box may hold threads of both. Every path is relative to the
+   * home and is already the path inside the box. The `manifest` file lists
+   * every path, and the entrypoint removes what the previous manifest
+   * installed before it installs the new one.
    *
-   * The directory's own inode is kept and only its contents are replaced: a
-   * running container has it bind-mounted, and swapping the directory would
-   * leave that container mounted on an unlinked one.
-   *
-   * The bundle is written over what is there, and only then is what it does
-   * not have removed. This runs on every start of a box, including a
-   * command run against a box that is already up, and clearing first would
-   * leave that box with no configuration at all for as long as the write
-   * takes.
+   * The directory itself stays and only its contents change, because a
+   * running container has it bind-mounted. The new bundle is written before
+   * the old entries are removed, so the directory is never empty while a box
+   * may read it.
    */
   materialize(boxId: string, setId: string | null): string {
     const dir = agentConfigPath(this.dataDir, boxId);
@@ -351,17 +327,14 @@ export class AgentStore {
 
     for (const { layout } of Object.values(HARNESSES)) {
       if (bundle.agentsMd !== '') {
-        // What the dashboard calls AGENTS.md is each harness's user-level
-        // memory. Landing it in the home rather than in the checkout applies
-        // it to every directory the agent works in rather than only to
-        // /workspace.
+        // The harness's user-level memory, so it applies in every directory
+        // the agent works in.
         this.write(dir, layout.agentsMd, bundle.agentsMd);
         manifest.push(layout.agentsMd);
       }
       for (const item of bundle.items) {
-        // A skill is a directory, so the manifest names the directory and the
-        // content goes in the SKILL.md inside it: removing the entry has to
-        // take anything else the skill carried with it.
+        // A skill is a directory, so the manifest names the directory and a
+        // removal takes everything the skill carried with it.
         const rel =
           item.kind === 'skill'
             ? `${layout.skills}/${item.name}`
@@ -439,10 +412,6 @@ function removeEmptyDirs(dir: string): void {
 }
 
 // --- validation ---------------------------------------------------------------
-//
-// These names become path components inside the container and the word after a
-// slash in the composer, so they are checked against a pattern rather than
-// sanitized: a rejected name is a message, a sanitized one is a surprise.
 
 /** Checks a set's display name. */
 function validSetName(value: unknown): string {
@@ -454,7 +423,11 @@ function validSetName(value: unknown): string {
   return name;
 }
 
-/** Checks a skill or command name. */
+/**
+ * Checks a skill or command name. The name becomes a path component and the
+ * word after the slash, so a name that does not match is refused rather than
+ * changed.
+ */
 function validItemName(value: unknown): string {
   const name = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!NAME_PATTERN.test(name)) {
@@ -481,7 +454,6 @@ function validContent(value: unknown, field: string): string {
   if (value.length > MAX_CONTENT) {
     throw new HttpError(400, `${field} must be ${MAX_CONTENT} characters or fewer`);
   }
-  // A lone CR or a CRLF pair reaches a file the agent reads; normalise here so
-  // what is stored is what the editor showed.
+  // Line endings become LF, so what is stored is what the editor showed.
   return value.replace(/\r\n?/g, '\n');
 }

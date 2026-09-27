@@ -1,10 +1,9 @@
 /**
- * The block the harness wakes an agent with when a background task reports in.
+ * Parser for the blocks the harness sends when a background task reports in.
  *
- * A task started in the background — a command left running, a subagent, a
- * monitor watching something — does not answer into the turn that started it.
- * It reports later, and the harness wakes the agent with a message in the
- * user's role carrying a block of XML:
+ * A background task, such as a command left running, a subagent or a monitor,
+ * reports after its turn has ended. The harness then wakes the agent with a
+ * user-role message that holds a block like this:
  *
  *     <task-notification>
  *     <task-id>bnztwmmw5</task-id>
@@ -12,19 +11,14 @@
  *     <event>2200/30321 ok=2193 bad=7 — rate limited, pausing 61s</event>
  *     </task-notification>
  *
- * The block is addressed to the model rather than typed by the user. It
- * travels as text, which is the one thing an adapter's transcript carries
- * unchanged, so a replay reads back what was sent and one parser serves both
- * the live stream and the reconnect.
- *
- * A block this build cannot read is left as the text it is. A notification
- * the harness wrapped in a `<system-reminder>`, which is how the CLI's own
- * transcript carries them, is still read, and the wrapper's own lines stay as
- * text around it. Over ACP they arrive bare.
+ * The block travels as message text, which the adapter's transcript keeps
+ * unchanged, so one parser serves the live stream and the replay.
  */
 
-/** Delimiters of one notification block. */
+/** Opening tag of one notification block. */
 const OPEN = '<task-notification>';
+
+/** Closing tag of one notification block. */
 const CLOSE = '</task-notification>';
 
 /** What a finished task cost, when the harness says. */
@@ -42,8 +36,8 @@ export interface TaskNotification {
   /** The harness's id for the task, which outlives any one notification. */
   taskId: string;
   /**
-   * `completed`, `failed`, `killed` or `blocked` — and absent on a task that
-   * is still going, which is what a monitor's event is.
+   * `completed`, `failed`, `killed` or `blocked`. Absent while the task is
+   * still running, as with a monitor's event.
    */
   status?: string;
   /** One line saying what happened. Always present. */
@@ -90,10 +84,8 @@ function usageOf(body: string): TaskUsage | undefined {
 }
 
 /**
- * One block's contents as a notification, or null when this build cannot
- * read it.
- *
- * A block missing either the id or the summary is not one of these.
+ * One block's contents as a notification, or null when the block lacks the
+ * task id or the summary.
  */
 function notificationOf(body: string): TaskNotification | null {
   const taskId = field(body, 'task-id');
@@ -118,17 +110,16 @@ function notificationOf(body: string): TaskNotification | null {
  * A block of message text as the notifications in it and the prose around
  * them, or null when it holds none.
  *
- * A block this build cannot read costs only itself: it stays in the text
- * around it, and the blocks beside it are still read. Null rather than one
- * text segment, so a caller can tell that there is nothing to do here.
+ * A block that cannot be read stays in the text, and the blocks beside it are
+ * still read. A notification inside a `<system-reminder>` wrapper is read too,
+ * and the wrapper's lines stay as text around it.
  */
 export function parseTaskNotifications(text: string): NotificationSegment[] | null {
   if (!text.includes(OPEN)) return null;
 
   const segments: NotificationSegment[] = [];
-  // Where the next text segment starts, and where the next block is looked
-  // for. The two differ over a block that was passed over, which is prose
-  // from here on and so belongs to the run of text around it.
+  // Start of the next text segment, and start of the next block search. They
+  // differ after an unreadable block, which then stays part of the text.
   let read = 0;
   let scan = 0;
 

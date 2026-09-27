@@ -6,16 +6,6 @@ import {
   type GitRunner,
 } from '../../orchestrator/src/review/git.ts';
 
-/**
- * A box's workspace on disk, which is what the review reads.
- *
- * The orchestrator reviews the files of a workspace directly and asks git
- * about them inside the box's container. There is no container here, so
- * git runs on this machine over the same directory — which is the seam
- * `setGitRunnerForTests` exists for — and the fixtures below build the
- * repositories it answers about.
- */
-
 /** A workspace as a test wants it: files, history and repositories. */
 export interface WorkspaceSpec {
   /** The working tree, by workspace-relative path. */
@@ -35,13 +25,11 @@ export interface WorkspaceSpec {
 }
 
 /**
- * The workspace the review tests browse: two projects side by side and a
+ * The workspace the review tests browse: two repositories side by side and a
  * loose directory beside them.
  *
- * That is the shape the review is designed around — the review is over the
- * workspace rather than over one repository — so it is the one the browser
- * walks. `app` holds a modified file, `lib` an untracked one, and `notes`
- * belongs to no repository at all.
+ * `app` holds a modified file, `lib` an untracked one, and `notes` belongs to
+ * no repository.
  */
 export function reviewWorkspace(over: Partial<WorkspaceSpec> = {}): WorkspaceSpec {
   const files: Record<string, string> = {
@@ -51,18 +39,15 @@ export function reviewWorkspace(over: Partial<WorkspaceSpec> = {}): WorkspaceSpe
     'app/README.md': '# demo\n\nA project the agent cloned.\n',
     'lib/README.md': '# lib\n\nThe other project.\n',
     'lib/index.ts': 'export const version = "1.0.0";\n',
-    // Outside every repository: no .gitignore has said what is noise here,
-    // so it shows, and it has no status and no diff.
+    // Outside every repository, so it shows with no status and no diff.
     'notes/todo.txt': 'plain text, no grammar\n',
   };
   return {
     files,
     committed: {
       'app/src/app.ts': files['app/src/app.ts']!,
-      // Two shapes in one file, which is what the gutter draws: a line
-      // replaced by two, and a block at the end removed and put nowhere. The
-      // second is the only thing a deletion marker comes from, because an
-      // added line after a removed one makes the pair a change instead.
+      // One line replaced by two, and a block removed at the end. Only a pure
+      // removal draws a deletion marker; a removal followed by an addition is a change.
       'app/src/boot.ts':
         'export function boot(): void {\n  console.log("boot");\n}\n' +
         '// the old entry point, kept while the router is wired\nconst legacyBoot = boot;\n',
@@ -129,22 +114,20 @@ export function buildWorkspace(root: string, spec: WorkspaceSpec): void {
 }
 
 /**
- * The box a container id belongs to, which is how a git invocation finds
- * the workspace it is addressed at.
+ * The box a container id belongs to, or an empty string for any other id.
  *
- * Every box container is named after its box, so the name carries the
- * mapping and nothing has to be looked up.
+ * A box container is named `box-<id>`, so the name carries the box.
  */
 function boxOfContainer(containerId: string): string {
   return containerId.startsWith('box-') ? containerId.slice('box-'.length) : '';
 }
 
 /**
- * Runs review's git here, in the host directory a container path names.
+ * Makes the review run git on this machine instead of inside a box container.
  *
- * A workspace is at `/workspace` inside a box, and the container id names the
- * box, so the two together say which directory on this machine an
- * invocation means. One addressed anywhere else fails rather than running.
+ * The container id names the box, and the path under `/workspace` names the
+ * directory in its workspace. A call addressed anywhere else fails without
+ * running.
  */
 export function installLocalGit(workspaceOf: (boxId: string) => string): void {
   const runner: GitRunner = async (target, argv, env) => {

@@ -7,18 +7,7 @@ import type {
 import { api } from '../api.ts';
 import { pollWhileVisible } from '../lib/poll.ts';
 
-/**
- * The box list, together with the deployment facts a view has to warn
- * about.
- *
- * The list screen polls the whole of it while it is up. A view watching one
- * box reads that box for itself and takes only the deployment facts
- * from here.
- *
- * A plain module-level store with a subscriber set: React reads it through
- * useSyncExternalStore, and nothing outside this file needs a hook to change
- * it.
- */
+/** Store for the box list and the deployment health facts. */
 
 /** What the views render. */
 export interface BoxesState {
@@ -27,14 +16,12 @@ export interface BoxesState {
    * Every harness the deployment can run, and whether each has a credential
    * that works.
    *
-   * Empty until a probe has answered, so a slow first answer warns about
-   * nothing: a harness nobody has heard of yet is not a harness that cannot
-   * run.
+   * Empty until the first probe answers, so no warning shows before then.
    */
   harnesses: HarnessHealth[];
   /**
-   * Which build of each of the deployment's images is running, all three null
-   * until a probe has said otherwise.
+   * The running build of each deployment image. All three are null until a
+   * probe answers.
    */
   images: DeploymentImages;
   /** The message from the last failed poll, or null. */
@@ -43,6 +30,7 @@ export interface BoxesState {
   loading: boolean;
 }
 
+/** The current state. */
 let state: BoxesState = {
   boxes: [],
   harnesses: [],
@@ -50,14 +38,16 @@ let state: BoxesState = {
   error: null,
   loading: true,
 };
+/** The callbacks to run on every state change. */
 const listeners = new Set<() => void>();
 
-/** Replaces the state and wakes every subscriber. */
+/** Merges `next` into the state and notifies every subscriber. */
 function set(next: Partial<BoxesState>): void {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
 
+/** Adds a subscriber and returns the function that removes it. */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -73,11 +63,11 @@ export function useBoxes(): BoxesState {
 }
 
 /**
- * What a failed list says, in the terms of the thing that went wrong.
+ * Turns a failed list request into the message for the user.
  *
- * A request that never reached the server rejects with the browser's own
- * "Failed to fetch", which names neither what failed nor what happens next.
- * An answer the server did send is already a sentence, and is passed through.
+ * A request that never reached the server rejects with a TypeError. Its
+ * browser message does not say what failed or what happens next. An error
+ * message from the server passes through unchanged.
  */
 function reachable(error: Error): string {
   return error instanceof TypeError
@@ -88,9 +78,7 @@ function reachable(error: Error): string {
 /**
  * Fetches the box list and the health probe once.
  *
- * The two are settled apart: a failed probe says nothing about the boxes,
- * and neither does a failed list say anything about the credentials, so one
- * failure never discards the other's answer.
+ * Each result is applied on its own, so one failure keeps the other answer.
  */
 export async function refresh(): Promise<void> {
   const [list, health] = await Promise.allSettled([api.listBoxes(), api.health()]);
@@ -109,20 +97,15 @@ export async function refresh(): Promise<void> {
 }
 
 /**
- * Fetches the health probe alone.
- *
- * For a view that watches one box rather than the list: which harnesses
- * can run is a fact about the deployment, so it is asked for once on arrival
- * instead of riding along with a list that view never reads. A probe that did
- * not answer leaves what is held, because a failed probe says nothing about a
- * credential.
+ * Fetches the health probe alone, for a view that shows one box and does not
+ * read the list.
  */
 export async function refreshHealth(): Promise<void> {
   try {
     const health = await api.health();
     set({ harnesses: health.harnesses, images: health.images });
   } catch {
-    // Nothing to say, so nothing is said.
+    // A failed probe keeps the held values.
   }
 }
 
@@ -130,11 +113,10 @@ export async function refreshHealth(): Promise<void> {
 const POLL_MS = 5000;
 
 /**
- * Polls for as long as the tab is visible, and returns the teardown.
+ * Refreshes now, polls while the tab is visible, and returns the teardown.
  *
- * Started by the screen that shows the list, so a browser reading one
- * conversation is not asking for every box in the deployment every few
- * seconds.
+ * The list screen starts it, so a browser that shows one thread does not
+ * fetch every box every few seconds.
  */
 export function startPolling(): () => void {
   void refresh();

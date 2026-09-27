@@ -16,51 +16,26 @@ import {
 import { isAbsolute, resolve, sep } from 'node:path';
 import { chownFdToAgent } from '../workspaces.ts';
 
-/**
- * Contained reads and writes under one root, which for a review is the
- * box's whole workspace.
- *
- * This file holds the symlink-containment invariant, and it holds it alone, so
- * that it stays reviewable. A review serves a whole source tree that an agent
- * controls and has no access control of its own, so the obvious attack is a
- * link: `ln -s /data x` in the workspace would otherwise serve the
- * deployment's database and its gateway token through the file endpoint.
- *
- * The rule is: resolve the client's path with `realpath`, require the result to
- * be at or under the root's own realpath, and refuse a final component that is
- * a symlink at all. A review covers the whole workspace, so a contained path
- * may be in any repository it holds, or in none.
- *
- * Accepted residual: a determined agent can race the check against the open,
- * because Node exposes no way to open a file beneath a directory atomically
- * (there is no `openat`/`RESOLVE_BENEATH` binding). The window is between the
- * `realpath` and the `readFileSync` below. What it buys an attacker is one read
- * of one file that the orchestrator's own uid can read, and closing it costs
- * either a native dependency or an exec per read. Every read here uses this
- * process's own file descriptors — no shell, no argument interpolation — so
- * nothing beyond the read itself follows from winning the race.
- */
-
-/** How much of a file the file endpoint will return. */
+/** The most bytes of a file the file endpoint returns. */
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
-/** How large a REVIEW.md may be before it is refused as not one. */
+/** The most bytes read of REVIEW.md, and of any file that is hashed. */
 export const MAX_REVIEW_BYTES = 8 * 1024 * 1024;
 
-/** Why a path was refused. Every reason is a 404 to the client. */
+/** Why {@link resolveInRoot} refused a path. */
 type PathRefusal = 'invalid' | 'outside' | 'symlink' | 'missing';
 
 /** A resolved path, or the reason it was refused. */
 export type Resolved = { ok: true; path: string } | { ok: false; reason: PathRefusal };
 
 /**
- * Whether a client-supplied relative path is well-formed before anything
- * touches the filesystem.
+ * Whether a client-supplied relative path is well-formed, checked before
+ * anything touches the filesystem.
  *
- * Rejects absolute paths, NUL bytes, Windows drive letters and backslashes, and
- * any `..` segment. A segment rather than the two characters anywhere:
- * `[...slug].astro` is a real filename and has to stay openable, so the check
- * is on segments rather than on the text.
+ * Refuses an empty or overlong path, a NUL byte, an absolute path, a leading
+ * backslash, a drive letter, an empty segment and any `..` segment. Slashes and
+ * backslashes both separate segments. The check works on whole segments, so a
+ * name like `[...slug].astro` stays valid.
  */
 export function validRelativePath(path: string): boolean {
   if (path === '' || path.length > 4096) return false;
@@ -74,9 +49,17 @@ export function validRelativePath(path: string): boolean {
 /**
  * Resolves a client-supplied path under a review root, or says why not.
  *
- * `mustExist` is false for a path being written to, where the file is allowed
- * not to be there yet — but its parent still has to be inside the root and not
- * reached through a link.
+ * The agent controls the tree, so a link such as `ln -s /data x` could expose
+ * the deployment's database and gateway token. The resolved path must lie at or
+ * under the root's own realpath, and its final component must not be a symlink.
+ *
+ * An agent can still race this check against the later open or write, because
+ * Node offers no way to open a file beneath a directory atomically. Swapping a
+ * directory for a link in between redirects that one read or write to a path
+ * the orchestrator's uid can reach.
+ *
+ * `mustExist` is false for a path about to be written. The file may then be
+ * missing, but its parent must resolve inside the root.
  */
 export function resolveInRoot(root: string, relPath: string, mustExist = true): Resolved {
   if (!validRelativePath(relPath)) return { ok: false, reason: 'invalid' };
@@ -91,15 +74,15 @@ export function resolveInRoot(root: string, relPath: string, mustExist = true): 
   const candidate = resolve(rootReal, relPath);
   if (!contains(rootReal, candidate)) return { ok: false, reason: 'outside' };
 
-  // The final component must not be a link, even one that stays inside the
-  // root: what it points at can be changed after the tree was listed.
+  // A link is refused even when it stays inside the root, because its target
+  // can change after the tree was listed.
   let stats;
   try {
     stats = lstatSync(candidate);
   } catch {
     if (mustExist) return { ok: false, reason: 'missing' };
-    // Not there yet. The parent still has to resolve inside the root, so a
-    // link somewhere above it cannot be used to write out of the tree.
+    // Not there yet. The parent must resolve inside the root, so a link above
+    // it cannot lead a write out of the tree.
     const parent = candidate.slice(0, candidate.lastIndexOf(sep));
     try {
       if (!contains(rootReal, realpathSync(parent))) return { ok: false, reason: 'outside' };
@@ -110,7 +93,7 @@ export function resolveInRoot(root: string, relPath: string, mustExist = true): 
   }
   if (stats.isSymbolicLink()) return { ok: false, reason: 'symlink' };
 
-  // And nothing on the way to it may be a link out of the root either.
+  // No directory on the way may be a link out of the root.
   let real: string;
   try {
     real = realpathSync(candidate);
@@ -129,6 +112,7 @@ function contains(root: string, path: string): boolean {
 
 /** A file that was read, and what had to be left out. */
 export interface FileRead {
+  /** The text read, up to the cap. */
   content: string;
   /** True when the file was longer than the cap and the rest was dropped. */
   truncated: boolean;
@@ -139,12 +123,11 @@ export interface FileRead {
 }
 
 /**
- * Reads a text file under a review root, capped and refusing binaries.
+ * Reads a text file under a review root, up to `cap` bytes.
  *
- * A NUL byte in the first chunk is what says "binary": the same heuristic git
- * uses, and cheaper and more honest than a content-type guess. A binary file
- * comes back as `binary: true` with no content rather than as an error, because
- * the tree legitimately lists files the viewer cannot show.
+ * A NUL byte anywhere in the bytes read marks the file as binary, like git's
+ * own heuristic. A binary file comes back with `binary: true` and no content
+ * rather than as an error, because the tree lists files the viewer cannot show.
  */
 export function readTextFile(path: string, cap = MAX_FILE_BYTES): FileRead {
   const { buffer, size } = readCapped(path, cap);
@@ -160,19 +143,18 @@ export function readTextFile(path: string, cap = MAX_FILE_BYTES): FileRead {
 
 /** What one capped read got, and how large the file it came from is. */
 interface CappedRead {
+  /** The bytes read: at most the cap plus one. */
   buffer: Buffer;
   /** The file's real size in bytes, whatever was returned. */
   size: number;
 }
 
 /**
- * At most `cap` bytes of a file, plus the one byte that tells a file ending at
- * the cap from one going past it.
+ * Reads at most `cap` bytes of a file, plus the one byte that tells a file
+ * ending at the cap from one going past it.
  *
- * Through a descriptor rather than with `readFileSync`, because the cap is
- * only worth having if the bytes past it are never held: a workspace holds
- * whatever the agent generated, and a hundred-megabyte log is an ordinary
- * thing to tap in a file tree.
+ * It reads through a descriptor, so bytes past the cap are never held in
+ * memory. A workspace can hold a log of hundreds of megabytes.
  */
 function readCapped(path: string, cap: number): CappedRead {
   const fd = openSync(path, 'r');
@@ -191,7 +173,7 @@ function readCapped(path: string, cap: number): CappedRead {
   }
 }
 
-/** A file's lines, without terminators, for taking an annotation's context. */
+/** Splits file content into lines without terminators, tolerating CRLF. */
 export function fileLines(content: string): string[] {
   if (content === '') return [];
   const lines = content.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
@@ -202,24 +184,18 @@ export function fileLines(content: string): string[] {
 /**
  * Writes a file under a review root atomically, and hands it to the agent.
  *
- * Temp file then rename, so a reader — the agent, reading REVIEW.md — never
- * sees a half-written document, and so a crash mid-write leaves the previous
- * version rather than a truncated one. The chown is what lets the agent edit
- * or delete what was written.
- *
- * A file that is already there keeps its permissions, because the rename
- * replaces it whole: without this, saving a shell script from the review would
- * take its executable bit off.
+ * The content goes to a temp file that is then renamed, so a reader never sees
+ * a half-written file and a crash leaves the previous version. The chown lets
+ * the agent edit or delete the file. An existing file keeps its permissions, so
+ * a saved shell script stays executable.
  */
 export function writeFileAtomic(path: string, content: string): void {
   const { fd, tmp } = openTemp(path);
   try {
     try {
       writeFileSync(fd, content, { encoding: 'utf8' });
-      // Through the descriptor, so the mode and the owner land on the file
-      // that was opened rather than on whatever the name holds by now. The
-      // mode comes after the write rather than through the open, which the
-      // umask masks.
+      // Mode and owner go through the descriptor, so they land on the opened
+      // file. The mode is set here because the umask masks a mode given to open.
       fchmodSync(fd, currentMode(path));
       chownFdToAgent(fd);
     } finally {
@@ -237,8 +213,8 @@ export function writeFileAtomic(path: string, content: string): void {
 }
 
 /**
- * How many atomic writes this process has started, which together with its pid
- * names a temp file no other write can be holding.
+ * Counts the atomic writes this process has started, so each temp file gets
+ * its own name.
  */
 let tmpWrites = 0;
 
@@ -247,18 +223,19 @@ const TMP_ATTEMPTS = 5;
 
 /** An open temp file, and the name it is open under. */
 interface TempFile {
+  /** The open descriptor. */
   fd: number;
+  /** The temp file's path. */
   tmp: string;
 }
 
 /**
  * Creates the temp file an atomic write goes through, next to its target.
  *
- * The name is predictable and the directory is the agent's, so the agent can
- * be holding it: a link planted there would otherwise take the write, the
- * mode and the chown to whatever it points at. The open creates the file
- * itself and follows nothing, so a name that is taken — by a link or by a
- * leftover — is refused, removed, and tried again.
+ * The name is predictable and the agent owns the directory, so the agent can
+ * plant a link at that name. The open creates the file and follows no link.
+ * When the name is taken, by a link or a leftover, the function removes it and
+ * tries again.
  */
 function openTemp(path: string): TempFile {
   const tmp = `${path}.${process.pid}.${tmpWrites++}.tmp`;
@@ -300,16 +277,11 @@ export function removeFile(path: string): boolean {
 }
 
 /**
- * A hash of a file's content, or '' when there is no file.
+ * Hashes a file's content, or returns '' when there is no file.
  *
- * Used as a guard rather than as a fingerprint: every REVIEW.md mutation reads
- * it before and after applying, so an edit the agent made in between is caught
- * instead of overwritten. What it is compared against is a previous value of
- * itself, so the algorithm matters only in being cheap and stable.
- *
- * At most {@link MAX_REVIEW_BYTES} are read, which is the whole of REVIEW.md
- * and of every file the review will serve, and bounds what hashing a huge one
- * costs.
+ * Callers compare two values of it to notice a change made in between, such as
+ * an agent's edit to REVIEW.md or to a file being saved. Only the first
+ * {@link MAX_REVIEW_BYTES} bytes, plus one, are hashed.
  */
 export function fileHash(path: string): string {
   try {

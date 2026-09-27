@@ -11,14 +11,6 @@ import type { BoxManager } from '../boxes.ts';
 import { threadOf } from './broadcast.ts';
 import type { DownstreamHandle, UpstreamBox } from './upstream.ts';
 
-/**
- * The browser-facing half of the gateway. Toward browsers the orchestrator
- * speaks ACP as an agent and forwards nearly everything on.
- *
- * JSON-RPC terminates on both sides, so each connection runs its own id space
- * and the SDK correlates request and response within it.
- */
-
 /** Pass-through parser, leaving params and their _meta untouched. */
 const raw = <T = unknown>(params: unknown): T => params as T;
 
@@ -44,11 +36,9 @@ const FORWARDED_NOTIFICATIONS = [ACP_METHOD.sessionCancel] as const;
 /**
  * How many bytes one browser's socket may have waiting on it.
  *
- * A send the socket cannot take is buffered in this process, so a browser
- * that has stopped reading — a phone asleep with the tab open — would grow
- * that buffer for as long as its box keeps talking. Past this it is
- * closed instead, which costs it nothing it cannot get back: it reconnects
- * and resumes from the message it holds.
+ * Past this the socket is closed, so a browser that stopped reading cannot
+ * grow the buffer without end. The browser reconnects and resumes from the
+ * last message it holds.
  */
 const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 
@@ -56,23 +46,16 @@ const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 let nextHandleId = 1;
 
 /**
- * Validates a WebSocket upgrade against the token of the box it names,
- * saying why when it refuses.
+ * Validates a WebSocket upgrade against the token of the box it names.
  *
  * A browser cannot set an Authorization header on a WebSocket, so a client
- * offers the token as a bearer.<token> subprotocol entry alongside the name
- * of the protocol it speaks. The gateway checks both here, on the upgrade
- * itself. Which subprotocol is negotiated is decided by the server's own
- * `handleProtocols`.
+ * offers the token as a `bearer.<token>` subprotocol next to the protocol it
+ * speaks.
  *
- * `subprotocol` is the name the endpoint being connected to answers to, and
- * the caller names it because every endpoint checks its upgrades here while
- * each speaks a protocol of its own.
- *
- * `boxToken` is the token of the box being connected to, so a token
- * reaches that box alone. An id no live box holds has none, which is
- * null here and refuses every offer: an upgrade never says which boxes
- * exist.
+ * @param protocolHeader The `Sec-WebSocket-Protocol` header of the upgrade.
+ * @param boxToken The token of the box, or null when no such box exists.
+ * @param subprotocol The protocol the endpoint speaks.
+ * @returns Whether the upgrade may proceed, and the reason when it may not.
  */
 export function checkUpgrade(
   protocolHeader: string | undefined,
@@ -106,11 +89,7 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/**
- * An ACP Stream over a WebSocket: one JSON-RPC message per text frame.
- *
- * Exported so the tests can drive the write side directly.
- */
+/** An ACP Stream over a WebSocket: one JSON-RPC message per text frame. */
 export function wsStream(ws: WebSocket, boxId: string): Stream {
   const slog = log.box(boxId);
 
@@ -129,9 +108,8 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
           slog.warn('rejecting non-JSON WS frame');
           return;
         }
-        // Some ACP clients send a $/ping notification every 25s. JSON-RPC
-        // forbids a reply to a notification, so drop it before the SDK logs
-        // an unknown method. The dashboard sends none.
+        // Some ACP clients send a $/ping notification. Dropped here so the SDK
+        // does not log it as an unknown method.
         if (
           typeof msg === 'object' &&
           msg !== null &&
@@ -161,18 +139,15 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
   const writable = new WritableStream<unknown>({
     write(msg) {
       if (ws.readyState !== ws.OPEN) return;
-      // Settled by the send itself, so the writer waits for the socket
-      // instead of handing it everything a box says at once. A send that
-      // failed settles too: a socket that has gone is the read side's to
-      // notice, and it closes the stream.
+      // Resolves when the send completes, so the writer waits for the socket.
+      // A failed send resolves too; the read side notices the closed socket.
       return new Promise<void>((resolve) => {
         ws.send(JSON.stringify(msg), () => resolve());
         if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return;
         slog.warn('closing a browser that cannot keep up', {
           buffered: ws.bufferedAmount,
         });
-        // 1008 is "policy violation": this connection broke a rule of the
-        // gateway rather than hitting a fault in it.
+        // 1008 is "policy violation".
         ws.close(1008, 'too far behind');
       });
     },
@@ -185,17 +160,15 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
 }
 
 /**
- * Wires one browser connection to the box's persistent upstream, pinned
- * to one of its threads.
+ * Wires one browser connection to the box's upstream, pinned to one of its
+ * threads.
  *
- * `threadId` is the thread the URL named, or null when it named none, as an
- * external ACP client does, which pins to the box's most recently active
- * thread instead. Either way the pinning happens here rather than in the browser,
- * and the ACP contract stays a `session/new` that hands back an id the client
- * did not choose.
+ * Toward the browser the orchestrator speaks ACP as an agent and forwards
+ * most requests to the adapter. Disconnecting only drops the handle from the
+ * broadcast set.
  *
- * Disconnecting drops the handle from the broadcast set and touches nothing
- * else.
+ * @param threadId The thread the URL named, or null to pin the box's most
+ *   recently active thread, as an external ACP client does.
  */
 export function attachDownstream(
   ws: WebSocket,
@@ -205,8 +178,7 @@ export function attachDownstream(
 ): void {
   const slog = log.box(boxId);
   const up: UpstreamBox = manager.upstream(boxId);
-  // Declared before the handle, so the closures below never read it in its
-  // temporal dead zone.
+  // Declared before the handle, whose closures read it.
   let conn: AgentConnection | null = null;
 
   const handle: DownstreamHandle = {
@@ -223,10 +195,8 @@ export function attachDownstream(
       if (!conn) return Promise.reject(new Error('downstream closed'));
       return conn.client.request(method, params, { cancellationSignal: signal });
     },
-    // 1012 is "service restart": the browser's own backoff brings it back,
-    // and its fresh handshake pins whatever its thread is now. The only
-    // caller is a respawn that could not bring this thread back under the id
-    // the connection holds.
+    // 1012 is "service restart". The browser reconnects, and the new
+    // handshake pins the thread's current id.
     close: () => {
       try {
         ws.close(1012, 'thread reloaded');
@@ -236,11 +206,8 @@ export function attachDownstream(
     },
   };
 
-  // Attached before the thread is settled: the socket is open and holding the
-  // box up, which is what the reaper counts, and nothing is routed to a
-  // handle that has no thread yet. Attaching is also what brings a stopped
-  // box back up, because pinning needs the adapter to answer for the
-  // thread.
+  // Attached before the pin, so the reaper counts the open socket at once.
+  // Pinning starts the box, because it needs the adapter.
   up.attach(handle);
   const pinned = up.pin(handle, threadId);
   pinned.catch((err: Error) => {
@@ -253,14 +220,8 @@ export function attachDownstream(
   });
 
   const app = acpAgent({ name: `boxes-downstream-${boxId}` })
-    // Answered from the cached upstream response, so its _meta extensions
-    // reach the browser intact.
-    //
-    // Which adapter's response that is, is the pinned thread's: a box may run
-    // two, and they advertise different modes and different capabilities. The
-    // pin is already in flight — it was started at attach — and a browser
-    // sends `initialize` before `session/new`, so awaiting it here costs this
-    // connection nothing it was not already waiting for.
+    // Answered from the cached initialize response of the adapter that holds
+    // the pinned thread, so its _meta extensions reach the browser intact.
     .onRequest(ACP_METHOD.initialize as string, raw, async () => {
       handle.lastActiveAt = Date.now();
       const acpThreadId = await pinned;
@@ -268,11 +229,8 @@ export function attachDownstream(
       if (!cached) throw new Error('Upstream initialize unavailable');
       return cached;
     })
-    // This connection is about one thread of the box — the one the URL
-    // named, or the box's most recently active one — so hand back that thread's ACP
-    // id rather than starting a second conversation on every reconnect.
-    // Which thread that is, is decided outside ACP, so the contract a client
-    // speaks does not change.
+    // Answered with the pinned thread's id, so a reconnect does not start a
+    // new conversation.
     .onRequest(ACP_METHOD.sessionNew as string, raw, async () => {
       handle.lastActiveAt = Date.now();
       const acpThreadId = await pinned;
@@ -283,32 +241,24 @@ export function attachDownstream(
   for (const method of FORWARDED_REQUESTS) {
     app.onRequest(method as string, raw, async ({ params }) => {
       handle.lastActiveAt = Date.now();
-      // Every forwarded request waits for the pin. A client that knows a
-      // thread id and loads it before saying hello would otherwise be
-      // answered by a handle with no thread: its replay goes nowhere, and
-      // the questions waiting on that thread are not flushed to it.
+      // Waits for the pin, so a client that loads a thread before
+      // `initialize` is not served by a handle with no thread.
       const pin = await pinned;
       const asked = threadOf(params);
-      // And it asks about the thread this connection is pinned to, or about
-      // no thread at all. Another thread's id would route that thread's
-      // replay here alone, and echo this connection's prompt where nobody is
-      // watching.
+      // A request may name only the pinned thread, or no thread.
       if (asked !== undefined && asked !== pin) {
         throw RequestError.invalidParams(
           { sessionId: asked },
           'this connection is pinned to another thread',
         );
       }
-      // The handle goes with the request: a replay belongs to the browser
-      // that asked for it, and a prompt is echoed on that browser's behalf.
+      // The handle decides who gets a replay, and which adapter gets a
+      // request that names no thread.
       const result = await up.forwardRequest(method, params, handle);
-      // Queued permission requests wait for the replay rather than going out
-      // the moment the socket opens. A client rebuilds its whole thread from
-      // the replay, so a question delivered before it lands is thrown away
-      // with everything else that was on screen, and it is sent only once.
+      // Queued permission requests go out after the replay, because a client
+      // discards what it showed before the replay landed.
       if (method === ACP_METHOD.sessionLoad) up.flushPendingTo(handle);
-      // An empty answer is not an error: session/load delivers the replay as
-      // session/update notifications rather than as its result.
+      // A load returns its replay as notifications, so its result may be empty.
       return result ?? {};
     });
   }

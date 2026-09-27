@@ -2,14 +2,11 @@ import { UPDATE_KIND } from '../../../shared/acp.ts';
 import type { ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 
 /**
- * How many bytes of one thread's log are kept, counted on the notifications
- * as they are written to a socket.
+ * How much of one thread's log is kept, counted as the JSON length of each
+ * logged update.
  *
- * Past this the oldest messages go. A thread opens at its bottom, so what is
- * lost is scrollback nobody reaches; a browser that already held it keeps
- * it. The same figure as the ceiling on one browser's socket buffer, which
- * is about the same question — how much of a thread is worth holding in
- * memory for one reader.
+ * Past this the oldest messages go. A thread opens at its bottom, so only
+ * old scrollback is lost.
  */
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
@@ -18,7 +15,9 @@ export const MAX_LOG_BYTES = 4 * 1024 * 1024;
  * it offers and the options it lets a client set.
  */
 export interface AdapterOptions {
+  /** The modes the thread offers and the current one, or null for none. */
   modes: ThreadModeState | null;
+  /** The options a client may set on the thread. */
   configOptions: ThreadConfigOption[];
 }
 
@@ -34,36 +33,36 @@ export interface Opening {
 
 /** One logged notification, with the size it has on the wire. */
 interface Entry {
+  /** The params of the `session/update` notification. */
   params: unknown;
+  /** The JSON length of `params`. */
   size: number;
 }
 
 /**
- * Everything a browser watching one thread would have been sent, in order.
+ * Log of everything a browser watching one thread would have been sent, in
+ * order.
  *
- * A browser opens a thread by being sent this and nothing else: whole for a
- * fresh tab, from the last message it holds for one that is reconnecting. The
- * adapter's own replay is never sent to a browser. It is read once, into
- * this, and only when the thread is otherwise silent — see `filling`.
- *
- * The log also carries the adapter's answer for the thread — its modes and
- * options — kept current from the notifications that change them, so the
- * answer to a browser's `session/load` needs no round trip either.
+ * A browser opens a thread by being sent this log: whole for a fresh tab, or
+ * from the last message it holds when it reconnects.
  */
 export class ThreadLog {
+  /** The logged notifications, oldest first. */
   private entries: Entry[] = [];
+  /** The summed size of `entries`. */
   private bytes = 0;
   /**
-   * True while the adapter is reading the transcript into this log.
+   * True while the adapter is reading the transcript into this log. What
+   * arrives meanwhile is logged and sent to nobody.
    *
-   * A replay and a live turn arrive on one connection in one shape, so a
-   * log filled while the thread was talking would hold both, mixed. The
-   * gateway only fills a thread nothing else can reach — one just brought up
-   * on a fresh adapter — and while it does, what arrives is logged and sent
-   * to nobody.
+   * A replay and a live turn look the same on the wire, so the gateway fills
+   * only a thread that is not talking.
    */
   filling = false;
-  /** The adapter's answer for this thread; see the class comment. */
+  /**
+   * The modes and options the adapter advertises for this thread, kept current
+   * from the updates that change them. They answer a browser's `session/load`.
+   */
   options: AdapterOptions = { modes: null, configOptions: [] };
 
   constructor(private readonly cap = MAX_LOG_BYTES) {}
@@ -78,12 +77,11 @@ export class ThreadLog {
   }
 
   /**
-   * Starts this log as a copy of another thread's, said to be about this one.
+   * Starts this log as a copy of another thread's, with every entry renamed
+   * to this thread.
    *
-   * A fork holds the source's context from the moment it is minted, but the
-   * adapter writes it a transcript only when it is first prompted. Copying
-   * the source's log is what lets the fork open on the conversation it is
-   * carrying rather than on a blank screen.
+   * The adapter writes a fork a transcript only when it is first prompted, so
+   * the copy lets a new fork open on the conversation it carries.
    */
   copyFrom(source: ThreadLog, acpThreadId: string): void {
     this.entries = source.entries.map(({ params, size }) => ({
@@ -96,12 +94,11 @@ export class ThreadLog {
   /**
    * What to send a browser opening this thread.
    *
-   * `anchor` is the last message the browser holds. When the log still has
-   * it, the browser is sent that message and everything after it — the
-   * message itself again rather than skipped, because a socket can drop
-   * partway through one, and the browser drops its own copy before folding
-   * the tail on. A message the log no longer holds, or none named, means the
-   * thread whole.
+   * When the log holds `anchor`, the browser gets that message and everything
+   * after it. The anchor message is sent again because a socket can drop
+   * partway through it. Otherwise the browser gets the whole thread.
+   *
+   * @param anchor The last message the browser holds, if any.
    */
   opening(anchor?: string): Opening {
     const at = anchor ? this.entries.findIndex((e) => messageOf(e.params) === anchor) : -1;
@@ -113,11 +110,9 @@ export class ThreadLog {
   }
 
   /**
-   * Drops the oldest message: its own chunks and everything up to the next
-   * message's first chunk, which is the tool calls it made and whatever else
-   * was said without naming a message. A cut anywhere else would leave a
-   * message that starts mid-sentence at the top of the thread, or a tool
-   * result without the call it answers.
+   * Drops the oldest message: its chunks and everything up to the next
+   * message's first chunk, such as the tool calls it made. A cut anywhere
+   * else would leave a partial message or a tool result without its call.
    */
   private evictOldest(): void {
     const message = messageOf(this.entries[0]?.params);
@@ -131,9 +126,8 @@ export class ThreadLog {
   }
 
   /**
-   * Keeps the answer current: the adapter says which mode a thread is in and
-   * what its options are through these two notifications, whether the change
-   * was asked for or its own.
+   * Updates {@link options} from a `current_mode_update` or a
+   * `config_option_update`.
    */
   private noteOptions(params: unknown): void {
     const update = (params as { update?: Record<string, unknown> } | null)?.update;

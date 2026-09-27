@@ -4,15 +4,12 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
 /**
- * The dashboard is a standard Vite app: one build emits the JS and the CSS
- * together, and Tailwind compiles from source on every build rather than from
- * a committed artifact.
- *
- * The dev server proxies the orchestrator's own routes, so a browser pointed
- * at Vite sees the same single origin the deployment serves.
+ * The orchestrator the dev server proxies the API, health and WebSocket
+ * routes to, so the dev page has the single origin of a deployment.
  */
 const orchestrator = process.env['ORCHESTRATOR_URL'] ?? 'http://localhost:3000';
 
+/** Vite and Vitest configuration of the dashboard. */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -30,16 +27,14 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    // Stated rather than left to the default, because two other places name
-    // this directory: the orchestrator serves what is under it with an
-    // immutable cache lifetime, and the service worker keeps a copy of it.
-    // Both are safe only because every name in here carries a content hash.
+    // Stated, because the orchestrator and the service worker name this
+    // directory and cache it for good. Every name in it carries a content
+    // hash.
     assetsDir: 'assets',
   },
   test: {
-    // One runner, two shapes of test. The unit project covers the
-    // framework-free stores; the e2e project drives a real Chromium against
-    // the real production bundle, which is why it builds first.
+    // The e2e project drives a real Chromium against the production bundle,
+    // so its global setup builds the bundle first.
     projects: [
       {
         test: {
@@ -56,15 +51,10 @@ export default defineConfig({
           globalSetup: ['e2e/build.setup.ts'],
           testTimeout: 60_000,
           hookTimeout: 60_000,
-          // Every `expect.poll` here is waiting on a real browser doing real
-          // work over a real socket, and vitest's own default for one is a
-          // second. That is not a bound on "this is broken", it is a bound on
-          // "this machine is busy" — which on a loaded CI box is the flake
-          // these tests were reported as. The per-test timeout is what
-          // actually stops a hung run.
+          // Vitest's default poll timeout of one second fails on a busy CI
+          // machine. The test timeout stops a hung run.
           expect: { poll: { timeout: 15_000, interval: 50 } },
-          // Chromium is a single shared resource here; parallel pages would
-          // fight over it for no gain at this suite size.
+          // Parallel files would compete for Chromium for no gain.
           fileParallelism: false,
         },
       },

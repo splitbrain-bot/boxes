@@ -2,13 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { anchorAt, scrollForAnchor, type RowOffset } from './anchor.ts';
 
-/**
- * The reader's place, held across a relayout.
- *
- * The case each of these is really about is the mode switch: the same file,
- * laid out twice, with the comment cards between the lines the second time.
- */
-
 /** Rows of equal height, with extra room after the lines named. */
 function rows(count: number, height: number, cards: Record<number, number> = {}): RowOffset[] {
   const out: RowOffset[] = [];
@@ -35,8 +28,6 @@ test('a line keeps its place when the cards above it fold away', () => {
 
   const anchor = anchorAt(commenting, 580);
   assert.deepEqual(anchor, { line: 21, offset: 0 });
-  // 580px into the commented layout and 400 into the edited one are the same
-  // place to a reader, which is the whole point.
   assert.equal(scrollForAnchor(editing, anchor!), 400);
 });
 
@@ -55,7 +46,7 @@ test('a pane at its very top stays at its very top', () => {
 });
 
 test('a line that is gone moves nobody anywhere', () => {
-  // The file was replaced under the reader rather than re-laid out.
+  // The file was replaced rather than laid out again.
   assert.equal(scrollForAnchor(rows(10, 20), { line: 40, offset: 0 }), null);
 });
 

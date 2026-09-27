@@ -2,6 +2,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { HARNESS_IDS, HARNESSES, harness, type Harness } from './harness.ts';
 
+/** Every harness in the registry. */
 const all: Harness[] = HARNESS_IDS.map((id) => HARNESSES[id]);
 
 test('HARNESS_IDS matches the keys of HARNESSES', () => {
@@ -13,16 +14,15 @@ test('every harness fills in every field, in the right shape', () => {
   for (const h of all) {
     assert.ok(h.label.length > 0, `${h.id}: label`);
     assert.ok(h.cmd.length > 0, `${h.id}: cmd`);
-    // The reading and the spawn are different questions, but today's answer is
-    // the same one, and a registry where they had drifted would read a process
-    // table for a token nothing in the box is running under.
+    // If these differed, the process table would be searched for a command
+    // that nothing in the box runs.
     assert.equal(h.processToken, h.cmd[0], `${h.id}: processToken`);
     assert.ok(Array.isArray(h.residentProcesses), `${h.id}: residentProcesses`);
     for (const re of h.residentProcesses) assert.ok(re instanceof RegExp, `${h.id}: resident entry`);
     assert.ok(h.defaultModeId.length > 0, `${h.id}: defaultModeId`);
     assert.ok(h.forkModeId.length > 0, `${h.id}: forkModeId`);
-    // A fork exists to ask questions about work the original is still doing,
-    // so it never starts in the mode the original is in.
+    // A fork asks questions about work the original is still doing, so it
+    // starts in a mode other than the default.
     assert.notEqual(h.forkModeId, h.defaultModeId, `${h.id}: fork mode differs`);
     for (const [option, value] of Object.entries(h.defaultConfig)) {
       assert.equal(typeof option, 'string');
@@ -132,8 +132,7 @@ test('the Codex entry matches what codex-acp reads', () => {
     INITIAL_AGENT_MODE: 'agent-full-access',
     DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
   });
-  // The mode the adapter is told to start every box in is the same one a
-  // fresh thread is switched into; two answers here would fight each other.
+  // The adapter's start mode and the mode of a new thread must match.
   assert.equal(h.env('key')['INITIAL_AGENT_MODE'], h.defaultModeId);
   assert.equal(h.alwaysBackground.size, 0);
 });

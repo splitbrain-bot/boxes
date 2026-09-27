@@ -9,16 +9,9 @@ import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 import { NO_BASE } from './gitstatus.ts';
 
 /**
- * Unified diff to gutter markers. The tables are ports of the Go
- * implementation's, which is what says these markers are the right ones.
- *
- * The one part that runs git is driven through a runner that starts it on this
- * machine instead of in a box container, over a repository the test built
- * itself: what is being checked is that the parser reads what git really
- * writes.
+ * A runner that starts git on this machine, in the directory the target names,
+ * so the parser is checked against output git really writes.
  */
-
-/** A runner that starts git here, in the directory the target names. */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
     const stdout = execFileSync(argv[0]!, argv.slice(1), {
@@ -302,8 +295,7 @@ describe('over output git actually produces', () => {
     const bare = mkdtempSync(join(tmpdir(), 'boxes-nogit-'));
     try {
       writeFileSync(join(bare, 'a.txt'), 'a\n');
-      // Degrading rather than failing is the point: a workspace need not be a
-      // repository at all.
+      // A workspace need not be a repository.
       assert.deepEqual(await fileDiff(at(bare), NO_BASE, 'a.txt', 'a\n'), {
         lines: {},
         hunks: [],

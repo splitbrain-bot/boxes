@@ -11,16 +11,7 @@ import { openDb, touchBox, type Db } from './db.ts';
 import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 
-/**
- * Keeping a box on the current box image.
- *
- * The orchestrator creates box containers, so nothing outside it may
- * recreate one — the id in the database and the runtime proxy attachment
- * would both be lost. Moving a box onto a new image is therefore the
- * orchestrator's own job, and start is the only moment it is safe: under a
- * running container it would kill the adapter exec mid-turn.
- */
-
+/** The box image the test config names. */
 const IMAGE = 'ghcr.io/example/box:latest';
 
 /** The daemon this suite pretends to talk to. */
@@ -29,12 +20,15 @@ interface Fake {
   images: Map<string, string>;
   /**
    * Container id to the image id it was created from, whether it runs, and
-   * the destinations it has mounts at — which the start path asks about, to
-   * recognise a container from before a mount existed.
+   * its mount destinations. The start path reads the mounts to recognise a
+   * container from before a mount existed.
    */
   containers: Map<string, { image: string; running: boolean; mounts: string[] }>;
+  /** The options of every container created, in order. */
   created: Array<Record<string, unknown>>;
+  /** The ids of the removed containers, in order. */
   removed: string[];
+  /** Every image reference pulled, in order. */
   pulled: string[];
   /**
    * Image ids on the host that carry no tag, and the label each was built
@@ -54,13 +48,16 @@ interface Fake {
   onRemove?: () => void;
   /** Networks the daemon has. A prune takes the container's with it. */
   networks: Set<string>;
+  /** The counter behind the ids of created containers. */
   next: number;
 }
 
+/** An error shaped like the daemon's 404 for a missing object. */
 function notFound(what: string): Error {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
 
+/** Installs the fake daemon as the Docker client. */
 function install(fake: Fake): void {
   dk.setDockerForTests(dockerFor(fake));
 }
@@ -167,15 +164,14 @@ let orchestrator: Orchestrator;
 let fake: Fake;
 
 /**
- * A stopped box with a container on `imageId`, shaped the way every
- * box created today is: both of its mounts are directories.
+ * Inserts a stopped box with a container on `imageId`, whose workspace and
+ * home are directories.
  *
- * `home` makes the older shape instead — a box from before homes became
- * directories, which keeps its named volume and goes on mounting it. Nothing
- * migrates it, so both shapes have to keep working.
+ * With `home` set to 'volume', the home is a named volume instead, as on an
+ * older box. Nothing migrates a home, so both shapes must keep working.
  *
- * The directories are made as well as named, because a start refuses a
- * box whose bind sources are gone.
+ * The directories are created too, because a start refuses a box whose bind
+ * sources are gone.
  */
 function insertBox(
   id: string,
@@ -187,9 +183,8 @@ function insertBox(
   fake.containers.set(containerId, {
     image: imageId,
     running: false,
-    // Every mount a container created today has. What this suite is about is
-    // the image moving under a box, not a container from before a mount
-    // existed — boxes.ts has its own path for that.
+    // Every mount of a new container, so only a moved image triggers a
+    // rebuild.
     mounts: [dk.WORKSPACE_DIR, '/home/agent', dk.NIX_DIR, dk.AGENT_CONFIG_DIR],
   });
   db.prepare(
@@ -243,8 +238,8 @@ afterEach(async () => {
 describe('starting a box whose image has moved', () => {
   it('recreates the container on what the tag now resolves to', async () => {
     insertBox('a1', 'c1', 'sha256:one');
-    // The tag did not change; what it points at did. That is the whole case
-    // this exists for, and comparing tags would miss it.
+    // The tag stays the same and points at a new id. Comparing tags would
+    // miss this.
     fake.images.set(IMAGE, 'sha256:two');
 
     const detail = await orchestrator.manager.start('a1');
@@ -254,7 +249,7 @@ describe('starting a box whose image has moved', () => {
     assert.equal(fake.created[0]!['Image'], IMAGE);
     assert.notEqual(detail.containerId, 'c1');
     assert.equal(detail.image, IMAGE);
-    // And it is actually running, not merely created.
+    // It is running, not only created.
     assert.equal(fake.containers.get(detail.containerId!)?.running, true);
   });
 
@@ -271,17 +266,15 @@ describe('starting a box whose image has moved', () => {
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
       `${dir}/nix/a2:/nix`,
-      // The agent configuration comes across too, read-only. It is derived
-      // from the database rather than durable in itself, but the mount has to
-      // be there or the box starts with nothing configured.
+      // The agent configuration comes from the database, but without the
+      // mount the box starts with nothing configured.
       `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
   });
 
   it('keeps mounting the volume of a box whose home is one', async () => {
-    // Nothing migrates a home, so a box created before homes became
-    // directories goes on mounting its volume for as long as it lives —
-    // including through a rebuild of its container.
+    // Nothing migrates a home, so an older box mounts its home volume for
+    // life, also after its container is rebuilt.
     insertBox('a2', 'c1', 'sha256:one', 'volume');
     fake.images.set(IMAGE, 'sha256:two');
 
@@ -298,8 +291,7 @@ describe('starting a box whose image has moved', () => {
 
   it('gives a box from before nix stores existed the mount at its next start', async () => {
     insertBox('a2', 'c1', 'sha256:one');
-    // The image did not move. The container is from before the mount was in
-    // the template, which is the only thing about it to fix.
+    // The image did not move. The container lacks only the Nix mount.
     fake.containers.get('c1')!.mounts = [dk.WORKSPACE_DIR, '/home/agent', dk.AGENT_CONFIG_DIR];
 
     const detail = await orchestrator.manager.start('a2');
@@ -371,8 +363,8 @@ describe('starting a box Docker has forgotten', () => {
   it('rebuilds a container something pruned, and starts it', async () => {
     insertBox('a1', 'c1', 'sha256:one');
     // `docker container prune` takes every stopped container, and an idle
-    // box is a stopped container. Nothing durable goes with it:
-    // both of a box's mounts are directories on the data volume.
+    // box is a stopped container. Nothing durable goes with it: the
+    // workspace, home and Nix store are directories on the data volume.
     fake.containers.delete('c1');
 
     const detail = await orchestrator.manager.start('a1');
@@ -380,8 +372,7 @@ describe('starting a box Docker has forgotten', () => {
     assert.equal(fake.created.length, 1);
     assert.notEqual(detail.containerId, 'c1');
     assert.equal(fake.containers.get(detail.containerId!)?.running, true);
-    // And the row names the container that exists, so the next start is an
-    // ordinary one.
+    // The row names the new container, so the next start is an ordinary one.
     assert.equal(detail.status, 'running');
   });
 
@@ -391,9 +382,8 @@ describe('starting a box Docker has forgotten', () => {
 
     await orchestrator.manager.start('a2');
 
-    // The point of the rebuild: a container is reproducible from the row, and
-    // what is not reproducible is in these two directories — which the new
-    // container mounts exactly as the old one did.
+    // The row describes the container. What it cannot reproduce is in these
+    // directories, which the new container mounts as the old one did.
     const host = fake.created[0]!['HostConfig'] as { Binds: string[] };
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
@@ -405,9 +395,8 @@ describe('starting a box Docker has forgotten', () => {
 
   it('makes the network again when that went with it', async () => {
     insertBox('a3', 'c1', 'sha256:one');
-    // What `docker system prune` does: the container, and then the network
-    // that has nothing left on it. A container cannot be created into a
-    // network that is not there.
+    // `docker system prune` takes the container, and then the network that
+    // has nothing left on it.
     fake.containers.delete('c1');
     fake.networks.delete('bn-a3');
 
@@ -423,8 +412,7 @@ describe('starting a box Docker has forgotten', () => {
 
     const detail = await orchestrator.manager.start('a4');
 
-    // The ordinary case, and the one this must not touch: a stopped container
-    // is started, not replaced.
+    // A stopped container is started, not replaced.
     assert.deepEqual(fake.created, []);
     assert.deepEqual(fake.removed, []);
     assert.equal(detail.containerId, 'c1');
@@ -432,9 +420,8 @@ describe('starting a box Docker has forgotten', () => {
 
   it('does not rebuild on a daemon that would not answer', async () => {
     insertBox('a5', 'c1', 'sha256:one');
-    // 500 rather than 404: the difference between a container that is gone
-    // and a daemon that is unwell. Rebuilding on the second would replace a
-    // container that is running perfectly well behind a failed inspect.
+    // A 500 means an unwell daemon, not a missing container. A rebuild here
+    // could replace a working container behind a failed inspect.
     dk.setDockerForTests({
       ...(dockerFor(fake) as unknown as Record<string, unknown>),
       getContainer: () => ({
@@ -503,16 +490,14 @@ describe('reclaiming what a pull superseded', () => {
 
     await orchestrator.manager.refreshBoxImage();
 
-    // A gigabyte or two per release, which nothing else was ever going to
-    // reclaim: an untagged image is not something a deployment goes looking
-    // for.
+    // A gigabyte or two per release. Nothing else removes an untagged image.
     assert.deepEqual(fake.imagesRemoved, ['sha256:one']);
   });
 
   it('leaves the one a box is still on, and takes it the next time round', async () => {
-    // A box that has not been started since the tag moved is still on the old
-    // image, and the daemon refuses to remove it. That refusal is the safety
-    // property, not an error to work around.
+    // A box that has not started since the tag moved is still on the old
+    // image, and the daemon refuses to remove it. That refusal keeps the box
+    // safe.
     fake.imagesInUse.add('sha256:one');
     fake.onPull = () => moveTagTo('sha256:two');
 
@@ -529,9 +514,7 @@ describe('reclaiming what a pull superseded', () => {
   });
 
   it('takes what an earlier process left behind, by the image label', async () => {
-    // The id this process replaced is known outright; one an orchestrator
-    // that has since restarted replaced is only findable because the image
-    // carries a label of its own.
+    // An image replaced before a restart can be found only by its label.
     fake.untagged.set('sha256:from-last-week', { [dk.IMAGE_LABEL]: dk.BOX_IMAGE_KIND });
     fake.onPull = () => moveTagTo('sha256:two');
 
@@ -541,8 +524,8 @@ describe('reclaiming what a pull superseded', () => {
   });
 
   it('never touches an untagged image that is not ours', async () => {
-    // The orchestrator holds this host's Docker socket. An image somebody
-    // else built is not its to reclaim, however unused it looks.
+    // The orchestrator holds this host's Docker socket. It must not remove an
+    // image somebody else built, however unused it looks.
     fake.untagged.set('sha256:somebody-elses', { 'com.example.thing': 'yes' });
     fake.onPull = () => moveTagTo('sha256:two');
 
@@ -557,8 +540,7 @@ describe('reclaiming what a pull superseded', () => {
 
     await orchestrator.manager.refreshBoxImage();
 
-    // A pull that changed nothing superseded nothing, and the sweep rides
-    // along with the change rather than running on its own.
+    // The sweep runs only when a pull moves the tag.
     assert.deepEqual(fake.imagesRemoved, []);
   });
 
@@ -599,8 +581,7 @@ describe('reading the uid back off the box image', () => {
   });
 
   it('says nothing about an image whose USER is a name', async () => {
-    // An older image, or one built elsewhere: there is no uid to compare, and
-    // guessing at one would be worse than staying quiet.
+    // An older image, or one built elsewhere, has no uid to compare.
     withImageUser('agent');
     assert.equal(await dk.imageUserUid(IMAGE), null);
   });
@@ -631,8 +612,7 @@ describe('starting a box whose files are gone', () => {
     );
     assert.deepEqual(fake.created, []);
     assert.equal(status('a1'), 'error');
-    // And nothing was put back: the missing half is not this process's to
-    // invent.
+    // The orchestrator does not recreate the missing directory.
     assert.ok(!existsSync(ws.workspacePath(dir, 'a1')));
   });
 
@@ -659,9 +639,9 @@ describe('starting a box whose files are gone', () => {
     );
   });
 
-  it('says nothing about a box whose halves are still volumes', async () => {
-    // A box from before either became a directory mounts a named volume,
-    // which Docker keeps on its own and this has no path to check.
+  it('says nothing about a box whose home is still a volume', async () => {
+    // The home of an older box is a named volume. The orchestrator has no
+    // path to check it.
     insertBox('a4', 'c1', 'sha256:one', 'volume');
     fake.containers.get('c1')!.running = true;
 
@@ -745,8 +725,7 @@ describe('one operation per box at a time', () => {
 
     await orchestrator.manager.remove('a1');
 
-    // The tombstone goes down before anything else of the box does, so
-    // there was never a moment when a write would have landed.
+    // The tombstone is set before the teardown starts, so no write lands.
     assert.equal(active, before);
   });
 });
@@ -758,9 +737,9 @@ describe('the upstreams the manager is holding', () => {
 
     orchestrator.manager.maintenance();
 
-    // The reaper builds one of these for every running box on every tick,
-    // and nothing else lets go of them. A fresh one rebuilds everything this
-    // holds, because it holds nothing.
+    // The reaper builds one of these for every running box on every tick, and
+    // nothing else drops them. This one holds nothing, so a fresh one loses
+    // nothing.
     assert.notEqual(orchestrator.manager.upstream('a1'), first);
   });
 

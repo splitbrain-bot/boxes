@@ -1,8 +1,7 @@
-# Keeps the build context to what the images build from.
+# Build context exclusions for the images.
 #
-# The orchestrator image runs `npm ci` and only then copies dashboard/ and
-# orchestrator/ over the result, so a developer's node_modules would land on
-# top of the freshly installed tree without this file.
+# The orchestrator image copies dashboard/ and orchestrator/ after npm ci, so
+# a local node_modules would otherwise overwrite the fresh install.
 **/node_modules
 **/dist
 .git

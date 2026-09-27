@@ -16,14 +16,16 @@ import {
   type EgressMaterial,
 } from './egress.ts';
 
-/**
- * What the orchestrator composes, what it stores, and what it puts on the
- * control channel.
- */
-
+/** A real Claude token as the store holds it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
+
+/** A real OpenAI API key as the store holds it. */
 const OPENAI_KEY = 'sk-therealopenaiapikey';
+
+/** A real GitHub token as the store holds it. */
 const GH_TOKEN = 'ghp_therealgithubtoken';
+
+/** A real GitLab token as the store holds it. */
 const GITLAB_TOKEN = 'glpat-therealgitlabtoken';
 
 let dirs: string[] = [];
@@ -39,6 +41,7 @@ afterEach(() => {
   dirs = [];
 });
 
+/** Creates a temporary data directory that afterEach removes. */
 function dataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-egress-'));
   dirs.push(dir);
@@ -50,12 +53,7 @@ function configFrom(env: Record<string, string> = {}): Config {
   return loadConfig({ DATA_DIR: dataDir(), ...env });
 }
 
-/**
- * A credential store over a database of its own, holding what was passed.
- *
- * The secrets come from here now rather than from the environment, so every
- * case below says what the deployment holds by writing it.
- */
+/** A credential store over a database of its own, holding what was passed. */
 function storeWith(
   cfg: Config,
   secrets: Partial<Record<CredentialId, string>> = {},
@@ -150,10 +148,8 @@ describe('composePolicy', () => {
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials).toEqual([]);
-    // The CA is unconditional: a box created now holds it for as long as it
-    // lives, and the credential that makes a host intercepted may arrive
-    // tomorrow. Withholding it here is what used to leave such a box unable
-    // to trust anything afterwards.
+    // A box keeps the CA it was created with for its whole life, and a
+    // credential may be added later.
     expect(policy.ca).not.toBeNull();
     expect(policy.ca?.cert).toContain('BEGIN CERTIFICATE');
   }, 30_000);
@@ -185,7 +181,7 @@ describe('composePolicy', () => {
     expect(allowedHosts).toContain('platform.claude.com');
     expect(allowedHosts).toContain('codeload.github.com');
     // The credential's own hosts are implied by the proxy, not listed here.
-    expect(allowedHosts).not.toContain('evil.com');
+    expect(allowedHosts).not.toContain('api.github.com');
   }, 30_000);
 
   it('intercepts the GitLab the deployment names, and only that one', async () => {
@@ -204,11 +200,8 @@ describe('composePolicy', () => {
   it('has nothing to swap for a subscription obtained by logging in', async () => {
     const cfg = configFrom();
     const store = storeWith(cfg);
-    // What `codex login --device-auth` leaves behind: a document, not a
-    // header value, and it authenticates traffic to chatgpt.com, which is
-    // deliberately not intercepted. Storing it therefore changes nothing
-    // about the wire — the row is kept and refreshed, and the harness health
-    // is where a person is told it cannot reach a box yet.
+    // `codex login --device-auth` leaves a document, not a header value. It
+    // authenticates traffic to chatgpt.com, which the proxy does not intercept.
     store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
     const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
     const policy = composePolicy(cfg, material, rows(store));
@@ -231,13 +224,13 @@ describe('composePolicy', () => {
     expect(openai?.secret).toBe(OPENAI_KEY);
     expect(openai?.placeholder).toBe(material.placeholders['openai']);
 
-    // Codex logs in and refreshes at one of these and may be talking to the
-    // other with a credential Boxes does not hold; both must stay reachable
-    // under a narrow allowlist, and neither is a host the key is sent to.
+    // Codex logs in and refreshes at auth.openai.com and may talk to
+    // chatgpt.com. Both stay reachable under a narrow allowlist, and the key
+    // is sent to neither.
     expect(policy.allowedHosts).toContain('auth.openai.com');
     expect(policy.allowedHosts).toContain('chatgpt.com');
     expect(openai?.hosts).not.toContain('chatgpt.com');
-    // A deployment's own choice rather than something the credential implies.
+    // The deployment allows these itself. The credential does not imply them.
     expect(policy.allowedHosts).not.toContain('files.openai.com');
     expect(policy.allowedHosts).not.toContain('ab.chatgpt.com');
   }, 30_000);
@@ -340,9 +333,8 @@ describe('EgressManager', () => {
     const manager = new EgressManager(cfg, storeWith(cfg));
     await manager.prepare();
 
-    // The box created on a deployment that holds nothing is the case this
-    // exists for: its environment is fixed now, and the token is entered
-    // later.
+    // A box created before any token is entered has its environment fixed at
+    // creation.
     expect(manager.placeholderFor('claude')).toMatch(/^sk-ant-oat01-/);
     expect(manager.placeholderFor('github')).toMatch(/^ghp_/);
     // Codex checks the shape of its key, so the placeholder carries the prefix
@@ -356,8 +348,7 @@ describe('EgressManager', () => {
     const manager = new EgressManager(cfg, storeWith(cfg));
     await manager.prepare();
 
-    // An empty string rather than an invention: boxEnv drops a variable
-    // with no value, so the box is given nothing rather than nonsense.
+    // boxEnv drops a variable with an empty value, so the box gets no variable.
     expect(manager.placeholderFor('gemini')).toBe('');
   }, 30_000);
 

@@ -8,16 +8,10 @@ import { loadConfig, type Config } from './config.ts';
 import * as dk from './docker.ts';
 import { deploymentImages, resetImagesForTests } from './images.ts';
 
-/**
- * Which build of each image a deployment is running.
- *
- * The orchestrator's own entry is reached exactly as the proxy's is — the
- * image behind a container — differing only in that the container is found by
- * reading this process's own cgroup rather than by name, so the cases below
- * exercise it through the proxy.
- */
-
+/** The box image the test config names. */
 const BOX_IMAGE = 'ghcr.io/example/boxes/box:latest';
+
+/** The proxy container the test config names. */
 const PROXY_CONTAINER = 'boxes-egress-proxy';
 
 /** An inspect answer, as the daemon shapes one. */
@@ -41,10 +35,12 @@ interface Fake {
 let fake: Fake;
 let dirs: string[] = [];
 
+/** An error shaped like the daemon's 404 for a missing image or container. */
 function notFound(what: string): Error {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
 
+/** Installs a Docker client that answers inspects from the fake. */
 function install(): void {
   dk.setDockerForTests({
     getImage: (name: string) => ({
@@ -88,6 +84,8 @@ afterEach(() => {
   dirs = [];
 });
 
+// The orchestrator entry uses the same container lookup as the proxy entry,
+// so the proxy cases cover it.
 describe('deploymentImages', () => {
   it('reports the registry digest of a pulled image, not the local id', async () => {
     fake.images.set(BOX_IMAGE, {
@@ -99,8 +97,8 @@ describe('deploymentImages', () => {
 
     const images = await deploymentImages(cfg());
 
-    // The digest the tag was published under is what a deployment following
-    // that tag can compare against; the config id means nothing off this host.
+    // A deployment that follows the tag compares against the published digest.
+    // The config id means nothing off this host.
     assert.deepEqual(images.box, {
       digest: 'sha256:published',
       builtAt: Date.parse('2026-08-12T22:40:00Z'),
@@ -143,8 +141,8 @@ describe('deploymentImages', () => {
   it('says nothing for an image the daemon does not have', async () => {
     const images = await deploymentImages(cfg());
 
-    // Every one of these is a legitimate state: no proxy container up, and a
-    // box image not pulled yet.
+    // Both are normal states: no proxy container is up, and the box image is
+    // not pulled yet.
     assert.equal(images.proxy, null);
     assert.equal(images.box, null);
   });
@@ -163,16 +161,14 @@ describe('deploymentImages', () => {
       }),
     } as unknown as Docker);
 
-    // The health probe this hangs off must still answer, so a footer with
-    // nothing in it is the whole of the failure.
+    // The health probe calls this and must still answer.
     const images = await deploymentImages(cfg());
 
     assert.deepEqual(images, { orchestrator: null, proxy: null, box: null });
   });
 
   it('reports no build date and no size rather than what cannot be rendered', async () => {
-    // A NaN date and an absent size both serialize to null over JSON anyway;
-    // saying so here is what keeps the type honest about it.
+    // Both would reach JSON as null anyway. Returning null keeps the type true.
     fake.images.set(BOX_IMAGE, { Id: 'sha256:nodate', Created: '' });
 
     const images = await deploymentImages(cfg());
@@ -189,8 +185,7 @@ describe('deploymentImages', () => {
     const first = fake.inspected.length;
     await deploymentImages(config);
 
-    // The probe this answers is polled by every open tab, and none of these
-    // move often enough to be worth an inspect apiece.
+    // Every open tab polls the health probe, and these values rarely change.
     assert.equal(fake.inspected.length, first);
   });
 });

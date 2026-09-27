@@ -208,8 +208,7 @@ test('an unknown update kind is noted by name and renders nothing', () => {
 });
 
 test('a kind that arrives over and over is noted once', () => {
-  // The adapter sends a usage update at the end of every cycle, so what is
-  // kept has to be the fact rather than the updates.
+  // The adapter sends a usage update at the end of every cycle.
   const model = emptyModel();
   for (let i = 0; i < 100; i++) {
     applyUpdate(model, { sessionUpdate: 'usage_update', tokens: i } as unknown as ThreadUpdate);
@@ -305,10 +304,8 @@ test("a tool call's image result is named in its output rather than left empty",
 
 // --- attachments ------------------------------------------------------------
 //
-// The composer sends what the user attached as one block of text — see
-// lib/attachments.ts. These cover what the thread does with it, which has to
-// be the same whether the block arrives from the gateway's echo or from the
-// adapter's transcript on a reconnect: it is the same text either way.
+// The composer sends what the user attached as one block of text. The thread
+// reads it the same way live and on replay.
 
 /** The envelope for one attachment, as a user chunk. */
 function attached(
@@ -364,8 +361,7 @@ test('an envelope that cannot be read is shown rather than swallowed', () => {
 });
 
 test('the envelope is only read in a user or agent message, never as a thought', () => {
-  // Nothing sends one in a thought; this is about the reasoning stream never
-  // acquiring parts that are not reasoning.
+  // The reasoning stream holds only reasoning parts.
   const model = fold({
     sessionUpdate: 'agent_thought_chunk',
     content: { type: 'text', text: buildEnvelope([
@@ -382,9 +378,8 @@ test('the envelope is only read in a user or agent message, never as a thought',
 
 // --- background tasks -------------------------------------------------------
 //
-// A task left running in the background reports in by waking the agent with a
-// block of XML in the user's own role — see lib/task-notifications.ts. These
-// cover the thread refusing to read that as somebody talking.
+// A background task reports by waking the agent with a block of XML in the
+// user role. The thread shows it as a task row, not as the user talking.
 
 /** A monitor's event, as the harness sends one. */
 const NOTIFICATION = [
@@ -409,8 +404,7 @@ test('a background task reporting in becomes a row of its own, not prose', () =>
 });
 
 test('what the user typed around one is still what they typed', () => {
-  // One message, because an adapter that names no message ids has only the
-  // role to go on and this is the shape that produces.
+  // One message, because without message ids only the role separates them.
   const model = fold(
     chunk('user_message_chunk', 'keep going'),
     chunk('user_message_chunk', NOTIFICATION),
@@ -441,8 +435,7 @@ test('only a message the adapter named carries its id', () => {
     chunk('user_message_chunk', 'not'),
   );
   assert.equal(model.messages[0]!.named, true);
-  // Numbered by this model, so a replay never says it back and it cannot be
-  // asked for as a resume point.
+  // Numbered by this model, so it cannot serve as a resume point.
   assert.equal(model.messages[1]!.named, undefined);
 });
 
@@ -458,8 +451,8 @@ test('truncating drops the message named and everything after it', () => {
 
   assert.deepEqual(dropped.map((m) => m.id), ['msg_2', 'msg_3']);
   assert.deepEqual(model.messages.map((m) => m.id), ['msg_1']);
-  // The index every tool lookup goes through has to lose a call in a message
-  // that has gone, or an update for it would be merged into nothing.
+  // The tool index loses the call, or a later update would merge into a
+  // dropped part.
   assert.equal(findTool(model, 'toolu_1'), undefined);
 });
 
@@ -488,7 +481,6 @@ test('a truncated model plus the rest is the model the whole thread builds', () 
   truncateFrom(resumed, 'msg_2');
   for (const u of script.slice(1)) applyUpdate(resumed, u);
 
-  // Cutting the fold at a message boundary and applying the rest is the same
-  // fold, which is what lets a reconnect take the tail alone.
+  // A reconnect can take the tail alone, because the result is the same.
   assert.deepEqual(resumed.messages, whole.messages);
 });

@@ -5,22 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 /**
- * Which revision the review is compared against.
+ * A popover that sets the revision the review is compared against.
  *
- * Without one, the diff is against each repository's own working tree: what
- * has not been committed yet. With one, it is against the merge base of that
- * revision and that repository's HEAD, so a whole branch's work reads as the
- * change — and commits made on the base branch after branching off do not.
- *
- * One expression for the whole workspace, resolved separately in every
- * repository it holds: `main` means main-in-each. A revision can name a branch
- * in one repository and nothing at all in the dependency checked out beside
- * it, so the picker says where it landed rather than pretending to a single
- * commit — and a revision that resolves nowhere is the only one refused.
- *
- * A popover with a free-text field rather than a list of branches: the
- * orchestrator does not enumerate refs, and "main" or "HEAD~3" is quicker to
- * type than a list is to scroll on a phone.
+ * The revision is a free-text field, because the orchestrator does not list
+ * refs. The same revision can resolve in one repository and not in another,
+ * so the popover lists the commit it resolved to in each repository.
  */
 export function BasePicker({
   base,
@@ -28,10 +17,13 @@ export function BasePicker({
   busy,
   onSet,
 }: {
+  /** The active base. An empty revision compares each repository against its own HEAD. */
   base: ReviewBase;
-  /** The workspace's repositories, each carrying where the revision landed. */
+  /** The workspace's repositories, each carrying the commit the revision resolved to. */
   repos: ReviewRepo[];
+  /** Disables the controls while a request runs. */
   busy: boolean;
+  /** Called with the new revision, or with null to compare against HEAD again. */
   onSet: (rev: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -52,8 +44,7 @@ export function BasePicker({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        // Re-seeded on open rather than kept: the field should show what is
-        // active, not what was last typed and abandoned.
+        // Reset on open, so the field shows the active base and not abandoned input.
         if (next) setRev(base.rev);
       }}
     >
@@ -67,12 +58,10 @@ export function BasePicker({
           title={
             active
               ? `Comparing against ${base.rev}${whereLanded(landed.length, repos.length)}`
-              : 'Comparing against the working tree'
+              : 'Comparing against HEAD'
           }
         >
           <GitCompareArrows className="size-3.5" />
-          {/* The status line says which base is active, the way the desktop
-              tool's does. On a narrow header the icon alone carries it. */}
           <span className="hidden max-w-24 truncate sm:inline">
             {active ? base.rev : 'HEAD'}
           </span>
@@ -128,11 +117,10 @@ export function BasePicker({
               {repos.map((repo) => (
                 <li key={repo.path} className="flex items-baseline justify-between gap-2">
                   <span className="truncate">{repo.name}</span>
-                  {/* A repository the revision names nothing in is compared
-                      against its own working tree rather than failing the
-                      whole request, so it says so instead of a commit. */}
+                  {/* The orchestrator compares a repository the revision does not
+                      resolve in against its own HEAD instead of failing. */}
                   <span className={repo.baseCommit === '' ? 'text-warn' : undefined}>
-                    {repo.baseCommit === '' ? 'working tree' : repo.baseCommit.slice(0, 8)}
+                    {repo.baseCommit === '' ? 'HEAD' : repo.baseCommit.slice(0, 8)}
                   </span>
                 </li>
               ))}
@@ -144,7 +132,13 @@ export function BasePicker({
   );
 }
 
-/** " in 2 of 3 repositories", or nothing at all when there is only one. */
+/**
+ * Describes how many repositories the base resolved in, for the button title.
+ *
+ * @param landed The number of repositories the base resolved in.
+ * @param total The number of repositories in the workspace.
+ * @returns Text like ", in 2 of 3 repositories", or an empty string for one repository or none.
+ */
 function whereLanded(landed: number, total: number): string {
   if (total <= 1) return '';
   return `, in ${landed} of ${total} repositories`;

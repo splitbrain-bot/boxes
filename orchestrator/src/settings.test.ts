@@ -6,12 +6,6 @@ import { afterEach, beforeEach, test } from 'vitest';
 import { openDb, type Db } from './db.ts';
 import { DEFAULT_GIT_EMAIL, DEFAULT_GIT_NAME, patchSettings, readSettings } from './settings.ts';
 
-/**
- * The plain settings: the git identity every box commits as, and what each
- * dialog last chose. Everything here has a default, so a deployment that has
- * never opened the settings page is fully configured.
- */
-
 let dir: string;
 let db: Db;
 
@@ -50,9 +44,7 @@ test('a patch writes what it names and leaves the rest alone', () => {
 
 test('clearing a field puts the default back rather than leaving nobody there', () => {
   patchSettings(db, { gitName: 'Release bot' });
-  // An emptied field is a field cleared, not a box that commits as nobody —
-  // and the stored row goes, so a later release moving the default moves this
-  // deployment with it.
+  // The stored row is deleted, so a later change to the default applies here too.
   assert.equal(patchSettings(db, { gitName: '  ' }).gitName, DEFAULT_GIT_NAME);
 });
 

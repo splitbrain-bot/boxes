@@ -13,15 +13,6 @@ import {
   type Db,
 } from './db.ts';
 
-/**
- * The migrations that moved a box's conversation onto its threads.
- *
- * A deployment upgrading in place has live boxes whose conversation is a
- * single `boxes.acp_session_id`, and that conversation has to survive as
- * the box's first thread. What was box-wide about a running turn then
- * moves onto the thread it is about.
- */
-
 let dir: string;
 
 beforeEach(() => {
@@ -32,7 +23,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Builds a database at the version just before threads existed. */
+/**
+ * Builds a database at the version just before threads existed. Its one box
+ * holds its conversation in `acp_session_id`, or none when that is null.
+ */
 function atVersion3(withAcpSessionId: string | null): void {
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS.slice(0, 3)) db.exec(sql);
@@ -68,7 +62,7 @@ test('an existing conversation becomes the box first thread', () => {
 
     // The column it replaces is gone, so nothing can keep writing to it.
     assert.ok(!columns(db, 'boxes').includes('acp_session_id'));
-    // A box no longer records a current thread at all.
+    // The migrations also drop current_thread_id.
     assert.ok(!columns(db, 'boxes').includes('current_thread_id'));
   } finally {
     db.close();
@@ -79,7 +73,7 @@ test('a box that never had a conversation gets no thread', () => {
   atVersion3(null);
   const db = openDb(dir);
   try {
-    // The orchestrator mints one on the next spawn, exactly as it did before.
+    // The orchestrator creates one on the next spawn.
     const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
     assert.equal(count.n, 0);
   } finally {
@@ -108,13 +102,12 @@ function atVersion4(turnActive: number): void {
 }
 
 test('a running turn moves onto the threads, starting cleared', () => {
-  // Mid-turn when the orchestrator went down, which is the state the upgrade
-  // actually meets.
+  // The orchestrator went down mid-turn, which is the state the upgrade meets.
   atVersion4(1);
   const db = openDb(dir);
   try {
-    // Not a loss of state but the truth: a turn cannot survive the restart
-    // that applies the migration, so every thread starts at 0.
+    // A turn cannot survive the restart that applies the migration, so every
+    // thread starts at 0.
     const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get('t1') as Record<
       string,
       unknown
@@ -122,7 +115,7 @@ test('a running turn moves onto the threads, starting cleared', () => {
     assert.equal(thread['turn_active'], 0);
     // The column it replaces is gone, so nothing can keep writing to it.
     assert.ok(!columns(db, 'boxes').includes('turn_active'));
-    // And the thread's conversation and identity are untouched by the move.
+    // The thread's conversation and identity are untouched.
     assert.equal(thread['acp_session_id'], 'acp-abc');
     assert.equal(thread['ordinal'], 1);
   } finally {
@@ -181,14 +174,9 @@ test('a volume-backed box keeps its volume and gains no directory', () => {
 });
 
 /**
- * A deployment already running the push-notification release, upgrading to
- * this one.
- *
- * The two features were built on separate branches and both added a migration
- * at the same index. Whichever shipped first has to keep its index, or a
- * database that already applied it skips it and runs the wrong statement in
- * its place — so this asserts the order rather than trusting the merge that
- * chose it.
+ * A deployment on the push-notification release, upgrading. Two migrations
+ * were written for the same index. The one that shipped first must keep it,
+ * or a database that applied it runs the wrong statement in its place.
  */
 test('a deployment on the previous release upgrades cleanly', () => {
   const db = new Database(join(dir, 'boxes.db'));
@@ -214,9 +202,8 @@ test('a deployment on the previous release upgrades cleanly', () => {
     assert.ok(boxes.includes('workspace_dir'));
     // The review's base revision survives as the expression it always was.
     assert.ok(boxes.includes('review_base_rev'));
-    // Its root and its resolved commit do not: the review is over the whole
-    // workspace now, and one expression resolves separately in every
-    // repository the workspace holds, so neither can mean anything.
+    // Its root and resolved commit are dropped. The review covers the whole
+    // workspace, and one expression resolves separately in each repository.
     assert.ok(!boxes.includes('review_root'));
     assert.ok(!boxes.includes('review_base_commit'));
 
@@ -228,8 +215,7 @@ test('a deployment on the previous release upgrades cleanly', () => {
       .get() as { n: number };
     assert.equal(push.n, 1);
 
-    // And the box that predates workspace directories is untouched: it
-    // migrates at its next start, not here.
+    // The box that predates workspace directories migrates at its next start.
     const row = upgraded
       .prepare("SELECT ws_volume, workspace_dir FROM boxes WHERE id = 'live'")
       .get() as { ws_volume: string; workspace_dir: string | null };
@@ -263,13 +249,9 @@ test('threads from before the mode column upgrade to the deployment default', ()
   try {
     assert.ok(columns(upgraded, 'threads').includes('mode_id'));
 
-    // No backfill, because null already says the right thing: this thread is
-    // in whatever its harness starts one in. Nothing has to guess what a
-    // conversation from before the column was in.
-    //
-    // The model column is gone by the time every migration has run — it is one
-    // entry of the config map now — and a thread that never had one comes out
-    // with an empty map rather than a guess.
+    // No backfill: a null mode means the mode its harness starts a thread in.
+    // A later migration moves the model into the config map, and a thread
+    // without a model gets an empty map.
     const row = upgraded
       .prepare("SELECT mode_id, config FROM threads WHERE id = 't1'")
       .get() as { mode_id: string | null; config: string };
@@ -312,8 +294,7 @@ test('the agent tables arrive with a global set, and existing boxes select none'
 });
 
 test('a database that has an exec log loses it', () => {
-  // The `!bang` escape hatch the log served is gone, so an upgrade takes the
-  // table with it rather than leaving rows nothing reads.
+  // Nothing reads the exec log, so the upgrade drops the table.
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS.slice(0, 16)) db.exec(sql);
   db.pragma('user_version = 16');
@@ -357,8 +338,7 @@ test('threads from before the done column read as not done', () => {
   try {
     assert.ok(columns(upgraded, 'threads').includes('done'));
 
-    // No backfill and nothing to guess: a mark is the reader's, and one they
-    // have never had the chance to set is not set.
+    // The reader sets the mark, so a thread from before the column is not done.
     const row = upgraded.prepare("SELECT done FROM threads WHERE id = 't1'").get() as {
       done: number;
     };
@@ -386,15 +366,14 @@ test('boxes from before the token column each get one of their own', () => {
 
   const upgraded = openDb(dir);
   try {
-    // A box that existed before this went on being reachable, so it needs
-    // a token now rather than at its next start.
+    // An existing box stays reachable, so it needs a token now rather than at
+    // its next start.
     const rows = upgraded
       .prepare('SELECT id, ws_token FROM boxes ORDER BY id')
       .all() as Array<{ id: string; ws_token: string }>;
     assert.equal(rows.length, 2);
     for (const row of rows) assert.match(row.ws_token, /^[0-9a-f]{64}$/);
-    // One each: the backfill is what keeps a leaked token from opening the
-    // box next to it.
+    // One each, so a leaked token cannot open another box.
     assert.notEqual(rows[0]!.ws_token, rows[1]!.ws_token);
   } finally {
     upgraded.close();
@@ -402,9 +381,8 @@ test('boxes from before the token column each get one of their own', () => {
 });
 
 test('a database written by a newer build is refused rather than opened', () => {
-  // A rollback puts this build on a schema it does not know: the columns a
-  // later migration changed are the ones every query here names, so opening
-  // it happily means failing at the first request instead of at boot.
+  // After a rollback, the queries of this build name columns a later
+  // migration changed. Refusing at boot beats failing at the first request.
   const db = new Database(join(dir, 'boxes.db'));
   for (const sql of MIGRATIONS) db.exec(sql);
   db.pragma(`user_version = ${MIGRATIONS.length + 1}`);
@@ -427,9 +405,8 @@ function insertLiveBox(db: Db, id: string): void {
 }
 
 test('a deleted box takes no more writes', () => {
-  // Deleting sets the tombstone before it clears the tables, so work still in
-  // flight — an upstream that is only now settling — must not stir the row
-  // behind it.
+  // Deleting sets the tombstone before it clears the tables. Work still in
+  // flight, such as an upstream that is settling, must not touch the row.
   const db = openDb(dir);
   insertLiveBox(db, 's1');
 
@@ -444,9 +421,8 @@ test('a deleted box takes no more writes', () => {
 });
 
 /**
- * A deployment at the version before credentials, harnesses and the config map
- * — the last state anybody can be in — with one live box and one thread
- * that was left on a model.
+ * Builds a database at the version before credentials, harnesses and the
+ * config map, with one live box, one thread left on a model and one without.
  */
 function atLastRelease(): void {
   const db = new Database(join(dir, 'boxes.db'));
@@ -479,9 +455,8 @@ test('the credential and settings tables arrive empty on an existing deployment'
 
   const upgraded = openDb(dir);
   try {
-    // Nothing is carried over from the environment, deliberately: a
-    // deployment that had credentials in its .env enters them again on the
-    // settings page, and the release notes say so.
+    // Nothing is carried over from the environment. A deployment that had
+    // credentials in its .env enters them again on the settings page.
     const credentials = upgraded
       .prepare('SELECT COUNT(*) AS n FROM credentials')
       .get() as { n: number };
@@ -505,8 +480,8 @@ test('the credential and settings tables arrive empty on an existing deployment'
       'updated_at',
     ]);
 
-    // And the box that predates them is untouched: its box gets a
-    // placeholder for every credential at its next start, whatever is stored.
+    // The box is untouched. It gets a placeholder for every credential at its
+    // next start, whatever is stored.
     const row = upgraded.prepare("SELECT name FROM boxes WHERE id = 'live'").get() as {
       name: string;
     };
@@ -530,21 +505,19 @@ test('a thread from before harnesses is Claude, on the model it was left on', ()
       // had: both adapters call that option `model`. The mode is untouched —
       // it stays its own column, because ACP treats a mode as its own concept.
       { id: 't1', harness: 'claude', mode_id: 'plan', config: '{"model":"opus"}' },
-      // And a thread nobody chose a model for gets an empty map rather than a
-      // guess: it comes back on its harness's default, which is what an empty
-      // column has always meant.
+      // A thread without a model gets an empty map and comes back on its
+      // harness's default.
       { id: 't2', harness: 'claude', mode_id: null, config: '{}' },
     ]);
     // The column it replaces is gone, so nothing can keep writing to it.
     assert.ok(!columns(upgraded, 'threads').includes('model_id'));
 
-    // And the argv comes from the registry now: a box may need either adapter,
-    // so the one a box was created with says nothing.
+    // The argv comes from the harness registry, because a box may need
+    // either adapter.
     assert.ok(!columns(upgraded, 'boxes').includes('agent_cmd'));
 
-    // The catalogue arrives empty. Nothing fills it until an adapter has
-    // answered for a thread — a dialog on a fresh deployment offers the agent
-    // choice alone rather than starting a box to find out what it would offer.
+    // The catalogue arrives empty. An adapter fills it when it answers for a
+    // thread. Until then, a dialog offers only the choice of agent.
     assert.deepEqual(columns(upgraded, 'harness_catalog'), [
       'harness',
       'modes',
@@ -577,9 +550,8 @@ test('the catalogue keeps the half an answer says nothing about', () => {
       seenAt: readHarnessCatalog(db, 'claude')!.seenAt,
     });
 
-    // An answer that carries only one of them says nothing about the other,
-    // and emptying the half it did not mention would cost the dialog a list it
-    // has no other way to get.
+    // An answer with only one list leaves the other in place. The dialog has
+    // no other way to get it.
     upsertHarnessCatalog(db, 'claude', null, [
       { id: 'model', category: 'model', currentValue: 'sonnet' },
     ]);

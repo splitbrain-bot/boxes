@@ -210,9 +210,8 @@ function ImagePreview({
           ref={imgRef}
           src={src}
           alt={alt}
-          /* Boxes edit: a thread runs long, so an image is fetched and
-             decoded as it comes into view rather than the moment a replay
-             puts the whole transcript on the page. */
+          /* Boxes edit: images load as they scroll into view, because a
+             replay puts a whole long thread on the page at once. */
           loading="lazy"
           decoding="async"
           className={cn(
@@ -278,13 +277,8 @@ function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
     triggerRef.current?.focus();
   }, []);
 
-  /*
-   * A zoomed image covers the thread, so the back button closes it rather
-   * than leaving the thread — the same rule the dialogs under components/ui
-   * follow, applied by hand because this overlay is its own portal rather
-   * than a Radix root. Escape below does the same on a keyboard; on a phone
-   * there is no Escape, and back is the gesture that means dismiss.
-   */
+  // Boxes edit: back closes the zoomed image instead of leaving the thread.
+  // The overlay is its own portal, not a Radix root, so it calls the hook itself.
   useHistoryOverlay(isOpen, handleClose);
 
   useEffect(() => {
@@ -421,8 +415,8 @@ function ImageContentFilterError({
 export type ImageActionsProps = {
   part: ImageMessagePart;
   /**
-   * Wire to your own generation call to show a regenerate button. The button
-   * renders only when this is set and the part carries a `prompt`.
+   * Called when the user asks to regenerate the image. The regenerate button
+   * renders only when this is set.
    */
   onRegenerate?: () => void | Promise<void>;
   className?: string;
@@ -451,9 +445,7 @@ function RegenerateButton({
       aria-label="Regenerate image"
       className="hover:bg-muted inline-flex size-7 items-center justify-center rounded disabled:opacity-50"
     >
-      {/* Boxes edit: the shared spinner while it runs, rather than the
-          refresh arrow spun. Same reason as everywhere else — one thing means
-          "working" in this dashboard. */}
+      {/* Boxes edit: the shared spinner while it runs. */}
       {isRegenerating ? <Spinner /> : <RefreshCwIcon className="size-4" />}
     </button>
   );

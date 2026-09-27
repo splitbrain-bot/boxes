@@ -14,18 +14,16 @@ import { terminalUrlFor } from '@/lib/ws-url';
 import '@xterm/xterm/css/xterm.css';
 
 /**
- * How many lines of what has scrolled past the terminal keeps.
- *
- * Enough to scroll back over the command on screen. The scrollback that
- * matters is tmux's, in the box, which survives this tab closing.
+ * How many scrolled-off lines the terminal keeps. The tmux scrollback in the
+ * box outlives this tab.
  */
 const SCROLLBACK = 2000;
 
 /**
- * The terminal's palette, read off the page's own.
+ * Reads the terminal's colours from the page's CSS variables, which follow the
+ * system scheme.
  *
- * The scheme follows the system, so a second copy of the colours here would
- * drift from the one the rest of the page uses.
+ * @returns The xterm theme.
  */
 function themeFromPage(): { background: string; foreground: string; cursor: string } {
   const style = getComputedStyle(document.documentElement);
@@ -38,20 +36,21 @@ function themeFromPage(): { background: string; foreground: string; cursor: stri
   };
 }
 
-/** Why a closed terminal closed, in a line. */
+/**
+ * Formats the notice for a closed terminal.
+ *
+ * @param detail The close reason, if any.
+ * @returns One line for the notice.
+ */
 function closedText(detail: string | undefined): string {
   return detail ? `The terminal closed: ${detail}` : 'The terminal closed.';
 }
 
 /**
- * A shell in the box's container, at `/boxes/:id/terminal`.
+ * Page with a shell in the box's container, at `/boxes/:id/terminal`.
  *
- * Names the box rather than a conversation. Every terminal opened on one
- * box attaches to the same tmux box, so two tabs show the same shell.
- * The box is held running for as long as this page is open.
- *
- * Owns the whole viewport, because a full-screen program in the box needs
- * every row it can be given.
+ * Every terminal on one box attaches to the same tmux session, so two tabs
+ * show the same shell. The box keeps running while this page is open.
  */
 export function BoxTerminal() {
   const { id = '' } = useParams();
@@ -62,13 +61,12 @@ export function BoxTerminal() {
 
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [detail, setDetail] = useState<string | undefined>(undefined);
-  /** Bumped to open a new connection, which is what the reconnect button does. */
+  /** Counter that the reconnect button bumps to open a new connection. */
   const [attempt, setAttempt] = useState(0);
 
   const host = useRef<HTMLDivElement>(null);
 
-  // The address bar is hidden and the page does not scroll: the terminal
-  // fills the viewport, and a phone keyboard must not push it off the screen.
+  // Locks the page, so a phone keyboard cannot push the terminal off the screen.
   useViewportLock();
   useDocumentTitle(`Terminal · ${name}`);
 
@@ -95,16 +93,15 @@ export function BoxTerminal() {
       onStatus: (next, why) => {
         setStatus(next);
         setDetail(why);
-        // Before anything is typed, so the shell draws its first prompt at the
-        // width it is being read at.
+        // Sent before any input, so the first prompt has the right width.
         if (next === 'ready') socket.resize(term.cols, term.rows);
       },
     });
 
     const typed = term.onData((data) => socket.send(data));
 
-    // A full-screen program draws over the wrong area unless the pty is told
-    // every time the rows change — a rotated phone, a keyboard coming up.
+    // A full-screen program needs the pty size after every change, such as a
+    // rotated phone or an opened keyboard.
     const resized = new ResizeObserver(() => {
       fit.fit();
       socket.resize(term.cols, term.rows);
@@ -139,8 +136,7 @@ export function BoxTerminal() {
           <span className="truncate text-sm font-medium">Terminal</span>
           <span className="truncate text-xs text-muted-foreground">
             {name}
-            {/* Starting a box the reaper took runs into seconds, so the wait
-                says what it is waiting for. */}
+            {/* Starting a box that the reaper stopped takes seconds. */}
             {status === 'connecting' ? ' · opening a shell in the box…' : ''}
           </span>
         </div>
@@ -151,16 +147,13 @@ export function BoxTerminal() {
         ) : null}
       </header>
 
-      {/* A working terminal is its own status, and one that is opening says so
-          in the header. */}
       {status === 'closed' ? (
         <Notice className="shrink-0 border-b px-3 py-2" tone="warn">
           {closedText(detail)}
         </Notice>
       ) : null}
 
-      {/* The page's own background, so the area under the last row matches the
-          rows above it. */}
+      {/* The page background matches the terminal's below the last row. */}
       <div ref={host} className="min-h-0 flex-1 overflow-hidden bg-background px-2 py-1" />
     </div>
   );

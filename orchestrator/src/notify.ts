@@ -9,16 +9,7 @@ import {
 import { log } from './log.ts';
 import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';
 
-/**
- * The one place that says "something needs you".
- *
- * One channel: Web Push, which reaches every browser that subscribed,
- * including ones with no tab open.
- *
- * Every send is fire-and-forget. A turn that is waiting on a human must not
- * also be waiting on a push service, so nothing here is ever awaited by the
- * gateway and nothing here throws.
- */
+/** Web Push notifications for the events where a thread needs a person. */
 
 /** Longest a thread title may be in a notification, in characters. */
 const MAX_TITLE = 80;
@@ -28,26 +19,28 @@ export type NotifyKind = 'approval' | 'idle';
 
 /** One thing worth interrupting somebody for. */
 export interface NotifyEvent {
+  /** What happened. */
   kind: NotifyKind;
+  /** The box the thread is in. */
   boxId: string;
+  /** The box's display name. */
   boxName: string;
   /** The dashboard's own thread id, so the notification can link at it. */
   threadId: string | null;
   /** What that conversation is called, or null for an untitled one. */
   threadName: string | null;
   /**
-   * Whether that conversation still has work running in it, for an event that
-   * knows.
-   *
-   * This thread's own work: another conversation in the same box having a
-   * build running says nothing about whether this one is finished.
+   * Whether this thread still has background work running, when the event
+   * knows. Work in other threads of the box does not count.
    */
   background?: boolean;
 }
 
 /** The JSON a service worker receives. */
 interface PushPayload {
+  /** The notification title. */
   title: string;
+  /** The notification text. */
   body: string;
   /**
    * Replaces an earlier notification with the same tag rather than stacking
@@ -59,10 +52,8 @@ interface PushPayload {
 }
 
 /**
- * Title and body for one event.
- *
- * Exported so a test can read it: the payload is encrypted end to end, so
- * what a notification says cannot be checked on the wire.
+ * Title and body for one event. Exported for tests, as the encrypted payload
+ * cannot be read on the wire.
  */
 export function wording(event: NotifyEvent): { title: string; body: string } {
   const where = event.threadName
@@ -74,8 +65,7 @@ export function wording(event: NotifyEvent): { title: string; body: string } {
       body: `${where} is waiting for a permission decision.`,
     };
   }
-  // That something is running, rather than what: a lock screen is not the
-  // place to read a command line.
+  // Says that something runs, not what: a lock screen is no place for a command.
   const still = event.background ? ' Something is still running.' : '';
   return {
     title: 'Boxes: waiting for you',
@@ -84,11 +74,8 @@ export function wording(event: NotifyEvent): { title: string; body: string } {
 }
 
 /**
- * A thread title short enough for a notification.
- *
- * A title is whatever the first prompt was about and can run long, while the
- * whole payload has to fit one encrypted record, and no lock screen shows
- * more than a line of it anyway.
+ * A thread title cut to MAX_TITLE characters. The whole payload must fit one
+ * encrypted record.
  */
 function shortTitle(name: string): string {
   return name.length <= MAX_TITLE ? name : `${name.slice(0, MAX_TITLE - 1)}…`;
@@ -101,19 +88,20 @@ function target(event: NotifyEvent): string {
 
 /** Sends one event to every subscribed browser. */
 export class Notifier {
+  /** The VAPID keypair, or null before first use. */
   private keys: VapidKeys | null = null;
 
   constructor(
+    /** Where the push subscriptions are stored. */
     private readonly db: Db,
+    /** The deployment's configuration. */
     private readonly cfg: Config,
   ) {}
 
   /**
-   * The deployment's VAPID public key, which a browser needs before it can
-   * subscribe at all.
-   *
-   * Generated on first read rather than at boot, so a deployment nobody
-   * subscribes from never writes a keypair to its data volume.
+   * The deployment's VAPID public key, which a browser needs to subscribe.
+   * The first read generates the keypair, so a deployment without subscribers
+   * writes none.
    */
   get publicKey(): string {
     return this.vapid().publicKey;
@@ -126,16 +114,11 @@ export class Notifier {
   }
 
   /**
-   * Sends one event.
+   * Sends one event. It never throws: every failure is logged.
    *
-   * Returns a promise so a test can wait for it, but no caller in the gateway
-   * awaits it: a turn already waiting on a human must not also wait on a push
-   * service. Every failure inside is logged and swallowed.
-   *
-   * Swallowed here because the callers discard this promise, and a rejection
-   * nobody is holding would take the orchestrator down. `sendPush` answers
-   * with a result rather than throwing, but reading the subscriptions,
-   * generating the keypair and pruning a dead row can all fail.
+   * The gateway does not await it, so a turn waiting on a person does not also
+   * wait on a push service. An unhandled rejection would crash the process.
+   * The promise lets a test wait.
    */
   async notify(event: NotifyEvent): Promise<void> {
     try {
@@ -150,25 +133,17 @@ export class Notifier {
   }
 
   /**
-   * Pushes to every subscribed browser, dropping the ones the push service
-   * reports as finished.
-   *
-   * A dead subscription is the normal end of one — the browser was
-   * uninstalled, the permission revoked, Safari expired it — so pruning on a
-   * 404 or 410 is ordinary housekeeping rather than an error path. A key
-   * rotation ends one just as surely, and the row says which key it was made
-   * under, so those go the same way.
+   * Pushes to every subscribed browser. It deletes subscriptions the push
+   * service reports as gone, and those made under another VAPID key.
    */
   private async push(event: NotifyEvent): Promise<void> {
     const stored = listPushSubscriptions(this.db);
-    // Before the keypair is asked for, so a deployment nobody subscribes from
-    // still writes none.
+    // Before the keypair is read, so a deployment without subscribers writes none.
     if (stored.length === 0) return;
 
     const keys = this.vapid();
-    // A subscription made under an earlier key can never be delivered to
-    // again, and a push service refuses it with a status the pruning below
-    // does not read, so it would be retried at every event forever.
+    // One made under another key is refused with a status the gone check
+    // below misses, so without this it would be retried forever.
     const dropped = dropOtherKeySubscriptions(this.db, keys.publicKey);
     if (dropped > 0) {
       log.info('dropped push subscriptions made under an earlier key', { count: dropped });

@@ -9,15 +9,7 @@ import { setLogLevel } from '../log.ts';
 import type { BoxManager } from '../boxes.ts';
 import { attachTerminal } from './terminal.ts';
 
-/**
- * One terminal connection end to end: what reaches the pty, what reaches the
- * browser, what happens when either end goes, and how long the box is held.
- *
- * Docker is a stand-in, so what is under test is the connection's own rules
- * rather than anything a real shell does with the bytes.
- */
-
-// These tests drive the paths the connection narrates, so only failures are
+// The connection logs every path these tests drive, so only errors are
 // written.
 setLogLevel('error');
 
@@ -33,6 +25,7 @@ const MAX_BUFFERED = 1024 * 1024;
 class FakeSocket extends EventEmitter {
   /** The readyState of a socket that can take frames. */
   readonly OPEN = 1;
+  /** The state the socket is in. A close moves it to closed. */
   readyState = 1;
   /** Bytes written to the socket and not taken. */
   bufferedAmount = 0;
@@ -45,20 +38,24 @@ class FakeSocket extends EventEmitter {
   /** True once the connection was dropped without a closing handshake. */
   terminated = false;
 
+  /** Takes one binary frame and leaves its bytes buffered. */
   send(data: Buffer): void {
     this.sent.push(Buffer.from(data));
     this.bufferedAmount += data.length;
   }
 
+  /** Records a close and marks the socket as closed. */
   close(code?: number, reason?: string): void {
     this.closes.push({ code: code ?? 1000, reason: reason ?? '' });
     this.readyState = 3;
   }
 
+  /** Counts a ping. */
   ping(): void {
     this.pings++;
   }
 
+  /** Records that the connection was dropped. */
   terminate(): void {
     this.terminated = true;
   }
@@ -108,8 +105,7 @@ function fakeDocker(): FakePty {
   let killed = false;
   let client = '';
 
-  // What the endpoint writes into the pty, which a PassThrough would otherwise
-  // echo straight back out as if the shell had said it.
+  // Records the endpoint's writes, so they do not come back out as shell output.
   const pty = Object.assign(stream, {
     write: (chunk: Buffer | string): boolean => {
       written.push(Buffer.from(chunk as Buffer));
@@ -118,14 +114,12 @@ function fakeDocker(): FakePty {
   });
 
   dk.setDockerForTests({
-    // The real modem reads the exec's stream; without something draining it,
-    // a short exec here would never report that it had finished.
+    // Drains a short exec's stream, so the exec reports that it finished.
     modem: { demuxStream: (from: PassThrough) => from.resume() },
     getContainer: () => ({
       exec: async (opts: { Cmd: string[]; Tty?: boolean; ConsoleSize?: [number, number] }) => {
         if (!opts.Tty) {
-          // Every short exec the endpoint runs against the box, which is how
-          // it ends the client it started.
+          // A short exec, such as the one that ends this terminal's tmux session.
           ran.push(opts.Cmd);
           const done = new PassThrough();
           queueMicrotask(() => done.end());
@@ -163,6 +157,7 @@ function fakeDocker(): FakePty {
 
 /** What a test's fake manager recorded about the box being held. */
 interface FakeManager {
+  /** The stand-in manager to attach terminals with. */
   manager: BoxManager;
   /** How many terminals the manager currently counts on the box. */
   held: () => number;
@@ -218,8 +213,6 @@ test('a control frame is read as a size, and anything else is not', () => {
 });
 
 test('a size past what a pty can hold is brought back to the ceiling', () => {
-  // The daemon takes two 16-bit numbers, so a browser reporting nonsense
-  // would be passed straight through to it.
   assert.deepEqual(parseTerminalControl('{"type":"resize","cols":99999,"rows":0}'), {
     type: 'resize',
     cols: 500,
@@ -249,15 +242,12 @@ test('typing reaches the pty and its output reaches the browser', async () => {
   await vi.waitFor(() => assert.match(ws.received, /a\.txt/));
 
   assert.equal(pty.typed(), 'ls\r');
-  // Typing is what says the box is in use, and what holds the reaper off once
-  // the terminal is closed again.
   assert.equal(touches(), 1);
   dk.setDockerForTests(null);
 });
 
 test('bytes typed before the shell is there are kept, not dropped', async () => {
-  // Starting a reaped box takes seconds, and a reader who types into the
-  // window before the prompt appears means it.
+  // Starting a reaped box takes seconds.
   const pty = fakeDocker();
   const { manager } = fakeManager();
   const ws = new FakeSocket();
@@ -285,9 +275,8 @@ test('a resize after the shell is open is passed to the pty', async () => {
 });
 
 test('a browser that cannot keep up holds the pty up rather than being dropped', async () => {
-  // A terminal that produces faster than it is drawn is ordinary — a test
-  // run, a `find /`. The pty stops being read, which is the back pressure a
-  // real terminal applies, and the connection stays.
+  // Fast output is ordinary, for example from a test run. The pty stops being
+  // read, and the connection stays.
   const pty = fakeDocker();
   const { manager } = fakeManager();
   const ws = new FakeSocket();
@@ -309,16 +298,14 @@ test('the shell ending closes the browser socket', async () => {
   pty.end();
 
   await vi.waitFor(() => assert.equal(ws.closes.length, 1));
-  // And the box is let go of, so the reaper can have it back.
+  // The hold on the box is released.
   assert.equal(held(), 0);
   dk.setDockerForTests(null);
 });
 
 test('the browser closing ends this terminal shell and lets the box go', async () => {
-  // Docker offers no way to signal a running exec, so dropping the stream on
-  // its own would leave a tmux client attached to the box for good — one more
-  // with every tab anybody ever closed. The session it was started under is
-  // what gets ended, so no other terminal on the box is touched.
+  // Docker cannot signal a running exec, so the endpoint ends the tmux session
+  // this terminal started under. Other terminals on the box keep theirs.
   const pty = fakeDocker();
   const { manager, held } = fakeManager();
   const ws = new FakeSocket();
@@ -335,7 +322,7 @@ test('the browser closing ends this terminal shell and lets the box go', async (
   dk.setDockerForTests(null);
 });
 
-test('two terminals on one box get shells of their own to end', async () => {
+test('two terminals on one box get tmux client sessions of their own', async () => {
   const first = fakeDocker();
   const ws1 = new FakeSocket();
   await attach(ws1, fakeManager().manager);
@@ -358,14 +345,11 @@ test('a box that cannot be reached closes the socket and says why', async () => 
   await vi.waitFor(() => assert.equal(ws.closes.length, 1));
 
   assert.equal(ws.closes[0]?.reason, 'Box has no container');
-  // The hold went up before the box was started, so it has to come down on
-  // the way that never reaches a shell.
+  // The hold is taken before the box starts, so this path must release it.
   assert.equal(held(), 0);
 });
 
 test('a browser that stops answering pings is dropped and the box let go', async () => {
-  // A phone that locked or a laptop that slept leaves a socket TCP will hold
-  // open for far longer than anyone expects, and with it the container.
   vi.useFakeTimers();
   try {
     const pty = fakeDocker();

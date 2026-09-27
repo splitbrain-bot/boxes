@@ -7,24 +7,17 @@ const BEL = '\u0007';
 /**
  * What a terminal would be showing, rebuilt from what was written to it.
  *
- * A UI that redraws itself sends only the cells that changed, stepping the
- * cursor over the ones it is leaving alone. Read by deleting the escape
- * sequences and joining what is left, such a stream loses every character it
- * did not resend: `Please make sure the full code was copied` arrives as
- * `Please makesure the fullcde wascopied`, a word short of its meaning and a
- * letter short of `code`. A token read the same way is a token with a
- * character missing, which is stored, delivered and refused.
- *
- * So the cells are kept instead. Writing moves a cursor over them and leaves
- * characters behind, which is what a terminal does, and {@link text} is what
- * one would be showing. Only the movements these CLIs use are understood;
- * anything else is skipped, because a sequence that draws nothing cannot
- * change what is on the screen.
+ * A UI that redraws itself sends only the changed cells and moves the cursor
+ * over the rest. Stripping the escape sequences would lose every character it
+ * did not resend, so the cells are kept instead. Only the cursor movements and
+ * erases the login CLIs use are understood. Other sequences are skipped.
  */
 export class Screen {
   /** The cells, by row. Short rows end where they end rather than in spaces. */
   private readonly rows: string[][] = [];
+  /** The cursor row, from 0. */
   private row = 0;
+  /** The cursor column, from 0. */
   private col = 0;
   /** A partial escape sequence, held until the rest of it arrives. */
   private pending = '';
@@ -63,10 +56,8 @@ export class Screen {
   }
 
   /**
-   * Everything on the screen, one line per row and trailing blanks dropped.
-   *
-   * Rows nothing was ever written to are empty lines, which is what they look
-   * like.
+   * Everything on the screen, one line per row, with trailing blanks dropped.
+   * Rows never written to are empty lines.
    */
   get text(): string {
     return this.rows
@@ -83,10 +74,8 @@ export class Screen {
   }
 
   /**
-   * Reads one escape sequence and acts on it, answering how long it was.
-   *
-   * Null when the sequence is not all here yet, which is the caller's signal
-   * to hold what is left of the chunk until the rest arrives.
+   * Reads one escape sequence, acts on it, and returns its length. Returns
+   * null when the rest of the sequence has not arrived yet.
    */
   private escape(text: string, at: number): number | null {
     const next = text[at + 1];

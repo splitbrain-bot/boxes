@@ -17,21 +17,10 @@ import { BoxManager } from '../boxes.ts';
 import type { DownstreamHandle } from './upstream.ts';
 import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 
-// A turn is announced when the thread it ran on has gone quiet, not when the
-// prompt comes back — so these tests have to wait one out. Turned down to the
-// shortest the config allows, before anything reads it.
+// A turn is announced once its thread has gone quiet, so these tests wait for
+// that. Set to the shortest the config allows, before anything reads it.
 process.env['AGENT_QUIET_SECONDS'] = '1';
 process.env['AGENT_SETTLE_SECONDS'] = '1';
-
-/**
- * The upstream's spawn path against an adapter that answers for real, with
- * only the Docker socket faked.
- *
- * What matters here is what happens to the stored threads when the adapter no
- * longer holds one. The agent SDK writes a transcript only once a prompt has
- * run, so a thread minted and never prompted does not survive the adapter
- * restarting — and that must cost the box only that one thread.
- */
 
 /** One frame of a Docker-multiplexed stream, on stdout. */
 function frame(text: string): Buffer {
@@ -43,13 +32,14 @@ function frame(text: string): Buffer {
 }
 
 /**
- * An error the stand-in answers with, by its JSON-RPC code.
- *
- * A plain Error is the missing-resource answer every existing test wants; this
- * is for the ones that turn on *which* refusal it is — an adapter with no
- * account refuses with -32000 and a sentence, and that is not a spawn failure.
+ * An error the stand-in answers with, carrying its own JSON-RPC code. A plain
+ * Error answers with -32002, the missing-resource code.
  */
 class RpcError extends Error {
+  /**
+   * @param code The JSON-RPC error code.
+   * @param message The error message.
+   */
   constructor(
     readonly code: number,
     message: string,
@@ -60,8 +50,11 @@ class RpcError extends Error {
 
 /** A JSON-RPC frame, in either direction. */
 interface Rpc {
+  /** The request id, absent on a notification. */
   id?: number | string;
+  /** The method of a request or notification. */
   method?: string;
+  /** The params of a request or notification. */
   params?: Record<string, unknown>;
 }
 
@@ -71,10 +64,12 @@ interface Rpc {
  * Docker frames.
  */
 class FakeAdapter extends Duplex {
+  /** Text written to the stand-in and not yet split into lines. */
   private buffer = '';
   /** Methods the orchestrator sent, in order. */
   readonly seen: string[] = [];
 
+  /** @param answer Produces the result for each request, or an Error to refuse it. */
   constructor(private readonly answer: (msg: Rpc) => unknown | Promise<unknown>) {
     super();
   }
@@ -83,6 +78,7 @@ class FakeAdapter extends Duplex {
     // Answers are pushed as they are produced.
   }
 
+  /** Splits what the orchestrator writes into lines and handles each one. */
   override _write(chunk: Buffer, _enc: string, done: (err?: Error) => void): void {
     this.buffer += chunk.toString('utf8');
     let cut = this.buffer.indexOf('\n');
@@ -100,6 +96,7 @@ class FakeAdapter extends Duplex {
     this.push(frame(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`));
   }
 
+  /** Answers one request line. Notifications get no answer. */
   private handle(line: string): void {
     const msg = JSON.parse(line) as Rpc;
     if (msg.id === undefined || !msg.method) return;
@@ -119,32 +116,22 @@ class FakeAdapter extends Duplex {
 }
 
 /**
- * Installs a fake Docker whose adapter exec is the given stand-in.
- *
- * A function rather than an instance builds a fresh one per exec, which is
- * what a respawn needs: killing an exec destroys its stream, so an adapter
- * that has been torn down cannot answer the connection that replaces it.
- */
-/**
  * What `docker top` reports for the fake box, which is how the gateway learns
- * whether anything is still running in it. Written parent-first: the adapter
- * Boxes launched, an agent under it, and whatever the agent is running.
+ * whether anything is still running in it. Written parent-first: the init,
+ * the adapter Boxes launched, and the agent under it.
  */
 const BASE_PROCESSES: string[][] = [
   ['1', '0', '/sbin/docker-init'],
   ['19', '1', 'node /usr/local/bin/claude-agent-acp'],
-  // The agent process says which conversation it is running, which is how
-  // work found under it reaches that thread and no other.
-  ['100', '19', 'claude --output-format stream-json --box-id=acp-gone'],
+  ['100', '19', 'claude --output-format stream-json --session-id=acp-gone'],
 ];
 
 /** The box as this test is pretending to find it. Reset for every one. */
 let processes: string[][] = [...BASE_PROCESSES];
 
 /**
- * What the box's own `ps` would print, which is not what `docker top` prints:
- * the pids are the container's own numbering. Only the command lines are the
- * same in both, which is why they are what a stop is asked for.
+ * What the box's own `ps` would print. Its pids are the container's own
+ * numbering, unlike those of `docker top`, so a stop kills by these.
  */
 let insideProcesses: string[][] = [];
 
@@ -165,22 +152,28 @@ let containerRunning = true;
 /** Every line the logger wrote during a test. */
 let written: string[] = [];
 
-/** A stand-in adapter, or a fresh one per spawn where a respawn is the point. */
+/**
+ * A stand-in adapter, or a function that builds a fresh one per exec. A
+ * respawn needs a fresh one, because killing an exec destroys its stream.
+ */
 type Standin = FakeAdapter | (() => FakeAdapter);
 
 /**
  * What each adapter command in the box answers as.
  *
- * Keyed by the argv the registry spawns that harness with, because that is
- * what the orchestrator hands `docker exec` and the only thing in the call
- * that says which adapter is wanted. One stand-in on its own answers whatever
- * is spawned, which is every test from before a box could run two.
+ * Keyed by the argv the registry spawns that harness with, because it is the
+ * only part of the `docker exec` call that says which adapter is wanted. One
+ * stand-in on its own answers whatever is spawned.
  */
 type Standins = Standin | Record<string, Standin>;
 
-/** How many adapter execs have been started, by the command each ran. */
+/** The command of every adapter exec started, in order. */
 let spawned: string[] = [];
 
+/**
+ * Installs a fake Docker whose adapter execs are the given stand-ins, and
+ * whose short `ps` and `kill` execs read and record the box.
+ */
 function fakeDocker(adapter: Standins): void {
   const byCommand =
     typeof adapter === 'function' || adapter instanceof FakeAdapter
@@ -200,7 +193,7 @@ function fakeDocker(adapter: Standins): void {
       top: async () => ({ Titles: ['PID', 'PPID', 'COMMAND'], Processes: processes }),
       exec: async (opts: { Cmd?: string[] }) => {
         const cmd = opts?.Cmd ?? [];
-        // The stop's two calls. Everything else is the adapter, which is a
+        // The stop's two calls. Everything else is an adapter, which is a
         // long-lived stream rather than a command with an answer.
         if (cmd[0] === 'ps') {
           const rows = insideProcesses.map(([pid, ppid, args]) => `${pid} ${ppid} ${args}`);
@@ -234,11 +227,12 @@ function fakeDocker(adapter: Standins): void {
 let dir: string;
 let db: Db;
 let manager: BoxManager;
-/** Every event the gateway announced, in order; see notifications below. */
+/** Every event the gateway announced, in order. */
 let announced: NotifyEvent[];
 
 /** A notifier that records instead of sending. */
 class RecordingNotifier extends Notifier {
+  /** Records the event. */
   override async notify(event: NotifyEvent): Promise<void> {
     announced.push(event);
   }
@@ -322,7 +316,7 @@ function fakeHandle(
     lastActiveAt: Date.now(),
     asked: [] as unknown[],
     told: [] as unknown[],
-    /** How each replay this browser read was said to have turned out. */
+    /** Every replay notice this browser was sent. */
     replays: [] as ReplayParams[],
     closed: 0,
     notify(this: { told: unknown[]; replays: ReplayParams[] }, method, params) {
@@ -390,9 +384,9 @@ function permissionFrame(acpThreadId: string, id = 9000): Buffer {
 test('a thread the adapter has forgotten is re-minted, and the others are left alone', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
-    // The stored thread has no transcript on disk, which is what the adapter
-    // reports as a missing resource.
-    if (msg.method === 'session/load') return new Error('Box not found');
+    // The stored thread was never prompted, so the SDK wrote no transcript.
+    // The adapter reports that as a missing resource.
+    if (msg.method === 'session/load') return new Error('Session not found');
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
   });
@@ -444,7 +438,7 @@ test('a box with no thread yet gets its first one recorded', async () => {
 });
 
 test('every conversation is created asking for Fable and readable thinking', async () => {
-  /** The `_meta` each box-creating call carried. */
+  /** The `_meta` each session/load and session/new carried. */
   const meta: Array<{ method: string; meta: unknown }> = [];
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
@@ -456,7 +450,7 @@ test('every conversation is created asking for Fable and readable thinking', asy
     }
     // The stored thread is gone, so both paths run: a load that fails and
     // the fresh conversation that replaces it.
-    if (msg.method === 'session/load') return new Error('Box not found');
+    if (msg.method === 'session/load') return new Error('Session not found');
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
   });
@@ -464,10 +458,8 @@ test('every conversation is created asking for Fable and readable thinking', asy
 
   await manager.upstream('s1').ensureStarted();
 
-  // Without `model`, the adapter offers only what the account's plan covers
-  // and the picker has no Fable in it. Without `display`, a current model
-  // streams thinking blocks with no text in them and the dashboard has no
-  // reasoning to show.
+  // `model` puts Fable in the picker, which the account's plan alone does not.
+  // `display` makes a current model put text in its thinking blocks.
   const wanted = {
     claudeCode: {
       options: {
@@ -494,8 +486,7 @@ test('forking is offered only when the adapter advertises the capability', async
   fakeDocker(withFork);
 
   const up = manager.upstream('s1');
-  // Per harness, because the answer is per adapter: a box may run two, and
-  // each says for itself. Nothing is claimed for either before it is reached.
+  // Per harness: a box may run two adapters, and each answers for itself.
   assert.equal(up.canFork('claude'), false, 'nothing is claimed before the adapter is reached');
   assert.equal(up.canFork('codex'), false);
   await up.ensureStarted();
@@ -552,8 +543,7 @@ test('a thread with no title is named after the prompt sent on it', async () => 
   assert.equal(thread('t1')['title'], 'Make the proxy stop');
   assert.equal(thread('t2')['title'], null, 'only the thread prompted is named');
 
-  // What comes next says nothing about what the thread is called: a name it
-  // already has is the agent's to replace, not the next prompt's.
+  // A later prompt does not rename the thread. Only the agent replaces a name.
   await up.forwardRequest('session/prompt', {
     sessionId: 'acp-gone',
     prompt: [{ type: 'text', text: 'and the headers' }],
@@ -629,11 +619,6 @@ test('forking a thread of another box is a 404 rather than a fork', async () => 
   );
 });
 
-/**
- * Threads in parallel: what has to be true for one thread to keep working
- * while another is used to explore it.
- */
-
 test('a prompt sets the running-turn flag on its own thread and no other', async () => {
   let releasePrompt = (): void => {};
   const held = new Promise<Record<string, never>>((resolve) => {
@@ -641,8 +626,7 @@ test('a prompt sets the running-turn flag on its own thread and no other', async
   });
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
-    // The turn does not end until the test lets it, which is what "one thread
-    // keeps working" looks like from here.
+    // The turn ends only when the test releases it.
     if (msg.method === 'session/prompt') return held;
     return {};
   });
@@ -684,8 +668,7 @@ test('a permission request goes to a browser watching the thread that asked', as
   const exploring = fakeHandle(2, 'acp-kept');
   up.attach(working);
   up.attach(exploring);
-  // The most recently active browser overall is on the other thread, which is
-  // exactly the case that used to pick the wrong one.
+  // The most recently active browser overall is on the other thread.
   exploring.lastActiveAt = Date.now() + 1000;
 
   adapter.push(permissionFrame('acp-gone'));
@@ -709,13 +692,12 @@ test('a permission request queues when only another thread has a browser', async
 
   adapter.push(permissionFrame('acp-gone'));
 
-  // Nobody is looking at the thread that asked, so it waits, exactly as it
-  // does with no browser attached at all. A question about one conversation
-  // cannot be answered from another's transcript.
+  // Nobody watches the thread that asked, so the request waits, as it does
+  // with no browser attached at all.
   await expect.poll(() => manager.pending.countForBox('s1')).toBe(1);
   assert.equal(elsewhere.asked.length, 0);
-  // And it is counted against the thread that asked, which is what the badge
-  // on that thread's row reads.
+  // It counts against the thread that asked, which the badge on that
+  // thread's row reads.
   assert.deepEqual(
     (await manager.detail('s1')).threads.map((t) => t.pendingCount),
     [1, 0],
@@ -765,15 +747,12 @@ test('a question one browser answers is taken back from the other', async () => 
   up.attach(answering);
   up.flushPendingTo(answering);
 
-  // So the other one is told the question is over rather than left showing a
-  // card whose answer would be thrown away.
+  // The other browser gets the question withdrawn.
   await expect.poll(() => waiting.withdrawn).toBe(1);
 });
 
 test('a respawn re-issues session/load for every watched thread', async () => {
   const loaded: string[] = [];
-  // A fresh stand-in per spawn, because the first one's stream is destroyed
-  // when the adapter it stands in for goes away.
   fakeDocker(
     () =>
       new FakeAdapter((msg) => {
@@ -789,13 +768,11 @@ test('a respawn re-issues session/load for every watched thread', async () => {
   await up.ensureStarted();
   assert.deepEqual(loaded, ['acp-gone']);
 
-  // A browser on the thread that is not the box's default. Without the
-  // reload below, its next prompt would name a thread the adapter has never
-  // heard of.
+  // A browser on the thread that is not the box's default.
   up.attach(fakeHandle(1, 'acp-kept'));
 
-  // The adapter dies and comes back. The browsers' own sockets are to the
-  // gateway, not to it, so nothing on their side notices or re-handshakes.
+  // The adapter dies and comes back. The browsers' sockets go to the gateway,
+  // so nothing on their side notices.
   up.stop();
   await up.ensureStarted();
 
@@ -812,7 +789,7 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
           // The default thread always comes back; the watched one is gone by
           // the time the adapter restarts.
           if (msg.params?.['sessionId'] === 'acp-kept' && firstLoadDone) {
-            return new Error('Box not found');
+            return new Error('Session not found');
           }
           return {};
         }
@@ -847,7 +824,7 @@ test('a respawn that re-mints the latest thread drops the browsers on its old id
           // adapter restarts, so its stored id is re-minted rather than
           // loaded back.
           if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
-            return new Error('Box not found');
+            return new Error('Session not found');
           }
           return {};
         }
@@ -913,14 +890,14 @@ test('pinning to a thread the adapter has forgotten mints one for it', async () 
   const handle = fakeHandle(1, null);
   up.attach(handle);
 
-  // There is no transcript to lose, so a fresh conversation in that row is
-  // the whole repair — and the id the connection pins is a live one.
+  // No transcript is lost, so a fresh conversation in that row repairs it,
+  // and the pinned id is a live one.
   assert.equal(await up.pin(handle, 't2'), 'acp-minted');
   assert.equal(thread('t2')['acp_session_id'], 'acp-minted');
 });
 
 test('a fork starts in plan mode where a fresh thread starts in auto', async () => {
-  const modeSet: Array<{ box: unknown; mode: unknown }> = [];
+  const modeSet: Array<{ session: unknown; mode: unknown }> = [];
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') {
       return {
@@ -935,7 +912,7 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh', modes };
     if (msg.method === 'session/fork') return { sessionId: 'acp-branch', modes };
     if (msg.method === 'session/set_mode') {
-      modeSet.push({ box: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
+      modeSet.push({ session: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
       return {};
     }
     return {};
@@ -948,8 +925,8 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
   // The fork shares the source's checkout, so it starts somewhere that reads
   // rather than writes. It is the user's choice from then on.
   assert.deepEqual(modeSet, [
-    { box: 'acp-fresh', mode: 'auto' },
-    { box: 'acp-branch', mode: 'plan' },
+    { session: 'acp-fresh', mode: 'auto' },
+    { session: 'acp-branch', mode: 'plan' },
   ]);
 });
 
@@ -1010,7 +987,7 @@ test('a respawn puts a loaded thread back in the mode it was left in', async () 
   await up.ensureStarted();
 
   // t1 is stored with an adapter id, so the spawn loads it rather than
-  // minting it — and a load used to be where the mode was lost.
+  // minting it.
   assert.deepEqual(asked, ['mode auto', 'model opus']);
 
   // The user switches to plan, the way the header does: a request the adapter
@@ -1037,7 +1014,7 @@ test("a respawn honours the adapter's own mode change over the last one asked fo
   await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'plan' });
 
   // An adapter leaves plan mode by itself once a plan is accepted, and says
-  // so. Where the thread comes back is where it actually ended up.
+  // so.
   adapter.notify({ sessionUpdate: 'current_mode_update', currentModeId: 'auto' });
   await expect.poll(() => thread('t1')['mode_id']).toBe('auto');
 
@@ -1055,16 +1032,15 @@ test('a respawn puts a loaded thread back on the model it was left on', async ()
   const up = manager.upstream('s1');
   await up.ensureStarted();
 
-  // Which option is the model is its category, never the adapter's id for
-  // it, so this is a change reported the way a real one is.
+  // The gateway finds the model option by its category, not by its id.
   adapter.notify({
     sessionUpdate: 'config_option_update',
     configOptions: [{ id: 'model', category: 'model', currentValue: 'sonnet' }],
   });
   await expect.poll(() => thread('t1')['config']).toBe('{"model":"sonnet"}');
 
-  // Left on sonnet, so it comes back on sonnet: the harness's default is for a
-  // thread nobody has chosen for, not an answer that overrides one.
+  // Left on sonnet, so it comes back on sonnet. The harness default applies
+  // only to a thread nobody has chosen a model for.
   asked.length = 0;
   up.stop();
   await up.ensureStarted();
@@ -1097,20 +1073,20 @@ function twoThreadAdapter(asked: string[], gone: Set<string> = new Set()): () =>
   });
   return () =>
     new FakeAdapter((msg) => {
-      const box = String(msg.params?.['sessionId'] ?? '');
+      const session = String(msg.params?.['sessionId'] ?? '');
       if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
       if (msg.method === 'session/new') return { sessionId: 'acp-minted', ...state() };
       if (msg.method === 'session/load') {
-        if (gone.has(box)) return new Error('no transcript for that box');
-        asked.push(`load ${box}`);
+        if (gone.has(session)) return new Error('no transcript for that session');
+        asked.push(`load ${session}`);
         return state();
       }
       if (msg.method === 'session/set_mode') {
-        asked.push(`mode ${box} ${String(msg.params?.['modeId'])}`);
+        asked.push(`mode ${session} ${String(msg.params?.['modeId'])}`);
         return {};
       }
       if (msg.method === 'session/set_config_option') {
-        asked.push(`model ${box} ${String(msg.params?.['value'])}`);
+        asked.push(`model ${session} ${String(msg.params?.['value'])}`);
         return {};
       }
       return {};
@@ -1135,9 +1111,7 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
   up.attach(handle);
   assert.equal(await up.pin(handle, 't2'), 'acp-kept');
 
-  // Opening it is what brings it up. Handing back the stored id instead left
-  // the browser's own session/load to rebuild the thread, which the adapter
-  // does in its own mode — manual approvals on a thread left in auto.
+  // Opening it brings it up in its stored mode and model.
   assert.deepEqual(asked, ['load acp-kept', 'mode acp-kept auto', 'model acp-kept opus']);
 
   // A second tab on the same thread joins the one the adapter is holding.
@@ -1316,7 +1290,7 @@ test('a fork whose source is gone too is started empty rather than left unpinnab
       branches += 1;
       // The first branch is the fork itself. By the second the adapter has
       // restarted, and the source turns out to have had no transcript either.
-      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Box not found');
+      return branches === 1 ? { sessionId: 'acp-branch' } : new Error('Session not found');
     }
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     return {};
@@ -1332,17 +1306,6 @@ test('a fork whose source is gone too is started empty rather than left unpinnab
   // to anything at all.
   assert.equal(await up.pin(handle, created.id), 'acp-fresh');
 });
-
-// --- notifications ----------------------------------------------------------
-
-/**
- * What the gateway announces, and when.
- *
- * Both events are gated on the same thing — nobody is watching that thread —
- * because both exist for the same moment: the browser is gone and the box
- * still wants something. A notification for a turn you are looking at is
- * noise, and noise is what gets notifications turned off.
- */
 
 /** An adapter that answers everything, with prompts finishing immediately. */
 function plainAdapter(): FakeAdapter {
@@ -1409,12 +1372,11 @@ test('a browser that says how much it has is sent only the rest', async () => {
     reader,
   );
 
-  // The phone on a bad link paid for the tail, not for the conversation. The
-  // message it named comes with the tail because it drops that one and takes
-  // it again, which is what makes the model the same either way.
+  // The message the browser named comes again with the tail, because a socket
+  // can drop partway through a message.
   assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
-  // Answered from the log the spawn filled. The adapter was asked for the
-  // thread once, on the way up, and not again for this browser.
+  // Answered from the log the spawn filled. The adapter loaded the thread
+  // once, on the way up.
   assert.deepEqual(loaded, ['acp-gone', 'acp-kept']);
   assert.deepEqual(
     reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
@@ -1441,9 +1403,8 @@ test('a resume point the transcript no longer holds is answered with all of it',
     reader,
   );
 
-  // A tail with a hole in front of it is worse than a slow replay, so the
-  // whole thread goes out instead — and the browser is told before any of it
-  // lands that it has to rebuild.
+  // The whole thread goes out, and the browser learns before any of it lands
+  // that it has to rebuild.
   assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
   assert.deepEqual(
     reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
@@ -1487,9 +1448,8 @@ test('a browser reconnecting mid-turn is sent the rest of the turn as well', asy
   });
   await expect.poll(() => up.speakingThreads).toEqual(['acp-kept']);
 
-  // Back, holding the thread as far as m2. The adapter is not asked to
-  // replay it: the log has the turn's chunk along with the transcript, and
-  // a replay arriving now would be mixed into whatever the turn says next.
+  // Back, holding the thread up to m2. The log holds the turn's chunk as well
+  // as the transcript, so the adapter is not asked to replay it.
   up.attach(reader);
   await up.forwardRequest(
     'session/load',
@@ -1575,6 +1535,8 @@ test('a fork borrowing a transcript is told once that it is rebuilding', async (
   assert.equal(reader.told.length, 1);
 });
 
+// --- notifications ----------------------------------------------------------
+
 test('a turn that finishes with nobody watching is announced, naming the thread', async () => {
   fakeDocker(plainAdapter());
   const up = manager.upstream('s1');
@@ -1585,8 +1547,8 @@ test('a turn that finishes with nobody watching is announced, naming the thread'
     prompt: [{ type: 'text', text: 'go' }],
   });
 
-  // Not on the prompt coming back: that says the request is over, which is
-  // not the same as the agent having finished — see gateway/activity.ts.
+  // Not when the prompt comes back: that ends the request, not the agent's
+  // work.
   assert.deepEqual(announced, []);
   await expect.poll(() => announced.length, { timeout: 5000 }).toBe(1);
   assert.deepEqual(announced, [
@@ -1594,15 +1556,12 @@ test('a turn that finishes with nobody watching is announced, naming the thread'
       kind: 'idle',
       boxId: 's1',
       boxName: 'test',
-      // The dashboard's own id, so the notification can link straight at the
-      // conversation rather than at the box.
+      // The dashboard's own id, so the notification can link to the thread.
       threadId: 't1',
-      // The agent's own title lands at the end of the turn, so what names
-      // the thread here is the prompt that started it — the same name the
-      // box list shows.
+      // The agent's title lands at the end of the turn, so the prompt names
+      // the thread here, as in the box list.
       threadName: 'go',
-      // Nothing was left running, which is what makes this a turn somebody
-      // can come back to at their leisure.
+      // No task was left running.
       background: false,
     },
   ]);
@@ -1697,8 +1656,7 @@ test('a tapped image block is logged without its base64 payload', async () => {
       status: 'completed',
       content: [
         { type: 'content', content: { type: 'image', mimeType: 'image/png', data } },
-        // A terminal's output lives under `data` too, and is exactly what
-        // somebody reads this log for.
+        // A terminal's output also sits under `data`, and must stay.
         { type: 'terminal', terminalId: 'term-1' },
       ],
       _meta: { terminal_output: { terminal_id: 'term-1', data: 'ok 1\nok 2' } },
@@ -1714,8 +1672,8 @@ test('a tapped image block is logged without its base64 payload', async () => {
   await expect.poll(tapped).toBeDefined();
   const logged = tapped()!;
 
-  // The bytes are gone, their size is not, and the line is nowhere near the
-  // truncation that would otherwise have eaten it.
+  // The bytes are gone, their size is kept, and the line stays far below the
+  // truncation.
   assert.ok(!logged.includes(data.slice(0, 200)), 'the payload is not in the log');
   assert.ok(logged.includes('[100000 base64 chars omitted]'), 'its size is');
   assert.ok(logged.includes('image/png'), 'and so is its type');
@@ -1735,7 +1693,7 @@ test('nothing is tapped unless the log level asks for it', async () => {
   const up = manager.upstream('s1');
   await up.ensureStarted();
 
-  // At the default level the tap does not even serialize the message.
+  // At the default level the tap returns before it serializes the message.
   adapter.notify('session/update', {
     sessionId: 'acp-gone',
     update: { sessionUpdate: 'tool_call_update', toolCallId: 'tc-quiet', status: 'completed' },
@@ -1759,10 +1717,9 @@ test('work the agent leaves running in the background holds the reaper off', asy
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
 
-  // The turn backgrounds a command and ends. Nothing else about the box
-  // says so: no browser is attached and no turn is running, and the task the
-  // adapter announced went with the process that announced it. What says so is
-  // the shell, which is still there.
+  // The turn backgrounds a command and ends. No browser is attached, no turn
+  // runs and no task is announced. Only the shell in the process table shows
+  // the work.
   processes = [
     ...processes,
     ['200', '100', "/bin/bash -c source ~/.claude/shell-snapshots/s.sh && eval 'npm run build'"],
@@ -1770,9 +1727,8 @@ test('work the agent leaves running in the background holds the reaper off', asy
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, true);
 
-  // An hour later the build is over. Nothing reported it — this is the case
-  // events cannot see, because they wait to be told — and the box is idle
-  // again on the next reading.
+  // The build ends without any event, and the next reading finds the box
+  // idle.
   processes = processes.filter((p) => p[0] !== '200');
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
@@ -1802,10 +1758,6 @@ function taskSpawned(acpThreadId: string, id: string, name: string): unknown {
 }
 
 test('a task the adapter announces belongs to the thread it names', async () => {
-  // The bug this shape exists for: one boolean about the whole box, sent to
-  // every conversation in it. A command left running by one thread said
-  // "something is still running" on a thread opened a minute later, with a
-  // stop button beside it that could not have reached the work.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1831,8 +1783,7 @@ test('a task the adapter announces belongs to the thread it names', async () => 
   ]);
   // The other conversation of the same box is told nothing.
   assert.deepEqual(up.threadState('acp-kept').background, []);
-  // And the browser watching was told without asking, because a bar above a
-  // composer is a standing fact rather than something in the transcript.
+  // The watching browser is told without asking.
   const told = watcher.told.filter(
     (params) => Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
@@ -1857,7 +1808,7 @@ test('a task that ends takes its own bar away', async () => {
   adapter.notify('session/update', taskSpawned('acp-gone', 'task-1', 'npm run build'));
   await expect.poll(() => up.threadState('acp-gone').background.length).toBe(1);
 
-  // `running` says the same thing again, and says nothing.
+  // A running state changes nothing.
   adapter.notify('session/update', {
     sessionId: 'acp-gone',
     update: { sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'running' },
@@ -1874,10 +1825,7 @@ test('a task that ends takes its own bar away', async () => {
 });
 
 test('an adapter that dies drops its tasks and re-sends the threads it had', async () => {
-  // Neither adapter re-announces the tasks of a process that has died, so a
-  // bar left standing would name something nothing can stop. What the dead
-  // process left running is the reading's to find and the box-wide stop's to
-  // kill.
+  // Neither adapter re-announces the tasks of a process that has died.
   let live!: FakeAdapter;
   fakeDocker(() => {
     live = new FakeAdapter((msg) => {
@@ -1903,9 +1851,7 @@ test('an adapter that dies drops its tasks and re-sends the threads it had', asy
 });
 
 test('the box list says which thread is holding the box awake', async () => {
-  // The list shows every conversation of a box at once, and the two answers
-  // it carries are different questions: the box is busy, and this thread is
-  // the one running something.
+  // The box is busy, and this thread is the one running something.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1931,9 +1877,8 @@ test('the box list says which thread is holding the box awake', async () => {
 });
 
 test('a box busy with work no thread claims is still busy', async () => {
-  // What every adapter restart leaves behind, and the state the box-level
-  // stop exists for: the card says the box is running something and no thread
-  // of it can say what. Reading it as idle would suspend the build.
+  // Every adapter restart can leave this behind. Reading it as idle would
+  // suspend the build.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1954,10 +1899,8 @@ test('a box busy with work no thread claims is still busy', async () => {
 });
 
 test('a box nobody has opened is idle, so the reaper can have it', async () => {
-  // Boxes keeps no adapter in a container between connections, so this is
-  // what an untouched running box looks like: the entrypoint and nothing
-  // else. It read as a shape that could not be understood, which counted as
-  // busy — a badge on the card and a box the reaper would never stop.
+  // Boxes keeps no adapter in a container between connections, so an
+  // untouched running box runs only the entrypoint.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -1974,11 +1917,6 @@ test('a box nobody has opened is idle, so the reaper can have it', async () => {
 });
 
 test('a box that is not up has nothing running in it, and says so', async () => {
-  // The two ways of having nothing to read arrived here as the same empty
-  // process table: a box that is down, and a box that would not answer. The
-  // second counts as busy, so every stopped box that the orchestrator
-  // still had in memory said "still running" — on the card, forever, with no
-  // thread able to say what was.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2011,9 +1949,7 @@ test('stopping a box stops it claiming work, without waiting for a reading', asy
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, true);
 
-  // The box is going away and what was in it goes with it, so the answer is
-  // known without asking. Waiting for the next reading would leave the badge
-  // on a box that has just been shut down.
+  // The box is going away, so the answer is known without a reading.
   up.stop();
   assert.equal(up.backgroundActive, false);
 });
@@ -2037,8 +1973,8 @@ test('stopping one task names it to the adapter that is running it', async () =>
   adapter.notify('session/update', taskSpawned('acp-gone', 'task-2', 'npm run watch'));
   await expect.poll(() => up.threadState('acp-gone').background.length).toBe(2);
 
-  // A kill and not a cancel, and the adapter's own: the task is named by the
-  // id it announced, on the connection holding that conversation.
+  // The adapter gets the task id it announced, on the connection that holds
+  // the conversation.
   assert.equal(await up.stopBackgroundWork('acp-gone', 'task-2'), 1);
   assert.deepEqual(stops, [{ sessionId: 'acp-gone', asyncTaskId: 'task-2' }]);
   // And nothing is signalled in the box: the adapter stops what it started.
@@ -2075,9 +2011,8 @@ test('a stop with no task named stops everything that thread is running', async 
 });
 
 test('a task that was already over is taken off the bar anyway', async () => {
-  // `stopped: false` is the adapter saying the task finished between the
-  // reading the browser is showing and the button being pressed. No state
-  // update is coming for it, so the bar catches up here or never.
+  // The adapter answers `stopped: false` for a task that finished before the
+  // stop. No state update is coming for it.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === '_session/async_task/stop') return { stopped: false };
@@ -2101,9 +2036,7 @@ test('a task that was already over is taken off the bar anyway', async () => {
 });
 
 test("a stop goes to the thread's own adapter, and reaches no other", async () => {
-  // Two adapters over one checkout, each running tasks of its own. A stop
-  // routed to the wrong one would name a box that adapter has never heard
-  // of, and leave the work running.
+  // Two adapters over one checkout, each running tasks of its own.
   seedThread('t3', 'codex', 'cx-1', 3);
   const seen: string[] = [];
   const stops = (msg: Rpc): unknown =>
@@ -2135,9 +2068,8 @@ test("a stop goes to the thread's own adapter, and reaches no other", async () =
 });
 
 test('the box-level stop kills everything the box is running, leaves first', async () => {
-  // The floor's own stop, for work no task claims. After a respawn the bars
-  // are empty and the box is still compiling; a signal is the only thing left
-  // that can reach it.
+  // For work no task claims. After a respawn the bars are empty while the
+  // box still compiles, and only a signal can reach the work.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2147,14 +2079,13 @@ test('the box-level stop kills everything the box is running, leaves first', asy
   const up = manager.upstream('s1');
   await up.ensureStarted();
 
-  // The box read from inside: the same commands under numbers of its own.
-  // `docker top` reports the host's pids, and a kill in here would otherwise
-  // be aimed at whatever the host happens to run at 200.
+  // The box read from inside: the same commands under the container's own
+  // pids. A kill in the box cannot use the host pids of `docker top`.
   insideProcesses = [
     ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
     ['7', '1', 'sleep infinity'],
     ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
-    ['13', '12', 'claude --output-format stream-json --box-id=acp-gone'],
+    ['13', '12', 'claude --output-format stream-json --session-id=acp-gone'],
     ['14', '13', shell('npm run build')],
     ['15', '14', 'node .../vite build'],
     // The other harness's tree, in the same box: its adapter, the app-server
@@ -2167,9 +2098,8 @@ test('the box-level stop kills everything the box is running, leaves first', asy
   ];
 
   assert.equal(await up.stopBoxWork(), 3);
-  // Leaves before what spawned them: a parent killed first hands its children
-  // to init, still running and no longer in any reading. Neither adapter,
-  // neither agent and nothing of the entrypoint's is in it.
+  // Leaves first. The adapters, the agents and the entrypoint are not
+  // signalled.
   assert.deepEqual(killed, [['-TERM', '15', '14', '22']]);
 });
 
@@ -2191,9 +2121,8 @@ test('a box-level stop over an empty box signals nothing', async () => {
 });
 
 test('a prompt held open for background work is not the agent still talking', async () => {
-  // The shape this whole distinction exists for: the adapter defers the
-  // prompt's result until what the turn started settles, so the request stays
-  // open long after the agent has said its piece.
+  // The adapter holds the prompt's result until the work the turn started
+  // settles, so the request stays open after the agent has stopped.
   let finish!: (result: unknown) => void;
   const held = new Promise<unknown>((resolve) => {
     finish = resolve;
@@ -2214,10 +2143,8 @@ test('a prompt held open for background work is not the agent still talking', as
     sessionId: 'acp-gone',
     prompt: [{ type: 'text', text: 'build it' }],
   });
-  // Forwarding one is enough to say the agent is working: the browser that
-  // sent it should not have to wait out the model's first token. (Polled
-  // rather than read: forwarding starts by awaiting the connection, so the
-  // prompt reaches the adapter a microtask after the call returns.)
+  // The forwarded prompt marks the agent as working before its first token.
+  // Polled, because forwarding first awaits the connection.
   await expect.poll(() => up.threadState('acp-gone').speaking).toBe(true);
 
   adapter.notify('session/update', {
@@ -2239,13 +2166,11 @@ test('a prompt held open for background work is not the agent still talking', as
     },
   });
 
-  // And then it stops. The request is still open, and nothing about it says
-  // so — which is the entire bug: silence, and a bit that reads "running".
+  // Then the agent stops, and the request stays open.
   await expect.poll(() => up.threadState('acp-gone').speaking, { timeout: 5000 }).toBe(false);
   const state = up.threadState('acp-gone');
   assert.equal(state.active, true);
-  // Nothing was read out of a box — there is no container under this test —
-  // so nothing is claimed to be running in one.
+  // No task was announced, so the thread has nothing in the background.
   assert.deepEqual(state.background, []);
 
   // The browser watching was told all of it, without asking.
@@ -2281,16 +2206,15 @@ test("the adapter's own end-of-cycle update ends the turn without waiting", asyn
   });
   await expect.poll(() => up.threadState('acp-gone').speaking).toBe(true);
 
-  // The one the adapter sends while a message streams says nothing about the
-  // end: tokens and a window, no cost.
+  // The usage_update sent while a message streams carries no cost.
   adapter.notify('session/update', {
     sessionId: 'acp-gone',
     update: { sessionUpdate: 'usage_update', used: 12_000, size: 200_000 },
   });
   assert.equal(up.threadState('acp-gone').speaking, true);
 
-  // The one it sends at the end of a cycle carries the cycle's cost, and is
-  // taken at its word — no quiet window waited out.
+  // The usage_update at the end of a cycle carries a cost, and stops the
+  // thread without the quiet window.
   adapter.notify('session/update', {
     sessionId: 'acp-gone',
     update: {
@@ -2304,9 +2228,8 @@ test("the adapter's own end-of-cycle update ends the turn without waiting", asyn
 });
 
 test('a replayed transcript is history, not work to wait for', async () => {
-  // The adapter re-sends the thread on load, which is how replay works
-  // everywhere else in the gateway. Among it is a command backgrounded in
-  // some earlier life of the container, and it is not running now.
+  // The adapter re-sends the thread on load. The replay includes a command
+  // backgrounded in an earlier life of the container, which no longer runs.
   const adapter: FakeAdapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === 'session/load') {
@@ -2333,9 +2256,8 @@ test('a replayed transcript is history, not work to wait for', async () => {
 });
 
 test('a box the gateway has not read yet is not a box known to be empty', async () => {
-  // What the reaper meets on its first sweep after every restart. Answered
-  // as "nothing running", a box with an hour-long build in it and nobody
-  // watching is stopped, and the build goes with it.
+  // The reaper meets this on its first sweep after every restart. It must
+  // keep a box it has no answer for.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2349,9 +2271,9 @@ test('a box the gateway has not read yet is not a box known to be empty', async 
 });
 
 test('a start that is stopped under it gives up quietly', async () => {
-  // A spawn retries for twelve seconds, and a box can be stopped inside
-  // that window. Every answer the retries have then is about a box that has
-  // been shut down on purpose, an error status included.
+  // A spawn retries with backoff waits of four seconds in total, and a box
+  // can be stopped inside that window. The retries then give up without
+  // setting an error status.
   let attempts = 0;
   const up = manager.upstream('s1');
   fakeDocker(() => {
@@ -2371,9 +2293,7 @@ test('a start that is stopped under it gives up quietly', async () => {
 });
 
 test('a queued question is failed when the adapter exec exits', async () => {
-  // The adapter that asked it is gone, so no answer can reach it. Left
-  // queued, the request holds its box out of the reaper for good and
-  // shows a browser a question nobody can answer.
+  // The adapter that asked is gone, so no answer can reach it.
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     return {};
@@ -2393,10 +2313,8 @@ test('a queued question is failed when the adapter exec exits', async () => {
 });
 
 test('a thread whose load was cut short is heard from again after the restart', async () => {
-  // An update arriving during a load is the transcript being replayed, not
-  // the agent talking, and a count per thread is what says which. A count
-  // left over from a connection that is gone reads as a replay that never
-  // ends: the thread never shows the agent speaking again.
+  // A count per thread marks the updates of a load as a replay. A count left
+  // from a connection that is gone would mark every later update as replay.
   const adapters: FakeAdapter[] = [];
   let answerLoads = false;
   fakeDocker(() => {
@@ -2429,15 +2347,7 @@ test('a thread whose load was cut short is heard from again after the restart', 
 
 // --- two harnesses in one box ------------------------------------------------
 
-/**
- * A box holds one adapter per harness a thread of it runs, and everything
- * below is about the seam between them: a message reaches the adapter that has
- * the conversation it names, an adapter that will not start costs the box
- * only its own threads, and what each of them advertises is answered
- * separately.
- */
-
-/** Adds a thread of any harness to the seeded box, active before its first one. */
+/** Adds a thread of any harness to the seeded box, last active a minute ago. */
 function seedThread(id: string, harness: string, acp: string | null, ordinal: number): void {
   const now = Date.now();
   db.prepare(
@@ -2460,10 +2370,10 @@ function harnessAdapter(
 ): () => FakeAdapter {
   return () =>
     new FakeAdapter((msg) => {
-      const box = String(msg.params?.['sessionId'] ?? '');
+      const session = String(msg.params?.['sessionId'] ?? '');
       const answer = answers(msg);
       if (answer !== undefined) {
-        seen.push(`${tag} ${String(msg.method)} ${box}`.trim());
+        seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
         return answer;
       }
       if (msg.method === 'initialize') {
@@ -2473,7 +2383,7 @@ function harnessAdapter(
           _meta: { adapter: tag },
         };
       }
-      seen.push(`${tag} ${String(msg.method)} ${box}`.trim());
+      seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
       if (msg.method === 'session/new') return { sessionId: `${tag}-minted` };
       if (msg.method === 'session/fork') return { sessionId: `${tag}-branch` };
       return {};
@@ -2481,10 +2391,8 @@ function harnessAdapter(
 }
 
 test('only the harness that asks for a _meta is sent one', async () => {
-  // Claude's adapter reads `_meta.claudeCode.options` and lays it over the
-  // options it hands the Agent SDK. Codex's reads no `_meta` at all, so
-  // sending it one would be noise on the wire — and the registry, not a
-  // branch here, is what decides.
+  // Claude's adapter lays `_meta.claudeCode.options` over the options it
+  // hands the Agent SDK. Codex's adapter reads no `_meta`.
   seedThread('t3', 'codex', 'cx-1', 3);
   const meta: Array<{ harness: string; method: string; meta: unknown }> = [];
   const record =
@@ -2553,8 +2461,7 @@ test('each thread is served by its own harness, and only its own is started', as
   assert.deepEqual(spawned, ['claude-agent-acp', 'codex-acp']);
   assert.deepEqual(seen, ['codex session/load cx-1']);
 
-  // And a prompt goes to the adapter holding the conversation it names. Sent
-  // to the other one it would be a thread id that adapter has never heard of.
+  // A prompt goes to the adapter holding the conversation it names.
   seen.length = 0;
   await up.forwardRequest('session/prompt', {
     sessionId: 'cx-1',
@@ -2575,8 +2482,7 @@ test('initialize is answered by the adapter holding the thread that asked', asyn
   const seen: string[] = [];
   fakeDocker({
     'claude-agent-acp': harnessAdapter(seen, 'claude'),
-    // The other adapter advertises different things, which is the whole reason
-    // the answer cannot be the box's.
+    // The Codex adapter advertises different capabilities.
     'codex-acp': () =>
       new FakeAdapter((msg) =>
         msg.method === 'initialize'
@@ -2622,8 +2528,7 @@ test(
     const seen: string[] = [];
     fakeDocker({
       'claude-agent-acp': harnessAdapter(seen, 'claude'),
-      // Nothing answers the handshake, so every attempt times out as a
-      // connection that died on its own.
+      // The stand-in throws on every message, so no handshake succeeds.
       'codex-acp': () =>
         new FakeAdapter(() => {
           throw new Error('codex-acp: not installed in this image');
@@ -2675,9 +2580,8 @@ test('an adapter with no credential is not retried, and is kept up', async () =>
   const handle = fakeHandle(1, null);
   up.attach(handle);
 
-  // What the log said while the refusal happened. A person reading it has to
-  // be able to act on it, and the only action is entering one named
-  // credential on the settings page.
+  // The log must name the credential a person has to enter on the settings
+  // page.
   const logged: string[] = [];
   const stderr = vi
     .spyOn(process.stderr, 'write')
@@ -2688,32 +2592,28 @@ test('an adapter with no credential is not retried, and is kept up', async () =>
 
   await assert.rejects(
     () => up.pin(handle, 't3'),
-    // The browser's request fails with the adapter's own sentence, which is
-    // the one worth showing: it names what is missing.
+    // The request fails with the adapter's own sentence, which names what is
+    // missing.
     (err: Error) => err.message.startsWith('Authentication required'),
   );
   stderr.mockRestore();
   const complaint = logged.find((line) => line.includes('no credential to run under'));
   assert.ok(complaint, `nothing was logged about the missing credential: ${logged.join('')}`);
-  // By name: `codex` is the harness, `openai` is the row somebody has to fill
-  // in, and they are not the same word.
+  // `codex` is the harness, and `openai` is the credential row to fill in.
   assert.match(complaint, /"credential":"openai"/);
 
-  // Spawned once. Retrying cannot conjure a credential, and three attempts
-  // apiece would only be three of the same refusal.
+  // Spawned once, because a retry cannot supply a credential.
   assert.deepEqual(
     spawned.filter((cmd) => cmd === 'codex-acp'),
     ['codex-acp'],
   );
-  // The box is not in error: the box is running and the other harness is
-  // working. What is missing is a credential, which the settings page fixes
-  // without restarting anything.
+  // The box is not in error: it runs, and the other harness works.
   const box = db.prepare('SELECT status FROM boxes WHERE id = ?').get('s1') as {
     status: string;
   };
   assert.equal(box.status, 'running');
-  // The connection is kept up, so the next attempt is a request rather than a
-  // spawn — a credential entered meanwhile is picked up by the adapter itself.
+  // The connection stays up, so the next attempt is a request rather than a
+  // spawn. The adapter picks up a credential entered meanwhile.
   seen.length = 0;
   await assert.rejects(() => up.pin(handle, 't3'));
   assert.deepEqual(
@@ -2788,8 +2688,7 @@ function configurableAdapter(asked: string[]): () => FakeAdapter {
 }
 
 test('a respawn puts a thread back on every setting it was left with', async () => {
-  // What an hour-old thread has on its row: a mode, a model, and an effort
-  // level that used to be forwarded and forgotten.
+  // An hour-old thread's row: a mode, a model and an effort level.
   db.prepare(
     `UPDATE threads SET mode_id = 'plan', config = '{"model":"sonnet","effort":"high"}'
       WHERE id = ?`,
@@ -2800,7 +2699,7 @@ test('a respawn puts a thread back on every setting it was left with', async () 
   await manager.upstream('s1').ensureStarted();
 
   // One request per entry whose value differs, the mode through its own
-  // method, and nothing at all for the option that merely echoes the mode.
+  // method, and none for the option that echoes the mode.
   assert.deepEqual(asked, ['mode plan', 'model sonnet', 'effort high']);
 });
 
@@ -2822,9 +2721,7 @@ test('a setting changed through the gateway is recorded, and the mode is not', a
     effort: 'high',
   });
 
-  // The mode arrives as a config option too, from an adapter that changed it
-  // itself. It belongs to `mode_id` and nowhere else — a mode with two homes
-  // is a mode that comes back wrong.
+  // The mode is recorded in `mode_id` only, never in the config map.
   await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'auto' });
   assert.equal(thread('t1')['mode_id'], 'auto');
   assert.deepEqual(JSON.parse(String(thread('t1')['config'])), {
@@ -2867,8 +2764,7 @@ test('a setting the adapter reports on its own is recorded, the mode excluded', 
   await expect
     .poll(() => thread('t1')['config'])
     .toBe('{"model":"sonnet","effort":"high"}');
-  // The mode came in the same message and was passed over: it is not a setting
-  // of the thread, it is the thread's mode.
+  // The mode in the same message is skipped, because it is not a setting.
   assert.equal(thread('t1')['mode_id'], null);
 });
 
@@ -2914,10 +2810,9 @@ test('a thread for a harness with no credential is still created', async () => {
     ),
   });
 
-  // No hard gate on the API: the dialog is what keeps somebody from asking for
-  // a harness that cannot run, and a thread whose adapter refuses is a row
-  // with no conversation yet — the same state an adapter restart leaves
-  // behind, and brought up the same way once a credential exists.
+  // The API does not check credentials. A thread whose adapter refuses is a
+  // row without a conversation, which a pin brings up once a credential
+  // exists.
   const created = await manager.createThread('s1', { options: { harness: 'codex' } });
   assert.equal(created.harness, 'codex');
   assert.equal(created.acpSessionId, null);
@@ -2944,10 +2839,8 @@ test('what an adapter advertises is cached against its harness', async () => {
 });
 
 test('pinning to the thread a spawn already brought back does not replay it twice', async () => {
-  // The first browser on a stopped box does both halves at once: its pin
-  // starts the adapter, and the adapter brings back the box's latest
-  // thread on its way up. Loading it again afterwards would say the whole
-  // conversation to that browser a second time.
+  // The first browser on a stopped box starts the adapter with its pin, and
+  // the adapter brings back the box's latest thread on its way up.
   const loads: string[] = [];
   fakeDocker(
     () =>

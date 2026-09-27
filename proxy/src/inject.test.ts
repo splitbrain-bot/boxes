@@ -9,19 +9,18 @@ import type { EgressPolicy } from '../../shared/types.ts';
 import { Interceptor } from './inject.ts';
 
 /**
- * The swap and the refusal, driven through the real interception engine.
- *
- * A box reaches a credential host over TLS, so that is how these tests
- * reach the engine. The engine's own upstream is pointed at a stand-in for the
- * vetting tunnel, so they need no network: what is under test is what the
- * proxy adds — that a placeholder becomes the real credential, that anything
- * else is refused here rather than forwarded, and that the certificate a
- * box sees is the deployment's.
+ * Tests for the real interception engine, reached over TLS as a box reaches
+ * it. The engine forwards to a stand-in tunnel and origin, so no test needs
+ * the network.
  */
 
+/** What the box holds. */
 const PLACEHOLDER = 'ghp_PLACEHOLDERPLACEHOLDER';
+
+/** The real credential. */
 const SECRET = 'ghp_therealsecretvalue';
 
+/** The deployment CA. The stand-in origin serves it as its own certificate. */
 let ca: { key: string; cert: string };
 
 /** Records what actually arrived upstream. */
@@ -29,6 +28,8 @@ let received: Array<{ url: string; headers: http.IncomingHttpHeaders }> = [];
 
 /** A TLS origin standing in for the host being protected. */
 let origin: https.Server;
+
+/** Port the stand-in origin listens on. */
 let originPort = 0;
 
 /**
@@ -36,9 +37,14 @@ let originPort = 0;
  * vetting and resolving, so no test here touches DNS or the network.
  */
 let tunnel: http.Server;
+
+/** Port the stand-in tunnel listens on. */
 let tunnelPort = 0;
 
+/** The engine under test. */
 let interceptor: Interceptor;
+
+/** The policy the engine reads; each test sets it. */
 let policy: EgressPolicy;
 
 /** How many times the engine has reported that it started. */
@@ -53,6 +59,7 @@ interface Answer {
   body: string;
 }
 
+/** Starts a server on loopback and resolves with its port. */
 const listen = (server: http.Server | https.Server): Promise<number> =>
   new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
@@ -61,11 +68,10 @@ const listen = (server: http.Server | https.Server): Promise<number> =>
 /**
  * Lets the engine reach the stand-in origin over TLS.
  *
- * The engine checks the certificate of the host it forwards to against the
- * system trust store, which a test cannot add a CA to, and the stand-in origin
- * serves a certificate of its own. Wrapping the TLS client is the way in: a
- * connection that names no CA is the engine's and skips the check, while the
- * connections these tests make call the unwrapped client above.
+ * The engine checks the origin's certificate against the system trust store,
+ * and a test cannot add a CA there. The wrapper skips the check for a
+ * connection that names no CA, which is the engine's. The tests' own
+ * connections use the unwrapped client.
  */
 function trustTheStandInOrigin(): void {
   const relaxed = (options: tls.ConnectionOptions, onSecure?: () => void): tls.TLSSocket =>
@@ -277,13 +283,6 @@ describe('the interception engine', () => {
   }, 30_000);
 
   it('refuses a protocol upgrade rather than forwarding it unswapped', async () => {
-    // The swap is a header rewrite and the engine's websocket passthrough
-    // cannot do one, so a forwarded upgrade would carry the box's
-    // placeholder to the far end. Refused here instead, and with a status of
-    // its own: without a rule the engine answers its own "no rules matched",
-    // which is the same refusal by accident and reads as a broken
-    // deployment. A client that wanted one falls back to HTTPS, where the
-    // swap works.
     policy = githubPolicy();
     await interceptor.apply();
 
@@ -297,10 +296,7 @@ describe('the interception engine', () => {
   }, 30_000);
 
   it('refuses a caller that did not come through the front door', async () => {
-    // The engine's own listener takes every interface, and the proxy sits on
-    // every box network, so a box can open this port directly. Reaching it
-    // that way skips the front door's rules about which hosts and ports may be
-    // intercepted at all, so the engine refuses anything not from loopback.
+    // A box can reach the engine's port on a non-loopback interface.
     const outward = Object.values(networkInterfaces())
       .flat()
       .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;

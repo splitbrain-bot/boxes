@@ -2,63 +2,41 @@ import { useCallback, useRef, type MouseEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { historyIndex } from '@/lib/history';
 
-/** What a back control needs; see useUp. */
+/** What a back control needs. */
 export interface Up {
-  /**
-   * The parent, so the control can be a real link: middle click opens it in a
-   * tab, the context menu can copy it, and a keyboard gets it for free.
-   */
+  /** The parent route, so the control can be a real link. */
   href: string;
-  /** Swallows the ordinary click and steps out instead. */
+  /** Handles a plain click by stepping out. A modified click follows the link. */
   onClick: (event: MouseEvent<HTMLElement>) => void;
-  /** The same step for something that is not a link — a Cancel, a handoff. */
+  /** Steps out, for a control that is not a link, such as Cancel. */
   go: () => void;
   /**
    * The stack index the view was entered at.
    *
-   * For a view with a step inside itself — the review, whose open file is one
-   * on a phone — this is how it tells whether there is an entry of its own to
-   * pop or whether it is sitting on the entry it arrived at.
+   * A view that pushes entries of its own, such as the review on a phone,
+   * compares it with the current index.
    */
   entry: number;
 }
 
 /**
- * Leaving a view, by popping the entries it pushed rather than pushing one
- * more.
+ * Leaves a view by going back past its own entry and every entry it pushed,
+ * in one step, instead of pushing the parent. A pushed parent would make the
+ * device's back button return into the view.
  *
- * This is the rule the whole strategy rests on: a control labelled back or up
- * never pushes. A plain link would leave the stack as boxes, thread,
- * boxes, and the device's own back button would then go into the thread
- * again.
+ * When the view is the first entry of the app, as after a pasted link or a
+ * push notification, the parent replaces the current entry instead.
  *
- * What gets popped is everything this view put on the stack, in one step: the
- * file the review opened, the thread a fork moved to, the markers its dialogs
- * left behind. Leaving is one press, and nothing of the view is left for a
- * later back press to fall into.
+ * Call it in the view that owns the route, because it records the index at
+ * its first render.
  *
- * Where there is nothing of ours to pop — a pasted link, a push
- * notification, a shortcut on a home screen, all of which start the stack at
- * this view — the parent replaces the current entry instead. Back then leads
- * out of the app the way it did before, which is what the browser's own
- * button is for; up leads to the parent, which is what this control is for.
- * That is the one case where a press after this one can land back inside the
- * view, since the entries it pushed are below the entry being replaced.
- *
- * Call it in the view that owns the route, not in a component nested inside
- * one: the entry it pops back to is the one that was on top when the hook
- * first ran, so it has to run when the view is entered.
- *
- * @param parent Where the view sits under, for the link and for the fallback.
+ * @param parent The parent route, for the link and for the fallback.
  */
 export function useUp(parent: string): Up {
   const navigate = useNavigate();
   /**
-   * The stack index this view was entered at.
-   *
-   * A ref filled on the first render rather than state: it never changes, and
-   * nothing should re-render because of it. Re-entering the view by a back
-   * press remounts and fills it again, with the index that entry now has.
+   * The stack index this view was entered at, set on the first render.
+   * Re-entering the view remounts it and sets it again.
    */
   const entry = useRef<number | null>(null);
   entry.current ??= historyIndex();
@@ -68,19 +46,13 @@ export function useUp(parent: string): Up {
     // Every entry this view added, plus the entry the view itself is.
     const delta = historyIndex() - from + 1;
     if (from > 0 && delta > 0) navigate(-delta);
-    // Nothing of the app's below, so there is nothing to pop back to: the
-    // parent takes this entry's place rather than being pushed on top of it,
-    // which is the difference between the browser's back button leading out
-    // of the app and it leading in circles. What the view pushed inside
-    // itself stays underneath — the browser's history is the browser's, and
-    // a synthesized parent is the best an entry point can do.
+    // No app entry below: replace instead of push, so back still leaves the app.
     else void navigate(parent, { replace: true });
   }, [navigate, parent]);
 
   const onClick = useCallback(
     (event: MouseEvent<HTMLElement>) => {
-      // A modified click is the visitor asking the browser for something else
-      // — a tab, a window, a download — and that is what href is there for.
+      // A modified click opens a tab, a window or a download through href.
       if (
         event.defaultPrevented ||
         event.button !== 0 ||

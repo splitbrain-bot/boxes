@@ -2,27 +2,6 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTopLevel, type GitBox, type GitTarget } from './git.ts';
 
-/**
- * Which repositories a workspace holds, and which of them owns a path.
- *
- * A box's workspace is not one repository. The agent clones what it was
- * pointed at, forks and clones a second thing to compare against, checks a
- * dependency out beside it, and sometimes ends up with a repository inside a
- * repository. So the review is over the workspace and a repository is an
- * attribute of a path rather than the unit of the thing being reviewed:
- * every file is browsable in one tree, and each is shown with the status and
- * diff of the *closest enclosing* repository.
- *
- * That whole mechanism is {@link RepoMap.repoFor}, a longest-prefix lookup:
- *
- *     repoFor('repo-a/src/x.ts')    -> repo-a
- *     repoFor('repo-a/inner/b.txt') -> repo-a/inner   (nested wins)
- *     repoFor('notes/todo.md')      -> null           (no repository)
- *
- * A nested repository needs no special case, being a longer prefix that
- * wins, and a file no repository claims is shown without git.
- */
-
 /** One repository found in a workspace. */
 export interface Repo {
   /**
@@ -37,12 +16,11 @@ export interface Repo {
 }
 
 /**
- * Directory names the discovery walk does not descend into.
+ * Directory names the discovery walk does not enter.
  *
- * An agent's dependency tree can hold dozens of repositories nobody wants
- * listed, and `npm install` is a normal thing for an agent to do. The cost is
- * that a repository deliberately cloned into `vendor/` is not found, which is
- * the right trade at this size.
+ * A dependency tree can hold dozens of repositories that no reviewer wants
+ * listed. A repository cloned into such a directory, for example `vendor/`, is
+ * not found.
  */
 const PRUNED_DIRS = new Set([
   '.boxes',
@@ -58,18 +36,16 @@ const PRUNED_DIRS = new Set([
 /**
  * How deep under the workspace a repository is looked for.
  *
- * `/workspace/projects/foo` is a shape that occurs; anything much deeper is a
- * dependency tree rather than something a reviewer cloned.
+ * Clones sit near the top, as in `/workspace/projects/foo`. Much deeper
+ * directories belong to dependency trees.
  */
 export const MAX_REPO_DEPTH = 6;
 
 /**
- * How many directories one discovery walk may read before it gives up looking.
+ * How many directories one discovery walk may read before it stops looking.
  *
- * An agent that ran `npm install` has a workspace with tens of thousands of
- * directories in it. The prune list drops most of that, and this is what
- * bounds the rest — a walk is one bounded cost per tree fetch, not an
- * unbounded one.
+ * After `npm install`, a workspace can hold tens of thousands of directories.
+ * {@link PRUNED_DIRS} drops most of them, and this cap bounds the rest.
  */
 export const MAX_SCANNED_DIRS = 4000;
 
@@ -80,14 +56,12 @@ const MAX_REPOS = 32;
  * The repositories of one workspace, with the lookup that assigns a path to
  * one of them.
  *
- * Immutable, and cheap to hold: a handful of paths. It is rediscovered by a
- * tree fetch and reused by everything else, so a fetch is the clock.
+ * A workspace can hold several repositories: side by side, deeper down, or one
+ * inside another. Each path belongs to its closest enclosing repository, and a
+ * path that no repository encloses is shown without git. The map is immutable.
  */
 export class RepoMap {
-  /**
-   * Sorted by path, which is also the order the API reports them in — so a
-   * truncated or re-read map lists the same repositories in the same places.
-   */
+  /** The repositories, sorted by path. The API reports them in this order. */
   readonly repos: readonly Repo[];
 
   constructor(
@@ -107,8 +81,8 @@ export class RepoMap {
    * The closest repository enclosing a workspace-relative path, or null when
    * no repository claims it.
    *
-   * Longest prefix wins, which is what makes a repository inside a repository
-   * work without a case of its own.
+   * The longest enclosing path wins, so a nested repository claims its own
+   * files.
    */
   repoFor(path: string): Repo | null {
     let best: Repo | null = null;
@@ -137,11 +111,10 @@ export function inWorkspace(repo: Repo, path: string): string {
 }
 
 /**
- * Where one repository's git runs, from where the repository sits.
+ * Where one repository's git runs, from its workspace-relative path.
  *
- * A workspace-relative path is all the map holds, and the container holds the
- * whole workspace at one known place, so a repository root inside the box is
- * the two joined. It is the only translation between the two namings.
+ * The container holds the workspace at `box.workspaceDir`, so the repository
+ * root inside the box is the two joined.
  */
 export function gitTarget(box: GitBox, repoPath: string): GitTarget {
   return {
@@ -153,26 +126,20 @@ export function gitTarget(box: GitBox, repoPath: string): GitTarget {
 /**
  * A workspace-relative path as its own repository names it.
  *
- * The caller has already established that the repository encloses the path —
- * `repoFor` is how — so this is a slice rather than a check.
+ * The repository must enclose the path, as {@link RepoMap.repoFor} ensures.
+ * This function does not check it.
  */
 export function inRepo(repo: Repo, path: string): string {
   return repo.path === '' ? path : path.slice(repo.path.length + 1);
 }
 
 /**
- * Finds every repository in a workspace.
+ * Finds every repository in a workspace, up to {@link MAX_REPOS}.
  *
  * The walk reads the workspace directory on this process's filesystem, which
- * is the same tree the box holds at `box.workspaceDir`. It prunes
- * {@link PRUNED_DIRS}, never follows a symlink, and is bounded by
- * {@link MAX_REPO_DEPTH} and {@link MAX_SCANNED_DIRS}.
- *
- * A directory holding a `.git` entry — file *or* directory, so submodules and
- * linked worktrees count — is a candidate, and every candidate is confirmed by
- * asking git in the box whether it is the top of a work tree. A `.git` that
- * belongs to a repository above it is how a directory becomes a candidate and
- * not a repository.
+ * is the same tree the box holds at `box.workspaceDir`. Every directory holding
+ * a `.git` file or directory is a candidate. Git in the box then confirms that
+ * each candidate is the top of a work tree.
  */
 export async function discoverRepos(workspace: string, box: GitBox): Promise<RepoMap> {
   const candidates = candidateDirs(workspace, box);
@@ -185,9 +152,9 @@ export async function discoverRepos(workspace: string, box: GitBox): Promise<Rep
 /**
  * The directories under a workspace that hold a `.git`, breadth first.
  *
- * Breadth first so that when a cap bites it is the deepest directories that go
- * unread: a repository the reviewer cloned sits near the top, and a dependency
- * tree is what fills the bottom.
+ * The walk skips {@link PRUNED_DIRS} and stops at {@link MAX_REPO_DEPTH},
+ * {@link MAX_SCANNED_DIRS} or {@link MAX_REPOS}. Breadth first means a cap
+ * leaves the deepest directories unread, where dependency trees sit.
  */
 function candidateDirs(workspace: string, box: GitBox): Repo[] {
   const found: Repo[] = [];
@@ -208,8 +175,7 @@ function candidateDirs(workspace: string, box: GitBox): Repo[] {
       }
 
       for (const entry of entries) {
-        // A `.git` file is a linked worktree or a submodule, and both are
-        // repositories the reviewer can be looking at.
+        // A `.git` file marks a linked worktree or a submodule.
         if (entry.name === '.git' && (entry.isDirectory() || entry.isFile())) {
           found.push({
             path: dir.path,
@@ -217,9 +183,8 @@ function candidateDirs(workspace: string, box: GitBox): Repo[] {
             git: gitTarget(box, dir.path),
           });
         }
-        // `isDirectory` is false for a link to one, so a link is never
-        // descended into: the tree is agent-controlled and a link to `/`
-        // would otherwise be walked.
+        // `isDirectory` is false for a symlink, so the walk never follows a
+        // link out of the agent's tree.
         if (!entry.isDirectory() || PRUNED_DIRS.has(entry.name)) continue;
         next.push({
           absolute: join(dir.absolute, entry.name),

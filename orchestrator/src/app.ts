@@ -70,14 +70,10 @@ import { setBoxOwner } from './workspaces.ts';
 /** Version reported by the health endpoint. */
 const VERSION = '1.0.0';
 
+/** Directory of this module. */
 const here = dirname(fileURLToPath(import.meta.url));
 
-/**
- * Dashboard bundle, copied into the image by the Dockerfile's build stage.
- *
- * A caller may name another one: the browser suite serves the bundle it just
- * built, rather than putting a copy where the image would have.
- */
+/** Dashboard bundle, where the orchestrator image puts it. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
 
 /**
@@ -90,13 +86,11 @@ const HASHED_ASSETS = '/assets/';
 const ASSET_MAX_AGE = 31_536_000;
 
 /**
- * How long one file of the bundle may be held.
+ * The Cache-Control value for one file of the bundle.
  *
- * A name under the hashed-asset directory is derived from the bytes under it,
- * so a build that changes a file changes its name and this copy can never be
- * the wrong one. Every other name in the bundle — index.html above all, which
- * is the file that says which assets are current — stays the same across
- * builds and is therefore revalidated on every load.
+ * A name under the hashed-asset directory changes whenever its bytes change,
+ * so a cached copy is never stale. Every other name, index.html above all,
+ * stays the same across builds and is revalidated on every load.
  */
 function cacheControlFor(path: string): string {
   return path.startsWith(HASHED_ASSETS)
@@ -120,21 +114,16 @@ const SAFE_HOST = /^[A-Za-z0-9.\-[\]]+(:\d+)?$/;
 /**
  * The content security policy the dashboard document is served under.
  *
- * The thread renders markdown the agent wrote, and a remote `<img>` in it
- * would carry whatever it names out through the reader's browser instead of
- * through the egress proxy. So every fetch the page can make is pinned to
- * this origin: its own scripts and styles, images from here plus the `data:`
- * and `blob:` URLs an attachment preview is built from, and the gateway
- * socket on this same host.
+ * The thread renders markdown the agent wrote. A remote `<img>` in it would
+ * carry data out through the reader's browser and past the egress proxy, so
+ * every fetch the page makes is pinned to this origin.
  *
- * `'unsafe-inline'` for styles and not for scripts: the overlay primitives
- * position themselves and the code pane colours every token through the style
- * attribute, and a style attribute cannot be hashed.
+ * Styles allow `'unsafe-inline'`, because the overlay primitives and the code
+ * pane set the style attribute, and a style attribute cannot be hashed.
  *
- * The socket is spelled out as well as covered by `'self'`, because not every
- * browser reads `'self'` as including the ws and wss forms of its origin. A
- * Host header that is not a plain host is dropped instead, which leaves the
- * page working everywhere that does.
+ * The socket is named as well as covered by `'self'`, because some browsers
+ * do not read `'self'` as including the ws and wss forms of the origin. A Host
+ * header that is not a plain host is left out.
  */
 function documentCsp(host: string | undefined): string {
   const origin = host !== undefined && SAFE_HOST.test(host) ? host : null;
@@ -162,10 +151,8 @@ const COMPRESS_THRESHOLD_BYTES = 1024;
 /**
  * Sends one file out of a workspace, typed by its name rather than its bytes.
  *
- * What a browser can show is sent as itself, a format an app on the device
- * may open as a download of that type, and everything else as a download of
- * unknown type — see servedTypeFor. The caller has already resolved the path
- * inside the workspace and made sure it is a file.
+ * {@link servedTypeFor} decides the type and the policy. The caller has
+ * already resolved the path inside the workspace and made sure it is a file.
  */
 function sendWorkspaceFile(reply: FastifyReply, path: string, name: string, size: number) {
   const served = servedTypeFor(name);
@@ -175,14 +162,11 @@ function sendWorkspaceFile(reply: FastifyReply, path: string, name: string, size
     // The name is percent-encoded: it comes from a directory the agent
     // writes to, and a quote or a newline in it must not reach the header.
     'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
-    // The type is decided here rather than sniffed from the bytes, so a
-    // download is never treated as a document.
+    // The browser must not sniff the bytes and treat a download as a document.
     'X-Content-Type-Options': 'nosniff',
-    // What lets an SVG be served as an SVG: nothing in one may run or
-    // fetch anything.
+    // Lets an SVG be served as itself: nothing in it may run or fetch.
     'Content-Security-Policy': served.csp,
-    // Short, rather than immutable: the name is stable but the file under
-    // it belongs to a workspace the agent can rewrite.
+    // Short, because the agent can rewrite the file under a stable name.
     'Cache-Control': 'private, max-age=60',
   });
   return createReadStream(path);
@@ -218,8 +202,11 @@ export interface BuildOptions {
 
 /** What one orchestrator process hands its boot and its tests, wired together. */
 export interface Orchestrator {
+  /** The HTTP app, not yet listening. */
   app: ReturnType<typeof Fastify>;
+  /** The box lifecycle behind the routes. */
   manager: BoxManager;
+  /** The config the app was built with. */
   cfg: Config;
   /** Owns the egress policy and keeps the proxy holding it. */
   egress: EgressManager;
@@ -233,10 +220,7 @@ export interface Orchestrator {
 
 /**
  * Builds the HTTP app and the objects behind it, without listening or
- * touching Docker.
- *
- * Boot lives in main(); this is separate so a test can drive the real routes
- * over a real database without a Docker socket or an open port.
+ * touching Docker, so a test can drive the real routes over a real database.
  */
 export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestrator {
   const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
@@ -244,9 +228,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // that writes files for the agent, or runs a process as it, reads this.
   setBoxOwner(cfg.BOX_UID, cfg.BOX_GID);
 
-  // The store and the manager each need the other: the policy is composed
+  // The store and the egress manager need each other: the policy is composed
   // from the store's rows, and every write to the store re-pushes it. The
-  // hoisted function below is what lets them be built in this order.
+  // hoisted function below lets the store be built first.
   const credentials = new CredentialStore(db, () => repushPolicy());
   const egress = new EgressManager(cfg, credentials);
   const notifier = new Notifier(db, cfg);
@@ -254,9 +238,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Pushes the policy again because a credential changed.
    *
-   * Best effort and never awaited: the write that caused it has already
-   * happened, the settings page should not fail because the proxy is
-   * restarting, and the reconciler re-pushes every minute regardless.
+   * Best effort and never awaited, so the settings page does not fail while
+   * the proxy restarts. The reconciler pushes it again every minute.
    */
   function repushPolicy(): void {
     void egress.sync().catch((err: Error) => {
@@ -271,9 +254,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.BOX_IMAGE));
   const agents = new AgentStore(db, cfg.DATA_DIR);
   const manager = new BoxManager(db, cfg, egress, notifier, agents);
-  // The review surface reaches the files and the box through the manager,
-  // which is the one thing that knows whether a box is directory-backed
-  // yet and how to get a container of it running.
+  // The manager knows where a box's files are and how to get its container
+  // running.
   const review = new ReviewService(db, {
     workspacePath: (id) => manager.workspacePathOf(id),
     execTarget: (id) => manager.execTarget(id),
@@ -284,9 +266,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   const app = Fastify({ logger: false });
 
   /**
-   * Attachment uploads arrive as raw bytes, which Fastify has no parser for
-   * until it is given one. `parseAs: 'buffer'` is the whole of it: the route
-   * sets the size limit, and what the bytes are is the client's business.
+   * Hands attachment uploads to the route as a Buffer. The route sets the
+   * size limit.
    */
   app.addContentTypeParser(
     'application/octet-stream',
@@ -295,12 +276,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   );
 
   /**
-   * One line per response, which is the whole request log: Fastify's own
-   * logger is off and everything here goes through the structured one.
+   * The request log: one line per response, through the structured logger.
    *
-   * The path is taken without its query string, which can carry a filename or
-   * a path the reader typed. A refusal is the caller's problem and a failure
-   * is the deployment's, so the two get different levels.
+   * The path is logged without its query string, which can carry a filename
+   * or a path the reader typed. A 4xx logs as a warning and a 5xx as an error.
    */
   app.addHook('onResponse', async (req, reply) => {
     const status = reply.statusCode;
@@ -319,9 +298,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     if (err instanceof HttpError) {
       return reply.code(err.statusCode).send({ error: err.message });
     }
-    // Fastify's own refusals — a body over the route's limit, a content type
-    // with no parser — already carry both the status and the sentence worth
-    // showing, so they are passed through as they are.
+    // Fastify's own refusals, such as a body over the route's limit, already
+    // carry a status and a message worth showing.
     const status = (err as { statusCode?: number }).statusCode;
     if (typeof status === 'number' && status >= 400 && status < 500) {
       return reply.code(status).send({ error: (err as Error).message });
@@ -331,9 +309,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Liveness: this process is serving requests. Always 200 while it answers
-   * at all, so a probe reading the status code restarts nothing that is
-   * merely misconfigured. What is wrong with the deployment is in the body.
+   * Liveness: this process is serving requests. Always 200, so a probe does
+   * not restart a deployment that is only misconfigured. The body says what
+   * is wrong.
    */
   app.get('/healthz', async (): Promise<HealthResponse> => {
     const boxes = countLiveBoxes(db);
@@ -356,17 +334,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Readiness: whether this deployment can serve boxes, as a status code.
    *
-   * Three things decide it, because a box cannot be created or started
-   * without all three: the database answers, the proxy holds the egress
-   * policy this orchestrator composed, and the Docker daemon is reachable. An
-   * egress policy that is not in sync counts because a box started
-   * against a stale one reaches hosts the deployment has stopped allowing.
+   * The database has to answer, the proxy has to hold the current egress
+   * policy, and the Docker daemon has to be reachable. A box started against
+   * a stale policy reaches hosts the deployment has stopped allowing.
    *
-   * What /healthz also reports stays out of this. A harness with no
-   * credential is a deployment that serves boxes nobody has given a
-   * credential, and a proxy warning names one box's network rather than
-   * the instance — a probe that took the instance out of service for either
-   * would be answering about the wrong thing.
+   * Missing harness credentials and proxy warnings do not count, because
+   * they concern single boxes rather than the instance.
    */
   app.get('/readyz', async (_req, reply): Promise<ReadyResponse> => {
     const checks = {
@@ -381,11 +354,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * What each harness needs, and whether it has it.
    *
-   * Only the harnesses this deployment can carry a credential to: a box holds
-   * one placeholder per entry of the config's credential set, so a harness
-   * whose credential is not in that set could not be given one whatever the
-   * store held. Both harnesses qualify now that the OpenAI credential is in
-   * the set, and a third would the moment its own credential joined it.
+   * Lists only the harnesses whose credential is in the config's credential
+   * set, because a box holds a placeholder for those credentials alone.
    */
   function harnessHealth(): HarnessHealth[] {
     const deliverable = new Set(cfg.credentialSet.map((spec) => spec.id));
@@ -393,12 +363,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       .filter((h) => deliverable.has(h.credentialId))
       .map((h) => {
         const row = credentials.get(h.credentialId);
-        // A credential can be perfectly good and still not reach a box: a
-        // subscription obtained by logging in is a document rather than a
-        // header value, and Boxes has no way to hand one to a container yet.
-        // See credentials.ts's deliverableSecret(). The reason travels in
-        // the field the dashboard already shows beside a harness it cannot
-        // offer.
+        // A valid credential may still not reach a box: a subscription
+        // obtained by logging in is a document rather than a header value.
+        // The reason goes in the field the dashboard shows beside the harness.
         const blocked = row ? undeliverableReason(row) : null;
         const summary = row ? credentials.summarize(row) : null;
         return {
@@ -406,23 +373,22 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
           label: h.label,
           credential:
             summary && blocked ? { ...summary, lastError: summary.lastError ?? blocked } : summary,
-          // A stored credential that is expired or failing is still stored:
-          // the dashboard offers the harness and says what is wrong with it,
-          // rather than having it disappear.
+          // An expired or failing credential keeps the harness listed, so the
+          // dashboard can say what is wrong with it.
           runnable: row?.status === 'ok' && blocked === null,
         };
       });
   }
 
   /**
-   * Every harness this deployment can run: what the registry says about it,
-   * what its adapter last advertised, and whether it can run right now.
+   * Every harness this deployment can run, for the dialogs: what the registry
+   * says about it, what its adapter last advertised, and whether it can run
+   * now.
    *
-   * What the dialogs are built from. The catalogue half is a cache written by
-   * whichever adapter last answered a `session/new`, `session/load` or
-   * `session/fork`, and it is null on a deployment that has never run one —
-   * such a dialog offers the agent choice alone rather than starting a box to
-   * find out what it would have offered.
+   * The catalogue is a cache written by the adapter that last answered a
+   * `session/new`, `session/load` or `session/fork`. It is null until an
+   * adapter of that harness has answered one, and the dialog then offers the
+   * agent choice alone.
    */
   app.get('/api/harnesses', async (): Promise<HarnessInfo[]> =>
     harnessHealth().map((health) => {
@@ -468,19 +434,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * The conversations a box owns. A box shares its container, its
-   * volumes and its egress policy across all of them, so an extra one costs
-   * nothing but its own transcript.
+   * The conversations a box owns. They share the box's container, files and
+   * egress policy.
    */
   app.get('/api/boxes/:id/threads', async (req) => {
     const { id } = req.params as { id: string };
     return manager.threads(id);
   });
 
-  /**
-   * Adds a conversation: empty, or carrying the context of
-   * the thread named by `from`.
-   */
+  /** Adds a conversation: empty, or carrying the context of the thread named by `from`. */
   app.post('/api/boxes/:id/threads', async (req, reply) => {
     const { id } = req.params as { id: string };
     const created = await manager.createThread(id, parseBody(createThreadBody, req.body));
@@ -488,11 +450,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Marks a conversation done, or takes the mark off again.
-   *
-   * A note the reader keeps about which of a box's conversations they are
-   * finished with. It changes how the thread is drawn in a list, and the
-   * thread still runs, still answers, and can be marked undone.
+   * Marks a conversation done, or takes the mark off again. The mark changes
+   * how the thread is drawn in a list, and the thread still runs and answers.
    */
   app.post('/api/boxes/:id/threads/:threadId/done', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
@@ -503,15 +462,14 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Stops one task that conversation left running, or every task it has.
    *
-   * A stop and not a cancel: a background command outlives the turn which
-   * started it, and interrupting the conversation does not reach it. The
-   * adapter running the task is asked to stop it by name. The `processId` is
-   * the id the thread state carried, which is the adapter's own id for the
-   * task; without one, everything that thread is running stops.
+   * A stop and not a cancel: a background command outlives the turn that
+   * started it, and a cancel does not reach it. `processId` is the adapter's
+   * own id for the task, as the thread state carried it. Without one, every
+   * task of the thread stops.
    *
-   * The answer says how many tasks the adapter stopped, and zero is an
-   * ordinary one — a task that had already finished answers that it had, and
-   * the thread's state is re-sent either way so the bar catches up.
+   * The answer says how many tasks the adapter stopped. Zero is normal for a
+   * task that had already finished, and the thread's state is sent again
+   * either way.
    */
   app.post('/api/boxes/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
@@ -520,14 +478,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Kills everything running in a box, whoever left it there.
+   * Kills every process in a box that Boxes did not start itself, and
+   * answers how many were signalled.
    *
-   * The per-thread stop reaches what an adapter is still holding; this reaches
-   * what no adapter can name any more. Neither adapter re-announces the tasks
-   * of a process that has died, so after a restart the bars are empty and the
-   * box is still compiling something — and a signal is all that is left.
-   *
-   * The answer says how many processes were signalled.
+   * This reaches work no adapter can name any more. Neither adapter announces
+   * the tasks of a process that has died again, so after a restart a build
+   * can run with no task to stop.
    */
   app.post('/api/boxes/:id/background/stop', async (req) => {
     const { id } = req.params as { id: string };
@@ -538,14 +494,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * Stores one file the user attached to a prompt, in the box's own
    * workspace.
    *
-   * Raw bytes rather than a multipart form: there is one file per request and
-   * its name is in the query, and octet-stream is a body Fastify hands over
-   * as a Buffer without a dependency that parses envelopes.
-   *
-   * The upload happens before the prompt that mentions it, and is what makes
-   * the mention true. It needs no container: a workspace is a directory this
-   * process owns, so a box that is stopped — or has never been started —
-   * takes attachments the same way a running one does.
+   * The body is the raw bytes of one file, and its name is in the query. The
+   * upload comes before the prompt that mentions it. It needs no container,
+   * because the workspace is a directory this process writes, so a stopped
+   * box takes attachments as well.
    */
   app.post(
     '/api/boxes/:id/attachments',
@@ -564,11 +516,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       if (!workspace) throw new HttpError(404, 'Box not found');
 
       const stored = await storeAttachment(workspace, name, body);
-      // The same touch every other thing a user does to a box makes: an
-      // upload is somebody working here, and the reaper counts idleness.
+      // An upload is somebody working in the box, so the reaper leaves it.
       manager.touch(id);
-      // And the one way a workspace grows with nothing running in it, which
-      // is the case the size cache stops measuring.
+      // An upload can grow the workspace of a stopped box, which the size
+      // cache does not measure again on its own.
       manager.workspaceChanged(id);
       log.box(id).info('attachment stored', { path: stored.path, size: stored.size });
       return stored;
@@ -579,20 +530,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * Serves one stored attachment back, which is how the thread shows the
    * picture the user attached.
    *
-   * This reads out of a tree the agent controls, so a link planted in the
-   * attachments directory could otherwise serve whatever the orchestrator's
-   * own uid can read. `resolveInRoot` holds the containment.
-   *
-   * What a browser can show — images, SVG, PDF, audio, video — is served as
-   * itself, and everything else as a download. `sandbox` and
-   * `default-src 'none'` leave an SVG opened as a document with no script and
-   * no origin, and an SVG behind an `<img>` is inert. A PDF, audio and video
-   * are served unsandboxed so the browser's viewer or player takes them.
+   * The agent controls this tree, so a link planted in the attachments
+   * directory could point at anything the orchestrator's uid can read.
+   * `resolveInRoot` keeps the read inside the directory.
    */
   app.get('/api/boxes/:id/attachments/:name', async (req, reply) => {
     const { id, name } = req.params as { id: string; name: string };
-    // Stored names are a single path component by construction, so anything
-    // shaped otherwise is not looked for.
+    // A stored name is always a single path component.
     if (name.includes('/') || name.includes('\\')) {
       throw new HttpError(404, 'Attachment not found');
     }
@@ -609,27 +553,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   // --- Code review over a box's workspace ---------------------------------
-
-  /**
-   * The review surface. Files come off the workspace directory this process
-   * can read; git runs in the box's own container, over repositories the
-   * agent controls. So a route that asks git something starts a stopped box,
-   * and reviewing keeps it running.
-   *
-   * The responses are batched so a client gets one round trip per screen: the
-   * directory endpoint carries a folder and everything the left panel needs
-   * around it, the file endpoint the whole file view.
-   *
-   * A route that asks git something marks the box active, the same way a
-   * local command does: running git in the box is use of the box, and the
-   * reaper stopping one under an open review would only be followed by the
-   * next request starting it again.
-   *
-   * Every one reads the filesystem on the spot and there is nothing to poll, so
-   * a fetch is the freshness. Git is the exception: its answer for the whole
-   * workspace is held for as long as a review is being browsed, and the browser
-   * asks for a new one when it arrives.
-   */
+  // Files come from the workspace directory. Git runs in the box's container,
+  // so a route that asks git starts a stopped box and marks it active.
 
   /**
    * One directory of the review, with the facts the whole view needs.
@@ -653,8 +578,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   /**
    * One file of the workspace as its bytes, for a file the view cannot show
-   * as text to be opened in a tab of its own. Served the way an attachment
-   * is, so a browser or an app on the device can take it from there.
+   * as text. Served the way an attachment is.
    */
   app.get('/api/boxes/:id/review/raw', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -667,17 +591,16 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Saves one file of the workspace, as edited in the review.
+   * Saves one file of the workspace, as edited in the review, and answers
+   * with the file view.
    *
-   * The whole file and the hash it was read at, so a save over an edit the
-   * agent made in the meantime is refused instead of made. The answer is the
-   * file endpoint's, so the view repaints from one round trip.
+   * The body carries the hash the file was read at, so a save over an edit
+   * the agent made in the meantime is refused.
    */
   app.put(
     '/api/boxes/:id/review/file',
-    // Above the display limit the service enforces, because a file that size
-    // grows when it is JSON-encoded, and a save must not fail before that
-    // check is reached.
+    // Twice the display limit, because JSON encoding grows the file and the
+    // service's own size check has to be reached.
     { bodyLimit: 2 * MAX_FILE_BYTES },
     async (req) => {
       const { id } = req.params as { id: string };
@@ -687,9 +610,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   );
 
   /**
-   * Creates or replaces the comment on one line. The same route for both,
-   * because REVIEW.md holds at most one comment per line and the reviewer
-   * editing one is not a different operation from writing it.
+   * Creates or replaces the comment on one line. REVIEW.md holds at most one
+   * comment per line.
    */
   app.put('/api/boxes/:id/review/annotations', async (req) => {
     const { id } = req.params as { id: string };
@@ -726,16 +648,6 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   // --- Agent configuration ----------------------------------------------------
 
-  /**
-   * The AGENTS.md, skills and slash commands a box is given.
-   *
-   * `global` is applied to every box and always exists; any other set is
-   * chosen when a box is created and merged over it. Every mutation
-   * answers with the whole set rather than the piece that changed.
-   *
-   * What is written here reaches a box when that box next starts.
-   */
-
   app.get('/api/agent-sets', async () => agents.listSets());
 
   app.post('/api/agent-sets', async (req, reply) => {
@@ -771,12 +683,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return agents.deleteItem(setId, kind, name);
   });
 
-  /**
-   * What a box selecting this set gets, global set included.
-   *
-   * A merge of two sets is not obvious from either half, so the editor shows
-   * the result.
-   */
+  /** What a box selecting this set gets, global set included, for the editor to show. */
   app.get('/api/agent-sets/:setId/preview', async (req) => {
     const { setId } = req.params as { setId: string };
     agents.getSet(setId);
@@ -786,15 +693,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // --- Credentials and settings ------------------------------------------------
 
   /**
-   * The deployment's credentials and the plain settings beside them.
-   *
-   * Secrets are write-only: they go in through PUT and come back out only as
-   * an account and a status. Every write starts a recompose and a push of the
-   * egress policy through the store's own change hook, so a pasted token
-   * reaches the proxy in the same second rather than at the reconciler's next
-   * minute.
+   * The deployment's credentials. A secret goes in through PUT and never
+   * comes back out: this lists only an account and a status for each.
    */
-
   app.get('/api/credentials', async (): Promise<CredentialSummary[]> =>
     credentials.list().map((row) => credentials.summarize(row)),
   );
@@ -811,20 +712,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Logging in, for a credential that cannot be pasted.
+   * Starts a login, for a subscription that cannot be pasted.
    *
-   * A ChatGPT or Claude subscription has no static form: the only thing that
-   * can obtain one is the harness's own CLI, which Boxes runs in a throwaway
-   * container and drives from here. Four calls, because the flow is a state
-   * machine a page polls rather than a request that blocks for the minutes a
-   * person takes in a browser: start it, ask where it is, answer the one
-   * question Claude's CLI asks, and give up.
-   *
-   * `github` has no flow — a personal access token is a string somebody
-   * pastes — and says so rather than starting a container that would print
-   * nothing.
+   * Only the harness's own CLI can obtain a ChatGPT or Claude subscription,
+   * so Boxes runs it in a throwaway container and drives it. The page polls
+   * the routes below for the state, sends the code Claude's CLI asks for, and
+   * cancels. `github` and `gitlab` have no flow and answer a 400.
    */
-
   app.post('/api/credentials/:id/login', async (req) => {
     const id = credentialId(req.params as { id: string });
     return { loginId: logins.start(id) };
@@ -839,8 +733,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const { loginId } = req.params as { loginId: string };
     const { code } = parseBody(loginCodeBody, req.body);
     logins.submitCode(credentialId(req.params as { id: string }), loginId, code);
-    // Nothing to answer with: where the login goes next is what the poll
-    // above says, and it may not have moved yet.
+    // The poll above reports where the login goes next.
     return reply.code(204).send();
   });
 
@@ -860,13 +753,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   app.get('/api/settings', async (): Promise<Settings> => readSettings(db));
 
-  /**
-   * Writes the settings a body names and answers with the whole of them.
-   *
-   * A patch rather than a put: the git identity and a dialog's last choice are
-   * written by different screens, and neither should carry the other's values
-   * to be able to save.
-   */
+  /** Writes the settings a body names and answers with all of them. */
   app.patch('/api/settings', async (req): Promise<Settings> =>
     patchSettings(db, parseBody(patchSettingsBody, req.body)),
   );
@@ -875,23 +762,19 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   /**
    * The deployment's VAPID public key, which a browser needs before it can
-   * subscribe at all.
-   *
-   * Not a secret: it is the identity a push service checks the signature
-   * against, and it is meant to be handed to every browser.
+   * subscribe. It is public by design.
    */
   app.get('/api/push/key', async (): Promise<PushKeyResponse> => ({
     publicKey: notifier.publicKey,
   }));
 
   /**
-   * Checks a push endpoint before the orchestrator will ever POST to it.
+   * Checks a push endpoint before the orchestrator ever POSTs to it.
    *
-   * https only, and never an address literal: a push service is always a named
-   * host, and accepting a literal would turn this route into a way to aim the
-   * orchestrator at the LAN it can see. A hostname that resolves into private
-   * space is not caught here — the API is root-equivalent either way, and
-   * whatever authenticates it is the real boundary.
+   * It must be https and name a host. An address literal or localhost is
+   * refused, so the route cannot aim the orchestrator at the LAN it can see.
+   * A hostname that resolves to a private address still passes; whatever
+   * authenticates the API is the real boundary.
    */
   function validEndpoint(value: unknown): string {
     if (typeof value !== 'string' || value.length > 2000) {
@@ -921,9 +804,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Registers a browser for push, or refreshes what is stored for it.
    *
-   * There is no user to attach this to, since Boxes has no accounts, so a
-   * subscription is one more browser this deployment notifies and whatever
-   * authenticates the rest of `/api` decides who may add one.
+   * Boxes has no accounts, so a subscription belongs to the deployment.
+   * Whatever authenticates `/api` decides who may add one.
    */
   app.post('/api/push/subscribe', async (req, reply) => {
     const body = parseBody(pushSubscribeBody, req.body);
@@ -932,8 +814,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const auth = validKey(body.keys.auth, 16, 'auth');
     const label = typeof body.label === 'string' ? body.label.slice(0, 100) : null;
 
-    // Under the key this deployment holds now: a subscription outlives a key
-    // rotation as a row that can never be delivered to again.
+    // Stored with the current key, because after a key rotation the
+    // subscription can no longer be delivered to.
     upsertPushSubscription(db, endpoint, p256dh, auth, label, notifier.publicKey);
     log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
     return reply.code(204).send();
@@ -972,13 +854,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * Serves the dashboard bundle: a real file when the path names one, else its
    * index.html so client-side routes survive a reload.
    *
-   * The path is resolved under the bundle directory and has to stay there, with
-   * the separator in the prefix check so a sibling directory whose name merely
-   * starts the same way is not inside it.
+   * The path has to stay under the bundle directory. The prefix check
+   * includes the separator, so a sibling directory with the same prefix does
+   * not count as inside.
    *
-   * Every file is streamed rather than read in one piece: the entry chunk is
-   * over a megabyte, and reading it synchronously would stop the event loop
-   * on every request for it.
+   * Every file is streamed, because the entry chunk is over a megabyte and a
+   * synchronous read would block the event loop.
    */
   function sendBundle(reply: FastifyReply, path: string, host: string | undefined): FastifyReply {
     const candidate = resolve(bundleDir, `.${normalize(path)}`);
@@ -1006,17 +887,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   }
 
   /**
-   * The bundle, and the compression it is served with.
+   * The bundle, served compressed.
    *
-   * The compression plugin wires itself into each route as that route is
-   * declared, so it is loaded first and the route below is declared from
-   * inside it. That is also why the bundle is a route rather than the
-   * not-found handler: a handler Fastify never announces as a route is a
-   * handler the plugin never sees.
-   *
-   * The entry chunk is over a megabyte of JavaScript and about a third of
-   * that gzipped. The plugin picks whichever encoding the browser offered and
-   * leaves a body it knows is already compressed — a PNG, a font — alone.
+   * The compression plugin attaches to each route as the route is declared,
+   * so it is registered first and the route is declared inside it. For the
+   * same reason the bundle is a route rather than the not-found handler,
+   * which the plugin never sees.
    */
   void app.register(async (bundle) => {
     await bundle.register(compress, { global: true, threshold: COMPRESS_THRESHOLD_BYTES });

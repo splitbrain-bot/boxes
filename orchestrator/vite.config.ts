@@ -1,13 +1,12 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * One build system for the whole repository: the orchestrator is a Node
- * bundle, so it builds through Vite's SSR mode rather than a second tool.
+ * Vite and Vitest configuration of the orchestrator, built as a Node bundle in
+ * SSR mode.
  *
- * `ssr` leaves node builtins and every npm dependency external, which is what
- * a server bundle wants and what the native better-sqlite3 binding requires:
- * the runtime image installs production dependencies against its own libc and
- * the bundle resolves them from node_modules at boot.
+ * SSR mode keeps every npm dependency external. The native better-sqlite3
+ * binding needs that, because the runtime image installs it against its own
+ * libc.
  */
 export default defineConfig({
   build: {

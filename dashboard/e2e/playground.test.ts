@@ -3,11 +3,10 @@ import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
- * The installed assistant-ui components, rendered over the canned store.
+ * Browser tests for the installed assistant-ui components, rendered over
+ * canned messages on the playground page.
  *
- * This is the milestone's acceptance and the standing regression for a
- * registry re-run: every part kind draws, in both schemes, with nothing
- * unstyled and nothing on the console.
+ * They catch a registry re-run that leaves a part kind unstyled or broken.
  */
 
 let stub: TestOrchestrator;
@@ -29,14 +28,12 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
       await expect.poll(() => page.getByText('security boundary').first().isVisible()).toBe(true);
 
-      // Markdown: the bold run, the code fence and the table all became real
-      // elements rather than literal backticks and pipes.
+      // Markdown: the bold run, the code fence and the table became elements.
       expect(await page.locator('strong', { hasText: 'security boundary' }).count()).toBe(1);
       expect(await page.locator('pre code').count()).toBeGreaterThan(0);
       expect(await page.locator('table').count()).toBe(1);
 
-      // Tool calls arrive collapsed, which is the point of the group: the
-      // output is there to open, not in the way.
+      // Tool calls arrive collapsed.
       const groups = page.locator('[data-slot="tool-group-trigger"]');
       await expect.poll(() => groups.count()).toBe(2);
       await shoot(page, `playground-${scheme}`);
@@ -44,7 +41,7 @@ for (const scheme of ['light', 'dark'] as const) {
       await groups.first().click();
 
       // Opening the group reveals the call; opening the call reveals its
-      // arguments and its output. Both levels are the point of requirement 5.
+      // arguments and its output.
       const call = page.locator('[data-slot="tool-fallback-trigger"]');
       await expect.poll(() => call.count()).toBe(1);
       await call.first().click();
@@ -79,18 +76,16 @@ test('the components are styled by our own Tailwind build', async () => {
     const root = page.locator('.aui-thread-root');
     await expect.poll(() => root.count()).toBe(1);
 
-    // bg-background is a utility the component carries and our @theme bridge
-    // defines. No background here means the bridge is gone and every other
-    // token utility went with it.
+    // The @theme bridge defines bg-background. Without a background, the
+    // bridge and every other token utility are gone.
     const style = await root.evaluate((el) => {
       const cs = getComputedStyle(el);
       return { bg: cs.backgroundColor, position: cs.position };
     });
     expect(style.bg).not.toBe('rgba(0, 0, 0, 0)');
 
-    // The thread lays out in the flow of whatever embeds it. @assistant-ui/
-    // styles positioned .aui-root fixed, which floated the thread over the
-    // dashboard's own chrome; nothing may reintroduce that.
+    // A fixed position, as @assistant-ui/styles sets on .aui-root, would float
+    // the thread over the dashboard's own chrome.
     expect(style.position).toBe('static');
   } finally {
     await close();

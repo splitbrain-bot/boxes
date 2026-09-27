@@ -2,13 +2,12 @@
 #
 #   docker compose up -d     ->  http://localhost:3000
 #
-# The whole deployment is one published port: the orchestrator serves the
-# dashboard, the API and the /ws gateway on it. Putting it on the internet is
-# a reverse proxy's job, and no proxy is named here. Whichever one is put in
-# front has to forward the WebSocket upgrade on /ws.
+# The orchestrator serves the dashboard, the API and the /ws gateway on one
+# published port. To put it on the internet, add a reverse proxy in front.
+# That proxy must forward the WebSocket upgrade on /ws.
 #
-# The orchestrator creates box containers at runtime, each on an internal
-# network of its own, so they appear in no compose file.
+# The orchestrator creates the box containers at runtime, each on its own
+# internal network.
 
 name: boxes
 
@@ -19,40 +18,34 @@ services:
       dockerfile: orchestrator/Dockerfile
     container_name: boxes-orchestrator
     restart: unless-stopped
-    # Whatever is in the env file reaches the orchestrator, which parses and
-    # defaults all of it in orchestrator/src/config.ts. Nothing else needs
-    # listing here, and there is no env file to have by default. No credential
-    # is configuration: they are entered on the settings page and kept in the
-    # data volume below.
+    # Optional. The orchestrator validates every setting in it and supplies
+    # the defaults. Credentials are entered on the settings page instead.
     # Keep it outside the repo with: BOXES_ENV=~/.config/boxes.env
     env_file:
       - path: ${BOXES_ENV:-.env}
         required: false
     volumes:
       # Root-equivalent access, mitigated by the fixed HostConfig template, by
-      # never shell-exec'ing user strings, and by the auth in front.
+      # never passing user strings to a shell, and by the auth in front.
       - /var/run/docker.sock:/var/run/docker.sock
-      # /data because that is where the orchestrator keeps its database and
-      # its generated token — the default of DATA_DIR in
-      # orchestrator/src/config.ts. Mount it elsewhere and set that too.
+      # The orchestrator keeps its database, its generated keys and every
+      # box's files here. /data is the default of DATA_DIR. To mount the
+      # volume elsewhere, set DATA_DIR to match.
       - boxes-data:/data
-    # A ceiling, not a budget: the orchestrator buffers a whole attachment
-    # upload (MAX_ATTACHMENT_MB, 25 MiB by default) and a whole WebSocket
-    # frame (16 MiB) in memory per request, and holds one ACP connection per
-    # live box. Without a limit, one large upload is charged to the host.
-    # A gigabyte is several times what a small deployment's steady state needs
-    # and still leaves the host standing when something runs away.
+    # A ceiling, not a budget. The orchestrator buffers a whole attachment
+    # upload (MAX_ATTACHMENT_MB) and a whole WebSocket frame (16 MiB) in
+    # memory per request, and holds the ACP connections of every running box.
+    # A gigabyte is several times a small deployment's steady state.
     #
-    # The process count covers node's own threads plus the git it runs over a
-    # workspace for the review.
+    # The process limit covers node's own threads and the git processes the
+    # review runs.
     mem_limit: 1g
     pids_limit: 512
     ports:
-      # Loopback by default, because the orchestrator has no authentication of
-      # its own: binding it to every interface would publish a
-      # root-equivalent control plane to the LAN. A reverse proxy on this host
-      # reaches it here. One in a container should join this project's network
-      # and address `orchestrator:3000` directly, rather than widening this.
+      # Loopback by default, because the orchestrator has no authentication
+      # of its own and controls the host's Docker daemon. A reverse proxy on
+      # this host reaches it here. A reverse proxy in a container joins this
+      # project's network and uses orchestrator:3000 instead.
       - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-3000}:3000"
     networks:
       - default
@@ -63,10 +56,9 @@ services:
     build:
       context: .
       dockerfile: proxy/Dockerfile
-    # Fixed name: the orchestrator attaches this container to every box
-    # network by name, and expects this one — it is the default of
-    # EGRESS_PROXY_CONTAINER in orchestrator/src/config.ts. Renaming it here
-    # means setting that too, or boxes get no egress at all.
+    # The orchestrator attaches this container to every box network by this
+    # name, the default of EGRESS_PROXY_CONTAINER. To rename it, set that
+    # variable too, or boxes get no egress at all.
     container_name: boxes-egress-proxy
     restart: unless-stopped
     read_only: true
@@ -74,20 +66,16 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # Attached to the compose default network for external egress, and for the
-    # control channel the orchestrator pushes the egress policy over. The
-    # orchestrator dynamically connects it to each box's internal network
-    # too — those are internal, so nothing on them can route back here.
+    # The default network carries external egress and the control channel
+    # the orchestrator pushes the egress policy over. The orchestrator also
+    # connects the proxy to each box's internal network at runtime.
     #
-    # read_only holds: the proxy keeps its policy, its credentials and its CA
-    # in memory and writes nothing anywhere.
+    # read_only works because the proxy keeps its policy, its credentials and
+    # its CA in memory.
     networks:
       - default
-    # Smaller than the orchestrator's, because this holds no database and no
-    # box state — only the in-flight requests of every box at once,
-    # each of which it buffers to swap a credential into. Half a gigabyte is
-    # room for a busy moment and a bound on a box that uploads or
-    # downloads something enormous.
+    # The proxy holds no database and no box state, only the in-flight
+    # requests of every box. It buffers each one to swap a credential in.
     mem_limit: 512m
     pids_limit: 256
 

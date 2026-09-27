@@ -1,24 +1,16 @@
 /**
- * What an attachment becomes on its way into a prompt, and how it is read
- * back out of one.
+ * The attachment envelope: the block of prompt text that lists the files the
+ * user attached.
  *
- * Every attachment is uploaded into the box's workspace, whatever it is,
- * and the prompt then says so in one block of text — the envelope below.
- * Nothing travels inside the message: the agent opens what it was given the
- * path to, with the tools it already has.
- *
- * The envelope is plain text on purpose. ACP has `resource_link`, which is
- * the protocol's own way to name a file, but an adapter renders it as a bare
- * markdown link with nothing around it, and — the part that decides it —
- * what comes back on replay is that rendering rather than the block, so a
- * reconnected thread would not look like the one that was sent. Text
- * round-trips through any adapter's transcript exactly as written, which
- * makes the envelope both what the model reads and what this dashboard reads
- * back to draw the attachment chips.
+ * The files are uploaded into the box's workspace, and the agent reads them
+ * from there. The envelope is plain text, because text comes back from any
+ * adapter's transcript exactly as sent. The dashboard parses it back to draw
+ * the attachment chips.
  */
 
-/** Marks the envelope, and is what `parseEnvelope` looks for. */
+/** The line that opens the envelope. */
 const OPEN = '<attachments>';
+/** The line that closes the envelope. */
 const CLOSE = '</attachments>';
 
 /** The line above the list, addressed to the model. */
@@ -32,12 +24,13 @@ export interface AttachmentEntry {
   path: string;
   /** The file's name, which is the last segment of the path. */
   name: string;
+  /** The file's MIME type. */
   mimeType: string;
-  /** For display, already formatted — the exact byte count is nobody's question. */
+  /** The size, formatted for display. */
   size: string;
 }
 
-/** A byte count as something to read, in the units a person would say. */
+/** A byte count in B, KB or MB, with one decimal above bytes. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -51,28 +44,29 @@ export function buildEnvelope(entries: readonly AttachmentEntry[]): string {
 }
 
 /**
- * One line of the list, back into an entry.
+ * One line of the list: path, MIME type and size.
  *
- * Names are sanitised at upload — no spaces, no brackets — which is what
- * lets this be a pattern rather than a parser.
+ * The upload removes spaces and brackets from names, so a pattern can match
+ * the line.
  */
 const LINE = /^- (\S+) \(([^,()]+), ([^,()]+?)\)$/;
 
 /** What was around an envelope, and what was in it. */
 export interface ParsedEnvelope {
-  /** Text before the envelope, kept so nothing said around it is lost. */
+  /** Text before the envelope. */
   before: string;
+  /** The attachments the envelope lists. */
   entries: AttachmentEntry[];
+  /** Text after the envelope. */
   after: string;
 }
 
 /**
- * Reads an envelope out of a block of message text, or returns null when
- * there is none.
+ * Reads an envelope out of a block of message text. Returns null when there
+ * is none, when it lists no files, or when a line of it does not parse.
  *
- * Tolerant by design: an envelope this build cannot parse is left alone as
- * text, because showing the model's own instructions is a much better
- * failure than dropping something the user attached.
+ * The caller then shows the text as it is, which is better than dropping an
+ * attachment.
  */
 export function parseEnvelope(text: string): ParsedEnvelope | null {
   const open = text.indexOf(OPEN);
@@ -86,8 +80,6 @@ export function parseEnvelope(text: string): ParsedEnvelope | null {
     const trimmed = line.trim();
     if (!trimmed || trimmed === PREAMBLE) continue;
     const match = LINE.exec(trimmed);
-    // A list with a line in it this build does not know is not a list this
-    // build should be summarising.
     if (!match) return null;
     const [, path, mimeType, size] = match;
     entries.push({
@@ -109,17 +101,17 @@ export function parseEnvelope(text: string): ParsedEnvelope | null {
 // --- showing one back -------------------------------------------------------
 
 /**
- * Types the orchestrator serves as themselves, and so the only ones a
- * thumbnail can be drawn from.
+ * Image types the attachment endpoint serves inline, so an `<img>` can show
+ * them.
  *
- * The same list the endpoint keeps. Anything else is served as a download of
- * unknown type, so an `<img>` pointed at it would show a broken picture
- * rather than the file — which is why this list and that one have to agree.
+ * Every type here has to be one the endpoint serves inline. An `<img>` on a
+ * file served as a download shows a broken picture.
  */
 const THUMBNAIL_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/webp',
+  'image/avif',
   'image/gif',
   'image/svg+xml',
 ]);
@@ -130,11 +122,10 @@ export function isThumbnailable(mimeType: string): boolean {
 }
 
 /**
- * Where the browser can fetch one stored attachment.
+ * The URL the browser fetches one stored attachment from.
  *
- * The path in the envelope is workspace-relative, which is what the agent
- * needs; what a browser needs is the endpoint that reads it back, and the
- * name is the only part of the path that varies.
+ * @param path The workspace-relative path from the envelope. Only its last
+ *   segment goes into the URL.
  */
 export function attachmentUrl(boxId: string, path: string): string {
   const name = path.split('/').pop() ?? path;

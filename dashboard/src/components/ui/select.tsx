@@ -6,8 +6,8 @@ import { cn } from "@/lib/utils"
 import { useOverlayState } from "@/hooks/use-history-overlay"
 
 /**
- * An open select blocks what is behind it, so it is a step back can take
- * back, the same way a dialog is. See useHistoryOverlay.
+ * The select root. Opening it pushes a history entry at the same URL, so the
+ * back button closes the list instead of leaving the screen under it.
  */
 function Select({
   open,

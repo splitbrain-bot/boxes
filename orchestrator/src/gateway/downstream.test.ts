@@ -31,8 +31,6 @@ test('rejects a missing bearer entry', () => {
 });
 
 test('rejects another box token on this box', () => {
-  // The whole point of a token per box: one that opens a box somewhere
-  // else in this deployment opens nothing here.
   const result = checkUpgrade(`acp.v1, bearer.${OTHER_TOKEN}`, TOKEN, ACP_SUBPROTOCOL);
   assert.equal(result.ok, false);
 });
@@ -43,8 +41,8 @@ test('rejects a token no box has', () => {
 });
 
 test('rejects every token for a box that is not there', () => {
-  // A box id nobody holds has no token, so an upgrade to it is refused
-  // the way a wrong token is rather than saying the box is missing.
+  // A box id nobody holds has no token. The client gets the same refusal as
+  // for a wrong token.
   assert.equal(checkUpgrade(`acp.v1, bearer.${TOKEN}`, null, ACP_SUBPROTOCOL).ok, false);
   assert.equal(checkUpgrade('acp.v1, bearer.', null, ACP_SUBPROTOCOL).ok, false);
 });
@@ -74,8 +72,8 @@ test('accepts a terminal upgrade offering its own subprotocol', () => {
 });
 
 test('rejects each endpoint the handshake the other one makes', () => {
-  // The two endpoints are opened by the same token, and what tells them apart
-  // is the protocol offered: neither answers a client holding the other's.
+  // Both endpoints take the same token. Only the offered protocol tells them
+  // apart.
   assert.equal(checkUpgrade(`acp.v1, bearer.${TOKEN}`, TOKEN, TERMINAL_SUBPROTOCOL).ok, false);
   assert.equal(
     checkUpgrade(`${TERMINAL_SUBPROTOCOL}, bearer.${TOKEN}`, TOKEN, ACP_SUBPROTOCOL).ok,
