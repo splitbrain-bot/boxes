@@ -554,6 +554,8 @@ export function BoxReview() {
                 editing={editing}
                 dirty={edit.dirty}
                 busy={saving}
+                // A deleted file has no bytes left to serve.
+                openHref={file.deleted ? null : rawHref(id, file.path)}
                 onWrap={() => setWrap((w) => !w)}
                 onStepChange={(direction) => step(changedLines, direction)}
                 onStepComment={(direction) => step(commentedLines, direction)}
@@ -569,7 +571,7 @@ export function BoxReview() {
                   {/* A plain link, so the browser handles the file by its type. */}
                   <Button asChild variant="outline" size="sm">
                     <a
-                      href={`/api/boxes/${encodeURIComponent(id)}/review/raw?path=${encodeURIComponent(file.path)}`}
+                      href={rawHref(id, file.path)}
                       target="_blank"
                       rel="noopener"
                     >
@@ -730,6 +732,11 @@ function plainClick(event: React.MouseEvent): boolean {
     !event.shiftKey &&
     !event.altKey
   );
+}
+
+/** The URL that serves one workspace file's bytes, typed by its name. */
+function rawHref(id: string, path: string): string {
+  return `/api/boxes/${encodeURIComponent(id)}/review/raw?path=${encodeURIComponent(path)}`;
 }
 
 /** Centred message for a pane without content. */

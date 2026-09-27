@@ -216,6 +216,8 @@ test('a file the change deleted is listed, and says it is gone', async () => {
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /old\.ts/ }).isVisible()).toBe(true);
+    // Nothing is left on disk to open in a tab.
+    expect(await page.getByRole('link', { name: 'Open in a new tab' }).count()).toBe(0);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -239,13 +241,40 @@ test('a binary is listed, and opens in a tab of its own with its own type', asyn
     await expect.poll(() => page.getByRole('button', { name: /chart\.png/ }).isVisible()).toBe(true);
     await shoot(page, 'review-binary-desktop');
 
+    // The toolbar has the link too, as it does for every file.
+    expect(await page.getByRole('link', { name: 'Open in a new tab' }).count()).toBe(2);
     // A real link, so the tab is the browser's and the type is the server's.
-    const link = page.getByRole('link', { name: 'Open in a new tab' });
+    const link = page
+      .getByText('This file is binary, so it cannot be shown here.')
+      .locator('..')
+      .getByRole('link', { name: 'Open in a new tab' });
     const [tab] = await Promise.all([page.context().waitForEvent('page'), link.click()]);
     await expect.poll(() => tab.url()).toContain('/review/raw?path=notes%2Fchart.png');
     const res = await page.request.get(new URL((await link.getAttribute('href'))!, stub.url).href);
     expect(res.headers()['content-type']).toBe('image/png');
     expect(await res.body()).toEqual(Buffer.from('PNG\0bytes'));
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a text file opens in a tab of its own from the toolbar', async () => {
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=notes%2Ftodo.txt`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.getByText('plain text, no grammar').isVisible()).toBe(true);
+    const link = page.getByRole('link', { name: 'Open in a new tab' });
+    expect(await link.getAttribute('target')).toBe('_blank');
+    expect(await link.getAttribute('href')).toContain('/review/raw?path=notes%2Ftodo.txt');
+    // A .txt is on no list of types a browser shows, so the server sends a download.
+    const res = await page.request.get(new URL((await link.getAttribute('href'))!, stub.url).href);
+    expect(res.headers()['content-disposition']).toMatch(/^attachment;/);
+    expect(await res.text()).toBe('plain text, no grammar\n');
     expect(errors).toEqual([]);
   } finally {
     await close();
