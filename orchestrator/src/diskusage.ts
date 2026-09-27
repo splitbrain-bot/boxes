@@ -5,8 +5,9 @@ import { join } from 'node:path';
  * How much disk a box is taking up, measured off the request path and
  * read from a cache.
  *
- * Two directories, summed: the workspace the agent works in, and the home its
- * thread history, tool caches and runtime installs are in.
+ * Three directories, summed: the workspace the agent works in, the home its
+ * thread history and tool caches are in, and the Nix store of what it
+ * installed with nix.
  *
  * A request never waits for a measurement. `bytes()` answers with what was
  * last measured — null before the first one — and starts a walk only when the
@@ -74,9 +75,10 @@ export interface UsageOptions {
   /**
    * The directories a box is made of, on this process's own filesystem.
    *
-   * Nulls are expected and dropped: an unknown box has none of them, and
-   * a box from before homes became directories has a workspace and a home
-   * volume nothing out here can walk. All-null means there is nothing to
+   * Nulls are expected and dropped: an unknown box has none of them, a box
+   * from before homes became directories has a workspace and a home volume
+   * nothing out here can walk, and one from before Nix stores existed has
+   * no store until its next start. All-null means there is nothing to
    * measure, and the box reports no size rather than a zero.
    */
   pathsOf: (boxId: string) => Array<string | null>;

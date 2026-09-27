@@ -137,6 +137,8 @@ function insertObjects(id: string): void {
   writeFileSync(join(workspace, 'work.txt'), 'the agent was here');
   const home = ws.createHome(orchestrator.cfg.DATA_DIR, id);
   writeFileSync(join(home, '.profile'), 'and lived here');
+  const nix = ws.createNix(orchestrator.cfg.DATA_DIR, id);
+  writeFileSync(join(nix, 'store'), 'and installed things');
 }
 
 function workspaceOf(id: string): string {
@@ -145,6 +147,10 @@ function workspaceOf(id: string): string {
 
 function homeOf(id: string): string {
   return ws.homePath(orchestrator.cfg.DATA_DIR, id);
+}
+
+function nixOf(id: string): string {
+  return ws.nixPath(orchestrator.cfg.DATA_DIR, id);
 }
 
 beforeEach(() => {
@@ -165,6 +171,7 @@ beforeEach(() => {
 afterEach(async () => {
   rmSync(ws.workspacesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   rmSync(ws.homesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
+  rmSync(ws.nixRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   await orchestrator.app.close();
   db.close();
   dk.setDockerForTests(null);
@@ -172,7 +179,7 @@ afterEach(async () => {
 });
 
 describe('sweeping objects no box owns', () => {
-  it('takes the container, the network, the volume and both directories', async () => {
+  it('takes the container, the network, the volume and every directory', async () => {
     insertBox('live');
     insertObjects('live');
     // A box that was deleted, and whose teardown did not finish.
@@ -183,12 +190,14 @@ describe('sweeping objects no box owns', () => {
 
     assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
     assert.ok(!existsSync(workspaceOf('gone')));
-    // The home is the bigger half: the caches and whatever the agent
-    // installed at runtime are in it.
+    // The home and the store are the bigger part: the caches and whatever
+    // the agent installed at runtime are in them.
     assert.ok(!existsSync(homeOf('gone')));
+    assert.ok(!existsSync(nixOf('gone')));
     // And nothing of the box that is still there.
     assert.ok(existsSync(workspaceOf('live')));
     assert.ok(existsSync(homeOf('live')));
+    assert.ok(existsSync(nixOf('live')));
     assert.ok(fake.containers.has('c-live'));
     assert.ok(fake.volumes.has('home-live'));
   });
@@ -335,7 +344,7 @@ describe('sweeping objects no box owns', () => {
     insertBox('keep');
     // The shape a failed teardown leaves: it removes the container, the
     // network and the volumes first, so a box it gave up on halfway is
-    // two directories and nothing else.
+    // its directories and nothing else.
     insertObjects('half-torn-down');
     fake.containers.delete('c-half-torn-down');
     fake.networks.delete('bn-half-torn-down');
@@ -345,6 +354,7 @@ describe('sweeping objects no box owns', () => {
 
     assert.ok(!existsSync(workspaceOf('half-torn-down')));
     assert.ok(!existsSync(homeOf('half-torn-down')));
+    assert.ok(!existsSync(nixOf('half-torn-down')));
   });
 
   it('sweeps for a deployment whose boxes have all been deleted', async () => {

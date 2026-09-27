@@ -87,8 +87,8 @@ would kill the adapter exec mid-turn. The copy the tag moved off is removed
 once nothing is left on it, which is the only way that space is ever
 reclaimed; see [Reclaiming what a box leaves](#reclaiming-what-a-box-leaves). Recreating is otherwise cheap and is how
 a box container changes anything about itself: the rootfs is read-only and
-everything durable is in the two mounts, so the workspace and the thread
-history come across untouched. For the same reason nothing outside the
+everything durable is in the three mounts, so the workspace, the thread
+history and what the agent installed come across untouched. For the same reason nothing outside the
 orchestrator may recreate one — the container id in the database and the
 runtime proxy attachment would both be lost — so the template carries
 `com.centurylinklabs.watchtower.enable=false`.
@@ -1583,10 +1583,10 @@ Creating a box, in `BoxManager.create`:
 4. Allocate a `/24` out of `BOX_SUBNET_POOL` and insert the row as
    `creating`.
 5. Create the network `bn-<id>`, attach the egress proxy, create the workspace
-   directory `${DATA_DIR}/workspaces/<id>`, write the merged agent
-   configuration to `${DATA_DIR}/agents/<id>`, create the home directory
-   `${DATA_DIR}/homes/<id>` and fill it from the image, create the container
-   `box-<id>`, and start it.
+   directory `${DATA_DIR}/workspaces/<id>` and the Nix store directory
+   `${DATA_DIR}/nix/<id>`, write the merged agent configuration to
+   `${DATA_DIR}/agents/<id>`, create the home directory `${DATA_DIR}/homes/<id>`
+   and fill it from the image, create the container `box-<id>`, and start it.
 6. Insert the box's first conversation as a row: which harness it runs, and
    what it is configured with. Nothing is minted with the adapter here — a
    thread with no adapter-side conversation is a state the gateway already
@@ -1650,7 +1650,7 @@ are cleared, because a turn cannot survive the restart that killed the
 connection owning it.
 
 **A container that is gone is made again.** Everything a box container is
-comes from the row and the two directories it points at — image, network,
+comes from the row and the directories it points at — image, network,
 mounts, environment — so a container is reproducible and losing one costs
 nothing durable. Without a rebuild, `start` would hand the missing id to the
 daemon and take the 404, leaving the workspace and the home intact on the data
@@ -1727,6 +1727,27 @@ inside the box wrote. A named volume was never a boundary against this process
 anyway, only a path it did not have: the volume sits on the same host under the
 same root. Review still has no business there, and does not go there.
 
+**The Nix store is the third**, and it is what turns "the agent needs a tool
+the image does not have" into something the agent does for itself. `nix` is
+on the image as one static binary, and `${DATA_DIR}/nix/<id>` is bind-mounted
+at `/nix` — that path and no other, because every path in Nix's binary cache
+is hashed against `/nix/store`, and the Nix manual rules out a symlink in its
+place. The store is the agent's own: made empty, laid out by nix on first
+use, and 0755 like the workspace, since a package store holds nothing secret.
+So a box installs PostgreSQL or a compiler as its own user, with no
+capability the box does not already have, and keeps it across every stop,
+start and image roll. There is no column for it. Every box is given the
+directory at its next start, and the mount with it, through the same
+one-time recreate the agent configuration mount gets; until then its size is
+the size of its other two directories. Builds run unsandboxed, since the
+sandbox wants the user namespaces a box does not have, and the binary cache
+covers most of what an agent asks for. Nix's TLS is the one place the
+deployment CA alone is not enough: its static curl has no directory of
+authorities behind the file it is given, so the entrypoint writes a bundle of
+the system store and the CA, and `/etc/nix/nix.conf` on the image names it.
+The image also carries a skill that tells the agent all of this, installed by
+the entrypoint the way the browser skill is.
+
 **A bind is not seeded, which a volume was.** Docker fills a new named volume
 from the image's own `/home/agent`; a bind mount covers it instead. The image
 keeps that directory near-empty on purpose, so it is easy to assume nothing is
@@ -1800,11 +1821,13 @@ and nobody is waiting for them, and lazy rather than on a loop: a deployment
 nobody is looking at should not be walking disk on a timer. Sizes are apparent
 rather than allocated — `du --apparent-size` — and symlinks count as nothing
 and are never followed, the same containment the review surface and workspace
-removal keep. Both directories are walked and summed, and the home is usually
-the larger: a workspace holds a checkout, a home holds every toolchain cache
-and globally installed tool the agent ever reached for. A box still backed
-by a named home volume contributes only its workspace, there being no path to
-the other half.
+removal keep. All three directories are walked and summed. Of the workspace
+and the home, the home is usually the larger: a workspace holds a checkout, a
+home holds every toolchain cache and globally installed tool the agent ever
+reached for. A Nix store that has evaluated nixpkgs once is bigger than
+either, and is the same shape to walk as a `node_modules`. A box still backed
+by a named home volume contributes only its workspace and its store, there
+being no path to the home.
 
 **Boxes from before the change** keep their `ws_volume` and a null
 `workspace_dir`, and migrate at their next start, which is the only moment a
@@ -1854,8 +1877,8 @@ box that has no live row cannot be one on its way up. A deleted box's
 tombstone counts as no row, which is what makes a failed teardown recoverable.
 Containers go first, because a network with a container on it and a volume
 mounted into one are both refused; a removal that fails is a log line and the
-next sweep tries again. The workspace directory goes with them, being the size
-of all of it put together.
+next sweep tries again. The workspace, home and Nix store directories go with
+them, being the size of all of it put together.
 
 One guard: when the boxes the host carries outnumber the rows the database
 knows by a wide margin — an empty table beside a full host being the extreme of
@@ -1945,6 +1968,15 @@ other order would recreate the same container twice.
 Deleting a set is not blocked. Boxes that named it keep running and keep
 what is installed in them; the foreign key clears the column and they fall back
 to the global set alone at their next start.
+
+**The image carries skills of its own**, beside what the dashboard manages:
+the browser CLI's, which the CLI installs, and one per tool the image
+explains under `box-image/skills/`, which the entrypoint copies into both
+layouts on every start. Every start rather than once, so a rebuilt image's
+copy reaches a home that already exists. A set that claims the same name
+wins, and the image's copy is left out: the dashboard showed that version as
+the effective one, and installing over it would be the silent override the
+merged view exists to prevent.
 
 ## Code review
 
@@ -2534,7 +2566,10 @@ outside the orchestrator's own data volume. The CA certificate travels the same 
 the entrypoint writes to `~/.boxes/proxy-ca.crt` for the CA-trust variables to
 point at — `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`,
 `CURL_CA_BUNDLE`, and `CODEX_CA_CERTIFICATE`, which Codex reads before it falls
-back to `SSL_CERT_FILE`.
+back to `SSL_CERT_FILE`. Every one of those tools keeps the system authorities
+from their default directory beside the file it is pointed at. Nix's static
+curl does not, so the entrypoint also writes `~/.boxes/ca-bundle.crt`, the
+system store with the CA appended, and `/etc/nix/nix.conf` names that file.
 
 `GH_TOKEN` is now always set, so `gh auth setup-git` in the entrypoint always
 runs. A push from a box with no GitHub credential stored gets a 401 from
@@ -2598,7 +2633,7 @@ orchestrator/src/
   egress.ts             CA and placeholders, the policy, and the push to the proxy
   db.ts                 SQLite, schema migrations, the debug log
   boxes.ts              Box lifecycle, the owner of every UpstreamBox
-  workspaces.ts         Workspace and home directories on the data volume: paths, ownership
+  workspaces.ts         Workspace, home and Nix store directories on the data volume: paths, ownership
   diskusage.ts          How big each workspace has got, measured off the request path
   agents.ts             Agent sets: AGENTS.md, skills, commands; the merge and the materialized bundle
   docker.ts             Containers, networks, volumes, the adapter exec
@@ -2680,7 +2715,9 @@ shared/
   task-notifications.ts How a background task reports in, read by both sides
 box-image/              The per-box container image, in four files
   Dockerfile            What a box has installed, and the uid it runs as
-  entrypoint.sh         Identity, the CA and the agent configuration install; then it holds the container open
+  entrypoint.sh         Identity, the CA, the agent configuration and the image's skills; then it holds the container open
+  nix.conf              Nix in single-user mode, unsandboxed, trusting the bundle the entrypoint writes
+  skills/               Skills the image installs into every box, one per tool it explains
   playwright-cli.config.json  Browser defaults for a container with no Chrome and no sandbox
   profile-image-path.sh Puts the image's PATH back after /etc/profile has replaced it
 scripts/                Security smoke test and credentialed live test

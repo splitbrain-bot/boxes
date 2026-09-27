@@ -190,7 +190,7 @@ function insertBox(
     // Every mount a container created today has. What this suite is about is
     // the image moving under a box, not a container from before a mount
     // existed — boxes.ts has its own path for that.
-    mounts: [dk.WORKSPACE_DIR, '/home/agent', dk.AGENT_CONFIG_DIR],
+    mounts: [dk.WORKSPACE_DIR, '/home/agent', dk.NIX_DIR, dk.AGENT_CONFIG_DIR],
   });
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
@@ -258,18 +258,19 @@ describe('starting a box whose image has moved', () => {
     assert.equal(fake.containers.get(detail.containerId!)?.running, true);
   });
 
-  it('brings the workspace and the home across untouched', async () => {
+  it('brings the workspace, the home and the nix store across untouched', async () => {
     insertBox('a2', 'c1', 'sha256:one');
     fake.images.set(IMAGE, 'sha256:two');
 
     await orchestrator.manager.start('a2');
 
-    // Everything durable about a box lives in these two mounts, which is
+    // Everything durable about a box lives in these three mounts, which is
     // what makes recreating the container cheap rather than destructive.
     const host = fake.created[0]!['HostConfig'] as { Binds: string[] };
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
+      `${dir}/nix/a2:/nix`,
       // The agent configuration comes across too, read-only. It is derived
       // from the database rather than durable in itself, but the mount has to
       // be there or the box starts with nothing configured.
@@ -290,8 +291,34 @@ describe('starting a box whose image has moved', () => {
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
       'home-a2:/home/agent',
+      `${dir}/nix/a2:/nix`,
       `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
+  });
+
+  it('gives a box from before nix stores existed the mount at its next start', async () => {
+    insertBox('a2', 'c1', 'sha256:one');
+    // The image did not move. The container is from before the mount was in
+    // the template, which is the only thing about it to fix.
+    fake.containers.get('c1')!.mounts = [dk.WORKSPACE_DIR, '/home/agent', dk.AGENT_CONFIG_DIR];
+
+    const detail = await orchestrator.manager.start('a2');
+
+    // The directory is made before the container that binds it, so the
+    // daemon never gets to create it as root.
+    assert.ok(existsSync(join(dir, 'nix', 'a2')));
+    assert.deepEqual(fake.removed, ['c1']);
+    assert.notEqual(detail.containerId, 'c1');
+    assert.ok(fake.containers.get(detail.containerId!)?.mounts.includes(dk.NIX_DIR));
+  });
+
+  it('leaves a box that has every mount alone', async () => {
+    insertBox('a2', 'c1', 'sha256:one');
+
+    const detail = await orchestrator.manager.start('a2');
+
+    assert.deepEqual(fake.removed, []);
+    assert.equal(detail.containerId, 'c1');
   });
 
   it('moves a box onto the current image for a terminal too', async () => {
@@ -371,6 +398,7 @@ describe('starting a box Docker has forgotten', () => {
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
+      `${dir}/nix/a2:/nix`,
       `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
   });

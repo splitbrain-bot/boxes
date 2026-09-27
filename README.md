@@ -121,9 +121,13 @@ than a suggestion.
 ### Box list
 
 The start page lists every box. A box is one container with a home
-directory and a workspace directory bind-mounted into it. It contains one or
-more threads, and a thread is one instance of the agent harness. Idle boxes are suspended, which stops their
-container.
+directory, a workspace directory and a Nix store bind-mounted into it. It
+contains one or more threads, and a thread is one instance of the agent
+harness. Idle boxes are suspended, which stops their container.
+
+The agent installs what it needs with `nix`, as its own user: tools,
+languages, a database to test against. What it installs stays with the box
+across stops, restarts and image updates, and counts towards its disk usage.
 
 A box shows its name, its id, its disk usage and one or more status badges:
 

@@ -7,6 +7,33 @@
 # The OS is picked for its language toolchains, which are newer than Debian
 # stable's. Node is picked for the two npm globals the agent itself runs. The
 # official node image would tie the first choice to the second.
+
+# Nix, fetched as one statically linked binary from the official binary
+# cache. The installer's own layout -- a closure under /nix -- is no use here,
+# because /nix is a directory of each box's own, bound in over whatever the
+# image holds at that path. A static nix lives in /usr/local/bin like every
+# other tool on the image, and follows the image rather than the box.
+#
+# The build stage is a Nix image, because a store path is what the cache
+# serves and `nix copy` is what verifies it: the signature, against the
+# cache's key the image already trusts, is what pins the binary to the path
+# named here. The path is nixpkgs' nixStatic, one per architecture; a bump
+# is a new pair of paths and the version the check at the end expects.
+#
+# Always on the build platform: copying a store path runs nothing in it, so
+# an arm64 binary is fetched without emulating arm64.
+FROM --platform=$BUILDPLATFORM nixos/nix:2.35.2 AS nix-static
+ARG TARGETARCH
+ARG NIX_STATIC_AMD64=/nix/store/vx0h5sdb0r7qgsm9fp653f0fi2wn5v7k-nix-static-x86_64-unknown-linux-musl-2.34.8
+ARG NIX_STATIC_ARM64=/nix/store/x7ym2j54zsnws310rv7lg3sqbvhcfani-nix-static-aarch64-unknown-linux-musl-2.34.8
+RUN case "$TARGETARCH" in \
+      amd64) path="$NIX_STATIC_AMD64" ;; \
+      arm64) path="$NIX_STATIC_ARM64" ;; \
+      *) echo "no static nix pinned for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && nix --extra-experimental-features nix-command copy --from https://cache.nixos.org "$path" \
+ && cp -a "$path/bin" /out
+
 FROM ubuntu:26.04
 
 # What lets the orchestrator recognise a copy of this image after `:latest`
@@ -179,6 +206,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python it does not have without any privilege at all.
 RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
  && rm -rf /root/.cache
+
+# Nix, from the stage at the top of this file: the binary and the legacy
+# names that link to it. This is what turns "the agent needs a tool the
+# image does not have" into something the agent does for itself, as its own
+# user and into its own store -- a database, a compiler, a whole project
+# environment from a flake -- with no privilege the box does not already
+# have. The store it fills is the box's /nix, which the orchestrator binds in
+# and which outlives the container the way the home does.
+#
+# The system configuration goes in /etc/nix, on the image rather than in the
+# home: what a box needs to run nix at all follows the image, and an agent's
+# own ~/.config/nix/nix.conf is read on top of it. Read the file -- it
+# explains each setting.
+ARG NIX_VERSION=2.34.8
+COPY --from=nix-static /out/ /usr/local/bin/
+COPY nix.conf /etc/nix/nix.conf
 
 # The agent and the adapter are pinned here and nowhere else, to a major line
 # each rather than to an exact release: a rebuild picks up fixes on that line,
@@ -374,6 +417,12 @@ RUN pw=/usr/local/lib/node_modules/@playwright/cli/node_modules/.bin/playwright 
 # that. Read the file -- it explains why each key is there.
 COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
+# Skills the image carries for what is on it: what nix is for here and what
+# survives a restart is nothing an agent can find out from a --help. The
+# entrypoint installs them into a box's home on every start, so a rebuilt
+# image's copy reaches a home that already exists.
+COPY skills /usr/local/share/boxes/skills
+
 # The agent's own account, created rather than renamed: an Ubuntu base ships
 # no developer user to reuse, and 1020 keeps clear of the `ubuntu` account it
 # does carry at 1000 -- which on a real host is usually a person.
@@ -438,6 +487,11 @@ ENV NPM_CONFIG_PREFIX=/home/agent/.local \
 # themselves; being absent on PATH is harmless.
 ENV PATH=/home/agent/.local/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/agent/.config/composer/vendor/bin:$PATH
 
+# The nix profile's own directory, for the same reason. It is where
+# `nix profile add` links what the agent installs, under ~/.local/state
+# because nix.conf asks for the XDG layout; nix creates it on first use.
+ENV PATH=/home/agent/.local/state/nix/profile/bin:$PATH
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
@@ -456,8 +510,8 @@ RUN mkdir -p /etc/boxes \
 COPY profile-image-path.sh /etc/profile.d/boxes-image-path.sh
 RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 
-# The root filesystem is mounted read-only at runtime. /workspace and
-# /home/agent are the writable volumes, and /tmp is a tmpfs.
+# The root filesystem is mounted read-only at runtime. /workspace, /home/agent
+# and /nix are the writable volumes, and /tmp is a tmpfs.
 # /boxes/agent is where the orchestrator binds this box's merged agent
 # configuration, read-only. Created here rather than left to the daemon so the
 # mount point exists on a read-only rootfs.
@@ -466,8 +520,8 @@ RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 # not there rather than creating it, and the check below wants a `codex` that
 # runs. The entrypoint creates it too, for the home that was filled from an
 # image older than this line.
-RUN mkdir -p /workspace /home/agent/.local/bin /home/agent/.codex /home/agent/.claude /boxes/agent \
- && chown agent:agent /workspace /home/agent /home/agent/.local /home/agent/.local/bin \
+RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude /boxes/agent \
+ && chown agent:agent /workspace /nix /home/agent /home/agent/.local /home/agent/.local/bin \
       /home/agent/.codex /home/agent/.claude
 
 # Claude Code's user settings, with which a new box starts. They leave out the
@@ -499,9 +553,11 @@ WORKDIR /workspace
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
- && test -w /workspace && test -w /home/agent \
+ && test -w /workspace && test -w /home/agent && test -w /nix \
  && test -w /home/agent/.local/bin \
  && test "$(npm config get prefix)" = "/home/agent/.local" \
+ && test "$(command -v nix)" = "/usr/local/bin/nix" \
+ && nix --version | grep -qF "${NIX_VERSION}" \
  && test "$(command -v claude-agent-acp)" = "/usr/local/bin/claude-agent-acp" \
  && test "$(command -v codex-acp)" = "/usr/local/bin/codex-acp" \
  && test "$(command -v codex)" = "/usr/local/bin/codex" \

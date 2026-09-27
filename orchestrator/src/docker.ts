@@ -82,6 +82,16 @@ export const WORKSPACE_DIR = '/workspace';
  */
 export const AGENT_CONFIG_DIR = '/boxes/agent';
 
+/**
+ * Where the box's Nix store is mounted, writable.
+ *
+ * The path is not a choice: every path in Nix's binary cache is hashed
+ * against /nix/store, so a store anywhere else would build the world from
+ * source. What is mounted here is a per-box directory on the data volume,
+ * like the workspace and the home; see workspaces.ts.
+ */
+export const NIX_DIR = '/nix';
+
 let client: Docker | null = null;
 
 /** The shared Docker client, connected to the host socket on first use. */
@@ -98,9 +108,10 @@ export function setDockerForTests(d: Docker | null): void {
 /**
  * Docker object names derived from a box id.
  *
- * A workspace and a home are both directories on the orchestrator's data
- * volume, so there is no volume name to derive. The `ws-<id>` or `home-<id>`
- * volume of a box from before those changes is read off its row.
+ * A workspace, a home and a Nix store are all directories on the
+ * orchestrator's data volume, so there is no volume name to derive. The
+ * `ws-<id>` or `home-<id>` volume of a box from before those changes is read
+ * off its row.
  */
 export const names = {
   container: (id: string) => `box-${id}`,
@@ -133,6 +144,8 @@ export interface CreateContainerSpec {
    * the same field to Docker, and which one this is is the caller's business.
    */
   homeSource: string;
+  /** Host-side path of the box's Nix store directory, bound at NIX_DIR. */
+  nixSource: string;
   /**
    * What this box holds in place of the deployment's credentials, plus the
    * git identity: built by the caller with credentialEnv(), because every
@@ -632,13 +645,14 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     HostConfig: {
       NetworkMode: spec.networkName,
       Binds: [
-        // Both are directories on the orchestrator's data volume, so that
-        // reviewing a box's files needs no exec and no running container,
-        // and so that what a box is costing can be read by walking two
-        // paths. A box from before homes became directories names its
+        // All three are directories on the orchestrator's data volume, so
+        // that reviewing a box's files needs no exec and no running
+        // container, and so that what a box is costing can be read by walking
+        // three paths. A box from before homes became directories names its
         // volume here instead, and Docker takes either.
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeSource}:${HOME_DIR}`,
+        `${spec.nixSource}:${NIX_DIR}`,
         // Read-only: what the dashboard says a box is configured with is not
         // something the agent inside it gets to rewrite.
         `${spec.agentConfigSource}:${AGENT_CONFIG_DIR}:ro`,
@@ -1184,20 +1198,24 @@ async function runExec(
 }
 
 /**
- * Whether a container has a mount at `destination`.
+ * Which of `destinations` a container has no mount at.
  *
  * A container's mounts are fixed when it is created, so this is how a box
  * from before a mount existed is recognised and recreated with it. A container
- * that cannot be inspected answers true: a missing one has nothing to fix, and
- * recreating on a transient inspect failure would be the more destructive
- * mistake.
+ * that cannot be inspected answers with none missing: a container that is
+ * gone has nothing to fix, and recreating on a transient inspect failure
+ * would be the more destructive mistake.
  */
-export async function hasMount(containerId: string, destination: string): Promise<boolean> {
+export async function missingMounts(
+  containerId: string,
+  destinations: readonly string[],
+): Promise<string[]> {
   try {
     const info = await docker().getContainer(containerId).inspect();
-    return (info.Mounts ?? []).some((m) => m.Destination === destination);
+    const present = new Set((info.Mounts ?? []).map((m) => m.Destination));
+    return destinations.filter((d) => !present.has(d));
   } catch {
-    return true;
+    return [];
   }
 }
 

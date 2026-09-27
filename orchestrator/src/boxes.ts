@@ -101,10 +101,10 @@ export class BoxManager {
 
   /** How big each box has got, measured off the request path. */
   private readonly usage = new BoxUsage({
-    // Everything a box is on disk. A box still backed by a named
-    // home volume contributes only its workspace, there being no path to the
-    // other half.
-    pathsOf: (id) => [this.workspacePathOf(id), this.homePathOf(id)],
+    // Everything a box is on disk. A box still backed by a named home
+    // volume contributes its workspace and its Nix store, there being no
+    // path to the home.
+    pathsOf: (id) => [this.workspacePathOf(id), this.homePathOf(id), this.nixPathOf(id)],
     ttlMs: BOX_SIZE_TTL_MS,
     onTrouble: (id, error) =>
       log.box(id).warn('could not measure what a box is using', {
@@ -250,6 +250,22 @@ export class BoxManager {
     return ws.homePath(this.cfg.DATA_DIR, row.id);
   }
 
+  /**
+   * Where a box's Nix store is on this process's own filesystem, and null
+   * for a box that has none yet.
+   *
+   * No column records it: every box is given the directory at its next
+   * start, so the directory itself is what says whether it is there. A box
+   * from before Nix stores existed has none until then, and is measured by
+   * its other two directories in the meantime.
+   */
+  nixPathOf(id: string): string | null {
+    const row = this.getRow(id);
+    if (!row || row.status === 'deleted') return null;
+    const path = ws.nixPath(this.cfg.DATA_DIR, row.id);
+    return ws.directoryExists(path) ? path : null;
+  }
+
   // --- the box image ----------------------------------------------------
 
   /**
@@ -392,7 +408,7 @@ export class BoxManager {
     const volumes = await dk.listBoxVolumes();
     // The files are read separately, because a teardown removes the Docker
     // objects first: a box it gave up on halfway has nothing left to find
-    // it by except the two directories it wrote.
+    // it by except the directories it wrote.
     const directories = ws.boxDirectoryIds(this.cfg.DATA_DIR);
     // Last, after everything it is matched against: create() inserts the row
     // before it makes anything, so a box created while the readings
@@ -451,14 +467,17 @@ export class BoxManager {
       await this.sweeping(volume.boxId, 'volume', () => dk.removeVolume(volume.name));
     }
     // And the files, which are the size of all of the above put together.
-    // The workspace and home of a box with no row are reachable from
-    // nothing Boxes has.
+    // The workspace, home and Nix store of a box with no row are reachable
+    // from nothing Boxes has.
     for (const boxId of boxes) {
       await this.sweeping(boxId, 'workspace', () =>
         Promise.resolve(ws.removeWorkspace(this.cfg.DATA_DIR, boxId)),
       );
       await this.sweeping(boxId, 'home', () =>
         Promise.resolve(ws.removeHome(this.cfg.DATA_DIR, boxId)),
+      );
+      await this.sweeping(boxId, 'nix store', () =>
+        Promise.resolve(ws.removeNix(this.cfg.DATA_DIR, boxId)),
       );
     }
   }
@@ -580,8 +599,9 @@ export class BoxManager {
    *
    * Recreating is how a box container changes anything about itself —
    * migrateWorkspace does the same for its mount — and it is cheap: the
-   * rootfs is read-only and everything durable lives in the two mounts, so
-   * the workspace and the adapter's thread history come across untouched.
+   * rootfs is read-only and everything durable lives in the three mounts,
+   * so the workspace, the adapter's thread history and what the agent
+   * installed come across untouched.
    *
    * Start is the only moment this can happen. Under a running container it
    * would kill the adapter exec mid-turn, so a running box is left alone
@@ -729,6 +749,7 @@ export class BoxManager {
       networkName: row.network_name,
       subnet: row.subnet,
       workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
+      nixSource: ws.hostNixPath(this.hostDataDir, row.id),
       agentConfigSource: hostAgentConfigPath(this.hostDataDir, row.id),
       // A directory for every box created since homes became
       // directories, and the old named volume for one created before, which
@@ -888,19 +909,20 @@ export class BoxManager {
   }
 
   /**
-   * Builds the network, the two directories and the container of a new
+   * Builds the network, the three directories and the container of a new
    * box, and starts it.
    *
    * Split out of {@link create} so it can run under the box's slot: this
    * is the half that touches Docker and the filesystem, and its order is the
-   * one that works — the network before the container that joins it, and both
-   * directories before the container that binds them.
+   * one that works — the network before the container that joins it, and
+   * every directory before the container that binds them.
    */
   private async createResources(row: BoxRow): Promise<void> {
     const id = row.id;
     await dk.createNetwork(row.network_name, row.subnet, id);
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     ws.createWorkspace(this.cfg.DATA_DIR, id);
+    ws.createNix(this.cfg.DATA_DIR, id);
     // Before the container, because it is one of its mounts.
     this.agents.materialize(id, row.agent_set_id);
     // A bind mount covers what the image put in /home/agent rather than
@@ -940,6 +962,9 @@ export class BoxManager {
     // binds the directory: the daemon would otherwise create it itself, empty
     // and owned by root.
     this.agents.materialize(row.id, row.agent_set_id);
+    // The Nix store likewise, which a box from before it existed does not
+    // have: made here, the mount check below has a directory to bind.
+    ws.createNix(this.cfg.DATA_DIR, row.id);
     // Before anything binds the other two, for the same reason.
     this.requireDirectories(row);
     let current = await this.migrateWorkspace(row);
@@ -949,12 +974,12 @@ export class BoxManager {
     current = await this.restoreMissingContainer(current);
     this.giveUpIfPreempted(row.id);
     // Before the mount check below: a roll recreates the container from
-    // containerSpec, which already binds the agent configuration, so a
-    // box that moves image comes back with the mount and the check that
+    // containerSpec, which already binds everything the template has, so a
+    // box that moves image comes back with every mount and the check that
     // follows finds nothing to do.
     current = await this.rollOntoCurrentImage(current);
     this.giveUpIfPreempted(row.id);
-    return this.ensureAgentConfigMount(current);
+    return this.ensureTemplateMounts(current);
   }
 
   /**
@@ -1026,7 +1051,7 @@ export class BoxManager {
    * Start is the only moment this can happen: the mount is fixed when a
    * container is created, so the container has to be replaced. That is cheap
    * here — a box container has a read-only rootfs and everything durable
-   * lives in its two mounts — but it is not free of risk, so the order is
+   * lives in its mounts — but it is not free of risk, so the order is
    * chosen to lose nothing at any step: copy first, recreate second, and drop
    * the volume only once the new container has started. The row says which
    * mount it has the moment the container that has it exists, so a crash
@@ -1063,20 +1088,25 @@ export class BoxManager {
   }
 
   /**
-   * Gives a box created before agent configuration existed the mount that
-   * carries it, and returns the row as it now stands.
+   * Gives a box created before a mount existed the mounts the template has
+   * now, and returns the row as it now stands.
    *
-   * Nothing is lost if this fails halfway, because the directory is already
-   * written and the next start tries again.
+   * Two mounts arrived after the first boxes did: the agent configuration
+   * and the Nix store. A container from before either is recreated once,
+   * from the template, which binds both.
    *
-   * A running box is left alone, and gets the mount at its next
+   * Nothing is lost if this fails halfway, because the directories are
+   * already written and the next start tries again.
+   *
+   * A running box is left alone, and gets the mounts at its next
    * stop/start cycle.
    */
-  private async ensureAgentConfigMount(row: BoxRow): Promise<BoxRow> {
+  private async ensureTemplateMounts(row: BoxRow): Promise<BoxRow> {
     if (!row.container_id) return row;
-    if (await dk.hasMount(row.container_id, dk.AGENT_CONFIG_DIR)) return row;
-    if (await this.deferredWhileRunning(row, 'agent configuration')) return row;
-    log.box(row.id).info('recreating the container with the agent configuration mount');
+    const missing = await dk.missingMounts(row.container_id, [dk.AGENT_CONFIG_DIR, dk.NIX_DIR]);
+    if (missing.length === 0) return row;
+    if (await this.deferredWhileRunning(row, 'the mounts it lacks')) return row;
+    log.box(row.id).info('recreating the container with the mounts it lacks', { missing });
     const containerId = await this.recreateContainer(row);
     this.db
       .prepare('UPDATE boxes SET container_id = ? WHERE id = ?')
@@ -1194,6 +1224,13 @@ export class BoxManager {
       } catch (err) {
         slog.warn('home removal failed', { error: (err as Error).message });
       }
+    }
+    // The Nix store goes with them. Every box is tried, since no column says
+    // which have one, and removing a directory that is not there is nothing.
+    try {
+      ws.removeNix(this.cfg.DATA_DIR, row.id);
+    } catch (err) {
+      slog.warn('nix store removal failed', { error: (err as Error).message });
     }
     try {
       this.agents.removeMaterialized(row.id);
