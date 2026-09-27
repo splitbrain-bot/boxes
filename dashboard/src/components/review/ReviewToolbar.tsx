@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   ChevronUp,
+  ExternalLink,
   GitCompare,
   MessageSquare,
   Pencil,
@@ -12,7 +13,8 @@ import { cn } from '@/lib/utils';
 
 /**
  * The toolbar over the code pane: prev/next navigation over a file's changes
- * and comments, and the way in and out of edit mode.
+ * and comments, a link that opens the file in a new tab, and the way in and
+ * out of edit mode.
  *
  * The edit controls live here because the toolbar stays pinned while the
  * keyboard is up.
@@ -26,6 +28,7 @@ export function ReviewToolbar({
   editing,
   dirty,
   busy,
+  openHref,
   onWrap,
   onStepChange,
   onStepComment,
@@ -49,6 +52,8 @@ export function ReviewToolbar({
   dirty: boolean;
   /** Whether a write is in flight. */
   busy: boolean;
+  /** The URL that serves the file's bytes, or null for a file with none. */
+  openHref: string | null;
   /** Called when the user toggles wrapping. */
   onWrap: () => void;
   /** Called with −1 for the previous change or 1 for the next. */
@@ -80,6 +85,21 @@ export function ReviewToolbar({
         onStep={onStepComment}
       />
       <span className="flex-1" />
+
+      {/* A plain link, so the browser handles the file by its type. */}
+      {openHref ? (
+        <Button asChild variant="ghost" size="icon-sm">
+          <a
+            href={openHref}
+            target="_blank"
+            rel="noopener"
+            title="Open in a new tab"
+            aria-label="Open in a new tab"
+          >
+            <ExternalLink />
+          </a>
+        </Button>
+      ) : null}
 
       {editing ? (
         <>

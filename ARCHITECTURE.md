@@ -171,7 +171,7 @@ were.
 | `GET /api/boxes/:id/attachments/:name` | Serves one back; images, PDFs, audio and video as themselves, everything else as a download |
 | `GET /api/boxes/:id/review/dir?path=&fresh=` | One directory: its children with each file's status and comment count, each folder's subtree marks, and the facts the whole view needs. `fresh=1` says the reader has arrived, and retakes git's answer |
 | `GET /api/boxes/:id/review/file?path=` | Content, diff markers, the owning repository and comments — the whole file view |
-| `GET /api/boxes/:id/review/raw?path=` | One file's bytes, typed by its name the way an attachment is, for opening a binary in a tab of its own |
+| `GET /api/boxes/:id/review/raw?path=` | One file's bytes, typed by its name the way an attachment is, for opening it in a tab of its own |
 | `PUT /api/boxes/:id/review/file` | Saves one file of the workspace, refusing a save over an edit made since it was read |
 | `PUT /api/boxes/:id/review/annotations` | Creates or replaces one line's comment |
 | `DELETE /api/boxes/:id/review/annotations?path=&line=` | Deletes one comment |
@@ -2046,9 +2046,10 @@ under.
 One read of the workspace is one `readdirSync` of one directory. Every file is
 listed wherever it sits, binaries included: a version control system's own
 metadata and the review's own file at the root are left out, and nothing
-else. A binary cannot be shown as text, so the view offers to open it in a tab
-of its own through `GET /review/raw`, which serves it the way an attachment is
-served. A directory carries its own cap, so no single answer can be
+else. Any file that is still on disk can be opened in a tab of its own
+through `GET /review/raw`, which serves it the way an attachment is served. A
+binary cannot be shown as text, so for a binary that is what the view offers
+in place of the content. A directory carries its own cap, so no single answer can be
 large, and says when it hit it.
 
 **Git's answer is taken once and shared.** The repositories, what they are
