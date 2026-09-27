@@ -2,20 +2,16 @@ import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 
 /**
- * What a view says while it waits for its first answer.
- *
- * `role="status"` is what this is for: a screen reader is otherwise told
- * nothing at all while a view sits empty, and the word on the screen is the
- * only thing a sighted reader has either. The arrangement stays the caller's,
- * because this sits centred on a whole viewport in one place and under a back
- * link in another.
+ * Status text a view shows while it waits for its first answer. The status
+ * role lets a screen reader announce it. The caller sets the layout.
  */
 export function Loading({
   className,
   children = 'Loading…',
 }: {
+  /** Layout classes from the caller. */
   className?: string;
-  /** What it says, where a view has something more exact to say. */
+  /** The text, when a view has a more exact one than the default. */
   children?: ReactNode;
 }) {
   return (

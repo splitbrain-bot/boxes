@@ -1,24 +1,6 @@
 import * as dk from '../docker.ts';
 import { log } from '../log.ts';
 
-/**
- * The one place review starts a git process.
- *
- * Git runs inside the box's own container, as the agent user, over the
- * agent's own files — never in this process. A repository's configuration can
- * make git run a command on exactly the operations review runs: a clean filter
- * on `diff`, an fsmonitor hook on `status`. Inside the box that command is one
- * the agent could have run anyway, and there is nothing to defend. Outside it
- * would be code execution in the process holding the Docker socket.
- *
- * So the only address a git invocation has is a {@link GitTarget}: a container
- * and a directory inside it. Everything else — the argv, the environment, the
- * runner that reaches the daemon — is built here and cannot be passed in.
- *
- * Everything run through here reads. Nothing fetches, pushes or resolves a
- * remote.
- */
-
 /** A box's container and the workspace inside it: where review runs git. */
 export interface GitBox {
   /** The running container git is executed in. */
@@ -27,7 +9,12 @@ export interface GitBox {
   workspaceDir: string;
 }
 
-/** The container and the directory one git invocation runs in. */
+/**
+ * The container and the directory one git invocation runs in.
+ *
+ * It is all a caller says about where git runs. {@link git} builds the command
+ * line and the environment itself.
+ */
 export interface GitTarget {
   /** The running container git is executed in. */
   containerId: string;
@@ -38,10 +25,8 @@ export interface GitTarget {
 /**
  * The flags every git invocation carries, ahead of the subcommand.
  *
- * `core.quotepath=false` keeps a non-ASCII path unquoted, which is what the
- * parsers here expect and what makes git's paths the paths the file tree
- * reports. It is a requirement of reading the output, not a defence: the
- * repository's own configuration is the agent's to write either way.
+ * `core.quotepath=false` makes git write non-ASCII paths unquoted, as the
+ * parsers and the file tree expect.
  */
 function gitFlags(): string[] {
   return ['-c', 'core.quotepath=false'];
@@ -50,14 +35,12 @@ function gitFlags(): string[] {
 /**
  * The variables every git invocation adds to the container's own environment.
  *
- * - `GIT_OPTIONAL_LOCKS=0` — every invocation here only reads, and refreshing
- *   the index would take a lock the agent's own git then waits behind.
- * - `GIT_LITERAL_PATHSPECS=1` — a pathspec is a path, not a glob: a filename
- *   holding `*`, `?` or `[` would otherwise make `-- path` match files nobody
- *   asked about.
- * - `GIT_TERMINAL_PROMPT=0` — nothing here talks to a remote, and one that
- *   somehow did would fail rather than sit at a prompt until the timeout.
- * - `LC_ALL=C` — one language for what git writes, whatever the box is set to.
+ * Every invocation only reads. `GIT_OPTIONAL_LOCKS=0` stops git from refreshing
+ * the index, which takes a lock the agent's own git would wait for.
+ * `GIT_LITERAL_PATHSPECS=1` makes a pathspec a literal path, so a name holding
+ * `*`, `?` or `[` matches only itself. `GIT_TERMINAL_PROMPT=0` makes git fail
+ * rather than wait at a credential prompt. `LC_ALL=C` fixes the language of
+ * git's output.
  */
 export function gitEnv(): Record<string, string> {
   return {
@@ -69,11 +52,9 @@ export function gitEnv(): Record<string, string> {
 }
 
 /**
- * Diff flags the parser needs.
- *
- * What it reads is git's own unified diff over the file's own bytes: an
- * external diff driver or a textconv filter would hand it something else
- * entirely, and colour would only corrupt the parse.
+ * Diff flags the diff parser needs. They keep external diff drivers, textconv
+ * filters and colour out of the output, so the parser reads git's plain
+ * unified diff of the file's bytes.
  */
 export const DIFF_PARSE_FLAGS = ['--no-ext-diff', '--no-textconv', '--no-color'] as const;
 
@@ -81,8 +62,7 @@ export const DIFF_PARSE_FLAGS = ['--no-ext-diff', '--no-textconv', '--no-color']
  * The whole command line one invocation runs: git, the flags every invocation
  * carries, and the subcommand with its own arguments.
  *
- * The diff parse flags are added to every `diff` here rather than at the call
- * sites, so a diff written later cannot be the one that leaves them out.
+ * Every `diff` gets {@link DIFF_PARSE_FLAGS} right after the subcommand.
  */
 export function gitArgv(args: string[]): string[] {
   const sub = args[0] === 'diff' ? ['diff', ...DIFF_PARSE_FLAGS, ...args.slice(1)] : args;
@@ -92,24 +72,24 @@ export function gitArgv(args: string[]): string[] {
 /** How long a single git invocation may take before it is killed. */
 const TIMEOUT_MS = 20_000;
 
-/** How much output a single git invocation may produce. */
+/** The most bytes kept of each output stream of one git invocation. */
 const MAX_OUTPUT = 16 * 1024 * 1024;
 
 /** What a git invocation produced. */
 export interface GitResult {
   /** True when git exited 0. */
   ok: boolean;
+  /** What git wrote to standard output. */
   stdout: string;
+  /** What git wrote to standard error. */
   stderr: string;
-  /** Null when git was killed before reporting one. */
+  /** The exit code, or null when there is none, as when git was killed. */
   code: number | null;
 }
 
 /**
- * Starts one git command and reports what it produced.
- *
- * The seam a test replaces: the default reaches into a box container, and
- * a suite that has no Docker substitutes a runner of its own.
+ * A function that runs one git command line and reports what it produced.
+ * Tests replace the default runner with one that needs no Docker.
  */
 export type GitRunner = (
   target: GitTarget,
@@ -117,7 +97,15 @@ export type GitRunner = (
   env: Record<string, string>,
 ) => Promise<GitResult>;
 
-/** The runner review ships with: one exec in the box container. */
+/**
+ * The runner review ships with: one exec in the box container, as the agent
+ * user.
+ *
+ * A repository's configuration can make git run commands, for example a clean
+ * filter on `diff` or an fsmonitor hook on `status`. In the box, such a command
+ * can do only what the agent could do anyway. In this process, it would run
+ * next to the Docker socket.
+ */
 const inBoxContainer: GitRunner = async (target, argv, env) => {
   const result = await dk.execInContainer(target.containerId, argv, {
     workingDir: target.dir,
@@ -133,7 +121,7 @@ const inBoxContainer: GitRunner = async (target, argv, env) => {
   };
 };
 
-/** Where git is started. Replaced only by a test. */
+/** The runner {@link git} uses. Only tests replace it. */
 let runner: GitRunner = inBoxContainer;
 
 /** Replaces the runner that starts git. Null puts the shipped one back. */
@@ -142,13 +130,12 @@ export function setGitRunnerForTests(next: GitRunner | null): void {
 }
 
 /**
- * Runs one git subcommand in a repository and returns its output.
+ * Runs one git subcommand in a target directory and returns its output.
  *
- * `args` is the subcommand and its own arguments. A non-zero exit is a result
- * rather than a throw, because most callers have a meaningful answer for it:
- * "this is not a repository", "this revision is unknown", "there is no diff".
- * A container that cannot be reached is the same kind of answer, so a box that
- * went away leaves a review without git rather than without a response.
+ * `args` is the subcommand and its own arguments. A non-zero exit comes back
+ * as a result, not as an exception, because callers read it as an answer, such
+ * as "not a repository". A box that cannot be reached also gives a failed
+ * result, so the review loses git but still responds.
  */
 export async function git(target: GitTarget, args: string[]): Promise<GitResult> {
   try {
@@ -166,11 +153,11 @@ export async function gitOut(target: GitTarget, args: string[]): Promise<string>
 }
 
 /**
- * Whether the target directory is the very top of a git work tree.
+ * Whether the target directory is the top of a git work tree.
  *
- * `--show-prefix` is where the directory sits inside the work tree, and it is
- * empty exactly at the top. Asking this way needs no path comparison, so a
- * symlink anywhere on the way in cannot make a repository look like none.
+ * `--show-prefix` prints where the directory sits inside the work tree, which
+ * is empty only at the top. This needs no path comparison, so a symlink in the
+ * path cannot hide a repository.
  */
 export async function isTopLevel(target: GitTarget): Promise<boolean> {
   const result = await git(target, ['rev-parse', '--show-prefix']);

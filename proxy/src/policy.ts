@@ -2,11 +2,7 @@ import { createHash } from 'node:crypto';
 import net from 'node:net';
 import type { EgressCredential, EgressPolicy } from '../../shared/types.ts';
 
-/**
- * The policy the proxy applies, as pure functions over data.
- *
- * Nothing here does I/O and nothing here holds state.
- */
+/** Pure functions over the egress policy, with no I/O and no state. */
 
 /** The policy of a proxy nobody has pushed to yet. Frozen, because it is shared. */
 export const EMPTY_POLICY: EgressPolicy = Object.freeze({
@@ -20,10 +16,10 @@ export const EMPTY_POLICY: EgressPolicy = Object.freeze({
 /**
  * Whether a hostname matches one allowlist pattern.
  *
- * A pattern is either an exact name or `*.example.com`, where the star stands
- * for exactly one label: `*.example.com` matches `api.example.com` but neither
- * `example.com` nor `a.b.example.com`. Matching is case-insensitive, and an IP
- * literal matches only an identical literal.
+ * A pattern is an exact name or `*.example.com`, where the star stands for
+ * exactly one label. So `*.example.com` matches `api.example.com`, but not
+ * `example.com` or `a.b.example.com`. Matching ignores case, and an IP literal
+ * matches only an identical literal.
  */
 export function hostMatches(host: string, pattern: string): boolean {
   const h = host.trim().toLowerCase().replace(/\.$/, '');
@@ -46,8 +42,8 @@ function hostMatchesAny(host: string, patterns: readonly string[]): boolean {
 }
 
 /**
- * Whether a host may be reached at all. An empty allowlist is off: any public
- * host, with the resolved-address vetting still the boundary.
+ * Whether a host may be reached at all. An empty allowlist allows every host,
+ * and the address vetting still applies.
  */
 export function hostAllowed(host: string, policy: EgressPolicy): boolean {
   if (policy.allowedHosts.length === 0) return true;
@@ -65,15 +61,12 @@ export function credentialsForHost(
   return policy.credentials.filter((c) => hostMatchesAny(host, c.hosts));
 }
 
-/**
- * Whether a host's TLS has to be intercepted. Only a host with a credential
- * is decrypted; everything else stays an opaque tunnel.
- */
+/** Whether a host's TLS is intercepted: the policy has a CA and a credential for it. */
 export function isInjectionHost(host: string, policy: EgressPolicy): boolean {
   return policy.ca !== null && credentialsForHost(host, policy).length > 0;
 }
 
-/** Every host pattern the policy intercepts, for logging and status. */
+/** Every host pattern the policy intercepts, for logging. */
 export function injectionPatterns(policy: EgressPolicy): string[] {
   return [...new Set(policy.credentials.flatMap((c) => c.hosts))];
 }
@@ -82,12 +75,11 @@ export function injectionPatterns(policy: EgressPolicy): string[] {
 
 /**
  * Rewrites one header value so it carries `secret` instead of `placeholder`,
- * or returns null when the value does not carry the placeholder at all.
+ * or returns null when the value does not carry the placeholder.
  *
- * Two framings cover every client without a per-tool rule: the value carries
- * the placeholder verbatim (`Bearer <p>`, `token <p>`, or the bare value), or
- * it is HTTP Basic and the placeholder sits inside the decoded
- * `user:password` pair, which is the shape git's credential helper produces.
+ * The placeholder may appear as it is (`Bearer <p>`, `token <p>`, or the bare
+ * value), or inside the decoded `user:password` of HTTP Basic, which is what
+ * git's credential helper sends.
  */
 export function swapCredentialValue(
   value: string,
@@ -120,8 +112,8 @@ export type CredentialVerdict =
   | { action: 'deny'; reason: string };
 
 /**
- * Case-insensitive single-value read of a header. Every name in the set is
- * compared in lower case, so a client's capitalisation cannot hide a header.
+ * The first non-blank value of a header, or null. Names are compared in lower
+ * case, so a client's capitalisation cannot hide a header.
  */
 function headerValue(
   headers: Readonly<Record<string, string | string[] | undefined>>,
@@ -140,16 +132,12 @@ function headerValue(
 /**
  * Decides what a request to an intercepted host may carry.
  *
- * Only the headers the credential names are read. One holding the
- * deployment's placeholder is rewritten to hold the real credential, and one
- * holding any other value is refused, so a host being allowed does not make
- * the deployment's own credential swappable for somebody else's.
+ * Only the headers the host's credentials name are read. A header holding a
+ * placeholder is rewritten to hold the real credential. A header holding any
+ * other value refuses the request, so no foreign credential reaches the host.
  *
- * A request that authenticates some other way is not a credential to this and
- * passes through. A session cookie is the case that matters: logging in to a
- * translated host from inside a box is a flow this keeps working, and the
- * refusal above is about the deployment's credentials rather than about every
- * way to reach an account.
+ * A request with none of these headers passes through, so a login with a
+ * session cookie from inside a box keeps working.
  */
 export function decideCredentials(
   host: string,
@@ -194,9 +182,9 @@ export function decideCredentials(
 // --- identity ---------------------------------------------------------------
 
 /**
- * A stable fingerprint of a policy, so the orchestrator can tell whether what
- * it composed is what the proxy is running. Secrets are hashed, never echoed,
- * because this value travels back over the control channel and into /healthz.
+ * A stable fingerprint of a policy, reported in the proxy's status. Secrets
+ * are hashed, never echoed, because the status travels over the control
+ * channel.
  */
 export function policyHash(policy: EgressPolicy): string {
   const canonical = JSON.stringify({

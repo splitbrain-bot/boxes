@@ -17,19 +17,9 @@ import {
 } from './repos.ts';
 
 /**
- * Discovery over real temporary repositories rather than a mocked git.
- *
- * Every shape here is a way resolution can lose git for a whole box — two
- * clones side by side, a stray directory beside one, a clone a level deeper, a
- * repository inside a repository, a symlinked workspace path — so they are the
- * cases worth paying a `git init` for.
- *
- * Discovery confirms a candidate by asking git, which the orchestrator does in
- * the box's container. Here a runner starts it on this machine instead,
- * over the test's own repositories.
+ * A runner that starts git on this machine, in the directory the target names,
+ * over repositories the tests build themselves.
  */
-
-/** A runner that starts git here, in the directory the target names. */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
     const stdout = execFileSync(argv[0]!, argv.slice(1), {
@@ -101,8 +91,6 @@ describe('discovery', () => {
   test('two clones side by side are both found', async () => {
     repo('repo-a');
     repo('repo-b');
-    // The most common multi-repository shape, and the one the old
-    // `dirs.length === 1` rule dropped to a plain file browser.
     assert.deepEqual(await paths(), ['repo-a', 'repo-b']);
   });
 
@@ -132,8 +120,7 @@ describe('discovery', () => {
 
   test('a workspace reached through a symlink still resolves its repositories', async () => {
     // `rev-parse --show-toplevel` resolves symlinks, so comparing its answer
-    // against the raw path fails here — which lost git for every box of
-    // any deployment whose workspace path had a linked component.
+    // against the linked path would fail here.
     repo('project');
     const link = join(tmpdir(), `boxes-link-${process.pid}-${Math.random().toString(36).slice(2)}`);
     symlinkSync(dir, link);
@@ -192,8 +179,8 @@ describe('discovery', () => {
   });
 
   test('the directory cap is a real number, and a small workspace is under it', async () => {
-    // Building 4000 directories per test run is not worth the seconds, so the
-    // cap itself is asserted and an ordinary workspace is walked whole.
+    // Building 4000 directories would slow every run, so the test asserts the
+    // cap and walks an ordinary workspace.
     assert.equal(MAX_SCANNED_DIRS, 4000);
     for (let i = 0; i < 20; i++) mkdirSync(join(dir, `sib${i}`));
     repo('project');
@@ -228,8 +215,7 @@ describe('repoFor', () => {
   }
 
   test('a repository is addressed by its path inside the container', () => {
-    // The host path the walk read is not what git is given: the box holds the
-    // same tree at its own place.
+    // Git gets the path inside the box, not the host path the walk read.
     assert.deepEqual(mapOf('').repos[0]!.git, {
       containerId: 'box-1',
       dir: '/workspace',

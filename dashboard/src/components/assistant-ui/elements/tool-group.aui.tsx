@@ -42,6 +42,7 @@ export type ToolGroupRootProps = Omit<
     defaultOpen?: boolean;
   };
 
+/** The collapsible root of a tool group, with the viewport scroll locked while it animates. */
 function ToolGroupRoot({
   className,
   variant,
@@ -53,8 +54,7 @@ function ToolGroupRoot({
 }: ToolGroupRootProps) {
   const collapsibleRef = useRef<HTMLDivElement>(null);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
-  // Boxes edit: the lock, minus the fight with a thread following its own
-  // output. See hooks/use-disclosure-lock.ts.
+  // Boxes edit: skips the lock while the thread follows its output.
   const lockScroll = useDisclosureLock(collapsibleRef, ANIMATION_DURATION);
 
   const isControlled = controlledOpen !== undefined;
@@ -95,6 +95,7 @@ function ToolGroupRoot({
   );
 }
 
+/** The row that opens and closes a tool group, with the number of calls in it. */
 function ToolGroupTrigger({
   count,
   active = false,
@@ -118,8 +119,7 @@ function ToolGroupTrigger({
       )}
       {...props}
     >
-      {/* Boxes edit: the shared spinner, at the size the row was already
-          giving the icon it replaced. */}
+      {/* Boxes edit: the shared spinner. */}
       {active && (
         <Spinner
           data-slot="tool-group-trigger-loader"
@@ -217,7 +217,7 @@ const ToolGroupImpl: FC<
  * @deprecated This wrapper targets the legacy `components.ToolGroup` prop
  * on `<MessagePrimitive.Parts>`. Use `<MessagePrimitive.GroupedParts>` with
  * a `groupBy` returning `"group-tool"` and compose `ToolGroupRoot` /
- * `ToolGroupTrigger` / `ToolGroupContent` directly. See `thread.tsx`.
+ * `ToolGroupTrigger` / `ToolGroupContent` directly.
  */
 const ToolGroup = memo(ToolGroupImpl) as unknown as ToolGroupComponent;
 

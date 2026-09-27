@@ -28,18 +28,14 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 
 /**
- * One set: its AGENTS.md, its skills and its slash commands.
+ * Editor for one agent set: its AGENTS.md, its skills and its slash commands.
  *
- * Everything here is a file the agent will read, so the editor is textareas
- * rather than forms: there is no schema to offer.
- *
- * Nothing saves on typing. Each section has its own Save, and what is saved
- * reaches a box the next time that box starts, which the note at the top
- * says.
+ * Each section saves on its own. Saved changes reach a box the next time the
+ * box starts.
  */
 export function AgentSetEditor() {
   const { setId = '' } = useParams();
-  /** Out to the list of sets, popped rather than pushed; see useUp. */
+  /** Leaves for the list of sets. */
   const up = useUp('/agents');
 
   const [set, setSet] = useState<AgentSetDetail | null>(null);
@@ -47,7 +43,7 @@ export function AgentSetEditor() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  /** The AGENTS.md as edited, against which the Save button decides it is dirty. */
+  /** The AGENTS.md text as edited. The Save button compares it with the saved text. */
   const [agentsMd, setAgentsMd] = useState('');
   const [name, setName] = useState('');
 
@@ -57,12 +53,10 @@ export function AgentSetEditor() {
   const [confirmDelete, setConfirmDelete] = useState<AgentItem | null>(null);
 
   /**
-   * Loads the set and, for a non-global one, what it merges to.
+   * Loads the set and, for a non-global set, the merged result.
    *
-   * `seed` fills the two text buffers from the answer, and only the first
-   * load asks for it: every section saves on its own, so a reload after
-   * adding a skill would otherwise throw away an AGENTS.md or a name that is
-   * still being typed.
+   * @param seed Fills the AGENTS.md and name buffers from the answer. Only the
+   *   first load seeds them, so a reload after another save keeps unsaved text.
    */
   const load = useCallback(
     async (seed = false): Promise<void> => {
@@ -86,7 +80,11 @@ export function AgentSetEditor() {
     void load(true);
   }, [load]);
 
-  /** Runs one mutation and reloads, so the view never guesses at the result. */
+  /**
+   * Runs one mutation, then reloads the set.
+   *
+   * @returns Whether the mutation succeeded.
+   */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     setError(null);
@@ -132,8 +130,7 @@ export function AgentSetEditor() {
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
-      {/* Renaming the global set is allowed — it is only a label — but it
-          cannot be deleted, and that is decided in the list. */}
+      {/* The global set can be renamed too, because its name is only a label. */}
       <Card className="flex flex-col gap-3 p-4">
         <Label htmlFor="set-name">Name</Label>
         <div className="flex gap-2">
@@ -165,8 +162,7 @@ export function AgentSetEditor() {
         </p>
         <Textarea
           value={agentsMd}
-          // field-sizing-content makes rows= inert, so a minimum is what
-          // gives this a usable editing area before anything is typed.
+          // field-sizing-content ignores rows, so min-h sets the empty size.
           className="min-h-40 font-mono text-xs"
           placeholder={"# House rules\n\n- Run the tests before you say you are done.\n"}
           onChange={(e) => setAgentsMd(e.target.value)}
@@ -316,11 +312,7 @@ function ItemSection({
   );
 }
 
-/**
- * What a box selecting this set ends up with.
- *
- * The merge of two sets is not visible from either half, so it is shown.
- */
+/** Summary of the merged set that a box using this set gets. */
 function Merged({ preview }: { preview: AgentBundlePreview }) {
   const skills = preview.items.filter((i) => i.kind === 'skill');
   const commands = preview.items.filter((i) => i.kind === 'command');
@@ -351,12 +343,10 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
 }
 
 /**
- * The editor for one skill or command.
+ * Dialog that edits one skill or command.
  *
- * A name is fixed once the item exists: it is the skill's directory and the
- * word after the slash, and renaming in place would silently leave the old one
- * installed in every box until its next start. Delete and add is the honest
- * way to rename, and it is one more tap.
+ * The name is fixed once the item exists. A rename in place would leave the
+ * old item installed in every box until its next start.
  */
 function ItemDialog({
   kind,
@@ -375,8 +365,7 @@ function ItemDialog({
   const [content, setContent] = useState(item?.content ?? '');
 
   const skill = kind === 'skill';
-  // A skill without front matter loads as nothing at all, and the failure is
-  // silent inside the box, so it is called out here instead.
+  // A skill without front matter fails silently in the box, so the dialog warns here.
   const missingFrontMatter = skill && content.trim() !== '' && !content.startsWith('---');
 
   return (

@@ -9,12 +9,10 @@ import {
 } from '@/lib/follow-output.ts';
 
 /**
- * What each scroller is doing with its own output.
+ * The follow state of each scroller.
  *
- * A map rather than an attribute on the scroller: the runtime watches the
- * viewport's subtree for mutations and reads every non-style attribute change
- * as content arriving, so a flag written on the element would itself be a
- * reason to scroll.
+ * Kept in a map, not in an attribute: the runtime reads every attribute
+ * change in the viewport, except to style, as new content and scrolls.
  */
 const state = new WeakMap<Element, FollowState>();
 
@@ -28,14 +26,10 @@ function scrollerOf(node: Element | null): Element | null {
 }
 
 /**
- * Whether the scroller `node` sits inside is following its own output right
- * now — at the bottom of it, and lately moved to stay there.
+ * Whether the scroller that contains `node` follows its own output right now.
  *
- * For the disclosures in a message, which hold the viewport still while they
- * animate and must not do that to a thread that is chasing its own bottom.
- * See `use-disclosure-lock.ts`. A node in a view that never called
- * `useFollowOutput` — the playground, which streams nothing — is not
- * following anything, and the answer is no.
+ * False for a scroller that no {@link useFollowOutput} watches, such as the
+ * playground's.
  */
 export function isFollowingOutput(node: Element | null): boolean {
   const scroller = scrollerOf(node);
@@ -44,20 +38,16 @@ export function isFollowingOutput(node: Element | null): boolean {
 }
 
 /**
- * Asks whether the turn's anchor still has room to give, of the scroller.
+ * Returns a check for whether the turn anchor's reserve element in `el` still
+ * has height.
  *
- * A turn anchors the message that started it to the top of the viewport, and
- * pays for the empty space under a short answer with a reserve element the
- * runtime shrinks as the answer grows. While that reserve has height the
- * position is the anchor's business and the viewport is already against its
- * bottom; when it reaches nothing, the answer has outgrown the screen and the
- * anchor stops moving.
+ * The runtime anchors a turn's message to the top of the viewport and fills
+ * the space under a short answer with the reserve, which shrinks as the answer
+ * grows. The check caches the element while it stays in the document, because
+ * it runs on every chunk.
  *
- * Read from the DOM because the reserve is a DOM detail: a renamed attribute
- * costs the smooth scroll that opens a turn — this hook would take the
- * viewport to the same place at once instead — and nothing else. Kept for as
- * long as it stays in the document, because the question is asked on every
- * chunk of a turn and a thread is a large thing to search.
+ * If the runtime renames the attribute, the check finds nothing and the hook
+ * jumps to the bottom at once instead of letting the anchor scroll smoothly.
  */
 function reserveOf(el: Element): () => boolean {
   let reserve: HTMLElement | null = null;
@@ -71,20 +61,12 @@ function reserveOf(el: Element): () => boolean {
 }
 
 /**
- * Keeps a thread against the bottom of its own output, and says so.
+ * Keeps a thread at the bottom of its output once the turn anchor's reserve
+ * runs out, and records the follow state for {@link isFollowingOutput}.
  *
- * The runtime follows the bottom for everything except the one case it hands
- * to the turn anchor: while a turn runs, the position belongs to the anchor
- * holding the prompt at the top of the viewport, and the anchor only holds —
- * it never follows. That works for as long as the reserve under the answer
- * lasts, which is one screenful. Past that, every tool call and every line of
- * reasoning the turn goes on to write lands below the fold and stays there
- * until the turn ends, which is the whole of a long one.
- *
- * So the reserve running out is the handover: from there to the end of the
- * turn this hook keeps the viewport at the bottom. A reader who takes the
- * scroller away from it is left where they put it, and arriving back at the
- * bottom — by hand or by the button — rejoins the turn.
+ * During a turn, the runtime's anchor holds the prompt at the top of the
+ * viewport but does not follow the output. Without this hook, output past
+ * the first screen would stay below the fold until the turn ends.
  *
  * @returns The ref to put on the scroller.
  */
@@ -103,9 +85,7 @@ export function useFollowOutput(): React.RefObject<HTMLDivElement | null> {
     const now = (): number => performance.now();
 
     const touched = (event: Event): void => {
-      // A press lands on something for every reason there is — a disclosure,
-      // the composer, a link — and only a press on the scroller itself is a
-      // hand on its scrollbar.
+      // Only a press on the scroller itself is a press on its scrollbar.
       if (event.type === 'pointerdown' && event.target !== el) return;
       state.set(el, followTouched(state.get(el) ?? followStart(), now()));
     };
@@ -126,26 +106,17 @@ export function useFollowOutput(): React.RefObject<HTMLDivElement | null> {
 
     el.addEventListener('scroll', onScroll);
     /**
-     * The three ways a hand scrolls this, and no more than those.
-     *
-     * A key is not one of them, however much it looks like input: the
-     * composer sits inside the viewport, so every letter typed into it — and
-     * the Return that starts the turn — arrives here as well.
+     * The gestures that scroll by hand. Keys are left out, because the
+     * composer sits inside the viewport and every key typed into it arrives
+     * here too.
      */
     const gestures = ['wheel', 'touchmove', 'pointerdown'] as const;
     for (const kind of gestures) el.addEventListener(kind, touched, { passive: true });
 
     /**
-     * The scroller and what it holds, both measured.
-     *
-     * The scroller itself for a viewport that changes size — a keyboard
-     * opening under the composer, a rotation. What it holds because content
-     * arriving is not the only thing that grows a thread: a disclosure
-     * opening or closing animates its height for a fifth of a second without
-     * touching the DOM again, and a run of tool calls and reasoning is one of
-     * those every few hundred milliseconds. Watching for mutations alone
-     * leaves the bottom drifting out of view for the length of every
-     * animation, and catching up only when the next chunk lands.
+     * Watches the size of the scroller and of each child. The scroller
+     * resizes when a keyboard opens or the screen rotates. A child resizes
+     * while a disclosure animates, which changes no DOM node.
      */
     const size = new ResizeObserver(onGrow);
     size.observe(el);

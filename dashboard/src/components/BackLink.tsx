@@ -4,16 +4,12 @@ import type { Up } from '@/hooks/use-up';
 /**
  * The labelled back link above a stacked page.
  *
- * A page draws this twice, once while it is still loading and once with its
- * data. Leaving works in both states, so it must not move or change shape
- * between them.
+ * A page draws it while loading and again with its data, so it must keep its
+ * place and shape. It is an anchor with an href, so a middle click and copy
+ * link work. A plain click steps back in the history instead of pushing.
  *
- * A real anchor with a real href, so middle click and copy-link work, but the
- * ordinary click pops rather than pushes: see useUp for why nothing labelled
- * back is allowed to push.
- *
- * The back arrow inside a pane header is a different control; see
- * ThreadHeader.
+ * @param up The parent route and the step-out handlers.
+ * @param label The link text.
  */
 export function BackLink({ up, label }: { up: Up; label: string }) {
   return (

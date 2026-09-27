@@ -2,32 +2,28 @@ import type { Settings, ThreadDialogDefaults } from '../../shared/types.ts';
 import type { Db } from './db.ts';
 
 /**
- * The deployment's plain settings, over the `settings` table.
- *
- * Everything here is configuration a person sets on the settings page and
- * nothing here is a secret, which is the whole difference from
- * `credentials.ts`. The git identity lived in the environment until now, and
- * only did so because the credentials it sat beside did.
- *
- * The table is a key/value store rather than a column per setting: the keys
- * are read and written whole by one page, nothing queries across them, and
- * adding one is then a constant here rather than a migration.
+ * The deployment's settings that are not secrets, stored as key/value rows in
+ * the `settings` table. A new setting needs a key, not a migration.
  */
 
-/** Who a box commits as when nobody has said otherwise. */
+/** The git author name a box commits as when none is set. */
 export const DEFAULT_GIT_NAME = 'boxes-bot';
+
+/** The git author email a box commits as when none is set. */
 export const DEFAULT_GIT_EMAIL = 'boxes-bot@users.noreply.github.com';
 
-/** The keys this module stores, spelled once. */
+/** Settings key of the git author name. */
 const GIT_NAME = 'git.name';
+
+/** Settings key of the git author email. */
 const GIT_EMAIL = 'git.email';
 
-/** Where one harness's last dialog choice is kept. */
+/** Returns the settings key that holds one harness's last dialog choice. */
 function dialogKey(harnessId: string): string {
   return `dialog.${harnessId}`;
 }
 
-/** Every setting, with the defaults filled in for whatever is unset. */
+/** Returns every setting, with the default filled in for each unset one. */
 export function readSettings(db: Db): Settings {
   const stored = readAll(db);
   const dialogs: Record<string, ThreadDialogDefaults> = {};
@@ -44,16 +40,14 @@ export function readSettings(db: Db): Settings {
 }
 
 /**
- * Writes the settings a patch names and leaves the rest alone, then answers
- * with the whole of them.
+ * Writes the settings the patch names, leaves the rest alone, and returns all
+ * settings.
  *
- * A field set to the empty string is a field cleared back to its default
- * rather than a box committing as nobody: the row is deleted, so the default
- * moving in a later release moves this deployment with it.
+ * An empty git name or email deletes the row, so the setting falls back to
+ * the current default.
  *
- * The dialogs are merged one harness at a time. Two browsers configuring
- * different agents should not overwrite each other, and each entry is
- * replaced whole because it is one dialog's answer.
+ * Dialogs are merged per harness, so two browsers that configure different
+ * agents do not overwrite each other. Each harness entry is replaced whole.
  */
 export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
   const writes: Array<[string, string | null]> = [];
@@ -81,7 +75,7 @@ export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
   return readSettings(db);
 }
 
-/** Every stored key, as strings. */
+/** Returns every stored row as a map of key to value. */
 function readAll(db: Db): Record<string, string> {
   const rows = db.prepare('SELECT key, value FROM settings').all() as Array<{
     key: string;
@@ -91,11 +85,8 @@ function readAll(db: Db): Record<string, string> {
 }
 
 /**
- * One dialog's stored answer, or null when it is not one.
- *
- * Written by the dashboard as JSON and read back here, so a row left by an
- * older release — or by anything else that has been at the table — is
- * ignored rather than allowed to fail the whole read.
+ * Parses one stored dialog choice, or returns null when the value is not a
+ * JSON object. A bad row is skipped, so it cannot fail the whole read.
  */
 function parseDialog(value: string): ThreadDialogDefaults | null {
   try {

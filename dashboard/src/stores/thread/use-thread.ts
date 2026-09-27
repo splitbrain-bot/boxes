@@ -6,14 +6,10 @@ import { wsUrlFor } from '@/lib/ws-url';
 /**
  * Mounts one thread's ThreadStore for as long as the view is on screen.
  *
- * `threadId` names which of the box's conversations this is. It is part of
- * the URL the connection opens, so moving between two threads tears one store down
- * and builds the other — two tabs on two threads hold two of these, and
- * neither sees the other's stream.
- *
- * The store outlives no route: leaving the thread closes the WebSocket, and
- * coming back replays. The agent's turn is unaffected either way — the
- * orchestrator, not this browser, is the ACP client of record.
+ * `threadId` is part of the connection URL, so a switch to another thread
+ * replaces the store. Leaving the thread closes the WebSocket, and coming
+ * back replays. The agent's turn continues either way, because the
+ * orchestrator is the ACP client of record.
  */
 export function useThread(
   boxId: string,
@@ -48,13 +44,8 @@ export function useThread(
   return { store, state };
 }
 
+/** A subscribe function for the time before the store exists. */
 const NOOP_SUBSCRIBE = (): (() => void) => () => {};
 
-/**
- * The state a view shows before the store exists.
- *
- * The store's own first snapshot: no store yet is the same to a reader as a
- * store with nothing read into it — something is on its way and this is not
- * it.
- */
+/** The state a view shows before the store exists: the store's first snapshot. */
 const getInitial = (): ThreadSnapshot => INITIAL_SNAPSHOT;

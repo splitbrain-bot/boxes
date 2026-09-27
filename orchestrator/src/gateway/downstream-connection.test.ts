@@ -8,15 +8,7 @@ import type { BoxManager } from '../boxes.ts';
 import { attachDownstream, wsStream } from './downstream.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
-/**
- * One browser connection end to end: what the gateway answers on a socket,
- * what it refuses to pass on, and how far behind it lets a browser fall.
- *
- * The upstream is a stand-in, so what is under test is the connection's own
- * rules rather than anything the box does with what it forwards.
- */
-
-// These tests drive the paths the connection narrates, so only failures are
+// The connection logs every path these tests drive, so only errors are
 // written.
 setLogLevel('error');
 
@@ -41,11 +33,17 @@ const UPDATE_BYTES = Buffer.byteLength(JSON.stringify(UPDATE));
 
 /** A JSON-RPC message, in either direction. */
 interface Rpc {
+  /** The protocol version. */
   jsonrpc?: '2.0';
+  /** The request id, absent on a notification. */
   id?: number;
+  /** The method of a request or notification. */
   method?: string;
+  /** The params of a request or notification. */
   params?: Record<string, unknown>;
+  /** The result of a successful response. */
   result?: Record<string, unknown>;
+  /** The error of a failed response. */
   error?: { code: number; message: string; data?: unknown };
 }
 
@@ -94,8 +92,8 @@ class FakeSocket extends EventEmitter {
  * The box's upstream, answering everything and recording what the
  * connection asked of it.
  *
- * Its `pin` hands back the promise the test holds, which is the window every
- * forwarded request has to wait out.
+ * Its `pin` returns the promise the test holds. Every forwarded request waits
+ * for that promise.
  */
 class FakeUpstream {
   /** The initialize answer handed to the browser. */
@@ -131,7 +129,7 @@ class FakeUpstream {
     return this.pinned;
   }
 
-  /** The adapter is already up. */
+  /** Does nothing, as for an adapter that is already up. */
   async ensureStarted(): Promise<void> {}
 
   /** Records a forwarded request and answers it with nothing. */
@@ -180,7 +178,7 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-/** One JSON-RPC message written to the socket, as a box's updates are. */
+/** Writes one JSON-RPC message to the socket, the way the gateway writes a box's updates. */
 async function write(ws: FakeSocket, msg: AnyNotification): Promise<void> {
   const writer = wsStream(ws as unknown as WebSocket, 's1').writable.getWriter();
   await writer.write(msg);
@@ -202,8 +200,6 @@ test('a request naming another thread is refused rather than forwarded', async (
     params: { sessionId: T2, cwd: '/workspace', mcpServers: [] },
   });
 
-  // Passing either on would route that thread's replay to this browser alone,
-  // and echo this browser's prompt where nobody is watching.
   for (const reply of [await answer(ws, 1), await answer(ws, 2)]) {
     assert.equal(reply.error?.code, -32602);
     assert.deepEqual(reply.error?.data, { sessionId: T2 });
@@ -236,8 +232,6 @@ test('a request about the pinned thread, or about none, is forwarded with the ha
     up.forwarded.map((call) => call.method),
     ['session/prompt', 'session/load', 'session/list'],
   );
-  // The handle goes with each one: a replay belongs to the browser that asked
-  // for it, and a prompt is echoed on that browser's behalf.
   for (const call of up.forwarded) assert.equal(call.from, up.attached[0]);
 });
 
@@ -261,8 +255,7 @@ test('a request that arrives before the pin waits for it, and is still checked',
     params: { sessionId: T2, prompt: [{ type: 'text', text: 'someone else thread' }] },
   });
 
-  // A client that knows a thread id and prompts before saying hello. Answering
-  // now would mean forwarding for a handle that has no thread yet.
+  // A client that knows a thread id and prompts before saying hello.
   await settle();
   assert.deepEqual(
     up.forwarded.map((call) => call.method),
@@ -290,8 +283,6 @@ test('session/new answers with the pinned thread', async () => {
     params: { cwd: '/workspace', mcpServers: [] },
   });
 
-  // The browser is on one conversation of the box, so it is handed that
-  // one rather than a second conversation on every reconnect.
   assert.deepEqual((await answer(ws, 1)).result, { sessionId: T1 });
 });
 
@@ -306,8 +297,8 @@ test('a load flushes the questions waiting on its thread, once forwarded', async
   });
   await answer(ws, 1);
 
-  // A question delivered before the replay lands is thrown away with
-  // everything else the browser had on screen, and it is sent only once.
+  // The browser discards what it showed before the replay, so the flush
+  // comes after the load.
   assert.deepEqual(up.calls, ['session/load', 'flush']);
   assert.equal(up.flushed[0], up.attached[0]);
 });
@@ -318,7 +309,7 @@ test('a browser at or under the buffer ceiling is left alone', async () => {
   assert.deepEqual(keepingUp.sent, [JSON.stringify(UPDATE)]);
   assert.deepEqual(keepingUp.closes, []);
 
-  // Exactly on the ceiling is still a browser the gateway holds bytes for.
+  // Exactly on the ceiling is still allowed.
   const atTheLimit = new FakeSocket();
   atTheLimit.bufferedAmount = MAX_BUFFERED - UPDATE_BYTES;
   await write(atTheLimit, UPDATE);
@@ -332,8 +323,6 @@ test('a browser past the buffer ceiling is closed on the send that takes it ther
 
   await write(ws, UPDATE);
 
-  // A phone asleep with the tab open would grow this buffer for as long as the
-  // box keeps talking. Closing costs it nothing it cannot get back.
   assert.equal(ws.sent.length, 1);
   assert.deepEqual(ws.closes, [{ code: 1008, reason: 'too far behind' }]);
 });
@@ -344,8 +333,7 @@ test('a socket that is not open is sent nothing', async () => {
 
   await write(ws, UPDATE);
 
-  // The read side notices a socket that has gone and closes the stream; a
-  // write that lands in between is dropped rather than thrown.
+  // A write that lands before the read side closes the stream is dropped.
   assert.deepEqual(ws.sent, []);
   assert.deepEqual(ws.closes, []);
 });

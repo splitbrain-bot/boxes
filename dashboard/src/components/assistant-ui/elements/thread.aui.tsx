@@ -98,11 +98,8 @@ export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
   /**
-   * Boxes edit: something to show directly above the composer, for as long as
-   * it is true — what this thread has left running in the background. It goes
-   * here rather than in the transcript because it is not something that
-   * happened, and here rather than in the header because the composer is
-   * where the question "is it my turn?" gets asked. See BackgroundBar.
+   * Boxes edit: content shown directly above the composer, such as the work
+   * the thread has left running in the background.
    */
   aboveComposer?: ReactNode | undefined;
 };
@@ -146,6 +143,7 @@ const ThreadHistorySkeleton: FC = () => (
   </div>
 );
 
+/** The chat thread: the transcript and the composer. */
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
@@ -164,16 +162,15 @@ export const Thread: FC<ThreadProps> = ({
   );
 };
 
+/** The thread's scrolling viewport, its messages and the composer footer. */
 const ThreadRoot: FC<{
   isEmpty: boolean;
   autoFocus: boolean;
   aboveComposer?: ReactNode | undefined;
 }> = ({ isEmpty, autoFocus, aboveComposer }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  // Boxes edit: the rest of a long turn. autoScroll below stops at the turn
-  // anchor, which holds the prompt at the top and follows nothing; once the
-  // answer has outgrown the screen this keeps the newest of it in view for
-  // the rest of the turn. See hooks/use-follow-output.ts.
+  // Boxes edit: keeps the newest output in view once a turn outgrows the
+  // screen. The turn anchor alone holds the prompt at the top and follows nothing.
   const viewport = useFollowOutput();
 
   return (
@@ -186,18 +183,13 @@ const ThreadRoot: FC<{
         ["--composer-padding" as string]: "8px",
       }}
     >
-      {/* Boxes edit: autoScroll on top of turnAnchor. A turn still anchors
-          its user message to the top; everything else that grows the thread
-          follows the bottom. Without it a !bang command's output is written
-          below the fold and never scrolled to, because only a running turn
-          sets the anchor.
+      {/* Boxes edit: autoScroll with turnAnchor. A turn anchors its user
+          message to the top. Everything else that grows the thread follows
+          the bottom, such as a !bang command's output, which sets no anchor.
 
-          Boxes edit: @container here as well as on the root, because this is
-          the element whose width a full-bleed table has to fit inside (see
-          .aui-md-bleed in globals.css). The root's own width counts the
-          vertical scrollbar this element keeps, and a bleed measured against
-          that overflows by exactly a scrollbar — putting a horizontal one
-          under the whole thread. Nothing else here queries a container. */}
+          Boxes edit: @container here as well, because a full-bleed block must
+          fit this element's width. The root's width includes this element's
+          vertical scrollbar, so a bleed measured against it overflows. */}
       <ThreadPrimitive.Viewport
         ref={viewport}
         autoScroll
@@ -236,8 +228,7 @@ const ThreadRoot: FC<{
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            {/* Boxes edit: above the composer and below everything else, so
-                it is the last thing read before typing. */}
+            {/* Boxes edit: the last thing read before typing. */}
             {aboveComposer}
             <Composer autoFocus={autoFocus} />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -251,18 +242,13 @@ const ThreadRoot: FC<{
 };
 
 /**
- * The stock tool group, with one Boxes edit: it opens itself when a call
- * inside it is waiting on the user.
+ * The stock tool group. Boxes edit: it opens itself when a call inside it
+ * waits on the user.
  *
- * A tool call collapses because its output is usually not what a reader came
- * for.
- * A permission request is: the adapter blocks until it is answered, so a
- * question folded away behind a "1 tool call" summary stalls the turn until
- * someone thinks to look inside.
- *
- * Only the interrupt reason opens it. The other requires-action reason is a
- * call still waiting on its own result, which is ordinary progress and has
- * nothing for the user to do.
+ * The adapter blocks on a permission request until it is answered, so a
+ * question folded away would stall the turn. Only the interrupt reason opens
+ * the group. The other requires-action reason is a call waiting on its own
+ * result, which needs nothing from the user.
  */
 const DefaultToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   group,
@@ -287,22 +273,28 @@ const DefaultToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   );
 };
 
-// Boxes edit: the renderer for the one part kind that is Boxes' rather than
-// the registry's.
+/** Boxes edit: the renderers for the data parts Boxes adds, by part name. */
 const DATA_PARTS = {
   by_name: { [TASK_NOTIFICATION_PART]: TaskNotificationPart },
 };
 
-// Boxes edit: a message carrying nothing but background-task notifications is
-// not the user speaking, however it arrived — the harness wakes the agent in
-// the user's role when a task it started reports in. It is drawn as a quiet
-// row across the thread rather than as a bubble on the user's side of it.
+/**
+ * Boxes edit: tells whether a message holds only background-task notifications.
+ *
+ * The harness wakes the agent in the user's role when a task reports in, so
+ * such a message arrives as a user message. The thread draws it as a quiet row
+ * instead of a user bubble.
+ *
+ * @param s The assistant state of the message.
+ * @returns True when every part of the message is a task notification.
+ */
 const isTaskNotification = (s: AssistantState) =>
   s.message.content.length > 0 &&
   s.message.content.every(
     (part) => part.type === "data" && part.name === TASK_NOTIFICATION_PART,
   );
 
+/** One message, rendered by its role. Boxes edit: task notifications get their own row. */
 const ThreadMessage: FC = () => {
   const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
     useContext(ThreadComponentsContext);
@@ -366,27 +358,25 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
+/** The message composer, with attachments and the slash-command list. */
 const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
-  // Boxes edit: terminal semantics on the composer. ArrowUp on an empty
-  // draft walks back through what was sent, ArrowDown returns and restores
-  // the draft. The hook yields to IME, popovers and multi-line caret
-  // movement, so it costs nothing when the draft is not empty.
+  // Boxes edit: ArrowUp on an empty draft walks back through sent messages,
+  // and ArrowDown returns to the draft.
   const history = unstable_useComposerInputHistory();
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Boxes edit: keep the caret in the composer after a send. Typing the next
-  // prompt must never need a click, on a phone least of all — the composer
-  // is where a thread is driven from.
+  // Boxes edit: keeps the caret in the composer after a send, so the next
+  // prompt needs no tap.
   useAuiEvent({ event: "composer.send", scope: "thread" }, () => {
-    // After the runtime has cleared the draft, so the focus is not stolen
-    // back by the re-render that follows.
+    // Waits for the runtime to clear the draft, so the re-render that follows
+    // does not take the focus away again.
     requestAnimationFrame(() => inputRef.current?.focus());
   });
 
   return (
-    // Boxes edit: the trigger root wraps the composer so the input's own
-    // keyboard handling drives the slash-command list, and the list itself
-    // sits inside the relatively positioned root it opens above.
+    // Boxes edit: the trigger root wraps the composer, so the input's keyboard
+    // handling drives the slash-command list. The list sits inside the
+    // relatively positioned root it opens above.
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
         <SlashCommands />
@@ -402,10 +392,9 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
               className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
               rows={1}
               autoFocus={autoFocus}
-              // Boxes edit: a prompt here is prose and often several lines of
-              // it, so Enter opens a line and Ctrl/Cmd+Enter sends. Touch has
-              // no modifier to hold; the send button in ComposerAction is the
-              // way in from a phone, and it is there whenever a send is.
+              // Boxes edit: a prompt is often several lines of prose, so Enter
+              // adds a line and Ctrl/Cmd+Enter sends. On touch, the send
+              // button sends.
               submitMode="ctrlEnter"
               enterKeyHint="enter"
               aria-label="Message input"
@@ -422,9 +411,8 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      {/* Boxes edit: the add-attachment button is back, and does something.
-          A file picked here is uploaded into the box's workspace, which
-          is why it takes any type — see stores/thread/attachments.ts. */}
+      {/* Boxes edit: a file picked here is uploaded into the box's workspace,
+          so it can be of any type. */}
       <ComposerAddAttachment />
       <div className="flex items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>
@@ -502,6 +490,7 @@ const MessageError: FC = () => {
   );
 };
 
+/** One assistant message: its grouped parts, any error, and the action bar. */
 const AssistantMessage: FC = () => {
   const {
     ToolFallback: ToolFallbackComponent = ToolFallback,
@@ -519,13 +508,9 @@ const AssistantMessage: FC = () => {
       data-slot="aui_assistant-message-root"
       data-role="assistant"
       /* Boxes edit: no content-visibility utilities here, unlike the user
-         message below. It buys render skipping for off-screen messages and
-         pays for it with paint containment, which clips every child to this
-         box — and a table or a code block that bleeds out of the reading
-         column (.aui-md-bleed) is a child that has to escape it. So it is
-         applied in globals.css instead, to the messages that hold no such
-         block. The user message keeps the utilities: nothing in a prompt
-         bleeds. */
+         message. Their paint containment would clip a table or code block
+         that bleeds out of the reading column, so globals.css applies them
+         only to messages without such a block. */
       className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
@@ -556,11 +541,8 @@ const AssistantMessage: FC = () => {
                 }
                 const running = part.status.type === "running";
                 return (
-                  /* Boxes edit: ghost, the way DefaultToolGroup above renders
-                     its own. Reasoning is the least of what a message says,
-                     and the outline variant gave it the one framed box on the
-                     page — more chrome than the tool calls that did the work.
-                     Ghost leaves the disclosure line and the text. */
+                  /* Boxes edit: the ghost variant, like DefaultToolGroup, so
+                     reasoning gets no framed box. */
                   <ReasoningRoot variant="ghost" streaming={running}>
                     <ReasoningTrigger active={running} />
                     <ReasoningContent aria-busy={running}>
@@ -590,10 +572,9 @@ const AssistantMessage: FC = () => {
                   </div>
                 );
               case "indicator":
-                /* Boxes edit: the blocks, not a pulsing bullet. It is often
-                   the only thing on screen while a turn is thinking, and a
-                   dot fading in and out is indistinguishable from a page that
-                   has stopped repainting. */
+                /* Boxes edit: the shared spinner. It is often the only thing
+                   on screen while a turn thinks, and a pulsing dot looks like
+                   a page that stopped repainting. */
                 return (
                   <span
                     data-slot="aui_assistant-message-indicator"
@@ -621,6 +602,7 @@ const AssistantMessage: FC = () => {
   );
 };
 
+/** The copy and more actions under an assistant message. */
 const AssistantActionBar: FC = () => {
   return (
     <ActionBarPrimitive.Root
@@ -638,9 +620,7 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      {/* No Reload: regenerating an answer means re-running a turn, which ACP
-          does not offer and this runtime therefore does not implement. The
-          button threw on every click. */}
+      {/* Boxes edit: no Reload button, because ACP cannot re-run a turn. */}
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
@@ -668,10 +648,11 @@ const AssistantActionBar: FC = () => {
   );
 };
 
-// Boxes edit: an attached file is a link. Its data is the endpoint serving it
-// out of the box's workspace, so a PDF opens in the browser's own viewer
-// and anything else downloads — the registry's own chip offers neither,
-// because `sourceType: 'id'` means it has no bytes of its own to hand over.
+/**
+ * Boxes edit: an attached file as a link to the endpoint that serves it from
+ * the box's workspace. The browser shows some types, such as PDF, and
+ * downloads the rest.
+ */
 const UserFilePart: FileMessagePartComponent = (part) => {
   const href = part.data.startsWith('/api/') ? part.data : null;
   const chip = <File {...part} />;
@@ -700,6 +681,7 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
+/** One user message: its attachments, its text bubble and the branch picker. */
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -715,10 +697,9 @@ const UserMessage: FC = () => {
             components={{
               File: UserFilePart,
               Image: UserImagePart,
-              // Boxes edit: reached only by a notification sharing its
-              // message with something the user did say, which is what an
-              // adapter that names no message ids produces. One arriving on
-              // its own gets the row above instead.
+              // Boxes edit: renders a task notification that shares its
+              // message with user text. A message of notifications alone
+              // renders as TaskNotificationMessage.
               data: DATA_PARTS,
             }}
           />
@@ -734,11 +715,9 @@ const UserMessage: FC = () => {
 };
 
 /**
- * Boxes edit: a turn's worth of background work reporting in.
- *
- * Full width and quiet, at the rhythm of the tool rows rather than the
- * conversation: no bubble, no branch picker, and nothing to copy or edit,
- * because nobody wrote it.
+ * Boxes edit: a message of background-task notifications, drawn as a quiet
+ * full-width row. It has no bubble, branch picker or actions, because nobody
+ * wrote it.
  */
 const TaskNotificationMessage: FC = () => {
   return (
@@ -752,12 +731,13 @@ const TaskNotificationMessage: FC = () => {
   );
 };
 
-// No UserActionBar: its one button was Edit, which branches a conversation
-// from an earlier message. Nothing in ACP does that, so the runtime implements
-// no editing and the pencil threw on every click. EditComposer stays for the
-// same reason the primitive does — the next registry upgrade brings both back
-// as a diff rather than as a surprise.
-
+/**
+ * The composer for editing a sent message.
+ *
+ * Boxes edit: nothing opens it, because ACP cannot branch a conversation and
+ * the user action bar with its Edit button is gone. It stays, so a registry
+ * upgrade shows up as a diff.
+ */
 const EditComposer: FC = () => {
   return (
     <MessagePrimitive.Root

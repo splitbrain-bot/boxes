@@ -4,11 +4,9 @@ import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply, type GatewayScript } from './stub-gateway.ts';
 
-/**
- * The six complaints that forced the frontend decision, each asserted
- * against the real bundle in a real browser.
- */
+/** Browser tests for how the thread view behaves in use. */
 
+/** The box every test here drives. */
 const BOX = DEFAULT_BOX;
 
 let stub: TestOrchestrator;
@@ -51,7 +49,6 @@ test('Enter opens a line in the composer, Ctrl+Enter sends it', async () => {
   }
 });
 
-// 2 — ArrowUp recalls previous messages.
 test('ArrowUp walks back through what was sent, ArrowDown returns', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
@@ -63,13 +60,8 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
       await input.fill(text);
       await input.press('Control+Enter');
       await expect.poll(() => input.inputValue()).toBe('');
-      // The composer clearing is local and immediate; the message itself
-      // reaches the thread only when the gateway echoes it back. Recall walks
-      // the thread's own user messages, so this — not the empty composer — is
-      // when the history has what the rest of the test asks it for.
-      // Longer than the default poll: this one waits on a round trip rather
-      // than on a render, and every assertion below depends on it having
-      // happened.
+      // Recall reads the thread's user messages, which arrive only with the
+      // gateway's echo. The longer timeout covers that round trip.
       await expect
         .poll(() => page.getByText(text).isVisible(), { timeout: 10_000 })
         .toBe(true);
@@ -89,7 +81,6 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
   }
 });
 
-// 3 — the composer keeps focus.
 test('the composer is focused on arrival and stays focused after a send', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('done') }] });
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
@@ -112,8 +103,7 @@ test('the composer is focused on arrival and stays focused after a send', async 
 });
 
 test('a send that fails still leaves the composer focused', async () => {
-  // No prompt script and a gateway that answers, but the store reports the
-  // failure through the error banner; either way the caret must not be lost.
+  // No prompt script, so the stub ends the turn without an answer.
   await start({ prompts: [] });
   const { page, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
@@ -129,7 +119,6 @@ test('a send that fails still leaves the composer focused', async () => {
   }
 });
 
-// 5 — streamed tool output from the agent, collapsibly.
 test('an agent tool call shows its streamed output collapsibly', async () => {
   await start({
     prompts: [
@@ -173,7 +162,7 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
     await page.locator('[data-slot="tool-group-trigger"]').first().click();
     await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
     await expect.poll(() => page.getByText('ok 2 - subnet').isVisible()).toBe(true);
-    // The args are shown too, which is the other half of "can't see output".
+    // The arguments are shown too.
     await expect.poll(() => page.getByText('npm test', { exact: false }).first().isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
@@ -182,24 +171,15 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
 });
 
 /*
- * A working turn is mostly rows: "Reasoning", "1 tool call", "Reasoning"
- * again. Each is a single line, and each used to arrive with the space a
- * paragraph gets under it — the action bar's reserved height, and the gap
- * between messages when the adapter sends them as separate ones. A dozen of
- * them in a row was a screen of whitespace with a few words down the left
- * edge, which is what this measures: a run of rows stays a list, and the
- * prose after it still gets its air.
+ * A working turn is mostly one-line rows of reasoning and tool calls.
  *
- * Two turns, because both are real. The first has the adapter name a message
- * id per block, which is what puts every row in a message of its own; the
- * second names none, and everything lands in one message. The rows have to
- * be as tight either way.
+ * Two turns, because adapters do both. In the first the adapter names a
+ * message id per block, so every row is a message of its own. In the second it
+ * names none, so everything lands in one message.
  */
 test('a run of reasoning and tool rows stays a list, and prose after it still breathes', async () => {
-  // One thought and one tool call, as an adapter that names its messages
-  // sends them and as one that does not. The turn's own letter keeps the
-  // tool call ids apart: a re-announced id is an update to the call already
-  // in the thread, not a second one.
+  // One thought and one tool call. The turn's letter keeps the tool call ids
+  // apart, because a repeated id updates the call already in the thread.
   const row = (turn: string, n: number, split: boolean): ThreadUpdate[] =>
     [
       {
@@ -245,11 +225,8 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
       await expect
         .poll(() => page.getByText('and that is the answer').last().isVisible(), { timeout: 10_000 })
         .toBe(true);
-      // At rest, which is not the same moment: reasoning is held open while
-      // it streams and collapses when the turn moves on. The wait is on the
-      // panels having no height rather than on their state, which flips at
-      // the start of the 200ms collapse — a row measured during it is as
-      // tall as the text still inside it.
+      // Reasoning collapses over 200ms after the turn moves on, and its state
+      // flips at the start. So the wait is for the panels to have no height.
       await expect
         .poll(() =>
           page.evaluate(() =>
@@ -260,11 +237,8 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
         )
         .toBe(true);
 
-      // Every gap between one row and the next in this turn, measured on the
-      // triggers themselves so it counts whatever the message, group and
-      // margins between them add up to. This turn only: the one before it is
-      // still on the page, and the user message between them is not a gap
-      // anything here is about.
+      // Every gap between two rows of this turn, measured on the triggers so
+      // it includes all margins. The turn before is still on the page.
       const gaps = await page.evaluate(() => {
         const turn = [...document.querySelectorAll('[data-role="user"]')]
           .pop()!
@@ -310,20 +284,13 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
 /*
  * The same run, cut in half by the agent saying something.
  *
- * A tool call carries no message id of its own, so it joins whatever message
- * is trailing: the one the agent has just spoken in. That message says
- * something and ends in rows, and it kept the action bar's 30px under the
- * last of them — with the group's 24px under that, a 54px hole in the middle
- * of a run of 24px lines, in the shape a working turn takes most often.
- *
- * Measured as an ordered column of rows and paragraphs, because both
- * readings matter: two rows together are a list whatever messages they came
- * in, and a paragraph on either side of them still has its air.
+ * A tool call carries no message id, so it joins the trailing message: the one
+ * the agent has just spoken in. The test reads the turn as an ordered column of
+ * rows and paragraphs and checks each seam.
  */
 test('a row run stays a list across a message that speaks, and the prose in it still breathes', async () => {
-  // Message ids of the adapter's own choosing, which is what splits a turn
-  // into messages. They are not the ids the thread mints for the chunks that
-  // arrive without one, and must not collide with them.
+  // Adapter message ids split the turn into messages. They must not collide
+  // with the ids the thread mints for chunks that arrive without one.
   const think = (id: string, text: string): ThreadUpdate =>
     ({
       sessionUpdate: 'agent_thought_chunk',
@@ -375,9 +342,8 @@ test('a row run stays a list across a message that speaks, and the prose in it s
     await expect
       .poll(() => page.getByText('and that is the answer').isVisible(), { timeout: 10_000 })
       .toBe(true);
-    // At rest: a reasoning block is held open while it streams and collapses
-    // over 200ms when the turn moves on, and a row measured during that is
-    // as tall as the text still inside it.
+    // Reasoning collapses over 200ms after the turn moves on, so the wait is
+    // for the panels to have no height.
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -422,15 +388,12 @@ test('a row run stays a list across a message that speaks, and the prose in it s
     expect(seams('prose', 'row').length).toBe(1);
     expect(seams('row', 'prose').length).toBe(2);
 
-    // A row is 24px tall. Anything over half that between two of them and the
-    // run has stopped reading as one thing — including the seam in the
-    // middle, where the run carries on out of a message that spoke.
+    // A row is 24px tall. A gap over half that breaks the run, also at the
+    // seam where the run continues out of a message that spoke.
     for (const gap of seams('row', 'row')) expect(gap).toBeLessThanOrEqual(12);
-    // A sentence keeps the calls it announced: what separates them is the
-    // 6px the trigger carries above its own text, and nothing else.
+    // A sentence stays close to the calls it announced.
     for (const gap of seams('prose', 'row')) expect(gap).toBeLessThanOrEqual(12);
-    // And the space comes back in full where the run ends and the turn says
-    // something, which is the half of this that is not about tightening.
+    // And prose after a run keeps its full space.
     for (const gap of seams('row', 'prose')) expect(gap).toBeGreaterThanOrEqual(12);
 
     await shoot(page, 'quiet-rows-interrupted');
@@ -440,10 +403,8 @@ test('a row run stays a list across a message that speaks, and the prose in it s
   }
 });
 
-// An unfinished tool call is not a question. A call with no result inherits
-// its message's requires-action status, which used to render as "Wants to
-// run" over Allow and Deny buttons — in auto mode, where nothing is being
-// asked, and over a tool whose result cannot come from a browser anyway.
+// A call with no result inherits its message's requires-action status. It
+// must not render as a decision, because nothing is being asked.
 test('a tool call that never reported back is not offered as a decision', async () => {
   await start({
     prompts: [
@@ -532,9 +493,7 @@ test('a turn still running is still running after a detour away and back', async
   }
 });
 
-// Wide output. A reading column is the right width for prose and the wrong
-// width for a table, and neither the table nor the code block could be
-// scrolled sideways to see the rest of one.
+// A reading column suits prose but is too narrow for a wide table.
 test('a wide table leaves the reading column, and scrolls when even that is too narrow', async () => {
   const header = `| ${Array.from({ length: 9 }, (_, i) => `column heading ${i}`).join(' | ')} |`;
   const rule = `| ${Array.from({ length: 9 }, () => '---').join(' | ')} |`;
@@ -574,12 +533,8 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     const input = phone.page.getByLabel('Message input');
     await input.fill('show me the table');
     await input.press('Control+Enter');
-    // Two of them, and the wait is for both: this page is a second look at
-    // the box the desktop half just used, so the thread replays that
-    // exchange and then answers this page's own prompt with another table.
-    // Waiting only for the first leaves the second free to arrive between the
-    // wait and the measurement, and a locator matching two elements is an
-    // error rather than a choice — which is how this read as flaky.
+    // Two tables: the thread replays the desktop exchange, then answers this
+    // prompt. The wait is for both, so the second cannot arrive mid-measurement.
     const tables = phone.page.locator('.aui-md-table-wrap');
     await expect.poll(() => tables.count(), { timeout: 10_000 }).toBe(2);
     const table = tables.last();
@@ -595,7 +550,6 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
   }
 });
 
-// 6 — mode switching.
 test('the mode switcher lists the advertised modes and sets one', async () => {
   await start({
     modes: {
@@ -610,8 +564,7 @@ test('the mode switcher lists the advertised modes and sets one', async () => {
 
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
   try {
-    // Behind the settings button, with the model and the rest: the header row
-    // is a name and four icons now.
+    // Behind the settings button, with the model and the rest.
     await page.getByLabel('Agent settings').click();
     const modes = page.getByRole('combobox', { name: 'Agent mode' });
     await expect.poll(() => modes.isVisible()).toBe(true);
@@ -654,7 +607,6 @@ test('a current_mode_update from the adapter moves the switcher', async () => {
   }
 });
 
-// Model selection.
 test('the model selector lists the advertised models and sets one', async () => {
   await start({
     configOptions: [
@@ -690,8 +642,6 @@ test('the model selector lists the advertised models and sets one', async () => 
   }
 });
 
-// The tab title. Several boxes in several tabs, all called "Boxes", said
-// nothing about which one had stopped for a question.
 test('the tab says which box and thread it is, and what that thread is doing', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('done'), hold: true }] });
 
@@ -788,8 +738,6 @@ test('a thread asked which way to go says that instead', async () => {
   }
 });
 
-// Effort, and everything else the adapter offers beyond the model. These had
-// no control at all, so the effort level could not be set.
 test("the adapter's other settings are reachable, and setting one is sent", async () => {
   await start({
     // This adapter says what mode it is in twice — as the protocol's modes,
@@ -866,7 +814,7 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
     // substring match also finds "Model".
     expect(await page.getByRole('combobox', { name: 'Mode', exact: true }).count()).toBe(0);
     expect(await page.getByRole('combobox', { name: 'Agent mode' }).count()).toBe(1);
-    // And the model is in here now rather than in the header row.
+    // And the model is in the overlay, not in the header row.
     expect(await page.getByRole('combobox', { name: 'Model' }).count()).toBe(1);
     expect(errors).toEqual([]);
   } finally {

@@ -4,21 +4,13 @@ import { closeBrowser, openPage, VIEWPORTS } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
- * The back button, which on a phone is the navigation control.
+ * Browser tests for the back button, the navigation control on a phone.
  *
- * Every one of these presses the browser's own back — `page.goBack()` — or a
- * control the app calls back, and asserts where it lands. Nothing else in the
- * suite did, which is how the two came to disagree: every back arrow was a
- * link, so leaving a view pushed the view it left to, and the device's button
- * then went forward into what had just been left. Dialogs were worse — they
- * were component state, invisible to the one gesture a phone has for
- * dismissing them, so the press tore down the screen behind the dialog
- * instead.
- *
- * The strategy the assertions here are written against is in ARCHITECTURE.md:
- * places push, drill-downs pop, and modal surfaces are entries of their own.
+ * Places push, drill-downs pop, and modal surfaces are history entries of
+ * their own.
  */
 
+/** The box every test here drives. */
 const BOX = DEFAULT_BOX.id;
 
 let stub: TestOrchestrator;
@@ -28,9 +20,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // A fresh box and a fresh review per test: one of these deletes the
-  // box for real, and another writes a comment that would change the next
-  // test's counts.
+  // One test deletes the box, and another writes a comment the next would count.
   stub.resetBoxes();
   stub.createBox();
   stub.review(BOX);
@@ -43,12 +33,10 @@ afterAll(async () => {
 });
 
 /**
- * Where the browser is in its own stack, as the router records it.
+ * The page's position in the history stack, as the router records it.
  *
- * The one thing a page can know about entries it is not on, and what makes
- * "this control pushed" and "this control popped" tellable apart: a pop that
- * lands on the right screen by pushing a copy of it looks identical on
- * screen, and only the count gives it away.
+ * A push that shows the right screen looks the same as a pop. Only this index
+ * tells them apart.
  */
 function stackIndex(page: Page): Promise<number> {
   return page.evaluate(() => (window.history.state as { idx?: number } | null)?.idx ?? 0);
@@ -123,10 +111,8 @@ test('a file is not a step on a pointer, where the tree never left', async () =>
     await page.getByRole('button', { name: /app\.ts/ }).click();
     await expect.poll(() => page.getByText('import { boot }').isVisible()).toBe(true);
 
-    // Two files read, and no entry for either: the tree stayed beside them, so
-    // picking one is selecting in a sidebar rather than travelling. Back
-    // leaves the review, which is what this arrangement's one back control
-    // says it does.
+    // The tree stays beside the files, so picking one adds no entry. Back
+    // leaves the review.
     expect(await stackIndex(page)).toBe(1);
     await page.goBack();
     await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
@@ -205,9 +191,7 @@ test('back closes the hunk sheet and leaves the file where it was', async () => 
 
     await page.goBack();
 
-    // Closed, and nothing else moved: the file is still open and still the
-    // one in the URL. This used to close the file and leave the sheet up over
-    // the tree, showing a hunk of a file that was no longer open.
+    // Only the sheet closed: the file is still open and still in the URL.
     await expect.poll(() => page.locator('[data-slot="sheet-content"]').count()).toBe(0);
     await expect.poll(() => page.getByText('wire the router').isVisible()).toBe(true);
     expect(new URL(page.url()).search).toContain('path=app%2Fsrc%2Fboot.ts');
@@ -251,8 +235,7 @@ test('back closes the comment composer without closing the file under it', async
 
     await page.goBack();
 
-    // One press, one thing closed. It used to take the file with it, so what
-    // had been typed went and the file had to be found again.
+    // One press, one thing closed.
     await expect.poll(() => page.locator('[data-slot="sheet-content"]').count()).toBe(0);
     await expect.poll(() => page.getByText('wire the router').isVisible()).toBe(true);
     // Cancelled, not saved: nothing was written on the way out.
@@ -303,11 +286,9 @@ test('a deleted box is not what the entry left behind leads to', async () => {
     await page.waitForURL(`${stub.url}/`);
     await expect.poll(() => page.getByText('No boxes yet').isVisible()).toBe(true);
 
-    // And it stays there. The dialog was still mounted when the navigation
-    // happened, and the entry it had pushed was the one replaced — so the
-    // marker it would otherwise have taken back out on the way is somebody
-    // else's entry now, and popping it would land on the box that was
-    // just deleted.
+    // And it stays there. The dialog was still mounted during the navigation,
+    // which replaced the entry the dialog had pushed. Popping that entry now
+    // would land on the deleted box.
     await new Promise((done) => setTimeout(done, 250));
     expect(new URL(page.url()).pathname).toBe('/');
     expect(errors).toEqual([]);
@@ -327,18 +308,15 @@ test('the handoff prompt is staged once, not replayed by back and forward', asyn
     await expect.poll(() => handoff.isVisible()).toBe(true);
     await handoff.click();
 
-    // Back to the conversation it was opened from — the entry that was
-    // already there, which is the route as it was entered rather than a
-    // rebuilt one naming the thread.
+    // Back to the entry the review was opened from, not a new one.
     await page.waitForURL(`${stub.url}/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
     await expect
       .poll(() => page.getByLabel('Message input').inputValue())
       .toContain('Read REVIEW.md');
     await expect.poll(() => stackIndex(page)).toBe(0);
 
-    // Forward into the review and back out again. The prompt travelled beside
-    // the router rather than in the entry's state, which the browser replays:
-    // a turn nobody typed used to reappear in the composer here.
+    // Forward into the review and back out again. The prompt is not in the
+    // entry's state, so the browser cannot replay it.
     await page.goForward();
     await expect.poll(() => handoff.isVisible()).toBe(true);
     await page.goBack();

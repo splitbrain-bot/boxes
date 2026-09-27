@@ -1,24 +1,6 @@
 import { generateId, type AttachmentAdapter, type PendingAttachment } from '@assistant-ui/react';
 import { api } from '../../api.ts';
 
-/**
- * The composer's attachment adapter: what happens to a file between being
- * dropped on the thread and being part of a prompt.
- *
- * Everything is uploaded into the box's workspace, whatever it is, and
- * nothing travels inside the message. That is what makes this type-agnostic:
- * a PDF, a CSV and a core dump all become a path the agent opens with the
- * tools it already has.
- *
- * What the thread shows is fetched back from the workspace rather than kept
- * from the composer, so an image the user attached looks the same on the
- * phone that sent it and on the desktop that comes to it later.
- *
- * The upload happens on send rather than on drop, which is what keeps the
- * workspace free of files from attachments the user picked and thought
- * better of.
- */
-
 /** Which of assistant-ui's three tiles a file is shown as. */
 function kindOf(type: string): PendingAttachment['type'] {
   if (type.startsWith('image/')) return 'image';
@@ -29,21 +11,21 @@ function kindOf(type: string): PendingAttachment['type'] {
 }
 
 /**
- * Builds the adapter for one box.
+ * Builds the composer's attachment adapter for one box.
  *
- * `onError` is how a failed upload becomes something the user can read: the
- * composer's send button does not await the promise it starts, so an
- * adapter that only threw would restore the draft and say nothing about
- * why.
+ * Every file is uploaded into the box's workspace, and the prompt carries
+ * only its path, so the agent opens it with its own tools. The upload runs
+ * on send, so a file the user removes again never reaches the workspace.
+ *
+ * `onError` reports a failed upload, because the send button does not await
+ * the upload.
  */
 export function createAttachmentAdapter(
   boxId: string,
   onError: (message: string) => void,
 ): AttachmentAdapter {
   return {
-    // Every type. What a box can do with a file is the agent's business,
-    // and a picker that refuses the thing the user wanted to hand over is a
-    // worse answer than an agent saying it cannot read it.
+    // Every type: the agent decides what it can read.
     accept: '*',
 
     async add({ file }) {
@@ -63,9 +45,8 @@ export function createAttachmentAdapter(
         return {
           ...attachment,
           status: { type: 'complete' },
-          // Where the file went, and nothing else. `sourceType: 'id'` is
-          // assistant-ui's shape for "a reference, not the bytes", which is
-          // exactly what a workspace path is.
+          // `sourceType: 'id'` marks the workspace path as a reference, not
+          // the bytes.
           content: [
             {
               type: 'file' as const,

@@ -1,78 +1,57 @@
-/**
- * Whether a header should stand aside, decided from a scroller's positions
- * alone.
- *
- * Kept apart from the hook that listens for them because this is the whole of
- * the behaviour and none of it needs a browser: a run of samples in, a
- * decision out. `use-scroll-away.ts` is the wiring, and the tests are where
- * the thresholds below are held to.
- */
+/** Decides whether a header should move out of the way, from a scroller's positions. */
 
-/** How near the top the header always stands. */
+/** Within this many pixels of the top, the header always shows. */
 const AT_TOP = 48;
 /**
- * How near the bottom counts as pinned to it.
+ * Within this many pixels of the bottom, a scroller counts as at the bottom.
  *
- * A view that follows its own output sits exactly here for as long as the
- * output lasts: a thread streaming a reply, or writing the result of a `!bang`
- * command, keeps the scroller against its bottom and grows the content behind
- * it. Every one of those steps looks like reading down, and none of it is.
- *
- * Asking the scroller rather than the app is what makes that reliable: the
- * thread's own `isRunning` clears while the last chunks are still landing.
+ * A thread that streams output stays at the bottom while the content grows.
+ * Those steps look like reading down, but they are not. The position is a
+ * better signal than the thread's `isRunning`, which clears while the last
+ * chunks still arrive.
  */
 export const AT_BOTTOM = 8;
-/** How far a downward run has to go before it gives way. */
+/** How many pixels a downward run needs before the header moves away. */
 const HIDE_AFTER = 32;
 /**
- * And how far back up before it returns.
+ * How many pixels an upward run needs before the header returns.
  *
- * The smaller of the two: going away is a decision, coming back is a request,
- * and a request should not have to be repeated. Not much smaller, because a
- * scroller settling after a smooth scroll drifts by a dozen pixels either
- * way. Any flick worth the name clears two dozen.
+ * Smaller than {@link HIDE_AFTER}, so a request to bring it back is easy.
+ * A scroller settling after a smooth scroll drifts by about a dozen pixels,
+ * which stays below this.
  */
 const SHOW_AFTER = 24;
 /**
- * A single step longer than this is a jump rather than reading.
+ * A single step of more pixels than this is a jump, not reading.
  *
- * Both views scroll themselves sometimes — a review restoring the position a
- * file was left at, or putting a hunk in the middle of the pane; a thread
- * anchoring a new turn's message to the top. None of that is a reader's
- * decision about chrome, and all of it arrives as one enormous step, where a
- * hand on the glass arrives as a frame's worth at a time. Three hundred pixels
- * in a frame is faster than a fling and slower than any jump worth making.
+ * The views scroll themselves in one large step: the review restores a
+ * position or centres a hunk, and the thread anchors a new turn's message to
+ * the top. A reader's gesture moves a frame's worth at a time.
  */
 const JUMP = 320;
 /**
- * How long a decision takes to settle, and small steps go unread for.
+ * How long, in milliseconds, small steps are ignored after a decision.
  *
- * Collapsing the row grows the scroller by its height, and Chrome answers a
- * container growing under anchored content by nudging `scrollTop` a few pixels
- * to hold that content still. Those pixels arrive as an upward run — which is
- * the signal to come back, which grows the scroller again. The row would sit
- * there flapping, and the reason would be itself.
- *
- * Only steps small enough to be that nudge are disregarded, and only for as
- * long as the transition runs. A real flick inside the window is still a
- * flick: swallowing it wholesale would strand the header until the next scroll
- * event, and a flick that changed nothing is exactly what this was supposed to
- * stop being.
+ * Collapsing the header grows the scroller, and Chrome nudges `scrollTop` a
+ * few pixels to hold anchored content still. The nudge looks like an upward
+ * run and would bring the header back, which shrinks the scroller again.
+ * Only steps below {@link NUDGE} are ignored, so a real flick still counts.
  */
 const SETTLE_MS = 300;
-/** The most a settling scroller nudges itself by in one step. */
+/** The most pixels a settling scroller nudges itself by in one step. */
 const NUDGE = 24;
 
 /** One scroll event, as much of it as the decision uses. */
 interface ScrollAwaySample {
-  /** Where the scroller is now. */
+  /** The scroll position now. */
   top: number;
-  /** How much of the content is still below the fold. */
+  /** How many pixels of content are below the fold. */
   behind: number;
-  /** The clock, in the units `performance.now()` speaks. */
+  /** The time, in milliseconds on the `performance.now()` clock. */
   now: number;
 }
 
+/** The decision so far, and the run it is measured on. */
 export interface ScrollAwayState {
   /** True while the header should be out of the way. */
   away: boolean;
@@ -80,12 +59,13 @@ export interface ScrollAwayState {
   last: number;
   /** Where the current run began: the last time direction changed. */
   anchor: number;
+  /** Whether the current run goes down. */
   descending: boolean;
   /** Until when a step small enough to be the collapse settling is ignored. */
   settledUntil: number;
 }
 
-/** A header in reach, and a scroller nobody has touched yet. */
+/** The start state: the header shows, and the scroller has not moved. */
 export function scrollAwayStart(): ScrollAwayState {
   return { away: false, last: 0, anchor: 0, descending: false, settledUntil: 0 };
 }
@@ -93,12 +73,10 @@ export function scrollAwayStart(): ScrollAwayState {
 /**
  * The state after one scroll event.
  *
- * The rule is a run rather than a position: the header goes after thirty-odd
- * pixels of scrolling further down without a change of direction, and comes
- * back on the first hint of going the other way. Runs are measured from the
- * last turn rather than from the last event, so the pixel of jitter a finger
- * leaves on the glass cannot toggle anything, and a slow drift down still
- * adds up to a decision.
+ * The header moves away after a downward run of {@link HIDE_AFTER} pixels and
+ * returns after an upward run of {@link SHOW_AFTER}. A run is measured from
+ * the last change of direction, so finger jitter toggles nothing and a slow
+ * drift still adds up.
  */
 export function scrollAway(state: ScrollAwayState, sample: ScrollAwaySample): ScrollAwayState {
   const { top, behind, now } = sample;
@@ -107,27 +85,19 @@ export function scrollAway(state: ScrollAwayState, sample: ScrollAwaySample): Sc
 
   const moved = { ...state, last: top };
 
-  /** Deciding is idempotent, and a decision that changed nothing settles nothing. */
+  /** Applies a decision. Only a change starts the settling window. */
   const decide = (next: boolean, over: Partial<ScrollAwayState> = {}): ScrollAwayState =>
     next === state.away
       ? { ...moved, ...over }
       : { ...moved, ...over, away: next, settledUntil: now + SETTLE_MS };
 
-  // The top is chrome rather than content, and a view too short to scroll
-  // never leaves it. Nothing hides here.
+  // A view too short to scroll never leaves the top.
   if (top <= AT_TOP) return decide(false, { anchor: top, descending: false });
 
-  // Against the bottom: whatever moved the scroller, it was the content
-  // arriving rather than a reader leaving. Follow the position so the next run
-  // is measured from where reading resumes, and decide nothing. This
-  // is also what keeps the collapse from flapping down here: a taller viewport
-  // clamps the scroll position, and the clamp arrives as an upward step that
-  // would otherwise read as a request to come back.
+  // At the bottom, a step is content arriving, or the clamp after the header
+  // collapsed. Neither decides anything. The next run starts here.
   if (behind <= AT_BOTTOM) return { ...moved, anchor: top };
 
-  // A jump — restoring where a file was left, anchoring a new turn's message
-  // to the top — is not reading either. Nor is a step small enough to be the
-  // collapse settling.
   const jumped = Math.abs(step) > JUMP;
   const nudged = Math.abs(step) < NUDGE && now < state.settledUntil;
   if (jumped || nudged) return { ...moved, anchor: top };

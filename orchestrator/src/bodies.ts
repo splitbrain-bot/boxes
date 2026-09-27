@@ -3,20 +3,12 @@ import type { HarnessId } from '../../shared/types.ts';
 import { HttpError } from './http-error.ts';
 
 /**
- * What each route that takes a JSON body checks that body against, and the
- * check itself.
+ * The shapes of the REST routes' JSON bodies, and the check that applies them.
  *
- * A body is whatever the client sent. Read without a check, a field that is
- * missing or of the wrong type becomes a cast that misbehaves further in, or
- * a 500 that says nothing the caller can act on. Each schema below states one
- * route's body and nothing more: how long a name may be, whether a revision
- * resolves, whether a box exists, all stay with the code that knows.
- *
- * Unknown fields are dropped rather than refused, so a newer client talking to
- * an older orchestrator is served rather than rejected.
- *
- * The attachment upload has no schema here. It carries raw bytes rather than
- * JSON, and the route checks them itself.
+ * Each schema checks the shape of one route's body. Limits and lookups, such
+ * as how long a name may be or whether a box exists, stay with the code that
+ * owns them. Unknown fields are dropped rather than refused, so an older
+ * orchestrator still serves a newer client.
  */
 
 /**
@@ -69,8 +61,8 @@ export const threadDoneBody = z.object({
 });
 
 /**
- * POST /api/boxes/:id/threads/:threadId/background/stop — which process to
- * kill. Without one, everything that thread is running stops.
+ * POST /api/boxes/:id/threads/:threadId/background/stop — the adapter's id
+ * of the task to stop. Without one, every task of that thread stops.
  */
 export const backgroundStopBody = z.object({
   processId: z.string().optional(),

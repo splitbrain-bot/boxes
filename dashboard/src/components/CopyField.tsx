@@ -1,14 +1,17 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 
-/** A labelled value with a copy button, masked until revealed when asked. */
+/** A labelled value with a copy button, optionally masked until revealed. */
 export function CopyField({
   label,
   value,
   masked = false,
 }: {
+  /** The label above the value. */
   label: string;
+  /** The value to show and copy. */
   value: string;
+  /** Hides the value behind dots until the user reveals it. */
   masked?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
@@ -20,7 +23,7 @@ export function CopyField({
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Clipboard needs a secure context; reveal the value to be copied by hand.
+      // The clipboard needs a secure context, so the value is revealed for copying by hand.
       setRevealed(true);
     }
   };

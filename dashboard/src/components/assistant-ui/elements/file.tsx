@@ -80,9 +80,7 @@ function getBase64Size(base64: string): number {
   return Math.floor((base64Data.length * 3) / 4) - padding;
 }
 
-// Boxes edit: one implementation of this in the app, in lib/attachments.ts,
-// where the composer's own attachment chips read it too. The name the
-// registry exports stays.
+/** Boxes edit: the app's shared byte formatter, under the name the registry exports. */
 const formatFileSize = formatBytes;
 
 export type FileRootProps = React.ComponentProps<"div"> &

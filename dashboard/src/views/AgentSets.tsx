@@ -14,15 +14,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 /**
- * Every agent set, the global one first.
+ * Page that lists every agent set, the global one first.
  *
- * A set is an AGENTS.md, some skills and some slash commands. The global one
- * is applied to every box; a box may name one more, and the two are merged.
- * That is the whole model, and the paragraph at the top of this page is where
- * it is explained, because nowhere else in the UI has room for it.
+ * The global set goes into every box. A box may name one more set, and the
+ * two are merged.
  */
 export function AgentSets() {
-  /** Out to the box list, popped rather than pushed; see useUp. */
+  /** Leaves for the box list. */
   const up = useUp('/');
   const [sets, setSets] = useState<AgentSetSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -147,9 +145,7 @@ export function AgentSets() {
             </span>
             <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />
           </Link>
-          {/* The global set has no delete: it is what every box gets, and a
-              deployment without one would have nowhere to put a rule that
-              always applies. */}
+          {/* The global set goes into every box, so it cannot be deleted. */}
           {set.global ? null : (
             <Button
               type="button"

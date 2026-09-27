@@ -56,38 +56,8 @@ import {
 } from './tree.ts';
 
 /**
- * The per-box review façade: the repo map, the REVIEW.md
- * read-modify-write, and the routing of git questions to the repository that
- * can answer them.
- *
- * The workspace is the review. The root is always the box's
- * `/workspace`, there is nothing to pick and nothing to switch between, and
- * every file under it is browsable in one tree. A repository decides which
- * status and which diff one path is shown with: the closest enclosing one, by
- * longest prefix.
- *
- * REVIEW.md is the single source of truth and it is shared with the agent, so
- * there is no annotation table anywhere. Every mutation is
- * read → parse → apply → serialize → write-tmp-then-rename, under a per-box
- * lock, with the file's hash checked between the read and the write. If the
- * hash moved — the agent edited REVIEW.md mid-mutation — the whole thing is
- * re-read and re-applied once. A lost race costs one visible refresh rather
- * than data, because every write re-serializes the whole parsed file.
- *
- * It sits at `/workspace/REVIEW.md`, outside every repository, so it cannot be
- * committed by accident or show up in a repository's own status.
- *
- * Files are read and written here, on the workspace directory. Git is not: it
- * runs in the box's own container, over a repository whose configuration
- * the agent writes. So a question with git in it starts the box if it was
- * stopped, and the box stays counted as in use while the review is open.
- */
-
-/**
- * What one review last learned from git, held for as long as it is browsed.
- *
- * Taken for the whole workspace in one pass, because every directory answer is
- * a slice of it and git runs a container away.
+ * What one review last learned from git about the whole workspace. Every
+ * directory answer is a slice of it.
  */
 interface GitSnapshot {
   /** When it was taken, which is what its lifetime is measured from. */
@@ -114,7 +84,15 @@ export interface ReviewBoxes {
   execTarget(id: string): Promise<{ containerId: string; workingDir: string }>;
 }
 
-/** Review operations over the boxes of one orchestrator. */
+/**
+ * Review operations over the boxes of one orchestrator.
+ *
+ * The review of a box is its whole workspace. REVIEW.md at the workspace root
+ * is the only store of annotations, and the agent can edit it too. Files are
+ * read and written on this process's filesystem. Git runs in the box's
+ * container, so a request that needs git starts a stopped box and marks it
+ * active.
+ */
 export class ReviewService {
   /**
    * One promise chain per box, so two mutations of the same REVIEW.md are
@@ -126,22 +104,23 @@ export class ReviewService {
   private readonly snapshots = new Map<string, GitSnapshot>();
 
   constructor(
+    /** The database that holds the box rows. */
     private readonly db: Db,
+    /** The boxes the reviews look into. */
     private readonly boxes: ReviewBoxes,
   ) {}
 
   // --- the workspace and its repositories -----------------------------------
 
   /**
-   * How long a git snapshot is reused when nothing has asked for a new one.
+   * How long a git snapshot is reused when no request asks for a new one.
    *
-   * Long enough that browsing a tree — a burst of folder taps — runs git once,
-   * which is the point of holding one at all. The arrivals below are the
-   * mechanism; this is the backstop behind them.
+   * A burst of folder taps runs git once. Arrivals, saves and base changes
+   * take a new snapshot sooner.
    */
   private static readonly SNAPSHOT_MS = 60_000;
 
-  /** The box row, or a 404 by the same rule every other endpoint uses. */
+  /** The box row, or a 404 for an unknown or deleted box. */
   private row(id: string): BoxRow {
     const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as
       | BoxRow
@@ -152,12 +131,11 @@ export class ReviewService {
 
   /**
    * The box's workspace on this process's filesystem, which is the review
-   * root and the only one there is.
+   * root.
    *
-   * A box created before workspaces became directories has none until its
-   * next start, which recreates its container with the bind and copies the
-   * volume across. 409 rather than 404, because the box is real and the
-   * fix is a start — which is what the review view says.
+   * A box whose workspace is still a named volume has none until its next
+   * start migrates it. That is a 409 rather than a 404, because the box exists
+   * and a start fixes it.
    */
   private workspace(id: string): string {
     const row = this.row(id);
@@ -175,9 +153,8 @@ export class ReviewService {
   /**
    * The box's container to run git in, started if it was stopped.
    *
-   * Resolved for each request that asks git something, rather than remembered:
-   * a container can be stopped between two requests, or replaced by one, and
-   * either leaves a held id naming nothing.
+   * Each request asks for it again, because a container can stop or be
+   * replaced between two requests.
    */
   private async box(id: string): Promise<GitBox> {
     const target = await this.boxes.execTarget(id);
@@ -188,14 +165,9 @@ export class ReviewService {
    * What a review knows from git: which repositories the workspace holds, what
    * each is compared against, and the status of every changed file in it.
    *
-   * Taken once for the whole workspace and reused, because git runs in the
-   * box's container — a status per folder tap would be a `docker exec` per
-   * tap. A directory answer is a slice of the map it holds.
-   *
-   * A new one is taken when `fresh` says the browser has just arrived (the view
-   * mounting, a file closing back to the tree, the tab coming back), when a
-   * save or a base change has moved what git would say, and when
-   * {@link SNAPSHOT_MS} has passed.
+   * The snapshot is reused, because each git call is a `docker exec` into the
+   * box. A new one is taken when `fresh` says the browser has just arrived,
+   * after a save or a base change, and when {@link SNAPSHOT_MS} has passed.
    */
   private async snapshot(box: GitBox, id: string, fresh: boolean): Promise<GitSnapshot> {
     const held = this.snapshots.get(id);
@@ -218,17 +190,17 @@ export class ReviewService {
   }
 
   /**
-   * The revision expression the box compares against, or '' for each
-   * repository's own working tree.
+   * The revision expression the box compares against, or '' when none is set,
+   * which compares each repository against its own HEAD.
    *
-   * One expression for the whole workspace: what it resolves to is a different
-   * commit in every repository, and is derived per request rather than stored.
+   * One expression serves the whole workspace. It resolves to a different
+   * commit in each repository, and those commits are not stored.
    */
   private baseRev(id: string): string {
     return this.row(id).review_base_rev ?? '';
   }
 
-  /** Where REVIEW.md is: at the workspace root, outside every repository. */
+  /** Where REVIEW.md is: at the workspace root. */
   private reviewPath(workspace: string): string {
     return join(workspace, REVIEW_FILE);
   }
@@ -239,14 +211,12 @@ export class ReviewService {
    * One directory of the review: its children, and the facts the whole view
    * needs.
    *
-   * Listing and status are one answer rather than two requests, because a file
-   * the change deleted has no directory entry at all and can only come from the
-   * status map. The folder badges come from the same map, as a prefix scan.
+   * Listing and status come in one answer, because a file the change deleted
+   * has no directory entry and only the status map names it.
    *
-   * `fresh` is the browser saying it has arrived rather than opened a folder —
-   * the view mounting, a file closing back to the tree, the tab coming back. It
-   * takes git's answer again and runs the drift check over every annotated
-   * file. Opening a folder runs neither, so it costs one directory read.
+   * `fresh` says the browser has arrived: the view mounted, a file closed back
+   * to the tree, or the tab came back. It takes a new git snapshot and runs the
+   * drift check over every annotated file. Opening a folder does neither.
    */
   async dir(id: string, relDir: string, fresh: boolean): Promise<ReviewDirResponse> {
     const workspace = this.workspace(id);
@@ -279,11 +249,8 @@ export class ReviewService {
    * One file: content, diff markers and its comments, in one response.
    *
    * The diff and the status come from the repository that owns the path, with
-   * the path spelled the way that repository spells it. A file no repository
-   * claims gets neither.
-   *
-   * The content is plain text. Highlighting happens in the browser, so nothing
-   * on this wire is render markup and every line is an addressable row.
+   * the path as that repository names it. A file no repository claims gets
+   * neither. The content is plain text, and the browser does the highlighting.
    */
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
     const workspace = this.workspace(id);
@@ -297,10 +264,8 @@ export class ReviewService {
     const read = readTextFile(path);
     const base = repo ? await this.baseIn(box, id, repo) : NO_BASE;
 
-    // Only the owning repository is asked, rather than the whole workspace:
-    // one file's status is one repository's answer, and running `status` in
-    // every repository to find it would scale a file open with the number of
-    // repositories.
+    // Only the owning repository is asked, so opening a file costs the same
+    // however many repositories the workspace holds.
     const [diff, statuses] = await Promise.all([
       repo && !read.binary
         ? fileDiff(gitTarget(box, repo.path), base, inRepo(repo, relPath), read.content)
@@ -308,9 +273,8 @@ export class ReviewService {
       repo ? fileStatuses(gitTarget(box, repo.path), base) : Promise.resolve(null),
     ]);
 
-    // A binary file and a file past the display cap are not what the comments
-    // were written against, so they come back as they stand: a drift check
-    // against lines this process cannot read whole would mark them outdated.
+    // The drift check needs the whole text, so the comments on a binary or
+    // truncated file come back as they stand.
     const annotations =
       read.binary || read.truncated
         ? await this.annotationsOf(id, workspace, relPath)
@@ -341,9 +305,9 @@ export class ReviewService {
    * Resolves a client-supplied path to a file on disk the review offers, for
    * serving its bytes.
    *
-   * The same two rules as {@link resolveFile}, and no git: a file the change
-   * deleted has no bytes to serve, so it is the same 404 as any other path
-   * the review does not offer.
+   * It applies `listedFile` and `resolveInRoot` as {@link resolveFile} does,
+   * without asking git. A deleted file has no bytes to serve, so it gets the
+   * same 404 as any path the review does not offer.
    */
   rawFile(id: string, relPath: string): string {
     const workspace = this.workspace(id);
@@ -356,21 +320,14 @@ export class ReviewService {
   // --- mutation -------------------------------------------------------------
 
   /**
-   * Replaces one file of the workspace with what the reviewer edited, and
-   * answers with the file as it now stands.
+   * Replaces one file of the workspace with the reviewer's edited content, and
+   * returns the file view as it now stands.
    *
-   * The whole file, because that is what was being edited. `hash` is what the
-   * browser last read; a file that no longer matches it was written by the
-   * agent in the meantime, and saving over that would drop its work without
-   * anybody seeing it go. The refusal hands the decision back to the reviewer,
-   * who is holding the only other copy.
-   *
-   * A truncated read is refused rather than saved: what the browser was shown
-   * stops at the cap, and writing it back would delete everything past it.
-   *
-   * The answer is the file endpoint's, so one round trip repaints the code,
-   * the diff, the status and the comments — which have followed the edit,
-   * because {@link file} runs the drift check that moves them.
+   * `hash` is the file hash the browser last read. When the file no longer
+   * matches it, something else changed it, and the save is refused so that
+   * change is not lost. A truncated file is refused too, because the browser
+   * holds only the part up to the cap. The response comes from {@link file},
+   * whose drift check moves the comments with the edit.
    */
   async writeFile(
     id: string,
@@ -397,16 +354,14 @@ export class ReviewService {
         'This file is larger than the display limit, so it cannot be saved.',
       );
     }
-    // 412 rather than 409, because this is the one refusal the reviewer can
-    // overrule: they still hold their version, and the view offers to save it
-    // anyway. The others say the file cannot be edited at all.
+    // 412 rather than 409, because the reviewer can overrule this refusal and
+    // save anyway.
     if (fileHash(path) !== hash) {
       throw new HttpError(412, 'This file changed on disk while you were editing it.');
     }
 
     writeFileAtomic(path, content);
-    // The write moved this file's status, so what the snapshot says about the
-    // workspace is one file out of date.
+    // The write can change this file's git status.
     this.invalidate(id);
     return this.file(id, relPath);
   }
@@ -426,9 +381,8 @@ export class ReviewService {
     if (text.length > 20_000) throw new HttpError(400, 'comment is too long');
 
     const workspace = this.workspace(id);
-    // The path has to name a file the review lists, not merely resolve inside
-    // the workspace: a comment on something no directory offers could never be
-    // shown.
+    // The path must name a file the review lists, or the comment could never
+    // be shown.
     const path = await this.resolveFile(await this.box(id), id, workspace, relPath);
     if (path === null) {
       throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
@@ -454,12 +408,8 @@ export class ReviewService {
   }
 
   /**
-   * Runs the drift check over the whole review and answers with one file's
-   * comments as they then stand.
-   *
-   * What a comment write ends with. It is one of the two places an `(outdated)`
-   * is decided — the three arrivals are the other — and the comments the
-   * reviewer is looking at are the ones that just moved.
+   * Runs the drift check over the whole review and returns one file's comments
+   * as they then stand. Every comment write ends with this.
    */
   private async drifted(
     id: string,
@@ -471,10 +421,8 @@ export class ReviewService {
   }
 
   /**
-   * Deletes REVIEW.md — the "New review" button.
-   *
-   * The file is the review, so this is the whole operation. The agent may have
-   * already deleted it, which is not an error.
+   * Deletes REVIEW.md, which starts a new review. A missing file is not an
+   * error.
    */
   async deleteReview(id: string): Promise<void> {
     const workspace = this.workspace(id);
@@ -487,16 +435,13 @@ export class ReviewService {
    * Records the revision the whole review is compared against, and reports
    * where it landed.
    *
-   * One expression, resolved independently in each repository through the
-   * merge base with that repository's own HEAD, so commits made on the base
-   * branch after branching off are not reported as this branch's changes. A
-   * repository the revision names nothing in is compared against its own
-   * working tree instead of failing the request; a 400 comes back only when it
-   * resolves nowhere. Null clears it.
+   * The expression is resolved in each repository through the merge base with
+   * that repository's own HEAD. A repository where it names nothing is compared
+   * against its own HEAD. A 400 comes back only when it resolves nowhere. Null
+   * clears the base.
    */
   async setBase(id: string, rev: string | null): Promise<ReviewBaseResponse> {
-    // The box is validated here as it is everywhere else, because the held
-    // repository map would otherwise answer for a box that has none.
+    // Checks the box first: a held snapshot would answer without checking it.
     this.workspace(id);
     const box = await this.box(id);
     const { map } = await this.snapshot(box, id, false);
@@ -530,15 +475,11 @@ export class ReviewService {
   // --- the read-modify-write ------------------------------------------------
 
   /**
-   * Applies one change to REVIEW.md and writes it back, under the box's
-   * lock and guarded by the file's hash.
+   * Applies one change to REVIEW.md and writes it back, under the box's lock.
    *
-   * The hash check is what makes sharing the file with the agent safe: between
-   * the read and the write the agent may have edited or deleted REVIEW.md, and
-   * writing the parse of the old content would silently drop its edit. On a
-   * moved hash the whole thing is retried once against the new content, which
-   * is enough — a second concurrent write in the same few milliseconds is not a
-   * case worth an unbounded loop.
+   * The agent can edit or delete REVIEW.md at any time. The file's hash is
+   * compared before the read and before the write. When it moved, the change is
+   * applied once more to the new content. A second move gives a 409.
    */
   private async mutate(
     id: string,
@@ -553,9 +494,8 @@ export class ReviewService {
         const review = this.read(path);
         const asRead = serializeReview(review);
         apply(review);
-        // A change that applied to nothing — deleting a comment that is not
-        // there — leaves the file alone, rather than creating a review that
-        // holds none.
+        // A change that changed nothing, such as deleting a missing comment,
+        // writes no file.
         if (serializeReview(review) === asRead) {
           return toAnnotations(annotationsFor(review, relPath));
         }
@@ -588,10 +528,9 @@ export class ReviewService {
   /**
    * One file's comments as REVIEW.md holds them, without a drift check.
    *
-   * For the files drift has nothing to check against: one the change deleted,
-   * one that is binary, one longer than the display cap. The tree counts those
-   * comments, so the file view has to show them — a badge promising a comment
-   * the reviewer cannot read or delete is worse than no badge.
+   * For files the drift check cannot compare against: deleted, binary, or past
+   * the display cap. The tree counts their comments, so the file view shows
+   * them too.
    */
   private async annotationsOf(
     id: string,
@@ -616,8 +555,7 @@ export class ReviewService {
       let changed = false;
       for (const [file, annotations] of review.data) {
         const source = sourceLines(workspace, file);
-        // Undefined is a file that cannot be read honestly: it is skipped
-        // rather than having its annotations declared outdated.
+        // Undefined is a binary or truncated file: skipped, not marked outdated.
         if (source === undefined) continue;
         if (checkDrift(annotations, source)) changed = true;
       }
@@ -649,11 +587,10 @@ export class ReviewService {
   }
 
   /**
-   * Runs `fn` with the box's REVIEW.md to itself.
+   * Runs `fn` after every earlier holder of the box's lock has finished.
    *
-   * A plain promise chain rather than a mutex library: the queue is per
-   * box, every holder is a few filesystem operations long, and a rejection
-   * must not wedge the chain — hence the catch on the stored tail.
+   * The stored tail catches rejections, so one failure does not block the
+   * next holder.
    */
   private withLock<T>(id: string, fn: () => T | Promise<T>): Promise<T> {
     const previous = this.locks.get(id) ?? Promise.resolve();
@@ -671,9 +608,8 @@ export class ReviewService {
    * The repositories as the API reports them: where each is, what its HEAD
    * names, and what the review's base resolved to in it.
    *
-   * `baseCommit` is what lets the header say "vs main, 2 of 3 repositories" —
-   * a revision can name a branch in one repository and nothing at all in the
-   * dependency checked out beside it.
+   * A revision can name a branch in one repository and nothing in another, so
+   * each repository reports its own `baseCommit`.
    */
   private async describeRepos(
     box: GitBox,
@@ -698,8 +634,7 @@ export class ReviewService {
     const rev = this.baseRev(id);
     if (rev === '') return NO_BASE;
     const resolved = await resolveBase(gitTarget(box, repo.path), rev);
-    // Unknown here is not an error: this repository is compared against its
-    // own working tree, the same soft failure `resolveBases` takes.
+    // An unknown revision falls back to HEAD here, as in `resolveBases`.
     return 'base' in resolved ? resolved.base : NO_BASE;
   }
 
@@ -708,17 +643,13 @@ export class ReviewService {
   /**
    * Resolves a client-supplied path to a file the review offers.
    *
-   * Two rules. {@link listedFile} is the one a directory listing applies, so
-   * the API serves what the browser was offered and no metadata a listing
-   * leaves out — asked of the one path, rather than by rebuilding a listing
-   * to look in. `resolveInRoot` is the security boundary, against
-   * `/workspace`, so a contained path may be in any repository it holds or in
-   * none. Every refusal is the same 404, so an escape attempt learns nothing an
-   * unknown file would not have told it.
+   * {@link listedFile} applies the listing's rule, so the API serves only what
+   * a directory listing offers. `resolveInRoot` keeps the path inside the
+   * workspace. A directory is refused too. Every refusal is the same 404, so an
+   * escape attempt learns no more than an unknown path would.
    *
-   * Null is not a refusal: the working tree does not have the file and git
-   * reports it deleted, which is a change the review shows. What to say about
-   * one is the caller's to decide.
+   * Returns null for a file that is missing on disk and that git reports
+   * deleted. The caller decides how to answer for it.
    */
   private async resolveFile(
     box: GitBox,
@@ -735,8 +666,8 @@ export class ReviewService {
     }
     if (resolved.reason !== 'missing') throw new HttpError(404, 'File not found');
 
-    // Nothing on disk. Only git can tell a file the change removed from a path
-    // that was never there, and only the first of those is part of the review.
+    // Nothing on disk. Only git can tell a deleted file from a path that never
+    // existed.
     const { statuses } = await this.snapshot(box, id, false);
     if (statuses[relPath] !== 'deleted') throw new HttpError(404, 'File not found');
     return null;
@@ -745,10 +676,9 @@ export class ReviewService {
   /**
    * The children of one directory of the workspace, or a 404.
    *
-   * A directory the change emptied is off disk, and the files it held are still
-   * part of what is under review — so the status map is what says it is there,
-   * and {@link dirEntries} is what puts them back. Anything else the workspace
-   * does not have is a path the review does not offer.
+   * A directory missing on disk counts as empty when git reports deleted files
+   * under it, and {@link dirEntries} adds those files. Any other missing
+   * directory is a 404.
    */
   private children(
     workspace: string,
@@ -767,7 +697,7 @@ export class ReviewService {
     throw new HttpError(404, 'Directory not found');
   }
 
-  /** Drops what a box's review holds, for a delete. */
+  /** Drops the snapshot and the lock of a deleted box. */
   forget(id: string): void {
     this.snapshots.delete(id);
     this.locks.delete(id);
@@ -805,14 +735,9 @@ function goneFile(
 /**
  * A file's current lines for a drift check.
  *
- * Null says the file is gone, which is what marks every annotation on it
- * outdated. Undefined says it is there and cannot be read honestly — it is
- * binary, or longer than the display cap — where the lines on hand are not
- * what the comments were written against and drift has nothing to say.
- *
- * The path is workspace-relative and so is the annotation's, which is why a
- * file that moves between repositories needs nothing new: a comment follows
- * the path, and drift already handles its content moving.
+ * Null says the file is gone or unreadable, which marks every annotation on it
+ * outdated. Undefined says the file is binary or longer than the display cap,
+ * so the drift check skips it.
  */
 function sourceLines(workspace: string, relPath: string): string[] | null | undefined {
   const resolved = resolveInRoot(workspace, relPath);

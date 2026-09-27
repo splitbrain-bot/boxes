@@ -5,11 +5,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import { directorySize, BoxUsage } from './diskusage.ts';
 
-/**
- * How big a workspace is: the walk itself, and the cache in front of it that
- * keeps a five-second poll off the disk.
- */
-
 let dir: string;
 let outside: string;
 
@@ -50,15 +45,16 @@ test('a workspace that cannot be read at all is news', async () => {
   await assert.rejects(() => directorySize(join(dir, 'nosuch')));
 });
 
-/**
- * A usage cache over a stub measurer, so the walks are countable.
- *
- * `up` is the reading the manager passes for a running box, which is what the
- * tests below are about unless they say otherwise.
- */
+/** The `live` value the manager passes for a running box. */
 const up = true;
+
+/** The `live` value the manager passes for a stopped box. */
 const down = false;
 
+/**
+ * A usage cache over a stub measurer that records every walk. Each option
+ * replaces a default.
+ */
 function usage(over: {
   pathsOf?: (id: string) => Array<string | null>;
   measure?: (path: string) => Promise<number>;
@@ -83,8 +79,7 @@ function usage(over: {
 test('the first read answers with no number, and the next one with the measurement', async () => {
   const { cache, walks } = usage();
 
-  // Nothing has been measured, and nothing waits for it: a list request is
-  // not going to walk a checkout before it answers.
+  // A list request does not wait for the walk.
   assert.equal(cache.bytes('s1', up), null);
   await cache.settled();
   assert.deepEqual(walks, ['/data/workspaces/s1']);
@@ -133,9 +128,8 @@ test('what a box is using is its workspace and its home, together', async () => 
 
   cache.bytes('s1', up);
   await cache.settled();
-  // One number, because the question a card answers is how big this box has
-  // got — and the home, with the caches and the installed tools in it, is
-  // usually the larger half of the answer.
+  // A card shows one size for the box. The home holds the caches and the
+  // installed tools, so it is usually the larger part.
   assert.equal(cache.bytes('s1', up), 1000);
   assert.deepEqual(walks, ['/data/workspaces/s1', '/data/homes/s1']);
 });
@@ -162,8 +156,7 @@ test('half a box is not reported as the whole of it', async () => {
 
   cache.bytes('s1', up);
   await cache.settled();
-  // The workspace walk succeeded and the home walk did not. 300 would be a
-  // wrong answer stated confidently; no answer is the honest one.
+  // The home walk failed, and a total of only the workspace would be wrong.
   assert.equal(cache.bytes('s1', up), null);
 });
 
@@ -249,8 +242,8 @@ test('a box that is down is measured once and then left alone', async () => {
   await cache.settled();
   assert.equal(walks, 2);
 
-  // And then nothing, however long it sits there and however often the list
-  // is polled. Nothing is running in it, so nothing in it is changing.
+  // After that, no walks while it stays down. Nothing runs in it, so nothing
+  // in it changes.
   for (const days of [1, 2, 7, 30]) {
     now = days * 86_400_000;
     assert.equal(cache.bytes('s1', down), 42);
@@ -274,7 +267,7 @@ test('a box that comes back up is measured again', async () => {
   await cache.settled();
   assert.equal(walks, 1);
 
-  // Inside the interval, being up on its own is not news.
+  // Inside the interval, coming back up does not start a walk.
   now = 500;
   cache.bytes('s1', up);
   await cache.settled();
@@ -299,8 +292,8 @@ test('a box that stops while its walk is queued is measured again after it lands
     },
   });
 
-  // Asked for while it was up, so what it measures is a moving workspace —
-  // whatever the box's state is by the time it finishes.
+  // This walk was requested while the box was up, so it measured a workspace
+  // that could still change.
   cache.bytes('s1', up);
   await Promise.resolve();
   assert.equal(walks, 1);
@@ -333,8 +326,8 @@ test('a walk that failed on a stopped box is retried rather than frozen', async 
   await cache.settled();
   assert.equal(cache.bytes('s1', down), null);
   await cache.settled();
-  // No answer is not an answer to freeze on: a permission fixed by hand
-  // should show up on the next interval.
+  // A failed walk is retried on the interval, so a permission fixed by hand
+  // shows up.
   assert.equal(walks, 1);
 
   fail = false;
@@ -359,7 +352,7 @@ test('an upload into a stopped box has its size measured again', async () => {
   assert.equal(walks, 1);
   assert.equal(cache.bytes('s1', down), 42);
 
-  // The one way bytes arrive in a workspace with nothing running in it.
+  // An upload is the one way bytes reach the workspace of a stopped box.
   size = 99;
   cache.forget('s1');
   cache.bytes('s1', down);
@@ -379,10 +372,9 @@ test('a deleted box takes its measurement with it', async () => {
 });
 
 test('a walk that was measuring while the workspace changed is not the answer', async () => {
-  // The upload lands mid-walk, so what the walk is about to store is the
-  // size before it. Stored with a fresh timestamp it would be the answer for
-  // the whole interval — and for a box that is down, for good, since nothing
-  // else makes one due.
+  // The upload lands mid-walk, so the walk holds the old size. Stored, it
+  // would stand for the whole interval, and for a stopped box until the next
+  // upload.
   let size = 42;
   let walks = 0;
   let land: () => void = () => {};

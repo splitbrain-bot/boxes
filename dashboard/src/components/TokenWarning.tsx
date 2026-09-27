@@ -4,15 +4,13 @@ import { Notice } from '@/components/Notice';
 import { useBoxes } from '../stores/boxes.ts';
 
 /**
- * One line per harness that cannot run a turn.
+ * Warning with one line per harness that cannot run a turn.
  *
- * A box still starts and the dashboard still works without a credential; only
- * an agent turn fails, and not until somebody sends a prompt. Saying so up
- * front is the whole point, and saying which agent it is about is what makes
- * it actionable on a deployment that runs more than one.
+ * Without a credential only the agent turn fails, at the first prompt, so the
+ * warning says so up front. It renders nothing while every harness can run,
+ * and before the first health probe answers.
  *
- * Renders nothing while every harness is fine — including before the first
- * health probe has answered, since nothing is known to be wrong then.
+ * @param className Layout classes from the caller.
  */
 export function TokenWarning({ className }: { className?: string }) {
   const { harnesses } = useBoxes();
@@ -34,7 +32,12 @@ export function TokenWarning({ className }: { className?: string }) {
   );
 }
 
-/** Why this harness cannot run, in the terms the settings page uses. */
+/**
+ * Explains why a harness cannot run, in the terms the settings page uses.
+ *
+ * @param harness The harness.
+ * @returns One sentence.
+ */
 function reason(harness: HarnessHealth): string {
   const { credential } = harness;
   if (!credential) return `No credential is set for ${harness.label}, so its threads cannot run.`;

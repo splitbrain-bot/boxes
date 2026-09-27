@@ -3,55 +3,47 @@ import { modeDescription, modeLabel } from '@/lib/harness';
 import { cn } from '@/lib/utils';
 
 /**
- * The controls an agent's settings are set with, wherever they are set.
- *
- * Two places ask the same questions of a thread — the header of one that
- * exists, and the dialog that starts one — and they have to look and behave
- * the same, because they are the same question. The difference is only where
- * the answers come from: the header reads what this thread's adapter is
- * advertising right now, and the dialog reads what that harness's adapter
- * advertised last (the catalogue). Both shapes are the ACP ones in
- * `shared/types.ts`, so one set of controls serves both.
- *
- * Native selects rather than rows of buttons or a styled listbox: six modes
- * are longer than a phone is wide, and the native control opens the
- * platform's own picker and brings its keyboard and screen-reader behaviour
- * with it.
+ * Controls for an agent's mode and config options, shared by the thread header
+ * and the new-thread block.
  */
 
-/** The classes every select here shares, so the two views cannot drift. */
+/** The classes every select here shares. */
 const SELECT = 'min-w-0 rounded-md border bg-muted px-2 py-1 text-xs';
 
 /**
- * Whether an option is one these controls can put a control on.
+ * Whether an option is a select with more than one value.
  *
- * A select with something to choose between. The adapter may advertise other
- * kinds — it has a boolean form of some options for clients that ask for one,
- * which this one does not — and an option with a single value is not a
- * choice.
+ * @param option The config option.
+ * @returns True when the option offers a choice.
  */
 export function isSelectable(option: ThreadConfigOption): boolean {
   return (option.type ?? 'select') === 'select' && (option.options?.length ?? 0) > 1;
 }
 
-/** What to call an option whose adapter did not name it. */
+/**
+ * Returns the name of an option, or its id when the adapter gave no name.
+ *
+ * @param option The config option.
+ * @returns The name to show.
+ */
 export function optionName(option: ThreadConfigOption): string {
   return option.name ?? option.id;
 }
 
 /**
- * One setting: what it is called, what it does, and the control. A label
- * rather than a heading and a control, so the whole block is the hit area —
- * these are read and set with a thumb.
+ * One setting with its name, description and control. The block is a label,
+ * so the whole block is the hit area.
  */
 export function Setting({
   name,
   description,
   children,
 }: {
+  /** The setting's name. */
   name: string;
   /** What the adapter says it does, when it says anything. */
   description?: string | null | undefined;
+  /** The control. */
   children: React.ReactNode;
 }) {
   return (
@@ -63,7 +55,10 @@ export function Setting({
   );
 }
 
-/** One config option as a native select. */
+/**
+ * One config option as a native select. A native select opens the platform's
+ * own picker, which fits a phone.
+ */
 export function ConfigSelect({
   option,
   label,
@@ -71,17 +66,18 @@ export function ConfigSelect({
   className,
   onSet,
 }: {
+  /** The config option. */
   option: ThreadConfigOption;
   /** What to call it. The adapter's own name, unless the caller has a better one. */
   label?: string;
   /**
-   * What to show as chosen, for a caller holding the answer itself — the
-   * dialog, whose thread does not exist yet and whose value is therefore not
-   * on the option. The option's own `currentValue` when absent, which is what
-   * a live thread's header wants.
+   * The chosen value, for a caller that holds it, such as the new-thread
+   * block. The option's own `currentValue` when absent.
    */
   value?: string;
+  /** Extra classes for the select. */
   className?: string;
+  /** Called with the value the user picked. */
   onSet: (value: string) => void;
 }) {
   const name = label ?? optionName(option);
@@ -105,11 +101,10 @@ export function ConfigSelect({
 }
 
 /**
- * The mode picker, with what each mode does said in its own words.
+ * The mode picker as a native select.
  *
- * The names and descriptions are the adapter's — a mode id is an internal
- * name and `agent-full-access` says nothing about what it permits — and the
- * one thing added to them is the deployment's own caveat: see `modeLabel`.
+ * It shows the adapter's mode names, plus a caveat for a mode that may be
+ * unavailable in this deployment.
  */
 export function ModeSelect({
   modes,
@@ -117,10 +112,13 @@ export function ModeSelect({
   className,
   onSet,
 }: {
+  /** The available modes and the current one. */
   modes: ThreadModeState;
-  /** Whose modes these are, which is what the caveat depends on. */
+  /** The harness the modes belong to. The caveat depends on it. */
   harness: HarnessId | null;
+  /** Extra classes for the select. */
   className?: string;
+  /** Called with the mode id the user picked. */
   onSet: (modeId: string) => void;
 }) {
   return (
@@ -139,7 +137,13 @@ export function ModeSelect({
   );
 }
 
-/** What the mode picker says under its name: the current mode's own line. */
+/**
+ * Returns the description of the current mode, for under the picker's name.
+ *
+ * @param modes The mode state, if any.
+ * @param harness The harness the modes belong to.
+ * @returns The description, or null when there is none.
+ */
 export function currentModeDescription(
   modes: ThreadModeState | null | undefined,
   harness: HarnessId | null,

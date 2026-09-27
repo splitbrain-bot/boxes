@@ -11,17 +11,9 @@ import {
   type ToolPart,
 } from './translate.ts';
 
-/**
- * Our message model, in the shape the runtime reads.
- *
- * The two vocabularies line up almost exactly; the only translation with any
- * content is the permission one, and even that is a rename.
- */
+/** Converts the thread's message model into the shape the assistant-ui runtime reads. */
 
-/**
- * ACP permission kinds are assistant-ui's approval kinds with underscores.
- * The rest of the option is a rename too: optionId → id, name → label.
- */
+/** The assistant-ui approval kind for each ACP permission kind. */
 const KIND: Record<PermissionOptionKind, ToolApprovalOption['kind']> = {
   allow_once: 'allow-once',
   allow_always: 'allow-always',
@@ -33,8 +25,7 @@ const KIND: Record<PermissionOptionKind, ToolApprovalOption['kind']> = {
 function approvalOption(option: PermissionOption): ToolApprovalOption {
   return {
     id: option.optionId,
-    // An adapter may offer a kind this build predates; pass it through rather
-    // than guessing, which is what the open union is for.
+    // Passes through a kind this build does not know.
     kind: KIND[option.kind] ?? option.kind,
     label: option.name,
   };
@@ -57,17 +48,17 @@ function approval(state: ApprovalState): NonNullable<
   };
 }
 
-/**
- * A tool call's raw input as an args object.
- *
- * The value arrived as JSON over the wire, so it is JSON by construction,
- * and the cast says that rather than re-validating a parsed tree. Anything
- * that is not a plain object has no args to show.
- */
+/** The args object of a tool-call part. */
 type JsonObject = NonNullable<
   Extract<ThreadMessageLike['content'][number] & object, { type: 'tool-call' }>['args']
 >;
 
+/**
+ * A tool call's raw input as an args object.
+ *
+ * The value arrived as parsed JSON, so the cast needs no validation.
+ * Anything that is not a plain object gives empty args.
+ */
 function asArgs(value: unknown): JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as JsonObject)
@@ -88,23 +79,15 @@ function awaitingApproval(part: ToolPart): boolean {
 /** One tool part as a tool-call message part. */
 function toolPart(part: ToolPart) {
   const output = toolOutputText(part);
-  // A call still waiting on its permission question has no result, whatever
-  // content it has already sent: what an unapproved edit carries is the diff
-  // it proposes, not work it did. The runtime reads any result at all as
-  // proof the call finished, and a finished call is never the one being
-  // asked about, so reporting one here hides the question and leaves the
-  // turn blocked with no way to answer it.
-  //
-  // An empty result on a finished call is still a result: it says the tool
-  // produced nothing, which is different from still running.
+  // A call that awaits permission gets no result, even with content: the
+  // runtime treats any result as a finished call and then hides the
+  // question. A finished call gets a result even when it is empty.
   const finished =
     !awaitingApproval(part) &&
     (output !== '' || part.status === 'completed' || part.status === 'failed');
   return {
     type: 'tool-call' as const,
     toolCallId: part.toolCallId,
-    // The programmatic name when the adapter sends one, else the title it
-    // does send. The header needs something to say either way.
     toolName: part.name ?? part.title,
     args: asArgs(part.rawInput),
     ...(part.rawInput === undefined ? {} : { argsText: JSON.stringify(part.rawInput) }),
@@ -114,7 +97,7 @@ function toolPart(part: ToolPart) {
   };
 }
 
-/** One part as an image part, in the shape the runtime reads. */
+/** An image source as an image part, in the shape the runtime reads. */
 function imagePart(src: string) {
   return { type: 'image' as const, image: src };
 }
@@ -122,17 +105,11 @@ function imagePart(src: string) {
 /**
  * An attached file as a part the thread can draw.
  *
- * An image becomes the picture itself, loaded from the endpoint that serves
- * the box's workspace — which is what makes a screenshot readable in the
- * thread that sent it without the bytes ever going through the transcript.
- * Everything else becomes a chip naming the file, and carrying the same
- * endpoint so it can be opened: a PDF in the browser's viewer, anything else
- * as the download it is. `sourceType: 'id'` says the data is a reference
- * rather than the bytes, which is what stops assistant-ui offering a
- * download of something the browser never had.
+ * An image becomes the picture, loaded from the endpoint that serves the
+ * box's workspace. Any other file becomes a chip that links to the same
+ * endpoint. `sourceType: 'id'` marks the data as a reference, not the bytes.
  *
- * Without a box there is nothing to fetch from, so everything is a chip.
- * That is the shape a test reads, and it loses only the picture.
+ * Without a box id, every file becomes a chip that carries its path.
  */
 function attachmentPart(part: AttachmentPart, boxId?: string) {
   if (boxId && isThumbnailable(part.mimeType)) {
@@ -140,8 +117,6 @@ function attachmentPart(part: AttachmentPart, boxId?: string) {
   }
   return {
     type: 'file' as const,
-    // The endpoint when there is a box to read it from, which is what
-    // the chip opens; otherwise the path, which at least says where it went.
     data: boxId ? attachmentUrl(boxId, part.path) : part.path,
     mimeType: part.mimeType,
     filename: part.name,
@@ -152,33 +127,21 @@ function attachmentPart(part: AttachmentPart, boxId?: string) {
 /**
  * A background task's report, as a data part the thread has a renderer for.
  *
- * assistant-ui's message parts are a closed set of prose, pictures, files and
- * tool calls, and this is none of those — so it travels as the one part kind
- * that carries an application's own vocabulary: a name the renderer is keyed
- * by, and the notification itself as its data. The part's `type` discriminant
- * is dropped on the way, because `name` is what does that job here.
+ * The renderer is keyed by `name`, so the part's own `type` is dropped.
  */
 function taskPart({ type: _type, ...notification }: TaskPart) {
   return { type: 'data' as const, name: TASK_NOTIFICATION_PART, data: notification };
 }
 
 /**
- * The images a tool call produced, as parts of their own.
+ * The images a tool call produced, as parts that follow the tool-call part.
  *
- * A tool-call part cannot contain an image — assistant-ui's message parts are
- * flat — so a screenshot arrives as a sibling just after the card that
- * produced it. That is also where it reads best: the card says what was run,
- * and the picture is the answer, in the transcript rather than folded away
- * behind a disclosure nobody opens.
+ * A tool-call part cannot contain an image. The images come from the call's
+ * content on every conversion, so an update that replaces the content
+ * replaces the images too.
  *
- * Derived on every conversion rather than stored, so a tool_call_update that
- * replaces the call's content — which is what the schema says an update does
- * — replaces its images too, with nothing to keep in step.
- *
- * One consequence to expect rather than fix: the thread coalesces adjacent
- * tool calls into one "n tool calls" group, and an image between two of them
- * ends the first group. Two calls that each produced a screenshot therefore
- * read as two groups with a picture under each.
+ * An image between two tool calls splits the group that the thread forms
+ * from adjacent calls.
  */
 function toolImages(part: ToolPart) {
   return part.content.flatMap((c) => {
@@ -191,16 +154,15 @@ function toolImages(part: ToolPart) {
 /**
  * One part of a message, in the shape the runtime reads.
  *
- * Named because one of our parts can convert to more than one of these, and
- * an inferred element type from the first branch of that is not the union.
+ * The explicit type lets one part convert to several of these.
  */
 type ConvertedPart = ThreadMessageLike['content'][number] & object;
 
 /**
- * One of our messages, as the runtime reads it.
+ * One message of the model, as the runtime reads it.
  *
- * `boxId` is what an attachment is fetched back from; a caller with none
- * gets the same message with its attachments named rather than shown.
+ * `boxId` is where attachments load from. Without it, attachments show as
+ * chips that carry their path.
  */
 export function convertMessage(message: Message, boxId?: string): ThreadMessageLike {
   return {

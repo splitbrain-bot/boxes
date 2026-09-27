@@ -4,10 +4,7 @@ import type { EgressPolicy } from '../../shared/types.ts';
 import { parseHostPort, vetTarget } from './forward.ts';
 import { EMPTY_POLICY } from './policy.ts';
 
-/**
- * The check that stands between an agent and everything it must not reach:
- * the port, the allowlist, and the address a name actually resolves to.
- */
+/** Tests for host parsing and for vetting a target's port, host and address. */
 
 /** Answers DNS with a fixed set of addresses, without touching the network. */
 function resolvesTo(...addresses: string[]): void {
@@ -16,6 +13,7 @@ function resolvesTo(...addresses: string[]): void {
   );
 }
 
+/** A policy that allows only the given hosts. */
 const allowing = (...hosts: string[]): EgressPolicy => ({
   allowedHosts: hosts,
   ca: null,

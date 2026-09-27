@@ -31,12 +31,7 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
   closed: { label: 'disconnected', dot: 'bg-idle' },
 };
 
-/**
- * The thread's own chrome: where it goes back to, which of the box's
- * conversations it is, what it is connected to, whether the reader is done
- * with it, how to branch it — and one button holding everything the adapter
- * lets a client set.
- */
+/** The header of the thread page. */
 export function ThreadHeader({
   boxId,
   threadId,
@@ -56,79 +51,73 @@ export function ThreadHeader({
   onSetMode,
   onSetConfigOption,
 }: {
+  /** The box id, for the review and terminal links. */
   boxId: string;
-  /** Which thread this is, which the review link carries so it leads back here. */
+  /** The thread id, which the review link carries so it leads back here. */
   threadId: string | null;
-  /** The way out, which pops the thread rather than pushing the list. */
+  /** The parent route and the step-out handlers. */
   up: Up;
+  /** The box's name. */
   name: string;
   /** Which conversation of the box this is, or null while it is unknown. */
   threadLabel: string | null;
   /**
-   * Which agent is on the other end, or null while the thread is unknown.
-   *
-   * The id decides what a mode means — Codex's sandboxed modes carry a caveat
-   * no adapter can know about the container it was started in — and the label
-   * is what the reader is shown.
+   * The thread's harness, or null while the thread is unknown. It decides the
+   * caveat on a mode.
    */
   harness: HarnessId | null;
+  /** The harness's name for the reader, or null. */
   harnessLabel: string | null;
+  /** The connection state, which the dot shows. */
   connection: ConnectionState;
+  /** The adapter's modes, or null when it offers none. */
   modes: ThreadModeState | null;
+  /** The adapter's config options. */
   configOptions: readonly ThreadConfigOption[];
   /** Whether the reader has marked this conversation finished with. */
   done: boolean;
-  /** Whether the adapter advertised the fork capability; see BoxSummary. */
+  /** Whether the thread's adapter advertised the fork capability. */
   canFork: boolean;
-  /** Held while a fork is in flight, so a double tap cannot branch twice. */
+  /** Whether a fork is in flight. A double tap then cannot fork twice. */
   forking: boolean;
+  /** Forks the thread. */
   onFork: () => void;
   /** Sets the mark, or takes it off. Absent while there is no thread to mark. */
   onSetDone?: (done: boolean) => void;
+  /** Sets the thread's mode. */
   onSetMode: (modeId: string) => void;
+  /** Sets one config option of the thread. */
   onSetConfigOption: (configId: string, value: string) => void;
 }) {
   const state = CONNECTION[connection];
-  // By category rather than by id: what the option is for is part of the
-  // protocol, the id the adapter gives it is not.
+  // Found by category, because the protocol defines categories and each
+  // adapter picks its own ids.
   const model = configOptions.find((option) => option.category === 'model');
-  // Everything else the adapter lets a client set — the effort level, fast
-  // mode, the agent persona, whatever a later adapter adds.
-  //
-  // The mode is excluded because `modes` is already it, under the adapter's
-  // other name for the same thing: a client that reads both would offer the
-  // permission mode twice and have to keep the two in step.
+  // Every other selectable option. The mode option is left out, because
+  // `modes` already carries the mode.
   const rest = configOptions.filter(
     (option) =>
       option !== model && option.category !== 'mode' && isSelectable(option),
   );
 
-  // Everything the adapter offers lives behind the one button, the mode and
-  // the model included: four controls and a name do not fit a phone's header.
-  // The button is beside the name, so any of them is two taps away.
+  // All settings sit behind one button, because they do not fit a phone's header.
   const hasModes = Boolean(modes && modes.availableModes.length > 1);
   const hasModel = Boolean(model && isSelectable(model));
   const settings = hasModes || hasModel || rest.length > 0;
 
   return (
     <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-      {/* Leaving pops the thread's own entries rather than pushing the list on
-          top of them, so this button and the device's back button do not
-          point the same way. */}
       <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
         <a href={up.href} onClick={up.onClick} aria-label="Back to boxes">
           <ArrowLeft className="size-4" />
         </a>
       </Button>
 
-      {/* A floor under the name, which the icon buttons cannot push past. */}
+      {/* A minimum width, so the icon buttons cannot squeeze out the name. */}
       <div className="flex min-w-16 flex-1 flex-col">
-        {/* The thread's name shares the box's line: the row below is the
-            connection state. */}
         <span className="flex items-baseline gap-1.5 text-sm">
-          {/* The box's name goes first and keeps up to two thirds of the
-              line: which box you are in matters more than which of its
-              conversations, so the thread's name is what gives way. */}
+          {/* The box's name keeps up to two thirds of the line. The thread's
+              name truncates first. */}
           <span className="max-w-2/3 shrink-0 truncate font-medium">{name}</span>
           {threadLabel ? (
             <span className="min-w-0 truncate text-xs text-muted-foreground">{threadLabel}</span>
@@ -137,21 +126,13 @@ export function ThreadHeader({
         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className={cn('size-1.5 rounded-full', state.dot)} />
           {state.label}
-          {/* Which agent this conversation runs, because it is what the
-              settings behind the button below mean: the same mode id is a
-              different permission under each harness, and a box may hold a
-              thread of each. */}
+          {/* The harness name, because a mode id means a different permission
+              under each harness. */}
           {harnessLabel ? <span className="truncate">· {harnessLabel}</span> : null}
         </span>
       </div>
 
-      {/* Whatever the adapter advertises, with nothing hardcoded: an adapter
-          that offers no modes, no model and nothing else gets no button.
-
-          Selects rather than rows of buttons: six modes are longer than a
-          phone is wide, and the native control opens the platform's own
-          picker and brings its keyboard and screen-reader behaviour with
-          it. */}
+      {/* Shows only what the adapter advertises. Without any setting there is no button. */}
       {settings ? (
         <Popover>
           <PopoverTrigger asChild>
@@ -168,8 +149,7 @@ export function ThreadHeader({
           </PopoverTrigger>
           <PopoverContent align="end" className="w-72">
             <div className="flex flex-col gap-3">
-              {/* The mode first: of everything here it is the one that gets
-                  changed mid-thread, when a plan turns into work. */}
+              {/* The mode comes first, because it changes most often mid-thread. */}
               {modes && hasModes ? (
                 <Setting name="Agent mode" description={currentModeDescription(modes, harness)}>
                   <ModeSelect
@@ -206,10 +186,7 @@ export function ThreadHeader({
         </Popover>
       ) : null}
 
-      {/* The mark is set from inside the conversation and read on the list,
-          where a thread marked done is drawn struck through. A note to the
-          reader and nothing else: the thread goes on running, and the same
-          button takes the mark off. */}
+      {/* The box list strikes through a thread marked done. The thread keeps running. */}
       {onSetDone ? (
         <Button
           variant="ghost"
@@ -224,10 +201,7 @@ export function ThreadHeader({
         </Button>
       ) : null}
 
-      {/* Branching belongs here rather than only on the list, because this is
-          where the motion starts: a thread is doing something long and a
-          second one is wanted to ask about it. The fork keeps running
-          alongside this thread rather than replacing it. */}
+      {/* The fork runs beside this thread. */}
       {canFork ? (
         <Button
           variant="ghost"
@@ -242,15 +216,10 @@ export function ThreadHeader({
         </Button>
       ) : null}
 
-      {/* Reviewing sits next to forking because it is the other thing done
-          from inside a thread once the agent has produced something: read
-          what it wrote, comment on it, and hand the comments back. */}
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link
           to={`/boxes/${boxId}/review`}
-          // Which conversation the review was opened from, so its back link
-          // and its handoff come back here rather than to whichever thread the
-          // box has current — the two differ as soon as one is forked.
+          // The review's back link and handoff return to this thread.
           state={{ threadId }}
           aria-label="Review this box's code"
           title="Review this box's code"
@@ -259,9 +228,7 @@ export function ThreadHeader({
         </Link>
       </Button>
 
-      {/* The box seen directly, rather than through the agent. No thread in
-          the link: a terminal belongs to the box, and every one opened on it
-          is the same shell. */}
+      {/* A terminal belongs to the box, so the link names no thread. */}
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link
           to={`/boxes/${boxId}/terminal`}

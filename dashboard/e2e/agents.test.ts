@@ -2,14 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
-/**
- * Managing what the agent is configured with, in a real browser.
- *
- * The thing worth proving here is the two-set model, because it is the part a
- * screenshot cannot check: that the global set is offered to nobody as a
- * choice, that a named set can be picked when a box is created, and that the
- * editor shows the merge rather than only the half being edited.
- */
+/** Browser tests for the agent set pages and the global and named set model. */
 
 let stub: TestOrchestrator;
 
@@ -18,8 +11,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  // A fresh pair of sets per test: one of these writes a skill for real, and
-  // a leftover one would change what the next test is offered.
+  // One test writes a skill, which would change what the next test is offered.
   await stub.agentSets(
     {
       agentsMd: '# House rules\n\nRun the tests.\n',
@@ -146,8 +138,7 @@ test('a box is created against a named set, and the global one is not offered', 
     await expect.poll(() => page.getByLabel('Agent set').isVisible()).toBe(true);
     await page.getByLabel('Name').fill('a new box');
     await page.getByLabel('Agent set').click();
-    // The global set applies either way, so listing it would suggest it were
-    // a choice. Only "global only" and the named sets are offered.
+    // The global set applies either way, so it is no choice.
     expect(await page.getByRole('option').allInnerTexts()).toEqual([
       'Global set only',
       'Go projects',

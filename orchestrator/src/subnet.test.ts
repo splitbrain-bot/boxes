@@ -20,7 +20,7 @@ test('formats 32-bit values back to dotted quads', () => {
   assert.equal(formatIpv4(0xffffffff), '255.255.255.255');
 });
 
-/** Nothing is allocated yet, which is where most of these cases start. */
+/** An empty set of taken subnets. */
 const FREE = new Set<string>();
 
 test('allocates sequential /24s from the pool', () => {
@@ -35,11 +35,10 @@ test('wraps when the pool is exhausted', () => {
 });
 
 test('steps over the subnets that are taken', () => {
-  // The wrap the counter produces lands on the first box's subnet, which
-  // is the collision this set exists to prevent.
+  // The wrapped counter lands on the first box's subnet.
   const taken = new Set(['10.200.0.0/24', '10.200.1.0/24']);
   assert.equal(allocateSubnet('10.200.0.0/16', 256, taken), '10.200.2.0/24');
-  // And it wraps while stepping, rather than stopping at the pool's end.
+  // Stepping also wraps at the end of the pool.
   assert.equal(allocateSubnet('10.200.0.0/16', 255, taken), '10.200.255.0/24');
   assert.equal(
     allocateSubnet('10.200.0.0/16', 255, new Set([...taken, '10.200.255.0/24'])),

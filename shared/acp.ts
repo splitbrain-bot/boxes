@@ -1,12 +1,6 @@
 /**
- * The ACP words Boxes says: the subprotocol, the method names and the
- * `sessionUpdate` kinds.
- *
- * Plain strings and the types over them, and nothing else. The orchestrator
- * runs a real ACP client and has the SDK; the dashboard keeps the SDK out of
- * its bundle and writes the schema out by hand in `acp-types.ts`. Both sides
- * need the same spellings, so the spellings live here and the module stays
- * safe to pull into a browser bundle.
+ * ACP names shared by the orchestrator and the dashboard. The module holds
+ * plain strings only, so the dashboard can bundle it without the ACP SDK.
  */
 
 /**
@@ -59,11 +53,11 @@ export const ACP_METHOD = {
 export type AcpMethod = (typeof ACP_METHOD)[keyof typeof ACP_METHOD];
 
 /**
- * Every `sessionUpdate` kind Boxes knows, which is the `update.sessionUpdate`
- * field of a `session/update` notification.
+ * Every kind of `session/update` notification Boxes knows, as named in its
+ * `update.sessionUpdate` field.
  *
- * An adapter may send a kind this build predates, so a reader treats the list
- * as the kinds it recognises rather than the kinds that exist.
+ * An adapter may send kinds that are not listed here, so a reader must expect
+ * unknown kinds.
  */
 export const UPDATE_KIND = {
   /** A chunk of what the user, or the harness on their behalf, said. */

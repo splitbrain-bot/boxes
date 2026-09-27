@@ -3,36 +3,18 @@ import { join } from 'node:path';
 import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
 import type { RepoMap } from './repos.ts';
 
-/**
- * The file tree a review browses, one directory at a time.
- *
- * Opening a folder is one `readdirSync` of that folder plus a scan of the two
- * maps a review holds: git status per path, and comment count per path. So the
- * cost of a folder is the size of that folder, and a dependency tree beside the
- * code costs nothing until somebody opens it.
- *
- * What is listed is every file under the workspace, whether git tracks it,
- * ignores it, or has never seen it. The listing steps over version-control
- * metadata and Boxes' own scratch. Git contributes only what a directory
- * cannot show, which is a file the change deleted.
- */
-
-/** The annotation file, written at the workspace root. Not part of the review. */
+/** The review file at the workspace root, which the tree does not list. */
 export const REVIEW_FILE = 'REVIEW.md';
 
 /**
- * Directory names the listing steps over, because they hold nothing a person
- * reviews: a version control system's own metadata, and Boxes' scratch inside
- * a workspace, which holds the files the user attached to a prompt.
+ * Directory names the listing skips: version control metadata, and the Boxes
+ * directory that holds files attached to prompts.
  */
 const SKIPPED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
 
 /**
- * How many entries one directory may hold before the rest are left out.
- *
- * A generated directory with more of them in it than this is one no phone can
- * paint anyway, and the cap is per directory rather than over the whole
- * workspace, so a huge folder costs the reviewer that folder and nothing else.
+ * How many entries one directory listing returns before the rest are left out.
+ * The cap applies per directory, so a huge folder limits only that folder.
  */
 export const MAX_DIR_ENTRIES = 2000;
 
@@ -52,19 +34,17 @@ function inSkippedDir(path: string): boolean {
 /**
  * Whether the review lists a file at this workspace-relative path.
  *
- * The listing's own rule, asked about one path: not inside version-control
- * metadata or Boxes' scratch, and not the review's own file at the workspace
- * root. This is what the file endpoint serves by, so it offers exactly what a
- * directory offered. Containment is fs.ts's and this says nothing about it.
+ * It applies the listing's rule to one path: the path is not inside a skipped
+ * directory, and it is not the review file at the workspace root. The file
+ * endpoints serve by this rule. It does not check containment.
  */
 export function listedFile(relPath: string): boolean {
   return !inSkippedDir(relPath) && relPath !== REVIEW_FILE;
 }
 
 /**
- * Whether the review browses a directory at this workspace-relative path.
- *
- * The same rule without the part about the review file.
+ * Whether the review browses a directory at this workspace-relative path: the
+ * path is not inside a skipped directory.
  */
 export function listedDir(relDir: string): boolean {
   return !inSkippedDir(relDir);
@@ -73,10 +53,10 @@ export function listedDir(relDir: string): boolean {
 /**
  * Reads one directory of the workspace into its children.
  *
- * Read with `withFileTypes`, and a symlink is neither listed nor followed: the
- * tree is agent-controlled, and a link to `/` would otherwise be browsable.
- * Reading the file it points at is fs.ts's decision, and it refuses. A
- * directory that cannot be read lists nothing rather than failing.
+ * Only this directory is read, so a large tree beside the code costs nothing
+ * until someone opens it. Only plain files and directories are listed. The
+ * agent controls the tree, so a symlink could lead out of it. A directory that
+ * cannot be read lists nothing.
  */
 export function readDir(root: string, relDir: string): DirChild[] {
   let entries;
@@ -93,13 +73,10 @@ export function readDir(root: string, relDir: string): DirChild[] {
       if (SKIPPED_DIRS.has(name)) continue;
       children.push({ name, isDir: true });
     } else if (entry.isFile()) {
-      // Only the one at the root: a REVIEW.md deeper in the tree is a file of
-      // the project under review like any other.
+      // A REVIEW.md deeper in the tree is a project file like any other.
       if (relDir === '' && name === REVIEW_FILE) continue;
       children.push({ name, isDir: false });
     }
-    // Anything else — a symlink, a socket, a device — is not listed.
-    // Following one would leave the tree.
   }
   return children;
 }
@@ -107,18 +84,14 @@ export function readDir(root: string, relDir: string): DirChild[] {
 /**
  * One directory of the review, as the API reports it.
  *
- * Merges three things into one list: the children on disk, the review's git
- * statuses and its comment counts. A file carries its own status and its own
- * count. A folder carries what its whole subtree holds — whether git reports
- * something in it changed, and whether the review has a comment in it — which
- * is a prefix scan of the two maps rather than a walk of the folder.
+ * It merges the children on disk with the review's git statuses and comment
+ * counts. A file gets its own status and comment count. A folder gets flags for
+ * its whole subtree: `changed` when git reports a change in it, and `commented`
+ * when it holds a comment. A folder at a repository root gets `repo`.
  *
- * A directory read can only name what is on disk, so a file the change deleted
- * is merged in from the status map instead. That is also where a folder with
- * nothing left in it comes from: the change emptied it, and the files it held
- * are still part of what is under review.
- *
- * Folders come first, then files, each in name order.
+ * Files the change deleted come from the status map, because they are not on
+ * disk. So do folders the change emptied. Folders come first, then files, each
+ * in name order.
  */
 export function dirEntries(
   relDir: string,

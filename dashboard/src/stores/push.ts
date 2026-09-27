@@ -2,34 +2,29 @@ import { useSyncExternalStore } from 'react';
 import { api } from '../api.ts';
 
 /**
- * Web Push registration: the notification that arrives with Boxes closed.
- *
- * The browser subscribes with a push service of its vendor's choosing and
- * hands back an endpoint the orchestrator posts to. From then on the service
- * worker is woken whether or not a tab exists, which is the difference
- * between this and asking the page to notice something.
- *
- * A plain module-level store with a subscriber set: React reads it through
- * useSyncExternalStore, and nothing outside this file needs a hook to change
- * it.
+ * Store for this browser's Web Push registration, which notifies while Boxes
+ * is closed.
  */
 
 /** Why this browser cannot subscribe, when it cannot. */
 export type PushBlocker =
-  /** Not https and not localhost. Service workers do not exist here at all. */
+  /** The page is not a secure context, so service workers are unavailable. */
   | 'insecure'
-  /** iOS Safari before the page has been added to the Home Screen. */
+  /**
+   * The Push API is missing while the page runs in a tab, as on iOS Safari
+   * before the page is added to the Home Screen.
+   */
   | 'needs-install'
-  /** No Push API, whatever the reason. */
+  /** The browser has no service workers or no Push API. */
   | 'unsupported'
-  /** The user said no. Only they can undo it, in site settings. */
+  /** The user refused notifications. Only the site settings can undo this. */
   | 'denied';
 
 /** What the toggle renders. */
 export interface PushState {
   /** True when this browser could subscribe if asked. */
   supported: boolean;
-  /** Why not, when it cannot. Null while it can. */
+  /** Why this browser cannot subscribe, or null. */
   blocker: PushBlocker | null;
   /** True once this browser is registered with the orchestrator. */
   subscribed: boolean;
@@ -39,6 +34,7 @@ export interface PushState {
   error: string | null;
 }
 
+/** The current state. */
 let state: PushState = {
   supported: false,
   blocker: 'unsupported',
@@ -46,13 +42,16 @@ let state: PushState = {
   busy: false,
   error: null,
 };
+/** The callbacks to run on every state change. */
 const listeners = new Set<() => void>();
 
+/** Merges `next` into the state and notifies every subscriber. */
 function set(next: Partial<PushState>): void {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
 
+/** Adds a subscriber and returns the function that removes it. */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -67,14 +66,7 @@ export function usePush(): PushState {
   );
 }
 
-/**
- * Whether this browser is running as an installed app.
- *
- * iOS exposes the Push API only to a page added to the Home Screen, and the
- * API is absent until then, with no way to ask whether installing would help.
- * So a browser missing it while running in a tab on a platform that has
- * service workers is told to install rather than told it cannot.
- */
+/** Whether this browser runs the page as an installed app. */
 function installed(): boolean {
   const legacy = (navigator as { standalone?: boolean }).standalone;
   return legacy === true || window.matchMedia('(display-mode: standalone)').matches;
@@ -85,13 +77,14 @@ function blockerOf(): PushBlocker | null {
   if (!window.isSecureContext) return 'insecure';
   if (!('serviceWorker' in navigator)) return 'unsupported';
   if (!('PushManager' in window) || !('Notification' in window)) {
+    // iOS hides the Push API until the page is added to the Home Screen.
     return installed() ? 'unsupported' : 'needs-install';
   }
   if (Notification.permission === 'denied') return 'denied';
   return null;
 }
 
-/** base64url, for comparing a subscription's key against the deployment's. */
+/** Encodes bytes as unpadded base64url, the form of the deployment's key. */
 function b64url(bytes: ArrayBuffer): string {
   let binary = '';
   for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
@@ -99,13 +92,11 @@ function b64url(bytes: ArrayBuffer): string {
 }
 
 /**
- * Whether a subscription was made against the key the deployment holds now.
+ * Whether a subscription uses the key the deployment holds now.
  *
- * A deployment whose data volume was replaced generates a fresh keypair, and
- * every subscription made against the old one becomes undeliverable — the
- * push service rejects the assertion, and nothing about that reaches the
- * browser. Checking here is what makes that recoverable rather than a silent
- * end to notifications.
+ * A deployment with a replaced data volume generates a new keypair. The push
+ * service then rejects every subscription made with the old key, and the
+ * browser never learns about it.
  */
 function matchesDeployment(subscription: PushSubscription, publicKey: string): boolean {
   const key = subscription.options.applicationServerKey;
@@ -114,24 +105,17 @@ function matchesDeployment(subscription: PushSubscription, publicKey: string): b
 
 /** The registered worker, registering it on first call. */
 async function worker(): Promise<ServiceWorkerRegistration> {
-  // Scope is the whole origin, which is why sw.js is served from the root
-  // rather than from the hashed asset directory.
+  // The scope is the whole origin, so sw.js lives at the root.
   return navigator.serviceWorker.register('/sw.js', { scope: '/' });
 }
 
 /**
- * Registers the service worker, whatever push is doing.
+ * Registers the service worker, even when a blocker stops push.
  *
- * Not part of refreshPush, which returns before registering anything as soon
- * as it finds a blocker — and the blockers are the cases that need the worker
- * most. A browser whose user declined notifications would never register one,
- * and neither would an iPhone reading this in a tab, which is the browser
- * that has to install the app before it can subscribe at all. Installing is
- * the worker's other job: browsers that still gate the install offer on a
- * registered worker are asking at first load, long before anybody taps the
- * toggle.
+ * Some browsers offer to install the app only once a worker is registered.
+ * An iPhone in a tab has to install the app before it can subscribe.
  *
- * Resolves either way: nothing on the page depends on the outcome.
+ * Resolves either way, because nothing on the page depends on the outcome.
  */
 export async function installWorker(): Promise<void> {
   if (!window.isSecureContext || !('serviceWorker' in navigator)) return;
@@ -139,13 +123,13 @@ export async function installWorker(): Promise<void> {
 }
 
 /**
- * Brings the store up to date, and re-registers a browser that is already
+ * Brings the store up to date and re-registers a browser that is already
  * subscribed.
  *
- * The re-registration is not redundant: a push service may hand out a new
- * subscription at any time — Safari expires them on its own schedule — and
- * the orchestrator only learns about that from here. Posting the same
- * subscription twice is free, because the endpoint is the row's key.
+ * A push service may replace a subscription at any time, and Safari expires
+ * them on its own schedule. The orchestrator learns the new one only from
+ * this call. It keys subscriptions by endpoint, so posting the same one twice
+ * keeps one row.
  */
 export async function refreshPush(): Promise<void> {
   const blocker = blockerOf();
@@ -165,8 +149,7 @@ export async function refreshPush(): Promise<void> {
 
     const { publicKey } = await api.pushKey();
     if (!matchesDeployment(existing, publicKey)) {
-      // Made against a keypair this deployment no longer has. Permission is
-      // already granted, so re-subscribing needs no gesture and no prompt.
+      // Permission is already granted, so re-subscribing needs no user gesture.
       await api.unsubscribePush(existing.endpoint).catch(() => {});
       await existing.unsubscribe();
       existing = await registration.pushManager.subscribe({
@@ -186,10 +169,10 @@ export async function refreshPush(): Promise<void> {
 }
 
 /**
- * Subscribes this browser, asking for permission on the way.
+ * Asks for permission and subscribes this browser.
  *
- * Called from a click and nowhere else: an unprompted permission request is
- * refused outright by some browsers and held against the origin by others.
+ * Only a click may call it. Some browsers refuse a permission request without
+ * a user gesture, and others hold it against the origin.
  */
 export async function enablePush(): Promise<void> {
   if (state.busy) return;
@@ -197,32 +180,27 @@ export async function enablePush(): Promise<void> {
   try {
     const permission = await Notification.requestPermission();
     if (permission === 'denied') {
-      // Only the user can undo this, in site settings, so the toggle stops
-      // offering and says where to go instead.
+      // Only the site settings can undo this, so the toggle stops offering.
       set({ supported: false, blocker: 'denied' });
       return;
     }
     if (permission !== 'granted') {
-      // Dismissed rather than refused. Nothing has changed, and the toggle
-      // stays exactly as it was so it can be tried again.
+      // Dismissed, not refused. The toggle stays, so the user can retry.
       return;
     }
 
     const registration = await worker();
-    // The service worker has to be running before it can be subscribed for.
+    // Subscribing needs an active worker.
     await navigator.serviceWorker.ready;
     const { publicKey } = await api.pushKey();
-    // Reuse what this browser already has, but only if it was made against
-    // the key the deployment holds now; see matchesDeployment.
+    // Reuses the existing subscription only if it matches the current key.
     const existing = await registration.pushManager.getSubscription();
     if (existing && !matchesDeployment(existing, publicKey)) await existing.unsubscribe();
     const subscription =
       existing && matchesDeployment(existing, publicKey)
         ? existing
         : await registration.pushManager.subscribe({
-            // Required by Chrome: every push must show something. Which is
-            // the intent here anyway — a silent push would be a tracking
-            // channel.
+            // Chrome requires every push to show a notification.
             userVisibleOnly: true,
             applicationServerKey: publicKey,
           });
@@ -243,10 +221,10 @@ export async function enablePush(): Promise<void> {
 }
 
 /**
- * Unsubscribes this browser, in the browser and in the orchestrator.
+ * Unsubscribes this browser, in the orchestrator and in the browser.
  *
- * The orchestrator is told first, because a subscription it still holds after
- * the browser dropped it is one it pushes to until a 410 comes back.
+ * The orchestrator hears first. Otherwise it keeps pushing to the dropped
+ * subscription until the push service reports it gone.
  */
 export async function disablePush(): Promise<void> {
   if (state.busy) return;

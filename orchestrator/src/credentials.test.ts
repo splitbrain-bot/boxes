@@ -14,12 +14,6 @@ import {
 } from './credentials.ts';
 import { openDb, type Db } from './db.ts';
 
-/**
- * The credential store: what it keeps, what it never gives back, and that a
- * write is announced — which is what makes a pasted token reach the proxy
- * before the page has finished saving it.
- */
-
 let dir: string;
 let db: Db;
 let changes: number;
@@ -127,18 +121,7 @@ test('the list is in the order the settings page shows them', () => {
 
 // --- keeping an account credential alive -------------------------------------
 
-/**
- * The refresh loop: what it renews, what it can only report, and what it does
- * with an endpoint that says no.
- *
- * The POST is injected, because the rules are the part worth testing and
- * OpenAI is the part that cannot be reached from a test. The client id and the
- * endpoint are read out of the Codex CLI's source and are not a stable API,
- * which is exactly why the call is asserted here: if either moves, this is
- * where it is noticed.
- */
-
-/** A JWT as a service mints them: three parts, of which one is ever read. */
+/** A JWT whose payload holds claims. The header and signature are placeholders. */
 function jwt(claims: Record<string, unknown>): string {
   const body = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
   return `header.${body}.signature`;
@@ -174,8 +157,13 @@ function posts(answer: TokenAnswer | Error): {
   };
 }
 
+/** The clock every refresh case runs at, in epoch milliseconds. */
 const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
+
+/** Ten minutes after NOW, in epoch seconds as a JWT exp claim holds it. */
 const IN_TEN_MINUTES = Math.floor((NOW + 10 * 60_000) / 1000);
+
+/** Five hours after NOW, in epoch seconds as a JWT exp claim holds it. */
 const IN_FIVE_HOURS = Math.floor((NOW + 5 * 60 * 60_000) / 1000);
 
 test('a Codex access token about to expire is refreshed, whole document and all', async () => {
@@ -188,8 +176,8 @@ test('a Codex access token about to expire is refreshed, whole document and all'
 
   await refreshCredentials(store, post, NOW);
 
-  // Exactly the call the CLI makes, which is the one thing here that is not
-  // an API anybody promised.
+  // The call the Codex CLI makes. It is not a documented API, so a change
+  // shows up here.
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.url, CODEX_TOKEN_URL);
   assert.deepEqual(calls[0]?.body, {
@@ -223,8 +211,8 @@ test('a healthy token is left alone until it is either old or nearly out', async
   await refreshCredentials(store, post, NOW);
   assert.deepEqual(calls, []);
 
-  // Eight days without a refresh is the other reason to do one, whatever the
-  // access token says: the refresh token is what goes stale.
+  // Eight days without a refresh also triggers one, because the refresh
+  // token goes stale.
   const nineDays = NOW + 9 * 24 * 60 * 60_000;
   await refreshCredentials(store, post, nineDays);
   assert.equal(calls.length, 1);
@@ -274,8 +262,8 @@ test('a stored login with no refresh token says so once rather than every minute
 
 test('an account credential is stored and refreshed, and is not delivered to a box', () => {
   const oauth = store.put('openai', 'oauth', authJson(IN_FIVE_HOURS, '2026-09-12T11:00:00Z'));
-  // The proxy swaps a header value, and this is a document authenticating
-  // traffic that is deliberately not intercepted. See deliverableSecret().
+  // The proxy swaps a header value. This row is a document for traffic that
+  // the proxy does not intercept.
   assert.equal(deliverableSecret(oauth), null);
   assert.match(undeliverableReason(oauth) ?? '', /cannot hand a subscription login to a box/);
 

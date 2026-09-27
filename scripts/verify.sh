@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Everything about the egress proxy, the allowlist and the token translation
-# that only a real Docker deployment can prove.
+# End-to-end verification of the egress proxy, the allowlist and the token
+# translation on a real Docker deployment.
 #
-# It builds the three images, brings the stack up on an env file of its own,
-# asserts, and takes the stack down again. Your own .env is never read and
-# never written.
+# Builds the three images, brings the stack up on its own env file, runs the
+# checks, and takes the stack down again. It never reads or writes the .env
+# file in the repository.
 #
 #   PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... ./scripts/verify.sh
 #
-# The Claude token is what pays for the one real inference turn. Without it
-# the run still covers everything else and says which checks it skipped.
+# The Claude token pays for the real inference turns. Without it, the run
+# skips those checks and says so.
 #
-# Credentials are not configuration any more: they live in the deployment's
-# own store and are normally entered on the settings page. These two
-# variables are read for the convenience of whoever already exports them, and
-# this script PUTs them to /api/credentials once the stack is up.
+# The script stores each token it gets in the deployment with a PUT to
+# /api/credentials once the stack is up.
 #
 # Optional:
 #   PROFILE_DEFAULT_GH_TOKEN=ghp_...  a real PAT; a fake one is used otherwise,
@@ -27,7 +25,7 @@
 #                                     run the GitLab checks against instead of
 #                                     gitlab.com
 #   SKIP_BUILD=1                      reuse the images already built
-#   SKIP_UNIT=1                       skip the two vitest suites
+#   SKIP_UNIT=1                       skip the three vitest suites
 #   SKIP_SUITES=1                     skip smoke-test.sh and live-test.sh
 #   SKIP_RESTART=1                    skip the restart phase (~2 min)
 #   KEEP_UP=1                         leave the stack running at the end
@@ -48,9 +46,8 @@ REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
 GITLAB_HOST="${PROFILE_DEFAULT_GITLAB_HOST:-gitlab.com}"
 REAL_GITLAB="${PROFILE_DEFAULT_GITLAB_TOKEN:-}"
 
-# A fake PAT still proves the GitHub half: it is intercepted and swapped, and
-# then rejected by GitHub rather than by the proxy, which is a different answer
-# from the one a foreign token gets.
+# The proxy swaps a fake PAT in like a real one, and GitHub rejects it. A
+# foreign token gets a refusal from the proxy instead.
 GH_IS_FAKE=0
 if [ -z "$REAL_GH" ]; then
   REAL_GH="ghp_verifyFake$(openssl rand -hex 12)"
@@ -71,13 +68,13 @@ ALLOWLIST='github.com,*.github.com,*.githubusercontent.com,api.anthropic.com,api
 pass=0; fail=0; skip=0; note=0
 FAILED_IDS=()
 
+# Prints the arguments in colour, or as a phase heading.
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
 head1() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 
-# Keeps a real credential out of anything this script prints. Both tokens are
-# replaced wherever they appear, whatever produced the text.
+# Filters stdin to stdout and replaces every real credential with a label.
 redact() {
   sed -e "s|$REAL_GH|<GH_TOKEN>|g" \
       ${REAL_CLAUDE:+-e "s|$REAL_CLAUDE|<CLAUDE_TOKEN>|g"} \
@@ -85,9 +82,10 @@ redact() {
       ${REAL_GITLAB:+-e "s|$REAL_GITLAB|<GITLAB_TOKEN>|g"}
 }
 
-# Drops the escapes a coloured suite writes, so its summary can be read.
+# Filters stdin to stdout without colour escapes.
 uncolour() { sed -e 's/\x1b\[[0-9;]*m//g'; }
 
+# Records one outcome: $1 is the check id, $2 the description.
 ok()      { green "PASS $1  $2"; pass=$((pass+1)); }
 bad()     { red   "FAIL $1  $2"; fail=$((fail+1)); FAILED_IDS+=("$1"); }
 skipped() { grey  "SKIP $1  $2"; skip=$((skip+1)); }
@@ -130,7 +128,7 @@ lacks() {
   fi
 }
 
-# The same, run as the agent inside the box container.
+# Runs a command (sx) or a login shell script (sxs) as the agent in the box.
 sx()  { docker exec -u agent "$CONTAINER" "$@"; }
 sxs() { docker exec -u agent "$CONTAINER" bash -lc "$1"; }
 
@@ -159,6 +157,7 @@ fi
 ENV_FILE="$(mktemp -t boxes-verify-env.XXXXXX)"
 LOG_DIR="$(mktemp -d -t boxes-verify-logs.XXXXXX)"
 chmod 600 "$ENV_FILE"
+# Writes this run's env file, with $1 as the egress allowlist.
 write_env() {
   cat > "$ENV_FILE" <<ENV
 EGRESS_ALLOWED_HOSTS=$1
@@ -170,7 +169,7 @@ ENV
 }
 write_env "$ALLOWLIST"
 
-# Everything compose is run with, so no invocation can forget one of them.
+# Runs docker compose with this run's env file, port and bind address.
 up() { BOXES_ENV="$ENV_FILE" HOST_PORT="$HOST_PORT" BIND_ADDR=127.0.0.1 "${COMPOSE[@]}" "$@"; }
 
 BOX_ID=""
@@ -179,6 +178,7 @@ CFG_BOX=""
 OVR_BOX=""
 STACK_UP=0
 
+# Prints the recent log lines of the proxy and the orchestrator, redacted.
 dump_logs() {
   head1 "container logs (tail)"
   for c in boxes-egress-proxy boxes-orchestrator; do
@@ -187,6 +187,7 @@ dump_logs() {
   done
 }
 
+# Deletes the boxes this run created and takes the stack down, unless KEEP_UP=1.
 cleanup() {
   local status=$? id
   for id in "$BOX_ID" "$CFG_BOX" "$OVR_BOX"; do
@@ -227,8 +228,8 @@ wait_insync() {
   return 1
 }
 
-# Asserts a string appears nowhere in a box's environment or volumes. The
-# needle is a real credential, so only its absence is ever printed.
+# Asserts a string appears nowhere in a box's environment, workspace or
+# home. The needle is a real credential, so it is never printed.
 absent() {
   local id="$1" desc="$2" needle="$3" hits
   [ -z "$needle" ] && { skipped "$id" "$desc (not configured)"; return; }
@@ -241,7 +242,8 @@ absent() {
   if [ "$hits" = 1 ]; then bad "$id" "$desc"; else ok "$id" "$desc"; fi
 }
 
-# The same, against a container's log stream.
+# Asserts that no real GitHub, Claude or OpenAI credential is in a
+# container's log.
 absent_from_log() {
   local id="$1" desc="$2" container="$3" hits=0
   docker logs "$container" 2>&1 | grep -qF -- "$REAL_GH" && hits=1
@@ -254,13 +256,12 @@ absent_from_log() {
 
 if [ "${SKIP_UNIT:-0}" != 1 ]; then
   head1 "unit suites"
-  # Run in the image the build uses, with node_modules on a throwaway volume.
-  # better-sqlite3 needs its install script, which npm on a host may refuse to
-  # run, and nothing here should write into the checkout.
+  # Runs in the build's node image, with node_modules on a throwaway volume.
+  # better-sqlite3 needs its install script, which npm on a host may refuse
+  # to run, and the checkout stays untouched.
   for pkg in proxy orchestrator dashboard; do
-    # The dashboard's e2e project drives a real Chromium, which this image has
-    # not got. Its unit project is the half that covers the stores; run the
-    # whole suite with `npm test` in dashboard/ to get the browser half too.
+    # This image has no Chromium for the dashboard's e2e project. Run npm test
+    # in dashboard/ for that half.
     project=''
     [ "$pkg" = dashboard ] && project='-- --project unit'
     out=$(docker run --rm \
@@ -306,11 +307,9 @@ fi
 if wait_health; then ok "health" "/healthz answers on $API_BASE"
 else bad "health" "/healthz never answered"; dump_logs; exit 1; fi
 
-# The credentials, into the deployment's store. Once: they are on the data
-# volume, so they survive the restarts and the recreations below.
-#
-# The method is what the settings page would have recorded about how the
-# secret was obtained: a pasted OpenAI key is an `api_key`, the rest tokens.
+# Stores one credential in the deployment. The data volume keeps it across
+# the restarts below. $3 is how the settings page would record the secret:
+# api_key for a pasted OpenAI key, token for the rest.
 seed_credential() {
   local id="$1" secret="$2" method="${3:-token}"
   [ -z "$secret" ] && { skipped "seed-$id" "not configured"; return; }
@@ -331,15 +330,15 @@ seed_credential openai "$REAL_OPENAI" api_key
 
 head1 "A. the policy the proxy is running"
 
-# The first push can lose a race with the proxy's own boot, and the reconciler
-# is what fixes that, so allow it the minute it is designed to take.
+# The first push can lose a race with the proxy's boot. The reconciler fixes
+# that within about a minute.
 if wait_insync; then ok "A1" "/healthz reports the proxy is running the composed policy"
 else bad "A1" "/healthz never reported inSync"; why "$(curl -sS -m 5 "$API_BASE/healthz" | jq -c '.egress')"; fi
 
 matches "A2" "the allowlist is reported active" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/healthz' | jq -r '.egress.allowlistActive'"
 
-# Alphabetical, because the check sorts what /healthz reports.
+# Alphabetical, because the check sorts the reported ids.
 WANT_CREDS="github gitlab"
 [ -n "$REAL_CLAUDE" ] && WANT_CREDS="claude $WANT_CREDS"
 [ -n "$REAL_OPENAI" ] && WANT_CREDS="$WANT_CREDS openai"
@@ -386,16 +385,14 @@ matches "B2" "the CA file is the deployment CA" 'Boxes egress proxy CA' \
 matches "B3" "the CA file is exactly what BOXES_PROXY_CA carried" '^same$' \
   sxs 'if [ "$(cat /home/agent/.boxes/proxy-ca.crt)" = "$(printf "%s\n" "$BOXES_PROXY_CA")" ]; then echo same; else echo differs; fi'
 
-# CODEX_CA_CERTIFICATE among them: Codex reads it before SSL_CERT_FILE, and
-# the CA is delivered to every box whether or not a Codex thread ever runs.
+# Codex reads CODEX_CA_CERTIFICATE before SSL_CERT_FILE. Every box gets it.
 for var in NODE_EXTRA_CA_CERTS SSL_CERT_FILE GIT_SSL_CAINFO CURL_CA_BUNDLE CODEX_CA_CERTIFICATE; do
   matches "B4-$var" "$var points at the CA file" '^/home/agent/\.boxes/proxy-ca\.crt$' \
     sx printenv "$var"
 done
 
-# Unconditional: a box holds a placeholder for every credential whether or not
-# one is stored, because its environment is fixed when it is created and a
-# token entered afterwards has to reach it.
+# A box holds a placeholder for every credential, stored or not, because its
+# environment is fixed at creation and a later token must still reach it.
 matches "B5" "the box holds a Claude-shaped value" '^sk-ant-oat01-' \
   sx printenv CLAUDE_CODE_OAUTH_TOKEN
 if [ -n "$REAL_CLAUDE" ]; then
@@ -406,8 +403,8 @@ else
 fi
 matches "B7" "the box holds a GitHub-shaped value" '^ghp_' \
   sx printenv GH_TOKEN
-# The Codex half of the same unconditional delivery: the key the adapter logs
-# itself in with, and the three variables that make it do so.
+# The Codex side: the key placeholder, the login request, the start mode,
+# CODEX_HOME and the provider setting.
 matches "B7a" "the box holds an OpenAI-shaped value" '^sk-' \
   sx printenv CODEX_API_KEY
 matches "B7b" "the adapter is told to log in with it" '^\{"methodId":"api-key"\}$' \
@@ -434,9 +431,7 @@ absent "B10a" "the real OpenAI key is nowhere in the box" "$REAL_OPENAI"
 matches "B11" "the proxy is attached to the box network" '^true$' \
   bash -c "curl -fsS -m 5 '$API_BASE/api/boxes/$BOX_ID' | jq -r '.proxyAttached'"
 
-# One box, one checkout, a thread of each agent in it. The thread is a row and
-# an adapter of its own rather than a second container, so this costs nothing
-# but the request.
+# A Codex thread beside the Claude one, in the same box.
 if [ -z "$REAL_OPENAI" ]; then
   skipped "B11a" "no OpenAI key, so a Codex thread could not run"
   skipped "B11b" "no OpenAI key, so a Codex thread could not run"
@@ -452,17 +447,18 @@ fi
 
 head1 "B2. an agent set reaches the box that named it"
 
-# The whole path in one go: a global set and a named one, a box created against
-# the named one, and what the entrypoint installed in ~/.claude. The merge rule
-# is unit-tested; what only a real deployment proves is that the bind mount and
-# the copy work at all.
+# Unit tests cover the merge rule. This phase proves the bind mount and the
+# entrypoint's copy on a real deployment.
+
+# Sends one API request: $1 is the method, $2 the path, $3 an optional JSON
+# body.
 api() {
   local method="$1" path="$2" body="${3:-}" args=()
   [ -n "$body" ] && args=(-H 'Content-Type: application/json' -d "$body")
   curl -sS -m 30 -X "$method" "$API_BASE$path" "${args[@]}"
 }
 
-# The global AGENTS.md belongs to the operator, so keep it and put it back.
+# The global AGENTS.md belongs to the operator, so it is saved and restored.
 GLOBAL_AGENTS_MD=$(api GET /api/agent-sets/global | jq -r '.agentsMd // ""')
 api PATCH /api/agent-sets/global '{"agentsMd":"Verify: the house rules."}' >/dev/null
 api PUT /api/agent-sets/global/items \
@@ -495,21 +491,18 @@ else
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/commands/housecmd.md
   matches "B15" "the named set's skill is there too" 'name: verifyskill' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/skills/verifyskill/SKILL.md
-  # Both layouts, always: a box may hold threads of either harness, and
-  # neither agent reads the other's directories.
+  # Both layouts, because neither agent reads the other's directories.
   matches "B15a" "the AGENTS.md landed where Codex reads it too" 'Verify: the house rules' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.codex/AGENTS.md
   matches "B15b" "the command is a Codex prompt as well" 'the global command' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.codex/prompts/housecmd.md
   matches "B15c" "the skill is in the harness-neutral skills directory" 'name: verifyskill' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.agents/skills/verifyskill/SKILL.md
-  # Read-only: what the dashboard says a box is configured with is not the
-  # agent's to rewrite.
+  # The agent must not rewrite the configuration the dashboard shows.
   mustnot "B16" "the mounted configuration is not writable from inside the box" \
     docker exec -u agent "$CFG_CONTAINER" sh -c 'echo x > /boxes/agent/manifest'
 
-  # The image is the bottom layer of the same merge. No set here claims the
-  # name, so the image's own browser skill is what the box should have.
+  # No set claims the name, so the box gets the image's own browser skill.
   matches "B17" "a skill the image ships is installed when no set claims its name" \
     'name: playwright-cli' \
     docker exec -u agent "$CFG_CONTAINER" cat /home/agent/.claude/skills/playwright-cli/SKILL.md
@@ -518,9 +511,8 @@ else
 
   curl -sS -m 30 -X DELETE "$API_BASE/api/boxes/$CFG_BOX" >/dev/null 2>&1
 
-  # And a set that does claim the name wins, because the editor showed that
-  # version as the effective one. An override the operator cannot see is the
-  # thing the merged view exists to prevent.
+  # A set that claims the name wins, because the editor shows that version
+  # as the effective one.
   api PUT "/api/agent-sets/$SET_ID/items" \
     '{"kind":"skill","name":"playwright-cli","content":"---\nname: playwright-cli\ndescription: y\n---\nthe set overrides the image\n"}' \
     >/dev/null
@@ -563,9 +555,9 @@ matches "C2" "a passthrough host presents its own chain, not ours" 'issuer:' \
 
 must "C3" "curl reaches a passthrough host, so public CAs still verify" \
   sxs 'curl -fsS -m 25 -o /dev/null https://registry.npmjs.org/'
-# Node's own fetch ignores HTTP_PROXY, so this drives the tunnel by hand: it is
-# node's trust store that is under test, which is what NODE_EXTRA_CA_CERTS sets
-# and what the ACP adapter depends on.
+# Opens the CONNECT tunnel by hand, because node ignores HTTP_PROXY. The test
+# is of node's trust store, which NODE_EXTRA_CA_CERTS extends and the ACP
+# adapter depends on.
 NODE_TLS_PROBE='node -e '"'"'
 const http=require("http"),tls=require("tls");
 const host=process.argv[1];
@@ -605,13 +597,13 @@ fi
 matches "D2" "an invented GitHub credential is refused by the proxy" 'egress denied' \
   sxs 'curl -sS -m 25 -H "Authorization: Bearer ghp_notThisDeploymentsToken" https://api.github.com/user'
 
-# The proxy authenticates; it does not require authentication.
+# The proxy swaps credentials but does not require one.
 matches "D3" "an unauthenticated request still reaches the intercepted host" 'current_user_url' \
   sxs 'curl -sS -m 25 https://api.github.com/'
 
 if [ "$GH_IS_FAKE" = 1 ]; then
-  # GitHub answering at all is the proof: the placeholder was swapped and
-  # forwarded, rather than refused here as a foreign credential would be.
+  # An answer from GitHub proves the proxy swapped and forwarded the
+  # placeholder. The proxy refuses a foreign credential itself.
   matches "D4" "the placeholder is swapped and GitHub answers (fake PAT, so 401)" 'Bad credentials|"login"' \
     sxs 'curl -sS -m 25 -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user'
   skipped "D5" "gh api user needs a real PAT"
@@ -625,8 +617,8 @@ fi
 matches "D6" "an invented GitLab credential is refused by the proxy" 'egress denied' \
   sxs "curl -sS -m 25 -H 'PRIVATE-TOKEN: glpat-notThisDeploymentsToken' https://$GITLAB_HOST/api/v4/user"
 
-# The instance answering at all is the proof: the placeholder was swapped and
-# forwarded, rather than refused here as a foreign credential would be.
+# An answer from the instance proves the proxy swapped and forwarded the
+# placeholder.
 if [ "$GITLAB_IS_FAKE" = 1 ]; then
   matches "D7" "the GitLab placeholder is swapped and $GITLAB_HOST answers (fake PAT, so 401)" '401|"username"' \
     sxs "curl -sS -m 25 -H \"PRIVATE-TOKEN: \$GITLAB_TOKEN\" https://$GITLAB_HOST/api/v4/user"
@@ -639,17 +631,15 @@ else
 fi
 
 if [ -n "$REAL_OPENAI" ]; then
-  # What a Codex turn is on the wire. OpenAI answering at all is the proof the
-  # placeholder was swapped rather than forwarded or refused.
+  # An answer from OpenAI proves the proxy swapped the placeholder.
   matches "D2a" "the OpenAI placeholder is swapped and OpenAI answers" '"object"' \
     sxs 'curl -sS -m 25 -H "Authorization: Bearer $CODEX_API_KEY" https://api.openai.com/v1/models'
   matches "D2b" "an invented OpenAI key is refused by the proxy" 'egress denied' \
     sxs 'curl -sS -m 25 -H "Authorization: Bearer sk-notThisDeployments" https://api.openai.com/v1/models'
   matches "D2c" "api.openai.com presents the deployment CA" 'Boxes egress proxy CA' \
     sxs 'curl -sS -m 25 -o /dev/null -v https://api.openai.com/v1/models 2>&1 | grep -i "issuer:"'
-  # Codex logs in and refreshes here and may be talking to the subscription
-  # endpoint with a credential this deployment does not hold. Intercepting
-  # either would put a key where it does not belong.
+  # Codex logs in at auth.openai.com, and a subscription uses chatgpt.com
+  # with a credential this deployment does not hold. Neither is intercepted.
   lacks "D2d" "Codex's login host is not intercepted" 'Boxes egress proxy CA' \
     sxs 'curl -sS -m 25 -o /dev/null -v https://auth.openai.com/ 2>&1 | grep -i "issuer:"'
   lacks "D2e" "the subscription endpoint is not intercepted" 'Boxes egress proxy CA' \
@@ -658,15 +648,13 @@ else
   for id in D2a D2b D2c D2d D2e; do skipped "$id" "no OpenAI key configured"; done
 fi
 
-# git offers its credential only after a 401, and sends it as Basic. The proxy
-# must swap that framing rather than read it as a foreign credential, so what
-# matters is that the refusal never comes from the proxy.
+# git sends its credential as Basic auth after a 401. The proxy must swap it
+# there too, so the refusal must not come from the proxy.
 lacks "D6" "git's Basic-auth framing is swapped, not refused by the proxy" 'egress denied|error: 403' \
   sxs 'git ls-remote https://github.com/boxes-verify/no-such-repo.git 2>&1 | head -3'
 
 if [ -n "$REAL_CLAUDE" ]; then
-  # x-api-key is the second header the Claude credential may travel in, so the
-  # placeholder must be swapped there too rather than read as foreign.
+  # The Claude credential may also travel in x-api-key.
   lacks "D7" "the placeholder is swapped in x-api-key too, not refused" 'egress denied' \
     sxs 'curl -sS -m 25 -H "x-api-key: $CLAUDE_CODE_OAUTH_TOKEN" https://api.anthropic.com/v1/messages'
   # One host's placeholder is a foreign credential at another host.
@@ -697,15 +685,13 @@ else
   skipped "E5" "alsoAllow hosts come with the Claude credential"
 fi
 if [ -n "$REAL_OPENAI" ]; then
-  # The OpenAI credential's own alsoAllow: where Codex logs in and refreshes,
-  # and the endpoint a subscription would talk to. Neither takes this key, and
-  # a narrow allowlist may not sever either.
+  # The OpenAI credential's alsoAllow hosts stay reachable under a narrow
+  # allowlist.
   matches "E5a" "Codex's login host comes with the OpenAI credential" '^[2345][0-9][0-9]$' \
     sxs 'curl -sS -m 25 -o /dev/null -w "%{http_code}" https://auth.openai.com/'
   matches "E5b" "the subscription endpoint comes with it too" '^[2345][0-9][0-9]$' \
     sxs 'curl -sS -m 25 -o /dev/null -w "%{http_code}" https://chatgpt.com/'
-  # A deployment's own choice rather than something the credential implies, so
-  # a narrow list refuses it and Codex carries on without its telemetry.
+  # No credential implies the telemetry host, so a narrow list refuses it.
   mustnot "E5c" "Codex's telemetry host is not implied by the credential" \
     sxs 'curl -fsS -m 15 -o /dev/null https://ab.chatgpt.com/'
 else
@@ -742,8 +728,8 @@ matches "F4" "the control channel refuses a wrong bearer" '^401$' \
   docker exec boxes-orchestrator node -e \
     'fetch("http://boxes-egress-proxy:3129/status",{headers:{authorization:"Bearer wrong"}}).then(r=>console.log(r.status)).catch(e=>console.log(e.message))'
 
-# The compose network is an ordinary bridge, so the host can address the proxy
-# directly. That is a smaller surface than a box's, but not an empty one.
+# The compose network is an ordinary bridge, so the host can address the
+# proxy directly.
 PROXY_COMPOSE_IP=$(docker inspect \
   -f '{{with index .NetworkSettings.Networks "boxes_default"}}{{.IPAddress}}{{end}}' \
   boxes-egress-proxy 2>/dev/null)
@@ -764,9 +750,9 @@ fi
 
 head1 "G. a real agent turn through the translation"
 
-# One real turn, and everything the proxy refused while it ran. A turn that
-# fails under a narrow allowlist and succeeds without one is a list that is too
-# narrow, not a broken translation, and phase I settles which it was.
+# Runs one real claude -p turn and prints the hosts the proxy refused during
+# it. Phase I repeats the turn without an allowlist, which tells a too narrow
+# list from a broken translation.
 turn() {
   local id="$1" desc="$2" before after
   before=$(docker logs boxes-egress-proxy 2>&1 | wc -l)
@@ -795,9 +781,8 @@ else
 
   docker restart boxes-egress-proxy >/dev/null 2>&1
   sleep 6
-  # The proxy holds nothing at rest, so straight after a restart it runs the
-  # empty policy: no allowlist and nothing intercepted. This measures that
-  # window rather than asserting it away.
+  # The proxy stores nothing, so right after a restart it runs the empty
+  # policy until the orchestrator pushes again. This records that window.
   if sxs 'curl -fsS -m 15 -o /dev/null https://example.com' >/dev/null 2>&1; then
     noted "H1" "straight after a proxy restart the allowlist is OFF: an unlisted host is reachable"
   else
@@ -817,7 +802,7 @@ else
   matches "H3" "interception works again after the restart" 'Boxes egress proxy CA' \
     sxs 'curl -sS -m 25 -o /dev/null -v https://api.github.com/ 2>&1 | grep -i "issuer:"'
 
-  # A running box already trusts the CA, so it must not change under it.
+  # A running box trusts the CA, so the CA must survive the restart.
   CA_BEFORE=$(docker exec boxes-orchestrator sha256sum /data/egress-secrets.json 2>/dev/null | cut -d' ' -f1)
   docker restart boxes-orchestrator >/dev/null 2>&1
   wait_health
@@ -861,7 +846,7 @@ else
   for id in I2 I3 I4 I5; do skipped "$id" "the orchestrator did not come back"; done
 fi
 
-# Put the allowlist back for the suites below.
+# The suites below run with the allowlist.
 write_env "$ALLOWLIST"
 up up -d --no-deps --force-recreate orchestrator >/dev/null 2>&1
 wait_health

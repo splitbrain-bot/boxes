@@ -18,14 +18,8 @@ import type {
 } from './acp-types.ts';
 
 /**
- * The browser's ACP connection to the gateway.
- *
- * Plain JSON-RPC 2.0 over a WebSocket, one message per text frame. The
- * gateway is client-agnostic — external ACP clients use the same endpoint —
- * so nothing here is a private arrangement with the orchestrator.
- *
- * There is no $/ping. Some ACP clients send one; it is not part of the
- * protocol, and the gateway drops it.
+ * The browser's ACP connection to the gateway: JSON-RPC 2.0 over a
+ * WebSocket, one message per text frame.
  */
 
 /** What the header shows about the connection. */
@@ -40,11 +34,10 @@ export interface AcpClientHandlers {
   onUpdate(params: ThreadNotification): void;
   /**
    * The adapter asking permission. The promise resolves with the user's
-   * answer, which is what unblocks the agent's turn.
+   * answer, which unblocks the agent's turn.
    *
-   * `signal` aborts when the gateway withdraws the question, which is what
-   * happens when another browser on the thread answers it first. The card has
-   * nothing left to answer then, and whatever it resolves with is discarded.
+   * `signal` aborts when the gateway withdraws the question, for example
+   * because another browser on the thread answered it first.
    */
   onPermission(
     params: RequestPermissionRequest,
@@ -55,34 +48,32 @@ export interface AcpClientHandlers {
   /** The connection state changed. */
   onState(state: ConnectionState): void;
   /**
-   * The connection could not be brought up, and says why. A reconnect is
-   * already on its way; this is the reason to put in front of the reader
-   * while it runs.
+   * The handshake failed, with the reason. A reconnect follows, and the view
+   * can show the reason meanwhile.
    */
   onError(message: string): void;
   /**
    * The gateway said what this thread is doing: whether the agent is talking,
-   * and what it has left running in the background. It says so once after
-   * every replay and again on every transition, which is how a browser that
-   * did not send the prompt knows there is one — and the only way any browser
-   * learns about a monitor somebody started an hour ago.
+   * and what it has left running in the background. The gateway sends it
+   * after every replay and on every change, so a browser that did not send
+   * the prompt learns about the turn too.
    */
   onTurnState(state: ThreadTurnState): void;
   /**
    * Where a replay can be picked up from: the id of the last message the
-   * store holds that a replay will name again, or null when it has nothing
-   * to resume from and needs the thread whole.
+   * store holds that a replay will name again. Null asks for the whole
+   * thread.
    *
-   * Asked once per handshake, before the load that carries the answer.
+   * The client asks once per handshake, before the load that carries the
+   * answer.
    */
   resumePoint(): string | null;
   /**
-   * A replay is starting. `resumed` says the gateway is sending only what
-   * follows the resume point, so what the store holds still stands. False
-   * says the whole thread is coming and what the store holds is stale.
+   * A replay is starting. True for `resumed` means the gateway sends only
+   * what follows the resume point, so the store keeps what it holds. False
+   * means the whole thread follows, and what the store holds is stale.
    *
-   * It arrives before the first replayed update either way, which is what
-   * lets the store decide once and fold everything after it the same way.
+   * It arrives before the first replayed update.
    */
   onReplay(resumed: boolean): void;
 }
@@ -104,18 +95,18 @@ const BACKOFF_MS = [500, 1000, 2000, 5000, 10_000];
  * The JSON-RPC notification a peer sends to withdraw a request it is still
  * waiting on. Its params name the request by id.
  *
- * Not part of ACP itself but of the JSON-RPC layer under it, which is why it
- * is spelled here rather than with the ACP methods.
+ * It belongs to the JSON-RPC layer under ACP, so it is not among the ACP
+ * methods.
  */
 const CANCEL_REQUEST_METHOD = '$/cancel_request';
 
 /**
- * What a session/load asks for: the thread, the workspace it runs in, and
+ * The params of a session/load: the thread, the workspace it runs in, and
  * where a replay of it can start.
  *
  * `resumeFrom` names the last message the caller holds. It travels in
  * `_meta`, which ACP reserves for extensions, so the gateway reads it and the
- * adapter behind it ignores it. Left out, the load asks for the thread whole.
+ * adapter ignores it. Without it, the load asks for the whole thread.
  */
 export function loadParams(
   sessionId: string,
@@ -146,17 +137,24 @@ class RpcError extends Error {
   }
 }
 
-/** One box's connection, which reconnects on its own until closed. */
+/** One thread's connection, which reconnects on its own until disposed. */
 export class AcpClient {
+  /** The open socket, or null between attempts. */
   private ws: WebSocket | null = null;
+  /** The id for the next request this client sends. */
   private nextId = 1;
+  /** The requests this client sent that wait for an answer, by id. */
   private readonly pending = new Map<
     number | string,
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
+  /** The number of failed attempts since the last successful handshake. */
   private attempt = 0;
+  /** The timer of the next reconnect, or null. */
   private retryTimer: number | null = null;
+  /** True once `dispose` has run. */
   private disposed = false;
+  /** The ACP thread id from the last session/new, or null. */
   private acpSessionId: string | null = null;
   /**
    * Requests from the gateway that are still being answered, by their
@@ -164,13 +162,18 @@ export class AcpClient {
    */
   private readonly answering = new Map<number | string, AbortController>();
 
+  /**
+   * @param url The WebSocket URL of the thread.
+   * @param token The box token the gateway checks.
+   * @param handlers The callbacks the client reports to.
+   */
   constructor(
     private readonly url: string,
     private readonly token: string,
     private readonly handlers: AcpClientHandlers,
   ) {}
 
-  /** The ACP thread id this connection is talking about, once known. */
+  /** The ACP thread id of this connection, once known. */
   get sessionId(): string | null {
     return this.acpSessionId;
   }
@@ -217,13 +220,13 @@ export class AcpClient {
 
   // --- connection ----------------------------------------------------------
 
+  /** Opens a socket and starts the handshake once it is up. */
   private open(): void {
     if (this.disposed) return;
     this.handlers.onState(this.attempt === 0 ? 'connecting' : 'reconnecting');
 
-    // The token travels as a subprotocol entry because a browser cannot set
-    // an Authorization header on a WebSocket. The gateway selects the
-    // subprotocol explicitly and reads the bearer entry as credentials.
+    // A browser cannot set an Authorization header on a WebSocket, so the
+    // token travels as a subprotocol entry.
     const ws = new WebSocket(this.url, [ACP_SUBPROTOCOL, `bearer.${this.token}`]);
     this.ws = ws;
 
@@ -235,7 +238,7 @@ export class AcpClient {
       this.receive(event.data);
     };
     ws.onerror = () => {
-      // onclose always follows, and carries the reason worth reporting.
+      // onclose always follows and handles the failure.
     };
     ws.onclose = () => {
       if (this.ws !== ws) return;
@@ -245,6 +248,7 @@ export class AcpClient {
     };
   }
 
+  /** Opens a new socket after the backoff for the current attempt. */
   private scheduleReconnect(): void {
     if (this.disposed) return;
     const wait = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
@@ -257,18 +261,15 @@ export class AcpClient {
   }
 
   /**
-   * initialize, then resume the thread this connection is pinned to.
+   * Runs initialize, then loads the thread this connection is pinned to.
    *
-   * The gateway answers session/new with the bare `{ sessionId }`: which
-   * thread a connection is on is decided outside ACP, so the answer names
-   * that thread and says nothing else about it. The replay, the modes and the
-   * config options all come from the session/load that follows.
+   * The URL decides the thread, so the gateway answers session/new with only
+   * its id. The replay, the modes and the config options come from the
+   * session/load that follows.
    *
-   * The load says how much of the thread the store already has, so a
-   * reconnect is sent the tail rather than the whole conversation again. Only
-   * when the thread is the one this connection was already on: an id that has
-   * changed is a conversation that was re-minted under this connection, and
-   * nothing the store holds belongs to it.
+   * The load names a resume point, so a reconnect receives only the tail. It
+   * does so only when the thread id is unchanged. A new id is a new
+   * conversation, and nothing the store holds belongs to it.
    */
   private async handshake(): Promise<void> {
     try {
@@ -285,10 +286,8 @@ export class AcpClient {
         created.sessionId === this.acpSessionId ? this.handlers.resumePoint() : null;
       this.acpSessionId = created.sessionId;
 
-      // Nothing to resume from means the thread is coming whole whatever the
-      // gateway answers, so the store is told now rather than waiting to be
-      // told the only thing this can be. A load that does name a point waits:
-      // only the gateway knows whether the point was there.
+      // Without a resume point the whole thread follows, so the store hears
+      // it now. With one, the gateway's replay notice decides.
       if (!resumeFrom) this.handlers.onReplay(false);
 
       const loaded = await this.request<LoadThreadResponse>(
@@ -300,9 +299,7 @@ export class AcpClient {
       this.handlers.onState('ready');
       this.handlers.onReady(loaded?.modes ?? null, loaded?.configOptions ?? []);
     } catch (err) {
-      // A failed handshake is a failed connection: report why, then close and
-      // let the backoff bring up a fresh one rather than sitting half-open.
-      // Without the reason the view is a reconnecting dot and nothing else.
+      // Reports why, then closes so the backoff opens a fresh connection.
       this.handlers.onError((err as Error).message);
       try {
         this.ws?.close(1011, 'handshake failed');
@@ -314,6 +311,7 @@ export class AcpClient {
 
   // --- messages ------------------------------------------------------------
 
+  /** Dispatches one incoming frame. */
   private receive(text: string): void {
     let msg: RpcMessage;
     try {
@@ -335,8 +333,8 @@ export class AcpClient {
       return;
     }
 
-    // A request from the agent side. Only one is expected, but an unknown
-    // method must be answered rather than left blocking the adapter.
+    // A request from the agent side. An unknown method still gets an answer,
+    // so the adapter does not block on it.
     if (msg.id !== undefined && msg.method) {
       void this.answer(msg);
       return;
@@ -355,17 +353,13 @@ export class AcpClient {
 
     if (msg.method === REPLAY_METHOD) {
       const params = msg.params as Partial<ReplayParams> | undefined;
-      // Anything but an explicit yes is read as the whole thread coming,
-      // which is the answer that costs nothing to be wrong about.
+      // Anything but an explicit yes counts as a full replay, the safe reading.
       this.handlers.onReplay(params?.resumed === true);
       return;
     }
 
     if (msg.method === TURN_STATE_METHOD) {
       const params = msg.params as Partial<TurnStateParams> | undefined;
-      // Read defensively: the notification is a message off the wire like any
-      // other, and a field it omits is a field this thread knows nothing new
-      // about.
       this.handlers.onTurnState({
         speaking: params?.speaking === true,
         background: Array.isArray(params?.background) ? params.background : [],
@@ -373,7 +367,7 @@ export class AcpClient {
     }
   }
 
-  /** Answers a server-bound request, turning a rejection into a JSON-RPC error. */
+  /** Answers a request from the gateway, turning a rejection into a JSON-RPC error. */
   private async answer(msg: RpcMessage): Promise<void> {
     const reply = (body: Partial<RpcMessage>): void => {
       const ws = this.ws;

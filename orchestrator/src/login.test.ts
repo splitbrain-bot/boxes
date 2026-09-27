@@ -19,17 +19,6 @@ import {
   type LoginRuntime,
 } from './login.ts';
 
-/**
- * The two login flows, over a scripted exec.
- *
- * Everything a login does is read something a CLI printed and answer it, so
- * the only part worth a daemon is the part a daemon cannot be asked about
- * here. The runtime is injected and the streams are written by hand, exactly
- * as `docker.test.ts` fakes dockerode — which also means these tests say what
- * the parse expects, and a real box that prints something else is a change to
- * the strings below.
- */
-
 /** The escape byte, spelled rather than typed, so the source stays printable. */
 const ESC = String.fromCharCode(27);
 
@@ -40,15 +29,22 @@ function coloured(text: string): string {
 
 /** One scripted command: what it prints, what it is told, and how it ends. */
 class FakeExec implements LoginExec {
+  /** What the command prints. */
   readonly output = new PassThrough();
+  /** The command's stdin, present only for a terminal exec. */
   readonly stdin: PassThrough | null;
   /** Everything the flow wrote back to the CLI. */
   input = '';
-  /** The same, kept as the separate writes it arrived in: the UI reads one
-      chunk as one keypress, so how it was split is part of what was sent. */
+  /**
+   * The same input, as the separate writes it arrived in. The UI reads one
+   * chunk as one keypress, so the split is part of what was sent.
+   */
   chunks: string[] = [];
+  /** Whether the flow killed the command. */
   killed = false;
+  /** Resolves with the exit code, or null when the command was killed. */
   readonly exited: Promise<number | null>;
+  /** Resolves exited. */
   private settle: (code: number | null) => void = () => {};
 
   constructor(readonly spec: LoginExecSpec) {
@@ -62,6 +58,7 @@ class FakeExec implements LoginExec {
     });
   }
 
+  /** Writes text to the command's output. */
   print(text: string): void {
     this.output.write(text);
   }
@@ -72,6 +69,7 @@ class FakeExec implements LoginExec {
     this.settle(code);
   }
 
+  /** Records the kill and ends the command without an exit code. */
   kill(): void {
     this.killed = true;
     this.output.destroy();
@@ -81,12 +79,17 @@ class FakeExec implements LoginExec {
 
 /** The daemon this suite pretends to talk to. */
 interface Fake {
+  /** The runtime handed to the login manager. */
   runtime: LoginRuntime;
+  /** The ids of the started containers, in order. */
   started: string[];
+  /** The ids of the removed containers, in order. */
   removed: string[];
+  /** Every exec, in order. */
   execs: FakeExec[];
 }
 
+/** Creates a fake daemon with nothing started. */
 function fakeRuntime(): Fake {
   const fake: Fake = {
     started: [],
@@ -111,12 +114,12 @@ function fakeRuntime(): Fake {
   return fake;
 }
 
-/** Waits for something the flow does on its own, or gives up loudly. */
 /** Lets the reader take what has been written, so the next write is a read of its own. */
 async function flush(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Waits for something the flow does on its own, or fails the test when it does not happen. */
 async function until(what: string, ready: () => boolean): Promise<void> {
   for (let i = 0; i < 500; i += 1) {
     if (ready()) return;
@@ -177,9 +180,8 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   assert.match(cli.spec.cmd.join(' '), /codex login --device-auth/);
   assert.equal(cli.spec.env?.['CODEX_HOME'], '/home/agent/.codex');
 
-  // Coloured, and split across reads, because that is how it arrives. Each
-  // piece is handed over on its own: writes the reader has not got to yet are
-  // read as one, which would hide the split this is here for.
+  // Coloured and split across reads, as the CLI writes it. The reader would
+  // join writes it has not read yet, so each piece is flushed on its own.
   cli.print(`Open this URL to authenticate:\n  ${coloured('https://auth.openai.com/codex/dev')}`);
   await flush();
   cli.print('ice\nand enter the code ');
@@ -216,7 +218,7 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   assert.equal(row?.secret, document);
   assert.equal(row?.account, 'someone@example.com');
   assert.equal(row?.expires_at, 1_800_000_000_000);
-  // And the container it all ran in is gone.
+  // The container it ran in is removed.
   await until('the container to be removed', () => fake.removed.length === 1);
   assert.deepEqual(fake.removed, [fake.started[0]]);
 });
@@ -305,8 +307,8 @@ test('the prompt is recognised when the UI lays it out by column', async () => {
   cli.print('Visit: https://claude.ai/oauth/authorize?code=true\n');
   await until('the URL', () => logins.state('claude', loginId).state === 'awaiting_browser');
 
-  // What the CLI actually writes: each word placed at a column of its own,
-  // which leaves the stripped text with no spaces in it at all.
+  // The CLI places each word at a column of its own, so the stripped text
+  // has no spaces.
   cli.print(
     `${ESC}[2GPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`,
   );
@@ -341,9 +343,8 @@ test('the return that enters a code is a keypress of its own', async () => {
   logins.submitCode('claude', loginId, code);
   await until('the code to be entered', () => cli.input.endsWith('\r'));
 
-  // The code is typed and the return enters it, as two writes with a pause
-  // between them: sent together the UI takes the return for part of what was
-  // typed, and the code is never entered.
+  // The code and the return are two writes with a pause between them. Sent
+  // together, the UI takes the return as typed text and never enters the code.
   assert.deepEqual(cli.chunks, [code, '\r']);
 });
 
@@ -369,8 +370,7 @@ test('a code the CLI refuses is shown, and the login stays open for another', as
   // character it drew.
   assert.equal(refused.state === 'awaiting_code' ? refused.error : null, complaint);
 
-  // Sending another code takes the answered complaint off the page at once,
-  // rather than leaving the last code's refusal standing over this one.
+  // Sending another code clears the previous refusal at once.
   logins.submitCode('claude', loginId, 'the-right-one');
   const answered = logins.state('claude', loginId);
   assert.equal(answered.state === 'awaiting_code' ? answered.error : 'x', null);
@@ -492,8 +492,8 @@ test('a Codex auth.json is described without being verified', () => {
   assert.equal(described?.expiresAt, 1_700_000_000_000);
   assert.equal(described?.lastRefresh, Date.parse('2026-09-12T10:00:00Z'));
 
-  // Neither a signature nor a claim set anybody recognises is required, and
-  // anything that is not a document at all is refused.
+  // A token that is not a JWT still parses, without an expiry. Anything that
+  // is not an auth document is refused.
   assert.equal(parseAuthDocument('{"tokens":{"access_token":"not-a-jwt"}}')?.expiresAt, null);
   assert.equal(parseAuthDocument('not json'), null);
   assert.equal(parseAuthDocument('{"tokens":{}}'), null);

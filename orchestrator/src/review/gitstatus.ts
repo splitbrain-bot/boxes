@@ -2,17 +2,6 @@ import { git, gitOut, type GitBox, type GitTarget } from './git.ts';
 import { gitTarget, inWorkspace, type RepoMap } from './repos.ts';
 import { REVIEW_FILE } from './tree.ts';
 
-/**
- * Git file statuses and base-revision resolution.
- *
- * A port of the desktop tool's `internal/gitstatus`, with the workspace layer
- * on top: a review spans every repository the workspace holds, so the
- * statuses of all of them are merged into one map and one base expression is
- * resolved separately in each. The parsers are pure and take git's output as a
- * string; the functions that run git sit at the bottom and do nothing but call
- * them.
- */
-
 /** The git status of a file, as the tree shows it. */
 type FileStatus =
   | 'modified'
@@ -22,22 +11,21 @@ type FileStatus =
   | 'deleted'
   | 'conflict';
 
-/** File paths to their status, relative to whatever asked for them. */
+/** Git statuses by file path, relative to a repository or to the workspace. */
 export type FileStatuses = Record<string, FileStatus>;
 
 /**
- * The commit a review is compared against.
- *
- * `rev` is what the user asked for — a branch, a tag, a short id — and `commit`
- * is what that resolved to. Both empty means comparing against the working
- * tree's HEAD, which is the default.
+ * The commit a review is compared against. Both fields empty means HEAD, which
+ * is the default.
  */
 export interface Base {
+  /** What the user asked for: a branch, a tag or a short id. */
   rev: string;
+  /** The commit resolved from `rev` that the review compares against. */
   commit: string;
 }
 
-/** Comparing against HEAD: no base revision chosen. */
+/** No base revision chosen, so the review compares against HEAD. */
 export const NO_BASE: Base = { rev: '', commit: '' };
 
 /** The revision to hand `git diff`. */
@@ -48,10 +36,8 @@ export function baseRev(base: Base): string {
 // --- pure parsers -----------------------------------------------------------
 
 /**
- * Cleans a path the way `filepath.Clean` does for the relative, slash-separated
- * paths git reports: collapse `.` segments and duplicate separators, and drop a
- * trailing separator. Nothing here can produce an absolute path or a `..`, and
- * containment is fs.ts's job either way.
+ * Normalises a relative, slash-separated path from git. It drops `.` segments,
+ * duplicate separators and a trailing separator.
  */
 function cleanPath(path: string): string {
   const parts = path.split('/').filter((p) => p !== '' && p !== '.');
@@ -59,16 +45,11 @@ function cleanPath(path: string): string {
 }
 
 /**
- * Parses `git status --porcelain -z -uall` into per-file statuses.
+ * Parses `git status --porcelain -z` output into per-file statuses.
  *
- * One NUL-terminated record per file, `XY path`, and the path verbatim: `-z`
- * is what stops git quoting a name with a special character in it and what
- * makes a name holding a space, an arrow or a newline one record rather than
- * an ambiguous line.
- *
- * Untracked files are listed individually — `-uall` — because the file tree
- * lists them individually too; a collapsed directory entry would match none of
- * them.
+ * Each record is `XY path`, ends in a NUL byte and holds the path verbatim.
+ * With `-z`, git does not quote names, and a name holding a space, an arrow or
+ * a newline stays one record.
  */
 export function parsePorcelain(out: string): FileStatuses {
   const result: FileStatuses = {};
@@ -78,8 +59,8 @@ export function parsePorcelain(out: string): FileStatuses {
     if (record.length < 4) continue;
     const x = record[0]!;
     const y = record[1]!;
-    // A rename or a copy is followed by a second record holding the path it
-    // came from, which is not this record's.
+    // A rename or a copy is followed by a record holding the source path,
+    // which is skipped.
     if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i++;
     const status = classifyStatus(x, y);
     if (status) result[cleanPath(record.slice(3))] = status;
@@ -93,7 +74,7 @@ export function parseNameStatus(out: string): FileStatuses {
   for (const line of out.split('\n')) {
     const fields = line.split('\t');
     if (fields.length < 2 || fields[0] === '') continue;
-    // Renames and copies report both the old and the new path.
+    // Renames and copies list the old path first, so the last field is the path.
     const path = fields[fields.length - 1]!;
     const status = classifyDiffStatus(fields[0]![0]!);
     if (status) result[cleanPath(path)] = status;
@@ -136,7 +117,7 @@ function classifyStatus(x: string, y: string): FileStatus | null {
   if (x === 'A') return 'added';
   if (x === 'D') return 'deleted';
   if (x === 'M' || x === 'R' || x === 'C') {
-    // Also changed in the working tree: the more urgent of the two wins.
+    // A further change in the working tree shows as modified.
     if (y === 'M' || y === 'D') return 'modified';
     return 'staged';
   }
@@ -151,13 +132,11 @@ function classifyStatus(x: string, y: string): FileStatus | null {
  * The status of every file in a repository. With a base commit set, files are
  * reported by how they differ from that commit rather than from HEAD.
  *
- * `--no-renames` makes git report a rename as a deletion and an addition, so
- * the path the file was moved away from is still named — the tree can only
- * show a file the change removed if something reports it gone.
+ * `-uall` lists untracked files one by one, as the file tree lists them.
+ * `--no-renames` reports a rename as a deletion and an addition, so the tree
+ * can show the path the file moved away from.
  *
- * Returns null when the directory is no git repository, which is the same
- * answer a separate check would have given and is what turns the git features
- * off in the UI.
+ * Returns null when git fails, as it does outside a repository.
  */
 export async function fileStatuses(target: GitTarget, base: Base): Promise<FileStatuses | null> {
   if (base.commit !== '') return statusesSince(target, base);
@@ -214,19 +193,17 @@ export async function resolveBase(
 // --- the workspace layer ----------------------------------------------------
 
 /**
- * The status of every file in the workspace, from every repository in it.
+ * The status of every file in the workspace, merged from every repository in
+ * it.
  *
- * One `git status` per repository, run in parallel, keys prefixed with the
- * repository's own path, and the same closest-repo filter the tree runs: a
- * status contributed by repository `P` for path `p` is dropped when the
- * closest repository to `P/p` is not `P`. That is what stops an outer
- * repository reporting an inner work tree as one untracked entry, and what
- * makes the merged keys disjoint rather than merely last-writer-wins.
+ * The repositories are asked in parallel, and each prefixes its paths with its
+ * own path. A status from repository `P` is kept only when `P` is the closest
+ * repository to that path. This stops an outer repository from reporting an
+ * inner work tree as one untracked entry, and keeps the merged keys disjoint.
  *
- * `/workspace/REVIEW.md` is left out for the same reason the tree leaves it
- * out: it is the review, not a file of it. That only ever comes up when the
- * workspace is itself a repository, which is the one shape where the review
- * file is inside one.
+ * The workspace's REVIEW.md is left out, because it is the review and not a
+ * file under review. Git reports it only when the workspace is itself a
+ * repository.
  */
 export async function workspaceStatuses(
   box: GitBox,
@@ -256,10 +233,9 @@ export async function workspaceStatuses(
  * Resolves one revision expression in every repository of a workspace.
  *
  * `main` means main-in-each, through the merge base with that repository's own
- * HEAD. A repository the revision names nothing in is absent from the result,
- * which leaves it compared against its own working tree: a workspace holding
- * one repository on a branch and another that never heard of it is an ordinary
- * shape.
+ * HEAD. A repository where the revision names nothing is left out of the
+ * result, so it is compared against its own HEAD. A workspace can hold one
+ * repository with the branch and another without it.
  */
 export async function resolveBases(
   box: GitBox,

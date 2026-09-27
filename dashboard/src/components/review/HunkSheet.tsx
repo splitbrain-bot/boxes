@@ -9,19 +9,10 @@ import {
 import { cn } from '@/lib/utils';
 
 /**
- * One diff hunk, as its own surface.
+ * A bottom sheet that shows one diff hunk. It is the only place where deleted
+ * lines show.
  *
- * The desktop tool shows this in a tooltip on gutter hover. There is no hover
- * on a phone and a tooltip cannot be scrolled, so the same content becomes a
- * bottom sheet a gutter tap opens — which is also where the deleted lines
- * live, since the file itself cannot show them.
- *
- * The diff text comes from the workspace and is rendered as text nodes only.
- *
- * Long lines wrap, like the pane's do: a sheet is the narrowest surface in the
- * tool, and a hunk whose ends are off to the right is not showing the change.
- * The continuation of a wrapped line is indented past the +/− column, so the
- * marker that opens a line stays the only thing in it.
+ * The diff text comes from the workspace and renders as text nodes only.
  */
 export function HunkSheet({
   hunk,
@@ -29,6 +20,7 @@ export function HunkSheet({
 }: {
   /** The hunk to show, or null when the sheet is closed. */
   hunk: ReviewDiffHunk | null;
+  /** Called when the sheet closes. */
   onClose: () => void;
 }) {
   const lines = (hunk?.diff ?? '').split('\n');
@@ -51,6 +43,7 @@ export function HunkSheet({
                 <div
                   key={i}
                   className={cn(
+                    // Indents the rest of a wrapped line past the +/− column.
                     '-indent-3 pr-1 pl-4 break-words whitespace-pre-wrap',
                     line.startsWith('+') && 'bg-ok/12 text-ok',
                     line.startsWith('-') && 'bg-danger/12 text-danger',

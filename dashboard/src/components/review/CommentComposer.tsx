@@ -3,25 +3,8 @@ import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 
 /**
- * Writing a comment on a line.
- *
- * Inline under the line on a pointer, and a bottom sheet on touch — the
- * keyboard is coming up anyway, and a textarea halfway down a scrolling code
- * pane ends up behind it. Both render the same form, so there is one place
- * where "what a comment is" is decided.
- *
- * Which one is mounted is a media query in JavaScript rather than a CSS
- * breakpoint, because a Sheet renders into a portal: it is not inside the
- * element a `md:hidden` wrapper would hide. The view asks the query and
- * renders one of the two, so a resize never leaves both.
- */
-
-/**
- * The key that saves, written the way this platform writes it.
- *
- * The shortcut takes either modifier, so the hint is the only thing that has
- * to choose — and telling a Linux or Android reader to press ⌘ is telling
- * them about a key their keyboard does not have.
+ * The save shortcut as the hint shows it: ⌘↵ on Apple platforms, Ctrl+↵
+ * elsewhere. The shortcut itself accepts either modifier.
  */
 const SAVE_KEY = /mac|iphone|ipad|ipod/i.test(
   typeof navigator === 'undefined' ? '' : navigator.platform || navigator.userAgent,
@@ -38,19 +21,23 @@ function Form({
   onSave,
   onCancel,
 }: {
+  /** The line being commented on. */
   line: number;
   /** The existing comment when editing, or '' when writing a new one. */
   initial: string;
+  /** Disables the buttons while a write is in flight. */
   busy: boolean;
+  /** Focuses the textarea on mount and whenever the line changes. */
   autoFocus: boolean;
+  /** Called with the trimmed comment when the user saves. */
   onSave: (comment: string) => void;
+  /** Called when the user cancels. */
   onCancel: () => void;
 }) {
   const [text, setText] = useState(initial);
   const field = useRef<HTMLTextAreaElement>(null);
 
-  // A fresh line means a fresh comment: the same composer is reused for the
-  // next line, and it must not keep the last one's text.
+  // The composer stays mounted when it moves to another line, so it resets the text.
   useEffect(() => {
     setText(initial);
   }, [line, initial]);
@@ -71,8 +58,7 @@ function Form({
         value={text}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
-          // Enter makes a paragraph in a comment, so submitting is the
-          // modifier — the convention every composer in this app follows.
+          // Plain Enter adds a line break, so saving needs the modifier.
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             save();
@@ -99,12 +85,17 @@ function Form({
   );
 }
 
-/** The inline arrangement, under the annotated line. */
+/** The composer inline under the line, for wide screens. */
 export function InlineComposer(props: {
+  /** The line being commented on. */
   line: number;
+  /** The existing comment when editing, or '' when writing a new one. */
   initial: string;
+  /** Disables the buttons while a write is in flight. */
   busy: boolean;
+  /** Called with the trimmed comment when the user saves. */
   onSave: (comment: string) => void;
+  /** Called when the user cancels. */
   onCancel: () => void;
 }) {
   return (
@@ -114,7 +105,13 @@ export function InlineComposer(props: {
   );
 }
 
-/** The touch arrangement: a bottom sheet, which the keyboard can sit under. */
+/**
+ * The composer as a bottom sheet for narrow screens, so the keyboard does not
+ * cover the textarea.
+ *
+ * The view picks this or {@link InlineComposer} with a media query, because the
+ * sheet renders into a portal that a CSS breakpoint on a wrapper cannot hide.
+ */
 export function ComposerSheet({
   line,
   initial,
@@ -124,16 +121,19 @@ export function ComposerSheet({
 }: {
   /** The line being commented on, or null when the sheet is closed. */
   line: number | null;
+  /** The existing comment when editing, or '' when writing a new one. */
   initial: string;
+  /** Disables the buttons while a write is in flight. */
   busy: boolean;
+  /** Called with the trimmed comment when the user saves. */
   onSave: (comment: string) => void;
+  /** Called when the user cancels or dismisses the sheet. */
   onCancel: () => void;
 }) {
   return (
     <Sheet open={line !== null} onOpenChange={(open) => (open ? undefined : onCancel())}>
-      {/* No description: where a comment is stored is the tool's business, not
-          something to spend a line of a phone's screen on above the keyboard.
-          Saying so explicitly is how Radix is told the omission is deliberate. */}
+      {/* The sheet has no description. An explicit undefined tells Radix the
+          omission is deliberate. */}
       <SheetContent side="bottom" className="gap-0" aria-describedby={undefined}>
         <SheetHeader className="pb-2">
           <SheetTitle className="text-sm">

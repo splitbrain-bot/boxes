@@ -22,11 +22,12 @@ export const ANIMATION_DURATION = 200;
 
 const ReasoningPreviewContext = createContext(false);
 
-/* Boxes edit: no mb-4 here. A disclosure row is not responsible for the
-   space under the block it belongs to — the chain-of-thought group is, and
-   it sets that space once in globals.css. With the margin on the row, a
-   turn that reasoned and called a tool paid it twice, and a run of them
-   paid it on every line. */
+/**
+ * The class variants of the reasoning root.
+ *
+ * Boxes edit: the root has no bottom margin. The chain-of-thought group sets
+ * the space under the whole block once, so each row does not add its own.
+ */
 const reasoningVariants = cva("aui-reasoning-root w-full", {
   variants: {
     variant: {
@@ -166,6 +167,13 @@ function ReasoningFade({
   );
 }
 
+/**
+ * The row that opens and closes the reasoning.
+ *
+ * Boxes edit: it matches the tool group's row, with small text, a small
+ * chevron and no leading icon, so the two disclosures in a message read as
+ * one kind of row.
+ */
 function ReasoningTrigger({
   active,
   duration,
@@ -177,12 +185,6 @@ function ReasoningTrigger({
 }) {
   const durationText = duration ? ` (${duration}s)` : "";
 
-  /* Boxes edit: the same line the tool group draws for "1 tool call" —
-     text-xs, a size-3 chevron, and no leading icon. The brain was the loudest
-     thing in a thread whose subject is elsewhere, and it sat above reasoning
-     that already says what it is. Sizes are matched to
-     tool-group.aui.tsx rather than merely reduced, so the two disclosures a
-     message can carry read as one kind of row. */
   return (
     <CollapsibleTrigger
       data-slot="reasoning-trigger"
@@ -215,6 +217,7 @@ function ReasoningTrigger({
   );
 }
 
+/** The collapsible panel that holds the reasoning text. */
 function ReasoningContent({
   className,
   children,
@@ -237,10 +240,8 @@ function ReasoningContent({
       )}
       {...props}
     >
-      {/* Boxes edit: the top fade only while streaming, as the bottom one
-          already was. It exists so text scrolling out of the preview leaves
-          softly; at rest, with no box around any of this, all it did was dim
-          the first line of the reasoning against the page. */}
+      {/* Boxes edit: the top fade shows only while streaming, like the bottom
+          one. At rest it would dim the first line against the page. */}
       {isPreview ? <ReasoningFade side="top" /> : null}
       {children}
       {isPreview ? <ReasoningFade /> : null}
@@ -248,6 +249,7 @@ function ReasoningContent({
   );
 }
 
+/** The reasoning text, pinned to the newest tokens while it streams. */
 function ReasoningText({
   className,
   children,
@@ -306,9 +308,8 @@ function ReasoningText({
       ref={scrollRef}
       data-slot="reasoning-text"
       className={cn(
-        /* Boxes edit: ps-6 indented this under the trigger's icon. With no
-           icon there is nothing to indent to, and the text reads as the
-           message's own. */
+        /* Boxes edit: no start padding, because the trigger has no icon to
+           indent under. */
         "aui-reasoning-text relative z-0 max-h-64 overflow-y-auto pt-1 pb-2 leading-relaxed text-pretty",
         "transform-gpu transition-[transform,opacity] ease-[cubic-bezier(0.32,0.72,0,1)]",
         "motion-reduce:animate-none",

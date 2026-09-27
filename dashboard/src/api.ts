@@ -30,17 +30,16 @@ import type {
 } from '../../shared/types.ts';
 
 /**
- * Typed fetch client for the orchestrator's REST API.
- */
-
-/**
- * A request the API refused, carrying the status alongside the message.
+ * A request the API refused, with the HTTP status and the API's message.
  *
- * The message is what a caller shows; the status is for the few refusals a
- * caller can act on rather than merely report — a save the file's own hash
- * turned down, above all.
+ * A caller shows the message. The status lets a caller act on a refusal, such
+ * as a save the file's hash turned down.
  */
 export class ApiError extends Error {
+  /**
+   * @param status The HTTP status of the response.
+   * @param message The API's error message, or the status line.
+   */
   constructor(
     readonly status: number,
     message: string,
@@ -51,12 +50,11 @@ export class ApiError extends Error {
 }
 
 /**
- * Sends one JSON request and returns the parsed body. Throws with the API's
- * own error message when the response is not a success.
+ * Sends one JSON request and returns the parsed body, or undefined for a 204.
+ * Throws an {@link ApiError} when the response is not a success.
  *
- * The content type is declared only for a call that carries a body: the API
- * rejects an empty body that claims to be JSON, and start, stop and delete
- * send none.
+ * Sets the JSON content type only when the call has a body, because the API
+ * rejects an empty body that claims to be JSON.
  */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -80,32 +78,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** Every REST call the dashboard makes. */
+/** Typed client for the orchestrator's REST API. */
 export const api = {
+  /** Lists every box. */
   listBoxes: () => request<BoxSummary[]>('/api/boxes'),
+  /** Reads one box. */
   getBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}`),
+  /** Creates a box. */
   createBox: (body: CreateBoxBody) =>
     request<BoxDetail>('/api/boxes', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Starts a box's container. */
   startBox: (id: string) =>
     request<BoxDetail>(`/api/boxes/${id}/start`, { method: 'POST' }),
+  /** Stops a box's container. */
   stopBox: (id: string) =>
     request<BoxDetail>(`/api/boxes/${id}/stop`, { method: 'POST' }),
+  /** Deletes a box. */
   deleteBox: (id: string) => request<void>(`/api/boxes/${id}`, { method: 'DELETE' }),
+  /** Lists a box's threads. */
   listThreads: (id: string) => request<ThreadSummary[]>(`/api/boxes/${id}/threads`),
+  /** Adds a thread to a box, empty or with the context of the thread named by `from`. */
   createThread: (id: string, body: CreateThreadBody = {}) =>
     request<ThreadSummary>(`/api/boxes/${id}/threads`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   /**
-   * Marks a conversation done, or takes the mark off again.
+   * Marks a thread done, or removes the mark, and returns the thread.
    *
-   * The reader's own note about being finished with a thread. It changes how
-   * the thread is drawn and nothing else, so nothing here waits on it beyond
-   * reading the row back.
+   * The mark only changes how the thread is drawn.
    */
   setThreadDone: (id: string, threadId: string, done: boolean) =>
     request<ThreadSummary>(`/api/boxes/${id}/threads/${threadId}/done`, {
@@ -113,13 +117,14 @@ export const api = {
       body: JSON.stringify({ done }),
     }),
   /**
-   * Kills what a conversation left running in its box: one process, or all of
-   * them.
+   * Stops one task a thread left running, or every task it has, and returns
+   * how many the adapter stopped.
    *
-   * Not `session/cancel`, which is what the composer's stop sends. That
-   * interrupts the conversation and reaches the subagents a turn is being
-   * held open for; it does nothing to a command still running, which is a
-   * child of the agent's own process and outlives the turn by design.
+   * A cancel does not reach a background command, because the command
+   * outlives the turn that started it.
+   *
+   * @param processId The adapter's id for the task. Without it, every task
+   *   of the thread stops.
    */
   stopBackgroundWork: (id: string, threadId: string, processId?: string) =>
     request<{ stopped: number }>(`/api/boxes/${id}/threads/${threadId}/background/stop`, {
@@ -127,23 +132,19 @@ export const api = {
       body: JSON.stringify({ processId }),
     }),
   /**
-   * Kills everything running in a box, whichever conversation started it, and
-   * answers with how many processes were signalled.
+   * Kills every process in a box that Boxes did not start itself, and returns
+   * how many processes got the signal.
    *
-   * The one above names a task an adapter announced; this one names nothing.
-   * It is the floor under the bars: after a respawn no adapter knows about
-   * the shells the one before it left running, so the orchestrator reads the
-   * box's own process table and signals what it finds there. The card offers
-   * it only for that case — work running with no conversation claiming it.
+   * After an adapter restart, no adapter knows the tasks the old process left
+   * running. The orchestrator reads the box's process table instead.
    */
   stopBoxWork: (id: string) =>
     request<{ stopped: number }>(`/api/boxes/${id}/background/stop`, { method: 'POST' }),
   /**
-   * Stores one file the user attached, and answers with where it landed.
+   * Uploads one attached file into the box's workspace and returns where it
+   * was stored.
    *
-   * The bytes go up as themselves rather than as a form or as base64: this
-   * is the one call in the client that carries a file, and the endpoint
-   * wants nothing else from it but the name, which travels in the query.
+   * The body is the raw bytes. The file name travels in the query.
    */
   uploadAttachment: (id: string, file: File) =>
     request<StoredAttachment>(
@@ -154,13 +155,17 @@ export const api = {
         body: file,
       },
     ),
+  /** Reads the orchestrator's health probe. */
   health: () => request<HealthResponse>('/healthz'),
+  /** Reads the public key a browser subscribes to push with. */
   pushKey: () => request<PushKeyResponse>('/api/push/key'),
+  /** Registers a browser's push subscription. */
   subscribePush: (body: PushSubscribeBody) =>
     request<void>('/api/push/subscribe', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Removes the push subscription with this endpoint. */
   unsubscribePush: (endpoint: string) =>
     request<void>('/api/push/subscribe', {
       method: 'DELETE',
@@ -168,142 +173,142 @@ export const api = {
     }),
 
   // --- code review over the box's workspace ---------------------------
-  //
-  // Batched to match the endpoints: the directory call carries a folder and
-  // everything the left panel needs around it, and the file call the whole
-  // file view, so a phone on a slow link makes one request per screen.
 
   /**
-   * One directory of the review. `path` is empty for the workspace root, and
-   * `fresh` says the browser has arrived rather than opened a folder — which
-   * is what asks the orchestrator for git's answer again.
+   * Reads one directory of the review, with everything the side panel needs
+   * around it.
+   *
+   * @param path Workspace-relative, and empty for the workspace root.
+   * @param fresh True when the browser has just arrived rather than opened a
+   *   folder. It makes the orchestrator ask git again.
    */
   reviewDir: (id: string, path: string, fresh: boolean) =>
     request<ReviewDirResponse>(
       `/api/boxes/${id}/review/dir?path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`,
     ),
+  /** Reads one file of the review, with everything the file view needs. */
   reviewFile: (id: string, path: string) =>
     request<ReviewFileResponse>(
       `/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`,
     ),
+  /** Saves an edited file and returns it as read back. */
   saveReviewFile: (id: string, body: ReviewFileBody) =>
     request<ReviewFileResponse>(`/api/boxes/${id}/review/file`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  /** Adds or replaces the comment on one line. */
   setAnnotation: (id: string, body: ReviewAnnotationBody) =>
     request<ReviewAnnotationsResponse>(`/api/boxes/${id}/review/annotations`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  /** Removes the comment on one line. */
   deleteAnnotation: (id: string, path: string, line: number) =>
     request<ReviewAnnotationsResponse>(
       `/api/boxes/${id}/review/annotations?path=${encodeURIComponent(path)}&line=${line}`,
       { method: 'DELETE' },
     ),
+  /** Sets the revision the review compares against, or null for HEAD. */
   setReviewBase: (id: string, rev: string | null) =>
     request<ReviewBaseResponse>(`/api/boxes/${id}/review/base`, {
       method: 'PUT',
       body: JSON.stringify({ rev }),
     }),
+  /** Deletes the box's REVIEW.md, which holds the review. */
   deleteReview: (id: string) =>
     request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
 
   // --- agent configuration -------------------------------------------------
-  //
-  // Every mutation answers with the whole set, so the editor never has to
-  // stitch a patch into what it already holds.
+  // Every change returns the whole set.
 
+  /** Lists every agent set. */
   listAgentSets: () => request<AgentSetSummary[]>('/api/agent-sets'),
+  /** Reads one agent set. */
   getAgentSet: (setId: string) => request<AgentSetDetail>(`/api/agent-sets/${setId}`),
+  /** Creates an empty agent set. */
   createAgentSet: (name: string) =>
     request<AgentSetDetail>('/api/agent-sets', {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+  /** Renames a set or replaces its AGENTS.md. */
   updateAgentSet: (setId: string, body: { name?: string; agentsMd?: string }) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+  /** Deletes an agent set. */
   deleteAgentSet: (setId: string) =>
     request<void>(`/api/agent-sets/${setId}`, { method: 'DELETE' }),
+  /** Adds or replaces one item of a set. */
   putAgentItem: (setId: string, body: AgentItemBody) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/items`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  /** Removes one item of a set. */
   deleteAgentItem: (setId: string, kind: AgentItemKind, name: string) =>
     request<AgentSetDetail>(
       `/api/agent-sets/${setId}/items?kind=${kind}&name=${encodeURIComponent(name)}`,
       { method: 'DELETE' },
     ),
+  /** Reads what a box that selects this set receives, global set included. */
   agentSetPreview: (setId: string) =>
     request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),
 
   // --- harnesses ------------------------------------------------------------
-  //
-  // What agents this deployment can run. One call, because a dialog needs the
-  // registry's defaults, the catalogue and the credential's state together
-  // and has nothing to do with any of them apart.
 
   /**
-   * Every harness this deployment can run: the registry's defaults, whatever
-   * each adapter last advertised, and whether each has a credential that
-   * works.
+   * Lists every harness this deployment can run, with the registry's
+   * defaults, what each adapter last advertised, and the state of its
+   * credential.
    *
-   * What the dialogs are built from. The health probe carries the same
-   * harnesses without their catalogues, which is all a warning needs; this is
-   * the call for the view that has to offer the choice.
+   * The health probe carries the same harnesses without the catalogues.
    */
   harnesses: () => request<HarnessInfo[]>('/api/harnesses'),
 
   // --- credentials and settings ---------------------------------------------
-  //
-  // Secrets go one way. A credential is written by pasting it and comes back
-  // as an account and a status, never as the value, so nothing here can show
-  // one and nothing here has to be careful not to.
+  // The API never returns a secret, only its account and status.
 
+  /** Lists every stored credential. */
   listCredentials: () => request<CredentialSummary[]>('/api/credentials'),
+  /** Stores a pasted secret for a credential. */
   putCredential: (id: CredentialId, method: CredentialMethod, secret: string) =>
     request<CredentialSummary>(`/api/credentials/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ method, secret }),
     }),
+  /** Removes a stored credential. */
   deleteCredential: (id: CredentialId) =>
     request<void>(`/api/credentials/${id}`, { method: 'DELETE' }),
 
   // --- logging in to an account ---------------------------------------------
-  //
-  // The other way a credential arrives, for the ones that have no static form
-  // to paste. The orchestrator runs the harness's own CLI in a throwaway
-  // container and this is the window onto it: start it, ask where it has got
-  // to until it is somewhere, hand back a code where the CLI wants one, and
-  // give up by saying so rather than by closing the tab.
+  // The orchestrator runs the harness's own CLI in a throwaway container.
 
-  /** Starts a login and answers with the id every call below names. */
+  /** Starts a login and returns the id the other login calls take. */
   startLogin: (id: CredentialId) =>
     request<StartLoginResponse>(`/api/credentials/${id}/login`, { method: 'POST' }),
-  /** Where that login has got to, as the page polls it. */
+  /** Reads the state of a login. The page polls it. */
   loginState: (id: CredentialId, loginId: string) =>
     request<LoginState>(`/api/credentials/${id}/login/${loginId}`),
   /**
-   * Hands the CLI the code the login page gave the person.
+   * Hands the CLI the code the login page showed the user.
    *
-   * Only Claude's flow asks for one: its CLI prints a URL and then blocks on
-   * a prompt. Codex prints the code instead and polls for itself, and there
-   * is nothing to send back. The answer is not read — where the login goes
-   * next is what the poll above says.
+   * Only Claude's CLI asks for a code. The login state reports what happens
+   * next.
    */
   submitLoginCode: (id: CredentialId, loginId: string, code: string) =>
     request<void>(`/api/credentials/${id}/login/${loginId}/code`, {
       method: 'POST',
       body: JSON.stringify({ code } satisfies LoginCodeBody),
     }),
-  /** Gives up on a login, and takes the container it was running in with it. */
+  /** Cancels a login and removes its container. */
   cancelLogin: (id: CredentialId, loginId: string) =>
     request<void>(`/api/credentials/${id}/login/${loginId}`, { method: 'DELETE' }),
+  /** Reads the deployment settings. */
   getSettings: () => request<Settings>('/api/settings'),
+  /** Writes the settings the body names and returns all of them. */
   patchSettings: (body: Partial<Settings>) =>
     request<Settings>('/api/settings', {
       method: 'PATCH',

@@ -28,8 +28,7 @@ function ReasoningRoot({
   ...props
 }: ReasoningRootProps) {
   const collapsibleRef = useRef<HTMLDivElement | null>(null);
-  // Boxes edit: the lock, minus the fight with a thread following its own
-  // output. See hooks/use-disclosure-lock.ts.
+  // Boxes edit: skips the lock while the thread follows its output.
   const lockScroll = useDisclosureLock(collapsibleRef, ANIMATION_DURATION);
 
   const handleAnimationStart = useCallback(() => {
@@ -105,7 +104,6 @@ Reasoning.Fade = ReasoningFade;
  * prop on `<MessagePrimitive.Parts>`. Use `<MessagePrimitive.GroupedParts>`
  * with a `groupBy` returning `"group-reasoning"` and compose `ReasoningRoot`
  * / `ReasoningTrigger` / `ReasoningContent` / `ReasoningText` directly.
- * See `thread.aui.tsx` for an example.
  */
 const ReasoningGroup = memo(ReasoningGroupImpl);
 ReasoningGroup.displayName = "ReasoningGroup";

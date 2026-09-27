@@ -6,14 +6,12 @@ import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer } from './control.ts';
 import { policyHash } from './policy.ts';
 
-/**
- * The control channel, which is how the proxy gets a policy without a file and
- * how it stays uninteresting to anything that cannot reach the orchestrator's
- * network.
- */
+/** Tests for the control channel and for how the entry point applies pushes. */
 
+/** A stand-in CA; the control channel never reads it. */
 const CA = { key: 'KEY', cert: 'CERT' };
 
+/** Status of a proxy that has applied nothing. */
 const emptyStatus: EgressStatus = {
   applied: false,
   policyHash: 'hash',
@@ -23,6 +21,7 @@ const emptyStatus: EgressStatus = {
   uptimeSeconds: 0,
 };
 
+/** Servers the current test started, closed after it. */
 let servers: http.Server[] = [];
 
 afterEach(() => {
@@ -85,6 +84,7 @@ function call(
   });
 }
 
+/** A valid policy with one credential. */
 const policy = {
   allowedHosts: ['github.com'],
   ca: CA,
@@ -145,8 +145,7 @@ describe('the control channel', () => {
 
   it('answers anything else with a 404, and is claimed by none of it', async () => {
     const { port, claimed } = await start();
-    // Only a policy push may claim the channel, so every other path is
-    // unauthorized until one has.
+    // Only a policy push claims the channel, so any other path is a 401 until then.
     expect((await call(port, 'GET', '/secrets', 'token')).status).toBe(401);
     expect(claimed()).toBe(false);
 
@@ -171,11 +170,8 @@ function fakeServer(): http.Server {
 }
 
 /**
- * How the proxy's entry point handles two pushes at once.
- *
- * The listeners and the interception engine are stood in for, so what is
- * under test is the entry point's own policy handling: everything else it
- * boots is a shell that binds nothing.
+ * How the proxy's entry point handles two pushes at once. The listeners and
+ * the interception engine are mocked, so only its policy handling runs.
  */
 describe('overlapping policy pushes', () => {
   it('leave the policy of the push that succeeded', async () => {
@@ -226,9 +222,7 @@ describe('overlapping policy pushes', () => {
     const second = push(wanted);
     await Promise.all([first, second]);
 
-    // The first push rolls its own policy back. Rolling back over the second
-    // one would leave the proxy running a policy nobody pushed, and saying it
-    // had applied one.
+    // The failed first push must not roll back over the second push's policy.
     expect(livePolicy()).toEqual(wanted);
     expect(liveStatus().policyHash).toBe(policyHash(wanted));
   });

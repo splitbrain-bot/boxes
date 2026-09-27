@@ -11,27 +11,22 @@ import {
 } from '@/components/ui/dialog';
 
 /**
- * What a box's next conversation is started as.
+ * Dialog that starts a new thread in a box.
  *
- * A dialog rather than a button that starts one straight away, because a
- * thread is not a thing you change your mind about afterwards: the agent it
- * runs is fixed for the life of the transcript, and a mode picked after the
- * first prompt is a mode picked late. It opens on the last choice for that
- * agent, so the deployment that mostly starts the same kind of thread
- * confirms rather than configures.
- *
- * Escape, the backdrop and the back button all cancel — see `ui/dialog`,
- * which pushes a history entry so the phone's own dismiss gesture works.
+ * The agent of a thread is fixed for the life of its transcript, so the
+ * dialog asks before the thread starts. Escape, the backdrop and the back
+ * button all cancel.
  */
 export function NewThreadDialog({
   busy,
   onCancel,
   onCreate,
 }: {
-  /** Held while the create is in flight, so a double tap cannot start two. */
+  /** Whether a create is in flight. A double tap then cannot start two threads. */
   busy: boolean;
+  /** Called when the dialog closes without starting a thread. */
   onCancel: () => void;
-  /** Absent options means the orchestrator's own defaults; see ThreadOptions. */
+  /** Starts the thread. Undefined options start it on the orchestrator's defaults. */
   onCreate: (options: ThreadOptionsBody | undefined) => void;
 }) {
   const state = useThreadOptions();
@@ -54,11 +49,9 @@ export function NewThreadDialog({
           </Button>
           <Button
             type="button"
-            // Nothing to start until the list has said what can run: a create
-            // sent before then would take the orchestrator's default agent
-            // rather than the one this dialog is about to show. A list that
-            // could not be read is still an answer — the thread starts on the
-            // orchestrator's defaults, which is what the block says.
+            // An earlier create would take the orchestrator's default agent. A
+            // failed list also counts as ready, and the thread then starts on
+            // the orchestrator's defaults.
             disabled={busy || !state.ready}
             onClick={() => {
               state.remember();

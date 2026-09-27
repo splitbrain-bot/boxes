@@ -26,13 +26,6 @@ import {
   writeFileAtomic,
 } from './fs.ts';
 
-/**
- * Symlink containment, which is the security invariant this file exists to
- * hold. The tree it serves is written by an agent, so the tests here are the
- * attacks: a link out of the workspace, a link through a directory, a
- * traversal, and the filenames that merely look like one.
- */
-
 let root: string;
 let outside: string;
 let secret: string;
@@ -56,8 +49,6 @@ describe('validRelativePath', () => {
   });
 
   test('accepts a filename that merely contains dots', () => {
-    // The check is on segments, not on the text, so a real filename like this
-    // stays openable.
     for (const path of ['[...slug].astro', 'a..b.txt', 'src/..hidden', 'x/....y']) {
       assert.equal(validRelativePath(path), true, path);
     }
@@ -107,8 +98,7 @@ describe('resolveInRoot', () => {
   });
 
   test('refuses a symlink even when it stays inside the root', () => {
-    // What it points at can be changed after the tree was listed, so the link
-    // itself is refused rather than its current target inspected.
+    // Its target can change after the tree was listed.
     writeFileSync(join(root, 'real.txt'), 'x');
     symlinkSync(join(root, 'real.txt'), join(root, 'link.txt'));
     const result = resolveInRoot(root, 'link.txt');
@@ -120,8 +110,7 @@ describe('resolveInRoot', () => {
     symlinkSync(outside, join(root, 'escape'));
     const result = resolveInRoot(root, 'escape/boxes.db');
     assert.equal(result.ok, false);
-    // The final component is a real file, so what refuses this is the realpath
-    // landing outside the root.
+    // The final component is a real file, so the realpath check refuses it.
     assert.equal(result.ok === false && result.reason, 'outside');
   });
 
@@ -232,9 +221,9 @@ describe('writeFileAtomic', () => {
     const dir = join(root, 'planted');
     mkdirSync(dir);
     const path = join(dir, 'REVIEW.md');
-    // The directory belongs to the agent and the temp name is predictable, so
-    // this is the attack. The counter in the name is private to the module,
-    // so every name the write could pick is planted.
+    // The agent owns the directory and the temp name is predictable. The
+    // counter in the name is private, so every name the write could pick is
+    // planted.
     for (let n = 0; n < 64; n++) symlinkSync(secret, `${path}.${process.pid}.${n}.tmp`);
 
     writeFileAtomic(path, '# Code Review\n');

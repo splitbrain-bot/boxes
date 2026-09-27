@@ -1,9 +1,6 @@
 /**
- * The words the terminal connection says: its subprotocol, and the control
- * messages the browser sends alongside the bytes.
- *
- * The orchestrator and the dashboard both speak this, so the spellings live
- * here and the module stays safe to pull into a browser bundle.
+ * Subprotocol and control messages of the terminal WebSocket, shared by the
+ * orchestrator and the dashboard.
  */
 
 /**
@@ -23,8 +20,11 @@ export const TERMINAL_SUBPROTOCOL = 'boxes-terminal.v1';
  * only the browser knows it. Sent once on connect and again on every resize.
  */
 export interface TerminalResize {
+  /** Message type. */
   type: 'resize';
+  /** Width in cells. */
   cols: number;
+  /** Height in cells. */
   rows: number;
 }
 
@@ -32,22 +32,19 @@ export interface TerminalResize {
 export type TerminalControl = TerminalResize;
 
 /**
- * The widest window the server accepts, in cells.
+ * The widest window the server passes on, in cells. A wider one is clamped.
  *
- * A pty size is two 16-bit numbers, so a browser reporting nonsense would
- * reach the daemon with it. This is the ceiling on that mistake.
+ * A pty size is two 16-bit numbers, so without this ceiling a browser
+ * reporting nonsense would pass it on to the Docker daemon.
  */
 export const MAX_TERMINAL_COLS = 500;
 
-/** The tallest window the server accepts, in cells. */
+/** The tallest window the server passes on, in cells. A taller one is clamped. */
 export const MAX_TERMINAL_ROWS = 300;
 
 /**
- * One control message, or null when the frame is not one.
- *
- * A frame that does not parse is dropped and the connection stays open. The
- * bytes flowing the other way are what the reader came for, and a malformed
- * resize is not worth ending a shell over.
+ * One control message, or null when the frame is not one. Sizes are clamped
+ * to between 1 and {@link MAX_TERMINAL_COLS} or {@link MAX_TERMINAL_ROWS}.
  */
 export function parseTerminalControl(text: string): TerminalControl | null {
   let parsed: unknown;

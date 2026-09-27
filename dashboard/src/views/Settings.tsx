@@ -22,25 +22,15 @@ import { CODEX_LOGIN_OFFERED } from '@/lib/harness';
 import { shortAge } from '@/lib/rough';
 import { useBoxes } from '../stores/boxes.ts';
 
-/**
- * The deployment's credentials, and the identity its boxes commit as.
- *
- * Secrets are entered here and never come back: what a stored credential
- * shows is the last four characters of what was pasted, so two tokens can be
- * told apart and neither can be read off the screen. The real value reaches
- * the egress proxy and nothing else — a box holds a placeholder, which is why
- * a credential entered now works in a box created yesterday.
- */
-
 /** One credential this page can manage, and what a person is told about it. */
 interface CredentialKind {
+  /** The credential's id. */
   id: CredentialId;
+  /** The name on the card. */
   label: string;
   /**
-   * The harnesses that run on it, which is the one fact about a credential
-   * that belongs to the registry rather than to this page. What each of them
-   * is *called* is not written down here: the labels come from the harness
-   * list, so this page and the dialogs name an agent the same way.
+   * The harnesses that run on it. Their labels come from the harness list, so
+   * this page and the dialogs name an agent the same way.
    */
   harnesses: HarnessId[];
   /** What stops working without it. */
@@ -50,12 +40,8 @@ interface CredentialKind {
   /** What a pasted secret is stored as; a login decides its own. */
   method: CredentialMethod;
   /**
-   * Whether an account can be logged in to instead of a secret pasted.
-   *
-   * True for the two agents, whose subscriptions have no static form to
-   * paste: the orchestrator runs the harness's own CLI to get one. GitHub's
-   * credential is a token and nothing else, so its card offers the form
-   * alone.
+   * Whether the card offers an account login beside the paste form. The
+   * orchestrator then runs the harness's own CLI to get the credential.
    */
   canLogin: boolean;
 }
@@ -63,9 +49,8 @@ interface CredentialKind {
 /**
  * The credentials the settings page offers.
  *
- * The orchestrator's harness registry is the source of truth for which
- * credential each agent needs; this is the list a person is shown, and the
- * health probe is what says whether a harness can actually run on one.
+ * The orchestrator's harness registry decides which credential each agent
+ * needs. The health probe says whether a harness can run on it.
  */
 const KINDS: CredentialKind[] = [
   {
@@ -89,7 +74,7 @@ const KINDS: CredentialKind[] = [
   {
     id: 'github',
     label: 'GitHub',
-    // Not a harness: every box uses it, whichever agent is in the box.
+    // No harness runs on it. Every box uses it for git.
     harnesses: [],
     blurb:
       'What a box clones and pushes with. Without it, git and gh reach GitHub ' +
@@ -112,8 +97,14 @@ const KINDS: CredentialKind[] = [
   },
 ];
 
+/**
+ * Page with the deployment's credentials and the git identity of its boxes.
+ *
+ * A stored secret never comes back to the page. Only the egress proxy gets
+ * the real value, and a box holds a placeholder.
+ */
 export function Settings() {
-  /** Out to the box list, popped rather than pushed; see useUp. */
+  /** Leaves for the box list. */
   const up = useUp('/');
   const { harnesses } = useBoxes();
 
@@ -125,10 +116,8 @@ export function Settings() {
   /**
    * The login being followed, or null.
    *
-   * One at a time on the page, which is stricter than the API's one at a time
-   * per credential and is the same thing for a person: two device codes on
-   * one screen is two things to get wrong. Starting another cancels this one
-   * rather than leaving a container running for a flow nobody can see.
+   * The page follows one login at a time. The API allows one per credential.
+   * Starting another login cancels this one.
    */
   const [login, setLogin] = useState<{ id: CredentialId; loginId: string } | null>(null);
 
@@ -147,14 +136,14 @@ export function Settings() {
     void load();
   }, [load]);
 
-  /** Starts a login for one credential, taking down whatever was open. */
+  /** Starts a login for one credential and cancels the open one. */
   const beginLogin = async (id: CredentialId): Promise<void> => {
     const open = login;
     setLogin(null);
     setBusy(true);
     setError(null);
     try {
-      // Cancelled rather than abandoned: it holds a container of its own.
+      // Cancels the open login, because it holds a container of its own.
       if (open) await api.cancelLogin(open.id, open.loginId).catch(() => {});
       const { loginId } = await api.startLogin(id);
       setLogin({ id, loginId });
@@ -165,16 +154,17 @@ export function Settings() {
     }
   };
 
-  /**
-   * A login that stored something: the flow goes and the row it wrote is read
-   * back from the store, which is the only thing that knows what is in it.
-   */
+  /** Closes a login that stored a credential, and reloads the credentials. */
   const finishLogin = useCallback((): void => {
     setLogin(null);
     void load();
   }, [load]);
 
-  /** Runs one mutation and reloads, so the page never guesses at the result. */
+  /**
+   * Runs one mutation, then reloads the page data.
+   *
+   * @returns Whether the mutation succeeded.
+   */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     setError(null);
@@ -212,14 +202,8 @@ export function Settings() {
             key={kind.id}
             kind={kind}
             stored={credentials.find((c) => c.id === kind.id) ?? null}
-            // The harnesses that run on this credential, as the deployment
-            // names them, so the card can say what is not working rather than
-            // only that something is unset. Read off the health probe rather
-            // than written down here: the labels are the registry's.
             stalled={harnesses.filter((h) => kind.harnesses.includes(h.id) && !h.runnable)}
             busy={busy}
-            // The login this card is following, if any: one is open at a time
-            // across the page, and it belongs under the credential it is for.
             loginId={login?.id === kind.id ? login.loginId : null}
             onSave={(secret) => act(() => api.putCredential(kind.id, kind.method, secret))}
             onLogin={() => void beginLogin(kind.id)}
@@ -291,8 +275,7 @@ function CredentialCard({
   const save = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (busy || secret.trim() === '') return;
-    // Cleared whether or not the save worked: what was typed is a secret, and
-    // leaving it in the field is leaving it on the screen.
+    // Cleared even when the save fails, so the secret does not stay in the field.
     const typed = secret;
     setSecret('');
     await onSave(typed);
@@ -334,8 +317,6 @@ function CredentialCard({
         </Label>
         <Input
           id={`secret-${kind.id}`}
-          // A password field: what is typed here is never shown again, and a
-          // browser offering to remember it is offering the right thing.
           type="password"
           autoComplete="off"
           className="font-mono"
@@ -346,11 +327,7 @@ function CredentialCard({
         <Button type="submit" disabled={busy || secret.trim() === ''}>
           {stored ? 'Replace' : 'Save'}
         </Button>
-        {/* The other way in, for a credential that has an account behind it:
-            a subscription has no static form to paste, so the orchestrator
-            runs the harness's own CLI and this follows it. Beside the form
-            rather than instead of it — a deployment on an API key wants the
-            field, and one on a subscription wants this. */}
+        {/* A subscription has no secret to paste, so a login sits beside the form. */}
         {kind.canLogin && loginId === null ? (
           <Button
             type="button"
@@ -378,15 +355,20 @@ function CredentialCard({
   );
 }
 
-/** The one line under a credential's name: what is stored, and how it is doing. */
+/**
+ * Builds the status line under a credential's name.
+ *
+ * @param stored The stored credential, or null.
+ * @param stalled The harnesses that cannot run on it.
+ * @returns One line of text.
+ */
 function describe(stored: CredentialSummary | null, stalled: HarnessHealth[]): string {
   if (!stored) {
     return stalled.length === 0
       ? 'Not set.'
       : `Not set, so ${stalled.map((h) => h.label).join(' and ')} cannot run.`;
   }
-  // Past its own expiry, which is a date rather than the store's opinion of
-  // one: both are shown, and neither is said twice.
+  // The expiry date and the stored status can both say expired, so only one is shown.
   const expired = stored.expiresAt !== null && stored.expiresAt <= Date.now();
   const parts = [account(stored)];
   if (stored.status === 'expired' && !expired) parts.push('expired');
@@ -410,11 +392,11 @@ function describe(stored: CredentialSummary | null, stalled: HarnessHealth[]): s
 }
 
 /**
- * What a person recognises a credential by.
+ * Names a stored credential: the account of a login, or the last four
+ * characters of a pasted secret.
  *
- * A pasted secret is known by its last four characters, which is all anybody
- * can be shown of one. A login knows whose account it is, and saying "ends
- * someone@example.com" of an email address would be nonsense.
+ * @param stored The stored credential.
+ * @returns The label.
  */
 function account(stored: CredentialSummary): string {
   if (!stored.account) return 'Stored';
@@ -423,7 +405,7 @@ function account(stored: CredentialSummary): string {
     : `Ends ${stored.account}`;
 }
 
-/** Who a box commits as. Not a secret, and the only reason it lived in .env. */
+/** Card that edits the name and email every box commits as. */
 function GitIdentity({
   settings,
   busy,

@@ -59,22 +59,6 @@ import {
   type WorkspaceSpec,
 } from './workspace.ts';
 
-/**
- * The real orchestrator, driven in a browser over a fake Docker.
- *
- * Everything the dashboard talks to here is the shipped code: the real routes
- * over a real SQLite database, the real box, review and agent-set
- * services, and the real static handler serving the production bundle. What
- * is not real is what cannot be: the Docker daemon, git inside a container,
- * and the agent itself.
- *
- * The agent stays stubbed because there is nothing to talk to. A browser's
- * WebSocket reaches the stub gateway of stub-gateway.ts, which speaks the
- * agent half of ACP from canned scripts, and the REST routes that need an
- * adapter — minting a thread, killing background work — reach the stand-in
- * below instead of a spawned process.
- */
-
 /** The bearer every box's WebSocket upgrade carries in this suite. */
 const WS_TOKEN = 'e2e-ws-token-0123456789abcdef';
 
@@ -91,9 +75,8 @@ const OPENAI_KEY = 'sk-proj-a-key-for-the-tests-abcd';
 const LOGIN_DOCUMENT = "{\"tokens\": {\"access_token\": \"eyJhbGciOiAibm9uZSJ9.eyJleHAiOiA0MTAyNDQ0ODAwfQ.\", \"id_token\": \"eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJhZ2VudEBleGFtcGxlLmNvbSIsICJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOiB7ImVtYWlsIjogImFnZW50QGV4YW1wbGUuY29tIn19.\", \"refresh_token\": \"r\"}, \"last_refresh\": \"2026-09-12T10:00:00Z\"}";
 
 /**
- * What each adapter is said to have advertised, for a dialog that reads the
- * catalogue rather than asking an adapter: the modes and the settings the
- * real ones offer, in the adapter's own words.
+ * The modes and settings each adapter advertises, as the harness catalogue
+ * stores them. The dialogs read these without asking an adapter.
  */
 const CATALOG: Record<
   HarnessId,
@@ -173,7 +156,7 @@ const CATALOG: Record<
   },
 };
 
-/** Marks a request this harness made, so setup is not recorded as a test's. */
+/** Marks a request this harness made, so the recorded calls leave it out. */
 const SETUP_HEADER = 'x-boxes-e2e-setup';
 
 /** The box a test gets unless it asks for another. */
@@ -189,7 +172,9 @@ export interface ThreadSpec {
   id?: string;
   /** Which agent runs it. Claude unless a test says otherwise. */
   harness?: HarnessId;
+  /** The thread's title, or null for an untitled one. */
   title?: string | null;
+  /** Whether the thread is marked as done. */
   done?: boolean;
   /** Whether a prompt is open on this thread, as the database records it. */
   turnActive?: boolean;
@@ -199,35 +184,39 @@ export interface ThreadSpec {
   backgroundBusy?: boolean;
   /** Permission requests waiting on this thread. */
   pendingCount?: number;
+  /** When the thread was last active, in epoch milliseconds. */
   lastActiveAt?: number;
 }
 
 /** A box as a test wants to find it. */
 export interface BoxSpec {
+  /** The box id. Defaults to the id of {@link DEFAULT_BOX}. */
   id?: string;
+  /** The box name. Defaults to the name of {@link DEFAULT_BOX}. */
   name?: string;
+  /** The stored status. Defaults to running. */
   status?: BoxRow['status'];
   /** Whether the fake daemon has its container running. */
   containerRunning?: boolean;
+  /** The box's threads. Defaults to one thread with no options set. */
   threads?: ThreadSpec[];
   /**
-   * Whether the box is busy with work no conversation claims, which is what a
-   * box looks like after its adapter was respawned over a running build.
-   * Without it, the box is busy exactly when one of its threads is.
+   * Whether the box is busy with work that no thread claims, as after an
+   * adapter restart over a running build. Without it, the box is busy exactly
+   * when one of its threads is.
    */
   backgroundBusy?: boolean;
   /**
    * What a reading of the box finds running in it, as the detail reports it.
-   * Independent of the flag above, which is what the badge is drawn from: the
-   * two come apart whenever a task an adapter announced is not a process of
-   * its own.
+   * The badge reads `backgroundBusy` instead. The two differ when a task an
+   * adapter announced is not a process of its own.
    */
   boxWork?: BoxWork[];
   /** How many browsers the gateway has on this box. */
   attachedCount?: number;
   /** Whether the adapter advertises forking, which the list offers. */
   canFork?: boolean;
-  /** How big the workspace is made, as a sparse file nothing reads. */
+  /** The size of a sparse file put into the workspace, which nothing reads. */
   diskBytes?: number;
   /**
    * A box still backed by a workspace volume, which this process cannot
@@ -242,58 +231,60 @@ export interface DeploymentState {
    * The Claude credential this deployment holds, by the status the settings
    * page would show for it, or null where nobody has entered one.
    *
-   * Anything but `ok` is a harness the health probe reports as unrunnable,
-   * which is what the dashboard's warning is about.
+   * With anything but `ok`, the health probe reports Claude as unable to run,
+   * and the dashboard shows a warning.
    */
   claudeCredential: CredentialStatus | null;
   /** The OpenAI key, on the same terms. None unless a test gives it one. */
   openaiCredential: CredentialStatus | null;
   /**
-   * The harnesses whose adapters have answered here, and so have a catalogue
-   * for the dialogs to read. A harness not in it offers the agent choice
-   * alone, which is what a deployment that never ran an adapter shows.
+   * The harnesses that have a catalogue for the dialogs to read. For a harness
+   * without one, the dialogs offer only the choice of agent.
    */
   catalogued: HarnessId[];
   /**
-   * The cookie an authenticating reverse proxy in front of this deployment
-   * would be checking, or null for the loopback default that has none.
+   * The cookie an authenticating reverse proxy in front of the deployment
+   * checks, or null for no proxy.
    *
-   * Boxes has no auth of its own, so anything past a single-user machine is
-   * behind one (ARCHITECTURE.md, "One origin, one port"). Named here because
-   * that changes what the browser sees: a request the proxy does not
-   * recognize is bounced to a login page rather than answered, and not every
+   * A request without the cookie is redirected to a login page. Not every
    * request the page makes carries credentials.
    */
   requireCookie: string | null;
 }
 
-/**
- * The half of a Fastify request the hooks below read.
- *
- * Spelled out rather than imported: Fastify's own types are the
- * orchestrator's dependency, and a hook handler's parameters are not
- * inferrable from the instance alone.
- */
+/** The part of a Fastify request that the hooks below read. */
 interface HookRequest {
+  /** The HTTP method. */
   method: string;
+  /** The request URL, with its query string. */
   url: string;
+  /** The request headers, by lower-case name. */
   headers: Record<string, string | string[] | undefined>;
+  /** The parsed query string. */
   query: unknown;
+  /** The parsed body, or a buffer for a raw upload. */
   body: unknown;
 }
 
-/** The half of a Fastify reply the hooks below use. */
+/** The part of a Fastify reply that the hooks below use. */
 interface HookReply {
+  /** Sets the status code. */
   code(status: number): HookReply;
+  /** Sets one response header. */
   header(name: string, value: string): HookReply;
+  /** Sets the content type. */
   type(value: string): HookReply;
+  /** Sends the reply. */
   send(payload?: unknown): HookReply;
 }
 
 /** One review mutation the browser made, as the tests read them back. */
 export interface ReviewCall {
+  /** The mutation, such as `PUT` or `DELETE review`. */
   method: string;
+  /** The box the mutation was for. */
   boxId: string;
+  /** The request body, or the subject of a delete. */
   body: unknown;
 }
 
@@ -301,16 +292,21 @@ export interface ReviewCall {
 export interface AgentSetSpec {
   /** Named rather than generated, so a test can link straight at it. */
   id: string;
+  /** The set's display name. */
   name: string;
+  /** The set's AGENTS.md. Empty when absent. */
   agentsMd?: string;
+  /** The skills and slash commands the set holds. */
   items?: Array<{ kind: 'skill' | 'command'; name: string; content: string }>;
 }
 
 /** A running orchestrator, with the handles a test drives it by. */
 export interface TestOrchestrator {
+  /** The base URL the orchestrator listens on. */
   url: string;
   /** The ACP gateway attached to the same server, on the same origin. */
   gateway: StubGateway;
+  /** What the deployment reports about itself. Setting a field changes it. */
   state: DeploymentState;
   /** Files uploaded to the attachments endpoint, in order. */
   attachmentUploads: Array<{ boxId: string; name: string; bytes: Buffer }>;
@@ -345,7 +341,7 @@ export interface TestOrchestrator {
   write(boxId: string, path: string, content: string): void;
   /** Reads one file of a workspace back. */
   read(boxId: string, path: string): string;
-  /** Whether the box has a REVIEW.md, which is what a review is. */
+  /** Whether the box's workspace has a REVIEW.md. */
   hasReview(boxId: string): boolean;
   /** Writes one comment through the real API, as a previous visit would have. */
   comment(boxId: string, path: string, line: number, text: string): Promise<void>;
@@ -363,6 +359,7 @@ export interface TestOrchestrator {
   credentials(): Promise<CredentialSummary[]>;
   /** The deployment's plain settings, as the API reports them. */
   settings(): Promise<Settings>;
+  /** Stops the server and removes everything the harness installed or created. */
   close(): Promise<void>;
 }
 
@@ -374,6 +371,7 @@ export interface TestOrchestrator {
  * printed and reads what was typed into it.
  */
 export interface TestLogin {
+  /** The credential the login is for. */
   id: CredentialId;
   /** What the flow asked to run, which says which CLI it is driving. */
   spec: LoginExecSpec;
@@ -388,18 +386,12 @@ export interface TestLogin {
 }
 
 /**
- * The adapter side of a box, which no test has a real agent for.
+ * A stand-in for a box's upstream connection, which in a deployment spawns an
+ * ACP adapter inside the container.
  *
- * The routes that mint a thread, switch one or kill what a thread left
- * running all go through the box's upstream connection, and a real one
- * spawns an ACP adapter inside the container. This stands in for it: thread
- * ids are minted on the stub gateway, so the conversation a browser opens
- * afterwards is the one the gateway holds and a fork carries what its source
- * had said.
- *
- * The rest is what a box list reads off a live gateway — who is talking,
- * what is still running, how many browsers are attached — which lives in
- * memory beside the adapter and nowhere else.
+ * It mints thread ids on the stub gateway, so the thread a browser opens next
+ * is the one the gateway holds. Its fields hold what the box list reads off a
+ * live gateway.
  */
 class TestUpstream {
   /** Browsers the gateway has on this box, as the list reports it. */
@@ -476,19 +468,19 @@ class TestUpstream {
     return 1;
   }
 
-  /** Signals one process, after which the box reads as no longer busy. */
+  /** Reports one process signalled, and clears what the box has running. */
   async stopBoxWork(): Promise<number> {
     this.backgroundActive = false;
     this.boxWork = [];
     return 1;
   }
 
-  /** Ends the connection. Nothing is spawned here, so nothing is torn down. */
+  /** Does nothing, because the stand-in spawns nothing. */
   stop(): void {
     return undefined;
   }
 
-  /** Forgets the box, on the same terms as {@link stop}. */
+  /** Does nothing, like {@link stop}. */
   close(): void {
     return undefined;
   }
@@ -511,28 +503,27 @@ class TestUpstream {
 }
 
 /**
- * The manager's own map of upstream connections.
+ * The manager's private map of upstream connections.
  *
- * Reached into rather than replaced: the manager creates one on first use and
- * reads what a browser sees off the entry it holds, so a stand-in has to be
- * the entry rather than something handed to a caller.
+ * The manager reads what a browser sees off the entry in this map, so a
+ * stand-in has to be put there.
  */
 function upstreamsOf(manager: BoxManager): Map<string, unknown> {
   return (manager as unknown as { upstreams: Map<string, unknown> }).upstreams;
 }
 
 /**
- * What a fixture conversation is called.
+ * The id of a fixture thread.
  *
- * Short on the box the suite drives, so a route naming a thread can be
- * written out in a test; carrying the box on every other one, because a
- * thread id is unique across the deployment rather than within a box.
+ * On {@link DEFAULT_BOX} it is short, so a test can write out a route to it.
+ * On any other box it carries the box id, because thread ids are unique
+ * across the deployment.
  */
 function threadName(boxId: string, ordinal: number): string {
   return boxId === DEFAULT_BOX.id ? `th${ordinal}` : `${boxId}-th${ordinal}`;
 }
 
-/** Inserts one conversation. */
+/** Inserts one thread row and returns it. */
 function insertThread(
   db: Db,
   boxId: string,
@@ -598,10 +589,7 @@ function writeFile(root: string, path: string, content: string): void {
   writeFileSync(full, content);
 }
 
-/**
- * Adds one box: its row, its directories, its conversations, its
- * container, and the stand-in adapter the routes reach through.
- */
+/** Adds one box with its row, directories, threads, container and stand-in adapter. */
 function createBox(
   app: Orchestrator,
   db: Db,
@@ -646,8 +634,7 @@ function createBox(
   upstream.canFork = spec.canFork ?? true;
   const threads = spec.threads ?? [{}];
   threads.forEach((thread, at) => {
-    // The stub gateway's own first conversation is acp-thread-1 and it mints
-    // the rest in order, so a fixture thread carries the id it would have.
+    // The stub gateway starts with acp-thread-1 and mints the rest in order.
     const acpSessionId = `acp-thread-${at + 1}`;
     insertThread(db, id, {
       id: thread.id ?? threadName(id, at + 1),
@@ -680,9 +667,8 @@ function createBox(
 /**
  * Lists boxes until every one that asked for a size reports one.
  *
- * A workspace is measured off the request path on purpose — a list must never
- * wait for a disk walk — so the first answer carries no size at all. Asking
- * here rather than in the browser keeps the first thing a test sees complete.
+ * The orchestrator measures disks in the background, so the first list has no
+ * sizes. Waiting here means the first page a test opens shows them.
  */
 async function measureBoxes(app: Orchestrator, specs: BoxSpec[]): Promise<void> {
   const wanted = specs.filter((spec) => spec.diskBytes !== undefined).length;
@@ -706,19 +692,10 @@ function reviewCallOf(method: string, endpoint: string): string | null {
 }
 
 /**
- * Wires the two things a deployment has that the orchestrator does not: the
- * authenticating proxy the README puts in front of it, and a record of what
- * the browser asked for.
- *
- * Both are hooks rather than routes, so every request still reaches the real
- * handler and nothing about the API is answered here.
- */
-/**
  * Wires the real terminal endpoint onto the harness's server.
  *
- * The check is the orchestrator's own, called the way index.ts calls it, so a
- * handshake this suite accepts is one a deployment accepts too. Everything
- * past it is the orchestrator's own code, over the fake daemon's pty.
+ * It runs the orchestrator's own handshake check and terminal session, over
+ * the fake daemon's pty.
  */
 function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
   const wss = new WebSocketServer({
@@ -741,6 +718,12 @@ function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
   });
 }
 
+/**
+ * Adds hooks that stand in for an authenticating proxy and record what the
+ * browser asked for.
+ *
+ * Every request the proxy lets through still reaches the real handler.
+ */
 function installHooks(
   app: Orchestrator,
   state: DeploymentState,
@@ -757,8 +740,8 @@ function installHooks(
   app.app.addHook('onRequest', async (req: HookRequest, reply: HookReply) => {
     if (!state.requireCookie) return;
     if ((req.headers.cookie ?? '').includes(`${state.requireCookie}=`)) return;
-    // What oauth2-proxy, Authelia and a Caddy forward_auth all do: anything
-    // without the cookie is redirected to a login page that answers 200.
+    // As oauth2-proxy, Authelia and Caddy forward_auth do: redirect to a login
+    // page that answers 200.
     if ((req.url.split('?')[0] ?? '') === '/login') {
       return reply.type('text/html; charset=utf-8').send('<!doctype html><title>Sign in</title>');
     }
@@ -812,8 +795,7 @@ function installHooks(
     );
     const named = review ? reviewCallOf(req.method, review[2] ?? '') : null;
     if (review && named) {
-      // A delete carries its subject in the query rather than in a body,
-      // which is the shape the tests read back.
+      // A delete carries its subject in the query.
       calls.reviewCalls.push({
         method: named,
         boxId: review[1]!,
@@ -824,12 +806,11 @@ function installHooks(
 }
 
 /**
- * Stands in for the containers a login runs in.
+ * Stands in for the containers a login runs in, and returns the logins started.
  *
- * Each start is one entry the test drives: it prints what the CLI would have
- * and ends it with a status, and the flow reads that the way it reads a real
- * one. A `cat` of the file Codex wrote answers with the document under
- * `loginDocument`, so a finished Codex login stores an account.
+ * Each start adds one entry. The test prints the CLI's output through it and
+ * ends it with a status. A `cat` of the file Codex wrote answers with
+ * {@link LOGIN_DOCUMENT}, so a finished Codex login stores an account.
  */
 function installLoginRuntime(app: Orchestrator): TestLogin[] {
   const logins: TestLogin[] = [];
@@ -898,44 +879,35 @@ function deleteSubject(query: unknown): unknown {
 }
 
 /**
- * Starts the orchestrator on an ephemeral port, with the boxes given.
+ * Starts the real orchestrator on an ephemeral port, with the boxes given.
  *
- * `gatewayScript` is the agent's half: what the stub gateway answers prompts
- * with, which modes it advertises, and what it asks permission for.
+ * Only the Docker daemon, git inside a container and the agent are stand-ins.
+ * `gatewayScript` sets what the stub gateway answers prompts with, which
+ * modes it advertises and what it asks permission for.
  */
 export async function startOrchestrator(
   boxes: BoxSpec[] = [{}],
   gatewayScript: Partial<GatewayScript> = {},
 ): Promise<TestOrchestrator> {
   const dataDir = mkdtempSync(join(tmpdir(), 'boxes-e2e-'));
-  // Every response is logged at info, which would bury a test run; what goes
-  // wrong in the orchestrator is still reported.
+  // The orchestrator logs every response at info level.
   setLogLevel('error');
   const cfg = loadConfig({
     ...process.env,
     DATA_DIR: dataDir,
-    // The uid this process already is, so nothing it writes has to be given
-    // away and every chown is a no-op.
+    // This process's own ids, so every chown is a no-op.
     BOX_UID: String(process.getuid?.() ?? 1020),
     BOX_GID: String(process.getgid?.() ?? 1020),
   });
   setConfigForTests(cfg);
 
-  // The fake daemon stands the process in a container too, so the
-  // orchestrator's own image is read the way a deployment reads it.
   const docker = installFakeDocker(cfg.BOX_IMAGE, FAKE_SELF_CONTAINER);
   const db = openDb(dataDir);
   // The bundle this run just built, rather than the copy a built image holds.
   const app = buildApp(cfg, db, { bundleDir: resolve(import.meta.dirname, '../dist') });
   installLocalGit((boxId) => ws.workspacePath(dataDir, boxId));
 
-  /**
-   * The stand-in adapter for a box, made on first use.
-   *
-   * The manager creates a real one the same way, so this is put in its map
-   * rather than handed out: what the box list reports about a live
-   * gateway is read off the entry it holds.
-   */
+  /** The stand-in adapter for a box, made on first use and put in the manager's map. */
   const upstreamFor = (boxId: string): TestUpstream => {
     const held = upstreamsOf(app.manager).get(boxId);
     if (held) return held as TestUpstream;
@@ -951,8 +923,7 @@ export async function startOrchestrator(
     secret: string,
     status: CredentialStatus | null,
   ): void => {
-    // Through the real store, because that is the only place a credential
-    // lives now: a test changing this is somebody at the settings page.
+    // Credentials live only in the real store, as if entered on the settings page.
     if (status === null) {
       app.credentials.remove(id);
       return;
@@ -995,10 +966,8 @@ export async function startOrchestrator(
     reviewCalls: [] as ReviewCall[],
   };
 
-  // Same origin as the dashboard, which is how the deployment serves it and
-  // why the browser can derive the WebSocket URL from its own location. The
-  // real gateway is wired onto this same server in index.ts, and this takes
-  // that place.
+  // Same origin as the dashboard, as in a deployment, so the browser derives
+  // the WebSocket URL from its own location.
   const gateway = attachStubGateway(
     app.app.server,
     {
@@ -1015,37 +984,27 @@ export async function startOrchestrator(
         const row = threadId ? getThread(db, threadId) : latestThread(db, boxId);
         if (row) {
           if (row.box_id !== boxId) return null;
-          // A thread a box was created with has a row and no conversation
-          // yet: the real gateway mints one as a browser pins to it, and so
-          // does the stand-in.
+          // A fixture thread may have no conversation yet. The real gateway
+          // mints one when a browser pins to it, and so does the stand-in.
           return row.acp_session_id ?? upstreamFor(boxId).adoptThread(row);
         }
         if (threadId !== null) return null;
-        // A box nobody has opened has no conversation yet. The real gateway
-        // mints one as a browser pins to it, which is what makes a box
-        // just created usable, so the stand-in adapter does the same.
+        // A box with no threads gets its first one here, as the real gateway does.
         if (!boxRow(db, boxId)) return null;
         return upstreamFor(boxId).mintFirstThread();
       },
     },
   );
 
-  // The terminal is not stood in for: it is real orchestrator code down to
-  // the pty, and the fake daemon already answers with one. Only the upgrade
-  // has to be wired here, because index.ts is what does that in a deployment
-  // and this harness takes its place.
+  // The orchestrator's entry point wires the upgrade in a deployment.
   attachTerminalEndpoint(app, db);
 
   installHooks(app, state, calls);
   const logins = installLoginRuntime(app);
 
-  // As boot does, and for the same reason: a box's environment is built
-  // from the egress policy, so creating one before it exists fails.
+  // As at boot: creating a box fails until the egress policy exists.
   await app.egress.prepare();
-  // A deployment a test finds working, which is what all but the warning
-  // tests want: a credential for each agent, and Claude's catalogue for the
-  // dialogs. The settings page is where the credentials come from in a real
-  // one.
+  // A working deployment: a credential for each agent, and Claude's catalogue.
   state.claudeCredential = 'ok';
   state.openaiCredential = 'ok';
   state.catalogued = ['claude'];
@@ -1053,7 +1012,7 @@ export async function startOrchestrator(
   await app.app.listen({ host: '127.0.0.1', port: 0 });
   const { port } = app.app.server.address() as AddressInfo;
 
-  /** A request this harness makes, which is never recorded as a test's. */
+  /** Sends a request as the harness, which the recorded calls leave out. */
   const setup = (
     method: 'GET' | 'PUT' | 'PATCH',
     path: string,

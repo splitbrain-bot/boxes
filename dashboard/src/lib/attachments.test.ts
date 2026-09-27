@@ -8,15 +8,6 @@ import {
   parseEnvelope,
 } from './attachments.ts';
 
-/**
- * The envelope: the block of prompt text that says what the user attached.
- *
- * It is read by two things that must agree — the model, and this dashboard
- * drawing the chips back out of it — and it is the only record of an
- * attachment that survives a reconnect, because it goes through the
- * adapter's transcript as plain text. So what these cover is the round trip.
- */
-
 const ENTRY = {
   path: '.boxes/attachments/shot.png',
   name: 'shot.png',
@@ -60,8 +51,7 @@ test('ordinary prose is not an envelope', () => {
 });
 
 test('an envelope this build cannot read is left alone as text', () => {
-  // A later build's extra field, say. Showing the model's own instructions is
-  // a much better failure than dropping a row the user is looking for.
+  // A later build's extra field, for example.
   const unknown = '<attachments>\n- a.png (image/png, 1 B, 20 pages)\n</attachments>';
   assert.equal(parseEnvelope(unknown), null);
 });
@@ -82,9 +72,8 @@ test('an attachment is fetched back by name, from its box', () => {
 test('only the types the endpoint serves as themselves are shown as pictures', () => {
   assert.equal(isThumbnailable('image/png'), true);
   assert.equal(isThumbnailable('IMAGE/JPEG'), true);
-  // Including SVG: it is served as an SVG, inert, so a diagram is a diagram.
+  // The endpoint serves SVG inline under a sandboxing CSP.
   assert.equal(isThumbnailable('image/svg+xml'), true);
-  // Served as a download, so an <img> at it would show a broken picture —
-  // this one stays a chip.
+  // A PDF is not an image, so it stays a chip.
   assert.equal(isThumbnailable('application/pdf'), false);
 });

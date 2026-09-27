@@ -4,12 +4,10 @@ import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { CODEX_LOGIN_OFFERED } from '../src/lib/harness.ts';
 
 /**
- * The settings page in a real browser.
+ * Browser tests for the settings page.
  *
- * What is worth proving here is the one-way rule: a secret goes in and what
- * comes back is four characters and a status, with the value itself never
- * reaching the page again. The rest is a round trip — what is saved is what
- * the next load shows.
+ * A secret is write-only: the page gets back its last four characters and a
+ * status, never the value.
  */
 
 let stub: TestOrchestrator;
@@ -52,14 +50,12 @@ test('a pasted credential is stored and comes back as its last four characters',
     await page.getByRole('button', { name: 'Save' }).first().click();
 
     await expect.poll(() => page.getByText(/Ends 9876/).isVisible()).toBe(true);
-    // The secret is write-only: the field is cleared, and nothing on the page
-    // carries the value that was typed.
+    // The field is cleared, and nothing on the page carries the typed value.
     await expect.poll(() => page.getByLabel('Claude secret').inputValue()).toBe('');
     expect(await page.content()).not.toContain('sk-ant-oat01-pastedtoken9876');
-    // Stored as the deployment sees it, without the secret.
     expect((await stub.credentials()).find((c) => c.id === 'claude')?.account).toBe('9876');
 
-    // And the warning the box list was showing goes with it.
+    // And the box list no longer warns about a missing credential.
     const list = await openPage(stub.url, '/');
     try {
       await expect.poll(() => list.page.getByText('refactor auth').isVisible()).toBe(true);
@@ -98,14 +94,14 @@ test('the git identity round-trips through the deployment', async () => {
     await page.getByLabel('Email').fill('bot@example.com');
     await page.getByRole('button', { name: 'Save identity' }).click();
 
-    // The button says so once there is nothing left to save, which is the
-    // only confirmation this page gives.
+    // The button reads Saved once nothing is left to save. The page gives no
+    // other confirmation.
     await expect.poll(() => page.getByRole('button', { name: 'Saved' }).isVisible()).toBe(true);
     const saved = await stub.settings();
     expect(saved.gitName).toBe('Release bot');
     expect(saved.gitEmail).toBe('bot@example.com');
 
-    // And it is what the next load shows, rather than only what this one holds.
+    // And the next load shows it.
     const again = await openPage(stub.url, '/settings');
     try {
       await expect.poll(() => again.page.getByLabel('Name').inputValue()).toBe('Release bot');
@@ -129,22 +125,14 @@ test('the box list links to the settings page', async () => {
   }
 });
 
-/**
- * The two login flows, over the real login manager and a scripted CLI.
- *
- * What is worth proving is that the page follows a flow it does not drive:
- * the orchestrator runs the harness's own CLI in a container, and all the
- * browser has is a state per poll. Codex prints a URL and a code and finishes
- * by itself; Claude prints a URL and blocks until the code is pasted back.
- */
+// --- logins -----------------------------------------------------------------
+// The orchestrator runs the harness's CLI, scripted here, and the page follows
+// the flow by polling.
 
 /**
- * The Codex login's own shape: a URL and a one-time code, finishing by
- * itself, where Claude's blocks for a code pasted back.
+ * Runs a test only while the settings page offers the Codex login.
  *
- * Only these drive it, and the page does not offer it while a subscription
- * cannot be handed to a box. They come back when it does rather than being
- * deleted and written again.
+ * The Codex CLI prints a URL and a one-time code, and finishes by itself.
  */
 const codexLogin = test.skipIf(!CODEX_LOGIN_OFFERED);
 
@@ -155,8 +143,7 @@ codexLogin('a Codex login shows the URL and the code, and the account with it', 
     await expect.poll(() => stub.logins.length).toBe(1);
     stub.logins[0]!.print('Open https://auth.openai.com/codex/device and enter WDJB-MJHT\n');
 
-    // What the CLI printed: a link to open somewhere else — often on another
-    // device — and the one-time code to type into it.
+    // A link to open, often on another device, and the code to enter there.
     await expect
       .poll(() => page.getByText('https://auth.openai.com/codex/device').isVisible())
       .toBe(true);
@@ -165,8 +152,8 @@ codexLogin('a Codex login shows the URL and the code, and the account with it', 
       .toBe(true);
     expect(stub.logins.map((l) => l.id)).toEqual(['openai']);
 
-    // The CLI finishes on its own, and the page notices on its next poll:
-    // the flow goes, and the row it wrote takes its place.
+    // The CLI finishes by itself. On its next poll the page swaps the flow for
+    // the stored account.
     stub.logins[0]!.exit(0);
     await expect.poll(() => page.getByText(/Signed in as agent@example.com/).isVisible())
       .toBe(true);
@@ -198,14 +185,11 @@ test('a Claude login takes the code back and stores what the CLI printed', async
     await field.fill('AB12-CD34');
     await page.getByRole('button', { name: 'Send code' }).click();
 
-    // Which is what the CLI was blocked on: it goes to the login, and the
-    // flow carries on from there.
-    // A carriage return: the Enter key's own byte, which is what the raw
-    // terminal the CLI's UI reads needs to see.
+    // The Claude CLI blocks until the code arrives. It ends in a carriage
+    // return, the byte Enter sends to a raw terminal.
     await expect.poll(() => cli.input).toBe('AB12-CD34\r');
     cli.print('\nYour token: sk-ant-oat01-minted-by-the-cli-9f2c\n');
-    // A setup-token names no account, so the credential is known by its last
-    // four characters like any other paste — and never by its value.
+    // A setup-token names no account, so the page shows its last four characters.
     await expect.poll(() => page.getByText(/Ends 9f2c/).isVisible()).toBe(true);
     expect(await page.content()).not.toContain('AB12-CD34');
     expect(await page.content()).not.toContain('minted-by-the-cli');
@@ -222,8 +206,7 @@ test('a login that fails says why, and can be started again', async () => {
   try {
     await page.getByRole('button', { name: 'Log in to Claude' }).click();
     await expect.poll(() => stub.logins.length).toBe(1);
-    // The CLI gives up before it prints a token, which is what a login that
-    // timed out or was refused looks like from here.
+    // The CLI ends before it prints a token, as on a timeout or a refusal.
     stub.logins[0]!.print('Visit: https://claude.ai/oauth/code\nSomething went wrong.\n');
     stub.logins[0]!.exit(1);
     await expect
@@ -250,8 +233,7 @@ codexLogin('a login can be given up on, and the container goes with it', async (
 
     await page.getByRole('button', { name: 'Cancel' }).click();
 
-    // Said to the orchestrator rather than only closed here: the login is
-    // holding a container of its own.
+    // The orchestrator removes the login's container.
     await expect.poll(() => stub.logins[0]?.cancelled).toBe(true);
     await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(false);
     expect(errors).toEqual([]);
@@ -265,16 +247,14 @@ for (const scheme of ['light', 'dark'] as const) {
     stub.state.claudeCredential = null;
     const { page, errors, close } = await openPage(stub.url, '/settings', scheme);
     try {
-      // The flow that shows a code, and the flow that asks for one: the two
-      // shapes a login takes, both under the credential they belong to.
+      // The flow that shows a code, then the flow that asks for one.
       await page.getByRole('button', { name: 'Log in to OpenAI' }).click();
       await expect.poll(() => stub.logins.length).toBe(1);
       stub.logins[0]!.print('Open https://auth.openai.com/codex/device and enter WDJB-MJHT\n');
       await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
       await shoot(page, `settings-login-${scheme}`);
 
-      // Starting another takes the first down, which is the one-at-a-time
-      // rule seen from the page.
+      // Only one login runs at a time, so starting another ends the first.
       await page.getByRole('button', { name: 'Log in to Claude' }).click();
       await expect.poll(() => stub.logins.length).toBe(2);
       stub.logins[1]!.print('Visit: https://claude.ai/oauth/code\nPaste code here if prompted > ');

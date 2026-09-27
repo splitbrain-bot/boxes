@@ -7,18 +7,12 @@ import { commandsRunning } from '@/lib/activity';
 import { formatDuration } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
 
-/** How often the ages are re-read. A minute's work is not timed to the second. */
+/** How often the ages are re-read, in milliseconds. */
 const TICK_MS = 15_000;
 
 /**
- * What to call a task whose `kind` says something the command does not.
- *
- * A shell task's name *is* its command line, so a word in front of it would
- * only repeat what the row already shows. The other three are descriptions of
- * work rather than commands — a workflow's name says what it is doing, not
- * what it ran — and there the kind is the one thing that says how it got
- * there. A kind this build has not heard of is shown as the adapter spelled
- * it, which is better than dropping it.
+ * Row prefixes for the task kinds whose name is a description, not a command
+ * line. A shell task gets none, because its name is its command line.
  */
 const KINDS: Record<string, string> = {
   workflow: 'Workflow',
@@ -26,13 +20,24 @@ const KINDS: Record<string, string> = {
   task: 'Task',
 };
 
-/** The word this row is prefixed with, or null for a plain command. */
+/**
+ * Returns the prefix word for a row.
+ *
+ * @param kind The task kind from the adapter.
+ * @returns The prefix, the kind as the adapter spelled it for an unknown kind,
+ *   or null for a shell command.
+ */
 function kindLabel(kind: string): string | null {
   if (kind === '' || kind === 'shell') return null;
   return KINDS[kind] ?? kind;
 }
 
-/** Now, roughly, re-read while there is something whose age is being shown. */
+/**
+ * Returns the current time, re-read every {@link TICK_MS} while active.
+ *
+ * @param active Whether an age is being shown.
+ * @returns The time in epoch milliseconds.
+ */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -45,19 +50,11 @@ function useNow(active: boolean): number {
 }
 
 /**
- * What this thread has left running, above the composer, for as long as it is
- * running.
+ * Bar above the composer that lists the background work of this thread while
+ * it runs.
  *
- * It covers the one state nothing else expresses: the agent has finished, the
- * thread is quiet, the composer is free, and a monitor is watching a log or a
- * build has twenty minutes left. Without it such a thread looks finished, and
- * the only evidence is an old line where the agent promised to report back.
- *
- * This thread's work and nobody else's: what is listed is what runs under
- * this conversation's own agent process.
- *
- * Quiet, at the weight of the tool rows, because it is a standing fact about
- * the box rather than a thing that just happened.
+ * Without it, a thread with a quiet agent and a running monitor or build
+ * looks finished. It renders nothing when no work runs.
  */
 export function BackgroundBar({
   processes,
@@ -66,15 +63,11 @@ export function BackgroundBar({
   /** What this conversation is running, as the gateway last read it. */
   processes: readonly BackgroundProcess[];
   /**
-   * Kills it: one process and the tree under it, or everything this thread is
-   * running when given no id.
+   * Kills one process and its children, or everything this thread runs when
+   * given no id. Absent hides the stop buttons.
    *
-   * A kill rather than an interrupt. The composer's own stop sends
-   * `session/cancel`, which ends a turn and tears down the subagents it was
-   * being held open for — and does nothing at all to a command still running,
-   * because that is a child of the agent's process that outlives the turn by
-   * design. This bar borrowed that button once and so offered a stop that
-   * stopped nothing.
+   * A kill, because `session/cancel` ends the turn but leaves a running
+   * command alive.
    */
   onStop?: (processId?: string) => void;
 }) {
@@ -89,10 +82,8 @@ export function BackgroundBar({
     onStop(confirming === 'all' ? undefined : confirming.id);
   };
 
-  // What a stop can reach. Both adapters send `canStop: true` for everything
-  // they announce today, but the flag is theirs to set and a task that says it
-  // cannot be stopped gets no button rather than one that does nothing — and
-  // a bar of nothing but such tasks loses its stop-all too.
+  // A task that says it cannot be stopped gets no button. A bar without a
+  // stoppable task gets no stop-all either.
   const stoppable = processes.filter((process) => process.stoppable);
 
   return (
@@ -140,14 +131,11 @@ export function BackgroundBar({
               return (
                 <li key={process.id} className="flex items-baseline gap-2">
                   {kind ? <span className="shrink-0 opacity-70">{kind}</span> : null}
-                  {/* Monospaced where the name is a command line and not where
-                      it is a sentence about what something is doing. */}
+                  {/* Monospaced only for a command line. */}
                   <span className={cn('min-w-0 flex-1 truncate', kind === null && 'font-mono')}>
                     {process.command}
                   </span>
-                  {/* Since it started, not since it last said anything: a
-                      command that has printed nothing for an hour is the one
-                      this bar is for. */}
+                  {/* Time since the start, not since the last output. */}
                   <span className="shrink-0 tabular-nums opacity-80">
                     {formatDuration(Math.max(now - process.startedAt, 0))}
                   </span>

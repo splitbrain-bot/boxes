@@ -17,16 +17,9 @@ import {
 } from './tree.ts';
 
 /**
- * The directory listing a review browses.
- *
- * One directory at a time: `readDir` is the one function here that touches the
- * filesystem, and `dirEntries` is pure and merges what it found with the two
- * maps a review holds. What git there is here is repository discovery, driven
- * through a runner that starts git on this machine over the test's own
- * repositories rather than in a box container.
+ * A runner that starts git on this machine, in the directory the target names,
+ * for repository discovery over repositories the tests build themselves.
  */
-
-/** A runner that starts git here, in the directory the target names. */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
     const stdout = execFileSync(argv[0]!, argv.slice(1), {
@@ -72,8 +65,6 @@ describe('listedFile', () => {
   });
 
   test('metadata and the review file are not', () => {
-    // The same rule the listing applies, asked of one path — which is what the
-    // file endpoint serves by, so it offers exactly what a directory offered.
     for (const path of ['.git/config', 'repo/.git/HEAD', '.boxes/attached.txt']) {
       assert.equal(listedFile(path), false, path);
     }
@@ -119,8 +110,6 @@ describe('readDir', () => {
       { name: 'a.txt', isDir: false },
       { name: 'src', isDir: true },
     ]);
-    // Opening a folder is what reads it, so a dependency tree beside the code
-    // costs nothing until somebody opens it.
     assert.deepEqual(readDir(dir, 'src').toSorted((a, b) => (a.name < b.name ? -1 : 1)), [
       { name: 'main.ts', isDir: false },
       { name: 'util', isDir: true },
@@ -135,8 +124,7 @@ describe('readDir', () => {
     file('.boxes/attached.txt');
     file('logo.png');
     file('tool.exe');
-    // Out here no ignore file says what is noise, so every file a person can
-    // read shows.
+    // No ignore file applies, so dependency and build output shows too.
     assert.deepEqual(named(readDir(dir, '').map(asEntry)).toSorted(), [
       'd:dist',
       'd:node_modules',
@@ -280,8 +268,8 @@ describe('dirEntries', () => {
   });
 
   test('a file with a status but no entry is not invented', () => {
-    // One that went between git's answer and the directory read, say: only a
-    // deletion is worth putting back.
+    // For example a file removed between git's answer and the directory read.
+    // Only a deletion is added back.
     assert.deepEqual(dirEntries('', [], { 'logo.png': 'modified' }, new Map(), noRepos()), []);
   });
 });

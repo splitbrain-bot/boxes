@@ -1,27 +1,16 @@
 # Boxes box image: one long-lived container per box.
-# PID 1 only holds the container open; the ACP adapter runs as a gateway-owned
+# PID 1 only holds the container open. The gateway runs the ACP adapter as a
 # docker exec, so browser churn never restarts it.
 #
-# Ubuntu, and Node from NodeSource rather than from the official node image,
-# because those are two independent choices and this image wants both current.
-# The OS is picked for its language toolchains, which are newer than Debian
-# stable's. Node is picked for the two npm globals the agent itself runs. The
-# official node image would tie the first choice to the second.
+# Ubuntu for its current language toolchains, and Node from NodeSource, so
+# each can stay current on its own.
 
-# Nix, fetched as one statically linked binary from the official binary
-# cache. The installer's own layout -- a closure under /nix -- is no use here,
-# because /nix is a directory of each box's own, bound in over whatever the
-# image holds at that path. A static nix lives in /usr/local/bin like every
-# other tool on the image, and follows the image rather than the box.
+# Nix as one statically linked binary from the official binary cache. /nix is
+# a per-box bind, so the binary lives in /usr/local/bin and follows the image.
 #
-# The build stage is a Nix image, because a store path is what the cache
-# serves and `nix copy` is what verifies it: the signature, against the
-# cache's key the image already trusts, is what pins the binary to the path
-# named here. The path is nixpkgs' nixStatic, one per architecture; a bump
-# is a new pair of paths and the version the check at the end expects.
-#
-# Always on the build platform: copying a store path runs nothing in it, so
-# an arm64 binary is fetched without emulating arm64.
+# nix copy checks the cache's signature for the pinned store path. A bump
+# changes both paths and NIX_VERSION below. The stage runs on the build
+# platform, because copying a store path executes nothing.
 FROM --platform=$BUILDPLATFORM nixos/nix:2.35.2 AS nix-static
 ARG TARGETARCH
 ARG NIX_STATIC_AMD64=/nix/store/vx0h5sdb0r7qgsm9fp653f0fi2wn5v7k-nix-static-x86_64-unknown-linux-musl-2.34.8
@@ -36,27 +25,19 @@ RUN case "$TARGETARCH" in \
 
 FROM ubuntu:26.04
 
-# What lets the orchestrator recognise a copy of this image after `:latest`
-# has moved off it. A pull leaves the image it replaced untagged and on disk,
-# and nothing about an untagged image otherwise says whose it was — so without
-# this the only way to reclaim the space is `docker image prune`, which is not
-# an operation a tool holding the host's Docker socket has any business
-# performing on images it did not fetch.
+# Marks copies of this image, so the orchestrator can find and remove an
+# untagged copy after a pull replaced it.
 LABEL boxes.image=box
 
-# What the repositories below need before they can be added. apt reaches the
-# Ubuntu archive over plain http, but curl needs a trust store.
+# curl needs a trust store to add the repositories below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
  && rm -rf /var/lib/apt/lists/*
 
-# Node from NodeSource, because Ubuntu's own is frozen at whatever the release
-# shipped for the whole of its life, and the runtime the agent itself depends
-# on should not be stuck there. The signing
-# key is ASCII-armoured, so a .asc name is all `signed-by` needs and there is
-# no gnupg to install for a dearmor. `nodistro` is NodeSource's one
-# distribution-independent suite, so nothing here names a codename.
+# Node from NodeSource, because Ubuntu's own stays at the release's version.
+# The key is ASCII-armoured, so signed-by takes it without gnupg. nodistro is
+# NodeSource's suite for every distribution.
 ARG NODE_MAJOR=26
 RUN install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -67,14 +48,12 @@ RUN install -d -m 0755 /etc/apt/keyrings \
  && apt-get update && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-# procps is not only for a person in a terminal: Boxes reads the box's own
-# process table to find what a conversation has left running in it, and the
-# stop button beside that list kills by a pid only `ps` in here can give it.
+# Boxes reads the box's process table with ps to find what a thread left
+# running, and to stop it by pid.
 #
-# tmux is what the dashboard's terminal attaches to, so a reader who closes
-# the tab and comes back finds the same shell with the same scrollback, and
-# a build carries on while nobody is watching. Its socket goes in /tmp, which
-# is a tmpfs, so a stopped box starts again with no tmux session to attach to.
+# The dashboard's terminal attaches to tmux, so a shell and its scrollback
+# outlive a closed tab. The tmux socket lies in the /tmp tmpfs, so a restarted
+# box starts without a session.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
@@ -90,9 +69,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       bind9-dnsutils \
  && rm -rf /var/lib/apt/lists/*
 
-# GitHub CLI from the official apt repo, for the bot's fork and PR flow.
-# Ubuntu packages a `gh` of its own now, but it freezes with the release the
-# same way Node does, and this is the tool the PR flow depends on.
+# GitHub CLI from the official apt repository, for the fork and pull request
+# flow. Ubuntu's own gh stays at the release's version.
 RUN install -d -m 0755 /usr/share/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -102,11 +80,9 @@ RUN install -d -m 0755 /usr/share/keyrings \
  && apt-get update && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
-# GitLab CLI, for the same flow against a deployment's own GitLab instance.
-# There is no apt repository for it: the release carries a .deb per
-# architecture, so the version and each package's checksum are pinned here,
-# and a bump is an edit to these three lines. The package depends on git
-# alone, which is already installed, so dpkg can take it directly.
+# GitLab CLI, for the same flow on GitLab. It has no apt repository, so the
+# version and the checksum of each .deb are pinned here. The package depends
+# only on git, so dpkg installs it directly.
 ARG GLAB_VERSION=1.119.0
 ARG GLAB_SHA256_AMD64=95a9ca105518dec7f70ee403d98501402a5fda154c406f4f4cd6696928d3a098
 ARG GLAB_SHA256_ARM64=70987a8bab6970d0d042d73d0f06b9d56ecb9abb88c7137c742f1c11b19350e0
@@ -122,14 +98,9 @@ RUN arch="$(dpkg --print-architecture)" \
  && dpkg -i /tmp/glab.deb \
  && rm -f /tmp/glab.deb
 
-# Go, Rust and PHP, so a box can work in them without installing a
-# toolchain first. The distribution's own packages rather than upstream
-# tarballs: they carry its security updates and pin no checksum here. This is
-# the reason the base image is Ubuntu.
-#
-# pkg-config and libssl-dev are not toolchains but are what the common
-# native-dependency crates and extensions look for; build-essential, already
-# installed above, is the C linker all three need.
+# Go, Rust and PHP from the distribution, which carries their security
+# updates. pkg-config and libssl-dev are what common native crates and
+# extensions look for.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       golang-go \
       rustc \
@@ -151,18 +122,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# The tools an agent reaches for that are not a language: reading a PDF a
-# ticket linked to, unpacking whatever a download turned out to be, converting
-# a document, poking at a database file. All of it is stuck behind a read-only
-# /usr at runtime, so a tool that is not here is one the agent has to build or
-# do without in the middle of a task.
+# Tools for documents, archives and databases. /usr is read-only at runtime,
+# so the agent cannot add them later. They add a few hundred megabytes. A
+# derived image can remove them.
 #
-# Chosen for what a coding agent reaches for rather than for completeness -- these
-# add a few hundred megabytes between them, and a deployment that wants a
-# leaner image strips them in a derived one.
-#
-# Two names are not the obvious ones: fd-find installs itself as `fdfind` to
-# avoid a collision, and `7zip` replaced `p7zip-full`, which is now virtual.
+# fd-find installs its binary as fdfind, and 7zip is the package that
+# replaced p7zip-full.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       poppler-utils \
       qpdf \
@@ -193,74 +158,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 
-# uv, the one tool here the archive does not carry. Installed with the pipx
-# that is already present, both of its directories pointed at /usr/local for
-# this one command: the runtime values below put the agent's own `pipx install`
-# in the box's home, and uv belongs on the image beside the npm globals for
-# the same reason -- a home is filled from this image when the box is
-# created and never refreshed, so anything durable landing there is frozen at
-# the version that box was born with.
+# uv, which the archive does not carry. PIPX_HOME and PIPX_BIN_DIR point at
+# /usr/local for this one command, so uv lives on the image. A box's home is
+# seeded once and never refreshed, so a tool installed there would stay at
+# its first version.
 #
-# It earns its place twice over under a read-only /usr: `uv tool install` and
-# `uv python install` both write to the box's home, so the agent can fetch a
-# Python it does not have without any privilege at all.
+# uv tool install and uv python install write to the home, so the agent can
+# fetch a Python without privileges.
 RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
  && rm -rf /root/.cache
 
-# Nix, from the stage at the top of this file: the binary and the legacy
-# names that link to it. This is what turns "the agent needs a tool the
-# image does not have" into something the agent does for itself, as its own
-# user and into its own store -- a database, a compiler, a whole project
-# environment from a flake -- with no privilege the box does not already
-# have. The store it fills is the box's /nix, which the orchestrator binds in
-# and which outlives the container the way the home does.
-#
-# The system configuration goes in /etc/nix, on the image rather than in the
-# home: what a box needs to run nix at all follows the image, and an agent's
-# own ~/.config/nix/nix.conf is read on top of it. Read the file -- it
-# explains each setting.
+# Nix from the first stage, and its system configuration. With it, the agent
+# installs tools, services and flake environments into the box's own /nix
+# without privileges. An agent's ~/.config/nix/nix.conf is read on top of
+# /etc/nix/nix.conf.
 ARG NIX_VERSION=2.34.8
 COPY --from=nix-static /out/ /usr/local/bin/
 COPY nix.conf /etc/nix/nix.conf
 
-# The agent and the adapter are pinned here and nowhere else, to a major line
-# each rather than to an exact release: a rebuild picks up fixes on that line,
-# and a new major is a deliberate edit to this file. The adapter is below 1.0,
-# where a caret pins the minor, which is the line that carries its breaking
-# changes. Do not switch to @zed-industries/claude-code-acp, which is stale at
-# 0.16.2.
+# The agent and the adapter, each pinned to a major line. Below 1.0, the caret
+# pins the minor instead. Do not switch to @zed-industries/claude-code-acp,
+# which is stale.
 #
-# --prefix names /usr/local rather than leaving npm to work it out, because
-# what npm works out is the grandparent of the node binary -- and no npmrc
-# here overrides that. Under the official node image node sat in
-# /usr/local/bin and the default was already /usr/local, so this never had to
-# be said; Node from NodeSource sits in /usr/bin, which silently moves every
-# global to /usr/bin instead. Naming the prefix keeps /usr/local the one place
-# the image's own globals live however Node arrives, out of the /usr/bin the
-# distribution's own packages own, and it is what the identity check below
-# asserts the adapter resolves to.
+# --prefix keeps the image's globals in /usr/local. Without it, npm derives the
+# prefix from the node binary in /usr/bin. The identity check below relies on
+# /usr/local.
 RUN npm install -g --prefix /usr/local \
       @anthropic-ai/claude-code@^2 \
       @agentclientprotocol/claude-agent-acp@^0.81.0 \
  && npm cache clean --force
 
-# The second harness: the Codex CLI and the adapter that drives it, pinned here
-# for the reason the pair above are.
+# The Codex CLI and its ACP adapter, both pinned exactly.
 #
-# Two packages, one binary, and the flags are what keeps it to one. `@openai/
-# codex` on npm is a 13 KB launcher whose actual binary arrives as an optional
-# platform dependency -- @openai/codex-linux-x64, 339 MB -- so the global
-# install is where that copy lives. The adapter depends on `@openai/codex` over
-# a caret range, and a global install nests a copy of it under the adapter;
-# --omit=optional leaves that nested copy as the launcher alone, with no second
-# 339 MB binary behind it, and CODEX_PATH below points the adapter at the
-# global one instead.
-#
-# What that buys over linking the nested binary out: both versions are pinned
-# exactly rather than one of them following a range, and the `codex` a person
-# types in the box is the same build the adapter is driving. The identity check
-# further down is what proves it, and what would catch npm resolving the
-# optional dependency differently than this expects.
+# @openai/codex is a small launcher, and its platform binary arrives as an
+# optional dependency of several hundred megabytes. The adapter nests its own
+# @openai/codex. --omit=optional leaves that nested copy without a binary, and
+# CODEX_PATH points the adapter at the global one. A person's codex and the
+# adapter's codex are then the same build. The identity check below proves it.
 ARG CODEX_VERSION=0.156.1
 RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
  && npm install -g --prefix /usr/local --omit=optional \
@@ -268,85 +202,34 @@ RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
  && npm cache clean --force
 ENV CODEX_PATH=/usr/local/bin/codex
 
-# Codex's system-level configuration, read below every file an agent writes.
-# It points Codex at a provider without the WebSocket transport, because the
-# egress proxy refuses that upgrade and Codex would otherwise warn about the
-# fallback in every thread. Read the file -- it explains the rest.
+# Codex's system configuration. It selects a provider without the WebSocket
+# transport, which the egress proxy refuses.
 COPY codex-config.toml /etc/codex/config.toml
 
-# The browser an agent drives, and the tool it drives it with.
+# @playwright/cli and Chromium.
 #
-# @playwright/cli is Microsoft's own CLI for coding agents: a snapshot command
-# that renders the page as an accessibility tree with a [ref=eN] handle on
-# every element, and click/type/select/hover commands that take those refs. It
-# holds the browser in a daemon between invocations, so a snapshot in one
-# command and a click in the next act on the same page. That is the same
-# interaction model as Playwright MCP -- the two share the implementation --
-# without an MCP server to configure or a second process for anything here to
-# manage, and it writes each snapshot to a file rather than into the model's
-# context. It ships its own agent skill, which the entrypoint installs.
+# The CLI snapshots a page as an accessibility tree with a [ref=eN] handle on
+# each element, and its commands act on those refs. A daemon keeps the browser
+# open between commands. The entrypoint installs the CLI's own skill. The CLI
+# is 0.1.x and depends on a prerelease Playwright, so the caret pins the minor.
 #
-# Pinned, like the ACP adapter, and for a better reason: this is 0.1.x, and it
-# depends on a prerelease Playwright.
+# Only Chromium is installed. Ubuntu's chromium package is a snap wrapper, and
+# snapd does not run here. --with-deps installs Playwright's library list for
+# this distribution, including the fonts for non-Latin scripts.
 #
-# Chromium is the only browser binary here. Firefox and WebKit would roughly
-# double the layer, and a coding agent wants a browser rather than a
-# compatibility matrix -- but a project that does want the matrix can download
-# them for itself, and the block after this one is what makes that work.
-# Ubuntu's own chromium is not an option in any case -- it is a virtual package
-# standing in for a snap, and snapd does not run in here.
+# The browsers live on the image at BOXES_IMAGE_BROWSERS.
+# PLAYWRIGHT_BROWSERS_PATH points there only during the build. libnss3-tools
+# provides certutil, which the entrypoint uses to add the deployment CA to
+# Chromium's store.
 #
-# --with-deps rather than a hand-written library list, because Playwright
-# maintains that mapping per distribution and Ubuntu's 64-bit time_t
-# transition renamed half of it (libasound2t64, libcups2t64, libglib2.0-0t64).
-# It also brings the font packages, without which a screenshot of a page in a
-# non-Latin script comes back as boxes.
+# /usr/local/bin/chromium is a stable path to the image's Chromium, for a
+# project whose own Playwright wants another revision. /usr/local/bin/playwright
+# is the Playwright CLI nested under @playwright/cli, so a box can download
+# Firefox and WebKit without npx.
 #
-# BOXES_IMAGE_BROWSERS is where the browser lives: on the image rather than in
-# the box's home, for the reason the npm globals are on the image, that a
-# home is filled once when its box is created and never refreshed. It is
-# also what the entrypoint links into a box's browsers path, and what the
-# build below installs into -- PLAYWRIGHT_BROWSERS_PATH is pointed here for as
-# long as this build needs to write browsers, and moved to the box's home
-# at the end of the file. Read that block for why the two differ at runtime.
-#
-# libnss3-tools is not Playwright's: it is certutil, which the entrypoint uses
-# to put the deployment CA where Chromium looks for it.
-#
-# --prefix for the reason the adapter's install gives above, and here it also
-# has to land somewhere the next command can reach: /usr/local/bin is on PATH,
-# and playwright-cli is run by name on the line after it is installed.
-#
-# /usr/local/bin/chromium is the browser under a name something other than
-# this CLI can find. Playwright installs it as
-# chromium-<revision>/chrome-linux64/chrome, where the revision belongs to
-# whichever playwright-core @playwright/cli depends on -- so a project with a
-# Playwright of its own resolves a different revision, finds nothing there,
-# and cannot download into /opt because the image is read-only at runtime. A
-# test suite that would rather use the browser that is here than fetch a
-# second one needs a path it can hardcode, and this is it. `--version` is the
-# assertion that the link points at something that runs, and the first thing
-# in this build to say so -- the browser check at the end says it again, and
-# far later.
-#
-# /usr/local/bin/playwright is the Playwright CLI under the name a box
-# reaches for. @playwright/cli depends on the full `playwright` package and a
-# global npm install nests it, so the binary is already here -- just below a
-# path nothing types. Linked, the documented Firefox and WebKit download runs
-# without npx first fetching a second copy of the tool to run it with.
-#
-# It is worth being clear about what this does not fix. `npx playwright`
-# consults its own cache and the registry and never PATH, so it downloads
-# whatever the registry calls latest no matter what is linked here -- but the
-# download is the smaller half of that problem. Either binary, npx's or this
-# one, hangs on `install chromium` while PLAYWRIGHT_BROWSERS_PATH points
-# somewhere unwritable: it opens a connection to the egress proxy and stalls
-# with no output rather than reporting that the browser is already present.
-# So this link is not an alternative way to run that command, and the skill
-# note the entrypoint appends tells an agent not to run it at all. What the
-# link buys is the one install a box does have a reason to run -- the
-# Firefox and WebKit one, which names a writable path and works.
-# Below 1.0, so the caret pins the minor: rebuilds take 0.1.x and nothing more.
+# Pointed at an unwritable browsers path, playwright install chromium hangs
+# on the proxy without output. The note the entrypoint adds to the skill tells
+# an agent not to run it.
 ARG PLAYWRIGHT_CLI_VERSION=^0.1.19
 ENV BOXES_IMAGE_BROWSERS=/opt/playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=${BOXES_IMAGE_BROWSERS}
@@ -362,96 +245,47 @@ RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION}
  && apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# Firefox's and WebKit's system libraries, without their browser binaries.
+# The system libraries of Firefox and WebKit, without the browsers. A box can
+# download a browser as the agent, but cannot install libraries without root.
+# Library names do not depend on the Playwright revision, so this serves the
+# Playwright of any project. A deployment that uses only Chromium can delete
+# this block and the Firefox and WebKit check below.
 #
-# The binaries are the half a box can supply for itself and the libraries
-# are the half it cannot: `npx playwright install firefox` downloads happily
-# into the box's home as the agent, and then the browser will not start,
-# because `apt-get` needs a root and a writable /usr that no box has. What
-# that looks like is a download that reports success followed by a launch that
-# dies on `libgtk-3.so.0`, or on WebKit's forty-odd gstreamer and flite
-# objects -- which reads as a broken image rather than as a missing package.
-# Putting the libraries here and leaving the binaries out is what lets a
-# box download the build its own Playwright wants, for all three browsers
-# instead of only for Chromium.
+# install-deps is a command of the playwright-core that @playwright/cli nests,
+# so the path names it directly. The dry run fails if any package is still
+# missing, which an apt error in the install output would hide.
 #
-# Deps rather than binaries is also the only half that keeps: a binary here
-# would be at the revision this image's Playwright pins, and a project pinning
-# its own resolves a different revision and downloads it anyway --
-# the same argument the /usr/local/bin/chromium link above exists to answer,
-# for whoever would rather take the revision that is here than fetch. Library
-# names are not versioned that way, so one install serves whatever Playwright
-# a project brings. It costs roughly what the two binaries would have, mostly
-# in WebKit's gstreamer stack; a deployment that drives only Chromium
-# deletes this block and the check that pairs with it, which is the only way
-# to get the bytes back -- purging in a derived layer would not.
-#
-# `install-deps` is Playwright's own per-distribution package mapping, taken
-# rather than hand-written for the reason `--with-deps` is used above. It is
-# not a `playwright-cli` subcommand -- that CLI installs browsers, not deps --
-# so this reaches for the playwright-core that @playwright/cli depends on. A
-# global npm install nests its dependencies under the package rather than
-# hoisting them, which is what fixes that path; /usr/local is named outright
-# because `npm root -g` answers with the agent's own prefix later in this file.
-#
-# --dry-run is the assertion, and it is here because the install without it
-# cannot fail loudly: a package renamed out from under the map is one apt
-# error in a wall of apt output. The dry run re-resolves the same list and
-# exits non-zero if anything is still missing. Before the lists are removed,
-# since it simulates with `apt-get install -s`.
-#
-# It is not the whole guard. Playwright's map is keyed by architecture and
-# carries only x64 today, so on arm64 both commands resolve an empty list,
-# say `Cannot install dependencies for ubuntu26.04-arm64` and exit 0 -- a
-# warning, not a failure, and the dry run agrees with it because nothing was
-# asked for. What catches that is the launch further down, which is also the
-# only thing that catches a library the map merely forgot.
+# Playwright's map has no arm64 entry, so on arm64 both commands succeed and
+# install nothing. The launch check below catches that.
 RUN pw=/usr/local/lib/node_modules/@playwright/cli/node_modules/.bin/playwright \
  && "$pw" install-deps firefox webkit \
  && "$pw" install-deps --dry-run firefox webkit \
  && rm -rf /var/lib/apt/lists/*
 
-# The environment's half of the CLI's configuration: which browser, and the two
-# launch options a box container needs. The entrypoint copies this to the
-# CLI's global config with the egress proxy added, since only runtime knows
-# that. Read the file -- it explains why each key is there.
+# The CLI's base configuration. The entrypoint adds the egress proxy at
+# runtime. The file explains each key.
 COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
-# Skills the image carries for what is on it: what nix is for here and what
-# survives a restart is nothing an agent can find out from a --help. The
-# entrypoint installs them into a box's home on every start, so a rebuilt
-# image's copy reaches a home that already exists.
+# Skills the image carries, such as how nix works in a box. The entrypoint
+# installs them into the home at every start.
 COPY skills /usr/local/share/boxes/skills
 
-# The agent's own account, created rather than renamed: an Ubuntu base ships
-# no developer user to reuse, and 1020 keeps clear of the `ubuntu` account it
-# does carry at 1000 -- which on a real host is usually a person.
+# The agent's own account. 1020 keeps clear of the ubuntu user at 1000, which
+# is often a person on the host.
 #
-# These have to match the orchestrator's BOX_UID and BOX_GID -- their
-# defaults are the same numbers, in orchestrator/src/workspaces.ts. A box's
-# home is a directory the orchestrator fills by copying /home/agent out of this
-# image, ownership and all, so a mismatch leaves the agent unable to write its
-# own home; the orchestrator reads this image's user back at boot and says so
-# if they have drifted.
+# These must match the orchestrator's BOX_UID and BOX_GID, whose defaults are
+# the same numbers. A new box's home is a copy of /home/agent with its owners.
+# The orchestrator warns at boot when the image's user differs.
 ARG AGENT_UID=1020
 ARG AGENT_GID=1020
 
 RUN groupadd -g "${AGENT_GID}" agent \
  && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -m -d /home/agent -s /bin/bash agent
 
-# HOME is named outright rather than left to Docker's /etc/passwd lookup: it
-# is what GOPATH, GOCACHE, CARGO_HOME and COMPOSER_HOME are each derived from,
-# so a box that resolved it differently would put every build cache
-# somewhere other than its own volume.
-#
-# LANG likewise: the node image carried the locales package and this base does
-# not, and a box that ran in the C locale would mangle any non-ASCII path
-# or diff it touched. C.UTF-8 is built into glibc, so it needs no package.
-#
-# CODEX_HOME is the same kind of statement as CLAUDE_CONFIG_DIR: it is where
-# Codex keeps its configuration, its login and its rollouts, and naming it
-# outright is what makes a shell in the box and the adapter agree on one
-# directory on the home volume rather than each resolving its own.
+# HOME is set outright, because GOPATH, GOCACHE, CARGO_HOME and COMPOSER_HOME
+# derive from it. C.UTF-8 is built into glibc and keeps non-ASCII paths intact.
+# CLAUDE_CONFIG_DIR and CODEX_HOME make the adapter and a shell in the box use
+# the same directory.
 ENV HOME=/home/agent \
     LANG=C.UTF-8 \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
@@ -459,97 +293,62 @@ ENV HOME=/home/agent \
     TERM=dumb \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
-# Where the agent installs tools for itself.
+# The agent installs its own tools into the persistent home, because the
+# root filesystem is read-only and the agent is not root.
 #
-# The root filesystem is read-only at runtime and nothing in a box is
-# root, so `apt-get install` cannot work and neither can `npm install -g` into
-# /usr/local. /home/agent is a persistent volume, so pointing the user-level
-# package managers there is what turns "the agent needs one more tool" into
-# something it can do on its own -- and it needs no privilege the box
-# does not already have, which is the point.
-#
-# Set after the global install above, deliberately. That one belongs in
-# /usr/local, on the image. Landing it in the box's home instead would pin
-# the adapter to whatever version that box was born with: a home is filled
-# from this image exactly once, when the box is created, and never
-# refreshed, so every later image update would be invisible to it.
+# Set after the global installs above, which belong on the image. A home is
+# seeded once and never refreshed, so a global there would miss every image
+# update.
 ENV NPM_CONFIG_PREFIX=/home/agent/.local \
     PIPX_HOME=/home/agent/.local/pipx \
     PIPX_BIN_DIR=/home/agent/.local/bin
 
-# Each toolchain's own install directory, on PATH for the same reason. Go,
-# Cargo and Composer all default to somewhere under $HOME already -- ~/go/bin,
-# ~/.cargo/bin, ~/.config/composer/vendor/bin -- as do their build caches, so
-# a read-only /usr costs them nothing and there is nothing to redirect. What
-# they do not do is put those directories on PATH, which is what makes
-# `go install`, `cargo install` and `composer global require` produce a tool
-# the agent can then run. The tools create the directories
-# themselves; being absent on PATH is harmless.
+# Go, Cargo and Composer install binaries under $HOME already. These entries
+# put those directories on PATH.
 ENV PATH=/home/agent/.local/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/agent/.config/composer/vendor/bin:$PATH
 
-# The nix profile's own directory, for the same reason. It is where
-# `nix profile add` links what the agent installs, under ~/.local/state
-# because nix.conf asks for the XDG layout; nix creates it on first use.
+# Where nix profile add links what the agent installs. nix.conf selects the
+# XDG layout.
 ENV PATH=/home/agent/.local/state/nix/profile/bin:$PATH
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
-# A login shell has to end up with every directory above, because `bash -lc`
-# is what the command surface and the agent's own shell tools run under.
-# Ubuntu's /etc/profile leaves PATH alone, so today they survive it; Debian's
-# assigns PATH outright and drops all of them, and this image has been based
-# on both. /etc/profile.d is sourced after that assignment either way, so the
-# snippet below puts them back -- from this snapshot of PATH rather than from
-# a second copy of the list, which would be free to drift from the real one.
-#
-# Taken here, after every ENV that adds to PATH and before nothing else does.
+# Commands and the agent's shell tools run under bash -lc. An /etc/profile
+# that assigns PATH outright would drop the directories above. The profile.d
+# snippet restores them from this snapshot of PATH, taken after the last ENV
+# that changes PATH.
 RUN mkdir -p /etc/boxes \
  && printf "BOXES_IMAGE_PATH='%s'\n" "$PATH" > /etc/boxes/image-path \
  && chmod 0644 /etc/boxes/image-path
 COPY profile-image-path.sh /etc/profile.d/boxes-image-path.sh
 RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 
-# The root filesystem is mounted read-only at runtime. /workspace, /home/agent
-# and /nix are the writable volumes, and /tmp is a tmpfs.
-# /boxes/agent is where the orchestrator binds this box's merged agent
-# configuration, read-only. Created here rather than left to the daemon so the
-# mount point exists on a read-only rootfs.
+# The root filesystem is read-only at runtime, so every mount point must
+# exist in the image. /workspace, /home/agent and /nix are writable binds, /tmp
+# is a tmpfs, and /boxes/agent is the read-only agent configuration.
 #
-# CODEX_HOME is here because Codex refuses to start against a directory that is
-# not there rather than creating it, and the check below wants a `codex` that
-# runs. The entrypoint creates it too, for the home that was filled from an
-# image older than this line.
+# Codex refuses to start without its CODEX_HOME, and the check below runs
+# codex.
 RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude /boxes/agent \
  && chown agent:agent /workspace /nix /home/agent /home/agent/.local /home/agent/.local/bin \
       /home/agent/.codex /home/agent/.claude
 
-# Claude Code's user settings, with which a new box starts. They leave out the
-# attribution Claude Code would otherwise add to commits and pull requests. A
-# home is filled from this image only when the box is created, so the file is
-# the agent's from then on, and changing it here reaches new boxes only.
+# Claude Code's user settings for a new box, without commit and pull request
+# attribution. Only new boxes get a changed file, because a home is seeded
+# once.
 COPY --chown=agent:agent claude-settings.json /home/agent/.claude/settings.json
 
-# Numeric rather than `agent`, so the uid is readable from the image itself.
+# Numeric, so the uid is readable from the image itself.
 USER ${AGENT_UID}
 WORKDIR /workspace
 
-# Proof rather than assumption, because every failure this guards against is
-# silent: an ARG out of scope leaves USER empty, which means root, and the
-# build succeeds anyway having quietly undone both the uid and the non-root
-# part of the security model. The rest is the tool directories: an unwritable
-# one, an npm prefix that did not take, a login shell that lost them all to
-# /etc/profile, or an adapter that ended up in a box's home instead of on
-# the image -- none of which shows up until a box is running. Runs as the
-# user it is checking, so it needs no privileges of its own.
+# Checks the user, the writable directories, the npm prefix and the tool
+# locations. Each failure here would be silent otherwise: an ARG out of scope
+# leaves USER empty, which means root.
 #
-# `codex --version` is the one line here that runs a tool rather than locating
-# it, because locating it proves nothing: the CLI on PATH is a launcher, and
-# the --omit=optional above is one npm resolution away from leaving it with no
-# platform binary to launch. Asking the version is what makes the binary run,
-# and matching the pin is what catches a range having been followed instead.
-# A match rather than an equality, because the CLI prints its own name beside
-# the number.
+# codex --version runs the platform binary, so it fails if --omit=optional
+# left none. The match against CODEX_VERSION catches a followed range.
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
@@ -567,26 +366,18 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \
     done'
 
-# Node is the one thing here that does not come from the distribution, so both
-# halves of that get checked. The major is the one asked for -- and because
-# Ubuntu's own nodejs is on the same major, which would make that check pass
-# on the wrong package, the vendor is checked too: apt quietly preferring the
-# distribution's build would leave a working image whose npm is a separate
-# package nobody installed.
+# Node has the requested major and comes from NodeSource. Ubuntu's nodejs has
+# the same major, so the vendor check catches apt preferring it.
 RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
  && test "$(command -v node)" = "/usr/bin/node" \
  && dpkg-query -W -f='${Version}' nodejs | grep -q nodesource \
  && npm --version >/dev/null
 
-# Every added tool resolves, as the agent, under the name it will be reached
-# for. This is the check that catches a package renamed out from under the
-# list -- `p7zip-full` going virtual, or `dnsutils` doing the same -- which apt
-# reports as an unsatisfiable dependency only if the name is gone entirely,
-# and silently installs nothing useful if some other package still provides it.
+# Every added tool resolves by the name the agent uses. This catches a package
+# renamed to a virtual one that installs nothing useful.
 #
-# `timeout` is the base image's rather than one of ours, and it is here because
-# the orchestrator wraps every local command in it: that is what holds a
-# command to its wall clock, since the daemon cannot signal a running exec.
+# timeout comes from the base image. The orchestrator wraps local commands in
+# it, because the daemon cannot signal a running exec.
 RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
@@ -595,26 +386,13 @@ RUN set -eu; \
       command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
     done
 
-# The browser opens, loads a page and snapshots it with refs, as the agent.
+# Chromium opens a page and snapshots it with refs, as the agent. This catches
+# a missing library, an unreadable browsers directory, a config that looks for
+# Google Chrome, and a Chromium sandbox left on.
 #
-# Everything this catches is a runtime failure the build would otherwise ship:
-# a missing shared library, a browsers directory the agent cannot read, a
-# config that leaves the CLI looking for Google Chrome at /opt/google/chrome,
-# and above all a Chromium sandbox left on -- which fails at browser startup
-# and would make every browser command in every box useless.
-#
-# Served over loopback by python rather than fetched, because the build host
-# has no business needing egress for this, and `file:` URLs are blocked by the
-# CLI by design.
-#
-# The image's copy of the config is put at .playwright/cli.config.json in the
-# working directory -- the project location the CLI resolves first -- rather
-# than passed as --config, which is an option of `open` alone and not a global
-# one: `snapshot` rejects it outright, and `close` takes no options at all.
-# The global config would be the other place to put it, but that is
-# ~/.playwright, and anything left there is baked into every box's home
-# volume. Placed rather than passed, all three commands resolve the same
-# config, whether one launches the browser or attaches to the one already up.
+# A loopback python server serves the page, because the CLI blocks file: URLs.
+# The config goes into the working directory's .playwright/, because only open
+# takes --config, and a config in ~/.playwright would end up in every home.
 RUN set -eu; \
     cd /tmp; \
     printf '<!doctype html><title>t</title><button>Continue</button>\n' > index.html; \
@@ -633,39 +411,14 @@ RUN set -eu; \
     playwright-cli close; \
     rm -rf /tmp/index.html /tmp/.playwright /tmp/.playwright-cli
 
-# Firefox and WebKit do the same, the way a box would have to get them:
-# downloaded as the agent into the box's home, run from there, deleted again.
+# Firefox and WebKit launch, downloaded as the agent into the home the way a
+# box gets them. install-deps reports installed packages, not a browser that
+# starts. Playwright maps this Ubuntu release to an older release's Firefox
+# build, so Firefox is the likeliest to fail.
 #
-# This is the check the layer above exists for, and nothing cheaper stands in
-# for it. `install-deps` reports success for packages it installed, not for a
-# browser that starts, and the two differ exactly where it matters -- a
-# library Playwright's map forgot, one whose package apt satisfied with a
-# soname the build does not link against, or an architecture the map has no
-# entry for at all -- each of which shows up only when the process execs.
-#
-# Firefox sharpens that: Playwright publishes a WebKit built for this base's
-# release but no Firefox, and points it at an older release's Firefox build
-# instead. So the one browser here running against libraries from a release it
-# was not built on is the one this most needs to try, and a future image bump
-# that moves the base off a release Playwright still maps stops here rather
-# than in a box.
-#
-# PLAYWRIGHT_BROWSERS_PATH is exported to the path a box will really use,
-# rather than left at the image's own, for two reasons: that directory is what
-# a box can write, so pointing at it is what proves the route a box
-# walks rather than a build-time-only one, and the binaries are meant to leave
-# with this RUN. A box's home is filled by copying /home/agent out of this
-# image, so anything still in /home/agent/.cache at the end of the build is
-# copied into every box created from it -- the same reason the toolchain
-# caches below are removed. The export is still needed despite the ENV further
-# down setting the same path: ENV applies from where it appears, and this runs
-# above it.
-#
-# setContent rather than a served page: this is asking whether the browser
-# process starts and renders, which the check above already asks over http for
-# Chromium, and a second loopback server would only add a way for this to fail
-# that has nothing to do with browsers. playwright-core is required by path
-# for the reason install-deps was.
+# The export uses a box's runtime path, which the ENV below sets only later.
+# The download is removed at the end, because the home is copied into every
+# new box. playwright-core is required by path, as for install-deps.
 RUN set -eu; \
     export PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright; \
     deps=/usr/local/lib/node_modules/@playwright/cli/node_modules; \
@@ -686,48 +439,16 @@ RUN set -eu; \
     ' "$deps/playwright-core"; \
     rm -rf /home/agent/.cache
 
-# Where a box looks for browsers, which is not where the image keeps
-# them.
-#
-# Everything above this line needed the variable pointed at the image, because
-# everything above this line was installing browsers into it. A box needs
-# the opposite: a directory it can write. The entrypoint links the image's
-# builds into this one at every start, so the browser the image carries
-# resolves here without being copied, and a browser a project downloads for
-# itself lands beside the links rather than failing to land at all.
-#
-# What this buys is that `playwright install chromium` stops hanging, rather
-# than the download itself, which a project can still get by exporting the
-# variable for itself. Pointed at a directory the
-# agent cannot write, that command does not report the browser it already
-# found and does not fail either: it opens a connection to the egress proxy
-# and stalls with no output, indefinitely -- seven minutes and zero bytes when
-# it was measured, killed rather than finished. An agent reaching for the
-# command it would use on any other machine got a hang and no reason for it.
-# Pointed here it returns at once, having found the links.
-#
-# Linked at every start rather than baked into the image's /home/agent, which
-# would be the cheaper-looking place: a home is copied out of this image when
-# its box is created and never refreshed, so a baked link would name
-# whichever revision that image carried and dangle the moment the image is
-# rebuilt onto a newer Playwright. The entrypoint relinks against the image it
-# is running under, and drops links that no longer resolve.
+# At runtime, Playwright uses a writable directory in the home. The entrypoint
+# links the image's builds into it at every start, and a project's own
+# download lands beside the links. With it, playwright install chromium finds
+# the links and returns at once, instead of hanging.
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
 
-# The browser resolves through links of the kind the entrypoint writes.
-#
-# Nothing above proves this: the checks above found the browser by pointing at
-# the directory holding it, and every box will instead find it through a
-# symlink one level up. That indirection is an assumption about Playwright's
-# registry -- which reads a revision directory and an INSTALLATION_COMPLETE
-# marker inside it -- rather than a documented guarantee, so a Playwright bump
-# that starts resolving the real path of its browsers directory would break
-# every box's browser and nothing else here would notice.
-#
-# A throwaway directory rather than /home/agent/.cache/ms-playwright, for the
-# reason the Firefox check removes what it downloads: what is left in the home
-# at the end of this build is copied into every box created from it, and
-# these links belong to the entrypoint rather than to the image.
+# Chromium resolves through a symlink of the kind the entrypoint writes. This
+# relies on Playwright not resolving the real path of its browsers directory,
+# which is undocumented. A throwaway directory keeps the links out of the
+# image's home.
 RUN set -eu; \
     seed=/tmp/browsers-seed; \
     mkdir -p "$seed"; \
@@ -751,18 +472,9 @@ RUN set -eu; \
     ' /usr/local/lib/node_modules/@playwright/cli/node_modules/playwright-core; \
     rm -rf "$seed"
 
-# The toolchains build something, as the agent, with their caches where a
-# box will really put them.
-#
-# Running each binary with --version would only prove it is installed. The
-# thing that breaks at runtime is subtler: /usr is read-only there, so every
-# one of these has to be writing its build cache somewhere under /home/agent.
-# One compiled file each is what shows that, and it shows it here rather than
-# in the first real box that tries to build anything.
-#
-# The caches are removed afterwards, deliberately: left in place they would be
-# copied into every new box's home, which is filled from this image when
-# the box is created and never refreshed.
+# Go, Rust and PHP each build something as the agent, which proves their
+# caches go under /home/agent. The caches are removed, because the home is
+# copied into every new box.
 RUN set -eu; \
     cd /tmp; \
     printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("ok") }\n' > hello.go; \
@@ -777,32 +489,12 @@ RUN set -eu; \
     cd /tmp && rm -rf hello.go /tmp/hello-rs \
       /home/agent/.cache /home/agent/go /home/agent/.cargo /home/agent/.config/composer
 
-# Scratch space on disk rather than in memory.
+# Temporary files go to disk rather than to the 512 MB /tmp tmpfs, which
+# counts against the box's memory limit. Tools that hardcode /tmp still use
+# the tmpfs.
 #
-# /tmp in a box is a 512 MB tmpfs, which the read-only root filesystem
-# makes necessary and which is RAM: its pages are charged to the container's
-# memory limit, so filling /tmp spends an eighth of a default box's 4 GB
-# rather than any disk. Unset, TMPDIR sends every tool that stages anything --
-# an archive being unpacked, a package manager's download, a build's
-# intermediates -- into that budget, where running out arrives as an OOM or an
-# ENOSPC on a filesystem nobody thinks of as small.
-#
-# /home/agent is a bind onto real disk with room to spare, so pointing TMPDIR
-# there is what makes the size of a temporary file stop mattering. Everything
-# that reads TMPDIR follows: Python, Node, npm, pip, cargo, go, mktemp, tar.
-# Anything that hardcodes /tmp is unaffected and still has the tmpfs, which is
-# the right home for small and hot -- which is the whole of what it is now
-# asked to hold.
-#
-# Set last, after every RUN above has finished writing: with TMPDIR pointed
-# into the home during the build, each of those steps would leave its
-# intermediates in a directory that gets copied into every box created
-# from this image. The cleanup on the line above is what the build relies on
-# instead, and it only runs once.
-#
-# The entrypoint creates this and empties it on every start. A tmpfs is
-# discarded at restart for free and a directory on a persistent volume is not,
-# so without that it would accumulate for the life of the box.
+# Set last, so no build step leaves files in the home. The entrypoint creates
+# and empties the directory at every start.
 ENV TMPDIR=/home/agent/.cache/tmp
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

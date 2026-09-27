@@ -1,23 +1,14 @@
 /**
- * Holding a reader's place across a change that moves the content under them.
+ * Keeps the reader's place in the code pane across a change of layout, such as
+ * the switch between commenting and editing.
  *
- * Switching the code pane between commenting and editing folds away the
- * comment cards, the composer and the deletion markers, because a textarea is
- * one run of text and cannot have rows between its lines. Everything below the
- * first of those then moves, and a pane that jumped half a file on the way
- * into edit mode would be unusable for the thing edit mode is for: fixing the
- * line you are looking at.
- *
- * So the position is remembered as a line rather than as a pixel offset. A
- * pixel offset means nothing once the rows above it have changed height; a
- * line is the same line either side of the switch.
- *
- * Pure, and separate from the pane that reads the offsets out of the DOM,
- * because this is the whole of the behaviour and none of it needs a browser.
+ * The switch adds or removes the comment cards between lines, so the place is
+ * kept as a line and an offset into it rather than as a pixel offset.
  */
 
 /** One rendered line and where its row starts in the scroller. */
 export interface RowOffset {
+  /** The line number. */
   line: number;
   /** Distance from the top of the scrolled content to the top of the row. */
   top: number;
@@ -25,6 +16,7 @@ export interface RowOffset {
 
 /** Where a pane is, said as a line and how far into it. */
 export interface ScrollAnchor {
+  /** The line number. */
   line: number;
   /**
    * How far past the top of that line's row the pane is scrolled. Negative
@@ -34,14 +26,14 @@ export interface ScrollAnchor {
 }
 
 /**
- * The line a scroller is standing on, and how far into it.
+ * The topmost visible line of a scroller, and how far into it the scroller
+ * is. Null when there are no rows.
  *
- * The topmost visible line, which is the one the reader is looking at on a
- * phone — the screen holds few enough lines that anything else is a guess.
- * Where a line was tapped to start editing, the caller has a better answer and
- * should use it instead.
+ * On a phone the screen holds few lines, so the topmost one is the best guess
+ * for the reader's place. A caller that knows which line was tapped should use
+ * that line instead.
  *
- * `rows` must be in the order they are rendered.
+ * @param rows The rows in the order they are rendered.
  */
 export function anchorAt(rows: RowOffset[], scrollTop: number): ScrollAnchor | null {
   if (rows.length === 0) return null;
@@ -54,11 +46,9 @@ export function anchorAt(rows: RowOffset[], scrollTop: number): ScrollAnchor | n
 }
 
 /**
- * Where to scroll to put an anchor back, or null when its line is gone.
- *
- * Null means leave the scroller alone: the file was replaced under the reader
- * rather than re-laid out, and guessing a position for a line that no longer
- * exists would move them somewhere they never were.
+ * The scroll position that puts an anchor back, never above 0. Null when the
+ * line is gone, which means the file was replaced, and the scroller should
+ * stay where it is.
  */
 export function scrollForAnchor(rows: RowOffset[], anchor: ScrollAnchor): number | null {
   const row = rows.find((r) => r.line === anchor.line);
@@ -67,11 +57,10 @@ export function scrollForAnchor(rows: RowOffset[], anchor: ScrollAnchor): number
 }
 
 /**
- * The rows of a scroller, read out of the DOM.
+ * The rows of a scroller, read from its `[data-line]` elements.
  *
- * `offsetTop` is measured against the scrolled content rather than the
- * viewport, so it survives the scrolling that is about to happen — which
- * `getBoundingClientRect` would not.
+ * Uses `offsetTop` because it is measured against the scrolled content and
+ * does not change when the scroller scrolls.
  */
 export function rowOffsets(scroller: HTMLElement): RowOffset[] {
   const rows: RowOffset[] = [];

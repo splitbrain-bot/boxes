@@ -10,27 +10,19 @@ import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { TASK_NOTIFICATION_PART } from '@/lib/task-notifications';
 
 /**
- * The installed components over a canned store, with no ACP connection.
+ * A tool image, inline so the page needs no server.
  *
- * This is where a component upgrade is reviewed: every part kind the live
- * thread renders appears here, so a registry re-run that changes how one of
- * them looks shows up on one page rather than in a live box.
- */
-
-/**
- * A picture a tool produced, inline so the page needs nothing served to it.
- *
- * Wide and short: a message much taller than the height the thread reserves
- * for an off-screen one sets the scroller oscillating when it is read back up.
+ * Wide and short, because a message much taller than the height the thread
+ * reserves for an off-screen one makes the scroller oscillate.
  */
 const SCREENSHOT =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgAAAABgCAIAAADkcV3eAAACiElEQVR42u3VoQ3AMBAEQdeZIlyJCwsJdjuuweCkSDfS4wF/YMcz19W93746Pp/P5//THx7E5/P5AuBBfD6fLwAexOfz+QJgAD6fzxcAA/D5fL4AGIDP5/MFwAB8Pp8vAAbg8/l8ATAAn8/nCwCfz+fzBYDP5/P5AsDn8/l8AeDz+Xy+APD5fD5fAPh8Pp8fDYCH8vl8fqcvAHw+ny8AHsTn8/kC4EF8Pp8vAAbg8/l8ATAAn8/nC4AB+Hw+XwAMwOfz+QJgAD6fzxcAA/D5fL4A8Pl8Pl8A+Hw+ny8AfD6fzxcAPp/P5wsAn8/n8wWAz+fz+dkAeCifz+d3+gLA5/P5AuBBfD6fLwAexOfz+QJgAD6fzxcAA/D5fL4AGIDP5/MFwAB8Pp8vAAbg8/l8ATAAn8/nCwCfz+fzBYDP5/P5AsDn8/l8AeDz+Xy+APD5fD5fAPh8Pp+fDYCH8vl8fqcvAHw+ny8AHsTn8/kC4EF8Pp8vAAbg8/l8ATAAn8/nC4AB+Hw+XwAMwOfz+QJgAD6fzxcAA/D5fL4A8Pl8Pl8A+Hw+ny8AfD6fzxcAPp/P5wsAn8/n8wWAz+fz+dkAeCifz+d3+gLA5/P5AuBBfD6fLwAexOfz+QJgAD6fzxcAA/D5fL4AGIDP5/MFwAB8Pp8vAAbg8/l8ATAAn8/nCwCfz+fzBYDP5/P5AsDn8/l8AeDz+Xy+APD5fD5fAPh8Pp+fDYCH8vl8fqcvAHw+ny8AHsTn8/kC4EF8Pp8vAAbg8/l8ATAAn8/nC4AB+Hw+XwAMwOfz+QJgAD6fzxcAA/D5fL4A8Pl8Pl8A+Hw+ny8AfD6fzxcAPp/P5wsAn8/n8wWAz+fz+VH/ADfWFRnCibAxAAAAAElFTkSuQmCC';
 
-/** A file the composer attached, inline for the same reason. */
+/** A file the composer attached, inline so the page needs no server. */
 const LOG_FILE =
   'data:text/plain;base64,cHJveHk6IGRlbmllZCAxMC4wLjAuNTo0NDMgKHByaXZhdGUgYWRkcmVzcykKcHJveHk6IGFsbG93ZWQgZXhhbXBsZS5jb206NDQzCg==';
 
-/** One of everything the thread has to draw. */
+/** Canned messages with one of every part kind the thread renders. */
 const MESSAGES: ThreadMessageLike[] = [
   {
     role: 'user',
@@ -130,19 +122,20 @@ const MESSAGES: ThreadMessageLike[] = [
   },
 ];
 
-/** A thread that renders the canned messages and accepts no input. */
+/**
+ * Page that renders the installed thread components over canned messages,
+ * without an ACP connection. It shows every part kind, so a component upgrade
+ * can be checked on one page.
+ */
 export function Playground() {
-  // Every route sets its own title, so arriving here from a thread does not
-  // leave that thread's name on the tab.
   useDocumentTitle('Playground · Boxes');
-  // A thread over canned messages is still a thread: same viewport, same lock.
   useViewportLock();
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: MESSAGES,
     convertMessage: (m) => m,
     isRunning: false,
     onNew: async () => {
-      // Canned: there is nothing to send to.
+      // The canned store has no connection to send to.
     },
   });
 

@@ -8,56 +8,38 @@ import { Screen } from './screen.ts';
 import { log } from './log.ts';
 
 /**
- * Logging in to an account, rather than pasting a secret.
+ * Account logins, run by the harness's own CLI in a throwaway container.
  *
- * A subscription is not a string anybody can type into a form: there is no
- * static form of a ChatGPT or Claude account credential at all, and the only
- * thing that knows how to obtain one is the harness's own CLI. So the
- * orchestrator does not speak OAuth. It runs that CLI in a throwaway
- * container built from the box image, reads what it prints, answers what
- * it asks, and stores what it produced. The settings page drives the whole of
- * it by polling one state machine.
- *
- * What is deliberately not here: any parser that treats a CLI's wording as an
- * API. Neither `codex login --device-auth` nor `claude setup-token` documents
- * the exact lines it prints, and both are free to reword them in a patch
- * release. Everything below therefore looks for the *shapes* that cannot
- * change without the flow itself changing — a URL on the service's own host, a
- * one-time code, a token with a fixed prefix — and puts the raw output in the
- * log so that a person can finish by hand on the day a CLI surprises us.
- * What either CLI really prints is a thing only a box can answer, and the
- * tests below say what the parse expects rather than what it will meet.
+ * The CLIs do not document the lines they print. So the parsers look for
+ * shapes, such as a URL on the service's host, a one-time code or a token
+ * prefix, and the raw output goes to the log.
  */
 
-/** How long a person gets to finish a login before it is given up on. */
+/** How long a person gets to finish a login before it fails, in milliseconds. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 
-/** A login container older than this is nobody's and is swept. */
+/** Age in milliseconds after which the sweep removes a login container. */
 export const LOGIN_CONTAINER_MAX_AGE_MS = 15 * 60_000;
 
 /** Where Codex keeps its state inside the login container's tmpfs home. */
 const CODEX_HOME = '/home/agent/.codex';
 
-/** Where Claude Code keeps its own, for the same reason. */
+/** Where Claude Code keeps its state inside the login container's tmpfs home. */
 const CLAUDE_CONFIG_DIR = '/home/agent/.claude';
 
 /**
  * The URL `codex login --device-auth` sends a person to.
  *
- * Matched by prefix rather than compared: the path is the documented entry
- * point, and anything the CLI appends to it — a query carrying the code, a
- * locale — is still the right URL to show.
+ * Matched by prefix, as anything the CLI appends, such as a query with the
+ * code, is still the right URL to show.
  */
 const CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device';
 
 /**
  * What a Claude one-year token looks like, which is how it is recognised.
  *
- * The prefix is `sk-ant-` and no more of it than that. The mint names its own
- * kind after it — `oat01` was the one this read for — and a login that goes
- * on printing a token this cannot see is a login that hangs on a success,
- * which is worse than one that takes a token of a kind it has not met. The
- * length is what keeps it off anything else on the screen.
+ * Only the `sk-ant-` prefix is matched, not the kind after it, so a new token
+ * kind cannot make the login hang. The minimum length keeps it off other text.
  */
 const CLAUDE_TOKEN = /sk-ant-[A-Za-z0-9_-]{20,}/;
 
@@ -65,12 +47,8 @@ const CLAUDE_TOKEN = /sk-ant-[A-Za-z0-9_-]{20,}/;
 const CLAUDE_CODE_PROMPT = /paste code here/i;
 
 /**
- * The CLI's own complaint about a code it would not take.
- *
- * A refusal is not the end of the login: the CLI draws its prompt again and
- * waits, so this is shown beside the input rather than failing the flow. Its
- * own sentence is what the reader is shown, because the screen it is read off
- * has every character the CLI put there.
+ * The CLI's complaint about a code it would not take. The login goes on, so
+ * the captured sentence is shown beside the input.
  */
 const CLAUDE_CODE_REFUSED = /OAuth error:?\s*([^\n]+)/i;
 
@@ -81,35 +59,28 @@ const RETRY_PROMPT = /press enter to retry/i;
  * How long to wait between writing a code and writing the return that enters
  * it, in milliseconds.
  *
- * The UI reads a chunk of stdin as one keypress, so the return has to arrive
- * as input of its own. Two writes are not enough on their own — back to back
- * they reach the terminal together and the return is read as part of what was
- * typed — and a pause is what separates them. Measured rather than reasoned:
- * a code of a real length is never entered without one and always entered
- * with this much. Nobody waits on it, since the exchange after it takes
- * seconds.
+ * The UI reads a chunk of stdin as one keypress, and two writes back to back
+ * arrive as one chunk. The value is measured: with it, a real code is always
+ * entered.
  */
 const ENTER_DELAY_MS = 150;
 
 /**
- * How long a token is left to finish arriving before it is stored.
+ * How long a token is left to finish arriving before it is stored, in
+ * milliseconds.
  *
- * A read ends wherever it ends, and a token it ended in the middle of matches
- * the pattern above as well as a whole one does. Storing what arrived would
- * store a token a character or more short, which is minted, delivered and
- * then refused. The read that carries the rest is milliseconds behind, so the
- * wait is short, and it is a fixed one rather than a wait for more output:
- * the CLI may print nothing after the token and never exit.
+ * A read can end in the middle of a token, and the part matches the pattern
+ * too. The wait is fixed, as the CLI may print nothing more and never exit.
  */
 const TOKEN_GRACE_MS = 150;
 
-/** How long a Claude token is good for. The CLI says a year and cannot refresh. */
+/** How long a Claude token is valid, in days. It cannot be refreshed. */
 const CLAUDE_TOKEN_DAYS = 365;
 
-/** How much of a CLI's output is kept for the log and for an error message. */
+/** How many characters of a CLI's output are kept. */
 const OUTPUT_LIMIT = 64 * 1024;
 
-/** How much of it a failure reports. */
+/** How many characters of the output a log line or error reports. */
 const ERROR_TAIL = 600;
 
 /** The credentials that have a login flow at all. */
@@ -124,7 +95,9 @@ export function hasLoginFlow(id: CredentialId): boolean {
 
 /** One command a login runs in its container. */
 export interface LoginExecSpec {
+  /** The argument vector. */
   cmd: readonly string[];
+  /** Variables set for the command. */
   env?: Record<string, string>;
   /** A terminal and a writable stdin: what an interactive CLI needs. */
   tty?: boolean;
@@ -136,21 +109,20 @@ export interface LoginExec {
   output: Readable;
   /** Writable only on a TTY exec; null otherwise. */
   stdin: Writable | null;
+  /** Resolves when the command ends, with the exit code if known. */
   exited: Promise<number | null>;
+  /** Ends the command's stream. */
   kill(): void;
 }
 
 /**
- * Everything a login needs from Docker.
- *
- * An interface rather than direct calls because the two flows are the part
- * worth testing and a daemon is the part that cannot be: the tests drive both
- * of them over scripted streams, exactly as `docker.test.ts` drives the rest
- * over a faked dockerode.
+ * Everything a login needs from Docker. An interface, so tests can drive the
+ * flows over scripted streams.
  */
 export interface LoginRuntime {
-  /** Creates and starts the throwaway container, and answers with its id. */
+  /** Creates and starts the throwaway container, and returns its id. */
   start(credentialId: CredentialId): Promise<string>;
+  /** Runs one command in the container. */
   exec(containerId: string, spec: LoginExecSpec): Promise<LoginExec>;
   /** Removes it, whatever state it is in. Never throws. */
   remove(containerId: string): Promise<void>;
@@ -188,10 +160,15 @@ export function dockerLoginRuntime(image: string): LoginRuntime {
 
 /** One login in progress, or the last one that finished. */
 interface Flow {
+  /** The login id the page polls with. */
   id: string;
+  /** The credential the login is for. */
   credentialId: CredentialId;
+  /** Where the login has got to. */
   state: LoginState;
+  /** The login container, or null before it starts and after removal. */
   containerId: string | null;
+  /** The running CLI, or null. */
   exec: LoginExec | null;
   /** Set once the state is `done` or `failed`; nothing moves it afterwards. */
   settled: boolean;
@@ -199,38 +176,35 @@ interface Flow {
   refusal: string | null;
   /** Whether the retry the CLI is waiting on has been pressed already. */
   retrying: boolean;
+  /** The LOGIN_TIMEOUT_MS timer, or null once released. */
   timer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
- * Runs the logins, one per credential at a time.
- *
- * One at a time because a login is a container and a person: two of them for
- * the same credential would race to write the same row, and the second is
- * always the one that is meant. Starting one therefore cancels whatever was
- * running, and the abandoned flow's id stops resolving.
+ * Runs the logins, one per credential at a time. Two logins for one
+ * credential would race to write the same row, so a new one cancels the old.
  */
 export class LoginManager {
+  /** The current flow of each credential. */
   private readonly flows = new Map<CredentialId, Flow>();
 
   constructor(
+    /** Where a finished login stores its credential. */
     private readonly credentials: CredentialStore,
+    /** Runs the login containers and commands. */
     private runtime: LoginRuntime,
-    /** Overridden by the tests, which cannot wait ten minutes. */
+    /** How long a login may take, in milliseconds. */
     private readonly timeoutMs: number = LOGIN_TIMEOUT_MS,
   ) {}
 
-  /** Test seam, matching docker.ts's: install a runtime the tests script. */
+  /** Test seam: installs a runtime the tests script. */
   setRuntimeForTests(runtime: LoginRuntime): void {
     this.runtime = runtime;
   }
 
   /**
-   * Starts a login and answers with the id the page polls.
-   *
-   * Returns as soon as the flow exists rather than when the container does:
-   * pulling an image and starting a container take seconds, and `starting` is
-   * a state the page can already draw.
+   * Starts a login and returns the id the page polls. It returns before the
+   * container starts, and the page shows the `starting` state meanwhile.
    */
   start(credentialId: CredentialId): string {
     if (!hasLoginFlow(credentialId)) {
@@ -239,8 +213,6 @@ export class LoginManager {
         `${credentialId} has no login flow: paste its token on the settings page instead`,
       );
     }
-    // A second login is the one that is meant; the first is abandoned with
-    // its container.
     const previous = this.flows.get(credentialId);
     if (previous) this.abort(previous, 'a newer login replaced this one');
 
@@ -271,26 +243,15 @@ export class LoginManager {
   }
 
   /**
-   * Answers the CLI's prompt with the code the login page gave the person.
+   * Types the code the person pasted into the CLI's prompt.
    *
-   * Accepted a moment early as well as on the prompt itself: the page can send
-   * the code as soon as it has one, whether the prompt has been drawn by then
-   * is a race about terminal output rather than anything a person did, and a
-   * stream written to before the prompt is a stream the CLI reads when it gets
-   * there. A flow with nothing to write to — Codex's, which reads no stdin at
-   * all, or one that has not started its CLI yet — is a flow that has no
-   * question outstanding, and says so.
+   * It also accepts a code before the prompt is drawn, as the CLI reads the
+   * stream when it gets there. A flow without stdin, such as Codex's, answers
+   * 409.
    *
-   * Ended with a carriage return, because that is the byte a terminal sends
-   * for the Enter key. The UI reading this one puts it in raw mode, where no
-   * line discipline turns a newline into that return: a code ended with one
-   * is typed into the field and left sitting there unsubmitted.
-   *
-   * The return is written on its own. The UI reads a chunk of stdin as one
-   * keypress, so a return in the same chunk as the code is part of what was
-   * typed rather than the key that enters it — which a short code hides,
-   * arriving in a chunk small enough to be read as a key either way, and a
-   * real one does not.
+   * The code is entered with a carriage return, as a raw-mode UI does not turn
+   * a newline into Enter. The return is written ENTER_DELAY_MS later, as a
+   * separate keypress.
    */
   submitCode(credentialId: CredentialId, loginId: string, code: string): void {
     const flow = this.flow(credentialId, loginId);
@@ -300,10 +261,7 @@ export class LoginManager {
     if (!waiting || !flow.exec?.stdin) {
       throw new HttpError(409, 'this login is not waiting for a code');
     }
-    // The complaint on screen is about the code before this one, and the CLI
-    // takes it back once this one is entered. Cleared here rather than when
-    // that happens: the reader has just answered it, and it should go as they
-    // do so.
+    // The refusal was about the previous code, so it goes now.
     flow.refusal = null;
     if (flow.state.state === 'awaiting_code' && flow.state.error !== null) {
       this.settle(flow, { state: 'awaiting_code', url: flow.state.url, error: null });
@@ -350,8 +308,7 @@ export class LoginManager {
     } catch (err) {
       this.fail(flow, (err as Error).message);
     } finally {
-      // Whatever happened, the container goes: it holds a tmpfs home with
-      // freshly minted credential material in it.
+      // The container always goes, as its home holds new credential material.
       this.release(flow);
       if (flow.containerId) {
         const containerId = flow.containerId;
@@ -364,19 +321,13 @@ export class LoginManager {
   /**
    * Codex: the device-code flow.
    *
-   * The CLI reads nothing from stdin. It prints a URL and a one-time code,
-   * polls OpenAI for up to fifteen minutes, writes `auth.json` and exits 0;
-   * any failure exits 1 with the reason on stderr. So the whole of the
-   * orchestrator's part is to read two things off the output, wait, and then
-   * read the file. The wording of those lines is the CLI's own and may be
-   * reworded, which is why the parse below takes the URL by prefix and the
-   * code by shape, and why every line is logged whether it was understood
-   * or not.
+   * The CLI reads no stdin. It prints a URL and a one-time code, waits for the
+   * person, writes `auth.json` and exits 0. On failure it exits 1 with the
+   * reason on stderr.
    */
   private async codexLogin(flow: Flow): Promise<void> {
     const exec = await this.runtime.exec(flow.containerId!, {
-      // CODEX_HOME must already exist: the Codex CLI treats one that names a
-      // missing directory as an error rather than creating it.
+      // The Codex CLI fails when CODEX_HOME does not exist.
       cmd: ['bash', '-lc', `mkdir -p "$CODEX_HOME" && exec codex login --device-auth`],
       env: { CODEX_HOME },
     });
@@ -394,9 +345,7 @@ export class LoginManager {
 
     if (flow.settled) return;
     const exit = await exec.exited;
-    // The raw lines, understood or not. The one thing that makes a CLI
-    // rewording its output recoverable by hand rather than only by a release:
-    // the URL and the code are in here whether or not the parse found them.
+    // The raw output, so a person can finish by hand if the parse failed.
     log.info('codex device login finished', { exit, url, code, output: tail(output) });
     if (exit !== 0) {
       this.fail(flow, `codex login exited ${exit ?? 'without a status'}: ${tail(output)}`);
@@ -415,13 +364,8 @@ export class LoginManager {
   }
 
   /**
-   * Stores what the Codex CLI wrote, whole.
-   *
-   * The whole document rather than the access token alone, because the
-   * refresh loop needs the refresh token beside it and the orchestrator is
-   * the only thing that ever refreshes this credential. What is lifted out of
-   * it is only what the settings page shows: when the access token expires,
-   * and whose account it is.
+   * Stores the whole document the Codex CLI wrote, as the refresh needs the
+   * refresh token beside the access token.
    */
   private storeCodexDocument(flow: Flow, document: string): void {
     const parsed = parseAuthDocument(document);
@@ -444,13 +388,9 @@ export class LoginManager {
   /**
    * Claude: an interactive terminal UI with a code pasted back.
    *
-   * `claude setup-token` has no device-code mode and no non-interactive one.
-   * It needs a TTY, prints a URL, blocks on a prompt, and prints a one-year
-   * token once the code is entered. Everything here is therefore read off a
-   * terminal — redraws, escape sequences and all — which is why the scan is
-   * over a screen rebuilt from them rather than over the text they surround:
-   * the UI sends only the cells it is changing, so what it does not resend
-   * is lost to anything that reads the stream as text.
+   * `claude setup-token` needs a TTY. It prints a URL, blocks on a prompt, and
+   * prints a one-year token once the code is entered. The scan reads a
+   * rebuilt screen, as the UI redraws only the cells it changes.
    */
   private async claudeLogin(flow: Flow): Promise<void> {
     const exec = await this.runtime.exec(flow.containerId!, {
@@ -465,29 +405,19 @@ export class LoginManager {
     /** Set once a token has been seen, while the rest of it is given time to arrive. */
     let storing: ReturnType<typeof setTimeout> | null = null;
     /**
-     * Whether the CLI has asked for a code yet.
-     *
-     * Once, and then it stays: the prompt is drawn over — by a refusal, which
-     * replaces it with what to press to get it back — and a screen shows only
-     * what is on it. A flow that read the prompt's absence as the CLI no
-     * longer wanting a code would take the input away mid-login.
+     * Whether the CLI has asked for a code yet. It stays true, as a refusal
+     * draws over the prompt while the CLI still wants a code.
      */
     let prompted = false;
     const output = await readScreen(exec.output, (text) => {
       if (flow.settled) return;
-      // What the CLI has drawn so far. At debug level because it is the only
-      // way to see what a login actually said.
+      // The only record of what the login showed.
       log.debug('claude login output', { text: tail(text) });
       url = grown(url, visitUrlIn(text));
       token = grown(token, CLAUDE_TOKEN.exec(text)?.[0] ?? null);
       if (token) {
-        // The token is the end of the flow. The CLI may go on drawing, and
-        // waiting for it to exit would risk waiting out the whole timeout on
-        // a UI that wants a keypress. Verify step 8 says whether it does.
-        //
-        // Not on sight, though: a read can end in the middle of a token, and
-        // what arrived carries the prefix and the length this looks for as
-        // well as the whole does. The reads that follow finish it.
+        // The token ends the flow, without waiting for the CLI to exit. It is
+        // stored after TOKEN_GRACE_MS, as a read may end mid-token.
         storing ??= setTimeout(() => {
           if (flow.settled) return;
           if (token) this.storeClaudeToken(flow, token);
@@ -496,24 +426,18 @@ export class LoginManager {
         return;
       }
       if (!url) return;
-      // The prompt is what says the CLI is blocked rather than still
-      // printing, which is the difference the page draws an input for.
+      // The prompt shows the CLI is waiting, and the page then draws an input.
       prompted ||= CLAUDE_CODE_PROMPT.test(text);
       if (prompted) {
-        // Kept on the flow rather than read off the screen each time: the
-        // retry below takes the CLI's complaint off the screen, and the
-        // reader still has to be told why the code they sent was refused.
-        // It goes when they send another one.
+        // Kept on the flow, as the retry below takes the complaint off the
+        // screen. submitCode clears it.
         const reason = CLAUDE_CODE_REFUSED.exec(text)?.[1]?.trim() ?? null;
         if (reason !== null && flow.refusal === null) {
           flow.refusal = reason;
           log.warn('the CLI refused a login code', { reason });
         }
-        // A refusal replaces the prompt with what to press to bring it back,
-        // and the CLI reads nothing else until it has been pressed: a code
-        // sent to this screen is thrown away, and the reader would have to
-        // send the same one twice. Pressing it here leaves the prompt ready
-        // for the next code instead.
+        // After a refusal the CLI discards input until Enter brings the
+        // prompt back, so Enter is pressed here for the person.
         if (RETRY_PROMPT.test(text) && !flow.retrying) {
           flow.retrying = true;
           exec.stdin?.write('\r');
@@ -529,8 +453,7 @@ export class LoginManager {
     if (storing) clearTimeout(storing);
     if (flow.settled) return;
     if (token) {
-      // The CLI ended while the wait above was still running, which is the
-      // one thing that proves there is no more of the token to come.
+      // The CLI ended during the grace wait, so the token is complete.
       this.storeClaudeToken(flow, token);
       return;
     }
@@ -542,13 +465,9 @@ export class LoginManager {
   }
 
   /**
-   * Stores the token the CLI printed.
-   *
-   * A year out, because that is what the CLI mints and there is no refresh
-   * token to ask for more: at expiry the refresh loop marks the credential
-   * `expired` and the settings page asks for another login. The account is
-   * left to the store's own rule — the token's last four characters — since
-   * `setup-token` reports no account name to put there instead.
+   * Stores the token the CLI printed, expiring CLAUDE_TOKEN_DAYS from now.
+   * `setup-token` reports no account name, so the store uses the token's
+   * last four characters.
    */
   private storeClaudeToken(flow: Flow, token: string): void {
     this.credentials.put('claude', 'token', token, {
@@ -558,7 +477,7 @@ export class LoginManager {
     log.info('stored a Claude subscription token');
   }
 
-  /** Records a final state, unless the flow already has one. */
+  /** Records a new state, unless the flow has ended. `done` and `failed` end it. */
   private settle(flow: Flow, state: LoginState): void {
     if (flow.settled) return;
     flow.state = state;
@@ -568,7 +487,7 @@ export class LoginManager {
     }
   }
 
-  /** Ends a flow badly, with a sentence the settings page can show. */
+  /** Ends a flow as failed, with a sentence the settings page can show. */
   private fail(flow: Flow, error: string): void {
     if (flow.settled) return;
     log.warn('a login failed', { credential: flow.credentialId, error });
@@ -576,11 +495,9 @@ export class LoginManager {
   }
 
   /**
-   * Ends a flow and takes its container now rather than at its own pace.
-   *
-   * For a cancel and for the flow a newer login replaced: `run` is still
-   * awaiting a stream that only the kill will end, so the removal is started
-   * here and `run`'s own cleanup finds nothing left to do.
+   * Fails a flow, removes its container now, and forgets it. For a cancel,
+   * a shutdown, and a flow a newer login replaced. `run` then finds no
+   * container left to remove.
    */
   private abort(flow: Flow, reason: string): void {
     this.fail(flow, reason);
@@ -603,23 +520,10 @@ export class LoginManager {
 // --- reading what a CLI printed ---------------------------------------------
 
 /**
- * Everything a stream produces, stripped of terminal escapes, reported as it
- * grows.
- *
- * The callback is handed the whole of the output so far rather than the new
- * piece, because nothing here arrives on a chunk boundary: a URL can be split
- * across two reads, and a terminal UI rewrites lines it has already sent.
- * Scanning the accumulated text costs nothing at these sizes and cannot miss a
- * match that straddles a read.
+ * Reads a redrawing CLI's terminal, and returns what is on its screen at the
+ * end. onText gets the screen after every chunk, as the URL and the prompt
+ * may be drawn over later.
  */
-/**
- * Reads a redrawing CLI's terminal, answering with what is on its screen.
- *
- * The screen after every chunk rather than only at the end: what the flow is
- * looking for may be drawn and then drawn over — the URL and the prompt both
- * are — so each is read the first time it appears.
- */
-
 async function readScreen(
   output: Readable,
   onText: (text: string) => void,
@@ -636,6 +540,11 @@ async function readScreen(
   return screen.text;
 }
 
+/**
+ * Reads a stream to its end, stripped of terminal escapes, and returns the
+ * text. onText gets the whole text so far after every chunk, as a match may
+ * be split across reads.
+ */
 async function readOutput(
   output: Readable,
   onText: (text: string) => void,
@@ -647,9 +556,7 @@ async function readOutput(
       onText(text);
     }
   } catch (err) {
-    // A flow that has what it came for kills the exec, which destroys this
-    // stream mid-read. That is an ending rather than a failure, and the text
-    // read up to it is the text there was.
+    // A flow that is done kills the exec, which ends this stream mid-read.
     log.debug('a login stream ended abruptly', { error: (err as Error).message });
   }
   return text;
@@ -666,14 +573,6 @@ export function tail(text: string): string {
   return trimmed.length <= ERROR_TAIL ? trimmed : `…${trimmed.slice(-ERROR_TAIL)}`;
 }
 
-/**
- * Terminal escape sequences removed.
- *
- * Both CLIs colour their output and one of them is a full-screen UI, so
- * nothing below can match anything until this has run. Covers the two forms
- * that carry meaning here — CSI sequences and OSC strings — and leaves
- * anything else as the text it is.
- */
 /** The byte every terminal control sequence starts with. */
 const ESC = String.fromCharCode(0x1b);
 
@@ -692,6 +591,10 @@ const CSI_PATTERN = new RegExp(
   'g',
 );
 
+/**
+ * Returns the text with its CSI and OSC terminal sequences removed, and with
+ * carriage returns turned into newlines.
+ */
 export function stripAnsi(text: string): string {
   return (
     text
@@ -704,16 +607,12 @@ export function stripAnsi(text: string): string {
 }
 
 /**
- * The longer of what has been read and what a later read says.
+ * Returns the later reading when it extends the earlier one, and the earlier
+ * one otherwise.
  *
- * A read ends wherever it ends, which may be in the middle of a URL or a code,
- * and the piece that arrived looks exactly like a whole one: the pattern stops
- * where the text does. The rest comes with the next read, so a later reading
- * that begins with the one in hand replaces it.
- *
- * Anything else is left alone. A CLI that redraws itself can scroll part of a
- * line away or draw over it, and a URL read whole once must not be shortened
- * by what is on the screen afterwards.
+ * A read may end in the middle of a URL or a code, so a longer later reading
+ * replaces it. A redraw may cut a value short later, so a reading that does
+ * not start with the earlier one is ignored.
  */
 export function grown(seen: string | null, read: string | null): string | null {
   if (read === null) return seen;
@@ -725,9 +624,7 @@ export function grown(seen: string | null, read: string | null): string | null {
 export function deviceUrlIn(text: string): string | null {
   const match = new RegExp(`${CODEX_DEVICE_URL}[^\\s"'<>]*`).exec(text);
   if (match) return match[0];
-  // Any other URL on the login host will do. A CLI that moves the path has
-  // still sent the person somewhere on the service's own login domain, and
-  // showing it beats showing nothing.
+  // Otherwise any URL on the login host, in case the CLI moved the path.
   return /https:\/\/auth\.openai\.com\/[^\s"'<>]*/.exec(text)?.[0] ?? null;
 }
 
@@ -742,17 +639,10 @@ const NOT_A_CODE = new Set([
 /**
  * The one-time code in some output, or null until one appears.
  *
- * Read by shape rather than by the sentence around it, because the sentence is
- * not an API and the shape is: a run of upper-case letters and digits, in one
- * piece or in two joined by a hyphen. Only the text from the URL onwards is
- * considered, since that is where the CLI prints it, and the URL itself is cut
- * out first so that nothing in it can be mistaken for the code.
- *
- * A word that merely looks like a code is the failure mode, so the obvious
- * ones are excluded and a candidate has to be hyphenated, carry a digit, or be
- * long enough not to be a word anybody writes in capitals. If a real box shows
- * the parse picking the wrong token, the log line beside it carries the
- * untouched output and this is the function to fix.
+ * It matches the shape: runs of four or more upper-case letters and digits,
+ * joined by hyphens. Only text from the URL on is searched, with the URL cut
+ * out. Words in NOT_A_CODE are skipped, and a match must have a hyphen, a
+ * digit, or at least eight characters.
  */
 export function deviceCodeIn(text: string, url: string): string | null {
   const from = text.indexOf(url);
@@ -770,10 +660,7 @@ export function deviceCodeIn(text: string, url: string): string | null {
 /**
  * The URL `claude setup-token` wants visited, or null.
  *
- * `Visit:` first, since that is what the CLI labels it with today, and the
- * first https URL otherwise. A terminal wraps a long URL at its own width, so
- * a soft-wrapped one arrives split across lines; the exec asks for a wide
- * terminal to make that unlikely.
+ * The URL after `Visit:` first, and the first https URL otherwise.
  */
 export function visitUrlIn(text: string): string | null {
   const labelled = /Visit:\s*(https?:\/\/[^\s"'<>]+)/i.exec(text);

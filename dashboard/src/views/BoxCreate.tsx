@@ -17,33 +17,24 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
-/** What the picker calls "no extra set", which the API treats as absent. */
+/** Picker value for no extra set. The form sends it as null. */
 const NO_SET = 'none';
 
-/** The new-box form, which opens the box's thread on success. */
+/** Form that creates a box and then opens its first thread. */
 export function BoxCreate() {
   const navigate = useNavigate();
-  /** Out to the box list, whether the form was cancelled or submitted. */
+  /** Leaves for the box list on Cancel. */
   const up = useUp('/');
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /**
-   * The sets a box may be created with, which is every set but the global
-   * one: that goes in either way, so offering it would only suggest it were
-   * optional. Null while they are still loading, and an empty list where the
-   * deployment has never made one — in both cases the picker stays out of the
-   * way rather than showing a control with nothing in it.
+   * The sets a box may name, without the global set, which every box gets.
+   * Null while loading. The picker is hidden while this is null or empty.
    */
   const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
   const [agentSet, setAgentSet] = useState(NO_SET);
-  /**
-   * What the box's first conversation runs.
-   *
-   * A box is made to be worked in, so it is made with a thread in it, and the
-   * agent that thread runs is chosen here rather than in a second dialog on
-   * the way in. One request creates both.
-   */
+  /** The agent and settings of the box's first thread, created in the same request. */
   const thread = useThreadOptions();
 
   useEffect(() => {
@@ -51,7 +42,7 @@ export function BoxCreate() {
       try {
         setAgentSets((await api.listAgentSets()).filter((s) => !s.global));
       } catch {
-        // A box can be created without one; the form does not need this to work.
+        // A box needs no set, so the form works without the list.
         setAgentSets([]);
       }
     })();
@@ -68,13 +59,11 @@ export function BoxCreate() {
         agentSet: agentSet === NO_SET ? null : agentSet,
         ...(thread.value ? { thread: thread.value } : {}),
       });
-      // Remembered after the box exists rather than before: what is stored is
-      // what a thread was actually started as.
+      // Stored only after the create succeeded, so it records what a thread started as.
       thread.remember();
       await refresh();
-      // The form's entry is spent on the thread it made rather than left
-      // under it: the box exists now, and back onto a form that would make a
-      // second one is not where anybody meant to go.
+      // Replaces the form's entry, so back does not return to a form that
+      // would create a second box.
       const first = created.threads[0];
       void navigate(first ? `/boxes/${created.id}/threads/${first.id}` : '/', { replace: true });
     } catch (err) {
@@ -125,9 +114,6 @@ export function BoxCreate() {
         </div>
       ) : null}
 
-      {/* The first thread's agent and its settings, the same block the
-          new-thread dialog uses — a box and its first conversation are one
-          act, and asking twice for one of them would be two. */}
       <div className="flex flex-col gap-2">
         <span className="text-sm font-medium">First thread</span>
         <ThreadOptions state={thread} />
@@ -141,10 +127,8 @@ export function BoxCreate() {
         <Button type="button" variant="outline" onClick={up.go} disabled={busy}>
           Cancel
         </Button>
-        {/* Held until the harness list has answered, for the same reason the
-            dialog holds its own: a create sent before then would put the
-            box's first thread on the orchestrator's default agent rather than
-            on the one this form is showing. */}
+        {/* Held until the harness list has loaded or failed. An earlier create
+            would start the first thread on the orchestrator's default agent. */}
         <Button type="submit" disabled={busy || !name.trim() || !thread.ready}>
           {busy ? 'Creating…' : 'Create'}
         </Button>

@@ -7,23 +7,15 @@ import type {
   ThreadUpdate,
 } from '../src/stores/thread/acp-types.ts';
 
-/**
- * A stand-in ACP gateway: a WebSocket server speaking the agent side of ACP
- * from canned scripts.
- *
- * It mirrors what the real gateway does rather than what a browser wishes it
- * did — a box owning several threads, each socket pinned to one of them
- * by the thread in its upgrade path, session/new answered with that thread's
- * id, session/load replaying that thread's stored history to that socket
- * alone, and every update going only to the sockets watching the thread it is
- * about.
- */
-
 /** One content block of a prompt, as far as the stub reads it. */
 export interface PromptBlock {
+  /** The block type, such as text or image. */
   type: string;
+  /** The text of a text block. */
   text?: string;
+  /** The media type of a binary block. */
   mimeType?: string;
+  /** The base64 data of a binary block. */
   data?: string;
 }
 
@@ -38,20 +30,14 @@ export interface PromptScript {
   /** Hold the prompt open until the test releases it. */
   hold?: boolean;
   /**
-   * Whether this turn leaves work running in the background, which is the real
-   * adapter's most awkward shape: the agent says its piece, the prompt stays
-   * open because a subagent is still going, and the thread is waiting for its
-   * reader the whole time. Set alongside `hold`, and the stub goes quiet
-   * before it parks — a held prompt with no tasks stays a talking one.
+   * Whether this turn leaves work running in the background: the agent stops
+   * speaking, and the prompt stays open while a subagent runs. It takes effect
+   * only with `hold`. A held prompt without it keeps speaking.
    */
   background?: boolean;
 }
 
-/**
- * A streamed assistant reply, in the chunks an adapter would send it.
- *
- * Shared, because a script's updates are what every thread test builds.
- */
+/** A streamed assistant reply, in the chunks an adapter would send it. */
 export function reply(...texts: string[]): ThreadUpdate[] {
   return texts.map(
     (text) =>
@@ -61,19 +47,25 @@ export function reply(...texts: string[]): ThreadUpdate[] {
 
 /** A permission question the stub raises instead of answering a prompt. */
 export interface PermissionScript {
+  /** Matched against the prompt text; the first match wins. */
   match: (text: string) => boolean;
+  /** The tool call the question is about. */
   toolCall: { toolCallId: string; title: string; kind?: string };
+  /** The answers the browser can choose from. */
   options: Array<{ optionId: string; name: string; kind: string }>;
-  /** Streamed after the answer arrives, with the chosen option's id. */
+  /** Streamed after the answer arrives, given the chosen option's id or null. */
   after: (optionId: string | null) => ThreadUpdate[];
 }
 
 /** How the stub behaves, mutable between tests. */
 export interface GatewayScript {
+  /** The modes the adapter offers, or null for none. */
   modes: ThreadModeState | null;
   /** The options the adapter offers, such as the model. */
   configOptions: ThreadConfigOption[];
+  /** How the stub answers prompts. */
   prompts: PromptScript[];
+  /** The permission questions the stub raises instead of answering a prompt. */
   permissions: PermissionScript[];
   /** Delivered to the next socket that attaches, then cleared. */
   queuedPermission: PermissionScript | null;
@@ -83,22 +75,19 @@ export interface GatewayScript {
    */
   holdLoad?: boolean;
   /**
-   * What a turn that backgrounds something leaves running, as the adapter's
-   * async-task spawns describe it.
-   *
-   * One shell command by default, which is the ordinary case. A test that
-   * cares what a task's kind or its `canStop` does to the bar says so here
-   * rather than reaching into the stub.
+   * What a turn with `background` leaves running, as the adapter's async-task
+   * spawns describe it. One stoppable shell command by default.
    */
   backgroundTasks?: BackgroundProcess[];
 }
 
 /** A running stub gateway. */
 export interface StubGateway {
+  /** How the stub behaves. A test may change it between prompts. */
   script: GatewayScript;
   /** Prompt texts the stub received, across every thread. */
   prompts: string[];
-  /** The content blocks of each prompt, which is what text loses. */
+  /** The content blocks of each prompt, including those without text. */
   promptBlocks: PromptBlock[][];
   /** Notifications the stub received, in order, such as session/cancel. */
   notifications: Array<{ method: string; params: Record<string, unknown> }>;
@@ -117,28 +106,33 @@ export interface StubGateway {
   /**
    * How many session/loads are parked, waiting to be released.
    *
-   * Asked before releasing them, because a browser that has not sent its
-   * load yet cannot have it released: the release frees what is parked, and
-   * a load arriving a moment later parks behind it and stays there. A test
-   * that assumed otherwise waited out its own timeout for a window that had
-   * never opened.
+   * A release frees only the loads parked at that moment. A load that arrives
+   * later stays parked, so a test waits for this count before it releases.
    */
   loadsHeld: () => number;
   /** Sends one update to the sockets watching a thread, and records it. */
   emit: (update: ThreadUpdate, threadId?: string) => void;
+  /** Closes every socket and the server. */
   close: () => void;
 }
 
 /** A JSON-RPC frame. */
 interface Rpc {
+  /** The protocol version. */
   jsonrpc: '2.0';
+  /** The request id. A notification has none. */
   id?: number | string;
+  /** The method of a request or notification. */
   method?: string;
+  /** The parameters of a request or notification. */
   params?: unknown;
+  /** The result of a response. */
   result?: unknown;
+  /** The error of a failed response. */
   error?: { code: number; message: string };
 }
 
+/** The thread the stub starts with, and the default until another is minted. */
 const THREAD_ID = 'acp-thread-1';
 
 /** What the gateway has to know about a box to answer an upgrade. */
@@ -159,6 +153,10 @@ export interface BoxLookup {
 /**
  * Attaches a stub gateway to an existing HTTP server at
  * `/ws/boxes/:id/acp` and `/ws/boxes/:id/threads/:threadId/acp`.
+ *
+ * It speaks the agent side of ACP from canned scripts, and behaves like the
+ * real gateway. The upgrade path pins each socket to one thread. Every update
+ * goes only to the sockets that watch its thread.
  */
 export function attachStubGateway(
   server: Server,
@@ -183,7 +181,7 @@ export function attachStubGateway(
   const heldLoads: Array<() => void> = [];
   /** Threads with a prompt running, which is one third of the turn state. */
   const running = new Set<string>();
-  /** Threads the agent is talking on, which is usually but not always those. */
+  /** Threads the agent is talking on. A thread can run a prompt without speaking. */
   const speaking = new Set<string>();
   /** What each thread has left running in the box, as the gateway reads it. */
   const background = new Map<string, BackgroundProcess[]>();
@@ -202,9 +200,8 @@ export function attachStubGateway(
     [...sockets].filter(([, pinned]) => pinned === threadId).map(([ws]) => ws);
 
   /**
-   * The gateway's one ACP extension: whether a turn is running on a thread.
-   * Mirrored here because a browser re-opening a thread mid-turn learns it
-   * from nothing else — see TURN_STATE_METHOD.
+   * Sends a thread's turn state to its watchers, or to one socket only.
+   * A browser that re-opens a thread mid-turn learns it from nothing else.
    */
   const turnState = (threadId: string, only?: WebSocket): void => {
     for (const ws of only ? [only] : watchers(threadId)) {
@@ -236,8 +233,7 @@ export function attachStubGateway(
   const mint = (from: string | null): string => {
     const id = `acp-thread-${nextThread++}`;
     threads.set(id, from ? [...historyOf(from)] : []);
-    // The new thread becomes the default, and nobody is moved onto it: a
-    // socket already pinned to another thread keeps watching that one.
+    // The new thread becomes the default. Sockets stay pinned to their threads.
     current = id;
     return id;
   };
@@ -249,9 +245,8 @@ export function attachStubGateway(
     const boxId = path[1]!;
     const threadId = path[2] ?? null;
 
-    // The same handshake check the real gateway makes: acp.v1 plus the
-    // bearer entry, both offered as subprotocols, and the bearer is the
-    // token of the box the path names rather than a deployment-wide one.
+    // The real gateway's check: acp.v1 and the bearer of the box the path
+    // names, both offered as subprotocols.
     const offered = String(req.headers['sec-websocket-protocol'] ?? '')
       .split(',')
       .map((s) => s.trim());
@@ -262,10 +257,8 @@ export function attachStubGateway(
       return;
     }
 
-    // Which conversation this socket is for, settled at the handshake and
-    // fixed for its whole life, exactly as the real gateway pins it. A
-    // box or thread nobody knows is refused here, before there is a
-    // socket to answer on, rather than pinned to whatever is current.
+    // The socket stays pinned to this thread for its whole life, as in the
+    // real gateway. An unknown box or thread is refused before the upgrade.
     const pinned = boxes.thread(boxId, threadId);
     if (pinned === null) {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
@@ -282,7 +275,7 @@ export function attachStubGateway(
   });
 
   async function handle(ws: WebSocket, text: string): Promise<void> {
-    /** The thread this socket is about, which is never another's. */
+    /** The thread this socket is pinned to. */
     const pinned = sockets.get(ws) ?? current;
     let msg: Rpc;
     try {
@@ -292,9 +285,8 @@ export function attachStubGateway(
     }
     if (!msg.method) return;
     if (msg.id === undefined) {
-      // A notification, which is what session/cancel is in ACP. Recorded for
-      // the tests, and the cancel ends the turn it names the way the adapter
-      // ends it: the held prompt returns.
+      // A notification, such as session/cancel. A cancel ends the held prompt,
+      // as the adapter does.
       notifications.push({ method: msg.method, params: params(msg) });
       if (msg.method === 'session/cancel') releaseHeld?.();
       return;
@@ -306,18 +298,13 @@ export function attachStubGateway(
         return reply({ protocolVersion: 1, agentCapabilities: {} });
 
       case 'session/new':
-        // The thread this connection is pinned to, whichever it is. A
-        // response without modes is how the browser learns to load it rather
-        // than treat it as brand new.
+        // Only the pinned thread's id. The modes come with the session/load that follows.
         return reply({ sessionId: pinned });
 
       case 'session/fork':
-        // The fork answer carries modes and configOptions, the same as a
-        // fresh thread's, and its history starts as the source's. This stub
-        // stands in for the gateway and the adapter together: the real
-        // adapter writes a fork no transcript until it is prompted, and the
-        // orchestrator replays the source's in its place, so what a browser
-        // sees when it loads a fresh fork is what is modelled here.
+        // The stub plays gateway and adapter together. For a fork not yet
+        // prompted, the orchestrator replays the source's history, so the
+        // fork starts here with a copy of it.
         return reply({
           sessionId: mint(String(params(msg)['sessionId'] ?? current)),
           modes: script.modes,
@@ -327,8 +314,7 @@ export function attachStubGateway(
       case 'session/load': {
         const threadId = String(params(msg)['sessionId'] ?? pinned);
         if (script.holdLoad) await new Promise<void>((go) => heldLoads.push(go));
-        // Replay is that thread's stored history re-sent as notifications, to
-        // this socket only.
+        // The replay goes to this socket only.
         for (const update of historyOf(threadId)) {
           send(ws, {
             jsonrpc: '2.0',
@@ -336,23 +322,17 @@ export function attachStubGateway(
             params: { sessionId: threadId, update },
           });
         }
-        // Whether that thread is mid-turn, sent where the real gateway sends
-        // it: after the replay the client rebuilds from, never before.
+        // The real gateway sends the turn state after the replay.
         turnState(threadId, ws);
-        // After the replay, which is where the real gateway flushes them
-        // (orchestrator/src/gateway/downstream.ts). Delivering one earlier
-        // means delivering it into a transcript the client is about to throw
-        // away, and a queued request is only ever sent once.
+        // The real gateway sends queued requests after the replay, because the
+        // client discards what it showed before the replay. Each is sent once.
         if (script.queuedPermission) {
           const queued = script.queuedPermission;
           script.queuedPermission = null;
           void askPermission(ws, queued, threadId);
         }
-        // Answered last, which is the order that matters: the real gateway
-        // forwards the adapter's replay as it arrives and returns the result
-        // only once the load has finished (orchestrator's downstream.ts). A
-        // client is entitled to read the answer as "that is all of it", and
-        // this one does — it is where the thread reaches the screen.
+        // Answered last, as the real gateway does. The client shows the thread
+        // once the answer arrives.
         return reply({ modes: script.modes, configOptions: script.configOptions });
       }
 
@@ -380,8 +360,7 @@ export function attachStubGateway(
       }
 
       case 'session/prompt': {
-        // The thread the prompt names, which is this socket's own: a turn
-        // runs on a conversation, never on whichever is the default.
+        // A turn runs on the thread the prompt names, never on the default.
         const onThread = String(params(msg)['sessionId'] ?? pinned);
         const blocks = (params(msg)['prompt'] ?? []) as PromptBlock[];
         const promptText = blocks.map((b) => b.text ?? '').join('');
@@ -413,10 +392,8 @@ export function attachStubGateway(
     promptText: string,
     reply: (result: unknown) => void,
   ): Promise<void> {
-    // Block by block, as the real gateway echoes it: a prompt carrying an
-    // image and a note about what was attached is three blocks, and
-    // flattening them to their text is exactly the part a client renders
-    // differently.
+    // Echoed block by block, as the real gateway does, because a client
+    // renders an image block differently from text.
     for (const content of blocks) {
       emit({ sessionUpdate: 'user_message_chunk', content } as ThreadUpdate, onThread);
     }
@@ -435,8 +412,7 @@ export function attachStubGateway(
       }
       if (found.hold) {
         if (found.background) {
-          // What the adapter does with a turn that spawned one: the prompt
-          // stays open and the agent stops talking.
+          // As the adapter does: the prompt stays open and the agent stops speaking.
           background.set(
             onThread,
             script.backgroundTasks ?? [
@@ -478,10 +454,10 @@ export function attachStubGateway(
     for (const update of permission.after(optionId)) emit(update, onThread);
   }
 
-  /** Sends a request to a browser and waits for its answer. */
   let nextRequestId = 1000;
   const waiting = new Map<number, (value: unknown) => void>();
 
+  /** Sends a request to a browser and waits for its answer. */
   function request(ws: WebSocket, method: string, params: unknown): Promise<unknown> {
     const id = nextRequestId++;
     return new Promise((resolve) => {
@@ -535,10 +511,12 @@ function params(msg: Rpc): Record<string, unknown> {
     : {};
 }
 
+/** Sends a frame to a socket that is still open. */
 function send(ws: WebSocket, msg: Rpc): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
+/** Resolves after the given milliseconds. */
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

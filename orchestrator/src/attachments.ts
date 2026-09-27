@@ -6,17 +6,8 @@ import { resolveInRoot } from './review/fs.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
- * Files the user attaches to a prompt, stored in the box's own workspace.
- *
- * Everything an attachment could be — a screenshot, a PDF, a CSV, a heap
- * dump — is the same thing here: bytes written into the workspace under a
- * name the agent can type into a `Read` call. Nothing here decides the file's
- * type, and what a client says about what it uploaded is the client's own
- * business.
- *
- * The workspace is a plain directory this process owns, so an upload is a
- * file write rather than a copy into a container, and it works while the
- * box is stopped.
+ * Files the user attaches to a prompt, stored in the box's own workspace,
+ * and the types workspace files are served back as.
  */
 
 /** Directory attachments live in, relative to the workspace root. */
@@ -25,28 +16,19 @@ export const ATTACHMENTS_DIR = '.boxes/attachments';
 /**
  * What goes in `.boxes/.gitignore`.
  *
- * Attachments land inside a tree that is very often a git repository the
- * agent is working in, where they would show up as untracked files in every
- * `git status` the user reads and in every commit the agent is careless
- * with. A `*` here ignores the whole directory including this file itself,
- * which keeps the repository's own .gitignore — a file the user owns —
+ * The workspace is often a git repository, where attachments would show up
+ * as untracked files and could end up in a commit. A `*` ignores the whole
+ * directory, this file included, so the repository's own .gitignore stays
  * untouched.
  */
 const GITIGNORE = '*\n';
 
 /**
- * Content types a workspace file may be served back as itself.
+ * Content types a workspace file may be served back as itself: the images,
+ * PDFs, audio and video a browser shows rather than saves.
  *
- * Images, SVG included, PDFs, audio and video — the formats a browser shows
- * rather than saves. An SVG can carry script, and these are files the agent
- * can write, served from the same origin as the dashboard, so both ways of
- * opening one are shut: through an `<img>`, which is how the thread shows it,
- * a browser runs nothing in an SVG and fetches nothing it references, and
- * opened as a document it gets `default-src 'none'; sandbox`, which leaves it
- * no script, no origin and no network.
- *
- * HTML is the deliberate omission: a page served as one runs as this origin,
- * and there is no way to show it that does not.
+ * HTML is left out on purpose, because a page served as HTML runs as this
+ * origin.
  */
 const SERVABLE_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -95,36 +77,36 @@ const DOWNLOAD_TYPES: Record<string, string> = {
 };
 
 /**
- * The content security policy every workspace file is served under.
+ * The content security policy a workspace file is served under, unless a
+ * viewer or player shows it.
  *
- * `sandbox` leaves a document no script, no origin and no network, which is
- * what makes serving an SVG as itself safe.
+ * `sandbox` leaves a document no script, no origin and no network. That makes
+ * it safe to serve an SVG the agent wrote as itself. Shown through an
+ * `<img>`, an SVG runs nothing and fetches nothing.
  */
 const SANDBOXED_CSP = "default-src 'none'; sandbox";
 
 /**
- * The policy for a file a browser shows with a player or viewer of its own,
- * rather than as a document the file's bytes could script.
+ * The policy for a PDF, audio or video file, which the browser shows with its
+ * own viewer or player.
  *
- * A PDF is rendered by the browser's own viewer, and a sandboxed document is
- * one a browser may refuse to hand to a viewer at all — which turns "open it
- * in a tab" back into a download, the one thing serving it as
- * `application/pdf` was for. Audio and video are played by a media element
- * the browser builds around the file, and a sandboxed document has no origin
- * that element could load the file from. `media-src 'self'` is what lets it
- * load the file, and `default-src 'none'` still refuses everything else.
+ * A browser may refuse to hand a sandboxed PDF to its viewer and offer a
+ * download instead. A media element cannot load a file from a sandboxed
+ * document, because that document has no origin. `media-src 'self'` lets the
+ * player load the file, and `default-src 'none'` refuses everything else.
  */
 const VIEWER_CSP = "default-src 'none'; media-src 'self'";
 
-/** Whether a content type is shown by a viewer or player; see VIEWER_CSP. */
+/** Whether a content type is shown by the browser's own viewer or player. */
 function viewed(type: string): boolean {
   return type === 'application/pdf' || type.startsWith('audio/') || type.startsWith('video/');
 }
 
 /** How one workspace file is served: as itself, or as a download. */
 export interface ServedType {
+  /** The Content-Type header the file is sent with. */
   contentType: string;
-  /** False for anything not in SERVABLE_TYPES, which is then never rendered. */
+  /** Whether the file is shown inline. False means it is sent as a download. */
   inline: boolean;
   /** The content security policy it is served under. */
   csp: string;
@@ -151,21 +133,18 @@ const MAX_NAME = 100;
 const MAX_COLLISIONS = 100;
 
 /**
- * A client's filename, reduced to something safe to be both a path component
- * and a line of a prompt.
+ * A client's filename, reduced to a name that is safe as a path component and
+ * as a line of a prompt.
  *
- * Two different worries, one answer. As a path it must not escape the
- * attachments directory, so separators and traversal have to go; as prompt
- * text it is quoted into the message the model reads, so a newline in it
- * could forge a line of that message and a bracket could break the format
- * the dashboard parses back out. Keeping letters, digits, dot, dash and
- * underscore and replacing every run of anything else with a single
- * underscore settles all of it at once, and leaves a name that survives
- * being typed into a shell.
+ * Every run of characters other than letters, digits, dot, dash and
+ * underscore becomes one underscore. That removes separators, so the name
+ * cannot leave the attachments directory. It also removes newlines and
+ * brackets, which could forge a line of the prompt or break the format the
+ * dashboard parses back out.
  *
- * Unicode letters are kept, so `Größe.png` is not reduced to `Gr__e.png`. A
- * leading dot is dropped rather than replaced, so an upload cannot land on
- * `.gitignore` and turn the ignore rule above off.
+ * Unicode letters are kept, so `Größe.png` stays as it is. Leading dots are
+ * dropped, so an upload cannot land on `.gitignore` and turn the ignore rule
+ * off.
  */
 export function safeAttachmentName(name: string): string {
   const base = name.split(/[/\\]/).pop() ?? '';
@@ -183,15 +162,11 @@ export function safeAttachmentName(name: string): string {
 
 /**
  * Writes `bytes` under the first free name: `name`, `name-2`, `name-3`…
+ * Returns the name used and the full path.
  *
- * The open is exclusive and a taken name is tried again with the next
- * suffix, so two uploads of the same name at once land on two files rather
- * than one of them overwriting the other.
- *
- * The write itself is asynchronous: an attachment is as large as
- * MAX_ATTACHMENT_MB allows, and one process carries every box's stream,
- * so writing it in one blocking call stops all of them for as long as the
- * disk takes.
+ * The open is exclusive, so two uploads of the same name at once land on two
+ * files. The write is asynchronous, because one process carries every box's
+ * stream and a blocking write of a large attachment would stall them all.
  */
 async function writeUnderFreeName(
   dir: string,
@@ -215,13 +190,12 @@ async function writeUnderFreeName(
 
 /**
  * One directory of the attachments chain, created if it is not there yet and
- * handed to the agent. Returns where it really is.
+ * handed to the agent. Returns its resolved path.
  *
- * The workspace is a tree the agent writes, so a level of the chain can be a
- * link when an upload arrives: creating through one would put the directory,
- * the bytes and the chown outside the workspace. Every level is resolved
- * under the workspace first, which refuses a link as the last component and a
- * link anywhere above it, and is then created on its own rather than
+ * The agent writes the workspace, so any level of the chain can be a link.
+ * Creating through a link would put the directory, the bytes and the chown
+ * outside the workspace. So each level is resolved under the workspace, which
+ * refuses a link at any level, and is created on its own rather than
  * recursively.
  */
 function containedDir(workspace: string, relative: string): string {
@@ -239,13 +213,11 @@ function containedDir(workspace: string, relative: string): string {
 }
 
 /**
- * Writes one attachment into a workspace and hands back where it landed.
+ * Writes one attachment into a workspace and returns where it landed.
  *
- * The name is sanitised to a single path component before it is used, so
- * containment for it is by construction rather than by a check: there is no
- * path to resolve and compare, because the client never supplies one. The
- * directory it lands in is resolved under the workspace, because that part of
- * the path is a tree the agent can rearrange.
+ * The name is reduced to a single path component, so it cannot leave the
+ * directory. The directories above it are resolved under the workspace,
+ * because the agent can rearrange them.
  */
 export async function storeAttachment(
   workspace: string,

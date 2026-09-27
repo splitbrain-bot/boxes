@@ -6,9 +6,8 @@ import { cn } from "@/lib/utils"
 import { useOverlayState } from "@/hooks/use-history-overlay"
 
 /**
- * Like a dialog, a sheet is a step the back button can take back: it covers
- * what is behind it, so back closes it rather than the screen underneath.
- * See useHistoryOverlay.
+ * The sheet root. Opening it pushes a history entry at the same URL, so the
+ * back button closes the sheet instead of leaving the screen under it.
  */
 function Sheet({
   open,

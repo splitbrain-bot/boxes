@@ -1,22 +1,18 @@
-# The dashboard is bundled here and copied into the runtime image, which
-# serves it as static files alongside the API and the gateway. One image, one
-# origin, one published port, with no reverse proxy needed in front of it.
+# Orchestrator image. It also bundles the dashboard, which the orchestrator
+# serves as static files on the same origin as the API and the gateway.
 #
-# Type-checking runs before every bundle step, so an image cannot be built
-# from code that fails it.
+# Every bundle step type-checks first, so failing code cannot become an image.
 
 FROM node:26-bookworm AS dashboard-build
 WORKDIR /build
 COPY shared/ ./shared/
 COPY dashboard/package.json dashboard/package-lock.json* ./dashboard/
 WORKDIR /build/dashboard
-# ci, not install: the image is built from the dependency versions this commit
-# resolved, including the exactly-pinned assistant-ui packages.
+# ci, so the image uses the lock file versions.
 RUN npm ci
 COPY dashboard/ ./
-# The application alone, which is what this stage bundles. The browser suite
-# drives the orchestrator's own source, which is not in this stage and has no
-# business being here; `npm run check` covers it where both packages are.
+# check:app, because the full check also covers the browser suite, which
+# needs the orchestrator's source.
 RUN npm run check:app && npm run build
 
 # --- orchestrator ------------------------------------------------------------
@@ -33,13 +29,11 @@ FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-# better-sqlite3 is a native module, so production deps are installed against
-# the runtime image's own libc.
+# better-sqlite3 is a native module, so the production dependencies are
+# installed against the runtime image's own libc.
 COPY orchestrator/package.json orchestrator/package-lock.json* ./
-# git stays in the runtime image: the review surface runs it over a box's
-# workspace, as an ordinary child process with a fixed argv and a scrubbed
-# environment (orchestrator/src/review/git.ts). The build-only toolchain for
-# the native module is installed and removed in the same layer.
+# git stays, because the review runs it over a box's workspace. The native
+# module's build toolchain is installed and removed in the same layer.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git \
  && apt-get install -y --no-install-recommends python3 make g++ \

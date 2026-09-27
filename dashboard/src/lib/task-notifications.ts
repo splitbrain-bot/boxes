@@ -1,17 +1,11 @@
 import type { TaskUsage } from '../../../shared/task-notifications.ts';
 
-/**
- * What the thread does with a background task's report.
- *
- * What the harness sends, and how it is read back out of a transcript, is
- * shared between both ends. This is the display half: the name the renderer
- * is keyed by, and the one line that says what a task cost.
- */
+/** Display helpers for a background task's report. */
 
-/** The name the converted part carries, and the renderer is keyed by. */
+/** The name of the converted part, which selects its renderer. */
 export const TASK_NOTIFICATION_PART = 'task-notification';
 
-/** A token count as something to read, in the units a person would say. */
+/** A token count as text, in tokens, thousands or millions. */
 function formatTokens(tokens: number): string {
   if (tokens < 1000) return `${tokens} tokens`;
   if (tokens < 1000 * 1000) return `${(tokens / 1000).toFixed(1)}k tokens`;
@@ -19,11 +13,10 @@ function formatTokens(tokens: number): string {
 }
 
 /**
- * A duration as something to read; seconds below a minute, then minutes.
+ * A duration as text: seconds below a minute, then minutes and seconds, then
+ * hours and minutes.
  *
- * Exported because a task that is still going is timed the same way as one
- * that has finished — the row under a report and the bar above the composer
- * should not count in two different vocabularies.
+ * Used for finished reports and for work still running.
  */
 export function formatDuration(ms: number): string {
   const seconds = Math.round(ms / 1000);
@@ -35,7 +28,7 @@ export function formatDuration(ms: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-/** What a task cost, as the one line the row shows under it. */
+/** What a task cost, as one line. Leaves out every figure the usage lacks. */
 export function formatUsage(usage: TaskUsage): string {
   return [
     usage.tokens === undefined ? '' : formatTokens(usage.tokens),

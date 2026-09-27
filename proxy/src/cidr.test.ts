@@ -73,7 +73,6 @@ test('vets v4-translated IPv6 as the IPv4 address it reaches', () => {
 });
 
 test('vets NAT64 and 6to4 addresses as the IPv4 address they reach', () => {
-  // Both carry an IPv4 address an agent would otherwise reach unvetted.
   assert.equal(isBlockedAddress('64:ff9b::192.168.1.1'), true);
   assert.equal(isBlockedAddress('64:ff9b::169.254.169.254'), true);
   assert.equal(isBlockedAddress('64:ff9b::c0a8:101'), true);

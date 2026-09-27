@@ -17,16 +17,9 @@ import {
 } from './store.ts';
 
 /**
- * The REVIEW.md contract, against the implementation that defines it.
- *
- * `fixtures/` holds REVIEW.md files written by the desktop tool's own Go code
- * (see fixtures/README.md for how they were produced). The format is the
- * contract between the two tools, so those files are asserted byte-for-byte
- * rather than approximately: a review started in one has to be continued in
- * the other. The rest of the tables here are ports of the Go
- * round-trip, parse and drift tests.
+ * REVIEW.md files written by the desktop tool. Output here must match them
+ * byte for byte, so a review started in one tool continues in the other.
  */
-
 const FIXTURES = join(import.meta.dirname, 'fixtures');
 
 /** Splits source text the way an annotation's context is taken from it. */
@@ -107,7 +100,7 @@ const FIXTURE_INPUTS: Record<
 };
 
 describe('the format, against files the desktop tool wrote', () => {
-  // README.md documents the fixtures' provenance; it is not one of them.
+  // README.md is not a fixture.
   const names = readdirSync(FIXTURES)
     .filter((f) => f.endsWith('.md') && f !== 'README.md')
     .map((f) => f.slice(0, -3));
@@ -137,7 +130,7 @@ describe('the format, against files the desktop tool wrote', () => {
 
     test(`${name}: a second round trip is still identical`, () => {
       // The first pass could normalise something; the second proves it does
-      // not, which is what keeps two tools editing one file honest.
+      // not.
       const once = serializeReview(parseReview(want));
       assert.equal(serializeReview(parseReview(once)), once);
     });
@@ -292,7 +285,7 @@ describe('a comment survives a write and a read', () => {
   });
 
   test('a very long line is annotated and read back whole', () => {
-    // Minified and generated files are exactly what a workspace holds.
+    // Workspaces hold minified and generated files.
     const long = 'x'.repeat(200_000);
     const review = emptyReview('2026-08-31');
     setAnnotation(review, 'bundle.js', 2, 'this line is huge', ['first', long, 'last']);
@@ -366,7 +359,7 @@ describe('mutation', () => {
     const ann = review.data.get('gone.go')?.get(2);
     assert.deepEqual(ann?.context, []);
     assert.equal(ann?.contextFrom, 0);
-    // And it survives a round trip, since the fence is simply absent.
+    // It survives a round trip without a context fence.
     assert.equal(
       parseReview(serializeReview(review)).data.get('gone.go')?.get(2)?.comment,
       'still worth saying',

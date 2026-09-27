@@ -2,11 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { ThreadLog } from './thread-log.ts';
 
-/**
- * The log one thread keeps of what its watchers were sent: what a browser
- * opening the thread gets, and what goes when it grows past its cap.
- */
-
+/** The thread these tests log. */
 const T1 = 'acp-1';
 
 /** A chunk of a named message. */
@@ -22,7 +18,7 @@ function call(toolCallId: string, thread = T1): unknown {
   return { sessionId: thread, update: { sessionUpdate: 'tool_call', toolCallId, title: 'ls' } };
 }
 
-/** Roughly how many bytes an entry built by `chunk` takes on the wire. */
+/** The size the log counts for one entry: the JSON length of its params. */
 function sizeOf(params: unknown): number {
   return JSON.stringify(params).length;
 }
@@ -56,14 +52,13 @@ test('a log past its cap drops its oldest message, tool calls and all', () => {
   const first = chunk('m1', 'x'.repeat(200));
   const itsCall = call('c1');
   const second = chunk('m2', 'y'.repeat(200));
-  // Room for the second message and a little more, not for both.
+  // Room for the second message and the call, not for both messages.
   const log = new ThreadLog(sizeOf(second) + sizeOf(itsCall) + 50);
   log.append(first);
   log.append(itsCall);
   log.append(second);
 
-  // The first message went, and the call it made went with it: a call left
-  // behind would be a result with no question above it.
+  // The call that the first message made went with it.
   assert.deepEqual(log.opening().updates, [second]);
 });
 
@@ -74,8 +69,8 @@ test('eviction stops at the next message, whatever sits in between', () => {
   log.append(call('c1'));
   log.append(chunk('m2', 'second'));
 
-  // Over the cap by every entry, but the cut is made at m2's first chunk and
-  // the log is never emptied, so the newest message survives whole.
+  // Every entry is over the cap. The cut stops at m2's first chunk, and the
+  // log keeps at least one entry.
   assert.deepEqual(log.opening().updates, [chunk('m2', 'second')]);
 });
 

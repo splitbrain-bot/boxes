@@ -1,30 +1,13 @@
 import { Duplex, PassThrough } from 'node:stream';
 import * as dk from '../../orchestrator/src/docker.ts';
 
-/**
- * A Docker daemon that is not there, answering everything the orchestrator
- * asks of one.
- *
- * The suite drives the real orchestrator, which creates networks, creates and
- * starts containers, inspects images and runs commands in boxes. None of that
- * can happen in a test, and all of it is a method call on the shared Docker
- * client — so the client is what is replaced, the same way the orchestrator's
- * own tests replace it.
- *
- * Nothing here models Docker beyond what the routes read back: whether a
- * container runs, what image it was made from, and — for a terminal — a shell
- * that echoes and answers.
- */
-
 /** The prompt the fake shell draws, which is how a test knows it is there. */
 const PROMPT = 'agent@box:/workspace$ ';
 
 /**
  * A pty that behaves enough like a shell to drive a terminal against.
  *
- * It echoes what is typed, the way a real one does, and answers a finished
- * line with `answer`. That is the whole contract the browser end has: bytes
- * in, bytes out, and a size it can be told.
+ * It echoes what is typed and answers each finished line with `answer`.
  */
 function fakeShell(answer: (line: string) => string): Duplex {
   let line = '';
@@ -54,6 +37,7 @@ type DockerClient = NonNullable<Parameters<typeof dk.setDockerForTests>[0]>;
 interface FakeContainer {
   /** The image it was created from, which decides whether it is current. */
   image: string;
+  /** Whether the container runs. */
   running: boolean;
 }
 
@@ -63,7 +47,9 @@ interface FakeImage {
   repoDigest: string;
   /** The image's own id, which is what a container inspect points at. */
   id: string;
+  /** When the image was built, as an ISO timestamp. */
   builtAt: string;
+  /** The image size in bytes. */
   sizeBytes: number;
 }
 
@@ -82,8 +68,7 @@ const BOX_IMAGE: FakeImage = {
   repoDigest: 'sha256:0011223344556677889900aabbccddeeff00112233445566778899aabbccddee',
   id: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
   builtAt: '2026-08-12T22:40:00.000Z',
-  // Gigabytes, because the box image is: a language toolchain apiece and
-  // a browser. Which is the reason the dashboard says so at all.
+  // Gigabytes, like the real box image with its toolchains and browser.
   sizeBytes: 4_509_715_661,
 };
 
@@ -107,8 +92,8 @@ const ORCHESTRATOR_IMAGE: FakeImage = {
 };
 
 /**
- * The container this process stands in, so the orchestrator's own image can be
- * read the way it is in a deployment. The real answer comes from files under
+ * The container this process pretends to run in, so the orchestrator can read
+ * its own image as it does in a deployment. The real id comes from files under
  * `/proc` that a test process cannot arrange.
  */
 const SELF_CONTAINER = 'a'.repeat(64);
@@ -122,17 +107,17 @@ function notFound(what: string): Error & { statusCode: number } {
 }
 
 /**
- * Installs a Docker client that answers from memory, and returns the handles
- * a test drives it with.
+ * Replaces the orchestrator's shared Docker client with one that answers from
+ * memory, and returns the handles a test drives it with.
  *
- * Container ids are derived from the box label every object Boxes creates
- * carries, so a container can be addressed by the box it belongs to,
- * which is what the review's git runner needs.
+ * It models only what the routes read back: whether a container runs, which
+ * image it was made from, and a shell for the terminal. A container's id is
+ * the name it was created with, so a box container's id names its box.
  */
 export function installFakeDocker(boxImage: string, selfContainerId?: string): FakeDocker {
   /** Containers by id, including the ones the orchestrator creates itself. */
   const containers = new Map<string, FakeContainer>();
-  // The proxy, which the health probe reads the deployment's proxy image off.
+  // The health probe reads the proxy's image off this container.
   containers.set(PROXY_CONTAINER, { image: PROXY_IMAGE.id, running: true });
   containers.set(SELF_CONTAINER, { image: ORCHESTRATOR_IMAGE.id, running: true });
 
@@ -163,8 +148,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     remove: async () => {
       containers.delete(id);
     },
-    // A helper container runs a script and exits; the orchestrator waits for
-    // it and reads its logs only when it failed.
+    // The orchestrator waits for a helper container and reads its logs only on failure.
     wait: async () => ({ StatusCode: 0 }),
     logs: async () => Buffer.from(''),
     inspect: async () => {
@@ -172,8 +156,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
       return {
         Image: container.image,
         State: { Running: container.running },
-        // The binds of a current box container that the orchestrator
-        // checks for at start, and recreates one without.
+        // The orchestrator recreates a box container that lacks one of these mounts.
         Mounts: [
           { Destination: dk.AGENT_CONFIG_DIR },
           { Destination: dk.WORKSPACE_DIR },
@@ -181,9 +164,8 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
         ],
       };
     },
-    // A terminal asks for a pty; every other exec the orchestrator runs by
-    // itself is a probe that produces nothing here, and review runs git
-    // through its own injected runner.
+    // A terminal asks for a pty. Every other exec produces no output here.
+    // Review runs git through its own injected runner.
     exec: async (opts: { Tty?: boolean }) => ({
       start: async () => {
         if (opts.Tty) return fakeShell((line) => terminalAnswer(line));
@@ -204,8 +186,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
   });
 
   const client = {
-    // Demuxing a Docker stream is a pure function of the modem, so the real
-    // one is used rather than imitated. Asking for it makes no connection.
+    // The real modem demuxes exec streams. Getting it opens no connection.
     modem: dk.docker().modem,
     ping: async () => 'OK',
     createNetwork: async () => undefined,
@@ -213,8 +194,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     getVolume: () => ({ remove: async () => undefined }),
     getImage: (name: string) => ({
       inspect: async () => {
-        // Either an id read off a container, or the configured box image
-        // by the tag that names it.
+        // Either an image id read off a container, or the box image by its tag.
         const found = images.get(name) ?? (name === boxImage ? BOX_IMAGE : null);
         if (!found) throw notFound(`image: ${name}`);
         return {
@@ -222,16 +202,15 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
           RepoDigests: [`boxes@${found.repoDigest}`],
           Created: found.builtAt,
           Size: found.sizeBytes,
-          // The uid the box image was built on, which the orchestrator
-          // compares against BOX_UID and warns about a drift in.
+          // The orchestrator warns when this uid differs from BOX_UID.
           Config: { User: String(process.getuid?.() ?? 0) },
         };
       },
       remove: async () => undefined,
     }),
     createContainer: async (spec: { name?: string; Labels?: Record<string, string> }) => {
-      // Named after the box it belongs to, so the review's git runner can
-      // find the workspace a container id stands for.
+      // A box container is named after its box, so the review's git runner
+      // can find the workspace from the id. A helper has no name.
       const box = spec.Labels?.[dk.LABEL] ?? '';
       const id = spec.name ?? `helper-${box}-${containers.size}`;
       containers.set(id, { image: BOX_IMAGE.id, running: false });

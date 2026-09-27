@@ -1,35 +1,13 @@
-# Build the three Boxes images, and publish them to GHCR on every push to main.
-#
-# A pull request runs the same thing minus the push: the suites, and a build
-# of all three images that goes nowhere. A Dockerfile that no longer builds is
-# then a red check rather than a main that cannot publish, and the layer cache
-# makes the repeat cheap for a branch that did not touch the image.
-#
-# One image per process in ARCHITECTURE.md's table:
+# CI workflow: runs the test suites, builds the three Boxes images, and
+# publishes them to GHCR on every push to main. A pull request builds the
+# images without pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
 #   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
 #   ghcr.io/<owner>/boxes/box            what a box container runs
 #
-# The box image is a compose service nowhere -- the orchestrator creates
-# box containers at runtime from BOX_IMAGE -- which is exactly why it
-# is published here: a deployment cannot build it out of a checkout it does
-# not have.
-#
-# Everything gets `latest` and an immutable `sha-<short>`. A deployment that
-# follows `latest` picks the images up on its own; one that must not move
-# under itself pins the sha tag.
-#
-# A deployment that follows `latest` is also told, rather than left to notice:
-# the last job pings a watchtower HTTP API, if the repository is configured
-# with one, so a push and a deployment are the same event instead of one
-# polling interval apart. It is the pattern splitbrain/blogrng uses, down to
-# the secret's name.
-#
-# The Dockerfiles type-check before they bundle, so an image cannot be built
-# from code that fails `tsc`. That is not the same as the tests passing, and
-# `latest` is a tag something else deploys unattended, so the test job gates
-# the build rather than running beside it.
+# Every image gets latest and an immutable sha-<short> tag. The test job gates
+# the build, because something else deploys latest unattended.
 
 name: Build and publish images
 
@@ -39,7 +17,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Two commits in a row: the second one's images are the ones worth having.
+# Of two quick pushes, only the second one's images are worth building.
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
@@ -55,8 +33,7 @@ jobs:
     name: test (${{ matrix.package }})
     runs-on: ubuntu-latest
     strategy:
-      # Three independent suites: one failing says more when the other two
-      # have still run.
+      # One failing suite says more when the other two have still run.
       fail-fast: false
       matrix:
         package: [orchestrator, proxy, dashboard]
@@ -67,44 +44,30 @@ jobs:
         with:
           node-version: 26
           cache: npm
-          # Every lock file, because the dashboard job installs the
-          # orchestrator's dependencies as well as its own.
+          # Every lock file, because the dashboard job also installs the
+          # orchestrator's dependencies.
           cache-dependency-path: '*/package-lock.json'
 
-      # ci, not install: the same resolved versions the Dockerfiles build from,
-      # including the exactly-pinned assistant-ui packages.
+      # ci, so the suites run the lock file versions the Dockerfiles build.
       - name: Install dependencies
         working-directory: ${{ matrix.package }}
         run: npm ci
 
-      # The browser suite runs the real orchestrator in process rather than a
-      # stub of it, so the orchestrator's dependencies have to be installed for
-      # the dashboard to type-check or to test.
+      # The dashboard's browser suite runs the real orchestrator in process,
+      # so its type check and tests need the orchestrator's dependencies.
       - name: Install orchestrator dependencies
         if: matrix.package == 'dashboard'
         working-directory: orchestrator
         run: npm ci
 
-      # The dashboard's `e2e` project builds the production bundle and drives
-      # it in a real Chromium, so the browser has to exist before `npm test`.
-      # The `unit` project needs none of this, and neither does anything else
-      # in the matrix.
+      # The dashboard's e2e project drives the production bundle in a real
+      # Chromium.
       #
-      # `--with-deps` runs `apt-get update` first, and the runner image carries
-      # Google's Chrome repository -- which this needs nothing from: every
-      # library Playwright's Chromium wants comes out of the Ubuntu archive.
-      # That repository has served a `Packages.gz` whose hash did not match the
-      # Release file describing it, and apt fails the whole update on one bad
-      # index, so a repository Boxes does not use turned main red for as long
-      # as Google's mirrors disagreed with each other. Re-running did not help;
-      # the mismatch outlived it.
-      #
-      # So it is taken out of the picture before the install. The glob covers
-      # both the `.list` and the deb822 `.sources` spelling, and `rm -f`
-      # matching nothing is a success -- an image that stops shipping the
-      # repository quietly needs no change here. Only this one repository goes:
-      # wiping the directory would be a way to delete the Ubuntu archive itself
-      # on an image that keeps it there.
+      # --with-deps runs apt-get update. The runner image lists Google's
+      # Chrome repository, which Chromium's libraries do not come from. That
+      # repository has served an index with a wrong hash, and one bad index
+      # fails the whole update, so the step removes it first. The glob covers
+      # both the .list and the .sources file.
       - name: Install Chromium
         if: matrix.package == 'dashboard'
         working-directory: dashboard
@@ -131,17 +94,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The orchestrator and the proxy build from the repository root:
-          # both Dockerfiles copy shared/ next to their own package, so the
-          # context has to be the checkout rather than the package directory.
+          # Both Dockerfiles copy shared/ next to their own package, so the
+          # context is the repository root.
           - image: orchestrator
             context: .
             dockerfile: orchestrator/Dockerfile
           - image: egress-proxy
             context: .
             dockerfile: proxy/Dockerfile
-          # The box image copies only files from box-image/, so its
-          # own directory is the whole context.
+          # The box image copies only files from box-image/.
           - image: box
             context: box-image
             dockerfile: box-image/Dockerfile
@@ -150,8 +111,8 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      # Skipped on a pull request: nothing is pushed there, and a PR from a
-      # fork has no token that could log in anyway.
+      # Skipped on a pull request: nothing is pushed, and a pull request from
+      # a fork has no token that could log in.
       - if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
@@ -159,9 +120,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ghcr.io/<owner>/<repo>/<image>, derived rather than written out, so a
-      # fork publishes to its own namespace with nothing to edit. GHCR names
-      # must be lowercase and github.repository already is.
+      # Derived from the repository, so a fork publishes to its own
+      # namespace. GHCR needs lowercase names, and github.repository is
+      # lowercase.
       - id: meta
         uses: docker/metadata-action@v6
         with:
@@ -176,55 +137,41 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          # Built on a pull request, pushed only once it is on main. The tags
-          # are computed either way, so a PR proves the whole step bar the
-          # upload.
+          # The tags are computed on a pull request too, so it tests
+          # everything but the upload.
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # linux/amd64 is what the deployment host runs. Adding arm64 is one
-          # more entry here and roughly triples the box image's build,
-          # which installs an apt toolchain and the GitHub CLI.
+          # The deployment host runs linux/amd64.
           platforms: linux/amd64
-          # A cache scope per image: one shared scope has the three builds
-          # evicting each other's layers on every run.
+          # One cache scope per image, so the builds do not evict each
+          # other's layers.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-          # A plain single-platform manifest rather than an OCI index with
-          # attestations attached, because a digest is what the deployment's
-          # watchtower compares to decide it has something new.
+          # A plain single-platform manifest, because watchtower compares the
+          # digest to decide whether an image is new.
           provenance: false
           sbom: false
 
-  # Tell the deployment its images have moved, rather than leaving it to
-  # notice on its next poll. Watchtower's interval is the difference between a
-  # push and a deployment, and it is minutes long for no reason once the push
-  # can say so itself.
+  # Tells the deployment's watchtower to pull at once, instead of at its next
+  # poll.
   watchtower:
     name: watchtower
     needs: images
-    # Nothing was pushed on a pull request, so there is nothing to pull. A
-    # partly failed matrix does not get here either: some of the three images
-    # would be new and some would not, and that is a state to fix rather than
-    # to deploy. Watchtower's own polling still picks those up.
+    # A partly failed image matrix skips this job, because a mix of new and
+    # old images needs fixing rather than deploying.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      # Both settings are the deployment's, and a fork has neither: without a
-      # URL this says so and succeeds, because a fork of this repository
-      # publishing to its own namespace has nothing to notify and no business
-      # failing over it. WATCHTOWER_URL is a repository variable — it is a
-      # host name, not a credential — and the token is the secret, named as it
-      # is in splitbrain/blogrng so an organisation secret covers both.
+      # Without a WATCHTOWER_URL, as in a fork, the step succeeds with a
+      # note. WATCHTOWER_URL is a repository variable, because it is not a
+      # credential. The token is a secret.
       - name: Ask watchtower to pull what was just published
         env:
           WATCHTOWER_URL: ${{ vars.WATCHTOWER_URL }}
           WATCHTOWER_TOKEN: ${{ secrets.WATCHTOWER_HTTP_API_TOKEN }}
-        # `set -eu` rather than the runner's implicit `bash -e`, so the
-        # failure below is the script's own decision and stays that way
-        # wherever it is run. The `:-` defaults are for the same reason: a
-        # repository with neither setting has both of these as empty strings,
-        # and a checkout that has never heard of them should behave the same.
+        # set -eu and the :- defaults keep the script's behaviour the same
+        # outside the runner.
         run: |
           set -eu
           url=${WATCHTOWER_URL:-}
@@ -232,12 +179,11 @@ jobs:
             echo 'No WATCHTOWER_URL variable set; nothing to notify.'
             exit 0
           fi
-          # --fail so a refused or misrouted ping is a red check rather than a
-          # deployment that quietly stayed where it was. The endpoint answers
-          # only once it has pulled and recreated what it watches, which is
-          # why the timeout is minutes rather than seconds.
+          # --fail turns a refused ping into a red check. Watchtower answers
+          # only after it has pulled and recreated its containers, so the
+          # timeout is minutes long.
           answer=$(curl --fail --silent --show-error --max-time 300 \
             -X POST "$url" \
             -H "Authorization: Bearer ${WATCHTOWER_TOKEN:-}")
-          # What it did, which is the only record of this deployment moving.
+          # The only record of the deployment moving.
           printf 'Watchtower answered: %s\n' "$answer"

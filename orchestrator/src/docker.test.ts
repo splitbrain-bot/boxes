@@ -24,14 +24,13 @@ import {
 } from './docker.ts';
 import { readSettings } from './settings.ts';
 
-/**
- * The environment of a box container, which is the only place a box's
- * credentials ever come from — and, with translation on, the place a real one
- * must never appear.
- */
-
+/** A real Claude token as the store holds it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
+
+/** A real GitHub token as the store holds it. */
 const GH_TOKEN = 'ghp_therealgithubtoken';
+
+/** A real OpenAI API key as the store holds it. */
 const OPENAI_KEY = 'sk-therealopenaiapikey';
 
 let dirs: string[] = [];
@@ -44,6 +43,7 @@ afterEach(() => {
   dirs = [];
 });
 
+/** Creates a temporary data directory that afterEach removes. */
 function dataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-docker-'));
   dirs.push(dir);
@@ -116,9 +116,8 @@ describe('boxEnv', () => {
     const env = await envFor();
 
     // A container's environment is fixed when it is created, so a box made
-    // before the first credential has to hold the placeholder that a token
-    // entered tomorrow will make good. This is the whole of what ended
-    // logging in inside a box.
+    // before the first credential needs the placeholder for a token entered
+    // later.
     expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toMatch(/^sk-ant-oat01-/);
     expect(env['GH_TOKEN']).toMatch(/^ghp_/);
     expect(env['CODEX_API_KEY']).toMatch(/^sk-/);
@@ -128,9 +127,8 @@ describe('boxEnv', () => {
   }, 30_000);
 
   it('carries the GitLab pair, at gitlab.com or at the named instance', async () => {
-    // The placeholder, before any token is stored, on the same terms as
-    // GH_TOKEN; and the host, which is what glab reads and what the
-    // entrypoint points the credential helper at.
+    // The placeholder exists before any token is stored, as for GH_TOKEN.
+    // glab reads the host, and the entrypoint points the credential helper at it.
     const env = await envFor();
     expect(env['GITLAB_TOKEN']).toMatch(/^glpat-/);
     expect(env['GITLAB_HOST']).toBe('gitlab.com');
@@ -219,17 +217,15 @@ describe('the container template', () => {
   it('binds the workspace, the home and the nix store from host paths', async () => {
     const opts = await capture();
     const host = opts['HostConfig'] as { Binds: string[] };
-    // Paths, not volume names: the orchestrator has to read these files
-    // itself, which is what the whole review surface rests on — and what
-    // lets a box's size be read by walking three directories.
+    // Paths, not volume names: the orchestrator reads these files itself, for
+    // review and to measure the size of a box.
     assert.deepEqual(host.Binds, [
       '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234:/workspace',
       '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234:/home/agent',
       // At /nix and nowhere else: the binary cache is built against that
       // path, and nothing in it would substitute anywhere else.
       '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234:/nix',
-      // The agent configuration is read-only: what the dashboard says a box is
-      // configured with is not the agent's to rewrite.
+      // Read-only, so the agent cannot change what the dashboard configured.
       '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234:/boxes/agent:ro',
     ]);
   }, 30_000);
@@ -260,22 +256,20 @@ describe('the container template', () => {
     assert.deepEqual(host.Binds, [
       '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234:/to',
     ]);
-    // A bind mount covers what the image put in /home/agent instead of being
-    // seeded from it, and the skeleton .profile in there is what puts
-    // ~/.local/bin on the PATH of a login shell — which is where the agent's
-    // own `npm install -g` puts things.
+    // A bind mount hides what the image put in /home/agent, so the home is
+    // copied from the image. Its skeleton .profile puts ~/.local/bin, where
+    // `npm install -g` installs, on the PATH of a login shell.
     assert.deepEqual(opts['Cmd'], ['cp -a /home/agent/. /to/ && chown 1020:1020 /to']);
-    // As root, because `cp -a` preserving the image's ownership is the point,
-    // and because the directory itself has to be given away — which the
-    // orchestrator cannot do where it is not root itself.
+    // As root, so `cp -a` keeps the image's ownership and chown can hand the
+    // directory to the agent. The orchestrator may not run as root itself.
     assert.equal(opts['User'], 'root');
     assert.equal(host.NetworkMode, 'none');
   }, 30_000);
 
   it('runs as the configured uid and gid, not the image\'s user name', async () => {
     const opts = await capture();
-    // Numbers, so BOX_UID alone decides who a box is. The default
-    // is off 1000 deliberately: on a real host that is usually a person.
+    // Numbers, so BOX_UID alone decides who a box runs as. The default avoids
+    // 1000, which on a host usually belongs to a person.
     assert.equal(opts['User'], '1020:1020');
   }, 30_000);
 
@@ -284,10 +278,10 @@ describe('the container template', () => {
     const labels = opts['Labels'] as Record<string, string>;
     // The box id is how Boxes finds its own containers again.
     assert.equal(labels['boxes.box'], 'abcd1234');
-    // And this is how something else is told not to. A container recreated
-    // from under the orchestrator loses the id in the database and the
-    // runtime proxy attachment that is the box's only way out; the
-    // orchestrator rolls boxes onto a new image itself, at start.
+    // This label tells an updater to leave the container alone. A recreated
+    // container loses its id in the database and its proxy attachment, which
+    // is the box's only way out. The orchestrator moves boxes onto a new image
+    // itself, at start.
     assert.equal(labels['com.centurylinklabs.watchtower.enable'], 'false');
   }, 30_000);
 
@@ -301,11 +295,9 @@ describe('the container template', () => {
     assert.deepEqual(host['SecurityOpt'], ['no-new-privileges:true']);
   }, 30_000);
 
-  // The box image suppresses Playwright's --disable-dev-shm-usage on the
-  // strength of this number, so removing it would not fail anywhere near
-  // itself: Chromium would be left on Docker's 64 MB /dev/shm and report the
-  // exhaustion as a closed target, in a box, on whichever page first
-  // happened to be large enough.
+  // The box image drops Playwright's --disable-dev-shm-usage because of this
+  // size. Without it, Chromium gets Docker's 64 MB /dev/shm and reports the
+  // exhaustion as a closed target on a large page.
   it('gives the browser enough shared memory to not need the flag', async () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
@@ -335,10 +327,8 @@ describe('the login container', () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
 
-    // Nothing of a box is here. No workspace, no agent configuration, no
-    // placeholder for the proxy to swap — the CLI inside is authenticating a
-    // person to their own service, and there is no deployment secret in the
-    // container for an egress policy to protect.
+    // The CLI authenticates a person to their own service. The container
+    // holds no deployment secret for an egress policy to protect.
     assert.equal(host['Binds'], undefined);
     assert.deepEqual(opts['Env'], []);
     // The rootfs is read-only, and both CLIs write their state under $HOME.
@@ -405,8 +395,8 @@ describe('reading what is running in a container', () => {
   });
 
   it("asks again without the elapsed time where the host's ps will not take it", async () => {
-    // A reading that fails holds every box on the host awake, so the format
-    // is the one thing here worth retrying — once, and remembered.
+    // A failed reading keeps every box on the host awake, so the format is
+    // retried once and the fallback is remembered.
     const { asked } = fakeTop((args) => {
       if (args.includes('etimes')) throw new Error('ps: unknown user-defined format specifier');
       return { Titles: ['PID', 'PPID', 'COMMAND'], Processes: [['200', '100', 'sleep 300']] };
@@ -424,9 +414,8 @@ describe('reading what is running in a container', () => {
   });
 
   it('treats a table with no tree in it as no answer', async () => {
-    // Which the caller reads as "the box could not be asked" rather than as
-    // "nothing is running", because only one of those is safe to be wrong
-    // about.
+    // The caller reads this as "the box could not be asked", not as "nothing
+    // is running". Only the first is safe to be wrong about.
     fakeTop(() => ({ Titles: ['USER', 'COMMAND'], Processes: [['agent', 'sleep 300']] }));
     await expect(containerProcesses('c1')).rejects.toThrow(/PID\/PPID/);
   });
@@ -484,8 +473,8 @@ describe('reading and signalling from inside a container', () => {
   });
 
   it('says so when the box has no ps to ask', async () => {
-    // Rather than answering "nothing is running", which would make a stop
-    // look like it had found its target already gone.
+    // "Nothing is running" would make a stop look like its target was
+    // already gone.
     fakeExec('ps: command not found', 127);
     await expect(containerProcessesFromInside('c1')).rejects.toThrow(/exited 127/);
   });

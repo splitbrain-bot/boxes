@@ -1,15 +1,12 @@
 /**
- * Runs `tick` every `everyMs` for as long as the tab is visible, and returns
- * the teardown.
+ * Runs `tick` every `everyMs` while the tab is visible, and returns the
+ * teardown.
  *
- * Nothing here is polled because it changed — the orchestrator has no way to
- * say so over HTTP — so everything that watches a box does it on a timer, and
- * a timer that keeps firing in a background tab is a request every few seconds
- * for an answer nobody is looking at. Coming back ticks immediately, so the
- * pause costs nothing a reader can see.
+ * The timer pauses while the tab is hidden, so a background tab sends no
+ * requests. Showing the tab again ticks at once.
  *
- * The first tick is the caller's: a view usually has to load something before
- * it can poll for changes to it, and doing that here would race with it.
+ * The caller makes the first tick, because a view usually loads its data on
+ * mount, and a tick here would race with that load.
  */
 export function pollWhileVisible(tick: () => void, everyMs: number): () => void {
   let timer: number | null = null;
@@ -41,16 +38,11 @@ export function pollWhileVisible(tick: () => void, everyMs: number): () => void 
 
 /**
  * Runs `tick` every time the tab becomes visible again, and returns the
- * teardown. No interval: nothing fires while the tab is open and still.
+ * teardown.
  *
- * This is the poll's plumbing without the poll. A view whose every fetch reads
- * the source of truth on the spot only needs to be fresh *on arrival*, and on
- * a phone arrival is mostly this: switching away to something else and coming
- * back. The idle cost is then zero rather than a request every few seconds for
- * an answer that has not moved.
- *
- * The first tick is the caller's, the same way it is above: a view loads on
- * mount, and doing that here would race with it.
+ * For a view that only needs fresh data when the reader comes back to it. On
+ * a phone, that is mostly a return from another app. The caller makes the
+ * first tick, because a view loads its data on mount.
  */
 export function refetchOnVisible(tick: () => void): () => void {
   const onVisibility = (): void => {

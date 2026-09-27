@@ -2,22 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { tokenizeLines, type Token } from '@/lib/highlight';
 import type { OpenFile } from '../stores/review.ts';
 
-/**
- * The buffer behind edit mode, and the colours it is painted with.
- *
- * A review is mostly reading, so the buffer only exists while somebody is
- * editing: null is the reading state, and there is no copy of the file lying
- * around to go stale the rest of the time.
- *
- * Nothing here is in the review store. The store holds what the box has —
- * the tree, the open file, the comments — and a half-typed line is not that.
- * What the store does need to know is whether there is one, because refetching
- * over unsaved work would throw it away; the view tells it.
- */
-
-/** How long typing has to pause before the file is coloured again. */
+/** How long typing has to pause, in milliseconds, before the buffer is coloured again. */
 const RECOLOUR_AFTER = 150;
 
+/** The edit state of one file, and the actions on it. */
 export interface CodeEditing {
   /** The buffer, or null while the file is being read rather than edited. */
   text: string | null;
@@ -31,17 +19,21 @@ export interface CodeEditing {
   start: () => void;
   /** Stops editing, discarding whatever is in the buffer. */
   stop: () => void;
+  /** Replaces the buffer with what was typed. */
   change: (text: string) => void;
   /** Puts the file back as it was last read, without leaving edit mode. */
   revert: () => void;
 }
 
 /**
- * Holds one file's buffer for as long as it is being edited.
+ * Holds one file's buffer while it is edited, and the colours for it.
  *
- * Dirty is the buffer against the file rather than a flag of its own, so
- * saving clears it by the fact of the file coming back as what was typed, and
- * typing a line back to what it was clears it too.
+ * The buffer is null while the file is read. The hook keeps it out of the
+ * review store, which holds only what the box has. The view tells the store
+ * about unsaved work, so a refetch does not throw it away.
+ *
+ * Dirty compares the buffer with the file. A save that returns the typed text
+ * clears it, and so does typing the text back to what it was.
  */
 export function useCodeEdit(file: OpenFile | null): CodeEditing {
   const [text, setText] = useState<string | null>(null);
@@ -55,20 +47,15 @@ export function useCodeEdit(file: OpenFile | null): CodeEditing {
   const content = file?.content ?? '';
   const language = file?.language ?? '';
 
-  // A buffer belongs to the file it was opened from, so closing that file or
-  // opening another one ends the edit rather than carrying the text across.
+  // Closing the file or opening another one ends the edit.
   useEffect(() => {
     setText(null);
   }, [path]);
 
-  /**
-   * Colours the buffer again once typing stops.
-   *
-   * On a delay because tokenizing a long file on a phone is not something to
-   * do per keystroke, and it is not needed per keystroke either: the pane
-   * renders a line it has no current colours for as plain text, so what the
-   * reader sees is the line they are typing losing its colour for a moment
-   * and getting it back.
+  /*
+   * Colours the buffer again once typing pauses, because tokenizing a long
+   * file on every keystroke is too slow on a phone. Until then, the pane
+   * shows a changed line without colour.
    */
   useEffect(() => {
     if (text === null || text === painted.text) return;
@@ -85,8 +72,7 @@ export function useCodeEdit(file: OpenFile | null): CodeEditing {
   }, [text, painted.text, language]);
 
   const start = useCallback(() => {
-    // The file's own colours to begin with, because the buffer starts as the
-    // file: there is nothing to wait for and nothing to recompute.
+    // The buffer starts as the file, so the file's colours fit it.
     setPainted({ text: content, tokens: file?.tokens ?? null });
     setText(content);
   }, [content, file?.tokens]);

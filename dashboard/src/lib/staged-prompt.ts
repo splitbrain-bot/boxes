@@ -1,12 +1,9 @@
 /**
- * A prompt one view stages for another to pick up, consumed once.
+ * Prompts one view leaves for a box's thread to open with, by box id. The
+ * review's "Hand to agent" uses it.
  *
- * The review's "Hand to agent" opens the thread with a line already in the
- * composer. It lives beside the router rather than in the history entry's
- * state, which the browser replays: back and then forward would otherwise
- * re-stage the prompt. Taking it clears it.
- *
- * Per box, because two tabs on two boxes are a thing this app supports.
+ * Kept outside the history entry's state, because back and then forward would
+ * replay that state and stage the prompt again.
  */
 const staged = new Map<string, string>();
 
@@ -15,7 +12,7 @@ export function stagePrompt(boxId: string, prompt: string): void {
   staged.set(boxId, prompt);
 }
 
-/** Takes it, if there is one. A second call gets nothing. */
+/** Takes the staged prompt for a box and clears it. Null when there is none. */
 export function takeStagedPrompt(boxId: string): string | null {
   const prompt = staged.get(boxId);
   staged.delete(boxId);

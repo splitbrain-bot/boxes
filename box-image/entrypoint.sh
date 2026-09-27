@@ -1,25 +1,16 @@
 #!/usr/bin/env bash
-# Runs as agent on container start. Prepares the git and gh identity, then
-# holds the container open with sleep. The gateway spawns the ACP adapter
-# separately, as a long-lived exec.
+# Box container entrypoint. Runs as the agent at every start, prepares the
+# home, then holds the container open. The gateway runs the ACP adapter as a
+# separate exec.
 set -uo pipefail
 
+# Writes one line to stderr, which is the container log.
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 
 # --- scratch space ----------------------------------------------------------
-# TMPDIR is a directory in the home rather than /tmp, because /tmp here is a
-# tmpfs and so RAM charged to the container's memory limit -- see the Dockerfile
-# for why that is worth avoiding for anything large.
-#
-# Created because a home filled from an image older than this variable does not
-# have the directory, and a missing TMPDIR fails oddly and far from its cause.
-# Emptied because the tmpfs it replaces was discarded on every restart for free,
-# and a directory on a persistent volume would instead keep every temporary file
-# the box ever made.
-#
-# The contents go rather than the directory itself, so nothing has to re-create
-# it, and so a bad TMPDIR can never turn this into a recursive delete of a path
-# that means something else.
+# TMPDIR lies on the persistent home, so it is emptied at every start. It is
+# created for a home seeded from an older image. Only the contents go, so a
+# wrong TMPDIR cannot delete a directory that matters.
 if [ -n "${TMPDIR:-}" ]; then
   if mkdir -p "$TMPDIR"; then
     find "$TMPDIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
@@ -29,11 +20,9 @@ if [ -n "${TMPDIR:-}" ]; then
 fi
 
 # --- egress proxy CA --------------------------------------------------------
-# The proxy terminates TLS for the hosts whose credentials it translates, so
-# this container has to trust the deployment's CA for those hosts to work. The
-# certificate arrives as a PEM in the environment rather than a mount, and the
-# variables that point node, gh, git and curl at the file are already set by
-# the orchestrator; all that is left is putting it where they look.
+# The proxy terminates TLS for the hosts whose credentials it translates. The
+# orchestrator passes the deployment CA as a PEM and already points node, gh,
+# git and curl at this file.
 if [ -n "${BOXES_PROXY_CA:-}" ]; then
   mkdir -p /home/agent/.boxes
   if printf '%s\n' "$BOXES_PROXY_CA" > /home/agent/.boxes/proxy-ca.crt; then
@@ -44,13 +33,10 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
-# --- a CA bundle for the tool that reads one file and nothing else ------------
-# Most TLS clients here take the deployment CA as a file and keep the system
-# authorities from their default directory. Nix does not: its static build
-# knows no directory, and the one file it is given is the whole of what it
-# trusts. So it gets a bundle of both, written every start so it follows the
-# system store and the CA alike, and written without the CA too, since
-# /etc/nix/nix.conf names the file whether or not a proxy is configured.
+# --- a CA bundle for nix ------------------------------------------------------
+# The static nix trusts only the one file nix.conf names, so it gets the system
+# authorities and the deployment CA together. Written even without a CA,
+# because nix.conf always names the file.
 bundle=/home/agent/.boxes/ca-bundle.crt
 if mkdir -p /home/agent/.boxes \
    && cat /etc/ssl/certs/ca-certificates.crt > "$bundle.tmp" \
@@ -63,19 +49,15 @@ else
 fi
 
 # --- the nix store -----------------------------------------------------------
-# /nix is a directory of the box's own, bound in by the orchestrator. Nix
-# lays the store out underneath on first use, so all there is to check is
-# that it can.
+# The orchestrator binds in a /nix of the box's own. Nix creates the store
+# in it on first use.
 if [ ! -w /nix ]; then
   log "WARNING: /nix is not writable; nix will not work in this box"
 fi
 
 # --- directories an agent needs to find already there ------------------------
-# npm's prefix has to exist before `npm install -g` will use it, and Codex
-# treats a CODEX_HOME naming a missing directory as an error rather than
-# creating it. The image carries both, but a home filled from an image that
-# predates either does not have it: a home is copied out of the image when its
-# box is created and never refreshed.
+# npm install -g needs its prefix to exist, and Codex fails on a missing
+# CODEX_HOME. A home seeded from an older image may lack either.
 if ! mkdir -p /home/agent/.local/bin; then
   log "WARNING: could not create /home/agent/.local/bin; installing tools will fail"
 fi
@@ -84,36 +66,18 @@ if ! mkdir -p "${CODEX_HOME:-/home/agent/.codex}"; then
 fi
 
 # --- agent configuration ----------------------------------------------------
-# The orchestrator materializes this box's merged AGENTS.md, skills and slash
-# commands into a read-only bind at /boxes/agent, laid out exactly as they have
-# to appear in the home. Only the copy happens here. The orchestrator does have
-# a path to the home now that it is a directory of its own, but a box's home is
-# the box's to write: doing it out here would race with the agent that is
-# living in it.
-#
-# Every path is relative to $HOME rather than to one agent's configuration
-# directory, because a box may hold threads of either harness and each reads a
-# layout of its own -- .claude for Claude Code, .codex and .agents for Codex.
-# The orchestrator writes both and this installs whatever it wrote.
-#
-# The manifest is what makes the install reversible: it names every path put
-# there, a copy of it is left behind in ~/.boxes/managed, and the next start
-# removes exactly those before installing again. So a skill deleted in the
-# dashboard disappears from the box, while anything the agent itself put in its
-# home is never touched.
+# The orchestrator writes this box's merged AGENTS.md, skills and commands to
+# a read-only bind at /boxes/agent, laid out as they appear under $HOME. The
+# copy runs here, inside the box, so it cannot race the agent's own writes.
 AGENT_SRC=/boxes/agent
 HOME_DIR="${HOME:-/home/agent}"
 MANAGED="$HOME_DIR/.boxes/managed"
 
-# A manifest line has to be one relative path in one of the layouts above and
-# nothing else. The file is written by the orchestrator, but it decides what
-# gets deleted and its root is now the whole home, so it is checked rather than
-# trusted -- against a list written here rather than one the manifest carries,
-# which would be the same thing as trusting it.
+# Returns success when manifest line $1 is a safe relative path under $HOME.
 #
-# Two components at least, and a known prefix: a line reading `.claude` or
-# `.ssh` names a directory that is not this mechanism's to remove, and is
-# refused rather than quietly turned into a recursive delete.
+# The manifest decides what gets deleted, so each line must have two
+# components or more and one of the known prefixes. A line such as .claude or
+# .ssh is refused.
 safe_rel() {
   case "$1" in
     ''|/*|*..*|*'
@@ -131,6 +95,9 @@ safe_rel() {
   return 1
 }
 
+# Removes the paths the last start installed, then copies every manifest
+# entry into $HOME and records it in ~/.boxes/managed. A skill deleted in the
+# dashboard therefore leaves the box, and the agent's own files stay.
 install_agent_config() {
   if [ -f "$MANAGED" ]; then
     while IFS= read -r rel; do
@@ -153,9 +120,7 @@ install_agent_config() {
     safe_rel "$rel" || continue
     [ -e "$AGENT_SRC/$rel" ] || continue
     mkdir -p "$HOME_DIR/$(dirname -- "$rel")"
-    # cp -R onto an existing directory would nest inside it rather than
-    # replace it, so the destination goes first. A managed name wins over
-    # anything already sitting under it.
+    # cp -R onto an existing directory would nest inside it.
     rm -rf -- "$HOME_DIR/$rel"
     if cp -R -- "$AGENT_SRC/$rel" "$HOME_DIR/$rel"; then
       printf '%s\n' "$rel" >> "$MANAGED"
@@ -170,14 +135,8 @@ install_agent_config() {
 install_agent_config
 
 # --- chromium's trust store -------------------------------------------------
-# Chromium reads none of the CA variables the rest of the image is pointed at;
-# it keeps its own NSS database under ~/.pki/nssdb. Without the deployment CA
-# in there, the hosts the proxy intercepts -- and only those -- fail TLS inside
-# the browser while working in every other tool, which is a confusing shape to
-# debug from a page that will not load.
-#
-# Removed before it is added, so a restart replaces the entry rather than
-# failing on one that is already there.
+# Chromium ignores the CA variables and reads its own NSS database. The
+# entry is deleted first, so a restart replaces it.
 if [ -n "${BOXES_PROXY_CA:-}" ] && command -v certutil >/dev/null 2>&1; then
   nssdb=/home/agent/.pki/nssdb
   if mkdir -p "$nssdb"; then
@@ -193,25 +152,13 @@ if [ -n "${BOXES_PROXY_CA:-}" ] && command -v certutil >/dev/null 2>&1; then
 fi
 
 # --- the browser CLI ---------------------------------------------------------
-# Three things the CLI cannot work out for itself.
+
+# Links the image's browser builds into the writable PLAYWRIGHT_BROWSERS_PATH
+# and drops links that no longer resolve.
 #
-# First, where the browsers are. The image keeps them at BOXES_IMAGE_BROWSERS,
-# which is read-only in a box; PLAYWRIGHT_BROWSERS_PATH points instead at a
-# directory in the home, which is writable and which Playwright therefore
-# treats as somewhere it may install. Linking the image's builds into it is
-# what lets both be true at once: the browser the image already carries
-# resolves without being copied, and a project downloading a revision of its
-# own lands beside the links.
-#
-# Every start, rather than once when the home was filled. A home is copied out
-# of the image at box creation and never refreshed, so links written then
-# would name whichever revision that image carried, and an image rebuilt onto a
-# newer Playwright would leave every one of them dangling. Relinking against
-# the image that is running is what keeps a long-lived box working across
-# an upgrade, and the sweep below is what clears out what the upgrade orphaned.
-#
-# Only links are swept. A real directory here is a browser some project
-# downloaded, which this must not remove.
+# A project can then download its own revision beside the links. This runs at
+# every start, because a newer image may carry other revisions. Only links
+# are swept, because a real directory is a browser a project downloaded.
 link_image_browsers() {
   browsers="${PLAYWRIGHT_BROWSERS_PATH:-}"
   image="${BOXES_IMAGE_BROWSERS:-}"
@@ -249,12 +196,9 @@ link_image_browsers() {
 }
 link_image_browsers
 
-# Its global config, at ~/.playwright/cli.config.json, carries which browser to
-# use and the launch options a box container needs; the image ships that
-# much, and the only piece missing at build time is the egress proxy, which is
-# added here. Written on every start rather than once, so a corrected base
-# config reaches a box whose home already exists. A project's own
-# .playwright/cli.config.json still overrides all of it.
+# The CLI's global config: the image's base config plus the egress proxy,
+# which is known only at runtime. Written at every start, so a newer image's
+# base reaches an existing home.
 cli_base=/usr/local/share/boxes/playwright-cli.config.json
 cli_config=/home/agent/.playwright/cli.config.json
 if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
@@ -276,24 +220,9 @@ if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
   fi
 fi
 
-# What the CLI's own skill cannot say, because it is written for Playwright
-# anywhere rather than for this image: which browsers are already here, which
-# are a download away, and which command to reach for.
-#
-# Written for whoever is in the box rather than for whoever runs the
-# deployment. An agent that does
-# not know Chromium is already linked reaches for `npx playwright install`,
-# which is the one form that still costs something: npx never consults PATH, so
-# it downloads a second copy of the tool before discovering there is nothing to
-# do.
-#
-# Appended rather than shipped as a skill of our own: this is a paragraph about
-# an existing skill's subject, and a second skill covering the same ground is
-# how an agent ends up reading only one of them. Appended only in the branch
-# that installed the image's copy, so a box that supplies its own
-# playwright-cli skill keeps exactly what the dashboard showed. The marker
-# keeps it to one copy if the install ever preserves the file instead of
-# rewriting it.
+# Appends this image's browser notes to the installed playwright-cli skill:
+# which browsers are here, which are one download away, and which command to
+# use. The heading marks the notes, so they are appended only once.
 append_browser_notes() {
   skill=/home/agent/.claude/skills/playwright-cli/SKILL.md
   [ -f "$skill" ] || return 0
@@ -335,11 +264,8 @@ SKILL_NOTES
   log "appended this image's browser notes to the playwright-cli skill"
 }
 
-# The same skill, where the other harness looks for it. The CLI writes one copy
-# and knows only ~/.claude/skills; Codex reads ~/.agents/skills and nothing
-# under ~/.claude, so the box gets the browser instructions in one thread and
-# not the other unless the copy is made here. After the notes are appended, so
-# that both copies carry them.
+# Copies the playwright-cli skill from ~/.claude/skills, where the CLI
+# installs it, to ~/.agents/skills, where Codex reads skills.
 copy_skill_to_agents() {
   src=/home/agent/.claude/skills/playwright-cli
   dst=/home/agent/.agents/skills/playwright-cli
@@ -348,8 +274,7 @@ copy_skill_to_agents() {
     log "WARNING: could not create ~/.agents/skills; Codex will not see the browser skill"
     return 0
   }
-  # The destination goes first, for the reason install_agent_config gives:
-  # cp -R onto a directory that is already there nests inside it.
+  # cp -R onto an existing directory would nest inside it.
   rm -rf -- "$dst"
   if cp -R -- "$src" "$dst"; then
     log "copied the playwright-cli skill into ~/.agents/skills"
@@ -358,23 +283,12 @@ copy_skill_to_agents() {
   fi
 }
 
-# And its skill, which the CLI installs itself. --global puts it in
-# ~/.claude/skills rather than in the workspace, which is a git checkout that
-# is none of our business. Re-run every start so the copy in the box's home
-# follows the image rather than being frozen at whatever the home was filled
-# with when the box was created.
+# The CLI's own skill. --global installs it in the home, outside the
+# workspace checkout. Reinstalled at every start, so it follows the image.
 #
-# Runs after install_agent_config, and defers to it: a skill of this name in
-# the box's merged set is the one the box gets. The dashboard showed that
-# version as the effective one, so installing the image's copy over the top
-# would be exactly the silent override the editor's merged view exists to
-# prevent. This is the same direction the merge itself runs -- the more
-# specific configuration wins -- with the image as the least specific layer of
-# all. The image's copy fills the name in only while nothing has claimed it,
-# and install_agent_config replaces it the moment something does.
-#
-# One layout is enough to ask: the orchestrator writes a configured skill into
-# every harness's, so a set claiming this name claims it everywhere.
+# A skill of the same name in the box's configured set wins, because the
+# dashboard shows that one as effective. The orchestrator writes a configured
+# skill into every layout, so checking the .claude one is enough.
 if [ -f "$AGENT_SRC/manifest" ] \
    && grep -qxF '.claude/skills/playwright-cli' "$AGENT_SRC/manifest"; then
   log "the playwright-cli skill is configured for this box; leaving the image's copy out"
@@ -389,12 +303,9 @@ elif command -v playwright-cli >/dev/null 2>&1; then
 fi
 
 # --- skills the image carries -------------------------------------------------
-# What the image knows that an agent cannot find out from a --help: that nix
-# is here, where its store lives and what survives a restart. Installed into
-# both layouts on every start, so a rebuilt image's copy reaches a home that
-# already exists, and left out where the box's configured set claims the
-# name, for the reason the playwright-cli skill above is left out: the
-# dashboard showed that version as the effective one.
+
+# Installs the image's skill named $1 into both skill layouts, at every
+# start. A skill of the same name in the box's configured set wins.
 install_image_skill() {
   name=$1
   src=/usr/local/share/boxes/skills/$name
@@ -404,7 +315,7 @@ install_image_skill() {
     return 0
   fi
   for dst in "/home/agent/.claude/skills/$name" "/home/agent/.agents/skills/$name"; do
-    # The destination goes first, for the reason install_agent_config gives.
+    # cp -R onto an existing directory would nest inside it.
     if ! { mkdir -p "$(dirname -- "$dst")" && rm -rf -- "$dst" && cp -R -- "$src" "$dst"; }; then
       log "WARNING: could not install the $name skill into $dst"
     fi
@@ -422,8 +333,8 @@ if [ -n "${GIT_EMAIL:-}" ]; then
 fi
 git config --global init.defaultBranch main
 git config --global advice.detachedHead false
-# /workspace is the agent's own volume. Marking it safe avoids git's
-# dubious-ownership refusal when uid mapping differs across volume restores.
+# Every directory counts as safe, so git does not refuse a checkout whose
+# owner differs from the agent, for example after a restore.
 git config --global --replace-all safe.directory '*'
 
 # --- github auth ------------------------------------------------------------
@@ -436,9 +347,8 @@ if [ -n "${GH_TOKEN:-}" ]; then
 fi
 
 # --- gitlab auth ------------------------------------------------------------
-# glab reads GITLAB_TOKEN and GITLAB_HOST from the environment, so nothing has
-# to be logged in; git is pointed at glab's credential helper for that one
-# host, which is what `gh auth setup-git` does for GitHub.
+# glab reads GITLAB_TOKEN and GITLAB_HOST from the environment. git uses
+# glab's credential helper for that one host.
 if [ -n "${GITLAB_TOKEN:-}" ] && [ -n "${GITLAB_HOST:-}" ]; then
   if git config --global "credential.https://${GITLAB_HOST}.helper" '!glab auth git-credential'; then
     log "configured git credential helper for $GITLAB_HOST via glab"

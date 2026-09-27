@@ -1,28 +1,27 @@
 /**
- * Rough indicators: how long ago, and how big.
- *
- * Both are for a card in a list, where the reader is scanning rather than
- * reading — "which of these did I touch this morning", "which one has a
- * checkout in it". One or two characters of magnitude answers that, and a
- * precise figure would be a worse answer at the same size: exact is what the
- * details view is for, and what these deliberately are not.
+ * Rough ages and sizes for a card in a list, where the reader scans rather
+ * than reads.
  */
 
+/** One second, in milliseconds. */
 const SECOND = 1000;
+/** One minute, in milliseconds. */
 const MINUTE = 60 * SECOND;
+/** One hour, in milliseconds. */
 const HOUR = 60 * MINUTE;
+/** One day, in milliseconds. */
 const DAY = 24 * HOUR;
 
 /**
  * An age as one number and one letter: `5s`, `5m`, `5h`, `5d`.
  *
- * Always the largest unit that leaves a whole number, and always rounded
- * down, so a thread is never said to be older than it is. Days keep counting
- * rather than becoming weeks or months: past a day the number is a rough
- * sense of how stale something is, and `40d` says that better than `1mo`.
+ * Uses the largest unit that leaves a whole number, and rounds down, so a
+ * thread never looks older than it is. Days are the largest unit.
  *
- * A negative age is `0s` — the clocks are the browser's and the
- * orchestrator's, and they disagree by however far apart they are set.
+ * A negative age is `0s`. It happens when the browser's clock and the
+ * orchestrator's clock disagree.
+ *
+ * @param ms The age in milliseconds.
  */
 export function shortAge(ms: number): string {
   if (ms < MINUTE) return `${Math.max(Math.floor(ms / SECOND), 0)}s`;
@@ -35,15 +34,10 @@ export function shortAge(ms: number): string {
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
 /**
- * A byte count at the magnitude a person would say it: `12 KB`, `5.2 MB`,
- * `1.4 GB`.
+ * A byte count in the largest fitting unit: `12 KB`, `5.2 MB`, `1.4 GB`.
  *
- * One decimal below ten and none above it, which is the precision that fits
- * the question — the difference between 340 MB and 341 MB is nothing to
- * anybody, and between 1.4 GB and 2 GB is everything.
- *
- * For a whole workspace rather than for one file somebody picked, where a
- * tenth of a kilobyte matters and gigabytes never come up.
+ * One decimal below ten and none from ten up. A count in bytes has no
+ * decimal. Sized for a whole workspace.
  */
 export function shortSize(bytes: number): string {
   let value = Math.max(bytes, 0);
@@ -52,7 +46,6 @@ export function shortSize(bytes: number): string {
     value /= 1024;
     unit++;
   }
-  // Bytes are whole things; a tenth of one is not a number to print.
   const digits = unit > 0 && value < 10 ? 1 : 0;
   return `${value.toFixed(digits)} ${UNITS[unit]}`;
 }

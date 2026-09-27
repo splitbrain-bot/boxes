@@ -1,42 +1,29 @@
-/**
- * What a browser tab is called, and the symbol that says what it wants.
- *
- * A reader leaves Boxes running and comes back to it, usually with several
- * tabs open on several boxes. A row of tabs all called "Boxes" says nothing
- * about which one is mid-turn and which one has been sitting on a question
- * for ten minutes.
- *
- * The symbol goes first because the front of a title is the part a narrow tab
- * still shows, and it is the part that changes.
- */
+/** Browser tab titles that show what a thread needs from the reader. */
 
-/** What a tab is doing, in the order of how much it wants a reader. */
+/** What a tab is doing, most urgent first. */
 export type TabState = 'permission' | 'question' | 'running' | 'waiting' | 'idle';
 
 /**
  * The symbol for each state.
  *
- * Plain BMP glyphs rather than emoji: every platform has these in a system
- * font, and a tab title is not the place to find out which ones a machine
- * renders as a hollow box.
+ * Plain BMP glyphs, not emoji, because every platform has them in a system
+ * font.
  */
 const SYMBOL: Record<TabState, string> = {
   permission: '⚠',
   question: '?',
   running: '⟳',
-  // Between the two: nothing is being said, and the thread is not empty of
-  // work either. A ring with something in it, next to the hollow one.
+  // The agent is quiet, but work still runs: a filled ring beside the empty one.
   waiting: '◍',
   idle: '○',
 };
 
 /**
- * The title of a thread's tab: its state, the box, and which of the box's
- * conversations it is.
+ * The title of a thread's tab: the state symbol, the box name and the thread
+ * label.
  *
- * The box first and the thread second, the same order and the same names the
- * thread's own header uses: which box a thread is in matters more than which
- * of its conversations it is.
+ * The symbol comes first, because a narrow tab still shows the start of its
+ * title. The box comes before the thread, as in the thread's header.
  */
 export function threadTitle(
   state: TabState,

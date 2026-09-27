@@ -10,20 +10,12 @@ import {
 import type { ContainerProcess } from '../docker.ts';
 import { HARNESSES, type Harness } from '../harness.ts';
 
-/**
- * What a thread is told it has running, and what the box says underneath it.
- *
- * Two questions with two answers. The adapters name the tasks, which is the
- * only way a stop can name one; the process table says whether the box is
- * busy, which is the only answer that survives an adapter restart. The
- * fixtures below are the shapes both harnesses really leave in a container.
- */
-
 /** Both harnesses, which is what a reading of a box is taken against. */
 const BOTH: readonly Harness[] = [HARNESSES.claude, HARNESSES.codex];
 
-/** Two conversations of the same box. */
+/** A conversation of the box. */
 const ONE = '90732d29-a1aa-4df7-9b78-a726bb859148';
+/** A second conversation of the same box. */
 const TWO = 'd6d8f0a1-2b3c-4d5e-8f90-1a2b3c4d5e6f';
 
 // --- what the adapters say -------------------------------------------------
@@ -59,17 +51,15 @@ test('a spawn becomes what the bar shows, on the thread it names', () => {
       startedAt: 1_700_000_000_000,
     },
   ]);
-  // And only that thread. The other conversation in the same box is told
-  // nothing, which is the whole of who a task belongs to.
+  // The other conversation in the same box gets nothing.
   assert.deepEqual(board.for(TWO), []);
   assert.deepEqual(board.threads, [ONE]);
 });
 
 test('a task with no name of its own is still something a person can read', () => {
   const board = new TaskBoard();
-  // Claude's shell tasks carry the command as both `name` and `description`;
-  // its other kinds carry a description alone, and a monitor with neither
-  // would otherwise draw a blank line with a stop button beside it.
+  // Claude's shell tasks carry the command as both `name` and `description`.
+  // Its other kinds carry a description alone, or nothing.
   board.note(ONE, spawned('a', { name: undefined, description: 'Watching the build log' }));
   board.note(ONE, spawned('b', { name: undefined, description: undefined }));
   assert.deepEqual(
@@ -89,9 +79,8 @@ test('a task that ends is gone, whichever way it ended', () => {
 });
 
 test('a task that says it is still going is not news', () => {
-  // Claude reports `running` and `paused` as it goes; Codex, as far as its
-  // source shows, sends only the terminal states. Either way a bar that
-  // already shows the task has nothing to redraw.
+  // Claude reports `running` and `paused` as a task goes. The Codex source
+  // shows only the final states.
   const board = new TaskBoard();
   board.note(ONE, spawned('task-1'));
   assert.equal(board.note(ONE, state('task-1', 'running')), false);
@@ -103,9 +92,7 @@ test('progress may rename a task and is required to say nothing at all', () => {
   const board = new TaskBoard();
   board.note(ONE, spawned('task-1'));
 
-  // Claude only, and every field of it optional. One that carries a
-  // description says what the task is doing now; one that carries none is
-  // still a perfectly good update.
+  // Only Claude sends progress, and every field of it is optional.
   assert.equal(
     board.note(ONE, {
       sessionUpdate: 'async_task_progress',
@@ -130,9 +117,7 @@ test('progress may rename a task and is required to say nothing at all', () => {
 });
 
 test('an update about a task this process never announced changes nothing', () => {
-  // A state update for a task of some other adapter, or one this connection
-  // has already dropped. Inventing an entry from it would put a task on a bar
-  // with no spawn to say what it is.
+  // For example a task of another adapter, or one this board has dropped.
   const board = new TaskBoard();
   assert.equal(board.note(ONE, state('task-9', 'completed')), false);
   assert.equal(board.note(ONE, { sessionUpdate: 'async_task_progress', asyncTaskId: 'x' }), false);
@@ -155,9 +140,8 @@ test('two conversations of one adapter keep their own tasks', () => {
 });
 
 test('a task that was already over is dropped by the stop that found out', () => {
-  // What an adapter answering `stopped: false` means: the task finished
-  // between the reading the browser is showing and the button being pressed,
-  // and no state update is coming for it any more.
+  // An adapter answers `stopped: false` for a task that finished before the
+  // stop. It sends no state update for that task.
   const board = new TaskBoard();
   board.note(ONE, spawned('task-1'));
   assert.equal(board.drop(ONE, 'task-1'), true);
@@ -166,10 +150,6 @@ test('a task that was already over is dropped by the stop that found out', () =>
 });
 
 test('an adapter that has gone takes every task it announced with it', () => {
-  // Nothing re-announces them on the respawn: Claude's replay mentions tasks
-  // nowhere, and Codex's reconciles against a fresh app-server that owns none
-  // of the old terminals. The threads come back so their bars can be redrawn
-  // empty, and what is still running in the box is the reading's to find.
   const board = new TaskBoard();
   board.note(ONE, spawned('task-1'));
   board.note(TWO, spawned('task-2'));
@@ -185,7 +165,10 @@ function table(...rows: Array<[number, number, string]>): ContainerProcess[] {
   return rows.map(([pid, ppid, command]) => ({ pid, ppid, command, elapsedSeconds: null }));
 }
 
-/** The adapter as the registry spawns it, and the agent underneath it. */
+/**
+ * The Claude CLI that the adapter spawns as its agent. Its path carries the
+ * adapter's process token.
+ */
 const CLAUDE_AGENT =
   '/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/node_modules/' +
   '@anthropic-ai/claude-agent-sdk-linux-x64/claude --output-format stream-json --verbose';
@@ -214,21 +197,15 @@ const BOTH_IDLE: Array<[number, number, string]> = [
 ];
 
 test('a box holding both adapters and doing nothing is idle', () => {
-  // Every one of these is Boxes' own: the entrypoint holding the container
-  // open, an adapter per harness, and the agent process each one drives. A
-  // rule that knew one harness's shape would read the other's box as busy
-  // forever, or as empty with a build in it.
+  // The entrypoint, one adapter per harness and the agent under each belong
+  // to Boxes.
   const reading = readBox(table(...BOTH_IDLE), BOTH);
   assert.equal(reading.busy, false);
   assert.deepEqual(reading.work, []);
 });
 
 test('a box numbered by the host rather than by itself is still idle', () => {
-  // What `docker top` prints, which is the reading the badge and the reaper
-  // are built on: the host's pids, where the box's init is a five-digit
-  // number, its hold hangs off that, and nothing is 1 at all. Read for the
-  // number 1 instead of for what these are running, the init and the hold
-  // both count as work and every box is busy from the moment it starts.
+  // `docker top` prints host pids, so no process of the box is 1.
   const reading = readBox(
     table(
       [175384, 175359, '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
@@ -269,17 +246,15 @@ test('a shell under either agent is work, and both are named', () => {
     BOTH,
   );
   assert.equal(reading.busy, true);
-  // What it is running, for the log: the words are in the wrapper, and the
-  // line is the evidence of what a box nobody can name work in was doing.
+  // The Claude wrapper, the build under it, and the Codex shell.
   assert.equal(reading.work.length, 3);
   assert.ok(reading.work.some((found) => found.command.includes('npm run build')));
   assert.ok(reading.work.some((found) => found.command === 'bash -lc npm run watch'));
 });
 
 test("Codex's sandbox wrappers are the command's own, not the harness's", () => {
-  // In the two sandboxed modes a command sits three wrappers down. Every one
-  // of them belongs to that command and goes when it goes, so reading them as
-  // work is right — and is what makes the box busy while the command runs.
+  // In the two sandboxed modes a command sits under wrappers. They end with
+  // the command, so they count as work.
   const reading = readBox(
     table(
       ...BOTH_IDLE,
@@ -294,9 +269,8 @@ test("Codex's sandbox wrappers are the command's own, not the harness's", () => 
 });
 
 test('a build orphaned to PID 1 by a dead adapter still holds the box', () => {
-  // The case the whole floor exists for. The adapter that started this is
-  // gone, so no task names it and no bar shows it; the box is still building
-  // and must not be reaped.
+  // The adapter that started it is gone, so no task names it. Only the
+  // reading keeps the reaper away.
   const reading = readBox(table(...HELD, [23490, 1, shell('npm run build')]), BOTH);
   assert.equal(reading.busy, true);
   assert.deepEqual(
@@ -306,10 +280,7 @@ test('a build orphaned to PID 1 by a dead adapter still holds the box', () => {
 });
 
 test('what the reading found is named, numbered and aged', () => {
-  // The fields a person deciding whether to kill it needs. The age is the one
-  // that separates a build somebody is waiting on from something an adapter
-  // left behind hours ago, and the pid tells two identical command lines
-  // apart where the command alone cannot.
+  // The age tells a build somebody waits for from work left behind hours ago.
   const reading = readBox(
     [
       ...table(...HELD),
@@ -323,29 +294,23 @@ test('what the reading found is named, numbered and aged', () => {
 });
 
 test('a box with nothing of ours in it is empty, not unreadable', () => {
-  // Boxes spawns an adapter as an exec and keeps none there between
-  // connections, so a container that is up and has never been opened runs the
-  // entrypoint and nothing else. Counting that as busy would put "still
-  // running" on its card and keep the reaper off it for as long as it is up.
+  // Boxes spawns an adapter as an exec, so a box that was never opened runs
+  // only the entrypoint.
   assert.equal(readBox(table(...HELD), BOTH).busy, false);
   assert.equal(readBox([], BOTH).busy, false);
-  // And an entrypoint that is PID 1 itself, in a box started without an init.
+  // An entrypoint that is PID 1 itself, in a box started without an init.
   assert.equal(readBox(table([1, 0, 'sleep infinity']), BOTH).busy, false);
 });
 
 test('the ps that took the reading is not work the reading found', () => {
-  // A stop reads the box through its own `ps`, from inside, and that process
-  // is in the table it prints. Counting it would make every box busy the
-  // moment it was asked, and killing it would be Boxes shooting its own
-  // reading.
+  // A stop reads the box through its own `ps`, which appears in its output.
   const reading = readBox(table(...HELD, [4242, 0, 'ps -eo pid,ppid,args']), BOTH);
   assert.equal(reading.busy, false);
 });
 
 test('an agent an adapter left behind is still the harness, not work', () => {
-  // `residentProcesses` is matched wherever the process sits, so an agent
-  // outliving its adapter does not read as a running command — while the
-  // shell under it does.
+  // `residentProcesses` matches wherever the process sits. The shell under
+  // the agent is still work.
   const reading = readBox(
     table(...HELD, [23019, 1, CLAUDE_AGENT], [23490, 23019, shell('npm test')]),
     BOTH,
@@ -359,8 +324,6 @@ test('an agent an adapter left behind is still the harness, not work', () => {
 // --- stopping what nobody claims -------------------------------------------
 
 test('the pids to kill are the work, leaves before what spawned them', () => {
-  // A parent killed first hands its children to init, still running and out
-  // of every reading — a box that looks empty with a build in it.
   const procs = table(
     ...BOTH_IDLE,
     [23490, 23019, shell('npm run build')],
@@ -371,8 +334,8 @@ test('the pids to kill are the work, leaves before what spawned them', () => {
 });
 
 test('a stop never reaches the box itself', () => {
-  // No adapter, no agent, no entrypoint and no `ps`: a kill that took any of
-  // them would stop the conversation rather than its work.
+  // A kill of the adapter, the agent, the entrypoint or the `ps` would stop
+  // the conversation rather than its work.
   assert.deepEqual(workPids(table(...BOTH_IDLE, [4242, 0, 'ps -eo pid,ppid,args']), BOTH), []);
 });
 
@@ -432,9 +395,6 @@ const IDLE = table(...BOTH_IDLE);
 
 test('the first reading is not waited for, and lands behind the reader', async () => {
   const { p, settle } = probe(WORKING);
-  // Nothing has been read yet, which is its own answer: a box nobody has
-  // asked about is not a box known to be empty, and a build has been running
-  // in this one all along.
   assert.equal(p.active, null);
   await settle();
   assert.equal(p.active, true);
@@ -442,9 +402,7 @@ test('the first reading is not waited for, and lands behind the reader', async (
 
 test('what is running is served from the same reading as whether anything is', async () => {
   const { p, settle } = probe(WORKING);
-  // Before any reading, and after one: the list and the flag cannot disagree,
-  // because a card showing "still running" over an empty list would read as a
-  // fault rather than as a box nobody has looked at yet.
+  // Before the first reading, and after it.
   assert.equal(p.work.length, 0);
   await settle();
   assert.equal(p.active, true);
@@ -452,24 +410,19 @@ test('what is running is served from the same reading as whether anything is', a
     p.work.map((found) => found.command.includes('npm run build')),
     [true],
   );
-  // And a box that has been shut down holds nothing, said now rather than at
-  // a reading that will never be taken.
+  // A box that has been shut down holds nothing from that moment.
   p.clear();
   assert.equal(p.work.length, 0);
 });
 
 test('a box that has been stopped is empty rather than unread', async () => {
-  // Stopping is the one moment the answer is known without asking, so it is
-  // knowledge like any reading: nothing has to hold the box after it.
   const { p } = probe(WORKING);
   p.clear();
   assert.equal(p.active, false);
 });
 
 test('a reading already on the wire does not undo the stop that overtook it', async () => {
-  // The box was read, shut down, and the reading arrived afterwards. Stored,
-  // it would tell every browser that work is still running in a container
-  // that is gone, until a poll that can no longer reach it says otherwise.
+  // The box is read, then shut down, and the reading arrives afterwards.
   let land: (procs: ContainerProcess[]) => void = () => {};
   const p = new BackgroundProbe({
     list: () =>
@@ -507,9 +460,8 @@ test('a reading stands until it goes stale', async () => {
 });
 
 test('work nobody reported the end of is still gone from the next reading', async () => {
-  // The whole point of a level. A task killed with no notification, an
-  // adapter restarted, a frame lost: all answer correctly here, because the
-  // question is about the present rather than about what was announced.
+  // For example a task killed without notice, a restarted adapter or a lost
+  // frame. The reading shows only what runs now.
   const { p, set, pass, settle } = probe(WORKING);
   await settle();
   assert.equal(p.active, true);
@@ -521,9 +473,6 @@ test('work nobody reported the end of is still gone from the next reading', asyn
 });
 
 test('a box going busy or idle is said once, and only when it turns', async () => {
-  // It is the log's only news about work no conversation can name — a card
-  // saying "still running" with every thread of it quiet is otherwise
-  // indistinguishable from a fault.
   const { set, pass, changes, settle } = probe(IDLE);
   await settle();
   assert.deepEqual(changes(), []);
@@ -533,7 +482,7 @@ test('a box going busy or idle is said once, and only when it turns', async () =
   await settle();
   assert.deepEqual(changes(), [true]);
 
-  // A reading that says the same thing again says nothing at all.
+  // The same reading again fires nothing.
   pass(5_000);
   await settle();
   assert.deepEqual(changes(), [true]);
@@ -545,10 +494,6 @@ test('a box going busy or idle is said once, and only when it turns', async () =
 });
 
 test('a box that is not there is empty, not unreadable', async () => {
-  // The two answers are opposites — one is knowledge, the other is silence —
-  // and they arrived here as the same empty table. So every box that had
-  // ever been started and was now stopped said "still running" for as long as
-  // the orchestrator remembered it.
   const { p, settle } = probe(null);
   await settle();
   assert.equal(p.active, false);
@@ -566,9 +511,7 @@ test('a box that stops is empty from that moment, not from the next reading', as
 });
 
 test('a box that cannot be asked keeps the answer it had, and says so once', async () => {
-  // The answer is a guess for as long as this lasts, and the guess holds the
-  // reaper off — so a probe that has quietly stopped working is a box
-  // that never stops, for a reason nobody can see.
+  // The kept answer holds the reaper off, so the failure must show in the log.
   const { p, fail, pass, trouble, settle } = probe(WORKING);
   await settle();
   assert.deepEqual(trouble(), []);
@@ -579,16 +522,14 @@ test('a box that cannot be asked keeps the answer it had, and says so once', asy
   assert.equal(p.active, true);
   assert.deepEqual(trouble(), ['no daemon']);
 
-  // Still broken a minute later, and still one line: a poll that reported
-  // every failure would bury the one that mattered.
+  // More failures add no line.
   for (let i = 0; i < 3; i += 1) {
     pass(5_000);
     await settle();
   }
   assert.deepEqual(trouble(), ['no daemon']);
 
-  // And it says when it is reading again, because until then every answer it
-  // gave was the last one it was sure of.
+  // It reports when readings work again.
   fail(false);
   pass(5_000);
   await settle();
@@ -596,8 +537,8 @@ test('a box that cannot be asked keeps the answer it had, and says so once', asy
 });
 
 test('two readers in the same moment are one reading', async () => {
-  // `active` starts a refresh when it finds a stale answer, and every reader
-  // finds it stale at once — the reaper sweeping while a browser is served.
+  // For example the reaper sweeping while a browser is served. Each reader
+  // finds the same stale answer.
   const { p, reads } = probe(WORKING);
   await Promise.all([p.refresh(), p.refresh(), p.refresh()]);
   assert.equal(reads(), 1);
@@ -606,13 +547,12 @@ test('two readers in the same moment are one reading', async () => {
 // --- the call that started it ----------------------------------------------
 
 test('the adapters say outright which call backgrounded something', () => {
-  // The marker both adapters put on the call's own update, and the only one of
-  // the three answers that speaks for Codex: it has no `run_in_background`
-  // flag and puts no tool name on a call at all.
+  // Codex sends no `run_in_background` flag and no tool name, so the marker is
+  // its only sign of a backgrounded call.
   const marker = { _meta: { jetbrains: { air: { asyncTasks: { backgrounded: true } } } } };
   assert.equal(startsBackgroundWork(marker, HARNESSES.codex.alwaysBackground), true);
   assert.equal(startsBackgroundWork(marker, HARNESSES.claude.alwaysBackground), true);
-  // A call the adapter has not marked is not one, whatever else is on it.
+  // A marker set to false does not count.
   assert.equal(
     startsBackgroundWork(
       { _meta: { jetbrains: { air: { asyncTasks: { backgrounded: false } } } } },
@@ -623,8 +563,6 @@ test('the adapters say outright which call backgrounded something', () => {
 });
 
 test('a tool call that backgrounds something is still recognisable as one', () => {
-  // Asked in activity.ts, because a call that runs in the background is the
-  // call whose silence says nothing about whether the agent is working.
   const claude = HARNESSES.claude.alwaysBackground;
   assert.equal(startsBackgroundWork({ rawInput: { command: 'npm test' } }, claude), false);
   assert.equal(
@@ -637,9 +575,7 @@ test('a tool call that backgrounds something is still recognisable as one', () =
   );
   assert.equal(startsBackgroundWork({ name: 'Bash' }, claude), false);
 
-  // Which names those are is the harness's, from the registry: Codex has no
-  // tool that backgrounds itself, and `Monitor` there is a tool name like any
-  // other.
+  // Codex lists no tool that always runs in the background.
   const codex = HARNESSES.codex.alwaysBackground;
   assert.equal(
     startsBackgroundWork({ _meta: { claudeCode: { toolName: 'Monitor' } } }, codex),

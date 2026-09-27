@@ -10,44 +10,33 @@ import { ThreadLog, type AdapterOptions } from './thread-log.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
 /**
- * Who each adapter update goes to, and what a browser is sent when it opens
- * a thread.
+ * Router of adapter updates to the browsers of one box, and the logs a
+ * browser is sent when it opens a thread.
  *
- * Broadcasting everything to everyone is wrong in two places, both of which
- * need more than one browser attached to show up: a phone and a desktop on
- * one box, or two tabs on two threads of one box.
- *
- * Every rule here is scoped to a thread, because every rule is about one
- * conversation. A connection is pinned to a thread and an update carries the
- * thread it is about, so routing is a lookup rather than a guess: a prompt
- * echoed on one thread is not suppressed on another, and a thread being read
- * into its log leaves another thread's live updates alone.
+ * Every rule is scoped to one thread. Each connection is pinned to a thread,
+ * and each update names the thread it is about.
  */
 export class Broadcast {
+  /** Every attached browser, with or without a thread yet. */
   private readonly downstreams = new Set<DownstreamHandle>();
   /**
    * How many prompts the gateway is forwarding and has echoed itself, per
-   * thread. While a thread's count is above zero the gateway, not the
-   * adapter, is the authority on what the user just said on it, so an adapter
-   * that echoes the prompt back does not produce a second copy.
+   * thread. While a thread's count is above zero, the gateway drops the
+   * adapter's own echo of the prompt.
    */
   private readonly promptsInFlight = new Map<string, number>();
   /**
    * What each thread the adapter holds has said, by the adapter's id for it.
    *
-   * A browser opening a thread is sent this and nothing else — see
-   * {@link open}. The adapter's own replay never reaches a browser: it is
-   * read once into the log, when the thread is brought up, and a browser's
-   * `session/load` is answered from here without asking the adapter again.
+   * A browser opening a thread is sent its log only. The adapter's replay is
+   * read into the log once, when the thread is brought up.
    */
   private readonly logs = new Map<string, ThreadLog>();
 
   /**
-   * @param stateOf Everything a browser is told about a thread. The gateway
-   *   supplies it, because two thirds of it — whether the agent is speaking,
-   *   and what it left running in the background — are known upstream of this
-   *   class. The default is the part this class knows on its own, which is
-   *   what a test about routing wants.
+   * @param boxId The box, for the log.
+   * @param stateOf Everything a browser is told about a thread. The default
+   *   fills in only whether a prompt is in flight.
    */
   constructor(
     private readonly boxId: string,
@@ -81,9 +70,8 @@ export class Broadcast {
   }
 
   /**
-   * Adds a browser. Its thread may still be resolving, in which case it is
-   * counted as attached — it is holding a socket open — but nothing is routed
-   * to it until it has one.
+   * Adds a browser. Until its thread is resolved, it counts as attached but
+   * nothing is routed to it.
    */
   add(handle: DownstreamHandle): void {
     this.downstreams.add(handle);
@@ -94,6 +82,7 @@ export class Broadcast {
     this.downstreams.delete(handle);
   }
 
+  /** Forgets every browser, prompt count and log. */
   clear(): void {
     this.downstreams.clear();
     this.promptsInFlight.clear();
@@ -106,37 +95,29 @@ export class Broadcast {
    */
   update(params: unknown): void {
     const thread = threadOf(params);
-    // An update that names no thread cannot be routed. Broadcasting it to
-    // everyone is what this class exists to stop.
+    // An update that names no thread goes to nobody.
     if (!thread) return;
     const history = this.logs.get(thread);
-    // The transcript being read back into the log. Nobody is sent it:
-    // whoever opens the thread is sent the log instead, once it is whole.
+    // A transcript being read into the log is sent to nobody.
     if (history?.filling) {
       history.append(params);
       return;
     }
-    // A prompt the gateway has already echoed on this thread: whatever the
-    // adapter says the user said is the same thing, and sending it again
-    // would double it.
+    // The gateway has already echoed this prompt, so the adapter's echo
+    // would show it twice.
     if (this.isPrompting(thread) && updateKind(params) === UPDATE_KIND.userMessageChunk) {
       return;
     }
     history?.append(params);
-    // With nobody on this thread the update is delivered to no one rather
-    // than broadcast, which is what stops a background thread's stream
-    // reaching the wrong tab. It is logged all the same: the reconnect the
-    // log is for is a browser that was away while the turn ran.
+    // Logged even with nobody watching, for a browser that opens the thread
+    // later.
     this.deliver(this.byRecency(thread), params);
   }
 
   /**
-   * Starts reading a thread's transcript into a fresh log. Until
-   * {@link endFill}, the thread's updates are logged and sent to nobody.
-   *
-   * Fresh rather than added to, because the transcript is the whole of what
-   * the thread has said: whatever an earlier log of it held, the adapter is
-   * about to say again.
+   * Starts reading a thread's transcript into a fresh log, which replaces any
+   * earlier one. Until {@link endFill}, the thread's updates are logged and
+   * sent to nobody.
    */
   beginFill(acpThreadId: string): void {
     const history = new ThreadLog();
@@ -144,7 +125,7 @@ export class Broadcast {
     this.logs.set(acpThreadId, history);
   }
 
-  /** The transcript has all been read; the thread's updates are live again. */
+  /** Ends the fill: the thread's updates are sent to its browsers again. */
   endFill(acpThreadId: string, options: AdapterOptions): void {
     const history = this.logs.get(acpThreadId);
     if (!history) return;
@@ -152,7 +133,7 @@ export class Broadcast {
     history.options = options;
   }
 
-  /** Forgets a thread's log, because the adapter turned out not to hold it. */
+  /** Forgets a thread's log, for a thread the adapter does not hold. */
   dropLog(acpThreadId: string): void {
     this.logs.delete(acpThreadId);
   }
@@ -160,9 +141,9 @@ export class Broadcast {
   /**
    * Opens a log for a thread the adapter has just minted.
    *
-   * `from` names the thread it was forked from, whose log becomes the start
-   * of this one: the fork carries that conversation, and until it is first
-   * prompted the adapter has no transcript of its own to say so.
+   * @param from The thread it was forked from, whose log the new one starts
+   *   as a copy of. The adapter writes a fork no transcript until its first
+   *   prompt.
    */
   openLog(acpThreadId: string, options: AdapterOptions, from?: string): void {
     const history = new ThreadLog();
@@ -176,15 +157,11 @@ export class Broadcast {
    * Sends one browser a thread, and returns the answer to the `session/load`
    * it asked with.
    *
-   * `anchor` is the last message the browser holds, when it has one. The
-   * browser is told first whether it is being sent a tail to fold onto what
-   * it has or the thread whole to replace it — `_boxes/replay` — because
-   * nothing in the updates that follow tells the two apart, and a browser
-   * that finds out afterwards has to throw away what it was just sent.
+   * A `_boxes/replay` notification goes first and says whether the updates
+   * are a tail after the browser's anchor or the whole thread. A thread with
+   * no log is sent as empty.
    *
-   * A thread with no log is one the adapter never brought up here, and is
-   * sent as empty rather than refused: the browser asked to open a thread,
-   * and what there is of it is nothing.
+   * @param anchor The last message the browser holds, if any.
    */
   open(handle: DownstreamHandle, acpThreadId: string, anchor?: string): AdapterOptions {
     const history = this.logs.get(acpThreadId);
@@ -200,22 +177,17 @@ export class Broadcast {
   }
 
   /**
-   * Tells the browsers watching a thread what was just prompted on it, and
-   * opens the window in which the gateway owns what the user said.
+   * Echoes a prompt to the browsers watching its thread and to the log, and
+   * counts it as in flight.
    *
-   * The adapter is not required to echo a prompt live — it only has to replay
-   * it later — so without this the browser that sent it sees nothing until
-   * its next reload, and a second device on the same thread sees nothing at
-   * all. The echo is logged like anything else a watcher is sent, so a
-   * browser opening the thread later sees the prompt where it was made.
+   * ACP does not require the adapter to echo a prompt live.
    */
   beginPrompt(params: unknown): void {
     const thread = threadOf(params);
     if (!thread) return;
     const before = this.promptsInFlight.get(thread) ?? 0;
     this.promptsInFlight.set(thread, before + 1);
-    // The first prompt on a thread is what starts its turn; a second one
-    // arriving while that runs does not start a second turn.
+    // Only the first prompt in flight starts a turn.
     if (before === 0) this.threadState(thread);
     const blocks = (params as { prompt?: unknown })?.prompt;
     if (!Array.isArray(blocks)) return;
@@ -229,7 +201,7 @@ export class Broadcast {
     }
   }
 
-  /** Ends the window in which the gateway owns what the user said on a thread. */
+  /** Counts a prompt on a thread as done, and sends the new state after the last one. */
   endPrompt(params: unknown): void {
     const thread = threadOf(params);
     if (!thread) return;
@@ -248,26 +220,24 @@ export class Broadcast {
   }
 
   /**
-   * Tells the browsers watching a thread what it is doing.
+   * Sends the browsers watching a thread its state.
    *
-   * The one thing a browser cannot work out for itself: a turn it did not
-   * start, on a thread it has only just re-opened, is indistinguishable from
-   * a finished one until somebody says — and so is a monitor left running in
-   * the box an hour ago. See TURN_STATE_METHOD.
+   * A browser cannot tell on its own that a turn it did not start is still
+   * running, or that the thread has background work.
    */
   threadState(acpThreadId: string): void {
     this.send(this.byRecency(acpThreadId), TURN_STATE_METHOD, this.stateOf(acpThreadId));
   }
 
-  /** The same, to one browser: what a fresh connection is told after it opens a thread. */
+  /** Sends one browser the state of its thread, after it opens the thread. */
   threadStateTo(handle: DownstreamHandle): void {
     if (!handle.acpThreadId) return;
     this.send([handle], TURN_STATE_METHOD, this.stateOf(handle.acpThreadId));
   }
 
   /**
-   * Re-states every watched thread, for whoever has just changed something
-   * true of all of them — an adapter that exited, a box stopping.
+   * Sends the state of every watched thread again, for example after an
+   * adapter exited or the box stopped.
    */
   refreshThreadStates(): void {
     for (const thread of this.watchedThreads) this.threadState(thread);

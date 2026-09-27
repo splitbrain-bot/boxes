@@ -8,15 +8,11 @@ import { Interceptor } from './inject.ts';
 import { EMPTY_POLICY, injectionPatterns, policyHash } from './policy.ts';
 
 /**
- * The sole egress path out of every box network.
+ * Entry point of the egress proxy, the only way out of every box network.
  *
- * Box networks are internal Docker networks with no NAT and no default
- * route. This process is attached to each of them under the alias proxy, so it
- * is the only thing an agent can reach and the boundary between a box, the
- * LAN, and every other box.
- *
- * It holds no secret at rest: no config file, no database, no CA on disk. It
- * boots with no policy at all and is given one over the control channel.
+ * Box networks are internal, so this process, attached to each of them, is
+ * the only thing an agent can reach. It keeps its whole state in memory and
+ * holds no secret at rest.
  */
 
 /** Writes one JSON line to stderr. */
@@ -61,18 +57,18 @@ if (CONTROL_BIND !== '' && net.isIP(CONTROL_BIND) === 0) {
   fatalConfig(`CONTROL_BIND must be an IP address, not ${CONTROL_BIND}`);
 }
 
-// --- state: the whole of it, in memory ---------------------------------------
+// --- state --------------------------------------------------------------------
 
-/** Empty until the orchestrator pushes. */
+/** The live policy. Empty until the orchestrator pushes one. */
 let policy: EgressPolicy = EMPTY_POLICY;
 
 /** False until a policy has been pushed, however empty that policy is. */
 let applied = false;
 
 /**
- * Denials since boot, by category, reported back on the control channel. The
- * categories are a fixed set, so this cannot grow with what a box asks
- * for, and no hostname of its choosing ends up in the status.
+ * Denials since boot, by category, reported on the control channel. The
+ * categories are a fixed set, so a box cannot grow this map or put a
+ * hostname of its choice into the status.
  */
 const denials = new Map<DenialCategory, number>();
 
@@ -99,8 +95,9 @@ function status(): EgressStatus {
 // --- the three listeners -----------------------------------------------------
 
 /**
- * The upstream tunnel. It never intercepts, which is what stops the engine's
- * own connections from arriving back at the engine.
+ * The upstream tunnel, on loopback. The engine sends every connection through
+ * it, so decrypted traffic gets the same checks. It never intercepts, so the
+ * engine's connections do not loop back into the engine.
  */
 const upstream = createForwardServer({
   policy: () => policy,
@@ -110,12 +107,13 @@ const upstream = createForwardServer({
   log: (msg, fields) => log(msg, { via: 'upstream', ...fields }),
 });
 
+/** Port the upstream tunnel listens on, known once it is bound. */
 let upstreamPort = 0;
 
 /**
- * The interception engine, on loopback. It terminates TLS for the hosts a
- * credential is configured for, under the deployment CA, and swaps the
- * box's placeholder for the real credential.
+ * The interception engine. It terminates TLS for the hosts that have a
+ * credential, under the deployment CA, and swaps the box's placeholder for
+ * the real credential.
  */
 const interceptor = new Interceptor({
   policy: () => policy,
@@ -142,10 +140,8 @@ let pushes: Promise<void> = Promise.resolve();
 /**
  * Runs one policy push once the push before it has finished, or failed.
  *
- * A push sets the policy, waits for the engine, and puts the previous policy
- * back when the engine refuses the new one, while the control channel answers
- * requests concurrently. Interleaved, one push's rollback would discard the
- * policy another push had just applied and leave the status reporting it.
+ * A push that the engine refuses puts the previous policy back. Without the
+ * queue, that rollback could discard a policy another push had just applied.
  */
 function queuePush(work: () => Promise<void>): Promise<void> {
   const next = pushes.then(work, work);
@@ -186,7 +182,7 @@ const control = createControlServer({
 
 // --- boot --------------------------------------------------------------------
 
-/** Listens on a server and resolves with the port the OS assigned. */
+/** Starts a server listening and resolves with the port it is bound to. */
 function listen(server: Server, port: number, host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);

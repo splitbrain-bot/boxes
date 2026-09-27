@@ -19,19 +19,13 @@ import {
   type GitTarget,
 } from './git.ts';
 
-/**
- * How review invokes git.
- *
- * Git runs in the box's container, so what is pinned down here is the
- * command line and the environment the builders produce, that every
- * invocation is addressed to a container and a directory inside it, and that
- * no file of the orchestrator can start a process at all.
- */
-
 /** A target naming a container and a path inside it, as the service builds one. */
 const target: GitTarget = { containerId: 'box-1', dir: '/workspace/project' };
 
-/** A runner that answers nothing and records how it was called. */
+/**
+ * Installs a runner that records each call and answers with `result`, by
+ * default with empty output.
+ */
 function recorder(result: Partial<GitResult> = {}): {
   calls: Array<{ target: GitTarget; argv: string[]; env: Record<string, string> }>;
 } {
@@ -44,11 +38,8 @@ function recorder(result: Partial<GitResult> = {}): {
 }
 
 /**
- * A runner that starts git on this machine, in the directory the target names.
- *
- * The repositories these tests build are their own, so running their git here
- * is what keeps the builders honest about real git. Nothing in the
- * orchestrator does this: the runner it ships with execs in a container.
+ * A runner that starts git on this machine, in the directory the target names,
+ * so the builders are checked against real git.
  */
 const localGit: GitRunner = async (called, argv, env) => {
   try {
@@ -96,8 +87,6 @@ describe('the command line', () => {
   });
 
   test('a diff carries the flags the parser needs, ahead of what was asked for', () => {
-    // An external driver or a textconv filter would produce something the
-    // hunk parser cannot read, and colour would corrupt it.
     assert.deepEqual([...DIFF_PARSE_FLAGS], ['--no-ext-diff', '--no-textconv', '--no-color']);
     const argv = gitArgv(['diff', 'HEAD', '--', 'a.txt']);
     assert.deepEqual(argv.slice(argv.indexOf('diff')), [
@@ -123,8 +112,6 @@ describe('the environment', () => {
   });
 
   test('a pathspec is a path, not a glob', () => {
-    // A filename holding `*`, `?` or `[` would otherwise make `-- path` match
-    // files nobody asked about.
     assert.equal(env['GIT_LITERAL_PATHSPECS'], '1');
   });
 
@@ -178,9 +165,8 @@ describe('where an invocation is addressed', () => {
 });
 
 test('no file of the orchestrator can start a process of its own', () => {
-  // The whole of the protection: a repository's own configuration runs
-  // commands on `status` and on `diff`, and this process holds the Docker
-  // socket. Git runs in the box instead, so nothing here spawns anything.
+  // A repository's configuration can make git run commands, and this process
+  // holds the Docker socket.
   const src = fileURLToPath(new URL('..', import.meta.url));
   const offenders = readdirSync(src, { recursive: true, encoding: 'utf8' })
     .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))

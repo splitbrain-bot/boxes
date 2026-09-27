@@ -8,19 +8,11 @@ import { openDb, upsertPushSubscription, type Db } from './db.ts';
 import { Notifier, wording, type NotifyEvent } from './notify.ts';
 import { loadVapidKeys } from './push.ts';
 
-/**
- * The fan-out, with the transport faked at fetch.
- *
- * What matters here is not the bytes — push.test.ts covers those against the
- * RFC's own vectors — but that one event reaches every subscribed browser,
- * that a turn is never held up by a push service, and that a subscription
- * the service says is finished is forgotten rather than retried forever.
- */
-
 let dir: string;
 let db: Db;
 let cfg: Config;
 let calls: Array<{ url: string; headers: Record<string, string> }>;
+/** The real fetch, restored after each test. */
 const realFetch = globalThis.fetch;
 
 /** Installs a fetch that records every call and answers as told. */
@@ -35,10 +27,8 @@ function fakeFetch(answer: (url: string) => { status: number } | Error): void {
 }
 
 /**
- * One subscription row, with keys of the sizes the crypto needs.
- *
- * `vapidKey` is the deployment's own unless a test says otherwise, which is
- * what a browser subscribing right now records.
+ * Stores one subscription row, with keys of the sizes the crypto needs.
+ * `vapidKey` defaults to the deployment's current key.
  */
 function subscribe(endpoint: string, vapidKey = loadVapidKeys(dir).publicKey): void {
   upsertPushSubscription(
@@ -59,6 +49,7 @@ function subscribe(endpoint: string, vapidKey = loadVapidKeys(dir).publicKey): v
   );
 }
 
+/** An approval request for a named thread. */
 const event: NotifyEvent = {
   kind: 'approval',
   boxId: 's1',
@@ -106,8 +97,7 @@ test('an idle event and an approval read differently', () => {
 
 test('an idle event says what is still running, when anything is', () => {
   const idle = { ...event, kind: 'idle' as const };
-  // The difference between a thread you can come back to whenever, and one
-  // that is going to say something else without being asked.
+  // With background work running, the thread posts again without a new prompt.
   assert.doesNotMatch(wording(idle).body, /still running/);
   assert.match(wording({ ...idle, background: true }).body, /Something is still running/);
   assert.doesNotMatch(wording({ ...idle, background: false }).body, /still running/);
@@ -133,8 +123,7 @@ test('a push service that is merely down keeps its subscription', async () => {
   subscribe('https://push.example.net/a');
   fakeFetch(() => new Error('connect ECONNREFUSED'));
 
-  // Neither the throw nor the 500 may escape: the caller is a turn waiting on
-  // a human, and a push service is not its problem.
+  // The error must not escape, because the caller is a turn waiting on a person.
   await new Notifier(db, cfg).notify(event);
   await new Notifier(db, cfg).notify(event);
 
@@ -145,8 +134,7 @@ test('a push service that is merely down keeps its subscription', async () => {
 });
 
 test('a subscription made under an earlier key is forgotten rather than retried', async () => {
-  // The push service refuses it with a status that says nothing about the
-  // subscription, so nothing else here would ever drop the row.
+  // The push service refuses it with a status that the gone check misses.
   subscribe('https://push.example.net/rotated', 'a-key-this-deployment-no-longer-holds');
   subscribe('https://push.example.net/live');
   fakeFetch(() => ({ status: 201 }));

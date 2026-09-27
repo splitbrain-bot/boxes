@@ -10,13 +10,11 @@ import { TokenWarning } from '@/components/TokenWarning';
 import { Button } from '@/components/ui/button';
 import { startPolling, useBoxes } from '../stores/boxes.ts';
 
-/** The dashboard's home: every box as a card, and the card is the thread. */
+/** Home page that shows every box as a card. */
 export function BoxList() {
   const { boxes, images, error, loading } = useBoxes();
 
-  // The whole list is polled while this screen is up, and only while it is:
-  // every other view watches one box, and none of them needs the rest of
-  // the deployment fetched every few seconds.
+  // Polls the box list only while this page is mounted. Other views watch one box.
   useEffect(() => startPolling(), []);
 
   return (
@@ -24,21 +22,12 @@ export function BoxList() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Boxes</h1>
         <div className="flex items-center gap-1">
-          {/* Whether this browser hears about a box that wants something. A
-              subscription belongs to the browser rather than to a box, so
-              it lives with the list rather than inside one. */}
           <PushToggle />
-          {/* The AGENTS.md, skills and commands every box is built with.
-              Deployment-wide, so it hangs off the list rather than a box. */}
           <Button asChild size="sm" variant="ghost" aria-label="Agent configuration">
             <Link to="/agents">
               <SlidersHorizontal />
             </Link>
           </Button>
-          {/* The credentials every box runs on, and the identity it commits
-              as. Deployment-wide for the same reason, and beside the agent
-              configuration because the two are the whole of what is set up
-              once rather than per box. */}
           <Button asChild size="sm" variant="ghost" aria-label="Settings">
             <Link to="/settings">
               <KeyRound />
@@ -61,9 +50,7 @@ export function BoxList() {
 
       {loading && boxes.length === 0 ? <Loading className="py-8 text-center" /> : null}
 
-      {/* Only where the list is genuinely empty. A failed poll knows nothing
-          about how many boxes there are, and saying there are none under
-          the error that says so is the one reading that is certainly wrong. */}
+      {/* A failed poll says nothing about the count, so the empty note waits for success. */}
       {!loading && !error && boxes.length === 0 ? (
         <div className="py-8 text-center text-sm text-muted-foreground">
           No boxes yet. Create one to get started.
@@ -74,8 +61,6 @@ export function BoxList() {
         <BoxCard key={s.id} box={s} />
       ))}
 
-      {/* What this deployment is built from. Under the list because it is a
-          fact about the whole of it, and the last thing anybody scrolls to. */}
       <ImageFooter images={images} />
     </div>
   );

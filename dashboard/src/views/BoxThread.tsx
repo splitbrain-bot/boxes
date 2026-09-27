@@ -34,7 +34,12 @@ import { ThreadHeader } from '@/components/ThreadHeader';
 import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 
-/** The prose of a composer submission, without its attachments. */
+/**
+ * Returns the typed text of a composer submission, without its attachments.
+ *
+ * @param message The submission.
+ * @returns The trimmed text.
+ */
 function textOf(message: AppendMessage): string {
   return message.content
     .map((part) => (part.type === 'text' ? part.text : ''))
@@ -43,12 +48,13 @@ function textOf(message: AppendMessage): string {
 }
 
 /**
- * One composer submission as the content blocks of an ACP prompt.
+ * Converts one composer submission into the content blocks of an ACP prompt.
  *
- * The note saying what was attached comes first, then what the user typed:
- * context, then the question about it. Nothing carries a file — attachments
- * arrive already uploaded, and what the prompt holds is where they went. See
- * stores/thread/attachments.ts.
+ * The note on the attachments comes first, then the typed text. The
+ * attachments are already uploaded, so the note holds their paths.
+ *
+ * @param message The submission.
+ * @returns The prompt blocks.
  */
 function blocksOf(message: AppendMessage): ContentBlock[] {
   const entries: AttachmentEntry[] = [];
@@ -72,30 +78,23 @@ function blocksOf(message: AppendMessage): ContentBlock[] {
   ];
 }
 
-/**
- * One of a box's conversations, inside the dashboard.
- *
- * The browser speaks plain ACP to the gateway; the store turns the adapter's
- * session/update notifications into messages and this route mounts them into
- * the installed assistant-ui components.
- *
- * The route names the thread, and so does the connection's own URL, so two
- * tabs on two threads of one box each get their own conversation and neither
- * sees the other's stream.
- */
 /** Why this view could not read its box, in the words it shows. */
 interface LoadError {
+  /** The first line of the notice. */
   message: string;
+  /** The second line, which says what the failure means for the box. */
   detail: string;
 }
 
 /**
- * What to say about a box that would not load.
+ * Builds the notice for a box that would not load.
  *
  * Only a 404 means the box is gone. An authenticating proxy in front of the
- * deployment answers 401 or 403 once its cookie expires, and telling that
- * reader their box was deleted is both wrong and alarming; everything else is
- * the deployment being unreachable, which is a thing that passes.
+ * deployment answers 401 or 403 once its cookie expires. Any other failure
+ * means the deployment could not be reached.
+ *
+ * @param err The failed read.
+ * @returns The notice text.
  */
 function describeLoadError(err: Error): LoadError {
   const status = err instanceof ApiError ? err.status : 0;
@@ -117,104 +116,84 @@ function describeLoadError(err: Error): LoadError {
   };
 }
 
+/**
+ * Page with one thread of a box, at `/boxes/:id/threads/:threadId`.
+ *
+ * The browser speaks ACP to the gateway. The thread store turns the updates
+ * into messages, and this page renders them with the assistant-ui components.
+ * The connection URL names the thread, so two tabs on two threads of one box
+ * each get their own stream.
+ */
 export function BoxThread() {
   const { id = '', threadId = '' } = useParams();
   /**
-   * Text the review view staged in the composer on its way here — "read
-   * REVIEW.md and address the comments in it". Staged, never sent: what to do
-   * with a review is the reviewer's call, and a prompt that fires itself on
-   * navigation is a prompt nobody agreed to.
-   *
-   * Taken from beside the router rather than out of the history entry's
-   * state, which the browser replays: back and then forward would otherwise
-   * re-stage it.
+   * Text that the review view staged for the composer, or null. It fills the
+   * composer and is never sent on its own.
    */
   const [prefill, setPrefill] = useState<string | null>(null);
-  /** The thread a fork just made, revealed as a link rather than opened. */
+  /** The thread a fork just made, shown as a link. */
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
 
   /**
-   * This box, polled: the WS token the connection needs, the name in the
-   * header, the threads, and the mark on the one being read. It comes from
-   * the box API, behind the deployment's auth.
-   *
-   * Polled rather than read once, because a snapshot of arrival goes stale —
-   * a thread the agent titles at the end of its first turn would keep its
-   * ordinal until a reload.
+   * This box, polled for the WebSocket token, the name and the threads.
+   * Polling picks up a title the agent gives a thread after its first turn.
    */
   const { box, error: readError, reload } = useBox(id);
 
   /**
-   * Why there is nothing to show, or null.
-   *
-   * Only while the box has never been read: a poll that failed after one
-   * answered says the deployment is busy, not that the box is gone, and the
-   * conversation on screen is still worth reading.
+   * Why there is nothing to show, or null. Set only while the box has never
+   * been read, so a failed later poll keeps the conversation on screen.
    */
   const loadError: LoadError | null = box || !readError ? null : describeLoadError(readError);
 
-  // Whether the deployment holds a Claude token, which the warning below
-  // reads. A fact about the deployment rather than about this box, so it is
-  // asked for on arrival and not again.
+  // Reads the harness health once for the credential warning.
   useEffect(() => {
     void refreshHealth();
   }, []);
 
-  // On arrival, and once: taking it clears it, and the guard is what makes a
-  // second run — React mounting effects twice in development — harmless.
+  // Taking the staged prompt clears it, so a second run of this effect in
+  // development finds nothing.
   useEffect(() => {
     const staged = takeStagedPrompt(id);
     if (staged !== null) setPrefill(staged);
   }, [id]);
 
-  /** The way out of the thread: the box list, popped rather than pushed. */
+  /** Leaves for the box list. */
   const up = useUp('/');
 
   const { store, state } = useThread(id, threadId, box?.wsToken ?? null);
 
-  // Which of the box's conversations this is, named always rather than
-  // only when there is more than one: two tabs on one box are otherwise
-  // indistinguishable, which is the whole point of a thread in the URL.
+  // Named even in a box with one thread, so two tabs on one box differ.
   const threads = box?.threads ?? [];
   const thread = threads.find((t) => t.id === threadId);
   const threadLabel = thread ? threadName(thread) : null;
-  // What this thread's agent is called. The polled health list rather than a
-  // call of its own: a header needs the label and nothing else, and the list
-  // is being kept fresh for the warning under it either way.
+  // The harness labels come from the health list that the box store holds.
   const { harnesses } = useBoxes();
 
   /**
    * What this tab is doing, for its title.
    *
-   * A question outranks a running turn because it is the one that stopped:
-   * the two cannot both be true anyway — a thread waiting on an answer is not
-   * running, which is the whole point of the request. Below those, a thread
-   * that has stopped talking with work still running in it is its own state:
-   * the reader's turn, and not over.
+   * A waiting question outranks a running turn. Below those, background work
+   * without a turn reads as waiting.
    */
   const tabState: TabState =
     state.awaiting ??
     (state.isRunning ? 'running' : state.background.length > 0 ? 'waiting' : 'idle');
   useDocumentTitle(threadTitle(tabState, box?.name ?? id, threadLabel));
 
-  // The thread's viewport is the only scroller this route has: a document
-  // that scrolled too would take the header off the top of the screen.
+  // The thread viewport is the only scroller, so the header stays on screen.
   useViewportLock();
 
-  // Reading down through the thread is what moves the header instead: it
-  // steps aside on a downward run and comes back on the first upward one. A
-  // turn's own output moves nothing, because the viewport stays against its
-  // bottom for the whole of one.
+  // Hides the header while reading down and shows it on a scroll back up.
+  // A turn's output does not move it, because the viewport stays at the bottom.
   const { away, container } = useScrollAway('[data-slot="aui_thread-viewport"]');
 
   /**
-   * Branches this conversation and reveals the result as a link.
+   * Forks this thread and shows the result as a link.
    *
-   * A `window.open` after the await is what popup blockers stop, so the
-   * result is a link and one extra tap. This thread stays where it is either
-   * way, because no connection is pinned to the box's default.
+   * Popup blockers stop a `window.open` after the await, so the user taps a link.
    */
   const onFork = useCallback(() => {
     if (!thread || forking) return;
@@ -224,48 +203,37 @@ export function BoxThread() {
     api
       .createThread(id, { from: thread.id })
       .then(setForked)
-      // Reported where the action was, rather than in the bar that means the
-      // box itself could not be read.
+      // Shown beside the action, not as a box load error.
       .catch((err: Error) => setForkError(err.message))
       .finally(() => setForking(false));
   }, [id, thread, forking]);
 
   /**
-   * Marks this conversation done, or takes the mark off again.
+   * Marks this thread done, or removes the mark.
    *
-   * The mark is the orchestrator's to keep, so nothing is drawn from the
-   * answer: the box list is asked for again instead, and the header shows
-   * the mark when that row carries it.
+   * The header shows the mark from the polled box, so this reloads the box.
+   *
+   * @param next True to mark the thread done.
    */
   const onSetDone = useCallback(
     (next: boolean) => {
       if (!thread) return;
       api
         .setThreadDone(id, thread.id, next)
-        // The polled box is what the header reads, so the mark appears
-        // when that reading does. Asking for it now rather than waiting out
-        // the poll is what keeps the control answering under the finger that
-        // hit it.
         .then(() => reload())
-        // Nothing was marked, so nothing is drawn as marked. It goes where the
-        // rest of this thread's trouble goes.
         .catch((err: Error) => store?.reportError(err.message));
     },
     [id, thread, store, reload],
   );
 
   /**
-   * Kills what this conversation left running: one command, or all of them.
+   * Stops the background work of a thread: one process, or all of them.
    *
-   * Nothing is done here with the answer, and the bar is not touched. What it
-   * shows is the gateway's own reading of the box, and the row goes away when
-   * a reading says the process has — a couple of seconds later, once what was
-   * signalled has had time to be gone. Guessing here would be this browser
-   * inventing an ending for work it cannot see.
+   * The bar keeps its rows until the gateway reports the processes gone.
+   * A failed request shows as a thread error.
    *
-   * A stop that found nothing left to kill is not a failure either: the work
-   * ended between the reading and the tap. A stop that could not be *made* is,
-   * and it goes where the rest of this thread's trouble goes.
+   * @param forThread The thread id.
+   * @param processId The process to stop, or all of them when absent.
    */
   const stopBackground = useCallback(
     async (forThread: string, processId?: string): Promise<void> => {
@@ -278,6 +246,7 @@ export function BoxThread() {
     [id, store],
   );
 
+  /** Sends a composer submission as a prompt. */
   const onNew = useCallback(
     async (message: AppendMessage) => {
       if (!store) return;
@@ -288,18 +257,15 @@ export function BoxThread() {
 
   /**
    * The composer's attachment adapter, which uploads into this box's
-   * workspace. Rebuilt with the store so a failed upload has somewhere to
-   * report to; the composer holds the attachments themselves, so nothing is
-   * lost when it is.
+   * workspace. It is rebuilt with the store, so a failed upload reports to the
+   * current store.
    */
   const attachmentAdapter = useMemo(
     () => createAttachmentAdapter(id, (message) => store?.reportError(message)),
     [id, store],
   );
 
-  // Bound to the box because an attachment is fetched back from it: the
-  // thread's own pictures are served from its workspace, not carried in the
-  // transcript.
+  // Bound to the box, because attachments are served from its workspace.
   const convert = useCallback((message: Message) => convertMessage(message, id), [id]);
 
   const runtime = useExternalStoreRuntime<Message>({
@@ -312,14 +278,13 @@ export function BoxThread() {
     onRefetchThread: async () => store?.refetch(),
     adapters: { attachments: attachmentAdapter },
     onRespondToToolApproval: ({ approvalId, approved, optionId }) => {
-      // A decision with no option id is a plain refusal to choose; the store
-      // turns that into ACP's cancelled outcome.
+      // No option id means a refusal to choose. The store sends ACP's cancelled outcome.
       store?.respondToApproval(approvalId, approved || optionId ? optionId : undefined);
     },
   });
 
-  // Once, on arrival. Not in a dependency on the runtime, which is rebuilt on
-  // every message: that would keep overwriting whatever is being typed.
+  // The runtime is rebuilt on every message, so the ref keeps this to one run
+  // that does not overwrite typed text.
   const staged = useRef(false);
   useEffect(() => {
     if (!prefill || staged.current) return;
@@ -332,9 +297,7 @@ export function BoxThread() {
       <AssistantRuntimeProvider runtime={runtime}>
         <SlashCommandsProvider commands={state.commands}>
           <div ref={container} className="flex h-dvh flex-col">
-            {/* The header is the part that gives way. The notices below it are
-                not: a missing token, a fork to open, an error to read are all
-                things to act on, and none of them is in the way of anything. */}
+            {/* Only the header hides on scroll. The notices below it stay. */}
             <Shelf away={away}>
               <ThreadHeader
                 boxId={id}
@@ -342,14 +305,9 @@ export function BoxThread() {
                 up={up}
                 name={box?.name ?? id}
                 threadLabel={threadLabel}
-                // Off the health probe the app polls anyway: a header wants
-                // the name of the agent and the caveat its modes carry, and
-                // both are in the harness list the box store already
-                // holds.
                 harness={thread?.harness ?? null}
                 harnessLabel={harnessLabel(harnesses, thread?.harness)}
-                // Nothing is connecting while the box itself could not be
-                // read, and a dot that pulses forever says the opposite.
+                // Shows closed when the box could not be read, because nothing connects.
                 connection={loadError ? 'closed' : state.connection}
                 modes={state.modes}
                 configOptions={state.configOptions}
@@ -357,9 +315,7 @@ export function BoxThread() {
                 canFork={thread?.canFork === true}
                 forking={forking}
                 onFork={onFork}
-                // Nothing to mark until the box has been read and said
-                // which of its threads this is; the header drops the button
-                // rather than offering one that marks nothing.
+                // Undefined until the box has been read, which hides the button.
                 onSetDone={thread ? onSetDone : undefined}
                 onSetMode={(modeId) => void store?.setMode(modeId)}
                 onSetConfigOption={(configId, value) =>
@@ -370,16 +326,11 @@ export function BoxThread() {
             <TokenWarning className="border-b px-4 py-2" />
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
-                {/* It opens on this conversation: the gateway replays what
-                    was said here into it until it has said something of its
-                    own. What it carries and what it shows are the same thing,
-                    so there is nothing to warn about. */}
                 <span>
                   {threadName(forked)} branched from this conversation. It opens on everything
                   said here so far and goes its own way from there.
                 </span>
-                {/* A real click on a real link, so the browser opens the tab
-                    rather than a script asking it to. */}
+                {/* A plain link, so a popup blocker does not stop the new tab. */}
                 <Link
                   to={`/boxes/${id}/threads/${forked.id}`}
                   target="_blank"
@@ -406,35 +357,26 @@ export function BoxThread() {
               <Notice className="border-b px-4 py-2">{state.error}</Notice>
             ) : null}
             <div className="min-h-0 flex-1">
-              {/* A box that could not be read has no token, so nothing can
-                  connect and nothing can be sent. A composer over an empty
-                  greeting would say otherwise — which is exactly what a
-                  bookmark for a deleted box lands on. */}
+              {/* A box that could not be read has no token, so the page shows no composer. */}
               {loadError ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
                   <p className="text-sm">{loadError.message}</p>
                   <p className="text-sm text-muted-foreground">{loadError.detail}</p>
-                  {/* The same step out as the header's, so a box that
-                      turned out to be gone is left the same way any other is:
-                      whatever sent the visitor here, not a list pushed over
-                      it. */}
+                  {/* The same step out as the header's back button. */}
                   <a href={up.href} onClick={up.onClick} className="text-sm font-medium underline">
                     Back to boxes
                   </a>
                 </div>
               ) : state.loading ? (
-                // Nothing to type into and nothing to read yet: the box may
-                // still be starting, and the conversation arrives in one
-                // piece when it has been read. See ThreadLoading.
+                // The box may still be starting. The conversation appears in one
+                // piece once it has been read.
                 <ThreadLoading />
               ) : (
                 <Thread
                   aboveComposer={
                     <BackgroundBar
                       processes={state.background}
-                      // Nothing to stop with until there is a thread to name;
-                      // the bar drops the button rather than offering one
-                      // that does nothing.
+                      // Undefined until the box has been read, which hides the button.
                       onStop={
                         thread
                           ? (processId) => void stopBackground(thread.id, processId)

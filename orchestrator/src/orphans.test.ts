@@ -10,26 +10,15 @@ import { openDb, type Db } from './db.ts';
 import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 
-/**
- * Sweeping what a box left behind.
- *
- * Everything Boxes creates carries its box's id as a label, and boot
- * reconciliation reads that one way only — for each row, what Docker has. So
- * a container, network or volume whose row is gone was invisible: no card
- * lists it, no teardown will ever be run for it again, and a home volume of
- * it holds whatever the agent installed at runtime.
- *
- * What makes the rule exact rather than a guess is the order create() works
- * in: the row exists before any Docker object does, so a labelled object with
- * no live row cannot be one on its way up.
- */
-
 /** The daemon this suite pretends to talk to. */
 interface Fake {
+  /** Box containers by id. */
   containers: Map<string, { boxId: string; running: boolean }>;
   /** Login containers, which belong to a credential rather than to a box. */
   logins: Map<string, { credentialId: string; createdAt: number }>;
+  /** Network name to the id of the box it is labelled with. */
   networks: Map<string, string>;
+  /** Volume name to the id of the box it is labelled with. */
   volumes: Map<string, string>;
   /** Names of objects the sweep removed, in the order it removed them. */
   removed: string[];
@@ -39,6 +28,7 @@ interface Fake {
   whileListing?: () => void;
 }
 
+/** Installs a Docker client that lists and removes the objects of the fake. */
 function install(fake: Fake): void {
   const refuse = (name: string): void => {
     if (fake.stuck.has(name)) throw Object.assign(new Error('in use'), { statusCode: 409 });
@@ -104,7 +94,7 @@ let db: Db;
 let orchestrator: Orchestrator;
 let fake: Fake;
 
-/** A box row, and the objects Boxes would have created for it. */
+/** Inserts a box row that names the objects Boxes would create for it. */
 function insertBox(id: string, status = 'stopped'): void {
   const now = Date.now();
   db.prepare(
@@ -130,8 +120,7 @@ function insertBox(id: string, status = 'stopped'): void {
 function insertObjects(id: string): void {
   fake.containers.set(`c-${id}`, { boxId: id, running: false });
   fake.networks.set(`bn-${id}`, id);
-  // A box from before homes became directories still has this one, and
-  // it is labelled the same way.
+  // Older boxes have a home volume, labelled the same way.
   fake.volumes.set(`home-${id}`, id);
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
   writeFileSync(join(workspace, 'work.txt'), 'the agent was here');
@@ -141,14 +130,17 @@ function insertObjects(id: string): void {
   writeFileSync(join(nix, 'store'), 'and installed things');
 }
 
+/** The workspace directory of a box. */
 function workspaceOf(id: string): string {
   return ws.workspacePath(orchestrator.cfg.DATA_DIR, id);
 }
 
+/** The home directory of a box. */
 function homeOf(id: string): string {
   return ws.homePath(orchestrator.cfg.DATA_DIR, id);
 }
 
+/** The Nix store directory of a box. */
 function nixOf(id: string): string {
   return ws.nixPath(orchestrator.cfg.DATA_DIR, id);
 }
@@ -194,7 +186,7 @@ describe('sweeping objects no box owns', () => {
     // the agent installed at runtime are in them.
     assert.ok(!existsSync(homeOf('gone')));
     assert.ok(!existsSync(nixOf('gone')));
-    // And nothing of the box that is still there.
+    // Nothing of the live box is touched.
     assert.ok(existsSync(workspaceOf('live')));
     assert.ok(existsSync(homeOf('live')));
     assert.ok(existsSync(nixOf('live')));
@@ -209,8 +201,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    // Docker refuses a network with a container on it, and a volume mounted
-    // into one, so the order is the whole of whether this works.
+    // Docker refuses to remove a network or a volume that a container uses.
     assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
   });
 
@@ -228,11 +219,8 @@ describe('sweeping objects no box owns', () => {
   });
 
   it('leaves a box created while it was reading the daemon alone', async () => {
-    // The sweep asks Docker three questions and reads the directories, which
-    // takes long enough for a create to run: its row is inserted before it
-    // makes anything, so it exists by the time the sweep decides. A snapshot
-    // taken before the readings does not have it, and the box loses its
-    // network, its workspace and its home while it is being built.
+    // A create can insert its row while the sweep reads Docker and the
+    // directories, so the sweep reads the rows last.
     insertBox('keep');
     fake.whileListing = (): void => {
       insertBox('newborn', 'creating');
@@ -272,10 +260,8 @@ describe('sweeping objects no box owns', () => {
   });
 
   it('takes an abandoned login container, and leaves one still in use', async () => {
-    // A login runs the harness's own CLI in a container of its own and removes
-    // it when the flow ends — but only while the orchestrator is alive to end
-    // it. A restart mid-login leaves one holding half a credential in a tmpfs
-    // home, on the default bridge, that nothing else would ever look for.
+    // A login removes its container when the flow ends. A restart mid-login
+    // leaves the container behind, holding half a credential in a tmpfs home.
     insertBox('keep');
     const now = Date.now();
     fake.logins.set('login-old', { credentialId: 'openai', createdAt: now - 20 * 60_000 });
@@ -283,15 +269,15 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    // Age is the whole rule, and the cutoff is longer than a flow is allowed
-    // to take, so a person still in a browser is never swept out from under.
+    // Age is the only rule. The cutoff is longer than a flow may take, so a
+    // login in progress is not swept.
     assert.deepEqual(fake.removed, ['login-old']);
     assert.ok(fake.logins.has('login-fresh'));
   });
 
   it('sweeps login containers even where the boxes table is empty', async () => {
-    // The guard below is about box objects a foreign database would take;
-    // a login container belongs to no box and is nobody else's either.
+    // The empty-table guard protects box objects. A login container belongs
+    // to no box.
     fake.logins.set('login-old', { credentialId: 'openai', createdAt: Date.now() - 20 * 60_000 });
     insertObjects('orphan-by-accident');
 
@@ -303,8 +289,7 @@ describe('sweeping objects no box owns', () => {
 
   it('refuses to sweep for a database that knows of no box at all', async () => {
     // A data volume mounted from the wrong place, or replaced: the rows are
-    // gone but the host's boxes are not, and taking their home volumes is
-    // the one loss here with nothing to recover it from.
+    // gone but the host's boxes are not. Their homes could not be recovered.
     insertObjects('orphan-by-accident');
 
     await orchestrator.manager.sweepOrphans();
@@ -328,8 +313,7 @@ describe('sweeping objects no box owns', () => {
   });
 
   it('still sweeps a handful of strays beside a database that knows its boxes', async () => {
-    // And the guard is not so wide that it stops the sweep doing its job: a
-    // deployment with its rows intact has its failed teardowns taken.
+    // A deployment with its rows intact still has its failed teardowns swept.
     for (const id of ['live-1', 'live-2', 'live-3']) insertBox(id);
     insertBox('gone', 'deleted');
     insertObjects('gone');
@@ -372,10 +356,7 @@ describe('sweeping objects no box owns', () => {
 describe('boot reconciliation', () => {
   it('fails a create that the last orchestrator did not finish', async () => {
     // create() inserts the row first and fails the box itself if any step
-    // throws, so a row still saying `creating` at boot is one whose creator
-    // is gone. Nothing else touches it: the sweep protects every row that
-    // exists, so the box held its subnet and answered 409 to start for
-    // as long as the deployment lived.
+    // throws, so a row still saying `creating` at boot has lost its creator.
     insertBox('newborn', 'creating');
     insertObjects('newborn');
     fake.containers.delete('c-newborn');
@@ -386,8 +367,7 @@ describe('boot reconciliation', () => {
       status: string;
     };
     assert.equal(row.status, 'error');
-    // Its files are still there for the sweep, which is the only thing that
-    // deletes anything.
+    // Reconciliation deletes no files.
     assert.ok(existsSync(workspaceOf('newborn')));
   });
 

@@ -12,15 +12,8 @@ import { log } from './log.ts';
 import { writeSecretFile } from './secret.ts';
 
 /**
- * Web Push: the part of a notification that survives the app being closed.
- *
- * A browser subscribes with a push service of its vendor's choosing and hands
- * back an endpoint plus two keys. Posting an encrypted payload to that
- * endpoint wakes the service worker with no tab open.
- *
- * The crypto is RFC 8291 (`aes128gcm` payload encryption) over RFC 8188, and
- * the sender authenticates itself with RFC 8292 (VAPID). Both are implemented
- * here on `node:crypto`, against the published test vectors.
+ * Web Push delivery on `node:crypto`: RFC 8291 payload encryption and RFC 8292
+ * (VAPID) sender authentication.
  */
 
 /** One browser's subscription, as the Push API hands it to the page. */
@@ -51,12 +44,8 @@ const RECORD_OVERHEAD = 17;
 const DEFAULT_TTL = 12 * 60 * 60;
 
 /**
- * How long one delivery attempt may take, in milliseconds.
- *
- * `fetch` has no timeout of its own, and the caller pushes to every
- * subscribed browser at once and awaits all of them, so one push service that
- * accepted a connection and went quiet would hold that fan-out open. The next
- * event pushes again.
+ * How long one delivery attempt may take, in milliseconds. The caller awaits
+ * all browsers at once, so one silent push service would otherwise hold them.
  */
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -87,8 +76,7 @@ export function generateVapidKeys(): VapidKeys {
   ecdh.generateKeys();
   return {
     publicKey: b64url(ecdh.getPublicKey()),
-    // A scalar with leading zero bytes is returned short; every consumer of
-    // it expects exactly 32, so it is padded rather than passed on as-is.
+    // A scalar with leading zero bytes comes back short of 32 bytes.
     privateKey: b64url(pad32(ecdh.getPrivateKey())),
   };
 }
@@ -100,10 +88,8 @@ function pad32(scalar: Buffer): Buffer {
 }
 
 /**
- * The deployment's keypair, generated once and kept in the data volume.
- *
- * A keypair regenerated on every boot would invalidate every subscription
- * anybody has made.
+ * The deployment's keypair, generated once and kept under DATA_DIR. A new
+ * keypair invalidates every subscription.
  */
 export function loadVapidKeys(dataDir: string): VapidKeys {
   const path = join(dataDir, KEY_FILE);
@@ -139,12 +125,9 @@ export function loadVapidKeys(dataDir: string): VapidKeys {
  * Encrypts one push message for one subscriber, producing a whole
  * `aes128gcm` body: header, then a single record.
  *
- * A plaintext that does not fit that one record is refused, because the
- * header promises a receiver records of RECORD_SIZE and a longer one would
- * be split rather than padded.
+ * Throws for a plaintext that does not fit the one record.
  *
- * `salt` and `senderKeys` exist so the test can pin the random inputs to the
- * RFC's own; nothing else passes them.
+ * `salt` and `senderKeys` let a test pin the random inputs to the RFC's own.
  */
 export function encryptPayload(
   plaintext: Buffer,
@@ -166,8 +149,7 @@ export function encryptPayload(
   ecdh.setPrivateKey(unb64url(senderKeys.privateKey));
   const shared = ecdh.computeSecret(subscriberKey);
 
-  // The two public keys go into the info in receiver-then-sender order, which
-  // is what binds the derived key to this exact pair.
+  // Receiver key first, then sender key, as the RFC orders them.
   const keyInfo = Buffer.concat([
     Buffer.from('WebPush: info\0', 'utf8'),
     subscriberKey,
@@ -178,8 +160,7 @@ export function encryptPayload(
   const cek = hkdf(salt, ikm, Buffer.from('Content-Encoding: aes128gcm\0', 'utf8'), 16);
   const nonce = hkdf(salt, ikm, Buffer.from('Content-Encoding: nonce\0', 'utf8'), 12);
 
-  // 0x02 is the delimiter for the last record. There is only ever one here:
-  // these messages are a couple of hundred bytes against a 4096-byte record.
+  // 0x02 is the delimiter of the last record, and here the only one.
   const padded = Buffer.concat([plaintext, Buffer.from([0x02])]);
   const cipher = createCipheriv('aes-128-gcm', cek, nonce);
   const body = Buffer.concat([cipher.update(padded), cipher.final(), cipher.getAuthTag()]);
@@ -202,8 +183,7 @@ function audienceOf(endpoint: string): string {
 /**
  * The Authorization header proving this deployment sent the message.
  *
- * `subject` identifies whoever operates the deployment, so a push service
- * with a problem has somebody to contact; the RFC requires a mailto: or an
+ * `subject` is the operator's contact for the push service, as a mailto: or
  * https: URL.
  */
 export function vapidHeader(
@@ -247,13 +227,14 @@ export function vapidHeader(
 
 /** What one delivery attempt did, as the caller needs to see it. */
 export interface PushResult {
+  /** Whether the push service accepted the message. */
   ok: boolean;
   /** HTTP status from the push service, or 0 when it could not be reached. */
   status: number;
   /**
-   * True when the push service says this subscription is finished — 404 for
-   * an endpoint it never had, 410 for one the browser has dropped. Either way
-   * it is dead for good and the row should go.
+   * True when the subscription can never work again, so its row should go:
+   * the push service answered 404 or 410, or the subscription keys are
+   * malformed.
    */
   gone: boolean;
   /** Why the attempt failed, or null. Never carries the payload. */
@@ -263,9 +244,7 @@ export interface PushResult {
 /**
  * Posts one encrypted message to one push service.
  *
- * Never throws: a push service that is down, slow or hostile is not something
- * a permission request should be held up by, so every failure comes back as a
- * result the caller can log and move past.
+ * Never throws. Every failure comes back as a result the caller can log.
  */
 export async function sendPush(
   subscription: PushSubscription,
@@ -282,8 +261,7 @@ export async function sendPush(
       unb64url(subscription.auth),
     );
   } catch (err) {
-    // Malformed keys on the subscription row: it will never work, so it is
-    // gone in the same sense a 410 is.
+    // Malformed subscription keys never work, so the row counts as gone.
     return { ok: false, status: 0, gone: true, error: (err as Error).message };
   }
 

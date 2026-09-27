@@ -12,16 +12,6 @@ import {
   vapidHeader,
 } from './push.ts';
 
-/**
- * Web Push encryption, against the published vectors rather than against
- * itself.
- *
- * The crypto here is hand-rolled on node:crypto, so "it round-trips" is not
- * enough: an implementation can be self-consistent and still produce a body
- * no browser can open. The RFC 8291 example pins every input, so matching its
- * output byte for byte is the thing worth asserting.
- */
-
 /** The example from RFC 8291 section 5, with its intermediates from appendix A. */
 const RFC8291 = {
   plaintext: 'When I grow up, I want to be a watermelon',
@@ -39,6 +29,7 @@ const RFC8291 = {
     'pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN',
 };
 
+/** Decodes base64url text. */
 const b64 = (value: string): Buffer => Buffer.from(value, 'base64url');
 
 test('encryptPayload reproduces the RFC 8291 example byte for byte', () => {
@@ -65,9 +56,8 @@ test('encryptPayload writes a header a receiver can parse', () => {
 });
 
 test('a payload too long for one record is refused rather than mangled', () => {
-  // The header promises records of 4096 bytes, and the padding delimiter and
-  // the GCM tag take 17 of them. One byte more than that fits would be sent
-  // as a record no receiver can read.
+  // The header promises records of 4096 bytes. The padding delimiter and the
+  // GCM tag take 17 of them.
   const room = 4096 - 17;
   const fits = () =>
     encryptPayload(Buffer.alloc(room, 0x61), b64(RFC8291.uaPublic), b64(RFC8291.authSecret));
@@ -141,8 +131,8 @@ test('vapidHeader signs a JWT the public key verifies', () => {
 
   const [encodedHeader, encodedClaims, signature] = jwt!.split('.');
   const claims = JSON.parse(b64(encodedClaims!).toString('utf8')) as Record<string, unknown>;
-  // The audience is the push service's origin, never the full endpoint: the
-  // path is a capability and has no business in a token.
+  // The audience is the push service's origin. The endpoint path is a
+  // capability and stays out of the token.
   assert.equal(claims['aud'], 'https://push.example.net');
   assert.equal(claims['sub'], 'mailto:a@b.c');
   assert.ok((claims['exp'] as number) > Date.now() / 1000);
@@ -182,8 +172,8 @@ test('loadVapidKeys generates once and reuses after', () => {
   withDataDir((dir) => {
     const first = loadVapidKeys(dir);
     const second = loadVapidKeys(dir);
+    // Regenerating would invalidate every existing subscription.
     assert.deepEqual(first, second);
-    // Regenerating would silently invalidate every subscription anybody made.
     assert.equal(statSync(join(dir, 'vapid-keys.json')).mode & 0o777, 0o600);
   });
 });

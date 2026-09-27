@@ -26,37 +26,19 @@ import { TaskBoard } from './background.ts';
 import { threadOf } from './broadcast.ts';
 import type { AdapterOptions } from './thread-log.ts';
 
-/**
- * One adapter process of one box: the exec, the ACP handshake, and the
- * conversations that process is holding.
- *
- * A box owns one of these per harness a thread of it runs, spawned when a
- * thread of that harness first needs it — a box with only Claude threads never
- * starts `codex-acp`. Everything here is about the *process*: it dies with the
- * exec and is rebuilt by the next message that needs it, and it knows nothing
- * about browsers, permissions or what the box is running. Those belong to the
- * box, in `upstream.ts`, which owns these connections and routes to them.
- *
- * The split is what makes two adapters in one box possible at all. Each holds
- * its own `live` set, its own replay counter, its own cached `initialize` and
- * its own board of running tasks, so a load on one harness does not mask live
- * activity on the other and an adapter that dies takes only its own threads —
- * and only its own tasks — down with it.
- */
-
 /** Pass-through parser, leaving params and their _meta untouched. */
 const raw = <T = unknown>(params: unknown): T => params as T;
 
 /**
- * Update kinds this SDK's schema does not know, and which have to be taken off
- * the stream before it sees them. See {@link AdapterConnection.siftExtensions}.
+ * Update kinds the SDK's schema does not know, which
+ * {@link AdapterConnection.siftExtensions} takes off the stream.
  */
 const EXTENSION_UPDATE = /^async_task_/;
 
-/** How often a failed adapter spawn is retried before the box errors. */
+/** How many times the adapter spawn is tried before the box errors. */
 const MAX_SPAWN_ATTEMPTS = 3;
 
-/** Wait before each retry, in milliseconds. */
+/** Wait before each retry, in milliseconds, by retry number. */
 const SPAWN_BACKOFF_MS = [1000, 3000, 8000];
 
 /** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
@@ -66,20 +48,17 @@ const RESOURCE_NOT_FOUND = -32002;
 const AUTH_REQUIRED = -32000;
 
 /**
- * How far a borrowed replay follows the chain of forks back. A fork of a fork
- * inherits through the middle thread, and the bound is what stops a row that
- * somehow points at itself from spinning.
+ * How many hops {@link inheritedSource} follows back along a chain of forks.
+ * The bound stops a row that points at itself.
  */
 const MAX_INHERIT_HOPS = 32;
 
 /**
- * What Boxes advertises about itself at `initialize`.
+ * The client capabilities Boxes sends at `initialize`.
  *
- * One extension, under the namespace both adapters read it from: without it
- * neither ever sends an async-task update, so a backgrounded command is
- * invisible to the client that did not ask. Nothing else — no filesystem, no
- * terminal, no elicitation — which confines adapter-to-client traffic to
- * `session/update`, `session/request_permission` and the task updates.
+ * Only the async-task extension, which both adapters need before they send
+ * async-task updates. With no filesystem or terminal capability, the adapter
+ * sends the client only `session/update` and `session/request_permission`.
  */
 const CLIENT_CAPABILITIES = {
   _meta: { jetbrains: { air: { version: 1, capabilities: ['asyncTasks'] } } },
@@ -97,13 +76,11 @@ export function isResourceNotFound(err: unknown): boolean {
 }
 
 /**
- * True when the adapter refused because it has no account.
+ * True when the adapter refused because it has no credential.
  *
- * Matched on both halves, because -32000 is the generic server error and only
- * the message says what this one is. Codex's adapter checks authorization on
- * every `session/*` call and logs itself in from the environment first, so this is
- * what a box holding a placeholder for a credential nobody has entered answers
- * with.
+ * Matched on the code and the message, because -32000 is the generic server
+ * error. Codex's adapter answers every `session/*` call this way while the
+ * box holds only a placeholder for the credential.
  */
 export function isAuthRequired(err: unknown): boolean {
   const error = err as { code?: number; message?: unknown } | null;
@@ -130,11 +107,10 @@ export function pickModel(
 
 /**
  * The nearest thread a fork can be branched from again, or null when there is
- * none: the first up its chain that has a transcript of its own.
+ * none: the first thread up its chain that has a transcript of its own.
  *
- * A fork of a fork inherits through the middle one: that thread has no
- * transcript either, so following the chain is what makes the second branch
- * carry the conversation both of them came from.
+ * The chain matters for a fork of a fork that has not been prompted, because
+ * the middle thread has no transcript either.
  */
 export function inheritedSource(
   db: Db,
@@ -153,9 +129,8 @@ export function inheritedSource(
 }
 
 /**
- * What a browser opening the thread is handed of the adapter's answer to a
- * `session/new`, `session/fork` or `session/load`: the modes it offers and
- * the options it lets a client set. Absent ones read as none.
+ * The modes and config options from the adapter's answer to a `session/new`,
+ * `session/fork` or `session/load`. Absent ones read as none.
  */
 function optionsOf(
   res: {
@@ -167,104 +142,100 @@ function optionsOf(
 }
 
 /**
- * What a connection needs from the box that owns it.
- *
- * Everything here is box-level state an adapter process has no business
- * holding: the container every connection shares, who is watching what, and
- * where an update goes once it has arrived.
+ * What a connection needs from the box that owns it: the shared container,
+ * the browsers and their threads, and where updates go.
  */
 export interface AdapterHost {
+  /** The box's id. */
   readonly boxId: string;
+  /** The orchestrator's database. */
   readonly db: Db;
   /**
-   * Starts the box and attaches the egress proxy, answering with the container
-   * to exec into. Shared by every connection through one promise, so two
-   * adapters starting at once start one container.
+   * Starts the box and attaches the egress proxy, and resolves to the
+   * container id. Two adapters starting at once start one container.
    */
   ensureContainer(): Promise<string>;
   /** The box's most recently active thread, or null before it has one. */
   latestThread(): ThreadRow | null;
   /** Every conversation a browser is watching, by the adapter's own id. */
   watchedThreads(): readonly string[];
-  /**
-   * An adapter update, and whether it is a replay: a transcript arriving in a
-   * burst is history rather than the agent talking.
-   */
+  /** Receives an adapter update, and whether it is part of a replay. */
   onUpdate(harness: HarnessId, params: unknown, replaying: boolean): void;
-  /** A permission request, which blocks the adapter until it is answered. */
+  /** Answers a permission request. The adapter blocks until it resolves. */
   onPermission(params: unknown): Promise<unknown>;
-  /**
-   * This connection's conversations are gone with its process: their turns are
-   * over, and the browsers on them have to be told.
-   */
+  /** Reports the conversations lost when the adapter process exited. */
   onThreadsLost(acpThreadIds: readonly string[]): void;
   /** Closes the browsers pinned to one conversation, so each reconnects. */
   dropWatchers(acpThreadId: string): void;
   /**
-   * Opens a log for a conversation this adapter has just minted. `from` names
-   * the one it was forked from, whose log the new one starts as a copy of.
+   * Opens a log for a conversation this adapter has just minted.
+   *
+   * @param from The conversation it was forked from, whose log is copied.
    */
   openLog(acpThreadId: string, options: AdapterOptions, from?: string): void;
-  /** A transcript is about to be read into this conversation's log. */
+  /** Starts reading a transcript into this conversation's log. */
   beginFill(acpThreadId: string): void;
-  /** The transcript has all arrived, so the thread is live again. */
+  /** Ends the transcript read, so the thread's updates go to browsers again. */
   endFill(acpThreadId: string, options: AdapterOptions): void;
-  /** Forgets a conversation's log, the adapter not holding it after all. */
+  /** Forgets a conversation's log, for one the adapter does not hold. */
   dropLog(acpThreadId: string): void;
-  /** The connection is up and carrying threads. */
+  /** Reports that the connection is up and carrying threads. */
   onUp(): void;
-  /** It is up and working, or it failed every attempt and the box is in error. */
+  /** Sets the box status: running, or error after every spawn attempt failed. */
   onStatus(status: 'running' | 'error'): void;
 }
 
-/** The orchestrator's ACP connection to one harness's adapter in one box. */
+/**
+ * The orchestrator's ACP connection to one harness's adapter in one box: the
+ * exec, the ACP handshake, and the conversations that process holds.
+ *
+ * A box has one per harness its threads run. Everything here belongs to the
+ * process and is lost with it. Browsers, permissions and the box's processes
+ * belong to the {@link AdapterHost}.
+ */
 export class AdapterConnection {
+  /** The adapter process, while it runs. */
   private exec: dk.AdapterExec | null = null;
+  /** The ACP connection over the exec's stdio, while it is open. */
   private conn: ClientConnection | null = null;
+  /** The adapter's answer to `initialize`, once the handshake is done. */
   private initializeResponse: unknown = null;
+  /** The start in flight, shared by concurrent callers. */
   private starting: Promise<void> | null = null;
-  /** Guards against reconnect storms after a deliberate stop. */
+  /** Set by a deliberate stop, so an exec exit does not trigger a respawn. */
   private stopping = false;
   /**
-   * Loads in flight on *this* adapter, per thread, which is what says an
-   * update is history. Per thread because a replay is about one conversation:
-   * a turn starting on a second thread while this one rebuilds is the agent
-   * talking, and has to be seen as such.
+   * Loads in flight on this adapter, per thread. An update on a thread with a
+   * load in flight is part of a replay.
    */
   private readonly replaying = new Map<string, number>();
   /**
-   * The conversations this adapter process has been made to hold: every one it
-   * has minted, and every one it has loaded back.
+   * The conversations this adapter process holds: every one it has minted or
+   * loaded.
    *
-   * A stored ACP id says a thread had a conversation once, not that the adapter
-   * running now knows about it. Only this says that, which is what lets a pin
-   * tell a thread it has to bring up from one that is already up. Emptied with
-   * the connection, because a fresh adapter holds nothing.
+   * A stored ACP id says only that a thread had a conversation once. Emptied
+   * with the connection, because a fresh adapter holds nothing.
    */
   private readonly live = new Set<string>();
   /**
-   * What each config option the adapter has mentioned is for, by its own id.
+   * The category of each config option the adapter has mentioned, by option id.
    *
-   * Kept because a `session/set_config_option` passing through the gateway
-   * names an option and a value and nothing else, and whether that option is
-   * the one echoing the mode decides whether it is recorded at all.
+   * A `session/set_config_option` names only an option and a value, and an
+   * option in the `mode` category is not recorded.
    */
   private readonly categories = new Map<string, string | null>();
   /**
-   * What this adapter process has told Boxes it is running in the background.
-   *
-   * On the connection rather than on the box, because a task is a fact
-   * about one process: the id a stop names is this adapter's, the request goes
-   * back down this connection, and a process that dies takes every task it
-   * announced with it. Nothing re-announces them on the respawn, which is the
-   * case the box reading in `background.ts` exists for.
+   * The tasks this adapter process has announced as running in the background.
+   * They are lost with the process, and nothing announces them again.
    */
   private readonly tasks = new TaskBoard();
   /** Whether the missing credential has already been said once. */
   private unauthenticated = false;
 
   constructor(
+    /** The harness whose adapter this connection runs. */
     readonly harness: Harness,
+    /** The box that owns this connection. */
     private readonly host: AdapterHost,
     /** Tagged with the box and this harness, since a box may run two. */
     private readonly slog: Logger,
@@ -280,23 +251,17 @@ export class AdapterConnection {
     return this.initializeResponse;
   }
 
-  /**
-   * Whether this connection is holding nothing: no process, no start in
-   * flight. What lets the box forget an upstream it built only to answer
-   * a question about a box.
-   */
+  /** Whether this connection holds nothing: no process and no start in flight. */
   get holdsNothing(): boolean {
     return this.conn === null && this.exec === null && this.starting === null;
   }
 
   /**
-   * Whether this adapter advertised the fork capability. It is unstable in the
-   * ACP schema, so an adapter that does not offer it — or one that has not been
-   * reached yet — is reported as not forkable rather than assumed.
+   * Whether this adapter advertised the fork capability. False for an adapter
+   * that has not been reached yet.
    */
   get canFork(): boolean {
-    // ACP spells a supported capability as an object, `{}` included, and an
-    // unsupported one as absent or null.
+    // ACP marks a supported capability with an object, even `{}`.
     const fork = (
       this.initializeResponse as {
         agentCapabilities?: { sessionCapabilities?: { fork?: unknown } | null } | null;
@@ -318,13 +283,10 @@ export class AdapterConnection {
   // --- background work -------------------------------------------------------
 
   /**
-   * Reads one update for what it says about a task this adapter is running,
-   * and answers whether the thread's bar has changed.
+   * Reads one update for what it says about a task this adapter is running.
+   * Replayed updates count too, because an announced task is still running.
    *
-   * Replays are not excluded. Neither adapter re-announces the tasks of a
-   * process that has died, so a replay carries none of these in practice — and
-   * if one ever did, a task the adapter is telling us about again is a task it
-   * is still running, which is exactly what a bar should show.
+   * @returns Whether the thread's bar has changed.
    */
   noteTask(acpThreadId: string, update: unknown): boolean {
     return this.tasks.note(acpThreadId, update);
@@ -346,19 +308,15 @@ export class AdapterConnection {
   }
 
   /**
-   * Stops one task of a conversation, or every task it has, and answers how
-   * many the adapter said it stopped.
+   * Stops one task of a conversation, or every task it has, through
+   * `_session/async_task/stop`. A `session/cancel` does not reach a
+   * background task.
    *
-   * A kill rather than a cancel, and the adapter's own kill: `session/cancel`
-   * is the composer's button and it is right for a turn, but a backgrounded
-   * command outlives the turn that started it by design and no interrupt
-   * reaches it. `_session/async_task/stop` names the task itself.
+   * An answer of `stopped: false` means the task was already over, so its
+   * entry goes either way. A failed request keeps the entry, because the task
+   * may still run.
    *
-   * `stopped: false` means the task was already over — the answer to a bar
-   * showing something that has finished, not a failure — so the entry goes
-   * either way and the caller re-sends the thread's state. A request that
-   * *failed* is different: nothing is known about the task, and dropping it
-   * would take a running build off the bar.
+   * @returns How many tasks the adapter said it stopped.
    */
   async stopTasks(acpThreadId: string, taskId?: string): Promise<number> {
     const wanted = taskId ? [taskId] : this.tasks.for(acpThreadId).map((task) => task.id);
@@ -387,10 +345,8 @@ export class AdapterConnection {
    * Brings up the container, the exec and the ACP handshake. Concurrent callers
    * share one attempt.
    *
-   * The guard is the cached initialize response, not the connection: the
-   * connection exists from the moment the exec stream is wired up, but its
-   * handshake takes a few hundred milliseconds, and a browser arriving inside
-   * that window has to wait for the handshake.
+   * The check uses the initialize response, because the connection exists
+   * before its handshake has finished.
    */
   async ensureStarted(): Promise<void> {
     if (this.conn && this.initializeResponse) return;
@@ -406,9 +362,8 @@ export class AdapterConnection {
   private async start(): Promise<void> {
     this.stopping = false;
     const containerId = await this.host.ensureContainer();
-    // A repair that replaces the container stops this box's upstream,
-    // which is this one. Said again, so the flag it set cannot make the spawn
-    // below ignore its own exec exiting.
+    // A repair that replaces the container stops this connection and sets
+    // the flag. Cleared again, so the spawn below reacts to its exec exiting.
     this.stopping = false;
 
     let lastError: unknown = null;
@@ -430,12 +385,9 @@ export class AdapterConnection {
       try {
         await this.loadThreads();
       } catch (err) {
-        // An adapter with no account to run under is a configuration problem
-        // rather than a spawn failure: retrying cannot fix it, tearing the
-        // connection down would only spawn it again, and the box is not in
-        // error — it is waiting for somebody to enter a credential. The next
-        // request on this connection fails with the adapter's own message,
-        // which is what the browser shows.
+        // A missing credential is not a spawn failure, and a retry cannot fix
+        // it. The connection stays up, and each request fails with the
+        // adapter's own message.
         if (isAuthRequired(err)) {
           this.noteAuthRequired(err);
           this.host.onUp();
@@ -449,26 +401,18 @@ export class AdapterConnection {
         this.teardownConnection();
         continue;
       }
-      // The stop arrived while this was coming up, so what it brought up
-      // goes with it: the box was asked to be down, and the exec left
-      // behind would answer for a box nobody is holding.
+      // A stop arrived while this was coming up.
       if (this.stopping) {
         this.teardownConnection();
         return;
       }
       this.host.onStatus('running');
-      // A browser that stayed attached through a stop and start is still
-      // watching, and the clock its bar goes away on was cleared with the
-      // connection.
+      // Restarts the box reading's poll for browsers that stayed attached.
       this.host.onUp();
       return;
     }
-    // A spawn retries for twelve seconds, which is long enough for the
-    // box to be stopped under it. What it would report then is about a
-    // box that is already down, so it gives up quietly instead.
+    // The box was stopped during the retries.
     if (this.stopping) return;
-    // Only the box that needed *this* adapter is in error. A box whose
-    // other connection is serving threads perfectly well is not.
     this.host.onStatus('error');
     throw new Error(
       `${this.harness.label} adapter failed to start after ${MAX_SPAWN_ATTEMPTS} attempts: ` +
@@ -485,8 +429,7 @@ export class AdapterConnection {
     );
     this.exec = exec;
 
-    // stderr is log-only: the adapter sends its console logging there to keep
-    // stdout clean for protocol.
+    // The adapter logs to stderr and keeps stdout for the protocol.
     exec.stderr.setEncoding('utf8');
     exec.stderr.on('data', (chunk: string) => {
       for (const line of chunk.split('\n')) {
@@ -494,9 +437,7 @@ export class AdapterConnection {
       }
     });
 
-    // Only while this is still the connection's exec: one that was torn down
-    // and replaced reports its exit late, and acting on it would take the
-    // successor with it.
+    // An exec that has been replaced can report its exit late.
     void exec.exited.then((code) => {
       if (this.exec === exec) this.handleExecExit(code);
     });
@@ -522,18 +463,11 @@ export class AdapterConnection {
 
   /**
    * Brings back every conversation of this harness that this connection has to
-   * carry: the box's most recently active thread when it is one of ours, and
-   * each thread of ours a browser is watching.
-   *
-   * With two tabs on two threads, a respawn that loaded only the latest one
-   * would leave the other browser's next prompt naming a thread the adapter has
-   * never heard of. The set is derived from the attached handles, so it needs no
-   * storage and shrinks as tabs close.
+   * carry: the box's most recently active thread when it runs this harness,
+   * and each thread of this harness a browser is watching.
    */
   private async loadThreads(): Promise<void> {
-    // The latest thread first, because it is the one a box with no threads
-    // at all has to be given. A latest thread of the *other* harness is that
-    // connection's to bring up, not this one's.
+    // A box with no thread at all gets its first one here.
     const latest = this.host.latestThread();
     if (!latest) {
       await this.mintFirstThread();
@@ -543,28 +477,20 @@ export class AdapterConnection {
     }
 
     for (const acpThreadId of this.host.watchedThreads()) {
-      // What this adapter already holds: the latest thread above, and a
-      // thread a second tab is watching as well.
       if (this.live.has(acpThreadId)) continue;
       const row = threadByAcpId(this.host.db, this.host.boxId, this.harness.id, acpThreadId);
-      // Another harness's conversation is that connection's to bring up.
       if (!row && this.heldElsewhere(acpThreadId)) continue;
-      // No row under that id at all — the thread it named was re-minted, and
-      // the browsers on it are pinned to the id it lost.
       try {
         if (row?.acp_session_id && (await this.loadBox(row))) continue;
       } catch (err) {
         if (isAuthRequired(err)) throw err;
-        // A fault on a thread that is merely being watched must not cost the
-        // box its spawn; the browsers on it reconnect and resolve again.
+        // A fault on a watched thread does not fail the spawn.
         this.slog.warn('could not reload a watched thread', {
           threadId: row?.id ?? null,
           error: (err as Error).message,
         });
       }
-      // Its id is dead, so the browsers pinned to it are holding one the
-      // adapter will reject. Closing their sockets is the repair: each
-      // reconnects, and its handshake pins whatever the thread is now.
+      // The id is dead. Each browser on it reconnects and pins the current id.
       this.host.dropWatchers(acpThreadId);
     }
   }
@@ -578,13 +504,7 @@ export class AdapterConnection {
     );
   }
 
-  /**
-   * Gives a box with no conversation at all its first one, on this harness.
-   *
-   * Only a box created before a thread was made with it — every box now
-   * gets its first thread row when it is created, from what the dialog chose,
-   * and that row is brought up like any other.
-   */
+  /** Gives a box with no thread row its first conversation, on this harness. */
   private async mintFirstThread(): Promise<void> {
     const acpSessionId = await this.mintAcpThread(null, this.harness.defaultModeId, {
       ...this.harness.defaultConfig,
@@ -601,17 +521,11 @@ export class AdapterConnection {
    * conversation when the adapter still has the transcript for it, a fresh one
    * when it does not.
    *
-   * A thread minted, never prompted, and left behind by an adapter restart is
-   * the second case — the agent SDK writes no transcript until a prompt has run
-   * — and it has nothing to lose, so a fresh conversation in its row is the
-   * whole repair.
+   * @returns The adapter's id for the thread.
    */
   async bringUp(threadId: string): Promise<string> {
     await this.ensureStarted();
-    // Read after the spawn, not before: an adapter coming up brings back the
-    // box's most recently active thread and every watched one, so this may be a thread
-    // that is already here — and loading it again would replay the whole
-    // conversation a second time to whoever is watching.
+    // Read after the spawn, which may already have loaded this thread.
     const row = getThread(this.host.db, threadId);
     if (!row) throw new Error(THREAD_NOT_FOUND);
     if (row.acp_session_id && this.live.has(row.acp_session_id)) return row.acp_session_id;
@@ -622,19 +536,15 @@ export class AdapterConnection {
   /**
    * Mints a fresh adapter conversation and records it against a thread row.
    *
-   * A fork that has not been prompted yet is branched again rather than started
-   * empty: it exists to carry the source's context, and an adapter restart is
-   * not the user changing their mind about that. When the source cannot be
-   * branched either — the same restart may have left it with a conversation of
-   * its own to lose — the thread is started empty, because a thread with
-   * nothing to pin is worse than one with nothing to say.
+   * A fork that has not been prompted yet is branched from its source again.
+   * When the source cannot be branched either, the thread starts empty.
+   *
+   * @returns The adapter's id for the new conversation.
    */
   async mintInto(threadId: string): Promise<string> {
     const row = getThread(this.host.db, threadId);
     const source = row ? inheritedSource(this.host.db, this.host.boxId, row) : null;
-    // What the row remembers beats where a thread of its kind starts: a fork
-    // the user has since flipped to auto is not put back in plan by an adapter
-    // restart.
+    // The row's recorded mode wins over the default for the thread's kind.
     const modeId =
       row?.mode_id ?? (source ? this.harness.forkModeId : this.harness.defaultModeId);
     const config = row ? threadConfig(row) : { ...this.harness.defaultConfig };
@@ -663,12 +573,10 @@ export class AdapterConnection {
   }
 
   /**
-   * Makes sure this adapter holds one of the box's threads, log and all.
-   * False when the adapter no longer has its transcript.
+   * Makes sure this adapter holds one of the box's threads, and loads it when
+   * it does not.
    *
-   * What a fork needs of its source: the conversation it is about to copy. A
-   * thread a browser has opened on this adapter is already held; one that has
-   * only ever been looked at from the list is loaded here first.
+   * @returns False when the adapter no longer has the thread's transcript.
    */
   async hold(thread: ThreadRow): Promise<boolean> {
     if (!thread.acp_session_id) return false;
@@ -679,8 +587,8 @@ export class AdapterConnection {
   /**
    * Mints an ACP thread and gives it the mode and settings it is meant to have.
    *
-   * `from` forks that thread's context instead of starting empty. Both answers
-   * carry `modes` and `configOptions`, so the same two steps apply either way.
+   * @param from The thread to fork, or null to start empty.
+   * @returns The adapter's id for the new thread.
    */
   async mintAcpThread(
     from: string | null,
@@ -710,32 +618,24 @@ export class AdapterConnection {
 
   /**
    * Loads a stored thread, reading its transcript into the thread's log.
-   * Returns false when the adapter no longer holds it, which tells the caller
-   * to start a fresh one.
    *
-   * This is the one place the adapter's replay is asked for, and it runs on a
-   * thread nothing else can reach yet — one this adapter has just been spawned
-   * under, or one no browser is pinned to — so what the adapter says meanwhile
-   * is the transcript and only the transcript. Everything a browser is later
-   * sent of this thread comes from the log it fills.
+   * This is the only place that asks for the adapter's replay. It runs only
+   * on a thread that cannot be talking: one this adapter has just spawned
+   * for, or one no browser is pinned to. So everything that arrives meanwhile
+   * belongs to the transcript.
    *
-   * A missing thread is a legitimate state: the agent SDK writes a transcript
-   * only once a prompt has run, so an id minted by session/new and never
-   * prompted does not survive the container stopping. Any other error is
-   * rethrown, which keeps a transient fault from discarding a live thread.
+   * A thread that was never prompted has no transcript and does not survive a
+   * container stop. Any error other than a missing thread is rethrown, so a
+   * transient fault does not discard a live thread.
    *
-   * Both adapters stream a load's whole conversation back as `session/update`
-   * notifications, so one path serves either. What only a box can show is that
-   * a Codex rollout survives its container being stopped and started, which is
-   * what makes this return true rather than mint a fresh thread.
+   * @returns False when the adapter no longer holds the thread.
    */
   private async loadBox(thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id!;
     this.host.beginFill(acpSessionId);
     try {
-      // The same `_meta` a fresh thread gets: a load is where the adapter
-      // rebuilds the query for a conversation it no longer holds, which is the
-      // other place these options are read.
+      // The same `_meta` a fresh thread gets, because the adapter reads it
+      // on load too.
       const res = (await this.whileReplaying(acpSessionId, () =>
         this.request(ACP_METHOD.sessionLoad, {
           sessionId: acpSessionId,
@@ -751,9 +651,8 @@ export class AdapterConnection {
       this.live.add(acpSessionId);
       this.noteCatalog(res ?? {});
       this.slog.info('acp box loaded', { threadId: thread.id, acpSessionId });
-      // A load brings the conversation back and nothing else: the mode and the
-      // settings were the old process's, and this one starts in its own. Both
-      // are put back from the row, which is why the row has them.
+      // A load restores only the conversation. The mode and settings come
+      // from the row.
       await this.applyMode(
         acpSessionId,
         res?.modes ?? null,
@@ -770,24 +669,15 @@ export class AdapterConnection {
         acpSessionId,
         error: (err as Error).message,
       });
-      // Only this thread's row loses its adapter id. The box's other
-      // threads have transcripts of their own and are untouched.
       setThreadAcpId(this.host.db, thread.id, null);
       return false;
     }
   }
 
   /**
-   * Puts a thread in the mode it is meant to be in: the one recorded for it, or
-   * its harness's default when nothing is.
+   * Puts a thread in the given mode, after a mint or a load.
    *
-   * Called on a thread the adapter has just minted and on one it has just
-   * loaded back, because both arrive in whatever mode the adapter starts in. A
-   * mode is the user's choice, and the thread's row is where that choice
-   * outlives the process that was holding it.
-   *
-   * An adapter that does not offer the mode is left alone rather than argued
-   * with, and so is one already in it.
+   * Does nothing when the adapter does not offer the mode or is already in it.
    */
   async applyMode(
     acpSessionId: string,
@@ -800,26 +690,17 @@ export class AdapterConnection {
       await this.request(ACP_METHOD.sessionSetMode, { sessionId: acpSessionId, modeId });
       this.slog.info('thread put in its mode', { acpSessionId, modeId });
     } catch (err) {
-      // A thread in the adapter's own mode is still usable, so this never fails
-      // the spawn.
+      // A thread in the adapter's own mode is still usable.
       this.slog.warn('could not set the mode', { error: (err as Error).message });
     }
   }
 
   /**
-   * Puts a thread back on everything it was configured with, on the same terms
-   * as {@link applyMode}: one `set_config_option` per entry the adapter offers
-   * whose current value differs.
+   * Puts a thread back on its recorded settings: one `set_config_option` per
+   * offered option whose current value differs.
    *
-   * The option whose category is `mode` is passed over on every path. Both
-   * adapters echo the mode as a config option, and the mode travels through
-   * `session/set_mode` and the row's own column — a thread put into its mode by
-   * two mechanisms is how the two answers come apart.
-   *
-   * A model the adapter no longer offers falls back to the harness's default
-   * through {@link pickModel}, since model ids come and go; every other option
-   * is sent as it was recorded, and a value the adapter rejects is logged
-   * rather than fatal, because the adapter's own answer corrects the dashboard.
+   * The option in the `mode` category is skipped, because the mode goes
+   * through `session/set_mode`. A value the adapter rejects is logged.
    */
   async applyConfig(
     acpSessionId: string,
@@ -853,14 +734,11 @@ export class AdapterConnection {
   }
 
   /**
-   * What one option should be set to, or null to leave the adapter's own
-   * answer alone.
+   * What one option should be set to, or null to leave the adapter's value.
    *
-   * The model is the one option with a fallback, because it is the one the
-   * deployment has an opinion about and the one whose ids move: a thread that
-   * recorded nothing still comes back on the harness's default model, and one
-   * that recorded a model this adapter no longer lists comes back on a variant
-   * of it or on that default. Everything else is either recorded or not.
+   * Only the model has a fallback: a recorded model the adapter no longer
+   * offers, or no recorded model, falls back to the harness's default through
+   * {@link pickModel}. Other options use the recorded value.
    */
   private wantedValue(option: ThreadConfigOption, recorded: string | undefined): string | null {
     if (option.category !== 'model') return recorded ?? null;
@@ -874,17 +752,11 @@ export class AdapterConnection {
 
   /**
    * Records what the adapter says a thread is configured with, merged over what
-   * the row holds.
+   * the row holds. The option in the `mode` category is skipped.
    *
-   * Called with the answer to a `session/set_config_option` passing through the
-   * gateway and with a `config_option_update` arriving on its own, because both
-   * adapters answer a change with their whole list and change things by
-   * themselves as well — a slash command, an accepted plan, a model swapped
-   * under load. A thread should come back configured as it ended up rather than
-   * as it was last asked to be.
-   *
-   * Merged rather than replaced, because an answer that omits an option says
-   * nothing about it, and the mode's own option is dropped here as everywhere.
+   * Called with the answer to a `session/set_config_option` and with a
+   * `config_option_update`, because the adapter also changes settings by
+   * itself.
    */
   recordConfigOptions(acpSessionId: string, configOptions: ThreadConfigOption[]): void {
     const row = this.rowOf(acpSessionId);
@@ -905,12 +777,8 @@ export class AdapterConnection {
 
   /**
    * Records one option from the request that set it, for an adapter that
-   * answers a `session/set_config_option` with nothing.
-   *
-   * The answer is the record that matters — it carries the whole list, and the
-   * value the adapter settled on rather than the one it was asked for — so this
-   * is the fallback. An option this connection has seen categorised as the mode
-   * is not recorded, on the rule that holds everywhere else.
+   * answers a `session/set_config_option` with nothing. An option known to be
+   * in the `mode` category is skipped.
    */
   recordConfigValue(acpSessionId: string, configId: string, value: string): void {
     if (this.categories.get(configId) === 'mode') return;
@@ -928,13 +796,8 @@ export class AdapterConnection {
   }
 
   /**
-   * Sends a request to the adapter, naming the missing credential when it
-   * refuses for want of one.
-   *
-   * Every call this connection makes goes through here, including the ones the
-   * gateway is forwarding for a browser, so the log says which credential is
-   * missing once rather than on every request — and the browser's own request
-   * fails with the adapter's message, which is the sentence worth showing.
+   * Sends a request to the adapter. Logs the missing credential once when the
+   * adapter refuses for want of one.
    */
   async request(method: string, params: unknown): Promise<unknown> {
     const conn = this.conn;
@@ -957,18 +820,13 @@ export class AdapterConnection {
   }
 
   /**
-   * Runs a `session/load` with that thread's replay marked as history rather
-   * than news.
+   * Runs a `session/load` with the thread's updates marked as a replay until
+   * it settles.
    *
-   * Every load re-sends a conversation as ordinary notifications, which is what
-   * makes replay and live streaming the same code path everywhere else — and
-   * the one place that difference matters is background work, where a five-hour
-   * old tool call is not evidence of anything running now.
+   * A load sends the conversation as ordinary notifications, so this marker is
+   * what tells them apart from live updates.
    *
-   * Counted per thread and per connection: a turn starting on a second thread
-   * while this one rebuilds is the agent talking, and a load on one harness
-   * says nothing about the other's. `acpThreadId` is the id the updates being
-   * replayed carry, which for a borrowed replay is the source's own.
+   * @param acpThreadId The thread id the replayed updates carry.
    */
   async whileReplaying<T>(acpThreadId: string, load: () => Promise<T>): Promise<T> {
     this.replaying.set(acpThreadId, (this.replaying.get(acpThreadId) ?? 0) + 1);
@@ -997,14 +855,7 @@ export class AdapterConnection {
     });
   }
 
-  /**
-   * The `_meta` this harness's calls carry, or nothing when it wants none.
-   *
-   * Only Claude asks for anything: its adapter reads
-   * `_meta.claudeCode.options` and lays it over the options it hands the Agent
-   * SDK. Codex reads none, and sending it something it does not know would be
-   * noise on the wire.
-   */
+  /** The `_meta` this harness's thread calls carry, or nothing when it has none. */
   meta(): { _meta?: Record<string, unknown> } {
     return this.harness.threadMeta ? { _meta: { ...this.harness.threadMeta } } : {};
   }
@@ -1026,24 +877,13 @@ export class AdapterConnection {
   }
 
   /**
-   * Lifts the async-task extension's notifications off the stream before the
-   * SDK parses it, and delivers them by the path the SDK would have used.
+   * Takes the async-task extension's notifications off the stream before the
+   * SDK parses it, and passes them to {@link AdapterHost.onUpdate} directly.
    *
-   * The SDK's client installs a box-update router ahead of every handler an
-   * app registers, and that router parses each `session/update` against the
-   * schema it was generated from — a strict union of the update kinds that
-   * existed when it was generated. An update outside it throws there, and a
-   * handler that throws takes the whole message with it: nothing else sees the
-   * frame, however raw a parser the app asked for. The async-task extension is
-   * by construction outside any generated schema, so every frame this milestone
-   * rests on would be logged as invalid params and dropped.
-   *
-   * So the bytes are read one step earlier. Everything downstream is unchanged
-   * — the update is tapped, its thread is touched, the browsers watching are
-   * sent it, and the task board reads it — and only the route differs. What it
-   * costs is strict ordering against the frames still going through the SDK's
-   * own parsing: a bar may appear a beat before the tool call it belongs to,
-   * which is a level rather than a sequence and reads the same either way.
+   * The SDK's session-update router checks each `session/update` against its
+   * schema, and drops an update kind it does not know before any handler
+   * runs. These updates can arrive ahead of SDK-parsed frames that the adapter
+   * sent earlier.
    */
   private siftExtensions(stdout: Readable): Readable {
     const passed = new PassThrough();
@@ -1059,16 +899,13 @@ export class AdapterConnection {
         if (!this.consumeExtension(line)) full = passed.write(line) && full;
         cut = buffer.indexOf('\n');
       }
-      // A reader that has fallen behind — a replay of a long conversation
-      // arriving faster than it is parsed — stops the adapter rather than
-      // being buffered without limit here.
+      // Backpressure: a slow reader pauses the adapter's stdout.
       if (!full) {
         stdout.pause();
         passed.once('drain', () => stdout.resume());
       }
     });
-    // A half-written line at the end is the adapter dying mid-frame. It goes on
-    // as it is, because the SDK's own parser is where a broken frame belongs.
+    // A half-written last line goes to the SDK, which rejects a broken frame.
     stdout.on('end', () => {
       if (buffer) passed.write(buffer);
       passed.end();
@@ -1078,11 +915,9 @@ export class AdapterConnection {
   }
 
   /**
-   * Delivers one line if it is an extension notification, and answers whether
-   * it was one.
+   * Delivers one line if it is an extension notification.
    *
-   * Anything else — a response, a request, an update the SDK knows, a line
-   * that is not JSON at all — is left for the stream it came off.
+   * @returns Whether the line was one. Any other line stays on the stream.
    */
   private consumeExtension(line: string): boolean {
     if (!line.includes('async_task_')) return false;
@@ -1122,18 +957,13 @@ export class AdapterConnection {
 
   /**
    * Drops the connection when the adapter exits on its own. The next message
-   * for one of its threads calls ensureStarted, which re-spawns and re-issues
-   * session/load.
-   *
-   * Only this harness's threads are affected. The other adapter is a separate
-   * process with separate conversations, and it goes on serving them.
+   * for one of its threads calls ensureStarted, which respawns the adapter
+   * and loads the threads again.
    */
   private handleExecExit(code: number | null): void {
     if (this.stopping) return;
     this.slog.warn('adapter exec exited', { code });
-    // Every conversation this process held, and every one it had told us about
-    // a task on — the two are the same set in practice, and the union is what
-    // makes the bars go away even if they ever come apart.
+    // Includes threads with tasks, so their bars are cleared as well.
     const lost = new Set([...this.live, ...this.tasks.threads]);
     this.teardownConnection();
     this.host.onThreadsLost([...lost]);
@@ -1148,17 +978,11 @@ export class AdapterConnection {
     }
     this.conn = null;
     this.initializeResponse = null;
-    // A fresh adapter holds none of them, so the next pin brings its thread
-    // back up rather than trusting an id this process never heard.
+    // A fresh adapter holds none of these threads.
     this.live.clear();
-    // The loads counted here belong to the connection going away. A count
-    // left behind reads as a replay that never ends, and everything its
-    // thread says afterwards is taken for history: no agent speaking, no
-    // turn settling, and a row that is never touched again.
+    // A leftover count would mark every later update of its thread as replay.
     this.replaying.clear();
-    // And it knows nothing about what the old one had running: neither adapter
-    // re-announces a dead process's tasks. What that process left running in
-    // the box is the reading's to find and the box-level stop's to kill.
+    // Nothing announces the old process's tasks again.
     this.tasks.clear();
     try {
       this.exec?.kill();
@@ -1169,11 +993,8 @@ export class AdapterConnection {
   }
 
   /**
-   * Stops this adapter deliberately, which suppresses the reconnect.
-   *
-   * The box tells the browsers itself: a deliberate stop is the whole box
-   * going down, not one process of it, so there is nothing to report back
-   * about the threads this one was holding.
+   * Stops this adapter deliberately, which suppresses the respawn. The box
+   * tells the browsers itself.
    */
   stop(): void {
     this.stopping = true;
