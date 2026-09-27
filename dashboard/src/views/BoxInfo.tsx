@@ -150,7 +150,7 @@ export function BoxInfo() {
               value={
                 box.diskBytes === null
                   ? 'not measured'
-                  : `${shortSize(box.diskBytes)} on disk`
+                  : shortSize(box.diskBytes)
               }
             />
           </dl>

@@ -81,7 +81,7 @@ for (const scheme of ['light', 'dark'] as const) {
     try {
       await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
       await expect
-        .poll(() => page.getByText('348 MB on disk').isVisible())
+        .poll(() => page.getByText('348 MB', { exact: true }).isVisible())
         .toBe(true);
       await shoot(page, `info-${scheme}`);
       expect(errors).toEqual([]);
