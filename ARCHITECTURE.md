@@ -2722,27 +2722,19 @@ box-image/              The per-box container image, in four files
   skills/               Skills the image installs into every box, one per tool it explains
   playwright-cli.config.json  Browser defaults for a container with no Chrome and no sandbox
   profile-image-path.sh Puts the image's PATH back after /etc/profile has replaced it
-scripts/                Security smoke test and credentialed live test
+tests/                  Security smoke test, run against the built images
 ```
 
 ## Testing
 
-`scripts/smoke-test.sh` is the security gate and needs no credentials. It
+`tests/smoke-test.sh` is the security gate and needs no credentials. It
 creates two throwaway boxes and asserts the isolation properties from inside
 one of them: no proxy-bypassing egress, no private-range access through the
 proxy, no cross-box reachability, no docker socket, a read-only root
 filesystem, a contained fork bomb, and that the intended egress and writes do
 work. Every probe passes `curl -f`, so a 403 from the proxy leaves a non-zero
-exit status.
-
-`scripts/live-test.sh` covers what only a real inference call can prove:
-subscription auth inside the container, a turn running to completion after the
-browser leaves, the thread replaying on reattach, and a permission request held
-with nobody watching. Both scripts now seed the credential store over the API
-rather than reading the orchestrator's environment, since that is where a
-credential lives; give the live test an OpenAI key as well and it runs a Codex
-thread beside the Claude one in the same box, which is the whole of what a
-per-thread harness claims.
+exit status. CI runs it on every build, against the three images that build
+produced, and publishes those images only when it passes.
 
 The review surface is tested at three levels, because it has three kinds of
 thing to get wrong. The format is asserted byte-for-byte against REVIEW.md
