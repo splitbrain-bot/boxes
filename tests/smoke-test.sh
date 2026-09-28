@@ -5,7 +5,7 @@
 # boxes through the API, checks the isolation properties from inside one of
 # their containers, then cleans up.
 #
-#   API_BASE=http://localhost:3000 ./scripts/smoke-test.sh
+#   API_BASE=http://localhost:3000 ./tests/smoke-test.sh
 #
 # API_USER and API_PASS add HTTP basic auth to every API call.
 #

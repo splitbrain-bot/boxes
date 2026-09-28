@@ -1,13 +1,14 @@
-# CI workflow: runs the test suites, builds the three Boxes images, and
-# publishes them to GHCR on every push to main. A pull request builds the
-# images without pushing them.
+# CI workflow: runs the test suites, builds the three Boxes images, runs the
+# security smoke test against them, and publishes them to GHCR on every push
+# to main. A pull request builds and tests the images without pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
 #   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
 #   ghcr.io/<owner>/boxes/box            what a box container runs
 #
 # Every image gets latest and an immutable sha-<short> tag. The test job gates
-# the build, because something else deploys latest unattended.
+# the build and the smoke test gates the publishing, because something else
+# deploys latest unattended.
 
 name: Build and publish images
 
@@ -87,9 +88,6 @@ jobs:
     name: image (${{ matrix.image }})
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -111,15 +109,6 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      # Skipped on a pull request: nothing is pushed, and a pull request from
-      # a fork has no token that could log in.
-      - if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # Derived from the repository, so a fork publishes to its own
       # namespace. GHCR needs lowercase names, and github.repository is
       # lowercase.
@@ -133,13 +122,14 @@ jobs:
           labels: |
             org.opencontainers.image.title=boxes-${{ matrix.image }}
 
+      # Written to a file instead of pushed, so the smoke test runs the same
+      # image the publish job uploads. The tags are computed on a pull
+      # request too, so it tests everything but the upload.
       - uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          # The tags are computed on a pull request too, so it tests
-          # everything but the upload.
-          push: ${{ github.event_name != 'pull_request' }}
+          outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image }}.tar
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # The deployment host runs linux/amd64.
@@ -153,13 +143,105 @@ jobs:
           provenance: false
           sbom: false
 
+      # Kept for one day, because only the later jobs of this run need it.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-${{ matrix.image }}
+          path: ${{ runner.temp }}/${{ matrix.image }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # Checks the isolation of a box on a real Docker host, with the images this
+  # run built.
+  smoke:
+    name: smoke test
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: image-*
+          path: ${{ runner.temp }}/images
+          merge-multiple: true
+
+      # Compose looks for the image of a service under the name it would
+      # build it as, so the orchestrator and the proxy get those names. The
+      # box image under test is on no registry, so the orchestrator must never
+      # pull it. Each file is removed once loaded, to save the runner's disk.
+      # BOXES_ENV points compose at the settings file for the later steps.
+      - name: Load the images
+        run: |
+          set -eu
+          BOXES_ENV="$RUNNER_TEMP/boxes.env"
+          echo "BOXES_ENV=$BOXES_ENV" >> "$GITHUB_ENV"
+          load() {
+            docker load -i "$RUNNER_TEMP/images/$1.tar" | sed -n 's/^Loaded image: //p' | head -1
+            rm "$RUNNER_TEMP/images/$1.tar"
+          }
+          docker tag "$(load orchestrator)" boxes-orchestrator
+          docker tag "$(load egress-proxy)" boxes-egress-proxy
+          echo "BOX_IMAGE=$(load box)" >> "$BOXES_ENV"
+          echo "BOX_IMAGE_PULL_MINUTES=0" >> "$BOXES_ENV"
+
+      - name: Start the stack
+        run: |
+          set -eu
+          docker compose up -d --no-build
+          for _ in $(seq 1 60); do
+            if curl -fs -o /dev/null http://localhost:3000/healthz; then exit 0; fi
+            sleep 2
+          done
+          echo 'The orchestrator did not answer on /healthz.'
+          exit 1
+
+      - name: Run the smoke test
+        run: ./tests/smoke-test.sh
+
+      - name: Show the logs of the stack
+        if: failure()
+        run: docker compose logs
+
+  # Pushes the images the smoke test ran, so what is published is what was
+  # tested.
+  publish:
+    name: publish
+    needs: smoke
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: image-*
+          path: ${{ runner.temp }}/images
+          merge-multiple: true
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the images
+        run: |
+          set -eu
+          for image in orchestrator egress-proxy box; do
+            docker load -i "$RUNNER_TEMP/images/$image.tar"
+            rm "$RUNNER_TEMP/images/$image.tar"
+            docker push --all-tags "$REGISTRY/${{ github.repository }}/$image"
+          done
+
   # Tells the deployment's watchtower to pull at once, instead of at its next
   # poll.
   watchtower:
     name: watchtower
-    needs: images
-    # A partly failed image matrix skips this job, because a mix of new and
-    # old images needs fixing rather than deploying.
+    needs: publish
+    # A partly failed push skips this job, because a mix of new and old
+    # images needs fixing rather than deploying.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
