@@ -388,7 +388,7 @@ matches "B3" "the CA file is exactly what BOXES_PROXY_CA carried" '^same$' \
 
 # Codex reads CODEX_CA_CERTIFICATE before SSL_CERT_FILE. Every box gets it.
 for var in NODE_EXTRA_CA_CERTS SSL_CERT_FILE GIT_SSL_CAINFO CURL_CA_BUNDLE CODEX_CA_CERTIFICATE; do
-  matches "B4-$var" "$var points at the CA file" '^/home/agent/\.boxes/proxy-ca\.crt$' \
+  matches "B4-$var" "$var points at the CA bundle" '^/home/agent/\.boxes/ca-bundle\.crt$' \
     sx printenv "$var"
 done
 

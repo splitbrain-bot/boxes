@@ -2564,13 +2564,14 @@ What reaches a box container is a placeholder for each of them, built by
 `GITLAB_HOST`, `GIT_NAME` and `GIT_EMAIL`, and fixed into the container at
 create time. The real value never enters a box and never reaches a filesystem
 outside the orchestrator's own data volume. The CA certificate travels the same path, as `BOXES_PROXY_CA`, which
-the entrypoint writes to `~/.boxes/proxy-ca.crt` for the CA-trust variables to
-point at — `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`,
-`CURL_CA_BUNDLE`, and `CODEX_CA_CERTIFICATE`, which Codex reads before it falls
-back to `SSL_CERT_FILE`. Every one of those tools keeps the system authorities
-from their default directory beside the file it is pointed at. Nix's static
-curl does not, so the entrypoint also writes `~/.boxes/ca-bundle.crt`, the
-system store with the CA appended, and `/etc/nix/nix.conf` names that file.
+the entrypoint writes to `~/.boxes/proxy-ca.crt`. From it the entrypoint
+builds `~/.boxes/ca-bundle.crt`, the system store with the CA appended, for
+the CA-trust variables to point at — `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+`GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`, and `CODEX_CA_CERTIFICATE`, which Codex
+reads before it falls back to `SSL_CERT_FILE`. `/etc/nix/nix.conf` names the
+same file. Some tools, such as git-lfs and nix's static curl, trust only the
+file they are pointed at, so that file holds every authority, not only the
+deployment CA.
 
 `GH_TOKEN` is now always set, so `gh auth setup-git` in the entrypoint always
 runs. A push from a box with no GitHub credential stored gets a 401 from

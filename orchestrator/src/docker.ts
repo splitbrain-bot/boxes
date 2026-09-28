@@ -171,8 +171,11 @@ export function credentialEnv(
 /** The agent user's home inside a box container, where its own files and caches live. */
 export const HOME_DIR = '/home/agent';
 
-/** Where the entrypoint writes the CA, and where the CA env vars point. */
-const CA_PATH = `${HOME_DIR}/.boxes/proxy-ca.crt`;
+/**
+ * Where the entrypoint writes the system authorities together with the
+ * deployment CA, and where the CA env vars point.
+ */
+const CA_PATH = `${HOME_DIR}/.boxes/ca-bundle.crt`;
 
 /**
  * Environment of a box container, as Docker's `KEY=value` list. Variables
@@ -197,9 +200,10 @@ export function boxEnv(spec: CreateContainerSpec, cfg: Config): string[] {
   };
 
   if (spec.caCertificate !== '') {
-    // The entrypoint writes the PEM to CA_PATH; these are the variables that
-    // point node, gh, git, curl and Codex at it. A tool honouring none of
-    // them fails TLS against the intercepted hosts and nothing else.
+    // The entrypoint appends the PEM to the system authorities in CA_PATH;
+    // these are the variables that point node, gh, git, git-lfs, curl and
+    // Codex at it. A tool honouring none of them fails TLS against the
+    // intercepted hosts and nothing else.
     env['BOXES_PROXY_CA'] = spec.caCertificate;
     env['NODE_EXTRA_CA_CERTS'] = CA_PATH;
     env['SSL_CERT_FILE'] = CA_PATH;

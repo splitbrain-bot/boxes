@@ -155,7 +155,7 @@ describe('boxEnv', () => {
   }, 30_000);
 
   it('points every client at the CA, whether or not anything is intercepted', async () => {
-    const path = '/home/agent/.boxes/proxy-ca.crt';
+    const path = '/home/agent/.boxes/ca-bundle.crt';
     for (const env of [await envFor({ github: GH_TOKEN }), await envFor()]) {
       expect(env['BOXES_PROXY_CA']).toContain('BEGIN CERTIFICATE');
       expect(env['NODE_EXTRA_CA_CERTS']).toBe(path);
