@@ -21,8 +21,8 @@ fi
 
 # --- egress proxy CA --------------------------------------------------------
 # The proxy terminates TLS for the hosts whose credentials it translates. The
-# orchestrator passes the deployment CA as a PEM and already points node, gh,
-# git and curl at this file.
+# orchestrator passes the deployment CA as a PEM. The bundle below and the
+# browser's certificate store are built from this file.
 if [ -n "${BOXES_PROXY_CA:-}" ]; then
   mkdir -p /home/agent/.boxes
   if printf '%s\n' "$BOXES_PROXY_CA" > /home/agent/.boxes/proxy-ca.crt; then
@@ -33,19 +33,21 @@ if [ -n "${BOXES_PROXY_CA:-}" ]; then
   fi
 fi
 
-# --- a CA bundle for nix ------------------------------------------------------
-# The static nix trusts only the one file nix.conf names, so it gets the system
-# authorities and the deployment CA together. Written even without a CA,
-# because nix.conf always names the file.
+# --- the CA bundle -------------------------------------------------------------
+# The system authorities and the deployment CA together. The orchestrator
+# points the CA env vars at this file, and nix.conf names it for nix. Some
+# tools, such as git-lfs, trust only the file they are pointed at, so it must
+# hold every authority. Written even without a CA, because nix.conf always
+# names the file.
 bundle=/home/agent/.boxes/ca-bundle.crt
 if mkdir -p /home/agent/.boxes \
    && cat /etc/ssl/certs/ca-certificates.crt > "$bundle.tmp" \
    && { [ ! -f /home/agent/.boxes/proxy-ca.crt ] || cat /home/agent/.boxes/proxy-ca.crt >> "$bundle.tmp"; } \
    && mv "$bundle.tmp" "$bundle"; then
-  log "wrote the CA bundle for nix to $bundle"
+  log "wrote the CA bundle to $bundle"
 else
   rm -f "$bundle.tmp"
-  log "WARNING: could not write $bundle; nix downloads will fail TLS"
+  log "WARNING: could not write $bundle; TLS will fail for nix, git, curl and other tools"
 fi
 
 # --- the nix store -----------------------------------------------------------
