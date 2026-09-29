@@ -25,6 +25,8 @@ export interface AdapterOptions {
 export interface Opening {
   /** True when `updates` starts at the message the browser named. */
   resumed: boolean;
+  /** True when the log has dropped the oldest messages of the thread. */
+  truncated: boolean;
   /** The notifications to send, in order. */
   updates: unknown[];
   /** The answer to the browser's own `session/load`. */
@@ -51,6 +53,8 @@ export class ThreadLog {
   private entries: Entry[] = [];
   /** The summed size of `entries`. */
   private bytes = 0;
+  /** True once the log has dropped a message to stay under its cap. */
+  private truncated = false;
   /**
    * True while the adapter is reading the transcript into this log. What
    * arrives meanwhile is logged and sent to nobody.
@@ -89,6 +93,7 @@ export class ThreadLog {
       size,
     }));
     this.bytes = source.bytes;
+    this.truncated = source.truncated;
   }
 
   /**
@@ -104,6 +109,7 @@ export class ThreadLog {
     const at = anchor ? this.entries.findIndex((e) => messageOf(e.params) === anchor) : -1;
     return {
       resumed: at >= 0,
+      truncated: this.truncated,
       updates: this.entries.slice(Math.max(at, 0)).map((e) => e.params),
       options: this.options,
     };
@@ -115,6 +121,7 @@ export class ThreadLog {
    * else would leave a partial message or a tool result without its call.
    */
   private evictOldest(): void {
+    this.truncated = true;
     const message = messageOf(this.entries[0]?.params);
     do {
       const gone = this.entries.shift();

@@ -128,16 +128,17 @@ export function inheritedSource(
   return null;
 }
 
+/** The adapter's answer to a `session/load`: the modes and options it left the thread in. */
+export type LoadAnswer = {
+  modes?: ThreadModeState | null;
+  configOptions?: ThreadConfigOption[] | null;
+} | null;
+
 /**
  * The modes and config options from the adapter's answer to a `session/new`,
  * `session/fork` or `session/load`. Absent ones read as none.
  */
-function optionsOf(
-  res: {
-    modes?: ThreadModeState | null;
-    configOptions?: ThreadConfigOption[] | null;
-  } | null,
-): AdapterOptions {
+export function optionsOf(res: LoadAnswer): AdapterOptions {
   return { modes: res?.modes ?? null, configOptions: res?.configOptions ?? [] };
 }
 
@@ -634,31 +635,12 @@ export class AdapterConnection {
     const acpSessionId = thread.acp_session_id!;
     this.host.beginFill(acpSessionId);
     try {
-      // The same `_meta` a fresh thread gets, because the adapter reads it
-      // on load too.
-      const res = (await this.whileReplaying(acpSessionId, () =>
-        this.request(ACP_METHOD.sessionLoad, {
-          sessionId: acpSessionId,
-          cwd: dk.WORKSPACE_DIR,
-          mcpServers: [],
-          ...this.meta(),
-        }),
-      )) as {
-        modes?: ThreadModeState | null;
-        configOptions?: ThreadConfigOption[] | null;
-      } | null;
+      const res = await this.replay(acpSessionId);
       this.host.endFill(acpSessionId, optionsOf(res));
       this.live.add(acpSessionId);
       this.noteCatalog(res ?? {});
       this.slog.info('acp thread loaded', { threadId: thread.id, acpSessionId });
-      // A load restores only the conversation. The mode and settings come
-      // from the row.
-      await this.applyMode(
-        acpSessionId,
-        res?.modes ?? null,
-        thread.mode_id ?? this.harness.defaultModeId,
-      );
-      await this.applyConfig(acpSessionId, res?.configOptions ?? null, threadConfig(thread));
+      await this.restoreSettings(thread, res);
       return true;
     } catch (err) {
       this.host.dropLog(acpSessionId);
@@ -672,6 +654,44 @@ export class AdapterConnection {
       setThreadAcpId(this.host.db, thread.id, null);
       return false;
     }
+  }
+
+  /**
+   * Asks the adapter to replay a thread, with its updates marked as a
+   * replay. Where the updates go is up to the caller.
+   *
+   * A load may reset the thread's mode and settings, so the caller puts them
+   * back with {@link restoreSettings} once the replay has been routed.
+   *
+   * @returns The adapter's answer to the load.
+   */
+  async replay(acpThreadId: string): Promise<LoadAnswer> {
+    // The same `_meta` a fresh thread gets, because the adapter reads it on
+    // load too.
+    return (await this.whileReplaying(acpThreadId, () =>
+      this.request(ACP_METHOD.sessionLoad, {
+        sessionId: acpThreadId,
+        cwd: dk.WORKSPACE_DIR,
+        mcpServers: [],
+        ...this.meta(),
+      }),
+    )) as LoadAnswer;
+  }
+
+  /**
+   * Puts a thread back on the mode and settings its row records, after a
+   * load. A load restores only the conversation.
+   *
+   * @param res The adapter's answer to the load.
+   */
+  async restoreSettings(thread: ThreadRow, res: LoadAnswer): Promise<void> {
+    const acpSessionId = thread.acp_session_id!;
+    await this.applyMode(
+      acpSessionId,
+      res?.modes ?? null,
+      thread.mode_id ?? this.harness.defaultModeId,
+    );
+    await this.applyConfig(acpSessionId, res?.configOptions ?? null, threadConfig(thread));
   }
 
   /**

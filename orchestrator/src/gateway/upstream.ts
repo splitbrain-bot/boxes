@@ -25,7 +25,9 @@ import {
   AdapterConnection,
   NOTHING_TO_FORK,
   THREAD_NOT_FOUND,
+  optionsOf,
   type AdapterHost,
+  type LoadAnswer,
 } from './adapter.ts';
 import { BackgroundProbe, workPids } from './background.ts';
 import { Broadcast, threadOf } from './broadcast.ts';
@@ -100,6 +102,23 @@ function resumePointOf(params: unknown): string | undefined {
   const asked = (meta?.[BOXES_META] as LoadMeta | undefined)?.resumeFrom;
   return typeof asked === 'string' && asked ? asked : undefined;
 }
+
+/** Whether a browser's `session/load` asks for the full history, read from its `_meta`. */
+function wantsFullHistory(params: unknown): boolean {
+  const meta = (params as { _meta?: Record<string, unknown> } | null)?._meta;
+  return (meta?.[BOXES_META] as LoadMeta | undefined)?.full === true;
+}
+
+/** Why the full history cannot be loaded while the thread works. */
+export const THREAD_WORKING =
+  'The agent is working on this thread. Load the full history once it is idle.';
+
+/** Why a prompt or a second request is refused while the full history loads. */
+export const HISTORY_LOADING =
+  'The full history of this thread is loading. Try again once it is shown.';
+
+/** Why an unprompted fork has no full history to load. */
+const NO_OWN_HISTORY = 'This fork has no history of its own until it is prompted.';
 
 /**
  * The start of the text block in which the dashboard names a prompt's
@@ -1021,6 +1040,8 @@ export class UpstreamBox implements AdapterHost {
     const isPrompt = method === ACP_METHOD.sessionPrompt && thread !== undefined;
     const isLoad = method === ACP_METHOD.sessionLoad && thread !== undefined && from !== undefined;
 
+    // A turn would mix its updates into the replay.
+    if (isPrompt && this.downstreams.isRelaying(thread)) throw new Error(HISTORY_LOADING);
     if (isPrompt) {
       // The first prompt gives a fork its own transcript, so a restart loads
       // it rather than branching the source again.
@@ -1037,6 +1058,7 @@ export class UpstreamBox implements AdapterHost {
       this.activity.begin(thread);
       this.downstreams.beginPrompt(params);
     }
+    if (isLoad && wantsFullHistory(params)) return this.relayHistory(conn, from, thread);
     // The pin already filled the log, and a new replay would mix with live
     // updates.
     if (isLoad) return this.downstreams.open(from, thread, resumePointOf(params));
@@ -1062,6 +1084,49 @@ export class UpstreamBox implements AdapterHost {
         // can stay open until the turn's background subagents settle.
       }
     }
+  }
+
+  /**
+   * Sends one browser the full history of its thread, replayed by the adapter
+   * again. The replay goes to that browser only.
+   *
+   * A replay and a live turn look the same on the wire, so this runs only
+   * while the thread is idle: no prompt in flight, the agent quiet, and no
+   * background task that could wake it. Prompts are refused until the replay
+   * is over.
+   *
+   * @returns The answer to the browser's `session/load`.
+   */
+  private async relayHistory(
+    conn: AdapterConnection,
+    handle: DownstreamHandle,
+    acpThreadId: string,
+  ): Promise<AdapterOptions> {
+    if (this.downstreams.isRelaying(acpThreadId)) throw new Error(HISTORY_LOADING);
+    if (
+      this.downstreams.isPrompting(acpThreadId) ||
+      this.activity.speaking(acpThreadId) ||
+      this.tasksFor(acpThreadId).length > 0
+    ) {
+      throw new Error(THREAD_WORKING);
+    }
+    const row = conn.rowOf(acpThreadId);
+    if (!row || !conn.holds(acpThreadId)) throw new Error(THREAD_NOT_FOUND);
+    // The adapter would replay nothing, because it writes a fork no
+    // transcript until its first prompt.
+    if (row.inherits_from) throw new Error(NO_OWN_HISTORY);
+    this.slog.info('replaying the full history', { handle: handle.id, acpThreadId });
+    this.downstreams.beginRelay(handle, acpThreadId);
+    let res: LoadAnswer;
+    try {
+      res = await conn.replay(acpThreadId);
+    } finally {
+      this.downstreams.endRelay(acpThreadId);
+    }
+    // After the relay, so the updates this causes reach every browser and
+    // the log.
+    await conn.restoreSettings(row, res);
+    return optionsOf(res);
   }
 
   /**
