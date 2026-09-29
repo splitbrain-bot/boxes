@@ -102,6 +102,11 @@ export type ThreadProps = {
    * the thread has left running in the background.
    */
   aboveComposer?: ReactNode | undefined;
+  /**
+   * Boxes edit: content shown above the first message, such as the button
+   * that loads the older messages of a cut thread.
+   */
+  aboveMessages?: ReactNode | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -148,6 +153,7 @@ export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
   aboveComposer,
+  aboveMessages,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -157,6 +163,7 @@ export const Thread: FC<ThreadProps> = ({
         isEmpty={isEmpty}
         autoFocus={autoFocus}
         aboveComposer={aboveComposer}
+        aboveMessages={aboveMessages}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -167,7 +174,8 @@ const ThreadRoot: FC<{
   isEmpty: boolean;
   autoFocus: boolean;
   aboveComposer?: ReactNode | undefined;
-}> = ({ isEmpty, autoFocus, aboveComposer }) => {
+  aboveMessages?: ReactNode | undefined;
+}> = ({ isEmpty, autoFocus, aboveComposer, aboveMessages }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
   // Boxes edit: keeps the newest output in view once a turn outgrows the
   // screen. The turn anchor alone holds the prompt at the top and follows nothing.
@@ -209,6 +217,7 @@ const ThreadRoot: FC<{
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
+          {aboveMessages}
 
           <div
             data-slot="aui_message-group"

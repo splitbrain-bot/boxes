@@ -235,7 +235,7 @@ test('a browser opening a thread is sent its log, and told the thread is whole',
   b.add(late);
   const answer = b.open(late, T1);
 
-  assert.deepEqual(late.replays, [{ sessionId: T1, resumed: false }]);
+  assert.deepEqual(late.replays, [{ sessionId: T1, resumed: false, truncated: false }]);
   assert.deepEqual(late.sent, [
     named('user_message_chunk', 'the question', 'm1'),
     named('agent_message_chunk', 'the answer', 'm2'),
@@ -258,7 +258,7 @@ test('a browser that says how much it has is sent only the rest', () => {
   b.add(back);
   b.open(back, T1, 'm2');
 
-  assert.deepEqual(back.replays, [{ sessionId: T1, resumed: true }]);
+  assert.deepEqual(back.replays, [{ sessionId: T1, resumed: true, truncated: false }]);
   assert.deepEqual(back.sent, [
     named('agent_message_chunk', 'the first answer', 'm2'),
     named('user_message_chunk', 'and then this', 'm3'),
@@ -276,7 +276,7 @@ test('a message the log no longer holds means the thread whole', () => {
   b.add(back);
   b.open(back, T1, 'm-long-gone');
 
-  assert.deepEqual(back.replays, [{ sessionId: T1, resumed: false }]);
+  assert.deepEqual(back.replays, [{ sessionId: T1, resumed: false, truncated: false }]);
   assert.equal(back.sent.length, 2);
 });
 
@@ -305,7 +305,7 @@ test('a thread with no log is sent as empty', () => {
   b.add(opening);
 
   const answer = b.open(opening, T1);
-  assert.deepEqual(opening.replays, [{ sessionId: T1, resumed: false }]);
+  assert.deepEqual(opening.replays, [{ sessionId: T1, resumed: false, truncated: false }]);
   assert.deepEqual(opening.sent, []);
   assert.deepEqual(answer, { modes: null, configOptions: [] });
 });
@@ -402,7 +402,7 @@ test('a reconnect mid-turn is sent the rest of the turn, and nothing is asked of
   const back = fakeDownstream(2);
   b.add(back);
   b.open(back, T1, 'm1');
-  assert.deepEqual(back.replays, [{ sessionId: T1, resumed: true }]);
+  assert.deepEqual(back.replays, [{ sessionId: T1, resumed: true, truncated: false }]);
   assert.deepEqual(back.sent, [
     named('agent_message_chunk', 'the answer so far', 'm1'),
     call('tool_call', 'npm test', 'c1'),

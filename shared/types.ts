@@ -1055,6 +1055,12 @@ export interface ReplayParams {
    * asked for or the gateway no longer holds the message it names.
    */
   resumed: boolean;
+  /**
+   * True when the gateway no longer holds the start of the thread, so what it
+   * sends lacks the oldest messages. A browser can ask for the full history
+   * with {@link LoadMeta.full}.
+   */
+  truncated: boolean;
 }
 
 /**
@@ -1072,4 +1078,9 @@ export interface LoadMeta {
    * whole.
    */
   resumeFrom?: string;
+  /**
+   * True to ask for the full history of the thread, which the adapter
+   * replays again. The gateway refuses this while the thread works.
+   */
+  full?: boolean;
 }

@@ -31,6 +31,7 @@ test('a thread opens whole, or from the message the browser holds', () => {
 
   assert.deepEqual(log.opening(), {
     resumed: false,
+    truncated: false,
     updates: [chunk('m1', 'one'), chunk('m2', 'two'), chunk('m3', 'three')],
     options: { modes: null, configOptions: [] },
   });
@@ -60,6 +61,8 @@ test('a log past its cap drops its oldest message, tool calls and all', () => {
 
   // The call that the first message made went with it.
   assert.deepEqual(log.opening().updates, [second]);
+  // The log says that the start of the thread is gone.
+  assert.equal(log.opening().truncated, true);
 });
 
 test('eviction stops at the next message, whatever sits in between', () => {
@@ -122,4 +125,14 @@ test('a copy says every update is about the thread that copied it', () => {
   ]);
   // The source is untouched, and still about itself.
   assert.deepEqual(source.opening().updates, [chunk('m1', 'from the source', T1), call('c1', T1)]);
+});
+
+test('a copy of a cut log is cut too', () => {
+  const source = new ThreadLog(1);
+  source.append(chunk('m1', 'dropped', T1));
+  source.append(chunk('m2', 'kept', T1));
+
+  const fork = new ThreadLog();
+  fork.copyFrom(source, 'acp-fork');
+  assert.equal(fork.opening().truncated, true);
 });

@@ -1,6 +1,13 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
-import { TURN_STATE_METHOD, type BackgroundProcess } from '../../shared/types.ts';
+import {
+  BOXES_META,
+  REPLAY_METHOD,
+  TURN_STATE_METHOD,
+  type BackgroundProcess,
+  type LoadMeta,
+  type ReplayParams,
+} from '../../shared/types.ts';
 import type {
   ThreadConfigOption,
   ThreadModeState,
@@ -74,6 +81,12 @@ export interface GatewayScript {
    * browser spends waiting for its history is a window assertions fit in.
    */
   holdLoad?: boolean;
+  /**
+   * How many of a thread's oldest updates the gateway's log has dropped. A
+   * load then sends the rest and says the thread is cut. A load that asks for
+   * the full history is sent all of it.
+   */
+  dropped?: number;
   /**
    * What a turn with `background` leaves running, as the adapter's async-task
    * spawns describe it. One stoppable shell command by default.
@@ -314,8 +327,20 @@ export function attachStubGateway(
       case 'session/load': {
         const threadId = String(params(msg)['sessionId'] ?? pinned);
         if (script.holdLoad) await new Promise<void>((go) => heldLoads.push(go));
+        const meta = (params(msg)['_meta'] as Record<string, LoadMeta> | undefined)?.[BOXES_META];
+        const dropped = meta?.full ? 0 : (script.dropped ?? 0);
+        // The notice goes out only when the script cuts the log or the load
+        // asks for the full history.
+        if (script.dropped !== undefined || meta?.full) {
+          const notice: ReplayParams = {
+            sessionId: threadId,
+            resumed: false,
+            truncated: dropped > 0,
+          };
+          send(ws, { jsonrpc: '2.0', method: REPLAY_METHOD, params: notice });
+        }
         // The replay goes to this socket only.
-        for (const update of historyOf(threadId)) {
+        for (const update of historyOf(threadId).slice(dropped)) {
           send(ws, {
             jsonrpc: '2.0',
             method: 'session/update',

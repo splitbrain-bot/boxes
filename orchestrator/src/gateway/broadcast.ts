@@ -32,6 +32,11 @@ export class Broadcast {
    * read into the log once, when the thread is brought up.
    */
   private readonly logs = new Map<string, ThreadLog>();
+  /**
+   * The browser each thread's replay goes to, while the adapter replays the
+   * full history for it.
+   */
+  private readonly relays = new Map<string, DownstreamHandle>();
 
   /**
    * @param boxId The box, for the log.
@@ -82,11 +87,12 @@ export class Broadcast {
     this.downstreams.delete(handle);
   }
 
-  /** Forgets every browser, prompt count and log. */
+  /** Forgets every browser, prompt count, log and relay. */
   clear(): void {
     this.downstreams.clear();
     this.promptsInFlight.clear();
     this.logs.clear();
+    this.relays.clear();
   }
 
   /**
@@ -101,6 +107,11 @@ export class Broadcast {
     // A transcript being read into the log is sent to nobody.
     if (history?.filling) {
       history.append(params);
+      return;
+    }
+    const relay = this.relays.get(thread);
+    if (relay) {
+      this.deliver([relay], params);
       return;
     }
     // The gateway has already echoed this prompt, so the adapter's echo
@@ -157,9 +168,10 @@ export class Broadcast {
    * Sends one browser a thread, and returns the answer to the `session/load`
    * it asked with.
    *
-   * A `_boxes/replay` notification goes first and says whether the updates
-   * are a tail after the browser's anchor or the whole thread. A thread with
-   * no log is sent as empty.
+   * A `_boxes/replay` notification goes first. It says whether the updates
+   * are a tail after the browser's anchor or the whole thread, and whether
+   * the log still holds the start of the thread. A thread with no log is sent
+   * as empty.
    *
    * @param anchor The last message the browser holds, if any.
    */
@@ -167,13 +179,41 @@ export class Broadcast {
     const history = this.logs.get(acpThreadId);
     const opening = history?.opening(anchor) ?? {
       resumed: false,
+      truncated: false,
       updates: [],
       options: { modes: null, configOptions: [] },
     };
-    const params: ReplayParams = { sessionId: acpThreadId, resumed: opening.resumed };
+    const params: ReplayParams = {
+      sessionId: acpThreadId,
+      resumed: opening.resumed,
+      truncated: opening.truncated,
+    };
     this.send([handle], REPLAY_METHOD, params);
     for (const update of opening.updates) this.deliver([handle], update);
     return opening.options;
+  }
+
+  /**
+   * Sends a thread's updates to one browser only, until {@link endRelay}.
+   * The browser is told first that the whole thread follows.
+   *
+   * This is for the adapter replaying the full history, which must not reach
+   * the log or the other browsers.
+   */
+  beginRelay(handle: DownstreamHandle, acpThreadId: string): void {
+    const params: ReplayParams = { sessionId: acpThreadId, resumed: false, truncated: false };
+    this.send([handle], REPLAY_METHOD, params);
+    this.relays.set(acpThreadId, handle);
+  }
+
+  /** Ends the relay: the thread's updates go to the log and its browsers again. */
+  endRelay(acpThreadId: string): void {
+    this.relays.delete(acpThreadId);
+  }
+
+  /** Whether the adapter is replaying a thread's full history to one browser. */
+  isRelaying(acpThreadId: string): boolean {
+    return this.relays.has(acpThreadId);
   }
 
   /**

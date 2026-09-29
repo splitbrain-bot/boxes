@@ -707,3 +707,56 @@ test('a background task reporting in is a row of its own, not the user talking',
     await close();
   }
 });
+
+test('a cut thread offers its full history at the top, and loads it in place', async () => {
+  const said = Array.from({ length: 12 }, (_, i) => `exchange number ${i}`);
+  // The gateway's log has lost the first two exchanges.
+  await start({ dropped: 4 });
+  for (const text of said) {
+    stub.gateway.emit({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `asking about ${text}` },
+    } as ThreadUpdate);
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `answering about ${text}` },
+    } as ThreadUpdate);
+  }
+
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  try {
+    // "exchange number 1" is also part of "exchange number 10".
+    const exactly = (text: string) => page.getByText(text, { exact: true });
+    const button = page.getByRole('button', { name: 'Load full history' });
+    await expect.poll(() => button.isVisible()).toBe(true);
+    expect(await exactly('asking about exchange number 1').count()).toBe(0);
+    expect(await exactly('asking about exchange number 2').count()).toBe(1);
+
+    // Up to the top by hand, where the reader finds the button.
+    const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+    await viewport.hover();
+    await expect
+      .poll(async () => {
+        await page.mouse.wheel(0, -2000);
+        return viewport.evaluate((el) => el.scrollTop);
+      })
+      .toBe(0);
+    await shoot(page, 'thread-cut', 'viewport');
+    await button.click();
+
+    await expect.poll(() => exactly('asking about exchange number 0').count()).toBe(1);
+    expect(await button.count()).toBe(0);
+    expect(await exactly('answering about exchange number 11').count()).toBe(1);
+    // The view stays with the oldest messages.
+    expect(await viewport.evaluate((el) => el.scrollTop)).toBeLessThan(
+      await viewport.evaluate((el) => el.clientHeight),
+    );
+    // The messages shown before are gone, not kept as a second branch.
+    expect(await page.locator('.aui-branch-picker-root').count()).toBe(0);
+    await shoot(page, 'thread-full', 'viewport');
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});

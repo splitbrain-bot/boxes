@@ -69,6 +69,18 @@ export interface ThreadSnapshot {
    * The view shows a placeholder meanwhile, not an empty thread.
    */
   loading: boolean;
+  /**
+   * True when the thread lacks its oldest messages, because the gateway no
+   * longer holds them. {@link ThreadStore.loadFullHistory} fetches them.
+   */
+  truncated: boolean;
+  /** True while the full history is loading. */
+  loadingHistory: boolean;
+  /**
+   * How many replays of the whole thread have rebuilt the messages. A
+   * rebuild can bring messages back under other ids.
+   */
+  rebuilds: number;
 }
 
 /** What a thread shows before anything has been read into it. */
@@ -84,6 +96,9 @@ export const INITIAL_SNAPSHOT: ThreadSnapshot = {
   commands: [],
   error: null,
   loading: true,
+  truncated: false,
+  loadingHistory: false,
+  rebuilds: 0,
 };
 
 /** A permission request that has been shown but not yet answered. */
@@ -158,6 +173,13 @@ export class ThreadStore {
    * gateway found it, so the store keeps it until then.
    */
   private resumeAnchor: string | null = null;
+  /**
+   * Whether the model lacks the oldest messages of the thread. Published with
+   * the replay that set it.
+   */
+  private truncated = false;
+  /** The number of rebuilds so far. Published with the replay that did it. */
+  private rebuilds = 0;
 
   /** @param deps The client factory and the ids of the thread. */
   constructor(private readonly deps: ThreadStoreDeps) {
@@ -267,7 +289,15 @@ export class ThreadStore {
         this.resumeAnchor = this.lastNamedMessage();
         return this.resumeAnchor;
       },
-      onReplay: (resumed) => (resumed ? this.resume() : this.reset()),
+      onReplay: (resumed, truncated) => {
+        if (resumed) {
+          this.resume();
+          return;
+        }
+        // Only a replay of the whole thread says whether the store is cut.
+        this.truncated = truncated;
+        this.reset();
+      },
     });
     this.client.start();
   }
@@ -296,6 +326,7 @@ export class ThreadStore {
     this.model.modes = modes;
     this.model.configOptions = configOptions;
     this.views = new Map();
+    this.rebuilds++;
     // The gateway states the turn and the background work again after the
     // replay.
     this.speakingUpstream = false;
@@ -366,6 +397,8 @@ export class ThreadStore {
       plan: this.model.plan,
       commands: this.model.commands,
       loading: false,
+      truncated: this.truncated,
+      rebuilds: this.rebuilds,
     });
   }
 
@@ -617,6 +650,29 @@ export class ThreadStore {
     } finally {
       this.restoreApprovals();
       this.flushReplay();
+    }
+  }
+
+  /**
+   * Asks for the full history of the thread, which the gateway has the
+   * adapter replay again. It replaces the model once it has arrived.
+   *
+   * The gateway refuses while the thread works. The gateway's replay notice
+   * resets the store, so a refusal leaves the thread as it was. The reason
+   * shows as an error.
+   */
+  async loadFullHistory(): Promise<void> {
+    const client = this.client;
+    const sessionId = client?.sessionId;
+    if (!client || !sessionId || this.snapshot.loadingHistory) return;
+    this.emit({ loadingHistory: true, error: null });
+    try {
+      await client.request(ACP_METHOD.sessionLoad, loadParams(sessionId, null, true));
+    } catch (err) {
+      this.emit({ error: (err as Error).message });
+    } finally {
+      this.flushReplay();
+      this.emit({ loadingHistory: false });
     }
   }
 }

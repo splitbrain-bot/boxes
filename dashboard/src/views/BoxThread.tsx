@@ -1,5 +1,6 @@
 import {
   AssistantRuntimeProvider,
+  INTERNAL,
   useExternalStoreRuntime,
   type AppendMessage,
 } from '@assistant-ui/react';
@@ -8,6 +9,7 @@ import { Link, useParams } from 'react-router';
 import type { ThreadSummary } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { BackgroundBar } from '@/components/BackgroundBar';
+import { FullHistoryButton } from '@/components/FullHistoryButton';
 import { Notice } from '@/components/Notice';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { TokenWarning } from '@/components/TokenWarning';
@@ -268,11 +270,17 @@ export function BoxThread() {
   // Bound to the box, because attachments are served from its workspace.
   const convert = useCallback((message: Message) => convertMessage(message, id), [id]);
 
+  // The runtime keeps every message it was given as a branch. A rebuild can
+  // bring messages back under other ids, so each one gets a fresh store.
+  const repository = useMemo(() => new INTERNAL.MessageRepository(), [state.rebuilds]);
+
   const runtime = useExternalStoreRuntime<Message>({
     messages: state.messages as Message[],
+    unstable_messageRepositoryInstance: repository,
     convertMessage: convert,
     isRunning: state.isRunning,
-    isSendDisabled: !store || state.connection !== 'ready',
+    // A prompt would mix its turn into the replay of the full history.
+    isSendDisabled: !store || state.connection !== 'ready' || state.loadingHistory,
     onNew,
     onCancel: async () => store?.cancel(),
     onRefetchThread: async () => store?.refetch(),
@@ -373,6 +381,14 @@ export function BoxThread() {
                 <ThreadLoading />
               ) : (
                 <Thread
+                  aboveMessages={
+                    state.truncated ? (
+                      <FullHistoryButton
+                        loading={state.loadingHistory}
+                        onLoad={() => void store?.loadFullHistory()}
+                      />
+                    ) : null
+                  }
                   aboveComposer={
                     <BackgroundBar
                       processes={state.background}

@@ -14,7 +14,7 @@ import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { AgentStore } from '../agents.ts';
 import { BoxManager } from '../boxes.ts';
-import type { DownstreamHandle } from './upstream.ts';
+import { HISTORY_LOADING, THREAD_WORKING, type DownstreamHandle } from './upstream.ts';
 import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 
 // A turn is announced once its thread has gone quiet, so these tests wait for
@@ -1374,7 +1374,7 @@ test('a browser that says how much it has is sent only the rest', async () => {
 
   // The message the browser named comes again with the tail, because a socket
   // can drop partway through a message.
-  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true, truncated: false }]);
   // Answered from the log the spawn filled. The adapter loaded the thread
   // once, on the way up.
   assert.deepEqual(loaded, ['acp-gone', 'acp-kept']);
@@ -1405,7 +1405,7 @@ test('a resume point the transcript no longer holds is answered with all of it',
 
   // The whole thread goes out, and the browser learns before any of it lands
   // that it has to rebuild.
-  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false, truncated: false }]);
   assert.deepEqual(
     reader.told.map((p) => (p as { update: { messageId: string } }).update.messageId),
     ['m1', 'm2', 'm3'],
@@ -1426,7 +1426,7 @@ test('a browser that asks for no resume point is sent the thread whole', async (
     reader,
   );
 
-  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false }]);
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false, truncated: false }]);
   assert.equal(reader.told.length, 3);
 });
 
@@ -1462,7 +1462,7 @@ test('a browser reconnecting mid-turn is sent the rest of the turn as well', asy
     reader,
   );
 
-  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true }]);
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: true, truncated: false }]);
   assert.deepEqual(
     reader.told
       .map((p) => (p as { update?: { messageId?: string } }).update?.messageId)
@@ -1470,6 +1470,106 @@ test('a browser reconnecting mid-turn is sent the rest of the turn as well', asy
     ['m2', 'm3', 'm4'],
   );
   assert.deepEqual(loaded, ['acp-gone', 'acp-kept']);
+});
+
+/** The load a browser sends to ask for a thread's full history. */
+const FULL_LOAD = {
+  sessionId: 'acp-kept',
+  cwd: '/workspace',
+  mcpServers: [],
+  _meta: { boxes: { full: true } },
+};
+
+/** The message ids of the updates a browser was sent, in order. */
+function messageIds(told: unknown[]): string[] {
+  return told
+    .map((p) => (p as { update?: { messageId?: string } }).update?.messageId)
+    .filter((id): id is string => id !== undefined);
+}
+
+test('a browser asking for the full history is sent a new replay, and nobody else is', async () => {
+  fakeDocker(transcriptAdapter({ 'acp-kept': TRANSCRIPT }));
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  const other = fakeHandle(2, 'acp-kept');
+  up.attach(reader);
+  up.attach(other);
+  await up.ensureStarted();
+  reader.told.length = 0;
+  other.told.length = 0;
+
+  await up.forwardRequest('session/load', FULL_LOAD, reader);
+
+  // The adapter was asked again, and the whole thread went to the asker.
+  assert.deepEqual(loaded, ['acp-gone', 'acp-kept', 'acp-kept']);
+  assert.deepEqual(reader.replays, [{ sessionId: 'acp-kept', resumed: false, truncated: false }]);
+  assert.deepEqual(messageIds(reader.told), ['m1', 'm2', 'm3']);
+  assert.deepEqual(other.told, []);
+
+  // The log did not take the replay in a second time.
+  const late = fakeHandle(3, 'acp-kept');
+  up.attach(late);
+  await up.forwardRequest(
+    'session/load',
+    { sessionId: 'acp-kept', cwd: '/workspace', mcpServers: [] },
+    late,
+  );
+  assert.deepEqual(messageIds(late.told), ['m1', 'm2', 'm3']);
+});
+
+test('the full history is refused while the agent is talking', async () => {
+  const adapter = transcriptAdapter({ 'acp-kept': TRANSCRIPT });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+
+  adapter.notify('session/update', {
+    sessionId: 'acp-kept',
+    update: said('agent', 'm4', 'the answer being written'),
+  });
+  await expect.poll(() => up.speakingThreads).toEqual(['acp-kept']);
+
+  await expect(up.forwardRequest('session/load', FULL_LOAD, reader)).rejects.toThrow(
+    THREAD_WORKING,
+  );
+  assert.deepEqual(loaded, ['acp-gone', 'acp-kept']);
+});
+
+test('a prompt is refused while the full history loads', async () => {
+  let loads = 0;
+  let release = (): void => {};
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/load' && msg.params?.['sessionId'] === 'acp-kept') {
+      loads++;
+      // The first load brings the thread up. The second one is the full
+      // history, and it waits.
+      if (loads > 1) return new Promise((resolve) => (release = () => resolve({})));
+    }
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-kept');
+  up.attach(reader);
+  await up.ensureStarted();
+
+  const full = up.forwardRequest('session/load', FULL_LOAD, reader);
+  await expect.poll(() => loads).toBe(2);
+
+  await expect(
+    up.forwardRequest(
+      'session/prompt',
+      { sessionId: 'acp-kept', prompt: [{ type: 'text', text: 'hello' }] },
+      reader,
+    ),
+  ).rejects.toThrow(HISTORY_LOADING);
+  assert.equal(adapter.seen.includes('session/prompt'), false);
+
+  release();
+  await full;
 });
 
 test("a browser's load answers with the thread's modes and options", async () => {
@@ -1531,7 +1631,9 @@ test('a fork borrowing a transcript is told once that it is rebuilding', async (
   );
 
   // One answer, and the conversation the fork carries arrives behind it.
-  assert.deepEqual(reader.replays, [{ sessionId: 'acp-branch-1', resumed: false }]);
+  assert.deepEqual(reader.replays, [
+    { sessionId: 'acp-branch-1', resumed: false, truncated: false },
+  ]);
   assert.equal(reader.told.length, 1);
 });
 

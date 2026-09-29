@@ -636,8 +636,28 @@ goes is the top of the thread, which opens at its bottom: scrollback nobody
 reaches. A browser that already held it keeps it; a fresh tab on a thread
 whose traffic passed the cap opens on the last few megabytes, and the head
 comes back the next time the orchestrator restarts and reads the transcript
-in again. A thread the adapter turns out not to hold any more loses its log
+in again. The `_boxes/replay` notice says when the log has dropped the head,
+and the thread then shows a *Load full history* button above its first
+message. A thread the adapter turns out not to hold any more loses its log
 along with its conversation.
+
+The full history is the one thing a browser's `session/load` still asks the
+adapter for. The browser sets `full` in `_meta`, and the gateway has the
+adapter replay the thread again and sends that replay to the browser that
+asked. It goes nowhere else: not into the log, and not to the other browsers
+on the thread. A replay and a live turn look the same on the wire, so the
+gateway refuses while the thread works — a prompt in flight, the agent
+talking, or a background task that could wake it — and refuses prompts on the
+thread until the replay is over. A load may reset the thread's mode and
+settings, as Codex's adapter does, so the gateway sets them again from the
+row. It does that after the replay, so the updates it causes reach every
+browser and the log. The log stays as it was, so the next fresh tab opens on
+the last few megabytes again.
+
+A replay of the whole thread can bring messages back under other ids, such
+as a prompt the gateway echoed with no id and the adapter replays with one.
+The runtime keeps every message it was given as a branch, so the view gives
+it a fresh message store after each such replay.
 
 A replay is folded in silence and published once. The notifications are the
 same ones live streaming uses, so publishing each one would hand the view
@@ -1115,13 +1135,15 @@ carries the thread it is about, so routing is a lookup rather than a guess.
   *does* echo is suppressed, so either kind of adapter produces exactly one
   copy. A transcript being read into the log is exempt: there the adapter is
   reading back history the gateway never saw, and nobody is sent it anyway.
-- **The adapter's replay reaches no browser; a browser opening a thread is
-  sent the log.** A `session/load` the gateway itself issues fills the log of
+- **The adapter's replay reaches no browser, except the full history one
+  browser asked for; a browser opening a thread is sent the log.** A `session/load` the gateway itself issues fills the log of
   the one thread it names and is delivered to nobody — the tab already on
   that thread has the thread — and another thread's live updates go on as
   before, which is the bug two open tabs hit first. A browser's own
   `session/load` never reaches the adapter: it is answered from the log,
-  whole or from the message the browser named. A fork's log starts as a copy
+  whole or from the message the browser named. Only a load that asks for the
+  full history reaches the adapter, and only while the thread is idle; see
+  above. A fork's log starts as a copy
   of its source's, re-tagged as the fork's, because the browser reading it is
   pinned to the fork — see *Several threads per box*.
 

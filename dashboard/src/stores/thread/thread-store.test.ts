@@ -48,7 +48,8 @@ class FakeClient {
   load(): void {
     const from = this.handlers.resumePoint();
     this.resumePoints.push(from);
-    this.handlers.onReplay(this.resumes && from !== null);
+    const resumed = this.resumes && from !== null;
+    this.handlers.onReplay(resumed, this.truncates);
   }
 
   /** Ends the replay, which publishes what it built. */
@@ -58,6 +59,8 @@ class FakeClient {
 
   /** Whether the next load is answered as a resume rather than a full replay. */
   resumes = false;
+  /** Whether the gateway says it no longer holds the start of the thread. */
+  truncates = false;
   /** The resume point each load asked for, in order. */
   readonly resumePoints: Array<string | null> = [];
 
@@ -256,7 +259,7 @@ test('a replay drops the turn state it was told before it', () => {
   assert.equal(store.getSnapshot().isRunning, true);
 
   // A reconnect. The gateway states the thread again after the replay.
-  client.handlers.onReplay(false);
+  client.handlers.onReplay(false, false);
   assert.equal(store.getSnapshot().isRunning, false);
   assert.deepEqual(store.getSnapshot().background, []);
 });
@@ -367,7 +370,7 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   assert.equal(store.getSnapshot().messages.length, 2);
 
   // A fresh connection with nothing to resume from: the whole history follows.
-  client.handlers.onReplay(false);
+  client.handlers.onReplay(false, false);
   // The published conversation stays on screen.
   assert.equal(store.getSnapshot().messages.length, 2);
 
@@ -939,3 +942,71 @@ test('a resume gives up the questions the dead connection was showing', async ()
   assert.equal(tool.approval, undefined);
 });
 
+
+test('a cut thread says so, and a resume keeps what the store holds', () => {
+  const { store, client } = makeStore((c) => {
+    c.truncates = true;
+  });
+  push(client, said('agent', 'm1', 'the newest answer'));
+  assert.equal(store.getSnapshot().truncated, true);
+
+  // A reconnect picks up at the store's last message, so the store is still
+  // cut, whatever the gateway says about its own log.
+  client.resumes = true;
+  client.truncates = false;
+  client.load();
+  client.finish();
+  assert.equal(store.getSnapshot().truncated, true);
+});
+
+test('the full history replaces a cut thread once it has arrived', async () => {
+  const { store, client } = makeStore((c) => {
+    c.truncates = true;
+  });
+  push(client, said('agent', 'm2', 'the newest answer'));
+  const rebuilds = store.getSnapshot().rebuilds;
+
+  client.hold = true;
+  const done = store.loadFullHistory();
+  assert.equal(store.getSnapshot().loadingHistory, true);
+  assert.deepEqual(client.requests.at(-1), {
+    method: 'session/load',
+    params: {
+      sessionId: 'acp-1',
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { boxes: { full: true } },
+    },
+  });
+
+  // The gateway's notice, then the replay from the start.
+  client.handlers.onReplay(false, false);
+  push(client, said('agent', 'm1', 'the oldest answer'));
+  push(client, said('agent', 'm2', 'the newest answer'));
+  assert.equal(store.getSnapshot().messages.length, 1, 'not published piece by piece');
+  client.settle();
+  await done;
+
+  const snapshot = store.getSnapshot();
+  assert.equal(snapshot.messages.length, 2);
+  assert.equal(snapshot.truncated, false);
+  assert.equal(snapshot.loadingHistory, false);
+  assert.equal(snapshot.rebuilds, rebuilds + 1, 'the view learns the messages were rebuilt');
+});
+
+test('a refused full history leaves the thread as it was', async () => {
+  const { store, client } = makeStore((c) => {
+    c.truncates = true;
+  });
+  push(client, said('agent', 'm2', 'the newest answer'));
+  const before = store.getSnapshot().messages;
+
+  client.fail = 'The agent is working on this thread.';
+  await store.loadFullHistory();
+
+  const snapshot = store.getSnapshot();
+  assert.equal(snapshot.messages, before);
+  assert.equal(snapshot.truncated, true);
+  assert.equal(snapshot.loadingHistory, false);
+  assert.equal(snapshot.error, 'The agent is working on this thread.');
+});

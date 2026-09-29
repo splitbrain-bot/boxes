@@ -73,9 +73,12 @@ export interface AcpClientHandlers {
    * what follows the resume point, so the store keeps what it holds. False
    * means the whole thread follows, and what the store holds is stale.
    *
+   * True for `truncated` means the gateway no longer holds the oldest
+   * messages of the thread, so the replay lacks them.
+   *
    * It arrives before the first replayed update.
    */
-  onReplay(resumed: boolean): void;
+  onReplay(resumed: boolean, truncated: boolean): void;
 }
 
 /** A JSON-RPC message, in either direction. */
@@ -104,24 +107,31 @@ const CANCEL_REQUEST_METHOD = '$/cancel_request';
  * The params of a session/load: the thread, the workspace it runs in, and
  * where a replay of it can start.
  *
- * `resumeFrom` names the last message the caller holds. It travels in
- * `_meta`, which ACP reserves for extensions, so the gateway reads it and the
- * adapter ignores it. Without it, the load asks for the whole thread.
+ * `resumeFrom` names the last message the caller holds. `full` asks for the
+ * full history, replayed by the adapter again. Both travel in `_meta`, which
+ * ACP reserves for extensions, so the gateway reads them and the adapter
+ * ignores them. Without either, the load asks for the whole thread as the
+ * gateway holds it.
  */
 export function loadParams(
   sessionId: string,
   resumeFrom?: string | null,
+  full = false,
 ): {
   sessionId: string;
   cwd: string;
   mcpServers: never[];
   _meta?: Record<string, LoadMeta>;
 } {
+  const meta: LoadMeta = {
+    ...(resumeFrom ? { resumeFrom } : {}),
+    ...(full ? { full } : {}),
+  };
   return {
     sessionId,
     cwd: '/workspace',
     mcpServers: [],
-    ...(resumeFrom ? { _meta: { [BOXES_META]: { resumeFrom } } } : {}),
+    ...(Object.keys(meta).length > 0 ? { _meta: { [BOXES_META]: meta } } : {}),
   };
 }
 
@@ -288,7 +298,7 @@ export class AcpClient {
 
       // Without a resume point the whole thread follows, so the store hears
       // it now. With one, the gateway's replay notice decides.
-      if (!resumeFrom) this.handlers.onReplay(false);
+      if (!resumeFrom) this.handlers.onReplay(false, false);
 
       const loaded = await this.request<LoadThreadResponse>(
         ACP_METHOD.sessionLoad,
@@ -354,7 +364,7 @@ export class AcpClient {
     if (msg.method === REPLAY_METHOD) {
       const params = msg.params as Partial<ReplayParams> | undefined;
       // Anything but an explicit yes counts as a full replay, the safe reading.
-      this.handlers.onReplay(params?.resumed === true);
+      this.handlers.onReplay(params?.resumed === true, params?.truncated === true);
       return;
     }
 
