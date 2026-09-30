@@ -133,16 +133,45 @@ export class ThreadLog {
   }
 
   /**
+   * Sets the current mode in {@link options}, for a mode set by request. The
+   * adapter need not send a `current_mode_update` for it.
+   *
+   * @param modeId The mode that is now current.
+   * @returns The mode that was current before, or null for a thread with no modes.
+   */
+  setMode(modeId: string): string | null {
+    const modes = this.options.modes;
+    if (!modes) return null;
+    this.options = { ...this.options, modes: { ...modes, currentModeId: modeId } };
+    return modes.currentModeId;
+  }
+
+  /**
+   * Sets one option's value in {@link options}, for a value set by request.
+   * The adapter need not send a `config_option_update` for it.
+   *
+   * @param configId The option's id.
+   * @param value The value it is now set to.
+   * @param answered The options the adapter answered the request with. They
+   *   replace the known ones, because a change can change other options too.
+   */
+  setConfig(configId: string, value: string, answered?: ThreadConfigOption[]): void {
+    const configOptions =
+      answered ??
+      this.options.configOptions.map((option) =>
+        option.id === configId ? { ...option, currentValue: value } : option,
+      );
+    this.options = { ...this.options, configOptions };
+  }
+
+  /**
    * Updates {@link options} from a `current_mode_update` or a
    * `config_option_update`.
    */
   private noteOptions(params: unknown): void {
     const update = (params as { update?: Record<string, unknown> } | null)?.update;
     if (update?.['sessionUpdate'] === UPDATE_KIND.currentMode) {
-      const modes = this.options.modes;
-      if (modes && typeof update['currentModeId'] === 'string') {
-        this.options = { ...this.options, modes: { ...modes, currentModeId: update['currentModeId'] } };
-      }
+      if (typeof update['currentModeId'] === 'string') this.setMode(update['currentModeId']);
       return;
     }
     if (update?.['sessionUpdate'] === UPDATE_KIND.configOption) {

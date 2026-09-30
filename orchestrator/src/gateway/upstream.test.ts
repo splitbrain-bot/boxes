@@ -1609,6 +1609,114 @@ test("a browser's load answers with the thread's modes and options", async () =>
   });
 });
 
+/**
+ * What a browser's load of one thread is answered with: the current mode and
+ * the current value of each option.
+ */
+async function loadAnswer(
+  up: ReturnType<BoxManager['upstream']>,
+  reader: DownstreamHandle,
+  acpThreadId: string,
+): Promise<{ mode: unknown; config: Record<string, unknown> }> {
+  const answer = (await up.forwardRequest(
+    'session/load',
+    { sessionId: acpThreadId, cwd: '/workspace', mcpServers: [] },
+    reader,
+  )) as { modes: { currentModeId: string } | null; configOptions: Array<Record<string, unknown>> };
+  return {
+    mode: answer.modes?.currentModeId,
+    config: Object.fromEntries(
+      answer.configOptions.map((option) => [option['id'], option['currentValue']]),
+    ),
+  };
+}
+
+test("a browser's load answers with the mode and model the gateway put the thread in", async () => {
+  // Like the Claude adapter, this one sends no update for a requested change.
+  const adapter = forgetfulAdapter([]);
+  fakeDocker(adapter.spawn);
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-gone');
+  up.attach(reader);
+  await up.ensureStarted();
+
+  // The load came back in `default` on `sonnet`, and the gateway moved it.
+  assert.deepEqual(await loadAnswer(up, reader, 'acp-gone'), {
+    mode: 'auto',
+    config: { model: 'opus' },
+  });
+
+  // A change from a browser is what the next browser opens on too.
+  await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'plan' });
+  await up.forwardRequest('session/set_config_option', {
+    sessionId: 'acp-gone',
+    configId: 'model',
+    value: 'sonnet',
+  });
+  assert.deepEqual(await loadAnswer(up, reader, 'acp-gone'), {
+    mode: 'plan',
+    config: { model: 'sonnet' },
+  });
+});
+
+test('a new thread opens on the mode and model it was created with', async () => {
+  fakeDocker(twoThreadAdapter([]));
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+
+  const created = await manager.createThread('s1', {
+    options: { harness: 'claude', modeId: 'plan', config: { model: 'opus' } },
+  });
+  const reader = fakeHandle(1, null);
+  up.attach(reader);
+  const acpThreadId = await up.pin(reader, created.id);
+  assert.deepEqual(await loadAnswer(up, reader, acpThreadId), {
+    mode: 'plan',
+    config: { model: 'opus' },
+  });
+});
+
+test('a mode the adapter falls back from is shown as the one it fell back to', async () => {
+  const modes = () => ({
+    currentModeId: 'default',
+    availableModes: [{ id: 'default' }, { id: 'auto' }, { id: 'plan' }],
+  });
+  const adapter: FakeAdapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    if (msg.method === 'session/load') return { modes: modes() };
+    if (msg.method === 'session/set_mode' && msg.params?.['modeId'] === 'auto') {
+      // Auto mode is not available to this account, and the adapter says so
+      // before it answers.
+      adapter.notify('session/update', {
+        sessionId: msg.params?.['sessionId'],
+        update: { sessionUpdate: 'current_mode_update', currentModeId: 'default' },
+      });
+      return {};
+    }
+    if (msg.method === 'session/set_mode') return new RpcError(-32603, 'no such mode');
+    return {};
+  });
+  fakeDocker(adapter);
+  const up = manager.upstream('s1');
+  const reader = fakeHandle(1, 'acp-gone');
+  up.attach(reader);
+  await up.ensureStarted();
+  assert.equal((await loadAnswer(up, reader, 'acp-gone')).mode, 'default');
+  assert.equal(thread('t1')['mode_id'], 'default');
+
+  // A browser asking for it gets the same fallback, and the row records the
+  // fallback rather than the ask. Otherwise the next restart asks again.
+  await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'auto' });
+  assert.equal((await loadAnswer(up, reader, 'acp-gone')).mode, 'default');
+  assert.equal(thread('t1')['mode_id'], 'default');
+
+  // A refused change leaves the mode where it was.
+  await expect(
+    up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'plan' }),
+  ).rejects.toThrow();
+  assert.equal((await loadAnswer(up, reader, 'acp-gone')).mode, 'default');
+});
+
 test('a fork borrowing a transcript is told once that it is rebuilding', async () => {
   fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
   await manager.createThread('s1', { from: 't2' });

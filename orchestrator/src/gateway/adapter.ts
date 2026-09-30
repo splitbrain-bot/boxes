@@ -135,6 +135,16 @@ export type LoadAnswer = {
 } | null;
 
 /**
+ * The config options from the adapter's answer to a `session/set_config_option`.
+ *
+ * @returns The options, or undefined when the answer lists none.
+ */
+export function answeredOptions(res: unknown): ThreadConfigOption[] | undefined {
+  const configOptions = (res as { configOptions?: unknown } | null)?.configOptions;
+  return Array.isArray(configOptions) ? (configOptions as ThreadConfigOption[]) : undefined;
+}
+
+/**
  * The modes and config options from the adapter's answer to a `session/new`,
  * `session/fork` or `session/load`. Absent ones read as none.
  */
@@ -180,6 +190,23 @@ export interface AdapterHost {
   endFill(acpThreadId: string, options: AdapterOptions): void;
   /** Forgets a conversation's log, for one the adapter does not hold. */
   dropLog(acpThreadId: string): void;
+  /**
+   * Sets the current mode in a conversation's log.
+   *
+   * @returns The mode that was current before, or null when the log has none.
+   */
+  logMode(acpThreadId: string, modeId: string): string | null;
+  /**
+   * Sets one option's value in a conversation's log.
+   *
+   * @param answered The options the adapter answered the change with, if any.
+   */
+  logConfig(
+    acpThreadId: string,
+    configId: string,
+    value: string,
+    answered?: ThreadConfigOption[],
+  ): void;
   /** Reports that the connection is up and carrying threads. */
   onUp(): void;
   /** Sets the box status: running, or error after every spawn attempt failed. */
@@ -706,10 +733,14 @@ export class AdapterConnection {
   ): Promise<void> {
     if (!modes?.availableModes?.some((mode) => mode.id === modeId)) return;
     if (modes.currentModeId === modeId) return;
+    // Logged before the request, so that a `current_mode_update` for a mode
+    // the adapter falls back to replaces it.
+    this.host.logMode(acpSessionId, modeId);
     try {
       await this.request(ACP_METHOD.sessionSetMode, { sessionId: acpSessionId, modeId });
       this.slog.info('thread put in its mode', { acpSessionId, modeId });
     } catch (err) {
+      this.host.logMode(acpSessionId, modes.currentModeId);
       // A thread in the adapter's own mode is still usable.
       this.slog.warn('could not set the mode', { error: (err as Error).message });
     }
@@ -733,11 +764,12 @@ export class AdapterConnection {
       const value = this.wantedValue(option, config[option.id]);
       if (value === null || value === option.currentValue) continue;
       try {
-        await this.request(ACP_METHOD.sessionSetConfigOption, {
+        const res = await this.request(ACP_METHOD.sessionSetConfigOption, {
           sessionId: acpSessionId,
           configId: option.id,
           value,
         });
+        this.host.logConfig(acpSessionId, option.id, value, answeredOptions(res));
         this.slog.info('thread put back on a setting', {
           acpSessionId,
           configId: option.id,

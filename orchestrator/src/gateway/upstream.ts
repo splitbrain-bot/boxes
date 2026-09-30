@@ -25,6 +25,7 @@ import {
   AdapterConnection,
   NOTHING_TO_FORK,
   THREAD_NOT_FOUND,
+  answeredOptions,
   optionsOf,
   type AdapterHost,
   type LoadAnswer,
@@ -390,6 +391,21 @@ export class UpstreamBox implements AdapterHost {
   /** Forgets a conversation's log, for one the adapter does not hold. */
   dropLog(acpThreadId: string): void {
     this.downstreams.dropLog(acpThreadId);
+  }
+
+  /** Sets the current mode in a conversation's log. */
+  logMode(acpThreadId: string, modeId: string): string | null {
+    return this.downstreams.logMode(acpThreadId, modeId);
+  }
+
+  /** Sets one option's value in a conversation's log. */
+  logConfig(
+    acpThreadId: string,
+    configId: string,
+    value: string,
+    answered?: ThreadConfigOption[],
+  ): void {
+    this.downstreams.logConfig(acpThreadId, configId, value, answered);
   }
 
   /** Restarts the box reading's poll when a connection is up. */
@@ -1063,19 +1079,35 @@ export class UpstreamBox implements AdapterHost {
     // updates.
     if (isLoad) return this.downstreams.open(from, thread, resumePointOf(params));
 
+    const modeId =
+      method === ACP_METHOD.sessionSetMode && thread !== undefined
+        ? (params as { modeId?: unknown })?.modeId
+        : undefined;
+    // Logged before the request, so that a `current_mode_update` for a mode
+    // the adapter falls back to replaces it.
+    const previousMode =
+      thread !== undefined && typeof modeId === 'string'
+        ? this.downstreams.logMode(thread, modeId)
+        : null;
     try {
       const result = await conn.request(method, params);
       // Recorded here too, because the adapter need not send a
-      // current_mode_update for a requested change.
-      if (method === ACP_METHOD.sessionSetMode && thread !== undefined) {
-        const modeId = (params as { modeId?: unknown })?.modeId;
+      // current_mode_update for a requested change. The log's mode, because
+      // a current_mode_update for a mode the adapter fell back to has
+      // replaced the requested one there.
+      if (thread !== undefined && typeof modeId === 'string') {
         const row = conn.rowOf(thread);
-        if (row && typeof modeId === 'string') setThreadMode(this.db, row.id, modeId);
+        if (row) setThreadMode(this.db, row.id, this.downstreams.modeOf(thread) ?? modeId);
       }
       if (method === ACP_METHOD.sessionSetConfigOption && thread !== undefined) {
         this.recordConfigChange(conn, thread, params, result);
       }
       return result;
+    } catch (err) {
+      if (thread !== undefined && previousMode !== null) {
+        this.downstreams.logMode(thread, previousMode);
+      }
+      throw err;
     } finally {
       if (isPrompt) {
         this.setTurnActive(thread, false);
@@ -1130,9 +1162,9 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Records a setting a browser changed, from the adapter's answer where there
-   * is one and from the request where there is not. The option in the `mode`
-   * category is skipped.
+   * Records a setting a browser changed, in the thread's log and row, from the
+   * adapter's answer where there is one and from the request where there is
+   * not. The row skips the option in the `mode` category.
    */
   private recordConfigChange(
     conn: AdapterConnection,
@@ -1140,12 +1172,15 @@ export class UpstreamBox implements AdapterHost {
     params: unknown,
     result: unknown,
   ): void {
-    const answered = (result as { configOptions?: ThreadConfigOption[] } | null)?.configOptions;
-    if (Array.isArray(answered)) {
+    const answered = answeredOptions(result);
+    const { configId, value } = (params ?? {}) as { configId?: unknown; value?: unknown };
+    if (typeof configId === 'string' && typeof value === 'string') {
+      this.downstreams.logConfig(acpThreadId, configId, value, answered);
+    }
+    if (answered) {
       conn.recordConfigOptions(acpThreadId, answered);
       return;
     }
-    const { configId, value } = (params ?? {}) as { configId?: unknown; value?: unknown };
     if (typeof configId === 'string' && typeof value === 'string') {
       conn.recordConfigValue(acpThreadId, configId, value);
     }
