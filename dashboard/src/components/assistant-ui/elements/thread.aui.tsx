@@ -231,8 +231,11 @@ const ThreadRoot: FC<{
           <ThreadPrimitive.ViewportFooter
             className={cn(
               "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
+              /* Boxes edit: z-10, so the footer covers a hovered message.
+                 globals.css raises a message that ends in rows on hover, and
+                 without a z-index the footer paints under it. */
               !isEmpty &&
-                "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
+                "sticky bottom-0 z-10 mt-auto rounded-t-(--composer-radius)",
             )}
           >
             <ThreadScrollToBottom />
