@@ -559,6 +559,59 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
   }
 });
 
+test('a hovered message that runs under the composer stays under it', async () => {
+  await start();
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    // Prose and then rows: the shape whose action bar leaves the flow, and
+    // which the stylesheet raises on hover so the bar paints over the next
+    // message. Enough rows that the message runs under the composer.
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Some prose first.\n\n' },
+    } as ThreadUpdate);
+    for (let i = 0; i < 40; i++) {
+      stub.gateway.emit({
+        sessionUpdate: 'tool_call',
+        toolCallId: `tc-${i}`,
+        title: `Read file-${i}.ts`,
+        kind: 'read',
+        status: 'completed',
+      } as ThreadUpdate);
+    }
+    const trigger = page.locator('[data-slot="tool-group-trigger"]').first();
+    await expect.poll(() => trigger.isVisible()).toBe(true);
+    await trigger.click();
+    await expect.poll(() => page.getByText('Read file-39.ts').isVisible()).toBe(true);
+
+    await page.locator('[data-slot="aui_thread-viewport"]').evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    const row = page.getByText('Read file-2.ts').first();
+    await expect.poll(() => row.isVisible()).toBe(true);
+    await row.hover();
+
+    // The raised message must not paint over the composer's textarea.
+    const box = (await page.getByRole('textbox').last().boundingBox())!;
+    const hit = await page.evaluate(
+      ([x, y]) => document.elementFromPoint(x!, y!)?.tagName ?? null,
+      [box.x + box.width / 2, box.y + box.height / 2],
+    );
+    expect(hit).toBe('TEXTAREA');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('an update the dashboard does not know about does not break the thread', async () => {
   await start({
     prompts: [

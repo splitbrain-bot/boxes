@@ -3,6 +3,7 @@ import {
   REPLAY_METHOD,
   TURN_STATE_METHOD,
   type ReplayParams,
+  type ThreadConfigOption,
   type TurnStateParams,
 } from '../../../shared/types.ts';
 import { log } from '../log.ts';
@@ -147,6 +148,34 @@ export class Broadcast {
   /** Forgets a thread's log, for a thread the adapter does not hold. */
   dropLog(acpThreadId: string): void {
     this.logs.delete(acpThreadId);
+  }
+
+  /**
+   * Sets the current mode in a thread's log.
+   *
+   * @returns The mode that was current before, or null when the log has none.
+   */
+  logMode(acpThreadId: string, modeId: string): string | null {
+    return this.logs.get(acpThreadId)?.setMode(modeId) ?? null;
+  }
+
+  /** The current mode in a thread's log, or null when the log has none. */
+  modeOf(acpThreadId: string): string | null {
+    return this.logs.get(acpThreadId)?.options.modes?.currentModeId ?? null;
+  }
+
+  /**
+   * Sets one option's value in a thread's log.
+   *
+   * @param answered The options the adapter answered the change with, if any.
+   */
+  logConfig(
+    acpThreadId: string,
+    configId: string,
+    value: string,
+    answered?: ThreadConfigOption[],
+  ): void {
+    this.logs.get(acpThreadId)?.setConfig(configId, value, answered);
   }
 
   /**
