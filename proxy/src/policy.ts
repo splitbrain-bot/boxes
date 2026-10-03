@@ -130,11 +130,21 @@ function headerValue(
 }
 
 /**
+ * The authorization scheme a header value starts with, lowercased, or null
+ * when the value is not a scheme followed by a credential.
+ */
+function schemeOf(value: string): string | null {
+  return /^\s*([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+\S/.exec(value)?.[1]?.toLowerCase() ?? null;
+}
+
+/**
  * Decides what a request to an intercepted host may carry.
  *
  * Only the headers the host's credentials name are read. A header holding a
- * placeholder is rewritten to hold the real credential. A header holding any
- * other value refuses the request, so no foreign credential reaches the host.
+ * placeholder is rewritten to hold the real credential. A header under one of
+ * the credentials' pass-through schemes is left alone, because the host issued
+ * that value itself. A header holding any other value refuses the request, so
+ * no foreign credential reaches the host.
  *
  * A request with none of these headers passes through, so a login with a
  * session cookie from inside a box keeps working.
@@ -167,6 +177,10 @@ export function decideCredentials(
       }
     }
     if (swapped === null) {
+      const scheme = schemeOf(present);
+      if (scheme !== null && candidates.some((c) => c.passthroughSchemes?.includes(scheme))) {
+        continue;
+      }
       return {
         action: 'deny',
         reason: `foreign credential in ${name} for ${candidates[0]?.id ?? host}`,
@@ -195,6 +209,7 @@ export function policyHash(policy: EgressPolicy): string {
         id: c.id,
         hosts: [...c.hosts].map((h) => h.toLowerCase()).sort(),
         headers: [...c.headers].sort(),
+        passthroughSchemes: [...(c.passthroughSchemes ?? [])].sort(),
         placeholder: createHash('sha256').update(c.placeholder).digest('hex'),
         secret: createHash('sha256').update(c.secret).digest('hex'),
       }))
@@ -260,7 +275,15 @@ export function parsePolicy(input: unknown): EgressPolicy {
       h.toLowerCase(),
     );
     if (headers.length === 0) return fail(`credential ${id} needs at least one header`);
-    return { id, hosts, headers, placeholder, secret };
+    if (c['passthroughSchemes'] === undefined) return { id, hosts, headers, placeholder, secret };
+    const passthroughSchemes = stringArray(
+      c['passthroughSchemes'],
+      `credential ${id} passthroughSchemes`,
+    ).map((scheme) => scheme.toLowerCase());
+    for (const scheme of passthroughSchemes) {
+      if (/\s/.test(scheme)) return fail(`credential ${id} has a pass-through scheme with a space`);
+    }
+    return { id, hosts, headers, passthroughSchemes, placeholder, secret };
   });
 
   if (credentials.length > 0 && ca === null) {

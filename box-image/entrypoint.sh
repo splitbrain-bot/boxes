@@ -325,6 +325,7 @@ install_image_skill() {
   log "installed the image's $name skill"
 }
 install_image_skill nix
+install_image_skill share-app
 
 # --- git identity -----------------------------------------------------------
 if [ -n "${GIT_NAME:-}" ]; then

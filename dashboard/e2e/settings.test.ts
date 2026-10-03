@@ -39,6 +39,22 @@ for (const scheme of ['light', 'dark'] as const) {
   });
 }
 
+test('the Dev Tunnels card offers a login and no paste form', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await expect.poll(() => page.getByRole('heading', { name: 'Dev Tunnels' }).isVisible())
+      .toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'Log in to Dev Tunnels' }).isVisible())
+      .toBe(true);
+    // The service takes only a token from GitHub's device flow.
+    expect(await page.getByLabel('Dev Tunnels secret').count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a pasted credential is stored and comes back as its last four characters', async () => {
   stub.state.claudeCredential = null;
 

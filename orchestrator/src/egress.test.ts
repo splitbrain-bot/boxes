@@ -141,6 +141,22 @@ describe('composePolicy', () => {
     expect(policy.credentials[0]?.placeholder).toBe(material.placeholders['github']);
   }, 30_000);
 
+  it('carries a Dev Tunnels login as its access token, with the tunnel scheme passed', async () => {
+    const cfg = configFrom();
+    const store = storeWith(cfg);
+    store.put(
+      'devtunnels',
+      'oauth',
+      JSON.stringify({ access_token: 'ghu_theaccesstoken', refresh_token: 'ghr_refresh' }),
+    );
+    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const policy = composePolicy(cfg, material, rows(store));
+
+    expect(policy.credentials).toHaveLength(1);
+    expect(policy.credentials[0]?.secret).toBe('ghu_theaccesstoken');
+    expect(policy.credentials[0]?.passthroughSchemes).toEqual(['tunnel']);
+  }, 30_000);
+
   it('intercepts nothing when the store is empty, and still carries the CA', async () => {
     const cfg = configFrom();
     const store = storeWith(cfg);

@@ -7,6 +7,8 @@ import {
   CODEX_CLIENT_ID,
   CODEX_TOKEN_URL,
   CredentialStore,
+  DEVTUNNELS_CLIENT_ID,
+  GITHUB_TOKEN_URL,
   deliverableSecret,
   refreshCredentials,
   undeliverableReason,
@@ -270,4 +272,77 @@ test('an account credential is stored and refreshed, and is not delivered to a b
   const pasted = store.put('claude', 'token', 'sk-ant-oat01-abcdefgh1234');
   assert.equal(deliverableSecret(pasted), 'sk-ant-oat01-abcdefgh1234');
   assert.equal(undeliverableReason(pasted), null);
+});
+
+/** A Dev Tunnels login document, as the device login stores it. */
+function devTunnelsJson(access: string, refresh = 'ghr_the-refresh-token'): string {
+  return JSON.stringify({ access_token: access, refresh_token: refresh });
+}
+
+test('a Dev Tunnels login delivers its access token, not the document', () => {
+  const row = store.put('devtunnels', 'oauth', devTunnelsJson('ghu_theaccesstoken'));
+  assert.equal(deliverableSecret(row), 'ghu_theaccesstoken');
+  assert.equal(undeliverableReason(row), null);
+
+  const broken = store.put('devtunnels', 'oauth', 'not json');
+  assert.equal(deliverableSecret(broken), null);
+});
+
+test('a Dev Tunnels token in its last hour is refreshed against GitHub', async () => {
+  store.put('devtunnels', 'oauth', devTunnelsJson('ghu_old'), {
+    account: 'octocat',
+    expires_at: NOW + 10 * 60_000,
+  });
+  const { calls, post } = posts({
+    access_token: 'ghu_new',
+    refresh_token: 'ghr_rotated',
+    expires_in: 28_800,
+  });
+
+  await refreshCredentials(store, post, NOW);
+
+  // The call the devtunnel CLI makes, with no client secret.
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, GITHUB_TOKEN_URL);
+  assert.deepEqual(calls[0]?.body, {
+    client_id: DEVTUNNELS_CLIENT_ID,
+    grant_type: 'refresh_token',
+    refresh_token: 'ghr_the-refresh-token',
+  });
+  const row = store.get('devtunnels');
+  assert.deepEqual(JSON.parse(row?.secret ?? '{}'), {
+    access_token: 'ghu_new',
+    refresh_token: 'ghr_rotated',
+  });
+  assert.equal(row?.expires_at, NOW + 28_800_000);
+  assert.equal(row?.refreshed_at, NOW);
+  assert.equal(row?.account, 'octocat');
+  assert.equal(row?.status, 'ok');
+});
+
+test('a Dev Tunnels token with hours left is not refreshed', async () => {
+  store.put('devtunnels', 'oauth', devTunnelsJson('ghu_current'), {
+    expires_at: NOW + 5 * 60 * 60_000,
+  });
+  const { calls, post } = posts({ access_token: 'unused' });
+
+  await refreshCredentials(store, post, NOW);
+  assert.deepEqual(calls, []);
+});
+
+test('GitHub refusing a Dev Tunnels refresh with a 200 marks the login failing', async () => {
+  const document = devTunnelsJson('ghu_old');
+  store.put('devtunnels', 'oauth', document, { expires_at: NOW + 10 * 60_000 });
+  // GitHub reports an OAuth error in the body of a successful response.
+  const { post } = posts({
+    error: 'bad_refresh_token',
+    error_description: 'The refresh token passed is incorrect or expired.',
+  });
+
+  await refreshCredentials(store, post, NOW);
+
+  const row = store.get('devtunnels');
+  assert.equal(row?.status, 'failing');
+  assert.match(row?.last_error ?? '', /incorrect or expired/);
+  assert.equal(row?.secret, document);
 });

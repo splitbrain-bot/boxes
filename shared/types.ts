@@ -17,7 +17,7 @@ export type DockerState = 'running' | 'exited' | 'missing' | 'unknown';
 export type HarnessId = 'claude' | 'codex';
 
 /** A credential the deployment holds, named by the service it authenticates to. */
-export type CredentialId = 'claude' | 'openai' | 'github' | 'gitlab';
+export type CredentialId = 'claude' | 'openai' | 'github' | 'gitlab' | 'devtunnels';
 
 /**
  * How a credential was obtained, which decides what the secret is: a token
@@ -607,7 +607,8 @@ export interface StoredAttachment {
  * A box holds `placeholder`. Only the orchestrator and the proxy hold
  * `secret`. The proxy rewrites a request to one of `hosts` that carries
  * `placeholder` in one of `headers` to carry `secret`. It refuses a request
- * that carries any other value there.
+ * that carries any other value there, unless that value uses one of
+ * `passthroughSchemes`.
  */
 export interface EgressCredential {
   /** Stable identifier, used in logs and status. Never secret. */
@@ -619,6 +620,13 @@ export interface EgressCredential {
   hosts: string[];
   /** Header names that may carry it, lowercased. */
   headers: string[];
+  /**
+   * Authorization schemes, lowercased, whose values the host issues itself,
+   * such as a token it minted for one resource. A header value under one of
+   * these schemes passes unchanged instead of counting as a foreign
+   * credential. Absent means none.
+   */
+  passthroughSchemes?: string[];
   /** What the box holds. Shaped like the real thing, worth nothing. */
   placeholder: string;
   /** The real credential. */

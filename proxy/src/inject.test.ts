@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -87,6 +88,19 @@ beforeAll(async () => {
     received.push({ url: req.url ?? '', headers: req.headers });
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('origin reached\n');
+  });
+  // Accepts every websocket, so a forwarded upgrade completes.
+  origin.on('upgrade', (req: http.IncomingMessage, socket: net.Socket) => {
+    received.push({ url: req.url ?? '', headers: req.headers });
+    const key = String(req.headers['sec-websocket-key'] ?? '');
+    const accept = createHash('sha1')
+      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest('base64');
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    socket.end();
   });
   originPort = await listen(origin);
 
@@ -190,12 +204,14 @@ async function throughEngine(
 
 
 /**
- * Asks the engine to upgrade a connection, and answers with the status it
- * refused with. A rejection arrives as a response rather than as an upgrade,
- * so the status line is the whole of what this needs.
+ * Asks the engine to upgrade a connection, and answers with 101 when it was
+ * forwarded and upgraded, or with the status it refused with. A rejection
+ * arrives as a response rather than as an upgrade, so the status line is the
+ * whole of what this needs.
  */
 async function upgradeThroughEngine(
   port: number,
+  extraHeaders: http.OutgoingHttpHeaders = {},
   host = 'api.github.com',
   path = '/v1/responses',
 ): Promise<Answer> {
@@ -211,13 +227,17 @@ async function upgradeThroughEngine(
         upgrade: 'websocket',
         'sec-websocket-version': '13',
         'sec-websocket-key': 'uay0UrT0EHqIs+QoxwgNtQ==',
+        ...extraHeaders,
       },
     });
     req.on('response', (res) => {
       res.resume();
       resolve({ status: res.statusCode ?? 0, body: res.statusMessage ?? '' });
     });
-    req.on('upgrade', () => resolve({ status: 101, body: '' }));
+    req.on('upgrade', (_res, upgraded: net.Socket) => {
+      upgraded.destroy();
+      resolve({ status: 101, body: '' });
+    });
     req.on('error', reject);
     req.end();
   });
@@ -282,17 +302,70 @@ describe('the interception engine', () => {
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
   }, 30_000);
 
-  it('refuses a protocol upgrade rather than forwarding it unswapped', async () => {
+  it('refuses an upgrade that would need a swap, since it cannot be rewritten', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await upgradeThroughEngine(interceptor.port()!, {
+      authorization: `Bearer ${PLACEHOLDER}`,
+    });
+
+    expect(res.status).toBe(403);
+    // On the status line, which is what a rejected upgrade carries.
+    expect(res.body).toContain('refused by the egress policy');
+    // Nothing reached the far end: the placeholder did not leave the box.
+    expect(received).toHaveLength(0);
+  }, 30_000);
+
+  it('refuses an upgrade with a foreign credential', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await upgradeThroughEngine(interceptor.port()!, {
+      authorization: 'Bearer ghp_someoneelse',
+    });
+
+    expect(res.status).toBe(403);
+    expect(received).toHaveLength(0);
+  }, 30_000);
+
+  it('forwards an upgrade that carries no credential, as it would a request', async () => {
     policy = githubPolicy();
     await interceptor.apply();
 
     const res = await upgradeThroughEngine(interceptor.port()!);
 
-    expect(res.status).toBe(501);
-    // On the status line, which is what a rejected upgrade carries.
-    expect(res.body).toContain('protocol upgrades are not forwarded');
-    // Nothing reached the far end: the placeholder did not leave the box.
-    expect(received).toHaveLength(0);
+    expect(res.status).toBe(101);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.headers.authorization).toBeUndefined();
+  }, 30_000);
+
+  it('forwards an upgrade under a pass-through scheme unchanged', async () => {
+    const tunnelToken = 'tunnel eyJhbGciOiJFUzI1NiJ9.e30.sig';
+    policy = githubPolicy({
+      credentials: [
+        {
+          id: 'devtunnels',
+          hosts: ['euw-data.rel.tunnels.api.visualstudio.com'],
+          headers: ['authorization'],
+          passthroughSchemes: ['tunnel'],
+          placeholder: 'ghu_PLACEHOLDERPLACEHOLDER',
+          secret: 'ghu_therealsecretvalue',
+        },
+      ],
+    });
+    await interceptor.apply();
+
+    const res = await upgradeThroughEngine(
+      interceptor.port()!,
+      { authorization: tunnelToken },
+      'euw-data.rel.tunnels.api.visualstudio.com',
+      '/api/v1/Host/Connect/abc',
+    );
+
+    expect(res.status).toBe(101);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.headers.authorization).toBe(tunnelToken);
   }, 30_000);
 
   it('refuses a caller that did not come through the front door', async () => {

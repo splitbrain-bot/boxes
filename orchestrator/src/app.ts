@@ -712,12 +712,14 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Starts a login, for a subscription that cannot be pasted.
+   * Starts a login, for a credential that cannot be pasted.
    *
    * Only the harness's own CLI can obtain a ChatGPT or Claude subscription,
-   * so Boxes runs it in a throwaway container and drives it. The page polls
-   * the routes below for the state, sends the code Claude's CLI asks for, and
-   * cancels. `github` and `gitlab` have no flow and answer a 400.
+   * so Boxes runs it in a throwaway container and drives it. Dev Tunnels
+   * takes only a token from GitHub's device flow, which the orchestrator runs
+   * itself. The page polls the routes below for the state, sends the code
+   * Claude's CLI asks for, and cancels. `github` and `gitlab` have no flow and
+   * answer a 400.
    */
   app.post('/api/credentials/:id/login', async (req) => {
     const id = credentialId(req.params as { id: string });

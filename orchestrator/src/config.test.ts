@@ -155,7 +155,7 @@ test('the credential set describes where each credential travels', () => {
     const { credentialSet } = loadConfig({ DATA_DIR: dir });
     assert.deepEqual(
       credentialSet.map((c) => c.id),
-      ['claude', 'openai', 'github', 'gitlab'],
+      ['claude', 'openai', 'github', 'gitlab', 'devtunnels'],
     );
     const github = credentialSet.find((c) => c.id === 'github');
     assert.ok(github?.hosts.includes('api.github.com'));
@@ -169,6 +169,12 @@ test('the credential set describes where each credential travels', () => {
     // access token in private-token.
     assert.deepEqual(gitlab?.headers, ['authorization', 'private-token']);
     assert.equal(gitlab?.placeholderPrefix, 'glpat-');
+
+    const devtunnels = credentialSet.find((c) => c.id === 'devtunnels');
+    // The control planes and the relays, whose tunnel tokens pass unchanged.
+    assert.deepEqual(devtunnels?.hosts, ['*.rel.tunnels.api.visualstudio.com']);
+    assert.deepEqual(devtunnels?.passthroughSchemes, ['tunnel']);
+    assert.equal(devtunnels?.placeholderPrefix, 'ghu_');
   });
 });
 

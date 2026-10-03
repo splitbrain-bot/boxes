@@ -150,6 +150,8 @@ export interface CreateContainerSpec {
  *
  * GH_TOKEN is for git and gh, and is set even without a stored GitHub
  * credential. GITLAB_TOKEN and GITLAB_HOST are the same for git and glab.
+ * DEVTUNNELS_TOKEN is the GitHub token the Dev Tunnels API takes, for the
+ * share-app skill.
  */
 export function credentialEnv(
   placeholderFor: (credentialId: string) => string,
@@ -163,6 +165,7 @@ export function credentialEnv(
   env['GH_TOKEN'] = placeholderFor('github');
   env['GITLAB_TOKEN'] = placeholderFor('gitlab');
   env['GITLAB_HOST'] = gitlabHost;
+  env['DEVTUNNELS_TOKEN'] = placeholderFor('devtunnels');
   env['GIT_NAME'] = identity.gitName;
   env['GIT_EMAIL'] = identity.gitEmail;
   return env;

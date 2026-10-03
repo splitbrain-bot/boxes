@@ -126,6 +126,7 @@ export function composePolicy(
       id: spec.id,
       hosts: [...spec.hosts],
       headers: [...spec.headers],
+      ...(spec.passthroughSchemes ? { passthroughSchemes: [...spec.passthroughSchemes] } : {}),
       placeholder,
       secret: secrets.get(spec.id) ?? '',
     };

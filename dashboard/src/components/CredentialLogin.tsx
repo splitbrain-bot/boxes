@@ -20,8 +20,9 @@ const POLL_MS = 1_000;
  *
  * The orchestrator runs the harness's own CLI in a throwaway container. Codex
  * prints a URL and a one-time code and polls by itself. Claude prints a URL
- * and waits until the code is pasted back. The page starts the login, so a
- * remount does not start a second one.
+ * and waits until the code is pasted back. For Dev Tunnels the orchestrator
+ * runs GitHub's device flow itself, which shows a URL and a code like Codex.
+ * The page starts the login, so a remount does not start a second one.
  */
 export function CredentialLogin({
   credential,
@@ -132,7 +133,7 @@ export function CredentialLogin({
       {state.state === 'starting' ? (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <Spinner label={`Starting the ${label} login`} />
-          Starting a login. This takes a few seconds: it runs in a container of its own.
+          Starting a login. This takes a few seconds.
         </p>
       ) : null}
 

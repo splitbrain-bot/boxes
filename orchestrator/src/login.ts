@@ -1,14 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import type { CredentialId, LoginState } from '../../shared/types.ts';
-import { parseAuthDocument, type CredentialStore } from './credentials.ts';
+import {
+  DEVTUNNELS_CLIENT_ID,
+  GITHUB_TOKEN_URL,
+  parseAuthDocument,
+  postToken,
+  type CredentialStore,
+  type TokenPost,
+} from './credentials.ts';
 import * as dk from './docker.ts';
 import { HttpError } from './http-error.ts';
 import { Screen } from './screen.ts';
 import { log } from './log.ts';
 
 /**
- * Account logins, run by the harness's own CLI in a throwaway container.
+ * Account logins. A harness login is run by the harness's own CLI in a
+ * throwaway container. The Dev Tunnels login is GitHub's device flow, which
+ * the orchestrator runs itself.
  *
  * The CLIs do not document the lines they print. So the parsers look for
  * shapes, such as a URL on the service's host, a one-time code or a token
@@ -77,6 +86,18 @@ const TOKEN_GRACE_MS = 150;
 /** How long a Claude token is valid, in days. It cannot be refreshed. */
 const CLAUDE_TOKEN_DAYS = 365;
 
+/** GitHub's endpoint that starts a device login. */
+const GITHUB_DEVICE_CODE_URL = 'https://github.com/login/device/code';
+
+/** What the Dev Tunnels app asks of a GitHub account: its public profile. */
+const DEVTUNNELS_SCOPE = 'read:user';
+
+/** Seconds GitHub adds to the poll interval each time it answers `slow_down`. */
+const SLOW_DOWN_SECONDS = 5;
+
+/** How long the GitHub user lookup may take, in milliseconds. */
+const LOOKUP_TIMEOUT_MS = 15_000;
+
 /** How many characters of a CLI's output are kept. */
 const OUTPUT_LIMIT = 64 * 1024;
 
@@ -84,7 +105,7 @@ const OUTPUT_LIMIT = 64 * 1024;
 const ERROR_TAIL = 600;
 
 /** The credentials that have a login flow at all. */
-export const LOGIN_CREDENTIALS: readonly CredentialId[] = ['claude', 'openai'];
+export const LOGIN_CREDENTIALS: readonly CredentialId[] = ['claude', 'openai', 'devtunnels'];
 
 /** Whether a credential is obtained by logging in rather than by pasting. */
 export function hasLoginFlow(id: CredentialId): boolean {
@@ -156,6 +177,34 @@ export function dockerLoginRuntime(image: string): LoginRuntime {
   };
 }
 
+// --- GitHub, for the device login ------------------------------------------
+
+/** What the Dev Tunnels login needs from GitHub. An interface, so tests can fake it. */
+export interface GitHubClient {
+  /** One POST to an OAuth endpoint. */
+  post: TokenPost;
+  /** The login name of the account a token belongs to, or null when GitHub does not say. */
+  login(token: string): Promise<string | null>;
+}
+
+/** The real thing: GitHub's own endpoints. */
+export const gitHubClient: GitHubClient = {
+  post: postToken,
+  async login(token) {
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+      });
+      if (!res.ok) return null;
+      const login = ((await res.json()) as { login?: unknown }).login;
+      return typeof login === 'string' && login !== '' ? login : null;
+    } catch {
+      return null;
+    }
+  },
+};
+
 // --- the flows --------------------------------------------------------------
 
 /** One login in progress, or the last one that finished. */
@@ -195,6 +244,8 @@ export class LoginManager {
     private runtime: LoginRuntime,
     /** How long a login may take, in milliseconds. */
     private readonly timeoutMs: number = LOGIN_TIMEOUT_MS,
+    /** Where the Dev Tunnels login talks to GitHub. */
+    private readonly github: GitHubClient = gitHubClient,
   ) {}
 
   /** Test seam: installs a runtime the tests script. */
@@ -300,6 +351,16 @@ export class LoginManager {
 
   /** Runs one flow to its end, and cleans up whatever it was holding. */
   private async run(flow: Flow): Promise<void> {
+    if (flow.credentialId === 'devtunnels') {
+      try {
+        await this.devTunnelsLogin(flow);
+      } catch (err) {
+        this.fail(flow, (err as Error).message);
+      } finally {
+        this.release(flow);
+      }
+      return;
+    }
     try {
       flow.containerId = await this.runtime.start(flow.credentialId);
       if (flow.settled) return;
@@ -383,6 +444,79 @@ export class LoginManager {
       account: parsed.account,
       expiresAt: parsed.expiresAt,
     });
+  }
+
+  /**
+   * Dev Tunnels: GitHub's device flow for the Dev Tunnels app.
+   *
+   * GitHub hands out a one-time code, which the page shows with its URL, and
+   * the orchestrator polls until the person has entered it.
+   */
+  private async devTunnelsLogin(flow: Flow): Promise<void> {
+    const started = await this.github.post(GITHUB_DEVICE_CODE_URL, {
+      client_id: DEVTUNNELS_CLIENT_ID,
+      scope: DEVTUNNELS_SCOPE,
+    });
+    const { device_code: deviceCode, user_code: userCode, verification_uri: url } = started;
+    if (!deviceCode || !userCode || !url) {
+      throw new Error(
+        `GitHub did not start a device login: ${started.error_description ?? started.error ?? 'no code in the answer'}`,
+      );
+    }
+    this.settle(flow, { state: 'awaiting_browser', url, code: userCode });
+
+    let interval = started.interval ?? SLOW_DOWN_SECONDS;
+    while (!flow.settled) {
+      await sleep(interval * 1000);
+      if (flow.settled) return;
+      const answer = await this.github.post(GITHUB_TOKEN_URL, {
+        client_id: DEVTUNNELS_CLIENT_ID,
+        device_code: deviceCode,
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      });
+      if (flow.settled) return;
+      if (answer.access_token) {
+        await this.storeDevTunnelsLogin(flow, answer.access_token, answer);
+        return;
+      }
+      if (answer.error === 'authorization_pending') continue;
+      if (answer.error === 'slow_down') {
+        interval += SLOW_DOWN_SECONDS;
+        continue;
+      }
+      this.fail(
+        flow,
+        `GitHub ended the login: ${answer.error_description ?? answer.error ?? 'no token in the answer'}`,
+      );
+      return;
+    }
+  }
+
+  /**
+   * Stores a Dev Tunnels login as a document with both tokens, named by the
+   * GitHub account it belongs to.
+   */
+  private async storeDevTunnelsLogin(
+    flow: Flow,
+    accessToken: string,
+    answer: { refresh_token?: string; expires_in?: number },
+  ): Promise<void> {
+    const account = await this.github.login(accessToken);
+    if (flow.settled) return;
+    const now = Date.now();
+    this.credentials.put(
+      'devtunnels',
+      'oauth',
+      JSON.stringify({ access_token: accessToken, refresh_token: answer.refresh_token ?? '' }),
+      {
+        // Without a name the store would show the document's last characters.
+        account: account ?? 'a GitHub account',
+        expires_at: answer.expires_in ? now + answer.expires_in * 1000 : null,
+        refreshed_at: now,
+      },
+    );
+    this.settle(flow, { state: 'done' });
+    log.info('stored a Dev Tunnels login', { account });
   }
 
   /**
@@ -515,6 +649,14 @@ export class LoginManager {
     }
     flow.exec?.kill();
   }
+}
+
+/** Resolves after some milliseconds, without holding the process open. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 // --- reading what a CLI printed ---------------------------------------------

@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, test } from 'vitest';
-import { CredentialStore, parseAuthDocument } from './credentials.ts';
+import {
+  CredentialStore,
+  DEVTUNNELS_CLIENT_ID,
+  GITHUB_TOKEN_URL,
+  parseAuthDocument,
+  type TokenAnswer,
+} from './credentials.ts';
 import { openDb, type Db } from './db.ts';
 import { HttpError } from './http-error.ts';
 import {
@@ -14,6 +20,7 @@ import {
   LoginManager,
   stripAnsi,
   visitUrlIn,
+  type GitHubClient,
   type LoginExec,
   type LoginExecSpec,
   type LoginRuntime,
@@ -412,6 +419,108 @@ test('a second login cancels the first, and the first id stops resolving', async
   assert.equal(fake.removed[0], fake.started[0]);
   assert.throws(() => logins.state('openai', first));
   assert.equal(logins.state('openai', second).state !== 'failed', true);
+});
+
+/**
+ * A GitHub that answers the device login from a script: the device code
+ * first, then one answer per poll. It records every POST and every account
+ * lookup.
+ */
+function fakeGitHub(polls: TokenAnswer[]): {
+  github: GitHubClient;
+  calls: Array<{ url: string; body: Record<string, string> }>;
+  lookups: string[];
+} {
+  const calls: Array<{ url: string; body: Record<string, string> }> = [];
+  const lookups: string[] = [];
+  const queue = [...polls];
+  return {
+    calls,
+    lookups,
+    github: {
+      post: async (url, body) => {
+        calls.push({ url, body });
+        if (url.endsWith('/login/device/code')) {
+          return {
+            device_code: 'the-device-code',
+            user_code: 'ABCD-1234',
+            verification_uri: 'https://github.com/login/device',
+            // No wait between polls, so the test runs at once.
+            interval: 0,
+          };
+        }
+        return queue.shift() ?? { error: 'authorization_pending' };
+      },
+      login: async (token) => {
+        lookups.push(token);
+        return 'octocat';
+      },
+    },
+  };
+}
+
+test('the Dev Tunnels flow shows GitHub’s code and stores both tokens', async () => {
+  const { github, calls, lookups } = fakeGitHub([
+    { error: 'authorization_pending' },
+    { access_token: 'ghu_access', refresh_token: 'ghr_refresh', expires_in: 28_800 },
+  ]);
+  const manager = new LoginManager(store, fake.runtime, 5_000, github);
+  const loginId = manager.start('devtunnels');
+
+  await until('the code', () => manager.state('devtunnels', loginId).state === 'awaiting_browser');
+  assert.deepEqual(manager.state('devtunnels', loginId), {
+    state: 'awaiting_browser',
+    url: 'https://github.com/login/device',
+    code: 'ABCD-1234',
+  });
+
+  await until('the login', () => manager.state('devtunnels', loginId).state === 'done');
+  // The orchestrator runs the device flow itself: no container is started.
+  assert.deepEqual(fake.started, []);
+  assert.deepEqual(calls[0]?.body, { client_id: DEVTUNNELS_CLIENT_ID, scope: 'read:user' });
+  assert.equal(calls[1]?.url, GITHUB_TOKEN_URL);
+  assert.deepEqual(calls[1]?.body, {
+    client_id: DEVTUNNELS_CLIENT_ID,
+    device_code: 'the-device-code',
+    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+  });
+  assert.deepEqual(lookups, ['ghu_access']);
+
+  const row = store.get('devtunnels');
+  assert.equal(row?.method, 'oauth');
+  assert.equal(row?.account, 'octocat');
+  assert.deepEqual(JSON.parse(row?.secret ?? '{}'), {
+    access_token: 'ghu_access',
+    refresh_token: 'ghr_refresh',
+  });
+  assert.ok((row?.expires_at ?? 0) > Date.now() + 7 * 60 * 60_000);
+});
+
+test('a Dev Tunnels login GitHub ends fails with GitHub’s reason', async () => {
+  const { github } = fakeGitHub([
+    { error: 'access_denied', error_description: 'The authorization request was denied.' },
+  ]);
+  const manager = new LoginManager(store, fake.runtime, 5_000, github);
+  const loginId = manager.start('devtunnels');
+
+  await until('the failure', () => manager.state('devtunnels', loginId).state === 'failed');
+  const state = manager.state('devtunnels', loginId);
+  assert.match(state.state === 'failed' ? state.error : '', /was denied/);
+  assert.equal(store.get('devtunnels'), undefined);
+});
+
+test('a cancelled Dev Tunnels login stops polling and stores nothing', async () => {
+  const { github, calls } = fakeGitHub([]);
+  const manager = new LoginManager(store, fake.runtime, 5_000, github);
+  const loginId = manager.start('devtunnels');
+  await until('the code', () => manager.state('devtunnels', loginId).state === 'awaiting_browser');
+
+  manager.cancel('devtunnels', loginId);
+  const polled = calls.length;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // At most the poll already in flight completes.
+  assert.ok(calls.length <= polled + 1);
+  assert.equal(store.get('devtunnels'), undefined);
 });
 
 test('GitHub has no login flow and says so instead of starting a container', () => {
