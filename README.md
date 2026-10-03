@@ -79,6 +79,7 @@ card per credential, and the identity every box commits as.
 | OpenAI | An API key, `sk-…` | A Codex thread fails at its first prompt |
 | GitHub | A classic personal access token, `ghp_…` | git and gh reach GitHub unauthenticated, and a push is refused |
 | GitLab | A personal access token, `glpat-…` | git and glab reach GitLab unauthenticated, and a push is refused |
+| Dev Tunnels | A GitHub login, with **Log in** on the card | An agent cannot share a running web app with you |
 | Git identity | The name and email a box commits as | Boxes commit as `boxes-bot <boxes-bot@users.noreply.github.com>` |
 
 A secret is write-only. It goes in, and what comes back out is its last four

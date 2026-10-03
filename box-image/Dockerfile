@@ -98,6 +98,25 @@ RUN arch="$(dpkg --print-architecture)" \
  && dpkg -i /tmp/glab.deb \
  && rm -f /tmp/glab.deb
 
+# The Microsoft Dev Tunnels CLI, which the share-app skill hosts a tunnel
+# with. It is one self-contained binary with no package, so the version and
+# the checksum of each build are pinned here. The version check runs it as
+# root, and the step removes the files it unpacks into root's home.
+ARG DEVTUNNEL_VERSION=1.0.2094+24665e6583
+ARG DEVTUNNEL_SHA256_AMD64=2aa6c41aaf7840427e84b7e1e99be5b826a9966fc027ddf61dc0f69b68db060b
+ARG DEVTUNNEL_SHA256_ARM64=efac378f9ffb40914935fbd2361543088b50cd62248372df06c243e6f7c49cc8
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) build=linux-x64; sha="$DEVTUNNEL_SHA256_AMD64" ;; \
+      arm64) build=linux-arm64; sha="$DEVTUNNEL_SHA256_ARM64" ;; \
+      *) echo "no devtunnel build pinned for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://tunnelsassetsprod.blob.core.windows.net/cli/$(echo "$DEVTUNNEL_VERSION" | sed 's/+/%2B/')/${build}-devtunnel" \
+      -o /usr/local/bin/devtunnel \
+ && echo "$sha  /usr/local/bin/devtunnel" | sha256sum -c - \
+ && chmod 0755 /usr/local/bin/devtunnel \
+ && devtunnel --version | grep -qF "${DEVTUNNEL_VERSION}" \
+ && rm -rf /root/.net /root/.local/share/DevTunnels
+
 # Go, Rust and PHP from the distribution, which carries their security
 # updates. pkg-config and libssl-dev are what common native crates and
 # extensions look for.
@@ -382,7 +401,7 @@ RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
              sqlite3 fd fdfind shellcheck yq cmake uv uvx dig playwright-cli playwright \
-             certutil timeout; do \
+             certutil timeout devtunnel; do \
       command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
     done
 

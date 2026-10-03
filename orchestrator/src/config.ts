@@ -239,6 +239,12 @@ export interface CredentialSpec {
    * shape of its token accepts it and fails at the API rather than at startup.
    */
   placeholderPrefix: string;
+  /**
+   * Authorization schemes under which the hosts accept tokens they issued
+   * themselves. The proxy lets values under these schemes through unchanged.
+   * Absent means none.
+   */
+  passthroughSchemes?: readonly string[];
 }
 
 /**
@@ -299,9 +305,27 @@ function gitlabCredential(host: string): CredentialSpec {
   };
 }
 
+/**
+ * The Dev Tunnels credential: a GitHub token from the Dev Tunnels app, which
+ * the share-app skill creates tunnels with.
+ *
+ * The pattern covers the global and regional control planes and the regional
+ * relays. Only a control plane gets the GitHub token. While a tunnel is
+ * hosted, the CLI sends a control plane and a relay a token the service
+ * issued for that tunnel, under the `tunnel` scheme, which passes unchanged.
+ */
+const DEVTUNNELS_CREDENTIAL: CredentialSpec = {
+  id: 'devtunnels',
+  hosts: ['*.rel.tunnels.api.visualstudio.com'],
+  headers: ['authorization'],
+  alsoAllow: [],
+  placeholderPrefix: 'ghu_',
+  passthroughSchemes: ['tunnel'],
+};
+
 /** Every credential this deployment can translate, in settings-page order. */
 function credentialSetFor(gitlabHost: string): readonly CredentialSpec[] {
-  return [...FIXED_CREDENTIALS, gitlabCredential(gitlabHost)];
+  return [...FIXED_CREDENTIALS, gitlabCredential(gitlabHost), DEVTUNNELS_CREDENTIAL];
 }
 
 /** Splits a comma or whitespace separated host list into patterns. */

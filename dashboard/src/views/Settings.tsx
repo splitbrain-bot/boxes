@@ -35,8 +35,12 @@ interface CredentialKind {
   harnesses: HarnessId[];
   /** What stops working without it. */
   blurb: string;
-  /** What the secret looks like, so a wrong paste is obvious before saving. */
-  hint: string;
+  /**
+   * What the secret looks like, so a wrong paste is obvious before saving.
+   * Null for a credential that can only be obtained by logging in, which
+   * then gets no paste form.
+   */
+  hint: string | null;
   /** What a pasted secret is stored as; a login decides its own. */
   method: CredentialMethod;
   /**
@@ -94,6 +98,18 @@ const KINDS: CredentialKind[] = [
     hint: 'glpat-…, a personal access token with the api and write_repository scopes',
     method: 'token',
     canLogin: false,
+  },
+  {
+    id: 'devtunnels',
+    label: 'Dev Tunnels',
+    harnesses: [],
+    blurb:
+      'What an agent shows you a running web app with, through a private Microsoft ' +
+      'Dev Tunnels link that only your GitHub account can open. It is a GitHub login, ' +
+      'because the service takes no pasted token.',
+    hint: null,
+    method: 'oauth',
+    canLogin: true,
   },
 ];
 
@@ -312,21 +328,25 @@ function CredentialCard({
       ) : null}
 
       <form className="flex flex-col gap-2 sm:flex-row" onSubmit={(e) => void save(e)}>
-        <Label className="sr-only" htmlFor={`secret-${kind.id}`}>
-          {`${kind.label} secret`}
-        </Label>
-        <Input
-          id={`secret-${kind.id}`}
-          type="password"
-          autoComplete="off"
-          className="font-mono"
-          placeholder={kind.hint}
-          value={secret}
-          onChange={(e) => setSecret(e.target.value)}
-        />
-        <Button type="submit" disabled={busy || secret.trim() === ''}>
-          {stored ? 'Replace' : 'Save'}
-        </Button>
+        {kind.hint !== null ? (
+          <>
+            <Label className="sr-only" htmlFor={`secret-${kind.id}`}>
+              {`${kind.label} secret`}
+            </Label>
+            <Input
+              id={`secret-${kind.id}`}
+              type="password"
+              autoComplete="off"
+              className="font-mono"
+              placeholder={kind.hint}
+              value={secret}
+              onChange={(e) => setSecret(e.target.value)}
+            />
+            <Button type="submit" disabled={busy || secret.trim() === ''}>
+              {stored ? 'Replace' : 'Save'}
+            </Button>
+          </>
+        ) : null}
         {/* A subscription has no secret to paste, so a login sits beside the form. */}
         {kind.canLogin && loginId === null ? (
           <Button

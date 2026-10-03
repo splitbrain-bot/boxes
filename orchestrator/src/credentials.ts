@@ -12,7 +12,13 @@ import type { Db } from './db.ts';
 export type { CredentialId, CredentialMethod, CredentialStatus };
 
 /** Every credential id, in the order the settings page lists them. */
-export const CREDENTIAL_IDS: readonly CredentialId[] = ['claude', 'openai', 'github', 'gitlab'];
+export const CREDENTIAL_IDS: readonly CredentialId[] = [
+  'claude',
+  'openai',
+  'github',
+  'gitlab',
+  'devtunnels',
+];
 
 /** Every way a secret can be obtained. */
 export const CREDENTIAL_METHODS: readonly CredentialMethod[] = ['token', 'api_key', 'oauth'];
@@ -35,8 +41,10 @@ export interface CredentialRow {
   method: CredentialMethod;
   /**
    * The material, stored unencrypted: a token or an API key for a pasted
-   * secret, and the whole JSON document the CLI wrote for an `oauth` one, so
-   * a refresh has the refresh token beside the access token.
+   * secret, and a JSON document for an `oauth` one, so a refresh has the
+   * refresh token beside the access token. For Codex it is the whole document
+   * the CLI wrote; for Dev Tunnels it holds `access_token` and
+   * `refresh_token`.
    */
   secret: string;
   /** What the settings page shows: an account name, or a pasted secret's last four. */
@@ -163,16 +171,21 @@ export class CredentialStore {
 }
 
 /**
- * The secret the egress proxy can swap into a header for a box, or null for
- * an `oauth` row.
+ * The secret the egress proxy can swap into a header for a box, or null when
+ * the row has none.
  *
- * An `oauth` row is a document that Codex reads from `$CODEX_HOME/auth.json`,
- * not a header value. Its traffic goes to `chatgpt.com`, which the proxy does
- * not intercept. Such a row is stored, refreshed and reported, but never
- * reaches a box. Every other row delivers its secret as stored.
+ * A Codex `oauth` row is a document that Codex reads from
+ * `$CODEX_HOME/auth.json`, not a header value. Its traffic goes to
+ * `chatgpt.com`, which the proxy does not intercept. Such a row is stored,
+ * refreshed and reported, but never reaches a box. A Dev Tunnels `oauth` row
+ * delivers the access token inside its document. Every other row delivers its
+ * secret as stored.
  */
 export function deliverableSecret(row: CredentialRow): string | null {
-  return row.method === 'oauth' ? null : row.secret;
+  if (row.method !== 'oauth') return row.secret;
+  if (row.id !== 'devtunnels') return null;
+  const token = authObject(row.secret)?.['access_token'];
+  return typeof token === 'string' && token !== '' ? token : null;
 }
 
 /**
@@ -282,6 +295,16 @@ export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 /** Codex's OAuth token endpoint. It is not a stable API either. */
 export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 
+/**
+ * The GitHub App the Dev Tunnels service accepts user tokens from. It is
+ * taken from the devtunnel CLI and is not a stable API, so a CLI release may
+ * change it.
+ */
+export const DEVTUNNELS_CLIENT_ID = 'Iv1.e7b89e013f801f03';
+
+/** GitHub's OAuth token endpoint, for the device login and the refresh. */
+export const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
+
 /** How close to expiry an access token is refreshed, in milliseconds. */
 const REFRESH_WINDOW_MS = 60 * 60_000;
 
@@ -291,7 +314,10 @@ const REFRESH_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
 /** How long the token endpoint gets to answer, in milliseconds. */
 const REFRESH_TIMEOUT_MS = 15_000;
 
-/** What the token endpoint answers with. Every field is optional. */
+/**
+ * What an OAuth endpoint answers with. Every field is optional. GitHub
+ * reports a failure with a 200 and the `error` fields.
+ */
 export interface TokenAnswer {
   /** The new access token. */
   access_token?: string;
@@ -301,6 +327,18 @@ export interface TokenAnswer {
   id_token?: string;
   /** Seconds, as OAuth writes it. Only used when the token carries no `exp`. */
   expires_in?: number;
+  /** The device code a device login polls with. */
+  device_code?: string;
+  /** The code a person enters at `verification_uri`. */
+  user_code?: string;
+  /** Where a person enters `user_code`. */
+  verification_uri?: string;
+  /** Seconds a device login waits between two polls. */
+  interval?: number;
+  /** An OAuth error code, such as `authorization_pending`. */
+  error?: string;
+  /** The error in a sentence. */
+  error_description?: string;
 }
 
 /** One POST to a token endpoint. A type, so tests can pass a fake. */
@@ -310,7 +348,8 @@ export type TokenPost = (url: string, body: Record<string, string>) => Promise<T
 export const postToken: TokenPost = async (url, body) => {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // GitHub answers in a form encoding unless JSON is asked for.
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
   });
@@ -322,8 +361,9 @@ export const postToken: TokenPost = async (url, body) => {
 /**
  * Refreshes or checks every stored credential once.
  *
- * A Codex `oauth` row is refreshed the way the CLI would refresh it. The
- * orchestrator holds the only copy, so nothing else rotates the token. Any
+ * A Codex or Dev Tunnels `oauth` row is refreshed the way its CLI would
+ * refresh it. The orchestrator holds the only copy, so nothing else rotates
+ * the token. Any
  * other row with a past expiry, such as a Claude `setup-token` token, is
  * marked `expired`, as it cannot be renewed.
  *
@@ -338,6 +378,7 @@ export async function refreshCredentials(
   for (const row of store.list()) {
     if (row.method === 'oauth') {
       if (row.id === 'openai') await refreshCodex(store, row, post, now);
+      if (row.id === 'devtunnels') await refreshDevTunnels(store, row, post, now);
       continue;
     }
     if (row.expires_at !== null && row.expires_at <= now && row.status !== 'expired') {
@@ -422,6 +463,62 @@ async function refreshCodex(
       (answer.expires_in ? now + answer.expires_in * 1000 : null),
     refreshed_at: now,
   });
+}
+
+/**
+ * Refreshes one Dev Tunnels login against GitHub, which rotates the refresh
+ * token with the access token.
+ *
+ * It refreshes once the access token has less than an hour left, or has
+ * expired. GitHub needs no client secret for this app.
+ */
+async function refreshDevTunnels(
+  store: CredentialStore,
+  row: CredentialRow,
+  post: TokenPost,
+  now: number,
+): Promise<void> {
+  const refreshToken = authObject(row.secret)?.['refresh_token'];
+  if (typeof refreshToken !== 'string' || refreshToken === '') {
+    // A retry cannot fix this, so the status is written once.
+    if (row.status !== 'failing') {
+      store.markStatus(row.id, 'failing', 'the stored login carries no refresh token: log in again');
+    }
+    return;
+  }
+  if (row.expires_at !== null && row.expires_at - now > REFRESH_WINDOW_MS) return;
+
+  let answer: TokenAnswer;
+  try {
+    answer = await post(GITHUB_TOKEN_URL, {
+      client_id: DEVTUNNELS_CLIENT_ID,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+    });
+  } catch (err) {
+    store.markStatus(row.id, 'failing', `could not refresh: ${(err as Error).message}`);
+    return;
+  }
+
+  if (!answer.access_token) {
+    const reason = answer.error_description ?? answer.error ?? 'no access token in the answer';
+    store.markStatus(row.id, 'failing', `could not refresh: ${reason}. Log in again if this persists`);
+    return;
+  }
+
+  store.put(
+    row.id,
+    'oauth',
+    JSON.stringify({
+      access_token: answer.access_token,
+      refresh_token: answer.refresh_token ?? refreshToken,
+    }),
+    {
+      account: row.account,
+      expires_at: answer.expires_in ? now + answer.expires_in * 1000 : null,
+      refreshed_at: now,
+    },
+  );
 }
 
 /** The stored document as an object, or null when it is not one. */

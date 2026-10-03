@@ -137,6 +137,12 @@ describe('boxEnv', () => {
     expect(own['GITLAB_HOST']).toBe('gitlab.example.com');
   }, 30_000);
 
+  it('carries a Dev Tunnels placeholder for the share-app skill', async () => {
+    // Present before any login, so a box created now can share once one exists.
+    const env = await envFor();
+    expect(env['DEVTUNNELS_TOKEN']).toMatch(/^ghu_/);
+  }, 30_000);
+
   it('carries what Codex needs to log itself in from the environment', async () => {
     // The Codex app-server reads no key from its environment; `codex-acp` is
     // what reads CODEX_API_KEY, and it only does so when DEFAULT_AUTH_REQUEST

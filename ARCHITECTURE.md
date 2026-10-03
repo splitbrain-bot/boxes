@@ -2373,6 +2373,7 @@ TLS under the deployment CA and `decideCredentials` rules on the request:
 | The request carries | What happens |
 |---|---|
 | the placeholder, in a credential header | rewritten to carry the real credential |
+| a value under one of the credential's pass-through schemes | forwarded as it stands |
 | any other value in a credential header | 403 from the proxy; nothing reaches the host |
 | nothing in a credential header | forwarded as it stands |
 
@@ -2389,13 +2390,24 @@ credential header, which covers `Bearer <p>`, `token <p>`, a bare value, and
 the HTTP Basic pair git's credential helper produces — one mechanism instead of
 a rule per tool.
 
-A protocol upgrade on a translated host is refused with `501`, because the
-swap cannot follow a request there: the engine rewrites the host, the path,
-the query and the protocol of an upgrade, and no header, so a forwarded one
-would carry the placeholder to the far end and be refused as a bad credential
-after sending it. It is the same answer the front door gives an upgrade on a
-host it is only tunnelling, so the proxy has one position on upgrades rather
-than two.
+A *pass-through scheme* is an authorization scheme under which a host accepts
+tokens it issued itself. Dev Tunnels has one: the GitHub token buys a token
+for one tunnel, and the CLI then sends `Authorization: tunnel <token>` to the
+same hosts. That value is not the deployment's credential and cannot carry
+it, so refusing it would protect nothing and break hosting. The scheme is
+part of the credential set, so it is allowed at that credential's hosts only.
+
+A protocol upgrade on a translated host goes through the same checks as a
+request, with one difference: one that would need a swap is refused with
+`403`, because the swap cannot follow a request there. The engine rewrites
+the host, the path, the query and the protocol of an upgrade, and no header,
+so a forwarded one would carry the placeholder to the far end and be refused
+as a bad credential after sending it. An upgrade that carries no credential,
+or a value under a pass-through scheme, is forwarded as it stands, which is
+what lets the Dev Tunnels relay connect. Nothing forwarded unchanged can
+carry the real credential, because only a swap puts it on the wire. A plain
+`http://` upgrade at the front door is still refused with `501`, as the front
+door cannot vet the protocol that follows.
 
 Codex's built-in provider opens its transport with one, against
 `wss://api.openai.com/v1/responses`, retries a few times, and only then falls
@@ -2426,6 +2438,12 @@ pair, or a bearer — and in `PRIVATE-TOKEN`, which is what glab sends a
 personal access token in. A deployment that names its own instance intercepts
 that host instead, and gitlab.com becomes an ordinary passthrough host.
 
+The Dev Tunnels credential comes last in the set. It is translated on
+`*.rel.tunnels.api.visualstudio.com`, which covers the global control plane,
+the regional ones and the regional relays. Only a control plane ever gets the
+GitHub token; while a tunnel is hosted, the CLI sends both kinds of host the
+tunnel's own token, under the `tunnel` pass-through scheme.
+
 `chatgpt.com` is in that set as a host to allow and never to intercept. It
 carries the other kind of OpenAI credential — a subscription — and the two
 kinds reject each other's material, so leaving it alone is what lets a
@@ -2435,7 +2453,19 @@ not delivered to a box at all: it is a document rather than a header value, and
 the traffic it authenticates goes to that unintercepted host. Such a credential
 is stored, refreshed and reported, and the harness that needs it says it cannot
 run until a key is pasted. A Claude login is not that case: it ends in a token,
-which is delivered exactly as a pasted one is.
+which is delivered exactly as a pasted one is. Nor is a Dev Tunnels login,
+whose document holds the access token and the refresh token side by side: the
+access token is what the proxy swaps in.
+
+The Dev Tunnels service takes only a token GitHub issued to its own GitHub
+App, so a personal access token is refused and the card has no paste form.
+The login is GitHub's device flow, which the orchestrator runs itself rather
+than in a container, since there is no CLI output to read: it shows GitHub's
+URL and code, polls until the person has entered the code, and stores the
+answer. The access token lasts eight hours and the refresh token six months.
+The refresh needs only the app's public client id, and it rotates both
+tokens, so a login stays alive for as long as the orchestrator keeps
+refreshing it.
 
 The policy is composed from the store on every sync rather than once at boot,
 and the store calls `sync()` on every write — so a credential entered on the
@@ -2522,7 +2552,7 @@ restart; the resolver that answers the request is in memory only, so
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running box's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
 | Maintenance | 60s, with the reaper | Prunes each box's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
 | Orphan sweep (`boxes.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with boxes that no longer exist. See below |
-| Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login whose access token is within the hour of expiring, or which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
+| Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login or a Dev Tunnels login whose access token is within the hour of expiring, or a subscription login which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
 
 The list screen polls `GET /api/boxes` every 5 seconds while it is up and
 its tab is visible. A view watching one box — its thread, its review, its info
@@ -2583,7 +2613,7 @@ the store's `onChange`, which recomposes the egress policy and pushes it.
 
 What reaches a box container is a placeholder for each of them, built by
 `credentialEnv` from every harness's `env()` plus `GH_TOKEN`, `GITLAB_TOKEN`,
-`GITLAB_HOST`, `GIT_NAME` and `GIT_EMAIL`, and fixed into the container at
+`GITLAB_HOST`, `DEVTUNNELS_TOKEN`, `GIT_NAME` and `GIT_EMAIL`, and fixed into the container at
 create time. The real value never enters a box and never reaches a filesystem
 outside the orchestrator's own data volume. The CA certificate travels the same path, as `BOXES_PROXY_CA`, which
 the entrypoint writes to `~/.boxes/proxy-ca.crt`. From it the entrypoint
@@ -2614,7 +2644,9 @@ package that young puts its breaking changes.
 
 glab is pinned exactly, to a release and to the checksum of its `.deb` for
 each architecture, because there is no apt repository to take a signed package
-from. `gh` comes from one, and is pinned by nothing but that.
+from. `gh` comes from one, and is pinned by nothing but that. The `devtunnel`
+CLI is pinned the same way as glab, to a release and to the checksum of each
+build, because Microsoft ships it as a bare binary.
 
 Codex is pinned as a pair, and exactly. `@openai/codex` on npm is a 13 KB
 launcher whose platform binary arrives as an optional dependency of 339 MB, so
@@ -2650,7 +2682,7 @@ orchestrator/src/
   harness.ts            The registry: one record per harness, and every value that varies between them
   credentials.ts        The credential store, and the refresh that keeps a login true
   settings.ts           Git identity and each dialog's last choice, over the settings table
-  login.ts              Logging in to an account: a CLI in a throwaway container, and the state a page polls
+  login.ts              Logging in to an account: a CLI in a throwaway container or GitHub's device flow, and the state a page polls
   secret.ts             WS auth token: configured, stored, or generated
   notify.ts             "A thread wants you", pushed to every subscribed browser
   push.ts               VAPID and RFC 8291 payload encryption, on node:crypto

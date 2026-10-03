@@ -43,6 +43,19 @@ const GITHUB = {
   secret: 'ghp_realrealreal',
 };
 
+/**
+ * The Dev Tunnels credential. Its hosts also see tokens the service issued
+ * for one tunnel, which travel under the `tunnel` scheme.
+ */
+const DEVTUNNELS = {
+  id: 'devtunnels',
+  hosts: ['*.rel.tunnels.api.visualstudio.com'],
+  headers: ['authorization'],
+  passthroughSchemes: ['tunnel'],
+  placeholder: 'ghu_PLACEHOLDER',
+  secret: 'ghu_realrealreal',
+};
+
 /** A policy holding all three credentials, with some fields replaced. */
 const policy = (over: Partial<EgressPolicy> = {}): EgressPolicy => ({
   allowedHosts: [],
@@ -239,6 +252,38 @@ describe('decideCredentials', () => {
       decideCredentials('api.anthropic.com', { 'x-api-key': 'sk-ant-someoneelse' }, policy()).action,
     ).toBe('deny');
   });
+
+  it('passes a value under a pass-through scheme unchanged, and swaps the placeholder', () => {
+    const tunnels = policy({ credentials: [DEVTUNNELS] });
+    const host = 'euw-data.rel.tunnels.api.visualstudio.com';
+    // A token the service minted for one tunnel, which the box got from it.
+    expect(decideCredentials(host, { authorization: 'tunnel eyJhbGciOi.x.y' }, tunnels)).toEqual({
+      action: 'pass',
+    });
+    expect(decideCredentials(host, { authorization: 'Tunnel eyJhbGciOi.x.y' }, tunnels)).toEqual({
+      action: 'pass',
+    });
+    expect(
+      decideCredentials(host, { authorization: `github ${DEVTUNNELS.placeholder}` }, tunnels),
+    ).toEqual({
+      action: 'swap',
+      headers: { authorization: `github ${DEVTUNNELS.secret}` },
+      credentialIds: ['devtunnels'],
+    });
+  });
+
+  it('still refuses a foreign value under any other scheme, or under none', () => {
+    const tunnels = policy({ credentials: [DEVTUNNELS] });
+    const host = 'global.rel.tunnels.api.visualstudio.com';
+    for (const value of ['github ghu_someoneelse', 'Bearer ghu_someoneelse', 'tunnel', 'tunnelx y']) {
+      expect(decideCredentials(host, { authorization: value }, tunnels).action).toBe('deny');
+    }
+    // A pass-through scheme belongs to its own credential's hosts only.
+    expect(
+      decideCredentials('api.github.com', { authorization: 'tunnel eyJhbGciOi.x.y' }, policy())
+        .action,
+    ).toBe('deny');
+  });
 });
 
 describe('policyHash', () => {
@@ -248,6 +293,9 @@ describe('policyHash', () => {
     expect(policyHash(a)).toBe(policyHash(b));
     expect(policyHash(policy({ credentials: [{ ...GITHUB, secret: 'other' }, CLAUDE] }))).not.toBe(
       policyHash(a),
+    );
+    expect(policyHash(policy({ credentials: [DEVTUNNELS] }))).not.toBe(
+      policyHash(policy({ credentials: [{ ...DEVTUNNELS, passthroughSchemes: [] }] })),
     );
   });
 
@@ -272,6 +320,18 @@ describe('parsePolicy', () => {
     });
     expect(parsed.credentials[0]?.headers).toEqual(['authorization']);
     expect(parsed.allowedHosts).toEqual(['github.com', '*.github.com']);
+  });
+
+  it('accepts pass-through schemes, lowercased, and refuses one with a space', () => {
+    const parsed = parsePolicy({
+      ...valid,
+      credentials: [{ ...DEVTUNNELS, passthroughSchemes: ['Tunnel'] }],
+    });
+    expect(parsed.credentials[0]?.passthroughSchemes).toEqual(['tunnel']);
+    expect(parsePolicy(valid).credentials[0]?.passthroughSchemes).toBeUndefined();
+    expect(() =>
+      parsePolicy({ ...valid, credentials: [{ ...DEVTUNNELS, passthroughSchemes: ['a b'] }] }),
+    ).toThrow(/space/);
   });
 
   it('accepts the empty policy the proxy boots with', () => {

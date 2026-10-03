@@ -49,6 +49,15 @@ type RequestDecision =
     };
 
 /**
+ * What the shared checks make of a request: forward it as it stands, swap
+ * these headers, or refuse it for this reason.
+ */
+type Screening =
+  | { action: 'pass' }
+  | { action: 'swap'; headers: Record<string, string>; credentialIds: string[] }
+  | { action: 'refuse'; category: DenialCategory; reason: string };
+
+/**
  * Controller of the interception engine: starts, restarts and stops it as the
  * policy requires.
  */
@@ -130,10 +139,17 @@ export class Interceptor {
           proxyConfig: { proxyUrl: this.opts.upstreamProxyUrl() },
         });
 
-      // The websocket passthrough cannot rewrite headers, so a forwarded
-      // upgrade would carry the placeholder to the host. This rule gives the
-      // same 501 as the front door, in place of the engine's "no rules matched".
-      await server.forAnyWebSocket().thenRejectConnection(501, 'protocol upgrades are not forwarded');
+      // The first rule forwards what upgradeAllowed accepts. The second refuses
+      // the rest, in place of the engine's "no rules matched".
+      await server
+        .forAnyWebSocket()
+        .always()
+        .matching((req) => this.upgradeAllowed(req))
+        .thenPassThrough({ proxyConfig: { proxyUrl: this.opts.upstreamProxyUrl() } });
+      await server
+        .forAnyWebSocket()
+        .always()
+        .thenRejectConnection(403, 'protocol upgrade refused by the egress policy');
 
       await server.on('tls-client-error', (failure) => {
         // The shape of a tool that ignores the CA env vars: it reaches an
@@ -180,10 +196,32 @@ export class Interceptor {
   }
 
   /**
-   * Decides one intercepted request: forward it as it stands, forward it with
-   * the real credential in place of the placeholder, or refuse it here.
+   * Whether an intercepted protocol upgrade may be forwarded as it stands,
+   * which needs it to pass the checks a request passes and to need no swap.
+   *
+   * The engine forwards an upgrade with its headers unchanged, so an upgrade
+   * that needs a swap would hand over the placeholder and is refused. A
+   * refusal is logged and counted.
    */
-  private decide(req: CompletedRequest): RequestDecision {
+  private upgradeAllowed(req: CompletedRequest): boolean {
+    const { host, verdict } = this.screen(req);
+    if (verdict.action === 'pass') return true;
+    const category = verdict.action === 'refuse' ? verdict.category : 'foreign-credential';
+    const reason =
+      verdict.action === 'refuse'
+        ? verdict.reason
+        : 'a credential cannot be swapped into a protocol upgrade';
+    this.opts.denied(category);
+    this.opts.log('denied intercepted upgrade', { host, reason });
+    return false;
+  }
+
+  /**
+   * The checks a request and an upgrade share: that it came through the front
+   * door, that a credential host is reached encrypted, and what its credential
+   * headers allow.
+   */
+  private screen(req: CompletedRequest): { host: string; verdict: Screening } {
     const policy = this.opts.policy();
     let host: string;
     let protocol = '';
@@ -195,37 +233,62 @@ export class Interceptor {
       host = req.destination?.hostname ?? '';
     }
 
-    /** Answers the request here with a 403, and counts the denial. */
-    const refuse = (category: DenialCategory, reason: string): RequestDecision => {
-      this.opts.denied(category);
-      this.opts.log('denied intercepted request', { host, reason });
-      return {
-        response: {
-          statusCode: 403,
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
-          body: `egress denied: ${reason}\n`,
-        },
-      };
-    };
-
     // The engine listens on every interface, and the proxy sits on every box
     // network. Only the front door, over loopback, may reach it, so a box
     // cannot skip the front door's checks.
     if (!isLoopback(req.remoteIpAddress)) {
-      return refuse('blocked-address', 'the interception engine is reachable from the proxy only');
+      return {
+        host,
+        verdict: {
+          action: 'refuse',
+          category: 'blocked-address',
+          reason: 'the interception engine is reachable from the proxy only',
+        },
+      };
     }
 
-    if (protocol !== 'https:' && credentialsForHost(host, policy).length > 0) {
+    const encrypted = protocol === 'https:' || protocol === 'wss:';
+    if (!encrypted && credentialsForHost(host, policy).length > 0) {
       // In the clear a swap would put the real credential on the wire as
       // plaintext, and forwarding unswapped would hand over the placeholder.
-      return refuse('plaintext-credential-host', PLAINTEXT_CREDENTIAL_REASON);
+      return {
+        host,
+        verdict: {
+          action: 'refuse',
+          category: 'plaintext-credential-host',
+          reason: PLAINTEXT_CREDENTIAL_REASON,
+        },
+      };
     }
 
     const verdict = decideCredentials(host, req.headers, policy);
+    if (verdict.action === 'deny') {
+      return {
+        host,
+        verdict: { action: 'refuse', category: 'foreign-credential', reason: verdict.reason },
+      };
+    }
+    return { host, verdict };
+  }
+
+  /**
+   * Decides one intercepted request: forward it as it stands, forward it with
+   * the real credential in place of the placeholder, or refuse it here.
+   */
+  private decide(req: CompletedRequest): RequestDecision {
+    const { host, verdict } = this.screen(req);
     if (verdict.action === 'pass') return;
 
-    if (verdict.action === 'deny') {
-      return refuse('foreign-credential', verdict.reason);
+    if (verdict.action === 'refuse') {
+      this.opts.denied(verdict.category);
+      this.opts.log('denied intercepted request', { host, reason: verdict.reason });
+      return {
+        response: {
+          statusCode: 403,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          body: `egress denied: ${verdict.reason}\n`,
+        },
+      };
     }
 
     // Replacing the header set wholesale is the callback's only option, so the
