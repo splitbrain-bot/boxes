@@ -313,6 +313,18 @@ export interface ThreadSummary {
   lastActiveAt: number;
 }
 
+/** One port of a dev tunnel a box hosts, as the box's views show it. */
+export interface BoxTunnel {
+  /** The tunnel id. */
+  id: string;
+  /** The region the tunnel lives in, such as `euw`. */
+  cluster: string;
+  /** The port in the box the tunnel forwards to. */
+  port: number;
+  /** The public URL of that port. */
+  url: string;
+}
+
 /** A box as returned by the list endpoint. */
 export interface BoxSummary {
   /** The box's id. */
@@ -371,6 +383,11 @@ export interface BoxSummary {
    * again.
    */
   diskBytes: number | null;
+  /**
+   * The dev tunnel ports the box hosts, as the orchestrator read them at its
+   * last minute tick. Empty when it hosts none.
+   */
+  tunnels: BoxTunnel[];
   /** When the box was created, in epoch milliseconds. */
   createdAt: number;
   /** When the box was last active, in epoch milliseconds. */

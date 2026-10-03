@@ -1,5 +1,6 @@
 import {
   FileSearch,
+  Globe,
   HardDrive,
   Info,
   Plus,
@@ -179,6 +180,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
               {shortSize(box.diskBytes)}
             </span>
           )}
+          <TunnelLink box={box} />
         </div>
       </div>
       <Link
@@ -339,3 +341,39 @@ function threadDot(thread: ThreadSummary): { kind: BadgeKind; label: string } {
   return { kind: 'idle', label: 'idle' };
 }
 
+/**
+ * The marker for a box that shares a web app through a dev tunnel. With one
+ * tunnel port it opens that URL, and with several it leads to the info page,
+ * which lists them.
+ */
+function TunnelLink({ box }: { box: BoxSummary }) {
+  const first = box.tunnels[0];
+  if (!first) return null;
+  const className =
+    'inline-flex items-center gap-1 rounded-sm text-xs text-muted-foreground no-underline hover:text-foreground';
+  const label = box.tunnels.length === 1 ? 'Shared' : `Shared ×${box.tunnels.length}`;
+  if (box.tunnels.length === 1) {
+    return (
+      <a
+        href={first.url}
+        target="_blank"
+        rel="noreferrer"
+        className={className}
+        title={`Port ${first.port} is shared at ${first.url}`}
+      >
+        <Globe className="size-3" aria-hidden />
+        {label}
+      </a>
+    );
+  }
+  return (
+    <Link
+      to={`/boxes/${box.id}/info`}
+      className={className}
+      title={`${box.tunnels.length} ports are shared through dev tunnels`}
+    >
+      <Globe className="size-3" aria-hidden />
+      {label}
+    </Link>
+  );
+}

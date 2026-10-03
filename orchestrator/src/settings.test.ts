@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import { openDb, type Db } from './db.ts';
-import { DEFAULT_GIT_EMAIL, DEFAULT_GIT_NAME, patchSettings, readSettings } from './settings.ts';
+import {
+  DEFAULT_GIT_EMAIL,
+  DEFAULT_GIT_NAME,
+  deploymentId,
+  patchSettings,
+  readSettings,
+} from './settings.ts';
 
 let dir: string;
 let db: Db;
@@ -69,4 +75,12 @@ test('a stored value that is not a dialog is ignored rather than fatal', () => {
     0,
   );
   assert.deepEqual(readSettings(db).dialogs, {});
+});
+
+test('the deployment id is generated once and then kept', () => {
+  const first = deploymentId(db);
+  assert.match(first, /^[0-9a-f]{8}$/);
+  assert.equal(deploymentId(db), first);
+  // It is not a setting a person sees.
+  assert.deepEqual(Object.keys(readSettings(db)).sort(), ['dialogs', 'gitEmail', 'gitName']);
 });

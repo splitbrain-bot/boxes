@@ -4,6 +4,7 @@ import { boxTurnActive, boxesWithActiveTurns, type Db, type BoxRow } from './db.
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
 import type { BoxManager } from './boxes.ts';
+import type { TunnelReconciler } from './tunnels.ts';
 
 /** The interval of the reaper, proxy and credential loops, in milliseconds. */
 const TICK_MS = 60_000;
@@ -164,4 +165,13 @@ export function startProxyReconciler(
  */
 export function startCredentialRefresh(credentials: CredentialStore): { stop: () => void } {
   return loop('credential refresh', TICK_MS, () => refreshCredentials(credentials));
+}
+
+/**
+ * Starts the tunnel reconciler and returns a handle that stops it. Every
+ * minute it reads which dev tunnels each box hosts, and deletes the
+ * remembered tunnels that no box has hosted for a few minutes.
+ */
+export function startTunnelReconciler(tunnels: TunnelReconciler): { stop: () => void } {
+  return loop('tunnel reconciler', TICK_MS, () => tunnels.tick());
 }

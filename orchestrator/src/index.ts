@@ -12,6 +12,7 @@ import { claimDataDir } from './lock.ts';
 import { log, setLogLevel } from './log.ts';
 import {
   startCredentialRefresh,
+  startTunnelReconciler,
   startImageRefresher,
   startProxyReconciler,
   startReaper,
@@ -50,7 +51,7 @@ lockDataDir(cfg.DATA_DIR);
 const db = openDb(cfg.DATA_DIR);
 
 /** The HTTP app and the services it built. */
-const { app, manager, credentials, egress, logins, setProxyWarnings } = buildApp(cfg, db);
+const { app, manager, credentials, egress, logins, tunnels, setProxyWarnings } = buildApp(cfg, db);
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
@@ -209,6 +210,7 @@ async function main(): Promise<void> {
   loops.push(startImageRefresher(cfg, manager));
   loops.push(startProxyReconciler(manager, egress, setProxyWarnings));
   loops.push(startCredentialRefresh(credentials));
+  loops.push(startTunnelReconciler(tunnels));
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });
   log.info('orchestrator listening', { port: cfg.PORT });

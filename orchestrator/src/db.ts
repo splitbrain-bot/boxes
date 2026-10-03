@@ -460,6 +460,18 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE boxes DROP COLUMN current_thread_id;
   `,
+  // The dev tunnels boxes have hosted, so that the orchestrator can delete
+  // the ones nobody hosts any more. A row outlives its box on purpose.
+  `
+  CREATE TABLE tunnels (
+    id             TEXT PRIMARY KEY,
+    cluster        TEXT NOT NULL,
+    box_id         TEXT NOT NULL,
+    ports          TEXT NOT NULL,
+    unserved_since INTEGER,
+    created_at     INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** An open database handle. */

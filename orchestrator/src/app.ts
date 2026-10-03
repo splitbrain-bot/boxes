@@ -39,6 +39,7 @@ import {
 import type { Config } from './config.ts';
 import {
   CredentialStore,
+  deliverableSecret,
   isCredentialId,
   undeliverableReason,
   type CredentialId,
@@ -62,7 +63,8 @@ import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { BoxManager } from './boxes.ts';
-import { patchSettings, readSettings } from './settings.ts';
+import { deploymentId, patchSettings, readSettings } from './settings.ts';
+import { devTunnelsApi, TunnelReconciler } from './tunnels.ts';
 import { setBoxOwner } from './workspaces.ts';
 
 /** The HTTP surface: the REST API and the static bundle. */
@@ -214,6 +216,8 @@ export interface Orchestrator {
   credentials: CredentialStore;
   /** The logins in flight, one per credential at most. */
   logins: LoginManager;
+  /** Which dev tunnels each box hosts, and the removal of unserved ones. */
+  tunnels: TunnelReconciler;
   /** Box ids whose network is missing the egress proxy. */
   setProxyWarnings(warnings: string[]): void;
 }
@@ -253,7 +257,17 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // image that is.
   const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.BOX_IMAGE));
   const agents = new AgentStore(db, cfg.DATA_DIR);
-  const manager = new BoxManager(db, cfg, egress, notifier, agents);
+  // The closure lets the reconciler be built before the manager it reads.
+  const tunnels = new TunnelReconciler(
+    db,
+    devTunnelsApi(() => {
+      const row = credentials.get('devtunnels');
+      return row ? deliverableSecret(row) : null;
+    }),
+    deploymentId(db),
+    () => manager.processReadings(),
+  );
+  const manager = new BoxManager(db, cfg, egress, notifier, agents, (id) => tunnels.forBox(id));
   // The manager knows where a box's files are and how to get its container
   // running.
   const review = new ReviewService(db, {
@@ -922,6 +936,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     egress,
     credentials,
     logins,
+    tunnels,
     setProxyWarnings: (warnings) => {
       proxyWarnings = warnings;
     },

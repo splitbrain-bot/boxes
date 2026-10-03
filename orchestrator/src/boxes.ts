@@ -6,6 +6,7 @@ import {
   type HarnessId,
   type BoxDetail,
   type BoxSummary,
+  type BoxTunnel,
   type ThreadOptions,
   type ThreadSummary,
 } from '../../shared/types.ts';
@@ -38,6 +39,7 @@ import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
 import { generateWsToken } from './secret.ts';
 import { readSettings } from './settings.ts';
+import type { BoxReading } from './tunnels.ts';
 import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamBox } from './gateway/upstream.ts';
@@ -129,6 +131,8 @@ export class BoxManager {
      * so the REST routes and the lifecycle share one store.
      */
     private readonly agents: AgentStore,
+    /** The dev tunnel ports a box hosts, as the tunnel reconciler last read them. */
+    private readonly tunnelsOf: (boxId: string) => BoxTunnel[] = () => [],
   ) {
     this.pending = new PendingStore(db);
     this.hostDataDir = cfg.HOST_DATA_DIR || cfg.DATA_DIR;
@@ -1204,6 +1208,27 @@ export class BoxManager {
     this.usage.forget(id);
   }
 
+  /**
+   * The command lines running in every box that has not been deleted, for
+   * the tunnel reconciler. A box whose container is not running has none. A
+   * box whose state or processes cannot be read is reported as null.
+   */
+  async processReadings(): Promise<BoxReading[]> {
+    return Promise.all(
+      this.allRows().map(async (row): Promise<BoxReading> => {
+        const state = await dk.containerState(row.container_id);
+        if (state === 'exited' || state === 'missing') return { boxId: row.id, commands: [] };
+        if (state !== 'running' || !row.container_id) return { boxId: row.id, commands: null };
+        try {
+          const processes = await dk.containerProcesses(row.container_id);
+          return { boxId: row.id, commands: processes.map((p) => p.command) };
+        } catch {
+          return { boxId: row.id, commands: null };
+        }
+      }),
+    );
+  }
+
   /** Summaries of every live box. */
   async list(): Promise<BoxSummary[]> {
     const rows = this.allRows();
@@ -1263,6 +1288,7 @@ export class BoxManager {
         row.id,
         dockerState !== 'exited' && dockerState !== 'missing',
       ),
+      tunnels: this.tunnelsOf(row.id),
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,
     };

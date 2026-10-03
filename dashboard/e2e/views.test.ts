@@ -220,6 +220,30 @@ test('a box whose own conversation is running the work offers no box-wide kill',
   }
 });
 
+test('a box that shares a web app shows it on its card and its info view', async () => {
+  const url = 'https://kfb7sp43-3000.uks1.devtunnels.ms/';
+  stub.createBox({
+    id: 'shared01',
+    name: 'shared app',
+    tunnels: [{ id: 'kfb7sp43', cluster: 'uks1', port: 3000, url }],
+  });
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    // With one port, the marker opens the shared app itself.
+    const marker = page.getByRole('link', { name: 'Shared', exact: true });
+    await expect.poll(() => marker.isVisible()).toBe(true);
+    expect(await marker.getAttribute('href')).toBe(url);
+
+    await page.goto(`${stub.url}/boxes/shared01/info`);
+    await expect.poll(() => page.getByText('Shared web apps').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Port 3000').isVisible()).toBe(true);
+    expect(await page.getByRole('link', { name: url }).getAttribute('href')).toBe(url);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the info view lists what the box is running, whoever left it there', async () => {
   // The card lists the work only inside the kill confirmation. The info view
   // shows it without one.
