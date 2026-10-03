@@ -104,9 +104,8 @@ const KINDS: CredentialKind[] = [
     label: 'Dev Tunnels',
     harnesses: [],
     blurb:
-      'What an agent shows you a running web app with, through a private Microsoft ' +
-      'Dev Tunnels link that only your GitHub account can open. It is a GitHub login, ' +
-      'because the service takes no pasted token.',
+      'What an agent shows you a running web app with, through a Microsoft Dev ' +
+      'Tunnels link. It is a GitHub login, because the service takes no pasted token.',
     hint: null,
     method: 'oauth',
     canLogin: true,
