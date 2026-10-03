@@ -342,17 +342,17 @@ test('a row run stays a list across a message that speaks, and the prose in it s
     await expect
       .poll(() => page.getByText('and that is the answer').isVisible(), { timeout: 10_000 })
       .toBe(true);
-    // Reasoning collapses over 200ms after the turn moves on, so the wait is
-    // for the panels to have no height.
+    // Reasoning collapses over 200ms after the turn moves on. A closed panel
+    // keeps its text until its animation has ended, and that text is markdown
+    // the count below would take for prose, so the wait is for the panels to
+    // have let go of it.
     await expect
       .poll(() =>
-        page.evaluate(() =>
-          [...document.querySelectorAll('[data-slot="reasoning-content"]')].every(
-            (el) => el.getBoundingClientRect().height === 0,
-          ),
+        page.evaluate(
+          () => document.querySelectorAll('[data-slot="reasoning-content"] .aui-md').length,
         ),
       )
-      .toBe(true);
+      .toBe(0);
 
     // The turn as a column: every row and every paragraph in it, in the
     // order they are read, with the space above each.
