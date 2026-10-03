@@ -1,15 +1,15 @@
 ---
 name: share-app
-description: Show a web application that runs in this box to the person you work for, through a private Microsoft Dev Tunnels link that only their GitHub account can open. Use when asked to share, demo or let them try the running app, or to give them a link to it.
+description: Show a web application that runs in this box to the person you work for, through a public Microsoft Dev Tunnels link. Use when asked to share, demo or let them try the running app, or to give them a link to it.
 ---
 
 # Sharing a running web application
 
 The person you work for cannot reach this box's ports. A dev tunnel gives
-a port in this box a public HTTPS URL. The tunnel is private: only the
-GitHub account that the deployment logged in with can open it. The person
-clicks the link, signs in with GitHub once, and sees the application. There
-is no password to pass on.
+a port in this box a public HTTPS URL. Anyone who knows the URL can open
+it, and the URL has a random part that nobody can guess. The person
+clicks the link and sees the application. There is no login and no
+password to pass on.
 
 ## Before you start
 
@@ -20,21 +20,26 @@ is no password to pass on.
   it does not have to listen on all interfaces.
 - The token in `DEVTUNNELS_TOKEN` is a placeholder. The egress proxy swaps
   in the real one. Use it only as shown below, and never print it.
+- The service has a global API host and one per region. The global host
+  learns about a new tunnel minutes late, so after the first step every
+  command names the tunnel's region.
 
 ## Steps
 
-1. Create a tunnel with one port. Replace `3000` with the application's
-   port. The answer holds the tunnel's id, a host token for this tunnel, and
-   the URL.
+1. Create a tunnel with one port that anyone may connect to. Replace
+   `3000` with the application's port. The answer holds the tunnel's id,
+   its region, a host token for this tunnel, and the URL.
 
    ```sh
-   api=https://global.rel.tunnels.api.visualstudio.com/api/v1
-   curl -fsS -X POST "$api/tunnels?tokenScopes=host&includePorts=true" \
+   curl -fsS -X POST \
+     'https://global.rel.tunnels.api.visualstudio.com/api/v1/tunnels?tokenScopes=host&includePorts=true' \
      -H "Authorization: github $DEVTUNNELS_TOKEN" \
      -H 'Content-Type: application/json' \
-     -d '{"ports":[{"portNumber":3000,"protocol":"http"}]}' \
+     -d '{"ports":[{"portNumber":3000,"protocol":"http"}],"accessControl":{"entries":[{"type":"Anonymous","subjects":[],"scopes":["connect"]}]}}' \
      > "$TMPDIR/share-app-tunnel.json"
-   jq -r '.tunnelId, .ports[0].portForwardingUris[0]' "$TMPDIR/share-app-tunnel.json"
+   tunnel=$(jq -r '"\(.tunnelId).\(.clusterId)"' "$TMPDIR/share-app-tunnel.json")
+   api="https://$(jq -r .clusterId "$TMPDIR/share-app-tunnel.json").rel.tunnels.api.visualstudio.com/api/v1"
+   jq -r '.ports[0].portForwardingUris[0]' "$TMPDIR/share-app-tunnel.json"
    ```
 
 2. Host the tunnel as a background command, so it keeps running while the
@@ -42,32 +47,34 @@ is no password to pass on.
    hours.
 
    ```sh
-   devtunnel host "$(jq -r .tunnelId "$TMPDIR/share-app-tunnel.json")" \
+   devtunnel host "$tunnel" \
      --access-token "$(jq -r .accessTokens.host "$TMPDIR/share-app-tunnel.json")"
    ```
 
    It is ready when it prints `Ready to accept connections`.
 
-3. Tell the person the URL from step 1. Say that the first visit asks them
-   to sign in with GitHub, with the account that is logged in on the
-   settings page, and may show a warning page about dev tunnels, where they
-   click "Continue".
+3. Tell the person the URL from step 1. Say that the first visit may show
+   a warning page about dev tunnels, where they click "Continue".
 
 4. When they say they are done, or when you finish the task, stop the
-   `devtunnel` process and delete the tunnel. A tunnel left behind counts
-   against the account's limit of ten.
+   `devtunnel` process and delete the tunnel. A tunnel left behind stays
+   reachable and counts against the account's limit of ten.
 
    ```sh
-   curl -fsS -X DELETE \
-     "$api/tunnels/$(jq -r .tunnelId "$TMPDIR/share-app-tunnel.json")" \
+   curl -fsS -X DELETE "$api/tunnels/${tunnel%%.*}" \
      -H "Authorization: github $DEVTUNNELS_TOKEN"
    ```
 
 ## Problems and fixes
 
-- Creating a tunnel fails because the account has too many: list them with
-  `curl -fsS "$api/tunnels" -H "Authorization: github $DEVTUNNELS_TOKEN"`,
-  and delete the ones no task uses any more.
+- `devtunnel host` says `Login required`: it was given the tunnel id
+  without the region, or the tunnel does not exist. Use the
+  `tunnelId.clusterId` form from step 1.
+- Creating a tunnel fails because the account has too many: list them on
+  each region's host, for example
+  `curl -fsS https://euw.rel.tunnels.api.visualstudio.com/api/v1/tunnels -H "Authorization: github $DEVTUNNELS_TOKEN"`,
+  and delete the ones no task uses any more. The regions are listed by
+  `devtunnel clusters`.
 - The page loads, but the application redirects to `localhost` or rejects
   the request: development servers such as Vite check the `Host` header.
   Add the tunnel's host name to the server's allowed hosts setting.
