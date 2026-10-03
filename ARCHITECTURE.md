@@ -2516,7 +2516,8 @@ applies migrations tracked by `user_version`.
 | `agent_sets` | One row per named set of agent configuration, plus its `AGENTS.md`. The row `global` is seeded and applied to every box |
 | `agent_items` | The skills and slash commands of a set, keyed by set, kind and name |
 | `credentials` | One row per credential the deployment holds: the secret as the harness needs it, the account it is shown as, when it expires, when it was last refreshed, and whether it is believed to work |
-| `settings` | Plain configuration a person sets on the settings page: the git identity, and each thread dialog's last choice |
+| `settings` | Plain configuration a person sets on the settings page: the git identity, and each thread dialog's last choice. Also the deployment's id, which the labels on its dev tunnels carry |
+| `tunnels` | One row per dev tunnel a box has been seen hosting: its id and region, the box that hosted it last, its ports with their URLs, and since when nobody hosts it. A row outlives its box, so the tunnel is still deleted |
 | `harness_catalog` | What each adapter last advertised — its modes and config options — so a dialog with no adapter to ask has something to offer |
 | `counters` | The subnet allocation counter |
 
@@ -2552,6 +2553,7 @@ restart; the resolver that answers the request is in memory only, so
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running box's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
 | Maintenance | 60s, with the reaper | Prunes each box's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
 | Orphan sweep (`boxes.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with boxes that no longer exist. See below |
+| Tunnel reconciler (`reaper.ts`) | 60s | Reads each running box's process table for `devtunnel host <id>.<region>`. A tunnel seen for the first time is read once from the Dev Tunnels API for its ports, labelled with the deployment and the box, and remembered in the `tunnels` table. A remembered tunnel that no box has hosted for five minutes is deleted on its region's API host and forgotten. Apart from those two moments, the loop makes no API call. A box whose processes cannot be read keeps its tunnels. The loop deletes only tunnels it remembers, because the account is a person's GitHub account, and the service's global tunnel list leaves tunnels out |
 | Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login or a Dev Tunnels login whose access token is within the hour of expiring, or a subscription login which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
 
 The list screen polls `GET /api/boxes` every 5 seconds while it is up and
@@ -2704,7 +2706,8 @@ orchestrator/src/
     fs.ts               Contained reads and writes under the workspace: the symlink invariant
     git.ts              The one place a git process is spawned: fixed argv, scrubbed env
   subnet.ts             Per-box /24 allocation
-  reaper.ts             The idle reaper and the proxy reconciler
+  reaper.ts             The idle reaper, the proxy reconciler and the other minute loops
+  tunnels.ts            Which dev tunnels each box hosts, and the deletion of the ones nobody hosts
   log.ts                Structured stderr logging with secret redaction
   gateway/
     activity.ts         Whether the agent is talking on a thread, which silence is the only evidence of

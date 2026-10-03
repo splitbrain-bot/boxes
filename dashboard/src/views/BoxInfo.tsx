@@ -157,6 +157,28 @@ export function BoxInfo() {
         </CardContent>
       </Card>
 
+      {box.tunnels.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Shared web apps</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="flex flex-col gap-1 text-sm">
+              {box.tunnels.map((t) => (
+                <li key={`${t.id}-${t.port}`} className="flex items-baseline gap-2">
+                  <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                    Port {t.port}
+                  </span>
+                  <a href={t.url} target="_blank" rel="noreferrer" className="truncate font-mono text-xs">
+                    {t.url}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
+
       {/* Hidden when empty. The card's badge can show work that is not listed
           here, such as a task an adapter announced on its thread's bar. */}
       {box.boxWork.length > 0 ? (

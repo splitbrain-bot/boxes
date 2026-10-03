@@ -26,6 +26,7 @@ import type {
   ReviewFileResponse,
   BoxWork,
   BoxSummary,
+  BoxTunnel,
   Settings,
   ThreadOptions,
 } from '../../shared/types.ts';
@@ -212,6 +213,8 @@ export interface BoxSpec {
    * adapter announced is not a process of its own.
    */
   boxWork?: BoxWork[];
+  /** The dev tunnel ports the box hosts, as the tunnel reconciler reports them. */
+  tunnels?: BoxTunnel[];
   /** How many browsers the gateway has on this box. */
   attachedCount?: number;
   /** Whether the adapter advertises forking, which the list offers. */
@@ -658,6 +661,7 @@ function createBox(
   upstream.backgroundActive = spec.backgroundBusy ?? upstream.workingThreads.length > 0;
   upstream.boxWork = spec.boxWork ?? [];
   upstream.attachedCount = spec.attachedCount ?? 0;
+  app.tunnels.setServedForTests(id, spec.tunnels ?? []);
 
   if (spec.diskBytes !== undefined && !legacy) {
     sparseFile(join(ws.workspacePath(cfg.DATA_DIR, id), 'checkout.bin'), spec.diskBytes);

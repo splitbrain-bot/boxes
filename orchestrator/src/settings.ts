@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { Settings, ThreadDialogDefaults } from '../../shared/types.ts';
 import type { Db } from './db.ts';
 
@@ -17,6 +18,9 @@ const GIT_NAME = 'git.name';
 
 /** Settings key of the git author email. */
 const GIT_EMAIL = 'git.email';
+
+/** Settings key of the deployment's id. */
+const DEPLOYMENT_ID = 'deployment.id';
 
 /** Returns the settings key that holds one harness's last dialog choice. */
 function dialogKey(harnessId: string): string {
@@ -73,6 +77,21 @@ export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
   })();
 
   return readSettings(db);
+}
+
+/**
+ * Returns the deployment's id, a short random hex string, and generates and
+ * stores it on first use. Labels on shared resources carry it, so that two
+ * deployments on one account tell their resources apart.
+ */
+export function deploymentId(db: Db): string {
+  const stored = readAll(db)[DEPLOYMENT_ID];
+  if (stored) return stored;
+  const id = randomBytes(4).toString('hex');
+  db.prepare(
+    'INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)',
+  ).run(DEPLOYMENT_ID, id, Date.now());
+  return readAll(db)[DEPLOYMENT_ID] ?? id;
 }
 
 /** Returns every stored row as a map of key to value. */
