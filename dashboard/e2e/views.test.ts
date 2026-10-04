@@ -43,12 +43,12 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/', scheme);
     try {
       await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('2 approvals waiting').isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('running turn').isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('still running').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('2 approvals').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('thinking').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('1 job').isVisible()).toBe(true);
       // The thread that is running it, said in a dot and readable as words.
       await expect
-        .poll(() => page.getByRole('img', { name: 'something still running' }).isVisible())
+        .poll(() => page.getByRole('img', { name: 'jobs' }).isVisible())
         .toBe(true);
       // Time since each thread was active, and disk use per box. The seconds
       // are matched by shape, because the clock moves while the page loads.
@@ -229,7 +229,7 @@ test('a box that shares a web app shows it on its card and its info view', async
   });
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
-    await expect.poll(() => page.getByText('shared', { exact: true }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('1 tunnel', { exact: true }).isVisible()).toBe(true);
 
     await page.goto(`${stub.url}/boxes/shared01/info`);
     await expect.poll(() => page.getByText('Shared web apps').isVisible()).toBe(true);

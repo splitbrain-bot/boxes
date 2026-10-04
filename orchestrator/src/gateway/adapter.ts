@@ -335,6 +335,11 @@ export class AdapterConnection {
     return this.tasks.any;
   }
 
+  /** How many tasks this adapter has running, across its conversations. */
+  get taskCount(): number {
+    return this.tasks.count;
+  }
+
   /**
    * Stops one task of a conversation, or every task it has, through
    * `_session/async_task/stop`. A `session/cancel` does not reach a

@@ -350,6 +350,12 @@ export interface BoxSummary {
    * thread owns it, is on {@link TurnStateParams.background}.
    */
   backgroundBusy: boolean;
+  /**
+   * How many pieces of background work the box has running: the tasks its
+   * adapters announced, or what the box reading found where none did. Zero
+   * while {@link backgroundBusy} is false.
+   */
+  backgroundCount: number;
   /** Permission requests waiting for a browser to answer them, on any thread. */
   pendingCount: number;
   /**

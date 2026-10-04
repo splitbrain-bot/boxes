@@ -108,6 +108,13 @@ export class TaskBoard {
     return this.threads.length > 0;
   }
 
+  /** How many tasks this adapter has running, across its conversations. */
+  get count(): number {
+    let total = 0;
+    for (const tasks of this.byThread.values()) total += tasks.size;
+    return total;
+  }
+
   /**
    * Forgets one task. A stop also calls this, because an adapter that answers
    * `stopped: false` sends no final state update.
