@@ -2,14 +2,32 @@
 # PID 1 only holds the container open. The gateway runs the ACP adapter as a
 # docker exec, so browser churn never restarts it.
 #
-# Ubuntu for its current language toolchains, and Node from NodeSource, so
-# each can stay current on its own.
+# A new box's home is a copy of /home/agent, seeded once and never refreshed.
+# A tool that must follow the image is installed outside the home.
+#
+# Three stages: image installs everything, test checks it, and the last stage
+# ships image once test has passed.
+
+# Build arguments the test stage checks the image against. A stage sees one
+# only after it names it again with a bare ARG.
+ARG NODE_MAJOR=26
+ARG NIX_VERSION=2.34.8
+ARG CODEX_VERSION=0.156.1
+
+# The agent's own account. 1020 keeps clear of the ubuntu user at 1000, which
+# is often a person on the host.
+#
+# These must match the orchestrator's BOX_UID and BOX_GID, whose defaults are
+# the same numbers. A new box's home is a copy of /home/agent with its owners.
+# The orchestrator warns at boot when the image's user differs.
+ARG AGENT_UID=1020
+ARG AGENT_GID=1020
 
 # Nix as one statically linked binary from the official binary cache. /nix is
 # a per-box bind, so the binary lives in /usr/local/bin and follows the image.
 #
 # nix copy checks the cache's signature for the pinned store path. A bump
-# changes both paths and NIX_VERSION below. The stage runs on the build
+# changes both paths and NIX_VERSION above. The stage runs on the build
 # platform, because copying a store path executes nothing.
 FROM --platform=$BUILDPLATFORM nixos/nix:2.35.2 AS nix-static
 ARG TARGETARCH
@@ -23,7 +41,7 @@ RUN case "$TARGETARCH" in \
  && nix --extra-experimental-features nix-command copy --from https://cache.nixos.org "$path" \
  && cp -a "$path/bin" /out
 
-FROM ubuntu:26.04
+FROM ubuntu:26.04 AS image
 
 # Marks copies of this image, so the orchestrator can find and remove an
 # untagged copy after a pull replaced it.
@@ -38,7 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Node from NodeSource, because Ubuntu's own stays at the release's version.
 # The key is ASCII-armoured, so signed-by takes it without gnupg. nodistro is
 # NodeSource's suite for every distribution.
-ARG NODE_MAJOR=26
+ARG NODE_MAJOR
 RUN install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       -o /etc/apt/keyrings/nodesource.asc \
@@ -52,8 +70,7 @@ RUN install -d -m 0755 /etc/apt/keyrings \
 # running, and to stop it by pid.
 #
 # The dashboard's terminal attaches to tmux, so a shell and its scrollback
-# outlive a closed tab. The tmux socket lies in the /tmp tmpfs, so a restarted
-# box starts without a session.
+# outlive a closed tab.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
@@ -146,8 +163,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Tools for documents, archives and databases. /usr is read-only at runtime,
-# so the agent cannot add them later. They add a few hundred megabytes. A
-# derived image can remove them.
+# so the agent cannot add them later.
 #
 # fd-find installs its binary as fdfind, and 7zip is the package that
 # replaced p7zip-full.
@@ -182,20 +198,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # uv, which the archive does not carry. PIPX_HOME and PIPX_BIN_DIR point at
-# /usr/local for this one command, so uv lives on the image. A box's home is
-# seeded once and never refreshed, so a tool installed there would stay at
-# its first version.
-#
-# uv tool install and uv python install write to the home, so the agent can
-# fetch a Python without privileges.
+# /usr/local for this one command, so uv lives on the image and not in the
+# home.
 RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
  && rm -rf /root/.cache
 
 # Nix from the first stage, and its system configuration. With it, the agent
-# installs tools, services and flake environments into the box's own /nix
-# without privileges. An agent's ~/.config/nix/nix.conf is read on top of
-# /etc/nix/nix.conf.
-ARG NIX_VERSION=2.34.8
+# installs tools and services into the box's own /nix without privileges.
 COPY --from=nix-static /out/ /usr/local/bin/
 COPY nix.conf /etc/nix/nix.conf
 
@@ -218,41 +227,31 @@ RUN npm install -g --prefix /usr/local \
 # @openai/codex. --omit=optional leaves that nested copy without a binary, and
 # CODEX_PATH points the adapter at the global one. A person's codex and the
 # adapter's codex are then the same build. The identity check below proves it.
-ARG CODEX_VERSION=0.156.1
+ARG CODEX_VERSION
 RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
  && npm install -g --prefix /usr/local --omit=optional \
       @agentclientprotocol/codex-acp@1.13.0 \
  && npm cache clean --force
 ENV CODEX_PATH=/usr/local/bin/codex
 
-# Codex's system configuration. It selects a provider without the WebSocket
-# transport, which the egress proxy refuses.
+# Codex's system configuration.
 COPY codex-config.toml /etc/codex/config.toml
 
-# @playwright/cli and Chromium.
+# @playwright/cli and Chromium. The CLI is 0.1.x, so the caret pins the minor.
 #
-# The CLI snapshots a page as an accessibility tree with a [ref=eN] handle on
-# each element, and its commands act on those refs. A daemon keeps the browser
-# open between commands. The entrypoint installs the CLI's own skill. The CLI
-# is 0.1.x and depends on a prerelease Playwright, so the caret pins the minor.
+# Playwright's Chromium, because Ubuntu's chromium package is a snap wrapper
+# and snapd does not run here. --with-deps installs the libraries and fonts
+# the browser needs.
 #
-# Only Chromium is installed. Ubuntu's chromium package is a snap wrapper, and
-# snapd does not run here. --with-deps installs Playwright's library list for
-# this distribution, including the fonts for non-Latin scripts.
-#
-# The browsers live on the image at BOXES_IMAGE_BROWSERS.
+# The browsers live on the image at BOXES_IMAGE_BROWSERS, and
 # PLAYWRIGHT_BROWSERS_PATH points there only during the build. libnss3-tools
-# provides certutil, which the entrypoint uses to add the deployment CA to
+# provides certutil, with which the entrypoint adds the deployment CA to
 # Chromium's store.
 #
 # /usr/local/bin/chromium is a stable path to the image's Chromium, for a
 # project whose own Playwright wants another revision. /usr/local/bin/playwright
 # is the Playwright CLI nested under @playwright/cli, so a box can download
 # Firefox and WebKit without npx.
-#
-# Pointed at an unwritable browsers path, playwright install chromium hangs
-# on the proxy without output. The note the entrypoint adds to the skill tells
-# an agent not to run it.
 ARG PLAYWRIGHT_CLI_VERSION=^0.1.19
 ENV BOXES_IMAGE_BROWSERS=/opt/playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=${BOXES_IMAGE_BROWSERS}
@@ -271,8 +270,7 @@ RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION}
 # The system libraries of Firefox and WebKit, without the browsers. A box can
 # download a browser as the agent, but cannot install libraries without root.
 # Library names do not depend on the Playwright revision, so this serves the
-# Playwright of any project. A deployment that uses only Chromium can delete
-# this block and the Firefox and WebKit check below.
+# Playwright of any project.
 #
 # install-deps is a command of the playwright-core that @playwright/cli nests,
 # so the path names it directly. The dry run fails if any package is still
@@ -285,23 +283,21 @@ RUN pw=/usr/local/lib/node_modules/@playwright/cli/node_modules/.bin/playwright 
  && "$pw" install-deps --dry-run firefox webkit \
  && rm -rf /var/lib/apt/lists/*
 
+# At runtime, Playwright uses a writable directory in the home, into which
+# the entrypoint links the image's builds at every start.
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
+
 # The CLI's base configuration. The entrypoint adds the egress proxy at
-# runtime. The file explains each key.
+# runtime.
 COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
 # Skills the image carries, such as how nix works in a box. The entrypoint
 # installs them into the home at every start.
 COPY skills /usr/local/share/boxes/skills
 
-# The agent's own account. 1020 keeps clear of the ubuntu user at 1000, which
-# is often a person on the host.
-#
-# These must match the orchestrator's BOX_UID and BOX_GID, whose defaults are
-# the same numbers. A new box's home is a copy of /home/agent with its owners.
-# The orchestrator warns at boot when the image's user differs.
-ARG AGENT_UID=1020
-ARG AGENT_GID=1020
-
+# The agent's own account, with the uid and gid from the top of this file.
+ARG AGENT_UID
+ARG AGENT_GID
 RUN groupadd -g "${AGENT_GID}" agent \
  && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -m -d /home/agent -s /bin/bash agent
 
@@ -319,15 +315,12 @@ ENV HOME=/home/agent \
 # The agent installs its own tools into the persistent home, because the
 # root filesystem is read-only and the agent is not root.
 #
-# Set after the global installs above, which belong on the image. A home is
-# seeded once and never refreshed, so a global there would miss every image
-# update.
+# Set after the global installs above, which belong on the image.
 ENV NPM_CONFIG_PREFIX=/home/agent/.local \
     PIPX_HOME=/home/agent/.local/pipx \
     PIPX_BIN_DIR=/home/agent/.local/bin
 
-# Go, Cargo and Composer install binaries under $HOME already. These entries
-# put those directories on PATH.
+# Where Go, Cargo and Composer install binaries.
 ENV PATH=/home/agent/.local/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/agent/.config/composer/vendor/bin:$PATH
 
 # Where nix profile add links what the agent installs. nix.conf selects the
@@ -358,13 +351,30 @@ RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/age
       /home/agent/.codex /home/agent/.claude
 
 # Claude Code's user settings for a new box, without commit and pull request
-# attribution. Only new boxes get a changed file, because a home is seeded
-# once.
+# attribution.
 COPY --chown=agent:agent claude-settings.json /home/agent/.claude/settings.json
 
 # Numeric, so the uid is readable from the image itself.
 USER ${AGENT_UID}
 WORKDIR /workspace
+
+# Temporary files go to disk rather than to the 512 MB /tmp tmpfs, which
+# counts against the box's memory limit. Set at the end of the stage, so no
+# install step writes into the home.
+ENV TMPDIR=/home/agent/.cache/tmp
+
+# Checks the image. Nothing here reaches the shipped image, so the checks
+# need no cleanup.
+FROM image AS test
+ARG AGENT_UID
+ARG AGENT_GID
+ARG NIX_VERSION
+ARG CODEX_VERSION
+ARG NODE_MAJOR
+
+# The entrypoint creates TMPDIR at runtime. The Go and Rust builds below need
+# it now.
+RUN mkdir -p "$TMPDIR"
 
 # Checks the user, the writable directories, the npm prefix and the tool
 # locations. Each failure here would be silent otherwise: an ARG out of scope
@@ -399,8 +409,7 @@ RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
 # Every added tool resolves by the name the agent uses. This catches a package
 # renamed to a virtual one that installs nothing useful.
 #
-# timeout comes from the base image. The orchestrator wraps local commands in
-# it, because the daemon cannot signal a running exec.
+# timeout comes from the base image, and the orchestrator relies on it.
 RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
@@ -415,7 +424,7 @@ RUN set -eu; \
 #
 # A loopback python server serves the page, because the CLI blocks file: URLs.
 # The config goes into the working directory's .playwright/, because only open
-# takes --config, and a config in ~/.playwright would end up in every home.
+# takes --config.
 RUN set -eu; \
     cd /tmp; \
     printf '<!doctype html><title>t</title><button>Continue</button>\n' > index.html; \
@@ -431,19 +440,15 @@ RUN set -eu; \
     playwright-cli open http://127.0.0.1:18901/; \
     playwright-cli snapshot >/dev/null; \
     grep -qE 'button "Continue" \[ref=e[0-9]+\]' .playwright-cli/*.yml; \
-    playwright-cli close; \
-    rm -rf /tmp/index.html /tmp/.playwright /tmp/.playwright-cli
+    playwright-cli close
 
 # Firefox and WebKit launch, downloaded as the agent into the home the way a
 # box gets them. install-deps reports installed packages, not a browser that
 # starts. Playwright maps this Ubuntu release to an older release's Firefox
 # build, so Firefox is the likeliest to fail.
 #
-# The export uses a box's runtime path, which the ENV below sets only later.
-# The download is removed at the end, because the home is copied into every
-# new box. playwright-core is required by path, as for install-deps.
+# playwright-core is required by path, as for install-deps.
 RUN set -eu; \
-    export PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright; \
     deps=/usr/local/lib/node_modules/@playwright/cli/node_modules; \
     "$deps/.bin/playwright" install firefox webkit; \
     node -e ' \
@@ -459,19 +464,11 @@ RUN set -eu; \
           console.log(name + " ok"); \
         } \
       })().catch((e) => { console.error(e); process.exit(1); }); \
-    ' "$deps/playwright-core"; \
-    rm -rf /home/agent/.cache
-
-# At runtime, Playwright uses a writable directory in the home. The entrypoint
-# links the image's builds into it at every start, and a project's own
-# download lands beside the links. With it, playwright install chromium finds
-# the links and returns at once, instead of hanging.
-ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
+    ' "$deps/playwright-core"
 
 # Chromium resolves through a symlink of the kind the entrypoint writes. This
 # relies on Playwright not resolving the real path of its browsers directory,
-# which is undocumented. A throwaway directory keeps the links out of the
-# image's home.
+# which is undocumented.
 RUN set -eu; \
     seed=/tmp/browsers-seed; \
     mkdir -p "$seed"; \
@@ -492,12 +489,10 @@ RUN set -eu; \
         } \
         console.log("chromium resolves through a link"); \
       })().catch((e) => { console.error(e); process.exit(1); }); \
-    ' /usr/local/lib/node_modules/@playwright/cli/node_modules/playwright-core; \
-    rm -rf "$seed"
+    ' /usr/local/lib/node_modules/@playwright/cli/node_modules/playwright-core
 
 # Go, Rust and PHP each build something as the agent, which proves their
-# caches go under /home/agent. The caches are removed, because the home is
-# copied into every new box.
+# caches go under /home/agent.
 RUN set -eu; \
     cd /tmp; \
     printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("ok") }\n' > hello.go; \
@@ -508,16 +503,12 @@ RUN set -eu; \
     cd /tmp/hello-rs && cargo build --quiet --offline && ./target/debug/hello-rs >/dev/null; \
     command -v rustfmt >/dev/null && command -v cargo-clippy >/dev/null; \
     test "$(php -r 'echo "ok";')" = "ok"; \
-    composer --version >/dev/null; \
-    cd /tmp && rm -rf hello.go /tmp/hello-rs \
-      /home/agent/.cache /home/agent/go /home/agent/.cargo /home/agent/.config/composer
+    composer --version >/dev/null
 
-# Temporary files go to disk rather than to the 512 MB /tmp tmpfs, which
-# counts against the box's memory limit. Tools that hardcode /tmp still use
-# the tmpfs.
-#
-# Set last, so no build step leaves files in the home. The entrypoint creates
-# and empties the directory at every start.
-ENV TMPDIR=/home/agent/.cache/tmp
+RUN touch /tmp/checks-passed
 
+# The shipped image. Copying the marker makes this stage depend on the test
+# stage, so a failed check fails the build.
+FROM image
+COPY --from=test /tmp/checks-passed /etc/boxes/checks-passed
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
