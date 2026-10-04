@@ -141,7 +141,7 @@ export function devTunnelsApi(token: () => string | null): TunnelApi {
 }
 
 /** Reads one tunnel object from an API answer. */
-function toRemote(raw: unknown): RemoteTunnel {
+export function toRemote(raw: unknown): RemoteTunnel {
   const t = (raw ?? {}) as {
     tunnelId?: unknown;
     clusterId?: unknown;
@@ -154,11 +154,25 @@ function toRemote(raw: unknown): RemoteTunnel {
     labels: Array.isArray(t.labels) ? t.labels.filter((l): l is string => typeof l === 'string') : [],
     ports: (t.ports ?? []).map((p) => ({
       port: Number(p.portNumber ?? 0),
-      url: Array.isArray(p.portForwardingUris) && typeof p.portForwardingUris[0] === 'string'
-        ? p.portForwardingUris[0]
+      url: Array.isArray(p.portForwardingUris)
+        ? (p.portForwardingUris.find(
+            (u): u is string => typeof u === 'string' && onDefaultPort(u),
+          ) ?? null)
         : null,
     })),
   };
+}
+
+/**
+ * Whether a URL names no port of its own. The service also offers each
+ * port's URL on that port number, which a visitor's network may block.
+ */
+function onDefaultPort(url: string): boolean {
+  try {
+    return new URL(url).port === '';
+  } catch {
+    return false;
+  }
 }
 
 /** One row of the tunnels table. */
@@ -315,6 +329,9 @@ function toBoxTunnels(row: TunnelRow): BoxTunnel[] {
     id: row.id,
     cluster: row.cluster,
     port: p.port,
-    url: p.url ?? `https://${row.id}-${p.port}.${row.cluster}.devtunnels.ms/`,
+    url:
+      p.url !== null && onDefaultPort(p.url)
+        ? p.url
+        : `https://${row.id}-${p.port}.${row.cluster}.devtunnels.ms/`,
   }));
 }

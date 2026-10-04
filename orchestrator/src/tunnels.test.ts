@@ -10,6 +10,7 @@ import {
   hostedTunnels,
   TUNNEL_GRACE_MS,
   TunnelReconciler,
+  toRemote,
   type BoxReading,
   type RemoteTunnel,
   type TunnelApi,
@@ -134,6 +135,35 @@ test('a newly served tunnel is read and labelled once, then remembered', async (
   assert.deepEqual(reconciler.forBox('box1'), [
     { id: 'abc123', cluster: 'euw', port: 3000, url: 'https://abc123-3000.euw.devtunnels.ms/' },
   ]);
+});
+
+test('of the URLs the service lists for a port, the one on the standard port is taken', () => {
+  const read = toRemote({
+    tunnelId: 'abc123',
+    clusterId: 'euw',
+    labels: [],
+    ports: [
+      {
+        portNumber: 3000,
+        portForwardingUris: [
+          'https://abc123.euw.devtunnels.ms:3000/',
+          'https://abc123-3000.euw.devtunnels.ms/',
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(read.ports, [{ port: 3000, url: 'https://abc123-3000.euw.devtunnels.ms/' }]);
+});
+
+test('a URL remembered with its own port number is shown on the standard port', () => {
+  // A remembered URL on its own port number.
+  db.prepare(
+    `INSERT INTO tunnels (id, cluster, box_id, ports, unserved_since, created_at)
+     VALUES ('abc123', 'euw', 'box1', ?, NULL, 1)`,
+  ).run(JSON.stringify([{ port: 3000, url: 'https://abc123.euw.devtunnels.ms:3000/' }]));
+  const reconciler = reconcilerFor(fakeApi([]).api, () => []);
+
+  assert.equal(reconciler.forBox('box1')[0]?.url, 'https://abc123-3000.euw.devtunnels.ms/');
 });
 
 test('an unserved tunnel is deleted after the grace period, and forgotten', async () => {

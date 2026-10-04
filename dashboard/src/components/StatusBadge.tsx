@@ -2,7 +2,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
 /** What a badge reports, which picks its colour. */
-export type BadgeKind = 'running' | 'turn' | 'task' | 'waiting' | 'error' | 'idle';
+export type BadgeKind = 'running' | 'turn' | 'task' | 'shared' | 'waiting' | 'error' | 'idle';
 
 /**
  * The dot colour for each kind. Thread rows also use it for their bullet.
@@ -12,6 +12,7 @@ export const DOT: Record<BadgeKind, string> = {
   turn: 'bg-primary animate-pulse',
   // The turn's colour without the pulse, because the agent is not speaking.
   task: 'bg-primary/60',
+  shared: 'bg-shared',
   waiting: 'bg-warn animate-pulse',
   error: 'bg-danger',
   idle: 'bg-idle',

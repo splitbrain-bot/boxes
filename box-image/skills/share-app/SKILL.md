@@ -39,8 +39,13 @@ password to pass on.
      > "$TMPDIR/share-app-tunnel.json"
    tunnel=$(jq -r '"\(.tunnelId).\(.clusterId)"' "$TMPDIR/share-app-tunnel.json")
    api="https://$(jq -r .clusterId "$TMPDIR/share-app-tunnel.json").rel.tunnels.api.visualstudio.com/api/v1"
-   jq -r '.ports[0].portForwardingUris[0]' "$TMPDIR/share-app-tunnel.json"
+   jq -r 'first(.ports[0].portForwardingUris[] | select(test("\\.ms:[0-9]+/") | not))' \
+     "$TMPDIR/share-app-tunnel.json"
    ```
+
+   The service also lists a URL with the port number after the host name.
+   Do not use that one: it needs the port open on the visitor's network.
+   The command above picks the URL on the standard HTTPS port.
 
 2. Host the tunnel as a background command, so it keeps running while the
    turn ends. The host token works for this one tunnel only and lasts 24
