@@ -326,6 +326,7 @@ install_image_skill() {
 }
 install_image_skill nix
 install_image_skill share-app
+install_image_skill diagrams
 
 # --- git identity -----------------------------------------------------------
 if [ -n "${GIT_NAME:-}" ]; then

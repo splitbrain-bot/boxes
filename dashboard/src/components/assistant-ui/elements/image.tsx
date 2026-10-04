@@ -258,9 +258,16 @@ function ImageFilename({
 type ImageZoomProps = PropsWithChildren<{
   src: string;
   alt?: string;
+  /** Boxes edit: classes for the image in the full screen view. */
+  contentClassName?: string;
 }>;
 
-function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
+function ImageZoom({
+  src,
+  alt = "Image preview",
+  contentClassName,
+  children,
+}: ImageZoomProps) {
   const [isMounted, setIsMounted] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -349,7 +356,10 @@ function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
               data-slot="image-zoom-content"
               src={src}
               alt={alt}
-              className="aui-image-zoom-content fade-in zoom-in-95 animate-in max-h-[90vh] max-w-[90vw] cursor-zoom-out object-contain duration-200"
+              className={cn(
+                "aui-image-zoom-content fade-in zoom-in-95 animate-in max-h-[90vh] max-w-[90vw] cursor-zoom-out object-contain duration-200",
+                contentClassName,
+              )}
               onClick={(e) => {
                 e.stopPropagation();
                 handleClose();
