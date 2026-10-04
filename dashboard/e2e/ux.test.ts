@@ -550,6 +550,51 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
   }
 });
 
+// An agent draws a diagram as a mermaid code block. Half a diagram does not
+// parse, so the source shows until the message is complete.
+test('a mermaid block shows its source while streaming, then a diagram that opens full screen', async () => {
+  const diagram = '```mermaid\nflowchart LR\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Answer]\n  B -->|no| D[Fetch]\n```';
+  const broken = '```mermaid\nflowchart LR\n  A --> -->\n```';
+  await start({
+    prompts: [
+      {
+        match: () => true,
+        updates: reply(`here it is\n\n${diagram}\n\nand a broken one\n\n${broken}\n`),
+        hold: true,
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  try {
+    const input = page.getByLabel('Message input');
+    await input.fill('draw it');
+    await input.press('Control+Enter');
+
+    await expect
+      .poll(() => page.getByText('A[Request] --> B{Cached?}').isVisible(), { timeout: 10_000 })
+      .toBe(true);
+    expect(await page.locator('.aui-md-mermaid').count()).toBe(0);
+
+    stub.gateway.release();
+    const image = page.locator('.aui-md-mermaid img');
+    await expect.poll(() => image.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
+    // The broken one keeps its source, and says why.
+    expect(await page.locator('.aui-md-mermaid').count()).toBe(1);
+    await expect.poll(() => page.getByText('This diagram could not be drawn.').isVisible()).toBe(true);
+    await shoot(page, 'mermaid-phone');
+
+    await image.click();
+    const zoomed = page.locator('[data-slot="image-zoom-content"]');
+    await expect.poll(() => zoomed.isVisible()).toBe(true);
+    await shoot(page, 'mermaid-zoomed-phone', 'viewport');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the mode switcher lists the advertised modes and sets one', async () => {
   await start({
     modes: {
