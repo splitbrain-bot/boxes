@@ -15,7 +15,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { NewThreadDialog } from '@/components/NewThreadDialog';
 import { Card } from '@/components/ui/card';
 import { api } from '../api.ts';
-import { STILL_RUNNING } from '@/lib/activity';
+import { JOBS, jobsLabel } from '@/lib/activity';
 import { harnessLabel } from '@/lib/harness';
 import { shortAge, shortSize } from '@/lib/rough';
 import { threadName } from '@/lib/threads';
@@ -23,10 +23,22 @@ import { refresh, useBoxes } from '../stores/boxes.ts';
 import { cn } from '@/lib/utils';
 
 /**
+ * A count with the thing it counts: "1 approval", "3 approvals".
+ *
+ * @param count How many there are.
+ * @param noun The singular noun, which an "s" turns into the plural.
+ * @returns The label.
+ */
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/**
  * Builds the status badges for a box.
  *
  * The turn, task and approval badges cover every thread of the box, so one
- * busy thread makes the box read as busy.
+ * busy thread makes the box read as busy. A badge that has a number to show
+ * carries it.
  *
  * @param s The box.
  * @returns The badges in display order.
@@ -34,29 +46,20 @@ import { cn } from '@/lib/utils';
 export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string }> {
   const badges: Array<{ kind: BadgeKind; label: string }> = [];
   if (s.pendingCount > 0) {
-    badges.push({
-      kind: 'waiting',
-      label: s.pendingCount === 1 ? 'waiting for approval' : `${s.pendingCount} approvals waiting`,
-    });
+    badges.push({ kind: 'waiting', label: counted(s.pendingCount, 'approval') });
   }
   // Uses `speaking`, because a prompt held open for a background subagent is
-  // not a running turn to the reader.
-  if (s.speaking) badges.push({ kind: 'turn', label: 'running turn' });
-  if (s.backgroundBusy) badges.push({ kind: 'task', label: STILL_RUNNING });
+  // not the agent thinking to the reader.
+  if (s.speaking) badges.push({ kind: 'turn', label: 'thinking' });
+  if (s.backgroundBusy) badges.push({ kind: 'task', label: jobsLabel(s.backgroundCount) });
   if (s.tunnels.length > 0) {
-    badges.push({
-      kind: 'shared',
-      label: s.tunnels.length === 1 ? 'shared' : `${s.tunnels.length} shared`,
-    });
+    badges.push({ kind: 'shared', label: counted(s.tunnels.length, 'tunnel') });
   }
   if (s.status === 'error') badges.push({ kind: 'error', label: 'error' });
   else if (s.dockerState === 'running') badges.push({ kind: 'running', label: 'up' });
   else badges.push({ kind: 'idle', label: s.status });
   if (s.attachedCount > 0) {
-    badges.push({
-      kind: 'idle',
-      label: s.attachedCount === 1 ? '1 viewer' : `${s.attachedCount} viewers`,
-    });
+    badges.push({ kind: 'idle', label: counted(s.attachedCount, 'viewer') });
   }
   return badges;
 }
@@ -332,15 +335,15 @@ export function BoxCard({ box }: { box: BoxSummary }) {
 /**
  * Picks the status dot for a thread's row.
  *
- * The checks run in priority order: a waiting approval, then a running turn,
- * then background work.
+ * The checks run in priority order: a waiting approval, then the agent
+ * thinking, then background work.
  *
  * @param thread The thread.
  * @returns The dot's kind and its accessible label.
  */
 function threadDot(thread: ThreadSummary): { kind: BadgeKind; label: string } {
-  if (thread.pendingCount > 0) return { kind: 'waiting', label: 'waiting for approval' };
-  if (thread.speaking) return { kind: 'turn', label: 'running a turn' };
-  if (thread.backgroundBusy) return { kind: 'task', label: 'something still running' };
+  if (thread.pendingCount > 0) return { kind: 'waiting', label: 'approval' };
+  if (thread.speaking) return { kind: 'turn', label: 'thinking' };
+  if (thread.backgroundBusy) return { kind: 'task', label: JOBS };
   return { kind: 'idle', label: 'idle' };
 }

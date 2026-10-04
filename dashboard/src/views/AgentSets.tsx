@@ -78,7 +78,7 @@ export function AgentSets() {
       <BackLink up={up} label="Boxes" />
 
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Agent configuration</h1>
+        <h1 className="text-xl font-semibold">Agent Set Configuration</h1>
         <Button size="sm" onClick={() => setCreating((c) => !c)}>
           <Plus />
           New set
@@ -86,10 +86,10 @@ export function AgentSets() {
       </div>
 
       <p className="text-sm text-muted-foreground">
-        A set is an <code className="font-mono">AGENTS.md</code>, some skills and some slash
-        commands. The global set goes into every box. A box can name one more set when it is
-        created, and the two are merged: the AGENTS.md files are concatenated, and a skill or
-        command in the named set replaces the global one of the same name.
+          An agent set defines an <code className="font-mono">AGENTS.md</code> and optionally some skills.
+          The global set is used for every box by default, but you can select an additional set to be
+          merged with the global one when starting a box. The AGENTS.md files are concatenated,
+          and a skill or command in the named set replaces the global one of the same name.
       </p>
 
       {creating ? (

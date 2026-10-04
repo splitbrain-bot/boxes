@@ -61,7 +61,7 @@ const KINDS: CredentialKind[] = [
     id: 'claude',
     label: 'Claude',
     harnesses: ['claude'],
-    blurb: 'What a Claude Code thread runs on. Without it, a turn fails at the first prompt.',
+    blurb: 'Claude Code authentication. Use `claude setup-token` to use your subscription seat.',
     hint: 'sk-ant-oat01-…, from claude setup-token',
     method: 'token',
     canLogin: true,
@@ -70,7 +70,7 @@ const KINDS: CredentialKind[] = [
     id: 'openai',
     label: 'OpenAI',
     harnesses: ['codex'],
-    blurb: 'What a Codex thread runs on. Without it, a turn fails at the first prompt.',
+    blurb: 'OpenAI Codex authentication. Subscription seats are not supported yet.',
     hint: 'sk-…, an OpenAI API key',
     method: 'api_key',
     canLogin: CODEX_LOGIN_OFFERED,
@@ -80,9 +80,7 @@ const KINDS: CredentialKind[] = [
     label: 'GitHub',
     // No harness runs on it. Every box uses it for git.
     harnesses: [],
-    blurb:
-      'What a box clones and pushes with. Without it, git and gh reach GitHub ' +
-      'unauthenticated and a push is refused.',
+    blurb: 'A personal access token to push and interact with GitHub.',
     hint: 'ghp_…, a classic personal access token',
     method: 'token',
     canLogin: false,
@@ -92,9 +90,8 @@ const KINDS: CredentialKind[] = [
     label: 'GitLab',
     harnesses: [],
     blurb:
-      'What a box clones and pushes with at gitlab.com, or at the instance the ' +
-      'deployment named instead. Without it, git and glab reach it unauthenticated ' +
-      'and a push is refused.',
+      'A personal access token to push and interact with GitLab. Set a custom domain in the settings if your ' +
+      'GitLab is self-hosted.',
     hint: 'glpat-…, a personal access token with the api and write_repository scopes',
     method: 'token',
     canLogin: false,
@@ -104,8 +101,8 @@ const KINDS: CredentialKind[] = [
     label: 'Dev Tunnels',
     harnesses: [],
     blurb:
-      'What an agent shows you a running web app with, through a Microsoft Dev ' +
-      'Tunnels link. It is a GitHub login, because the service takes no pasted token.',
+      'Github based authentication with Microsoft Dev Tunnels service. Used to make box services temporarily '+
+      'accessible from the outside',
     hint: null,
     method: 'oauth',
     canLogin: true,
@@ -199,12 +196,12 @@ export function Settings() {
     <div className="flex flex-col gap-4">
       <BackLink up={up} label="Boxes" />
 
-      <h1 className="text-xl font-semibold">Settings</h1>
+      <h1 className="text-xl font-semibold">Authentication Settings</h1>
 
       <p className="text-sm text-muted-foreground">
-        Credentials are held by this deployment and swapped onto the wire by the egress proxy. A
-        box never holds one: it gets a worthless placeholder of the same shape, so a credential
-        entered here works in every box, including the ones already running.
+          Configure your credentials and the git identity of your boxes here. Credentials are
+          not passed directly to the boxes, but are swapped in by the egress proxy. Agents never
+          see the real secret and thus cannot leak it.
       </p>
 
       {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}

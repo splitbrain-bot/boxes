@@ -403,6 +403,8 @@ class TestUpstream {
   canFork = true;
   /** Whether anything is running in the box, or null before it was read. */
   backgroundActive: boolean | null = false;
+  /** How many pieces of work are running in it, which the badge counts. */
+  backgroundCount = 0;
   /** What a reading of the box found running in it, which the detail carries. */
   boxWork: BoxWork[] = [];
   /** The adapter's ids for the threads the agent is talking on. */
@@ -660,6 +662,9 @@ function createBox(
   });
   upstream.backgroundActive = spec.backgroundBusy ?? upstream.workingThreads.length > 0;
   upstream.boxWork = spec.boxWork ?? [];
+  // A thread with work running counts as one task, as an adapter would
+  // announce it. Work no thread claims is counted from the box reading.
+  upstream.backgroundCount = upstream.workingThreads.length || upstream.boxWork.length;
   upstream.attachedCount = spec.attachedCount ?? 0;
   app.tunnels.setServedForTests(id, spec.tunnels ?? []);
 

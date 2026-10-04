@@ -457,6 +457,21 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
+   * How many pieces of background work the box has running.
+   *
+   * Counts the adapters' announced tasks where there are any, so the number
+   * matches what the threads report. Otherwise the box reading, which also
+   * counts what a dead adapter left behind. Zero before the first reading.
+   */
+  get backgroundCount(): number {
+    const announced = [...this.connections.values()].reduce(
+      (total, conn) => total + conn.taskCount,
+      0,
+    );
+    return announced > 0 ? announced : this.background.work.length;
+  }
+
+  /**
    * What the last reading found running in the box, for a reader deciding
    * whether to stop it.
    *

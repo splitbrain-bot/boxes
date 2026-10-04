@@ -1265,6 +1265,7 @@ export class BoxManager {
       turnActive,
       speaking: speaking.size > 0,
       backgroundBusy: upstream?.backgroundActive ?? false,
+      backgroundCount: upstream?.backgroundCount ?? 0,
       pendingCount,
       attachedCount: upstream?.attachedCount ?? 0,
       wsToken: row.ws_token,
