@@ -1,6 +1,5 @@
 import {
   FileSearch,
-  Globe,
   HardDrive,
   Info,
   Plus,
@@ -44,6 +43,12 @@ export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string
   // not a running turn to the reader.
   if (s.speaking) badges.push({ kind: 'turn', label: 'running turn' });
   if (s.backgroundBusy) badges.push({ kind: 'task', label: STILL_RUNNING });
+  if (s.tunnels.length > 0) {
+    badges.push({
+      kind: 'shared',
+      label: s.tunnels.length === 1 ? 'shared' : `${s.tunnels.length} shared`,
+    });
+  }
   if (s.status === 'error') badges.push({ kind: 'error', label: 'error' });
   else if (s.dockerState === 'running') badges.push({ kind: 'running', label: 'up' });
   else badges.push({ kind: 'idle', label: s.status });
@@ -180,7 +185,6 @@ export function BoxCard({ box }: { box: BoxSummary }) {
               {shortSize(box.diskBytes)}
             </span>
           )}
-          <TunnelLink box={box} />
         </div>
       </div>
       <Link
@@ -339,41 +343,4 @@ function threadDot(thread: ThreadSummary): { kind: BadgeKind; label: string } {
   if (thread.speaking) return { kind: 'turn', label: 'running a turn' };
   if (thread.backgroundBusy) return { kind: 'task', label: 'something still running' };
   return { kind: 'idle', label: 'idle' };
-}
-
-/**
- * The marker for a box that shares a web app through a dev tunnel. With one
- * tunnel port it opens that URL, and with several it leads to the info page,
- * which lists them.
- */
-function TunnelLink({ box }: { box: BoxSummary }) {
-  const first = box.tunnels[0];
-  if (!first) return null;
-  const className =
-    'inline-flex items-center gap-1 rounded-sm text-xs text-muted-foreground no-underline hover:text-foreground';
-  const label = box.tunnels.length === 1 ? 'Shared' : `Shared ×${box.tunnels.length}`;
-  if (box.tunnels.length === 1) {
-    return (
-      <a
-        href={first.url}
-        target="_blank"
-        rel="noreferrer"
-        className={className}
-        title={`Port ${first.port} is shared at ${first.url}`}
-      >
-        <Globe className="size-3" aria-hidden />
-        {label}
-      </a>
-    );
-  }
-  return (
-    <Link
-      to={`/boxes/${box.id}/info`}
-      className={className}
-      title={`${box.tunnels.length} ports are shared through dev tunnels`}
-    >
-      <Globe className="size-3" aria-hidden />
-      {label}
-    </Link>
-  );
 }

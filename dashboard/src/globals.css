@@ -39,6 +39,7 @@
   --warn: #e8c46a;
   --danger: #f2777a;
   --idle: #8a92a6;
+  --shared: #a78bfa;
 }
 
 .dark {
@@ -92,6 +93,7 @@
   --color-warn: var(--warn);
   --color-danger: var(--danger);
   --color-idle: var(--idle);
+  --color-shared: var(--shared);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);

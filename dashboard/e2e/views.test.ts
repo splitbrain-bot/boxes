@@ -229,10 +229,7 @@ test('a box that shares a web app shows it on its card and its info view', async
   });
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
-    // With one port, the marker opens the shared app itself.
-    const marker = page.getByRole('link', { name: 'Shared', exact: true });
-    await expect.poll(() => marker.isVisible()).toBe(true);
-    expect(await marker.getAttribute('href')).toBe(url);
+    await expect.poll(() => page.getByText('shared', { exact: true }).isVisible()).toBe(true);
 
     await page.goto(`${stub.url}/boxes/shared01/info`);
     await expect.poll(() => page.getByText('Shared web apps').isVisible()).toBe(true);
