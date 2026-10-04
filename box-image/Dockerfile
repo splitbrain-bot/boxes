@@ -424,8 +424,10 @@ RUN set -eu; \
 #
 # A loopback python server serves the page, because the CLI blocks file: URLs.
 # The config goes into the working directory's .playwright/, because only open
-# takes --config.
+# takes --config. The browsers path points at the image's builds, because
+# only the entrypoint links them into the home.
 RUN set -eu; \
+    export PLAYWRIGHT_BROWSERS_PATH="$BOXES_IMAGE_BROWSERS"; \
     cd /tmp; \
     printf '<!doctype html><title>t</title><button>Continue</button>\n' > index.html; \
     python3 -m http.server 18901 --bind 127.0.0.1 >/dev/null 2>&1 & \
