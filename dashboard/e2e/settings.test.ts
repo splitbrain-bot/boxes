@@ -28,7 +28,9 @@ for (const scheme of ['light', 'dark'] as const) {
   test(`the settings page renders in ${scheme}`, async () => {
     const { page, errors, close } = await openPage(stub.url, '/settings', scheme);
     try {
-      await expect.poll(() => page.getByText('Git identity').isVisible()).toBe(true);
+      await expect
+        .poll(() => page.getByRole('heading', { name: 'Git identity' }).isVisible())
+        .toBe(true);
       await expect.poll(() => page.getByRole('heading', { name: 'GitHub' }).isVisible()).toBe(true);
       await expect.poll(() => page.getByRole('heading', { name: 'GitLab' }).isVisible()).toBe(true);
       await shoot(page, `settings-${scheme}`);
@@ -134,7 +136,9 @@ test('the box list links to the settings page', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
     await page.getByRole('link', { name: 'Settings' }).click();
-    await expect.poll(() => page.getByText('Git identity').isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('heading', { name: 'Git identity' }).isVisible())
+      .toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
