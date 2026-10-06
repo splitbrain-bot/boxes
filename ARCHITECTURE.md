@@ -1626,10 +1626,9 @@ The container's `HostConfig` is a fixed template that user input never reaches.
 It runs as `BOX_UID:BOX_GID` — numbers rather than the image's `agent`,
 so one setting decides who a box is. The default is 1020, deliberately off
 the 1000 the `ubuntu` base account holds, as does a host's first login user.
-The box image builds its `agent` user on the same numbers, because a
-box's home is copied from the image with the ownership the image gave it,
-and the files inside it stay that way; `ensureBoxImage`
-reads the image's own user back and warns when the two have drifted. Pointing
+The box image's own build-time uid does not have to agree: the home seed
+chowns the copy it takes out of the image to `BOX_UID:BOX_GID`, and every
+other writable path is a bind the orchestrator owns. Pointing
 the orchestrator's own user at `BOX_UID` is what lets it drop root, since
 the workspace chown then has nothing to do. That is a deployment's own
 arrangement — a `user:` on the orchestrator service and a data directory
@@ -1780,10 +1779,12 @@ lost — but `useradd -m` leaves a skeleton `.profile` there, and Debian's
 what puts `~/.local/bin` back. Exec runs `bash -lc`. Without it, a tool the
 agent installed with `npm install -g` would stop being found by the next
 command, silently, in login shells only. So `seedHomeFromImage` copies the
-image's home in through a one-shot root container — `cp -a`, preserving the
-ownership the image gave it, and chowning the directory itself in the same
-breath, which is what makes a home come out right even where the orchestrator
-is not root and cannot chown.
+image's home in through a one-shot root container — `cp -a`, then
+`chown -R` to `BOX_UID:BOX_GID`. The container is what makes a home come out
+right even where the orchestrator is not root and cannot chown. The chown has
+to be recursive: `cp -a` keeps the uid the image was built on, so a
+`BOX_UID` set away from that number would leave the agent with a home
+directory of its own holding files it cannot write.
 
 **Naming the bind source.** Bind sources are resolved by the Docker daemon,
 not by the process asking for the mount, so the orchestrator cannot hand the
@@ -1801,8 +1802,8 @@ path and mount that, so a failure to resolve it is fatal at boot.
 
 **Ownership.** A bind mount, unlike a named volume, is not
 ownership-initialised by Docker, so every path the orchestrator creates in a
-workspace is chowned to `BOX_UID` — the box image's `agent` user,
-1020 by default and named as a constant in `workspaces.ts`. That is what lets the agent write in its own
+workspace is chowned to `BOX_UID` — 1020 by default and named as a constant
+in `workspaces.ts`. That is what lets the agent write in its own
 workspace, and lets it edit or delete the `REVIEW.md` the review surface
 writes there. `workspaces/` itself is 0700: one box's files are not
 another's, and the only thing that reads across all of them is this process.

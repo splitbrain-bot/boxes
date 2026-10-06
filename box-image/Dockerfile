@@ -17,9 +17,9 @@ ARG CODEX_VERSION=0.156.1
 # The agent's own account. 1020 keeps clear of the ubuntu user at 1000, which
 # is often a person on the host.
 #
-# These must match the orchestrator's BOX_UID and BOX_GID, whose defaults are
-# the same numbers. A new box's home is a copy of /home/agent with its owners.
-# The orchestrator warns at boot when the image's user differs.
+# The numbers are the defaults of the orchestrator's BOX_UID and BOX_GID but
+# need not match them: a box runs as BOX_UID:BOX_GID and the orchestrator
+# chowns its home, workspace and Nix store to those numbers.
 ARG AGENT_UID=1020
 ARG AGENT_GID=1020
 

@@ -53,12 +53,9 @@ const schema = z.object({
    * uid box containers run as, and so the owner of every file in a
    * workspace.
    *
-   * The box image has to agree. It builds its `agent` user on the same
-   * numbers through the AGENT_UID and AGENT_GID build args. A new box's home
-   * is a directory that seedHomeFromImage() fills from the image with
-   * `cp -a`, so the files in it keep the owner the image gave them.
-   * ensureBoxImage() reads the image's user and logs a warning when the two
-   * differ.
+   * The box image needs no matching uid: seedHomeFromImage() chowns the home
+   * it copies out of the image, and every other writable path is a bind this
+   * process owns.
    *
    * When this is the uid the orchestrator runs as, the orchestrator needs no
    * root to hand files to the agent.

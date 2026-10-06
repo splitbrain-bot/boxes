@@ -19,8 +19,9 @@ import { log } from './log.ts';
 /**
  * Default uid the box container runs as, and the default of BOX_UID.
  *
- * The box image builds its `agent` user on the same number, through the
- * AGENT_UID build arg, and the two must match.
+ * The box image's own `agent` user is built on the same number, but a
+ * BOX_UID set away from it works too, as every path a box writes to is
+ * chowned to BOX_UID.
  */
 export const DEFAULT_BOX_UID = 1020;
 

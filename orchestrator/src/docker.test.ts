@@ -265,9 +265,12 @@ describe('the container template', () => {
     // A bind mount hides what the image put in /home/agent, so the home is
     // copied from the image. Its skeleton .profile puts ~/.local/bin, where
     // `npm install -g` installs, on the PATH of a login shell.
-    assert.deepEqual(opts['Cmd'], ['cp -a /home/agent/. /to/ && chown 1020:1020 /to']);
-    // As root, so `cp -a` keeps the image's ownership and chown can hand the
-    // directory to the agent. The orchestrator may not run as root itself.
+    //
+    // The chown is recursive: `cp -a` keeps the uid the image was built on,
+    // which is not BOX_UID when the two were set apart.
+    assert.deepEqual(opts['Cmd'], ['cp -a /home/agent/. /to/ && chown -R 1020:1020 /to']);
+    // As root, so the copy and the chown both work. The orchestrator may not
+    // run as root itself.
     assert.equal(opts['User'], 'root');
     assert.equal(host.NetworkMode, 'none');
   }, 30_000);

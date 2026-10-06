@@ -373,18 +373,6 @@ async function inspecting<T>(read: () => Promise<T>): Promise<T | null> {
 }
 
 /**
- * The uid an image's own `USER` names, or null when the user is not numeric
- * or the image is missing.
- */
-export async function imageUserUid(image: string): Promise<number | null> {
-  return inspecting(async () => {
-    const info = await docker().getImage(image).inspect();
-    const user = (info.Config?.User ?? '').split(':')[0] ?? '';
-    return /^\d+$/.test(user) ? Number(user) : null;
-  });
-}
-
-/**
  * The id of an image on this host, or null when it is not here. Comparing ids
  * shows whether a moving tag has moved.
  */
@@ -443,16 +431,17 @@ export async function resolveHostMountSource(destination: string): Promise<strin
 }
 
 /**
- * Fills a box's empty home directory from the image's own `/home/agent`.
+ * Fills a box's empty home directory from the image's own `/home/agent` and
+ * hands the whole copy to the agent.
  *
  * A bind mount hides what the image has at that path, so the copy is needed.
  * It matters most for `.profile`: it puts `~/.local/bin` back on the PATH that
  * Debian's `/etc/profile` resets, and the agent's `npm install -g` tools live
  * there.
  *
- * The copy runs as root with `cp -a`, which keeps the ownership the image gave
- * the contents. The same script chowns the directory itself, so this process
- * needs no right to chown.
+ * The copy runs as root, so this process needs no right to chown. The chown
+ * is recursive, because `cp -a` keeps the uid the image was built on and the
+ * agent must be able to write every file, not only the directory.
  */
 export async function seedHomeFromImage(
   hostDirectory: string,
@@ -465,14 +454,14 @@ export async function seedHomeFromImage(
     image,
     boxId,
     binds: [`${hostDirectory}:/to`],
-    script: `cp -a ${HOME_DIR}/. /to/ && chown ${uid}:${gid} /to`,
+    script: `cp -a ${HOME_DIR}/. /to/ && chown -R ${uid}:${gid} /to`,
   });
 }
 
 /**
  * Runs one short-lived container over a box's files and waits for it.
  *
- * The helper runs as root, because `cp -a` needs root to keep ownership. It
+ * The helper runs as root, because it copies and chowns a box's files. It
  * has no network and a read-only rootfs. Each call site fixes the script, and
  * no part of it comes from user input.
  */

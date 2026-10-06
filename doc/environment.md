@@ -30,8 +30,8 @@ These variables are read by the orchestrator container.
 | `PORT` | `3000` | Positive integer | Port on which the orchestrator listens inside its container. The shipped Compose file publishes port 3000, so changing this also requires a matching Compose change. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` | Lowest severity written to standard error. `debug` logs every forwarded ACP message. |
 | `BOX_IMAGE` | `ghcr.io/splitbrain/boxes/box:latest` | Non-empty image reference | Image used to create boxes. |
-| `BOX_UID` | `1020` | Positive integer | User ID used inside boxes and for workspace files. A custom box image must be built with the matching `AGENT_UID` build argument. |
-| `BOX_GID` | `1020` | Positive integer | Group ID used inside boxes and for workspace files. A custom box image must be built with the matching `AGENT_GID` build argument. |
+| `BOX_UID` | `1020` | Positive integer | User ID used inside boxes and for workspace files. The box image needs no matching `AGENT_UID`, because Boxes chowns a new box's files to this ID. |
+| `BOX_GID` | `1020` | Positive integer | Group ID used inside boxes and for workspace files, on the same terms as `BOX_UID`. |
 | `BOX_IMAGE_PULL_MINUTES` | `60` | Non-negative integer | How often Boxes refreshes the box image. `0` disables scheduled and startup refreshes, but a missing image is still pulled. |
 | `BOX_IMAGE_PRUNE` | `true` | `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` | Removes superseded copies of the box image after refreshes. |
 | `BOX_SUBNET_POOL` | `10.200.0.0/16` | IPv4 CIDR | Address pool from which Boxes allocates each box's private network. |

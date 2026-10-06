@@ -265,40 +265,6 @@ export class BoxManager {
       await dk.pullImage(this.cfg.BOX_IMAGE);
       log.info('pulled the box image', { image: this.cfg.BOX_IMAGE });
     }
-    await this.warnOnBoxUidDrift();
-  }
-
-  /**
-   * Says so when the box image was built on a different uid than
-   * BOX_UID.
-   *
-   * A container can run as any uid, so the workspace bind works either way.
-   * The home does not: seedHomeFromImage() fills a new home from the image's
-   * `/home/agent` with `cp -a`, so its files keep the uid the image was built
-   * on. When the two differ, the agent cannot write its own home and every
-   * turn fails.
-   *
-   * A warning and not a refusal, because the rest of the orchestrator works
-   * and reviewing an existing box needs no container.
-   */
-  private async warnOnBoxUidDrift(): Promise<void> {
-    let imageUid: number | null;
-    try {
-      imageUid = await dk.imageUserUid(this.cfg.BOX_IMAGE);
-    } catch (err) {
-      log.warn('could not read the box image user', { error: (err as Error).message });
-      return;
-    }
-    if (imageUid === null || imageUid === this.cfg.BOX_UID) return;
-    log.warn(
-      'the box image was built on a different uid than BOX_UID; ' +
-        "a box's home will not be writable by the agent",
-      {
-        image: this.cfg.BOX_IMAGE,
-        imageUid,
-        boxUid: this.cfg.BOX_UID,
-      },
-    );
   }
 
   /**
