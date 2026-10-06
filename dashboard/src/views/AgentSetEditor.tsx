@@ -318,7 +318,7 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
   const commands = preview.items.filter((i) => i.kind === 'command');
   return (
     <Card className="flex flex-col gap-3 p-4">
-      <h2 className="text-sm font-medium">What a box using this set gets</h2>
+      <h2 className="text-sm font-medium">Merged result</h2>
       <p className="text-xs text-muted-foreground">
         The global set with this one laid over it — which is what is actually installed.
       </p>
