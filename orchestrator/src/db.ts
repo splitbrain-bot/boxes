@@ -31,22 +31,6 @@ export interface BoxRow {
   network_name: string;
   /** The /24 subnet of the box network. */
   subnet: string;
-  /** The named volume holding an older box's workspace, or empty for a directory. */
-  ws_volume: string;
-  /** The named volume holding an older box's home, or empty for a directory. */
-  home_volume: string;
-  /**
-   * Where the box's workspace was, as this process saw it at create or
-   * migration, or null while the box is still volume-backed. The path in use
-   * is derived from the current DATA_DIR, so this column only says whether
-   * the box has a directory.
-   */
-  workspace_dir: string | null;
-  /**
-   * Where the box's home was, on the same terms as `workspace_dir`, or null
-   * for an older box that runs from its `home_volume`.
-   */
-  home_dir: string | null;
   /**
    * The revision the review is compared against, as the user gave it, such as
    * a branch, a tag or a short id. Null means each repository's working tree.
@@ -471,6 +455,14 @@ export const MIGRATIONS: string[] = [
     unserved_since INTEGER,
     created_at     INTEGER NOT NULL
   );
+  `,
+  // Every box keeps its workspace and home in directories under DATA_DIR,
+  // named by its id, so no row records a volume or a path.
+  `
+  ALTER TABLE boxes DROP COLUMN ws_volume;
+  ALTER TABLE boxes DROP COLUMN home_volume;
+  ALTER TABLE boxes DROP COLUMN workspace_dir;
+  ALTER TABLE boxes DROP COLUMN home_dir;
   `,
 ];
 

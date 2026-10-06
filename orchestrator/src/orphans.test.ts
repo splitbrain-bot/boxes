@@ -18,8 +18,6 @@ interface Fake {
   logins: Map<string, { credentialId: string; createdAt: number }>;
   /** Network name to the id of the box it is labelled with. */
   networks: Map<string, string>;
-  /** Volume name to the id of the box it is labelled with. */
-  volumes: Map<string, string>;
   /** Names of objects the sweep removed, in the order it removed them. */
   removed: string[];
   /** Objects the daemon refuses to remove, by name. */
@@ -49,19 +47,12 @@ function install(fake: Fake): void {
         Labels: { [dk.LOGIN_LABEL]: l.credentialId },
       })),
     ],
-    listNetworks: async () =>
-      [...fake.networks].map(([name, boxId]) => ({
+    listNetworks: async () => {
+      fake.whileListing?.();
+      return [...fake.networks].map(([name, boxId]) => ({
         Name: name,
         Labels: { [dk.LABEL]: boxId },
-      })),
-    listVolumes: async () => {
-      fake.whileListing?.();
-      return {
-        Volumes: [...fake.volumes].map(([name, boxId]) => ({
-          Name: name,
-          Labels: { [dk.LABEL]: boxId },
-        })),
-      };
+      }));
     },
     getContainer: (id: string) => ({
       remove: async () => {
@@ -79,13 +70,6 @@ function install(fake: Fake): void {
         fake.networks.delete(name);
       },
     }),
-    getVolume: (name: string) => ({
-      remove: async () => {
-        refuse(name);
-        fake.removed.push(name);
-        fake.volumes.delete(name);
-      },
-    }),
   } as unknown as Docker);
 }
 
@@ -99,17 +83,13 @@ function insertBox(id: string, status = 'stopped'): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-       status, created_at, last_active_at)
+       network_name, subnet, status, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', ?,
-       ?, '10.200.0.0/24', '', ?, ?, ?, ?, ?, ?)`,
+       ?, '10.200.0.0/24', ?, ?, ?)`,
   ).run(
     id,
     `c-${id}`,
     `bn-${id}`,
-    `home-${id}`,
-    `${dir}/workspaces/${id}`,
-    `${dir}/homes/${id}`,
     status,
     now,
     now,
@@ -120,8 +100,6 @@ function insertBox(id: string, status = 'stopped'): void {
 function insertObjects(id: string): void {
   fake.containers.set(`c-${id}`, { boxId: id, running: false });
   fake.networks.set(`bn-${id}`, id);
-  // Older boxes have a home volume, labelled the same way.
-  fake.volumes.set(`home-${id}`, id);
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
   writeFileSync(join(workspace, 'work.txt'), 'the agent was here');
   const home = ws.createHome(orchestrator.cfg.DATA_DIR, id);
@@ -151,7 +129,6 @@ beforeEach(() => {
     containers: new Map(),
     logins: new Map(),
     networks: new Map(),
-    volumes: new Map(),
     removed: [],
     stuck: new Set(),
   };
@@ -171,7 +148,7 @@ afterEach(async () => {
 });
 
 describe('sweeping objects no box owns', () => {
-  it('takes the container, the network, the volume and every directory', async () => {
+  it('takes the container, the network and every directory', async () => {
     insertBox('live');
     insertObjects('live');
     // A box that was deleted, and whose teardown did not finish.
@@ -180,7 +157,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
     assert.ok(!existsSync(workspaceOf('gone')));
     // The home and the store are the bigger part: the caches and whatever
     // the agent installed at runtime are in them.
@@ -191,18 +168,17 @@ describe('sweeping objects no box owns', () => {
     assert.ok(existsSync(homeOf('live')));
     assert.ok(existsSync(nixOf('live')));
     assert.ok(fake.containers.has('c-live'));
-    assert.ok(fake.volumes.has('home-live'));
   });
 
-  it('removes the container before the network and the volume it holds', async () => {
+  it('removes the container before the network it is on', async () => {
     insertBox('keep');
     insertBox('gone', 'deleted');
     insertObjects('gone');
 
     await orchestrator.manager.sweepOrphans();
 
-    // Docker refuses to remove a network or a volume that a container uses.
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
+    // Docker refuses to remove a network that a container uses.
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
   });
 
   it('leaves a box that is still being created alone', async () => {
@@ -243,7 +219,7 @@ describe('sweeping objects no box owns', () => {
     await orchestrator.manager.sweepOrphans();
 
     // The network stays for the next sweep; nothing behind it is held up.
-    assert.deepEqual(fake.removed, ['c-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone']);
     assert.ok(fake.networks.has('bn-gone'));
     assert.ok(!existsSync(workspaceOf('gone')));
   });
@@ -320,19 +296,18 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
     assert.ok(!existsSync(homeOf('gone')));
   });
 
   it('takes the files of a box whose Docker objects are already gone', async () => {
     insertBox('keep');
-    // The shape a failed teardown leaves: it removes the container, the
-    // network and the volumes first, so a box it gave up on halfway is
-    // its directories and nothing else.
+    // The shape a failed teardown leaves: it removes the container and the
+    // network first, so a box it gave up on halfway is its directories and
+    // nothing else.
     insertObjects('half-torn-down');
     fake.containers.delete('c-half-torn-down');
     fake.networks.delete('bn-half-torn-down');
-    fake.volumes.delete('home-half-torn-down');
 
     await orchestrator.manager.sweepOrphans();
 
@@ -349,7 +324,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone', 'home-gone']);
+    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
   });
 });
 

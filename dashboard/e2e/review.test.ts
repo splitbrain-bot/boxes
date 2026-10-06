@@ -874,23 +874,6 @@ test('a workspace with no repository still browses and comments', async () => {
   }
 });
 
-test('a box whose workspace cannot be read says what to do', async () => {
-  // A legacy box keeps its files in a named volume, which this process cannot read.
-  stub.resetBoxes();
-  stub.createBox({ legacy: true });
-
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
-  try {
-    // Its next start migrates it, and the message has to name that fix.
-    await expect.poll(() => page.getByRole('alert').isVisible()).toBe(true);
-    await expect.poll(() => page.getByText(/Start the box once to migrate it/).isVisible()).toBe(true);
-    await shoot(page, 'review-legacy-phone');
-    expect(errors).toEqual([]);
-  } finally {
-    await close();
-  }
-});
-
 test('an empty workspace says so rather than showing nothing', async () => {
   stub.review(BOX, { files: {}, repos: [] });
 

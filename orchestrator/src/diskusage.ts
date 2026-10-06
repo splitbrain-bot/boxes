@@ -53,8 +53,8 @@ export interface UsageOptions {
   /**
    * The directories a box is made of, on this process's own filesystem.
    *
-   * Null entries are dropped. For example, a box with a named home volume has
-   * no home path. When all are null, the box reports no size rather than zero.
+   * Null entries are dropped. When all are null, as for a deleted box, the
+   * box reports no size rather than zero.
    */
   pathsOf: (boxId: string) => Array<string | null>;
   /** How long a measurement stands. */

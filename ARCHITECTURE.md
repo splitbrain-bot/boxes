@@ -1627,8 +1627,8 @@ It runs as `BOX_UID:BOX_GID` — numbers rather than the image's `agent`,
 so one setting decides who a box is. The default is 1020, deliberately off
 the 1000 the `ubuntu` base account holds, as does a host's first login user.
 The box image builds its `agent` user on the same numbers, because a
-box's home is a named volume Docker ownership-initialises from the image
-and nothing outside the container can chown it afterwards; `ensureBoxImage`
+box's home is copied from the image with the ownership the image gave it,
+and the files inside it stay that way; `ensureBoxImage`
 reads the image's own user back and warns when the two have drifted. Pointing
 the orchestrator's own user at `BOX_UID` is what lets it drop root, since
 the workspace chown then has nothing to do. That is a deployment's own
@@ -1761,10 +1761,9 @@ place. The store is the agent's own: made empty, laid out by nix on first
 use, and 0755 like the workspace, since a package store holds nothing secret.
 So a box installs PostgreSQL or a compiler as its own user, with no
 capability the box does not already have, and keeps it across every stop,
-start and image roll. There is no column for it. Every box is given the
-directory at its next start, and the mount with it, through the same
-one-time recreate the agent configuration mount gets; until then its size is
-the size of its other two directories. Builds run unsandboxed, since the
+start and image roll. There is no column for it: the directory is named by
+the box id, like the other two, and a start makes it again, empty, if it is
+gone. Builds run unsandboxed, since the
 sandbox wants the user namespaces a box does not have, and the binary cache
 covers most of what an agent asks for. Nix's TLS is the one place the
 deployment CA alone is not enough: its static curl has no directory of
@@ -1785,12 +1784,6 @@ image's home in through a one-shot root container — `cp -a`, preserving the
 ownership the image gave it, and chowning the directory itself in the same
 breath, which is what makes a home come out right even where the orchestrator
 is not root and cannot chown.
-
-**Boxes from before this** keep their `home_volume` and a null `home_dir`,
-and go on mounting the volume for as long as they live. Unlike the workspace
-there is no migration: `homeSource` is a directory for one and a volume name
-for the other, Docker takes either, and the two arrangements coexist
-until the last old box is deleted.
 
 **Naming the bind source.** Bind sources are resolved by the Docker daemon,
 not by the process asking for the mount, so the orchestrator cannot hand the
@@ -1850,19 +1843,7 @@ removal keep. All three directories are walked and summed. Of the workspace
 and the home, the home is usually the larger: a workspace holds a checkout, a
 home holds every toolchain cache and globally installed tool the agent ever
 reached for. A Nix store that has evaluated nixpkgs once is bigger than
-either, and is the same shape to walk as a `node_modules`. A box still backed
-by a named home volume contributes only its workspace and its store, there
-being no path to the home.
-
-**Boxes from before the change** keep their `ws_volume` and a null
-`workspace_dir`, and migrate at their next start, which is the only moment a
-container can be recreated with a different mount. The order loses nothing at
-any step: create the directory, copy the volume into it through a one-shot
-helper container that can see both (`cp -a`, which preserves the agent's
-ownership), recreate the box container with the bind, start it, and only
-then delete the volume. A crash before the row is updated leaves a
-volume-backed box that migrates again on the next attempt. A *running*
-legacy box is left alone and comes through at its next stop/start cycle.
+either, and is the same shape to walk as a `node_modules`.
 
 ## Reclaiming what a box leaves
 
@@ -1900,9 +1881,8 @@ rule exact rather than a heuristic is the order `create()` works in: the row
 is inserted **before** any Docker object exists, so an object labelled with a
 box that has no live row cannot be one on its way up. A deleted box's
 tombstone counts as no row, which is what makes a failed teardown recoverable.
-Containers go first, because a network with a container on it and a volume
-mounted into one are both refused; a removal that fails is a log line and the
-next sweep tries again. The workspace, home and Nix store directories go with
+Containers go first, because a network with a container on it is refused; a
+removal that fails is a log line and the next sweep tries again. The workspace, home and Nix store directories go with
 them, being the size of all of it put together.
 
 One guard: when the boxes the host carries outnumber the rows the database
@@ -1978,17 +1958,10 @@ than quietly turned into a recursive delete.
 mechanism that reloaded an `AGENTS.md` but not a skill would be worse than a
 rule anyone can state.
 
-Two details follow from Docker rather than from the design. The materialized
+One detail follows from Docker rather than from the design. The materialized
 directory's contents are replaced in place and its inode kept, because a
 running container has it bind-mounted and swapping the directory would leave
-that container mounted on an unlinked one. And a box created before this
-existed has no such mount — mounts are fixed when a container is created — so
-`start` recreates its container once, the same trade `migrateWorkspace` and
-`rollOntoCurrentImage` make and cheap for the same reason. That check runs
-*after* the image roll, because a roll recreates the container from
-`containerSpec`, which already binds the configuration: a box that moves
-image comes back with the mount and the check finds nothing left to do. The
-other order would recreate the same container twice.
+that container mounted on an unlinked one.
 
 Deleting a set is not blocked. Boxes that named it keep running and keep
 what is installed in them; the foreign key clears the column and they fall back
@@ -2555,7 +2528,7 @@ restart; the resolver that answers the request is in memory only, so
 | Reaper (`reaper.ts`) | 60s | Stops boxes that are idle on all five counts: no running turn on any thread, no waiting permission request, no attached browser, no background task still believed to be running, and no activity for `IDLE_STOP_MINUTES`. It never deletes, and it never waits: a box with an operation already in flight is skipped and tried again next tick. The turn count is derived from the threads; the rest stay box-scoped, because they are about the box rather than the conversation |
 | Proxy reconciler (`reaper.ts`) | 60s | Re-asserts both halves of the proxy's state: its attachment to every running box's network, which `compose up` can drop by recreating the container, and the policy it holds, which a restart erases entirely. Both show up in `/healthz` |
 | Maintenance | 60s, with the reaper | Prunes each box's debug log to its ring size, and forgets the upstream of a box that is down and holding nothing |
-| Orphan sweep (`boxes.ts`) | 60s, with the reaper | Removes the containers, networks, volumes and workspace directories labelled with boxes that no longer exist. See below |
+| Orphan sweep (`boxes.ts`) | 60s, with the reaper | Removes the containers, networks and workspace directories labelled with boxes that no longer exist. See below |
 | Tunnel reconciler (`reaper.ts`) | 60s | Reads each running box's process table for `devtunnel host <id>.<region>`. A tunnel seen for the first time is read once from the Dev Tunnels API for its ports, labelled with the deployment and the box, and remembered in the `tunnels` table. A remembered tunnel that no box has hosted for five minutes is deleted on its region's API host and forgotten. Apart from those two moments, the loop makes no API call. A box whose processes cannot be read keeps its tunnels. The loop deletes only tunnels it remembers, because the account is a person's GitHub account, and the service's global tunnel list leaves tunnels out |
 | Credential refresh (`reaper.ts`) | 60s | The one thing Boxes holds that goes stale on its own. A subscription login or a Dev Tunnels login whose access token is within the hour of expiring, or a subscription login which has simply sat for eight days, is refreshed against the provider's token endpoint and written back through the store, which pushes the new material to the proxy. A credential that cannot be renewed and has run out is marked expired instead, so the settings page says so rather than a turn failing with a 401 nobody sees |
 
@@ -2697,7 +2670,7 @@ orchestrator/src/
   workspaces.ts         Workspace, home and Nix store directories on the data volume: paths, ownership
   diskusage.ts          How big each workspace has got, measured off the request path
   agents.ts             Agent sets: AGENTS.md, skills, commands; the merge and the materialized bundle
-  docker.ts             Containers, networks, volumes, the adapter exec
+  docker.ts             Containers, networks, the adapter exec
   images.ts             Which build of the three images is running, cached off the health probe
   review/
     service.ts          Per-box façade: the repo map, the REVIEW.md read-modify-write, the routing
@@ -2882,8 +2855,7 @@ the code for the composer — including the line whose gutter is not a button
 because nothing changed there — comment on a line and see the write reach the
 API, edit and delete it, set a base revision, and hand the review to the agent
 with the prompt staged unsent.
-The degraded shapes are there as well — no git, an empty workspace, and a
-box whose workspace is still a volume.
+The degraded shapes are there as well — no git, and an empty workspace.
 The back button has a file of its own (`e2e/back.test.ts`), because it is the
 navigation control on the platform this is driven from. Every assertion there
 is a `page.goBack()` or a control the app calls back, checked against where it

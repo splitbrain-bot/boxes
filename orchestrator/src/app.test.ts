@@ -83,11 +83,10 @@ function insertBox(id: string): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status,
-       ws_token, created_at, last_active_at)
+       network_name, subnet, status, ws_token, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', ?, ?, 'running', ?, ?, ?)`,
-  ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, `token-${id}`, now, now);
+       ?, '10.200.0.0/24', 'running', ?, ?, ?)`,
+  ).run(id, `bn-${id}`, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 
@@ -123,7 +122,7 @@ afterEach(async () => {
 });
 
 /**
- * Inserts a box whose workspace and home are directories, as an attachment
+ * Inserts a box with its directories on disk, as an attachment or a start
  * needs, and returns the workspace path.
  */
 function insertWorkspaceBox(id: string): string {
@@ -132,12 +131,8 @@ function insertWorkspaceBox(id: string): string {
   // the first test in this file set — not necessarily this test's `dir`.
   // Everything that reaches the disk has to go through the app's own copy.
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
-  const home = ws.createHome(orchestrator.cfg.DATA_DIR, id);
-  db.prepare('UPDATE boxes SET workspace_dir = ?, home_dir = ? WHERE id = ?').run(
-    workspace,
-    home,
-    id,
-  );
+  ws.createHome(orchestrator.cfg.DATA_DIR, id);
+  ws.createNix(orchestrator.cfg.DATA_DIR, id);
   return workspace;
 }
 
@@ -244,19 +239,6 @@ test('an attachment upload without a name or a body is refused', async () => {
     payload: Buffer.alloc(0),
   });
   assert.equal(empty.statusCode, 400);
-});
-
-test('an attachment to a box that has no workspace is a 404', async () => {
-  // Inserted, but never given a workspace directory: nothing to write into.
-  insertBox('abc123');
-
-  const res = await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/boxes/abc123/attachments?name=a.txt',
-    headers: { 'content-type': 'application/octet-stream' },
-    payload: Buffer.from('x'),
-  });
-  assert.equal(res.statusCode, 404);
 });
 
 test('an attachment over the size limit is refused, and says so', async () => {
@@ -845,7 +827,7 @@ test('creating a box against an unknown set is refused before anything is built'
 test('starting a container to reach into writes the current configuration first', async () => {
   // Opening a thread and opening a terminal both start a stopped box without
   // /start. The entrypoint installs what is on disk at that moment.
-  insertBox('abc123');
+  insertWorkspaceBox('abc123');
   fakeDocker();
   await orchestrator.app.inject({
     method: 'PUT',

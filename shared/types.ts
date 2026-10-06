@@ -410,28 +410,6 @@ export interface BoxDetail extends BoxSummary {
   networkName: string;
   /** The subnet of that network. */
   subnet: string;
-  /**
-   * The named volume holding the workspace of a box created before
-   * workspaces became directories. Empty for a directory-backed box,
-   * which a volume-backed one becomes at its next start.
-   */
-  wsVolume: string;
-  /**
-   * Where the box's files are on the orchestrator's own filesystem, or
-   * null while the box is still volume-backed.
-   */
-  workspaceDir: string | null;
-  /**
-   * The named volume holding the home of a box created before homes
-   * became directories. Empty for a directory-backed box.
-   */
-  homeVolume: string;
-  /**
-   * Where the box's home is on the orchestrator's own filesystem — its
-   * thread history, its tool caches, whatever a login inside the box wrote —
-   * or null for one still backed by a named volume.
-   */
-  homeDir: string | null;
   /** The adapter's id for the box's most recently active thread, or null before one exists. */
   acpSessionId: string | null;
   /** True when the egress proxy is attached to this box's network. */

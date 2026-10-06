@@ -72,7 +72,7 @@ interface GitSnapshot {
 
 /** What the review needs of the boxes it is a view onto. */
 export interface ReviewBoxes {
-  /** Where a box's files are, or null while it is still volume-backed. */
+  /** Where a box's files are, or null for an unknown or deleted box. */
   workspacePath(id: string): string | null;
   /**
    * The box's container, started if it was stopped, and the directory a
@@ -133,9 +133,8 @@ export class ReviewService {
    * The box's workspace on this process's filesystem, which is the review
    * root.
    *
-   * A box whose workspace is still a named volume has none until its next
-   * start migrates it. That is a 409 rather than a 404, because the box exists
-   * and a start fixes it.
+   * A box whose directory is gone is a 409 rather than a 404, because the
+   * box exists.
    */
   private workspace(id: string): string {
     const row = this.row(id);
@@ -143,8 +142,8 @@ export class ReviewService {
     if (!path || !isDirectory(path)) {
       throw new HttpError(
         409,
-        'This box stores its workspace in a volume the orchestrator cannot read. ' +
-          'Start the box once to migrate it, then review it.',
+        'The workspace directory of this box cannot be found. ' +
+          'Restore the files from a backup, or delete the box.',
       );
     }
     return path;
