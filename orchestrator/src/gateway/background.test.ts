@@ -204,6 +204,20 @@ test('a box holding both adapters and doing nothing is idle', () => {
   assert.deepEqual(reading.work, []);
 });
 
+test('a box whose image starts it under tini is idle', () => {
+  const reading = readBox(
+    table(
+      [1, 0, '/usr/bin/tini -- /usr/local/bin/entrypoint.sh'],
+      [7, 1, 'sleep infinity'],
+      [22977, 0, 'node /usr/local/bin/claude-agent-acp'],
+      [23019, 22977, CLAUDE_AGENT],
+    ),
+    BOTH,
+  );
+  assert.equal(reading.busy, false);
+  assert.deepEqual(reading.work, []);
+});
+
 test('a box numbered by the host rather than by itself is still idle', () => {
   // `docker top` prints host pids, so no process of the box is 1.
   const reading = readBox(

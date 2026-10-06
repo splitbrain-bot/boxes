@@ -47,10 +47,12 @@ FROM ubuntu:26.04 AS image
 # untagged copy after a pull replaced it.
 LABEL boxes.image=box
 
-# curl needs a trust store to add the repositories below.
+# curl needs a trust store to add the repositories below. tini is PID 1;
+# see the ENTRYPOINT.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
+      tini \
  && rm -rf /var/lib/apt/lists/*
 
 # Node from NodeSource, because Ubuntu's own stays at the release's version.
@@ -513,4 +515,8 @@ RUN touch /tmp/checks-passed
 # stage, so a failed check fails the build.
 FROM image
 COPY --from=test /tmp/checks-passed /etc/boxes/checks-passed
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# tini as PID 1, because the kernel discards default-disposition signals for
+# PID 1: the entrypoint's sleep would never see SIGTERM, and every stop would
+# wait out the grace period. tini also reaps the processes orphaned in the
+# box, which would otherwise stay zombies and count against the pids limit.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

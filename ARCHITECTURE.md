@@ -1636,11 +1636,14 @@ arrangement — a `user:` on the orchestrator service and a data directory
 owned by the same uid — rather than something the shipped compose does.
 
 It runs non-root with `ReadonlyRootfs`, `CapDrop: ALL`,
-`no-new-privileges`, a tmpfs `/tmp`, memory, CPU and pids limits, and
-`Init: true`. That last one matters: the kernel discards default-disposition
-signals for PID 1, so without docker-init the entrypoint's `sleep` would never
-see SIGTERM and every stop would wait out the grace period. The only
-caller-supplied values are the box id and the profile secrets.
+`no-new-privileges`, a tmpfs `/tmp`, and memory, CPU and pids limits. The
+image's entrypoint starts under tini, which is PID 1. That matters: the kernel
+discards default-disposition signals for PID 1, so without an init the
+entrypoint's `sleep` would never see SIGTERM and every stop would wait out the
+grace period, and nothing would reap the processes orphaned in the box. The
+init lives in the image rather than in Docker's `Init: true`, so it is there
+whatever runs the image. The only caller-supplied values are the box id and
+the profile secrets.
 
 The entrypoint installs the agent configuration into `~/.claude`, sets the git
 and gh identity, and then holds the container open.

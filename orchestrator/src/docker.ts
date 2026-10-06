@@ -522,6 +522,8 @@ async function oneShot(spec: {
       SecurityOpt: ['no-new-privileges:true'],
       Privileged: false,
       RestartPolicy: { Name: 'no' },
+      // The entrypoint, and tini with it, is replaced above, so the init
+      // comes from Docker.
       Init: true,
     },
   });
@@ -588,10 +590,9 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       NanoCpus: Math.round(cfg.BOX_CPUS * 1e9),
       PidsLimit: cfg.BOX_PIDS_LIMIT,
       RestartPolicy: { Name: 'no' },
-      // The kernel discards default-disposition signals for PID 1, so the
-      // entrypoint's sleep never sees SIGTERM. docker-init forwards the signal
-      // and reaps, which keeps stops prompt.
-      Init: true,
+      // No `Init`: the image's entrypoint starts under tini, which reaps and
+      // forwards SIGTERM. A docker-init in front of it would leave tini a
+      // child that reaps nothing.
       // Stated explicitly so a later edit cannot loosen them by omission.
       Privileged: false,
       PublishAllPorts: false,
@@ -672,7 +673,6 @@ export async function createLoginContainer(spec: {
       // limit can break a Node CLI.
       PidsLimit: 256,
       RestartPolicy: { Name: 'no' },
-      Init: true,
       Privileged: false,
       PublishAllPorts: false,
     },
