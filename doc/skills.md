@@ -1,10 +1,10 @@
 # Built-in skills
 
-Boxes preinstalls skills for common project tasks. They are available in every box
-and are updated when the box image is updated.
+The box image carries skills for common project tasks. The entrypoint installs them into the agent's home at
+every box start, so they are available in every box and follow the box image when it is updated.
 
-Custom skills can be added to a box by including them in the agent set. Agent sets
-can also be used to override built-in skills with project-specific instructions.
+A skill of the same name in the box's merged [agent set](agent-sets.md) replaces the built-in one, which is
+how a project overrides a built-in skill with its own instructions.
 
 ## Nix
 
@@ -64,4 +64,5 @@ inspect the accessibility tree, interact with DOM elements, and verify behavior.
 Chromium is already installed. Firefox and WebKit can be downloaded when a
 project needs them.
 
-Skill instructions: [playwright-cli](https://github.com/microsoft/playwright-cli/blob/main/skills/playwright-cli/SKILL.md)
+Skill instructions:
+[playwright-cli](https://github.com/microsoft/playwright-cli/blob/main/skills/playwright-cli/SKILL.md)
