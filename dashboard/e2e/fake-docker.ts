@@ -153,16 +153,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     logs: async () => Buffer.from(''),
     inspect: async () => {
       const container = must(id);
-      return {
-        Image: container.image,
-        State: { Running: container.running },
-        // The orchestrator recreates a box container that lacks one of these mounts.
-        Mounts: [
-          { Destination: dk.AGENT_CONFIG_DIR },
-          { Destination: dk.WORKSPACE_DIR },
-          { Destination: dk.NIX_DIR },
-        ],
-      };
+      return { Image: container.image, State: { Running: container.running } };
     },
     // A terminal asks for a pty. Every other exec produces no output here.
     // Review runs git through its own injected runner.
@@ -191,7 +182,6 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     ping: async () => 'OK',
     createNetwork: async () => undefined,
     getNetwork: () => network(),
-    getVolume: () => ({ remove: async () => undefined }),
     getImage: (name: string) => ({
       inspect: async () => {
         // Either an image id read off a container, or the box image by its tag.
@@ -219,7 +209,6 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     getContainer: (id: string) => handle(id),
     listContainers: async () => [],
     listNetworks: async () => [],
-    listVolumes: async () => ({ Volumes: [] }),
     listImages: async () => [],
   };
 

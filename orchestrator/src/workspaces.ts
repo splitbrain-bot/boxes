@@ -145,8 +145,8 @@ export function createHome(dataDir: string, boxId: string): string {
  * process sees it.
  *
  * An empty store is usable, as nix lays it out on first use. Box starts call
- * it too, so an older box without a store gets one owned by the agent, not
- * one Docker creates for root.
+ * it too, so a box whose store is gone gets one owned by the agent, not one
+ * Docker creates for root.
  */
 export function createNix(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);

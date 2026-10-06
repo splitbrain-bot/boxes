@@ -143,8 +143,7 @@ export function BoxInfo() {
             {/* Every box gets the global set, so no named set reads as "global only". */}
             <Meta label="Agent set" value={box.agentSetName ?? 'global only'} />
             <Meta label="Last active" value={new Date(box.lastActiveAt).toLocaleString()} />
-            {/* Null before the first measurement, or when the box has no directory
-                to measure, such as a box on named volumes. */}
+            {/* Null before the first measurement. */}
             <Meta
               label="On disk"
               value={

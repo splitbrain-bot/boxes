@@ -37,11 +37,10 @@ function materialized(boxId: string, rel: string): string {
 function insertBox(id: string, agentSetId: string | null): void {
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status, agent_set_id,
-       created_at, last_active_at)
+       network_name, subnet, status, agent_set_id, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', '', ?, 'running', ?, 0, 0)`,
-  ).run(id, `bn-${id}`, `home-${id}`, agentSetId);
+       ?, '10.200.0.0/24', 'running', ?, 0, 0)`,
+  ).run(id, `bn-${id}`, agentSetId);
 }
 
 // --- the global set ----------------------------------------------------------

@@ -18,12 +18,8 @@ const IMAGE = 'ghcr.io/example/box:latest';
 interface Fake {
   /** Image reference to the id it currently resolves to. */
   images: Map<string, string>;
-  /**
-   * Container id to the image id it was created from, whether it runs, and
-   * its mount destinations. The start path reads the mounts to recognise a
-   * container from before a mount existed.
-   */
-  containers: Map<string, { image: string; running: boolean; mounts: string[] }>;
+  /** Container id to the image id it was created from, and whether it runs. */
+  containers: Map<string, { image: string; running: boolean }>;
   /** The options of every container created, in order. */
   created: Array<Record<string, unknown>>;
   /** The ids of the removed containers, in order. */
@@ -94,11 +90,7 @@ function dockerFor(fake: Fake): Docker {
       inspect: async () => {
         const c = fake.containers.get(id);
         if (!c) throw notFound('container');
-        return {
-          Image: c.image,
-          State: { Running: c.running },
-          Mounts: c.mounts.map((Destination) => ({ Destination })),
-        };
+        return { Image: c.image, State: { Running: c.running } };
       },
       start: async () => {
         const c = fake.containers.get(id);
@@ -121,13 +113,9 @@ function dockerFor(fake: Fake): Docker {
       fake.onCreate?.();
       fake.created.push(opts);
       const id = `container-${++fake.next}`;
-      const binds = (opts['HostConfig'] as { Binds?: string[] } | undefined)?.Binds ?? [];
       fake.containers.set(id, {
         image: fake.images.get(opts['Image'] as string) ?? 'unresolved',
         running: false,
-        // A container's mounts come from what it was created with, so the
-        // daemon reports back whatever containerSpec asked for.
-        mounts: binds.map((bind) => bind.split(':')[1] ?? ''),
       });
       return { id };
     },
@@ -164,48 +152,22 @@ let orchestrator: Orchestrator;
 let fake: Fake;
 
 /**
- * Inserts a stopped box with a container on `imageId`, whose workspace and
- * home are directories.
+ * Inserts a stopped box with a container on `imageId`.
  *
- * With `home` set to 'volume', the home is a named volume instead, as on an
- * older box. Nothing migrates a home, so both shapes must keep working.
- *
- * The directories are created too, because a start refuses a box whose bind
- * sources are gone.
+ * The workspace and home directories are created too, because a start
+ * refuses a box whose bind sources are gone.
  */
-function insertBox(
-  id: string,
-  containerId: string,
-  imageId: string,
-  home: 'directory' | 'volume' = 'directory',
-): void {
+function insertBox(id: string, containerId: string, imageId: string): void {
   const now = Date.now();
-  fake.containers.set(containerId, {
-    image: imageId,
-    running: false,
-    // Every mount of a new container, so only a moved image triggers a
-    // rebuild.
-    mounts: [dk.WORKSPACE_DIR, '/home/agent', dk.NIX_DIR, dk.AGENT_CONFIG_DIR],
-  });
+  fake.containers.set(containerId, { image: imageId, running: false });
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-       status, created_at, last_active_at)
+       network_name, subnet, status, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', ?, ?,
-       ?, '10.200.0.0/24', '', ?, ?, ?, 'stopped', ?, ?)`,
-  ).run(
-    id,
-    IMAGE,
-    containerId,
-    `bn-${id}`,
-    home === 'volume' ? `home-${id}` : '',
-    `${dir}/workspaces/${id}`,
-    home === 'volume' ? null : `${dir}/homes/${id}`,
-    now,
-    now,
-  );
+       ?, '10.200.0.0/24', 'stopped', ?, ?)`,
+  ).run(id, IMAGE, containerId, `bn-${id}`, now, now);
   ws.createWorkspace(dir, id);
-  if (home === 'directory') ws.createHome(dir, id);
+  ws.createHome(dir, id);
 }
 
 beforeEach(async () => {
@@ -270,47 +232,6 @@ describe('starting a box whose image has moved', () => {
       // mount the box starts with nothing configured.
       `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
-  });
-
-  it('keeps mounting the volume of a box whose home is one', async () => {
-    // Nothing migrates a home, so an older box mounts its home volume for
-    // life, also after its container is rebuilt.
-    insertBox('a2', 'c1', 'sha256:one', 'volume');
-    fake.images.set(IMAGE, 'sha256:two');
-
-    await orchestrator.manager.start('a2');
-
-    const host = fake.created[0]!['HostConfig'] as { Binds: string[] };
-    assert.deepEqual(host.Binds, [
-      `${dir}/workspaces/a2:/workspace`,
-      'home-a2:/home/agent',
-      `${dir}/nix/a2:/nix`,
-      `${dir}/agents/a2:/boxes/agent:ro`,
-    ]);
-  });
-
-  it('gives a box from before nix stores existed the mount at its next start', async () => {
-    insertBox('a2', 'c1', 'sha256:one');
-    // The image did not move. The container lacks only the Nix mount.
-    fake.containers.get('c1')!.mounts = [dk.WORKSPACE_DIR, '/home/agent', dk.AGENT_CONFIG_DIR];
-
-    const detail = await orchestrator.manager.start('a2');
-
-    // The directory is made before the container that binds it, so the
-    // daemon never gets to create it as root.
-    assert.ok(existsSync(join(dir, 'nix', 'a2')));
-    assert.deepEqual(fake.removed, ['c1']);
-    assert.notEqual(detail.containerId, 'c1');
-    assert.ok(fake.containers.get(detail.containerId!)?.mounts.includes(dk.NIX_DIR));
-  });
-
-  it('leaves a box that has every mount alone', async () => {
-    insertBox('a2', 'c1', 'sha256:one');
-
-    const detail = await orchestrator.manager.start('a2');
-
-    assert.deepEqual(fake.removed, []);
-    assert.equal(detail.containerId, 'c1');
   });
 
   it('moves a box onto the current image for a terminal too', async () => {
@@ -637,17 +558,6 @@ describe('starting a box whose files are gone', () => {
       () => orchestrator.manager.execTarget('a3'),
       /workspace directory.*and.*home directory/s,
     );
-  });
-
-  it('says nothing about a box whose home is still a volume', async () => {
-    // The home of an older box is a named volume. The orchestrator has no
-    // path to check it.
-    insertBox('a4', 'c1', 'sha256:one', 'volume');
-    fake.containers.get('c1')!.running = true;
-
-    await orchestrator.manager.start('a4');
-
-    assert.equal(status('a4'), 'running');
   });
 });
 

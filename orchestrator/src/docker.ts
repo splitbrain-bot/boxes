@@ -89,7 +89,6 @@ export function setDockerForTests(d: Docker | null): void {
  * Docker object names derived from a box id.
  *
  * Workspaces, homes and Nix stores are directories, so they have no name here.
- * The name of an older box's `ws-<id>` or `home-<id>` volume is on its row.
  */
 export const names = {
   /** Name of the box container. */
@@ -120,11 +119,7 @@ export interface CreateContainerSpec {
    * remove what a previous start installed.
    */
   agentConfigSource: string;
-  /**
-   * What is mounted at `/home/agent`: the host-side path of the box's home
-   * directory, or the name of an older box's home volume. Docker accepts
-   * either in the same field.
-   */
+  /** Host-side path of the box's home directory, bound at `/home/agent`. */
   homeSource: string;
   /** Host-side path of the box's Nix store directory, bound at NIX_DIR. */
   nixSource: string;
@@ -448,26 +443,6 @@ export async function resolveHostMountSource(destination: string): Promise<strin
 }
 
 /**
- * Copies a named volume's content into a host directory, through a one-shot
- * container that mounts both. It moves an older box's volume onto a
- * directory, as the orchestrator has no path to a named volume.
- */
-export async function copyVolumeToDirectory(
-  volumeName: string,
-  hostDirectory: string,
-  image: string,
-  boxId: string,
-): Promise<void> {
-  await oneShot({
-    what: `copy of ${volumeName}`,
-    image,
-    boxId,
-    binds: [`${volumeName}:/from:ro`, `${hostDirectory}:/to`],
-    script: 'cp -a /from/. /to/',
-  });
-}
-
-/**
  * Fills a box's empty home directory from the image's own `/home/agent`.
  *
  * A bind mount hides what the image has at that path, so the copy is needed.
@@ -569,8 +544,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       NetworkMode: spec.networkName,
       Binds: [
         // Directories on the data volume, so the orchestrator can read a
-        // box's files without a running container. An older box's home is a
-        // named volume instead.
+        // box's files without a running container.
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeSource}:${HOME_DIR}`,
         `${spec.nixSource}:${NIX_DIR}`,
@@ -777,15 +751,6 @@ export async function removeNetwork(networkName: string, cfg: Config): Promise<v
   }
   try {
     await net.remove();
-  } catch (err) {
-    if ((err as { statusCode?: number }).statusCode !== 404) throw err;
-  }
-}
-
-/** Removes a volume, tolerating one that is already gone. */
-export async function removeVolume(name: string): Promise<void> {
-  try {
-    await docker().getVolume(name).remove();
   } catch (err) {
     if ((err as { statusCode?: number }).statusCode !== 404) throw err;
   }
@@ -1052,26 +1017,6 @@ async function runExec(
 }
 
 /**
- * Which of `destinations` a container has no mount at.
- *
- * Mounts are fixed at creation, so this finds a container that needs to be
- * recreated to get a mount. A container that cannot be inspected reports none
- * missing, so a passing inspect failure never causes a recreate.
- */
-export async function missingMounts(
-  containerId: string,
-  destinations: readonly string[],
-): Promise<string[]> {
-  try {
-    const info = await docker().getContainer(containerId).inspect();
-    const present = new Set((info.Mounts ?? []).map((m) => m.Destination));
-    return destinations.filter((d) => !present.has(d));
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Every labelled box container Docker knows about, for boot
  * reconciliation and the orphan sweep. `helper` marks a copy container that
  * outlived its job rather than the box's own.
@@ -1103,15 +1048,6 @@ export async function listBoxNetworks(): Promise<Array<{ name: string; boxId: st
   return networks.flatMap((n) => {
     const boxId = (n.Labels as Record<string, string> | undefined)?.[LABEL];
     return boxId && n.Name ? [{ name: n.Name, boxId }] : [];
-  });
-}
-
-/** Box volumes Boxes created, by the box each is labelled with. */
-export async function listBoxVolumes(): Promise<Array<{ name: string; boxId: string }>> {
-  const { Volumes } = await docker().listVolumes({ filters: { label: [LABEL] } });
-  return (Volumes ?? []).flatMap((v) => {
-    const boxId = v.Labels?.[LABEL];
-    return boxId && v.Name ? [{ name: v.Name, boxId }] : [];
   });
 }
 

@@ -221,11 +221,6 @@ export interface BoxSpec {
   canFork?: boolean;
   /** The size of a sparse file put into the workspace, which nothing reads. */
   diskBytes?: number;
-  /**
-   * A box still backed by a workspace volume, which this process cannot
-   * read and the review refuses with an explanation.
-   */
-  legacy?: boolean;
 }
 
 /** What the deployment answers about itself, which a test may change. */
@@ -605,16 +600,13 @@ function createBox(
   const cfg: Config = app.cfg;
   const id = spec.id ?? DEFAULT_BOX.id;
   const now = Date.now();
-  const legacy = spec.legacy === true;
   const containerId = `box-${id}`;
   const index = (db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }).n;
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-       review_base_rev, status, agent_set_id, ws_token,
+       network_name, subnet, review_base_rev, status, agent_set_id, ws_token,
        created_at, last_active_at)
-     VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, ?, '', ?, ?,
-       NULL, ?, NULL, ?, ?, ?)`,
+     VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)`,
   ).run(
     id,
     spec.name ?? DEFAULT_BOX.name,
@@ -622,17 +614,15 @@ function createBox(
     containerId,
     `bn-${id}`,
     `10.200.${index}.0/24`,
-    legacy ? `ws-${id}` : '',
-    legacy ? null : ws.workspacePath(cfg.DATA_DIR, id),
-    ws.homePath(cfg.DATA_DIR, id),
     spec.status ?? 'running',
     WS_TOKEN,
     now,
     now,
   );
 
-  if (!legacy) ws.createWorkspace(cfg.DATA_DIR, id);
+  ws.createWorkspace(cfg.DATA_DIR, id);
   ws.createHome(cfg.DATA_DIR, id);
+  ws.createNix(cfg.DATA_DIR, id);
   docker.addContainer(containerId, spec.containerRunning ?? spec.status !== 'stopped');
 
   const upstream = upstreamFor(id);
@@ -668,7 +658,7 @@ function createBox(
   upstream.attachedCount = spec.attachedCount ?? 0;
   app.tunnels.setServedForTests(id, spec.tunnels ?? []);
 
-  if (spec.diskBytes !== undefined && !legacy) {
+  if (spec.diskBytes !== undefined) {
     sparseFile(join(ws.workspacePath(cfg.DATA_DIR, id), 'checkout.bin'), spec.diskBytes);
   }
 }

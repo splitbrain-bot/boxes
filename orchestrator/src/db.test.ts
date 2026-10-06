@@ -154,20 +154,19 @@ function atVersion5(): void {
   db.close();
 }
 
-test('a volume-backed box keeps its volume and gains no directory', () => {
+test('a box from before workspace directories loses its volume columns', () => {
   atVersion5();
   const db = openDb(dir);
   try {
-    const box = db.prepare('SELECT * FROM boxes WHERE id = ?').get('s1') as Record<
-      string,
-      unknown
-    >;
-    // Nothing is moved by the migration itself: the files are in a named
-    // volume this process has no path to, and only a start can recreate the
-    // container with the new mount.
-    assert.equal(box['ws_volume'], 'ws-s1');
-    assert.equal(box['workspace_dir'], null);
-    assert.ok(columns(db, 'boxes').includes('workspace_dir'));
+    // The row stays. Its directories are named by its id, so no column
+    // records where they are.
+    const box = db.prepare('SELECT name FROM boxes WHERE id = ?').get('s1') as {
+      name: string;
+    };
+    assert.equal(box.name, 'volume box');
+    for (const column of ['ws_volume', 'home_volume', 'workspace_dir', 'home_dir']) {
+      assert.ok(!columns(db, 'boxes').includes(column), column);
+    }
   } finally {
     db.close();
   }
@@ -199,7 +198,6 @@ test('a deployment on the previous release upgrades cleanly', () => {
   const upgraded = openDb(dir);
   try {
     const boxes = columns(upgraded, 'boxes');
-    assert.ok(boxes.includes('workspace_dir'));
     // The review's base revision survives as the expression it always was.
     assert.ok(boxes.includes('review_base_rev'));
     // Its root and resolved commit are dropped. The review covers the whole
@@ -214,12 +212,6 @@ test('a deployment on the previous release upgrades cleanly', () => {
       .prepare('SELECT COUNT(*) AS n FROM push_subscriptions')
       .get() as { n: number };
     assert.equal(push.n, 1);
-
-    // The box that predates workspace directories migrates at its next start.
-    const row = upgraded
-      .prepare("SELECT ws_volume, workspace_dir FROM boxes WHERE id = 'live'")
-      .get() as { ws_volume: string; workspace_dir: string | null };
-    assert.deepEqual(row, { ws_volume: 'ws-live', workspace_dir: null });
   } finally {
     upgraded.close();
   }
@@ -397,10 +389,9 @@ test('a database written by a newer build is refused rather than opened', () => 
 function insertLiveBox(db: Db, id: string): void {
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status,
-       created_at, last_active_at)
+       network_name, subnet, status, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', '', '', 'running', 1000, 2000)`,
+       ?, '10.200.0.0/24', 'running', 1000, 2000)`,
   ).run(id, `bn-${id}`);
 }
 

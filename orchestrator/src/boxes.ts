@@ -99,8 +99,7 @@ export class BoxManager {
 
   /** How big each box has got, measured off the request path. */
   private readonly usage = new BoxUsage({
-    // Everything a box is on disk. A box on a named home volume has no home
-    // path, so only its workspace and Nix store count.
+    // Everything a box is on disk.
     pathsOf: (id) => [this.workspacePathOf(id), this.homePathOf(id), this.nixPathOf(id)],
     ttlMs: BOX_SIZE_TTL_MS,
     onTrouble: (id, error) =>
@@ -217,44 +216,36 @@ export class BoxManager {
   }
 
   /**
-   * Where a box's files are on this process's own filesystem, or null for
-   * a box still backed by a named volume.
+   * Where a box's files are on this process's own filesystem.
    *
-   * Derived from the current DATA_DIR rather than read from the row, so moving
-   * the data volume moves the workspaces with it; the stored column says only
-   * whether the box has a directory. An unknown or deleted box is
-   * null as well, and the caller answers that with its own 404.
+   * Derived from the current DATA_DIR and the box id, so moving the data
+   * volume moves the workspaces with it. An unknown or deleted box is null,
+   * and the caller answers that with its own 404.
    */
   workspacePathOf(id: string): string | null {
     const row = this.getRow(id);
-    if (!row || row.status === 'deleted' || !row.workspace_dir) return null;
+    if (!row || row.status === 'deleted') return null;
     return ws.workspacePath(this.cfg.DATA_DIR, row.id);
   }
 
   /**
    * Where a box's home is on this process's own filesystem, on the same
-   * terms as its workspace, and null for one still backed by a named volume.
+   * terms as its workspace.
    */
   homePathOf(id: string): string | null {
     const row = this.getRow(id);
-    if (!row || row.status === 'deleted' || !row.home_dir) return null;
+    if (!row || row.status === 'deleted') return null;
     return ws.homePath(this.cfg.DATA_DIR, row.id);
   }
 
   /**
-   * Where a box's Nix store is on this process's own filesystem, and null
-   * for a box that has none yet.
-   *
-   * No column records it: every box is given the directory at its next
-   * start, so the directory itself is what says whether it is there. A box
-   * from before Nix stores existed has none until then, and is measured by
-   * its other two directories in the meantime.
+   * Where a box's Nix store is on this process's own filesystem, on the
+   * same terms as its workspace.
    */
   nixPathOf(id: string): string | null {
     const row = this.getRow(id);
     if (!row || row.status === 'deleted') return null;
-    const path = ws.nixPath(this.cfg.DATA_DIR, row.id);
-    return ws.directoryExists(path) ? path : null;
+    return ws.nixPath(this.cfg.DATA_DIR, row.id);
   }
 
   // --- the box image ----------------------------------------------------
@@ -377,8 +368,8 @@ export class BoxManager {
    * whose box has no live row is never one being created. A deleted box's
    * tombstone counts as no row, so a failed teardown is swept too.
    *
-   * Containers go first, because the daemon refuses to remove a network or a
-   * volume a container still uses.
+   * Containers go first, because the daemon refuses to remove a network a
+   * container still uses.
    */
   async sweepOrphans(): Promise<void> {
     // A login container belongs to no box, so the rules below do not apply.
@@ -386,7 +377,6 @@ export class BoxManager {
 
     const containers = await dk.listBoxContainers();
     const networks = await dk.listBoxNetworks();
-    const volumes = await dk.listBoxVolumes();
     // A teardown removes the Docker objects first, so a box it gave up on
     // halfway may have only its directories left.
     const directories = ws.boxDirectoryIds(this.cfg.DATA_DIR);
@@ -397,10 +387,9 @@ export class BoxManager {
       all.filter((o) => !live.has(o.boxId));
     const strayContainers = orphaned(containers);
     const strayNetworks = orphaned(networks);
-    const strayVolumes = orphaned(volumes);
     const strayDirectories = directories.filter((id) => !live.has(id));
 
-    const strays = [...strayContainers, ...strayNetworks, ...strayVolumes];
+    const strays = [...strayContainers, ...strayNetworks];
     const boxes = new Set([...strays.map((o) => o.boxId), ...strayDirectories]);
     if (boxes.size === 0) return;
 
@@ -417,7 +406,6 @@ export class BoxManager {
         boxes: [...boxes],
         containers: strayContainers.length,
         networks: strayNetworks.length,
-        volumes: strayVolumes.length,
         directories: strayDirectories.length,
       });
       return;
@@ -433,9 +421,6 @@ export class BoxManager {
       await this.sweeping(network.boxId, 'network', () =>
         dk.removeNetwork(network.name, this.cfg),
       );
-    }
-    for (const volume of strayVolumes) {
-      await this.sweeping(volume.boxId, 'volume', () => dk.removeVolume(volume.name));
     }
     for (const boxId of boxes) {
       await this.sweeping(boxId, 'workspace', () =>
@@ -519,12 +504,9 @@ export class BoxManager {
    *
    * Only for a container the daemon reports as missing. `unknown` means the
    * daemon did not answer, and the container may be running.
-   *
-   * A box still on a workspace volume is left to `migrateWorkspace`, which
-   * runs before this and rebuilds the container itself.
    */
   private async restoreMissingContainer(row: BoxRow): Promise<BoxRow> {
-    if (!row.container_id || !row.workspace_dir) return row;
+    if (!row.container_id) return row;
     if ((await dk.containerState(row.container_id)) !== 'missing') return row;
 
     const slog = log.box(row.id);
@@ -620,10 +602,9 @@ export class BoxManager {
 
   /**
    * Replaces a box's container with a fresh one built from `row`, and
-   * returns the new container's id. The row names the new container and the
-   * workspace directory it binds before it is started, so a start that fails
-   * cannot leave the row naming the removed container. The caller records
-   * whatever else changed.
+   * returns the new container's id. The row names the new container before
+   * it is started, so a start that fails cannot leave the row naming the
+   * removed container. The caller records whatever else changed.
    *
    * The old container is stopped before it is removed even when it is
    * already down; both calls tolerate a container that is gone.
@@ -635,8 +616,8 @@ export class BoxManager {
     }
     const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
     this.db
-      .prepare('UPDATE boxes SET container_id = ?, workspace_dir = ? WHERE id = ?')
-      .run(containerId, row.workspace_dir, row.id);
+      .prepare('UPDATE boxes SET container_id = ? WHERE id = ?')
+      .run(containerId, row.id);
     await dk.startContainer(containerId);
     return containerId;
   }
@@ -687,11 +668,7 @@ export class BoxManager {
       workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
       nixSource: ws.hostNixPath(this.hostDataDir, row.id),
       agentConfigSource: hostAgentConfigPath(this.hostDataDir, row.id),
-      // A directory for a newer box, and the named volume for an older one.
-      // Homes are never migrated.
-      homeSource: row.home_dir
-        ? ws.hostHomePath(this.hostDataDir, row.id)
-        : row.home_volume,
+      homeSource: ws.hostHomePath(this.hostDataDir, row.id),
       env: dk.credentialEnv(
         (id) => this.egress.placeholderFor(id),
         { gitName: settings.gitName, gitEmail: settings.gitEmail },
@@ -779,11 +756,6 @@ export class BoxManager {
       container_id: null,
       network_name: dk.names.network(id),
       subnet,
-      // Both are directories, so the volume columns stay empty.
-      ws_volume: '',
-      home_volume: '',
-      workspace_dir: ws.workspacePath(this.cfg.DATA_DIR, id),
-      home_dir: ws.homePath(this.cfg.DATA_DIR, id),
       // No base revision until the reviewer picks one. A review compares
       // each repository against its own HEAD by default.
       review_base_rev: null,
@@ -798,11 +770,11 @@ export class BoxManager {
     this.db
       .prepare(
         `INSERT INTO boxes (id, name, profile, image, container_id,
-           network_name, subnet, ws_volume, home_volume, workspace_dir, home_dir,
-           status, agent_set_id, ws_token, created_at, last_active_at)
+           network_name, subnet, status, agent_set_id, ws_token,
+           created_at, last_active_at)
          VALUES (@id, @name, @profile, @image, @container_id,
-           @network_name, @subnet, @ws_volume, @home_volume, @workspace_dir, @home_dir,
-           @status, @agent_set_id, @ws_token, @created_at, @last_active_at)`,
+           @network_name, @subnet, @status, @agent_set_id, @ws_token,
+           @created_at, @last_active_at)`,
       )
       .run(row);
 
@@ -873,19 +845,14 @@ export class BoxManager {
     // Before any step that may create a container binding this directory,
     // which the daemon would otherwise create empty and owned by root.
     this.agents.materialize(row.id, row.agent_set_id);
-    // The Nix store likewise, which an older box may not have yet.
+    // The Nix store likewise.
     ws.createNix(this.cfg.DATA_DIR, row.id);
     // Before anything binds the other two, for the same reason.
     this.requireDirectories(row);
-    let current = await this.migrateWorkspace(row);
+    // Before the image check, which needs a container to ask the daemon about.
+    const current = await this.restoreMissingContainer(row);
     this.giveUpIfPreempted(row.id);
-    // Before the two below, which need a container to ask the daemon about.
-    current = await this.restoreMissingContainer(current);
-    this.giveUpIfPreempted(row.id);
-    // Before the mount check: a recreated container already has every mount.
-    current = await this.rollOntoCurrentImage(current);
-    this.giveUpIfPreempted(row.id);
-    return this.ensureTemplateMounts(current);
+    return this.rollOntoCurrentImage(current);
   }
 
   /**
@@ -897,17 +864,16 @@ export class BoxManager {
    * partly restored backup, or a wrong HOST_DATA_DIR all cause this.
    *
    * The directories are not recreated, because a fresh home would erase the
-   * adapter's thread transcripts. Only the mounts the row marks as
-   * directories are checked.
+   * adapter's thread transcripts.
    */
   private requireDirectories(row: BoxRow): void {
     const missing: string[] = [];
     const workspace = ws.workspacePath(this.cfg.DATA_DIR, row.id);
     const home = ws.homePath(this.cfg.DATA_DIR, row.id);
-    if (row.workspace_dir && !ws.directoryExists(workspace)) {
+    if (!ws.directoryExists(workspace)) {
       missing.push(`its workspace directory (${workspace})`);
     }
-    if (row.home_dir && !ws.directoryExists(home)) {
+    if (!ws.directoryExists(home)) {
       missing.push(`its home directory (${home})`);
     }
     if (missing.length === 0) return;
@@ -941,63 +907,6 @@ export class BoxManager {
     // The upstream reconnects on the next forwarded message, which sends
     // session/load again and restores the thread.
     return this.detail(id);
-  }
-
-  /**
-   * Moves a box that still has a workspace volume onto a directory, and
-   * returns the row as it now stands.
-   *
-   * The order loses nothing at any step: copy first, recreate the container
-   * second, and drop the volume only once the new container has started. The
-   * row records the directory as soon as the container that binds it exists.
-   * Otherwise a crash could leave a row that says volume, and the next start
-   * would copy the volume over the agent's work.
-   *
-   * A running box is left alone until its next start.
-   */
-  private async migrateWorkspace(row: BoxRow): Promise<BoxRow> {
-    if (row.workspace_dir) return row;
-    const slog = log.box(row.id);
-    if (await this.deferredWhileRunning(row, 'workspace migration')) return row;
-
-    slog.info('migrating the workspace volume to a directory', { volume: row.ws_volume });
-    const directory = ws.createWorkspace(this.cfg.DATA_DIR, row.id);
-    const hostDirectory = ws.hostWorkspacePath(this.hostDataDir, row.id);
-
-    if (row.ws_volume) {
-      await dk.copyVolumeToDirectory(row.ws_volume, hostDirectory, row.image, row.id);
-    }
-    // cp -a kept the ownership of the contents; the directory itself needs it.
-    ws.chownToAgent(directory);
-
-    await this.recreateContainer({ ...row, workspace_dir: directory });
-    this.db.prepare("UPDATE boxes SET ws_volume = '' WHERE id = ?").run(row.id);
-
-    if (row.ws_volume) await dk.removeVolume(row.ws_volume);
-    slog.info('workspace migrated', { directory });
-    return this.mustGet(row.id);
-  }
-
-  /**
-   * Gives a box created before a mount existed the mounts the template has
-   * now, and returns the row as it now stands.
-   *
-   * An older container may lack the agent configuration or the Nix store
-   * mount, and is recreated once from the template. A failure halfway loses
-   * nothing, because the directories are already written and the next start
-   * tries again. A running box is left alone until its next start.
-   */
-  private async ensureTemplateMounts(row: BoxRow): Promise<BoxRow> {
-    if (!row.container_id) return row;
-    const missing = await dk.missingMounts(row.container_id, [dk.AGENT_CONFIG_DIR, dk.NIX_DIR]);
-    if (missing.length === 0) return row;
-    if (await this.deferredWhileRunning(row, 'the mounts it lacks')) return row;
-    log.box(row.id).info('recreating the container with the mounts it lacks', { missing });
-    const containerId = await this.recreateContainer(row);
-    this.db
-      .prepare('UPDATE boxes SET container_id = ? WHERE id = ?')
-      .run(containerId, row.id);
-    return this.mustGet(row.id);
   }
 
   /**
@@ -1086,21 +995,16 @@ export class BoxManager {
     } catch (err) {
       slog.warn('network teardown failed', { error: (err as Error).message });
     }
-    if (row.workspace_dir) {
-      try {
-        ws.removeWorkspace(this.cfg.DATA_DIR, row.id);
-      } catch (err) {
-        slog.warn('workspace removal failed', { error: (err as Error).message });
-      }
+    try {
+      ws.removeWorkspace(this.cfg.DATA_DIR, row.id);
+    } catch (err) {
+      slog.warn('workspace removal failed', { error: (err as Error).message });
     }
-    if (row.home_dir) {
-      try {
-        ws.removeHome(this.cfg.DATA_DIR, row.id);
-      } catch (err) {
-        slog.warn('home removal failed', { error: (err as Error).message });
-      }
+    try {
+      ws.removeHome(this.cfg.DATA_DIR, row.id);
+    } catch (err) {
+      slog.warn('home removal failed', { error: (err as Error).message });
     }
-    // No column says which boxes have a Nix store, so every box is tried.
     try {
       ws.removeNix(this.cfg.DATA_DIR, row.id);
     } catch (err) {
@@ -1111,9 +1015,6 @@ export class BoxManager {
     } catch (err) {
       slog.warn('agent configuration removal failed', { error: (err as Error).message });
     }
-    // Only an older box still has volumes.
-    if (row.ws_volume) await dk.removeVolume(row.ws_volume);
-    if (row.home_volume) await dk.removeVolume(row.home_volume);
   }
 
   // --- views ----------------------------------------------------------------
@@ -1309,10 +1210,6 @@ export class BoxManager {
       containerId: row.container_id,
       networkName: row.network_name,
       subnet: row.subnet,
-      wsVolume: row.ws_volume,
-      workspaceDir: row.workspace_dir,
-      homeVolume: row.home_volume,
-      homeDir: row.home_dir,
       acpSessionId: latestThread(this.db, id)?.acp_session_id ?? null,
       proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
       // `upstreams.get` rather than `upstream()`, which would create one. A

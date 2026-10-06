@@ -14,6 +14,7 @@ import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { AgentStore } from '../agents.ts';
 import { BoxManager } from '../boxes.ts';
+import * as ws from '../workspaces.ts';
 import { HISTORY_LOADING, THREAD_WORKING, type DownstreamHandle } from './upstream.ts';
 import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 
@@ -238,16 +239,21 @@ class RecordingNotifier extends Notifier {
   }
 }
 
-/** A running box with two threads, the first of which was active last. */
-function seed(): void {
+/**
+ * A running box with two threads, the first of which was active last. Its
+ * directories go under `dataDir`, which is the one the manager reads.
+ */
+function seed(dataDir: string): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, status,
-       created_at, last_active_at)
+       network_name, subnet, status, created_at, last_active_at)
      VALUES ('s1', 'test', 'DEFAULT', 'img', 'c1',
-       'bn-s1', '10.200.0.0/24', 'ws-s1', 'home-s1', 'running', ?, ?)`,
+       'bn-s1', '10.200.0.0/24', 'running', ?, ?)`,
   ).run(now, now);
+  // A start refuses a box whose directories are gone.
+  ws.createWorkspace(dataDir, 's1');
+  ws.createHome(dataDir, 's1');
   for (const [id, acp, ordinal, active] of [
     ['t1', 'acp-gone', 1, now],
     ['t2', 'acp-kept', 2, now - 60_000],
@@ -283,7 +289,9 @@ beforeEach(() => {
     new RecordingNotifier(db, cfg),
     new AgentStore(db, cfg.DATA_DIR),
   );
-  seed();
+  // config() is memoised for the process, so the manager's DATA_DIR is the
+  // first test's `dir`, not necessarily this test's.
+  seed(cfg.DATA_DIR);
 });
 
 afterEach(() => {

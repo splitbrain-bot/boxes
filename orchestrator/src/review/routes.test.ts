@@ -77,31 +77,18 @@ function workspace(id: string): string {
   return join(dir, 'workspaces', id);
 }
 
-/** A directory-backed box row, which is all the review routes need. */
+/** A box row and its workspace directory, which is all the review routes need. */
 function insertBox(id: string): string {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, workspace_dir,
-       review_base_rev, status, created_at, last_active_at)
+       network_name, subnet, review_base_rev, status, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', '', ?, ?, NULL, 'running', ?, ?)`,
-  ).run(id, `bn-${id}`, `home-${id}`, workspace(id), now, now);
+       ?, '10.200.0.0/24', NULL, 'running', ?, ?)`,
+  ).run(id, `bn-${id}`, now, now);
   const path = workspace(id);
   mkdirSync(path, { recursive: true });
   return path;
-}
-
-/** A box whose workspace is still a named volume, as a legacy row is. */
-function insertVolumeBox(id: string): void {
-  const now = Date.now();
-  db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, ws_volume, home_volume, workspace_dir,
-       review_base_rev, status, created_at, last_active_at)
-     VALUES (?, 'legacy', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', ?, ?, NULL, NULL, 'stopped', ?, ?)`,
-  ).run(id, `bn-${id}`, `ws-${id}`, `home-${id}`, now, now);
 }
 
 /** Runs git in a directory with the ambient binary. */
@@ -510,13 +497,6 @@ describe('the directory endpoint', () => {
     assert.equal((await orchestrator.app.inject({ url: '/api/boxes/nope/review/dir' })).statusCode, 404);
   });
 
-  test('a volume-backed box says what to do about it', async () => {
-    insertVolumeBox('hhh');
-    const res = await orchestrator.app.inject({ url: '/api/boxes/hhh/review/dir' });
-    // 409, not 404: the box is real and the fix is one start.
-    assert.equal(res.statusCode, 409);
-    assert.match((res.json() as { error: string }).error, /Start the box once/);
-  });
 });
 
 // --- the file ---------------------------------------------------------------
