@@ -7,7 +7,6 @@ description: Draw a diagram in an answer with a mermaid code block. Use when a p
 
 The person you work for reads your answers in the Boxes dashboard, often on
 a phone. The dashboard draws every code block marked `mermaid` as a diagram.
-They can tap the diagram to see it full screen and zoom in.
 
 ## When to draw
 
@@ -41,13 +40,29 @@ flowchart TD
   characters in double quotes: `A["parse(input)"]`.
 - Do not set a theme. The diagram follows the dashboard's light or dark mode.
 
-## What the reader sees
+## Check the diagram
 
-- While you are still writing, the block shows its source text. The diagram
-  appears when your answer is complete.
-- If mermaid cannot parse the block, the reader sees the source text and a
-  note that the diagram could not be drawn. You cannot see the result
-  yourself, so keep to syntax you are sure of.
-- The diagram is part of your answer only. It is not saved as a file. When
-  the person asks for a diagram file in the repository, write the mermaid
-  source to a `.md` or `.mmd` file instead.
+If the dashboard cannot parse a block, the person sees only the source text.
+Before you send a diagram that is not trivial, render it to an image and look
+at it. This finds syntax errors and shows if the layout is too wide or
+crowded.
+
+Write the source to a file, then render it with the mermaid CLI and the
+Chromium of the box:
+
+```bash
+mkdir -p /tmp/mermaid
+echo '{"args":["--no-sandbox"]}' > /tmp/mermaid/puppeteer.json
+# write the diagram source to /tmp/mermaid/diagram.mmd
+PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chromium \
+  npx -y @mermaid-js/mermaid-cli -p /tmp/mermaid/puppeteer.json \
+  -i /tmp/mermaid/diagram.mmd -o /tmp/mermaid/diagram.png
+```
+
+- Chromium crashes without the `--no-sandbox` argument in the puppeteer
+  configuration.
+- On a syntax error, the command prints the parse error with the line and
+  exits with a status that is not zero. Fix the source and render again.
+- Open the PNG file to look at the result. Use `-o diagram.svg` to get an
+  SVG file instead.
+

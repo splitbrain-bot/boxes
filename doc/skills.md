@@ -37,6 +37,23 @@ sharing is finished.
 
 Skill instructions: [share-app](../box-image/skills/share-app/SKILL.md)
 
+## Diagrams
+
+Some answers are easier to understand with a picture, for example how
+components connect or how a request moves through a system. The dashboard
+can show mermaid diagrams in the agent's answers.
+
+The `diagrams` skill tells the agent when a diagram helps and when text is
+sufficient. It also gives rules to write the mermaid source: which diagram
+type to use for which purpose and how to accommodate small screens.
+
+Before the agent sends a diagram, it can render the diagram to an image with
+the mermaid CLI and the Chromium of the box. Then it can find syntax errors and
+layout problems itself. The CLI is downloaded from the npm registry when the
+agent first uses it.
+
+Skill instructions: [diagrams](../box-image/skills/diagrams/SKILL.md)
+
 ## Playwright CLI
 
 When doing web development, browser debugging is necessary. The box image includes
