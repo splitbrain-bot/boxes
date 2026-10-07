@@ -108,7 +108,7 @@ proxy. Protect access to this volume and to its backups. See [Storage](storage.m
 1. Open the dashboard and go to **Settings**. Enter the credentials for the agents you want to use: a token for Claude
    Code or an API key for Codex. GitHub and GitLab tokens authenticate `git` and the CLIs in each box. See
    [Credentials](credentials.md).
-2. Create a box from the box list. The dialog asks for the agent and the settings of its first thread. On creating
-   the first box, the orchestrator pulls the box image from GHCR, which takes some minutes. It then creates the
+2. Create a [box](boxes.md) from the box list. The dialog asks for the agent and the settings of its first thread. On
+   creating the first box, the orchestrator pulls the box image from GHCR, which takes some minutes. It then creates the
    container and its private network, and starts the thread.
-3. Type prompts in the thread view. A running turn continues even when you close the tab.
+3. Type prompts in the [thread](threads.md) view. A running turn continues even when you close the tab.

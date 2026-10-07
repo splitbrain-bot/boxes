@@ -168,7 +168,7 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
  * broadcast set.
  *
  * @param threadId The thread the URL named, or null to pin the box's most
- *   recently active thread, as an external ACP client does.
+ *   recently active thread.
  */
 export function attachDownstream(
   ws: WebSocket,

@@ -1,13 +1,13 @@
 # Environment variables
 
-Boxes is started via Docker Compose. The orchestrator reads its configuration from environment variables. All
-variables have sensible defaults, so you only need to set the ones you want to change.
+Boxes is started via [Docker Compose](compose.md). The orchestrator reads its configuration from environment variables.
+All variables have sensible defaults, so you only need to set the ones you want to change.
 
-By default, the distributed compose file will read a `.env` file in the repository root - you can override this
-by setting the `BOXES_ENV` variable in your shell before running `docker compose`. 
+By default, the distributed compose file will read a `.env` file in the repository root - you can override this by
+setting the `BOXES_ENV` variable in your shell before running `docker compose`.
 
-Note that credentials are not environment variables, they are set in the dashboard and stored in the orchestrator
-database.
+Note that [credentials](credentials.md) are not environment variables, they are set in the dashboard and stored in the
+orchestrator database.
 
 ## Compose variables
 
@@ -25,7 +25,7 @@ These variables are read by the orchestrator container.
 
 | Variable | Default | Accepted value | Description |
 | --- | --- | --- | --- |
-| `DATA_DIR` | `/data` | Non-empty path | Directory for the database, generated keys, and box workspaces. |
+| `DATA_DIR` | `/data` | Non-empty path | Directory for the database, generated keys, and box [workspaces](storage.md). |
 | `HOST_DATA_DIR` | empty | Path | Host-side path corresponding to `DATA_DIR`. Usually leave this unset so Boxes discovers the Docker volume mount. Set it for rootless or nested Docker, or when `/data` is a host bind mount. |
 | `PORT` | `3000` | Positive integer | Port on which the orchestrator listens inside its container. The shipped Compose file publishes port 3000, so changing this also requires a matching Compose change. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` | Lowest severity written to standard error. `debug` logs every forwarded ACP message. |
@@ -50,7 +50,7 @@ These variables are read by the orchestrator container.
 | `EGRESS_PROXY_ALIAS` | `proxy` | Non-empty hostname | Name boxes use for the egress proxy on their private networks. |
 | `EGRESS_PROXY_PORT` | `3128` | Positive integer | Egress proxy port used by boxes. Changing it requires matching proxy container configuration. |
 | `EGRESS_CONTROL_PORT` | `3129` | Positive integer | Egress proxy control port used by the orchestrator. Changing it requires matching proxy container configuration. |
-| `EGRESS_ALLOWED_HOSTS` | empty | Comma- or whitespace-separated hostnames | Optional egress allowlist. Exact hostnames and one-label wildcards such as `*.example.com` are accepted. Leave empty to allow all public hosts. Private ranges remain blocked. A bare `*` is invalid. |
+| `EGRESS_ALLOWED_HOSTS` | empty | Comma- or whitespace-separated hostnames | Optional [egress allowlist](egress.md). Exact hostnames and one-label wildcards such as `*.example.com` are accepted. Leave empty to allow all public hosts. Private ranges remain blocked. A bare `*` is invalid. |
 | `GITLAB_HOST` | `gitlab.com` | Bare hostname with at least two labels | GitLab host for the GitLab credential. Set this for a self-managed public GitLab instance. |
 
 ## Development variable
@@ -61,8 +61,8 @@ These variables are read by the orchestrator container.
 
 ## Internal container variables
 
-Boxes sets the following variables when it creates a box. They are not
-deployment settings and should not be added to the orchestrator environment.
+Boxes sets the following variables when it creates a [box](boxes.md). They are not deployment settings and should not be
+added to the orchestrator environment.
 
 | Variables | Purpose |
 | --- | --- |
@@ -73,16 +73,13 @@ deployment settings and should not be added to the orchestrator environment.
 | `CODEX_API_KEY`, `CODEX_HOME`, `NO_BROWSER`, `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST` | Codex adapter configuration. |
 | `TERM` | Set to `dumb` for commands run through Boxes. |
 
-The box image also defines standard runtime variables such as `HOME`, `PATH`,
-`TMPDIR`, `PLAYWRIGHT_BROWSERS_PATH`, and `BOXES_IMAGE_BROWSERS`. Treat these as
-image implementation details. Override them only in a derived image that also
+The box image also defines standard runtime variables such as `HOME`, `PATH`, `TMPDIR`, `PLAYWRIGHT_BROWSERS_PATH`, and
+`BOXES_IMAGE_BROWSERS`. Treat these as image implementation details. Override them only in a derived image that also
 preserves the image entrypoint's expectations.
 
 ## Custom proxy deployments
 
-The egress proxy accepts `PORT`, `CONTROL_PORT`, and `CONTROL_BIND` directly.
-They default to `3128`, `3129`, and an automatically selected Compose-network
-address. The shipped Compose file does not pass these variables into the proxy.
-Use them only with a custom Compose configuration that changes the matching
-orchestrator settings: `EGRESS_PROXY_PORT` for `PORT` and
-`EGRESS_CONTROL_PORT` for `CONTROL_PORT`. `CONTROL_BIND` must be an IP address.
+The [egress proxy](egress.md) accepts `PORT`, `CONTROL_PORT`, and `CONTROL_BIND` directly. They default to `3128`,
+`3129`, and an automatically selected Compose-network address. The shipped Compose file does not pass these variables
+into the proxy. Use them only with a custom Compose configuration that changes the matching orchestrator settings:
+`EGRESS_PROXY_PORT` for `PORT` and `EGRESS_CONTROL_PORT` for `CONTROL_PORT`. `CONTROL_BIND` must be an IP address.

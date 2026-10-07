@@ -79,8 +79,7 @@ const wss = new WebSocketServer({
  * The upgrade paths of the ACP gateway.
  *
  * The long form names a thread and connects to that conversation. The short
- * form names none and means the current thread of the box. External ACP
- * clients use the short form.
+ * form names none and pins the box's most recently active thread.
  */
 const WS_PATH =
   /^\/ws\/boxes\/([A-Za-z0-9_-]{1,64})(?:\/threads\/([A-Za-z0-9_-]{1,64}))?\/acp$/;
