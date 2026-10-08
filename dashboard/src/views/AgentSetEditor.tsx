@@ -1,7 +1,12 @@
-import { FileText, Pencil, Plus, Trash2 } from 'lucide-react';
+import { FileText, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import type { AgentBundlePreview, AgentItem, AgentSetDetail } from '../../../shared/types.ts';
+import type {
+  AgentBundlePreview,
+  AgentItem,
+  AgentRepo,
+  AgentSetDetail,
+} from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { useUp } from '@/hooks/use-up';
@@ -44,6 +49,7 @@ export function AgentSetEditor() {
 
   const [editing, setEditing] = useState<{ item: AgentItem | null } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<AgentItem | null>(null);
+  const [confirmRepo, setConfirmRepo] = useState<AgentRepo | null>(null);
 
   /**
    * Loads the set and, for a non-global set, the merged result.
@@ -180,6 +186,14 @@ export function AgentSetEditor() {
         onDelete={setConfirmDelete}
       />
 
+      <RepoSection
+        repos={set.repos}
+        busy={busy}
+        onAdd={(url, ref) => act(() => api.addAgentRepo(setId, { url, ref }))}
+        onPull={(repo) => void act(() => api.pullAgentRepo(setId, repo.id))}
+        onDelete={setConfirmRepo}
+      />
+
       {preview ? <Merged preview={preview} /> : null}
 
       {editing ? (
@@ -205,6 +219,23 @@ export function AgentSetEditor() {
             void act(async () => {
               await api.deleteAgentItem(setId, confirmDelete.name);
               setConfirmDelete(null);
+            })
+          }
+        />
+      ) : null}
+
+      {confirmRepo ? (
+        <ConfirmDialog
+          title="Remove repository?"
+          description={`Its skills are removed from this set, and from every box that uses the set at its next start. ${confirmRepo.url}`}
+          confirmLabel="Remove"
+          danger
+          busy={busy}
+          onCancel={() => setConfirmRepo(null)}
+          onConfirm={() =>
+            void act(async () => {
+              await api.deleteAgentRepo(setId, confirmRepo.id);
+              setConfirmRepo(null);
             })
           }
         />
@@ -287,6 +318,115 @@ function ItemSection({
   );
 }
 
+/** The repositories a set takes skills from, with a form to add one. */
+function RepoSection({
+  repos,
+  busy,
+  onAdd,
+  onPull,
+  onDelete,
+}: {
+  repos: AgentRepo[];
+  busy: boolean;
+  /** Adds and pulls a repository. Resolves to whether that succeeded. */
+  onAdd: (url: string, ref: string) => Promise<boolean>;
+  onPull: (repo: AgentRepo) => void;
+  onDelete: (repo: AgentRepo) => void;
+}) {
+  const [url, setUrl] = useState('');
+  const [ref, setRef] = useState('');
+
+  /** Adds the repository in the form, and empties the form when that worked. */
+  const add = async (): Promise<void> => {
+    if (await onAdd(url.trim(), ref.trim())) {
+      setUrl('');
+      setRef('');
+    }
+  };
+
+  return (
+    <Card className="flex flex-col gap-3 p-4">
+      <h2 className="text-sm font-medium">Repositories</h2>
+      <p className="text-xs text-muted-foreground">
+        Git repositories to take more skills from. Every directory with a SKILL.md becomes a skill,
+        with all its files. The repositories are pulled once a day. A skill above wins over a
+        repository skill of the same name, and a repository higher in the list wins over a lower
+        one. Private repositories on GitHub use the GitHub credential.
+      </p>
+
+      {repos.length === 0 ? (
+        <p className="py-2 text-sm text-muted-foreground">None in this set.</p>
+      ) : null}
+
+      {repos.map((repo) => (
+        <div key={repo.id} className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm">
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <span className="truncate font-mono text-xs">{repo.url}</span>
+            <span className="text-xs text-muted-foreground">
+              {repo.ref === '' ? 'default branch' : repo.ref}
+              {repo.commit ? ` · ${repo.commit.slice(0, 7)}` : ''}
+              {repo.pulledAt ? ` · pulled ${new Date(repo.pulledAt).toLocaleString()}` : ''}
+            </span>
+            <span className="font-mono text-xs break-words">
+              {repo.skills.length === 0 ? 'no skills' : repo.skills.join(', ')}
+            </span>
+            {repo.error ? <span className="text-xs text-warn">{repo.error}</span> : null}
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Pull ${repo.url}`}
+            disabled={busy}
+            onClick={() => onPull(repo)}
+          >
+            <RefreshCw />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Remove ${repo.url}`}
+            className="text-danger"
+            disabled={busy}
+            onClick={() => onDelete(repo)}
+          >
+            <Trash2 />
+          </Button>
+        </div>
+      ))}
+
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Input
+          aria-label="Repository URL"
+          value={url}
+          maxLength={500}
+          placeholder="https://github.com/anthropics/skills"
+          className="sm:flex-1"
+          onChange={(e) => setUrl(e.target.value)}
+        />
+        <Input
+          aria-label="Branch, tag or commit"
+          value={ref}
+          maxLength={200}
+          placeholder="branch, tag or commit"
+          className="sm:w-48"
+          onChange={(e) => setRef(e.target.value)}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy || url.trim() === ''}
+          onClick={() => void add()}
+        >
+          <Plus />
+          Add
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 /** Summary of the merged set that a box using this set gets. */
 function Merged({ preview }: { preview: AgentBundlePreview }) {
   return (
@@ -304,7 +444,7 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
         </dd>
         <dt className="text-xs text-muted-foreground">Skills</dt>
         <dd className="font-mono text-xs break-words">
-          {preview.items.length === 0 ? 'none' : preview.items.map((i) => i.name).join(', ')}
+          {preview.skills.length === 0 ? 'none' : preview.skills.map((s) => s.name).join(', ')}
         </dd>
       </dl>
     </Card>

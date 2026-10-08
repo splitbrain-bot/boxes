@@ -47,6 +47,9 @@ A personal access token (`ghp_…`, paste only). The placeholder is set as `GH_T
 It authenticates git over HTTPS and the GitHub CLI (`gh`) in every box. The box entrypoint configures git's credential
 helper from the placeholder; the token travels to `github.com`, `api.github.com` and `*.githubusercontent.com`.
 
+The orchestrator also uses the token to pull private skill repositories from `github.com` for
+[agent sets](agent-sets.md).
+
 ### GitLab
 
 A personal access token (`glpat-…`, paste only) with the `api` and `write_repository` scopes. The placeholder is set as

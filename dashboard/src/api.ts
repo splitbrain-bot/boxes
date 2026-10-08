@@ -1,6 +1,7 @@
 import type {
   AgentBundlePreview,
   AgentItemBody,
+  AgentRepoBody,
   AgentSetDetail,
   AgentSetSummary,
   CreateBoxBody,
@@ -251,6 +252,18 @@ export const api = {
     request<AgentSetDetail>(`/api/agent-sets/${setId}/items?name=${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
+  /** Adds a repository to take skills from, and pulls it. */
+  addAgentRepo: (setId: string, body: AgentRepoBody) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/repos`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Removes a repository from a set. */
+  deleteAgentRepo: (setId: string, repoId: string) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/repos/${repoId}`, { method: 'DELETE' }),
+  /** Pulls one repository of a set now. */
+  pullAgentRepo: (setId: string, repoId: string) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/repos/${repoId}/pull`, { method: 'POST' }),
   /** Reads what a box that selects this set receives, global set included. */
   agentSetPreview: (setId: string) =>
     request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),

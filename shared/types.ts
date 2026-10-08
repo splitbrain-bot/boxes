@@ -947,8 +947,10 @@ export interface AgentSetSummary {
   global: boolean;
   /** True when this set contributes an AGENTS.md of its own. */
   hasAgentsMd: boolean;
-  /** How many skills the set holds. */
+  /** How many skills the set holds, not counting those of its repositories. */
   skillCount: number;
+  /** How many repositories the set takes skills from. */
+  repoCount: number;
   /** How many live boxes were created with this set selected. */
   boxCount: number;
   /** When the set was created, in epoch milliseconds. */
@@ -963,6 +965,26 @@ export interface AgentSetDetail extends AgentSetSummary {
   agentsMd: string;
   /** Its skills, by name. */
   items: AgentItem[];
+  /** The repositories it takes more skills from, in the order they were added. */
+  repos: AgentRepo[];
+}
+
+/** A git repository an agent set takes skills from. */
+export interface AgentRepo {
+  /** The repository's id within the deployment. */
+  id: string;
+  /** The HTTPS URL it is fetched from. */
+  url: string;
+  /** The branch, tag or commit it is fetched at, or '' for the default branch. */
+  ref: string;
+  /** The commit the skills come from, or null before the first good pull. */
+  commit: string | null;
+  /** Names of the skills found in that commit. */
+  skills: string[];
+  /** When the last pull ran, good or failed, in epoch milliseconds, or null. */
+  pulledAt: number | null;
+  /** Why the last pull failed, or null when it did not. */
+  error: string | null;
 }
 
 /** Body of a create-set request. */
@@ -977,6 +999,14 @@ export interface UpdateAgentSetBody {
   name?: string;
   /** The set's new AGENTS.md. */
   agentsMd?: string;
+}
+
+/** Body of a repository add. */
+export interface AgentRepoBody {
+  /** The HTTPS URL to fetch. */
+  url: string;
+  /** The branch, tag or full commit hash to fetch. Absent or '' means the default branch. */
+  ref?: string;
 }
 
 /** Body of a skill write. Creates the skill, or replaces it under its name. */
@@ -994,10 +1024,18 @@ export interface AgentItemBody {
 export interface AgentBundlePreview {
   /** The global AGENTS.md and the set's, joined by a blank line. */
   agentsMd: string;
-  /** Every skill the box gets, after the selected set's overrides. */
-  items: AgentItem[];
+  /** Every skill the box gets, after the overrides, by name. */
+  skills: AgentBundleSkill[];
   /** Names of the skills the selected set took over from the global one. */
   overrides: string[];
+}
+
+/** One skill of a merged configuration. */
+export interface AgentBundleSkill {
+  /** The skill's name. */
+  name: string;
+  /** The URL of the repository the skill comes from, or null for a skill of a set. */
+  repo: string | null;
 }
 
 // --- the gateway's own ACP extensions ---------------------------------------

@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { AgentStore, agentConfigPath } from './agents.ts';
 import { openDb, type Db } from './db.ts';
 import { HttpError } from './http-error.ts';
@@ -11,11 +22,34 @@ let dir: string;
 let db: Db;
 let store: AgentStore;
 
+/** The fake fetcher's checkouts, by URL. A string is the error the fetch fails with. */
+let remotes: Record<string, Record<string, string> | string>;
+
+/** Every fetch the store asked for, as URL and ref. */
+let fetches: string[];
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-agents-'));
   db = openDb(dir);
-  store = new AgentStore(db, dir);
+  remotes = {};
+  fetches = [];
+  store = new AgentStore(db, dir, async (repo, url, ref) => {
+    fetches.push(`${url}@${ref}`);
+    const remote = remotes[url];
+    if (remote === undefined || typeof remote === 'string') throw new Error(remote ?? 'not found');
+    rmSync(join(repo, 'tree'), { recursive: true, force: true });
+    files(join(repo, 'tree'), remote);
+    return 'c0ffee';
+  });
 });
+
+/** Writes files under `root`, creating the directories on the way. */
+function files(root: string, contents: Record<string, string>): void {
+  for (const [rel, content] of Object.entries(contents)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), content);
+  }
+}
 
 afterEach(() => {
   db.close();
@@ -93,12 +127,13 @@ test('skills are a union, and the set wins a name clash', () => {
 
   const bundle = store.bundle(set.id);
   assert.deepEqual(
-    bundle.items.map((i) => i.name),
+    bundle.skills.map((i) => i.name),
     ['bench', 'review', 'ship'],
   );
-  assert.equal(bundle.items.find((i) => i.name === 'review')!.content, 'go review');
   // An override is silent in the merged result, so it is reported separately.
   assert.deepEqual(bundle.overrides, ['review']);
+  store.materialize('s1', set.id);
+  assert.equal(materialized('s1', '.claude/skills/review/SKILL.md'), 'go review\n');
 });
 
 test('naming the global set as the extra one changes nothing', () => {
@@ -202,6 +237,185 @@ test('deleting a box takes its materialized directory with it', () => {
   store.materialize('s1', null);
   store.removeMaterialized('s1');
   assert.equal(readdirSync(join(dir, 'agents')).includes('s1'), false);
+});
+
+// --- repositories ------------------------------------------------------------
+
+test('a repository is pulled when it is added, and its skills are listed', async () => {
+  remotes['https://example.com/skills'] = {
+    'skills/pdf/SKILL.md': 'pdf',
+    'skills/pdf/reference.md': 'more',
+  };
+  const set = await store.addRepo('global', { url: 'https://example.com/skills', ref: 'v1' });
+
+  assert.deepEqual(fetches, ['https://example.com/skills@v1']);
+  assert.equal(set.repoCount, 1);
+  assert.deepEqual(
+    set.repos.map(({ url, ref, commit, skills, error }) => ({ url, ref, commit, skills, error })),
+    [{ url: 'https://example.com/skills', ref: 'v1', commit: 'c0ffee', skills: ['pdf'], error: null }],
+  );
+  assert.deepEqual(store.bundle(null).skills, [{ name: 'pdf', repo: 'https://example.com/skills' }]);
+});
+
+test('a skill of the set wins over a repository, and an earlier repository over a later one', async () => {
+  remotes['https://example.com/one'] = { 'review/SKILL.md': 'one', 'lint/SKILL.md': 'one' };
+  remotes['https://example.com/two'] = { 'lint/SKILL.md': 'two', 'ship/SKILL.md': 'two' };
+  await store.addRepo('global', { url: 'https://example.com/one' });
+  await store.addRepo('global', { url: 'https://example.com/two' });
+  store.putItem('global', { name: 'review', content: 'mine' });
+
+  assert.deepEqual(store.bundle(null).skills, [
+    { name: 'lint', repo: 'https://example.com/one' },
+    { name: 'review', repo: null },
+    { name: 'ship', repo: 'https://example.com/two' },
+  ]);
+});
+
+test('a repository of the selected set wins over a skill of the global set', async () => {
+  remotes['https://example.com/go'] = { 'review/SKILL.md': 'go' };
+  store.putItem('global', { name: 'review', content: 'global' });
+  const set = store.createSet('go');
+  await store.addRepo(set.id, { url: 'https://example.com/go' });
+
+  const bundle = store.bundle(set.id);
+  assert.deepEqual(bundle.skills, [{ name: 'review', repo: 'https://example.com/go' }]);
+  assert.deepEqual(bundle.overrides, ['review']);
+});
+
+test('a repository skill is copied with all its files, without its links', async () => {
+  remotes['https://example.com/skills'] = {
+    'skills/pdf/SKILL.md': 'pdf',
+    'skills/pdf/scripts/run.sh': '#!/bin/sh\n',
+  };
+  const set = await store.addRepo('global', { url: 'https://example.com/skills' });
+  const tree = join(dir, 'skill-repos', set.repos[0]!.id, 'tree', 'skills', 'pdf');
+  chmodSync(join(tree, 'scripts', 'run.sh'), 0o755);
+  symlinkSync('/etc/passwd', join(tree, 'passwd'));
+
+  store.materialize('s1', null);
+
+  assert.deepEqual(manifest('s1').sort(), ['.agents/skills/pdf', '.claude/skills/pdf']);
+  assert.equal(materialized('s1', '.claude/skills/pdf/SKILL.md'), 'pdf');
+  assert.equal(materialized('s1', '.agents/skills/pdf/scripts/run.sh'), '#!/bin/sh\n');
+  const mode = statSync(join(agentConfigPath(dir, 's1'), '.claude/skills/pdf/scripts/run.sh')).mode;
+  assert.equal(mode & 0o111, 0o111);
+  assert.equal(existsSync(join(agentConfigPath(dir, 's1'), '.claude/skills/pdf/passwd')), false);
+});
+
+test('a skill that changes source leaves no file of the old one behind', async () => {
+  remotes['https://example.com/skills'] = {
+    'pdf/SKILL.md': 'repo',
+    'pdf/extra.md': 'extra',
+  };
+  await store.addRepo('global', { url: 'https://example.com/skills' });
+  store.materialize('s1', null);
+  store.putItem('global', { name: 'pdf', content: 'mine' });
+  store.materialize('s1', null);
+
+  assert.deepEqual(readdirSync(join(agentConfigPath(dir, 's1'), '.claude/skills/pdf')), [
+    'SKILL.md',
+  ]);
+});
+
+test('a failed pull is recorded, and the skills of the last good pull stay', async () => {
+  remotes['https://example.com/skills'] = { 'pdf/SKILL.md': 'pdf' };
+  const set = await store.addRepo('global', { url: 'https://example.com/skills' });
+  remotes['https://example.com/skills'] = 'repository not found';
+
+  const after = await store.refreshRepo('global', set.repos[0]!.id);
+
+  assert.equal(after.repos[0]!.error, 'repository not found');
+  assert.deepEqual(after.repos[0]!.skills, ['pdf']);
+  store.materialize('s1', null);
+  assert.equal(materialized('s1', '.claude/skills/pdf/SKILL.md'), 'pdf');
+});
+
+test('a repository that cannot be pulled at all is still added', async () => {
+  const set = await store.addRepo('global', { url: 'https://example.com/missing' });
+  assert.equal(set.repos[0]!.error, 'not found');
+  assert.equal(set.repos[0]!.commit, null);
+  assert.deepEqual(store.bundle(null).skills, []);
+});
+
+test('removing a repository removes its checkout and its skills', async () => {
+  remotes['https://example.com/skills'] = { 'pdf/SKILL.md': 'pdf' };
+  const set = await store.addRepo('global', { url: 'https://example.com/skills' });
+  const id = set.repos[0]!.id;
+
+  const after = store.deleteRepo('global', id);
+
+  assert.deepEqual(after.repos, []);
+  assert.equal(existsSync(join(dir, 'skill-repos', id)), false);
+  assert.deepEqual(store.bundle(null).skills, []);
+});
+
+test('deleting a set removes the checkouts of its repositories', async () => {
+  remotes['https://example.com/skills'] = { 'pdf/SKILL.md': 'pdf' };
+  const set = store.createSet('go');
+  const id = (await store.addRepo(set.id, { url: 'https://example.com/skills' })).repos[0]!.id;
+
+  store.deleteSet(set.id);
+
+  assert.equal(existsSync(join(dir, 'skill-repos', id)), false);
+});
+
+test('the daily pull takes the repositories pulled a day ago, and removes stray checkouts', async () => {
+  remotes['https://example.com/old'] = { 'a/SKILL.md': 'a' };
+  remotes['https://example.com/new'] = { 'b/SKILL.md': 'b' };
+  const old = (await store.addRepo('global', { url: 'https://example.com/old' })).repos[0]!;
+  await store.addRepo('global', { url: 'https://example.com/new' });
+  db.prepare('UPDATE agent_repos SET pulled_at = 0 WHERE id = ?').run(old.id);
+  mkdirSync(join(dir, 'skill-repos', 'stray'));
+  fetches = [];
+
+  await store.pullDue();
+
+  assert.deepEqual(fetches, ['https://example.com/old@']);
+  assert.equal(existsSync(join(dir, 'skill-repos', 'stray')), false);
+});
+
+test('two pulls of one repository at the same time fetch once', async () => {
+  remotes['https://example.com/skills'] = { 'pdf/SKILL.md': 'pdf' };
+  const id = (await store.addRepo('global', { url: 'https://example.com/skills' })).repos[0]!.id;
+  fetches = [];
+
+  await Promise.all([store.pullRepo(id), store.pullRepo(id)]);
+
+  assert.equal(fetches.length, 1);
+});
+
+test('a repository URL must be HTTPS and carry no credentials, and a ref must look like one', async () => {
+  for (const body of [
+    { url: 'http://example.com/skills' },
+    { url: 'git@github.com:a/b.git' },
+    { url: 'file:///etc' },
+    { url: 'https://user:secret@example.com/skills' },
+    { url: 'https://example.com/skills', ref: '--upload-pack=x' },
+    { url: 'https://example.com/skills', ref: 'a b' },
+  ]) {
+    await assert.rejects(
+      store.addRepo('global', body),
+      (err: unknown) => err instanceof HttpError && err.statusCode === 400,
+      `expected ${JSON.stringify(body)} to be refused`,
+    );
+  }
+  assert.deepEqual(fetches, []);
+});
+
+test('an unknown repository is a 404, also in another set', async () => {
+  remotes['https://example.com/skills'] = { 'pdf/SKILL.md': 'pdf' };
+  const id = (await store.addRepo('global', { url: 'https://example.com/skills' })).repos[0]!.id;
+  const other = store.createSet('other');
+  for (const call of [
+    () => store.refreshRepo(other.id, id),
+    async () => store.deleteRepo(other.id, id),
+    () => store.refreshRepo('global', 'nope'),
+  ]) {
+    await assert.rejects(
+      call(),
+      (err: unknown) => err instanceof HttpError && err.statusCode === 404,
+    );
+  }
 });
 
 // --- validation --------------------------------------------------------------

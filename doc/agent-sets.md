@@ -21,8 +21,11 @@ content merge differently:
 
 - The `AGENTS.md` files are concatenated: the global one first, the selected set's one after it, separated by a blank
   line.
-- A skill is addressed by its name. When the selected set has one of the same name as the global set, the selected
-  set's one wins.
+- A skill is addressed by its name. When two skills have the same name, one wins. The order, highest first:
+  1. a skill of the selected set
+  2. a skill from a repository of the selected set, in the order of the repository list
+  3. a skill of the global set
+  4. a skill from a repository of the global set, in the order of the repository list
 
 The editor of a named set shows the merged result under "Merged result".
 
@@ -36,6 +39,24 @@ Skill names must be lowercase letters, digits, and dashes, start with a letter o
 A name is fixed once the skill exists. To rename a skill, delete it and add it again.
 
 A set holds at most 100 skills. An `AGENTS.md` or one skill's content may be at most 100,000 characters.
+
+## Skills from repositories
+
+A set can also take skills from Git repositories, for example a Claude plugin repository. Such a skill can have more
+files than its `SKILL.md`, for example references or scripts.
+
+A repository is added by its HTTPS URL. A branch, a tag, or a full commit hash is optional. Without one, the default
+branch is used. To change the URL or the branch, remove the repository and add it again.
+
+The orchestrator pulls a repository when it is added, once a day, and when the user selects the pull button. Each
+directory with a `SKILL.md` file is one skill, at any depth. The directory name is the skill name. A `SKILL.md` at the
+root gets the name of the repository. The orchestrator copies the full directory, but no links.
+
+Private repositories on `github.com` use the GitHub [credential](credentials.md).
+
+When a pull fails, the editor shows the error on the repository. The skills of the last good pull stay in use.
+
+A set takes skills from at most 20 repositories, and the orchestrator takes at most 100 skills from one repository.
 
 ## File installation into a box
 
@@ -65,8 +86,18 @@ can be opened in its editor.
 
 ## Technical internals
 
-The implementation is `orchestrator/src/agents.ts`, over the `agent_sets` and `agent_items` tables. The database is the
-source of truth; the files are derived from it.
+The implementation is `orchestrator/src/agents.ts`, over the `agent_sets`, `agent_items` and `agent_repos` tables. The
+database is the source of truth; the files are derived from it.
+
+### Repository checkouts
+
+`orchestrator/src/skill-repos.ts` fetches a repository into `DATA_DIR/skill-repos/<repo id>/tree`. Each pull is a
+shallow fetch into a new git directory, and the new files replace the old checkout in one step. The `agent_repos` row
+keeps the commit, the skills found, and the error of the last pull.
+
+This is the one place where the orchestrator runs git itself. A repository cannot make git run a program here: the new
+git directory has no hooks, the configuration that names filters and helpers is never fetched, no system or user
+configuration is read, and submodules are not fetched.
 
 ### Materialization
 
@@ -94,5 +125,6 @@ delete.
 
 ### Deleting a set
 
-The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items are deleted with it. A
-box that named the deleted set keeps its installed files and gets the global set alone at its next start.
+The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items and repositories are
+deleted with it, together with the repository checkouts. A box that named the deleted set keeps its installed files and
+gets the global set alone at its next start.

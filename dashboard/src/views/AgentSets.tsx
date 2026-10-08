@@ -188,6 +188,9 @@ function describe(set: AgentSetSummary): string {
   if (set.skillCount > 0) {
     parts.push(`${set.skillCount} ${set.skillCount === 1 ? 'skill' : 'skills'}`);
   }
+  if (set.repoCount > 0) {
+    parts.push(`${set.repoCount} ${set.repoCount === 1 ? 'repository' : 'repositories'}`);
+  }
   if (parts.length === 0) parts.push('empty');
   if (set.global) return `${parts.join(' · ')} — applied to every box`;
   if (set.boxCount > 0) {

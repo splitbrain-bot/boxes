@@ -124,6 +124,9 @@ clears the base back to each repository's own HEAD. The answer says where the ex
 | DELETE | `/api/agent-sets/:setId` | 204 |
 | PUT | `/api/agent-sets/:setId/items` | `AgentSetDetail` |
 | DELETE | `/api/agent-sets/:setId/items?name=<n>` | `AgentSetDetail` |
+| POST | `/api/agent-sets/:setId/repos` | 201, `AgentSetDetail` |
+| DELETE | `/api/agent-sets/:setId/repos/:repoId` | `AgentSetDetail` |
+| POST | `/api/agent-sets/:setId/repos/:repoId/pull` | `AgentSetDetail` |
 | GET | `/api/agent-sets/:setId/preview` | `AgentBundlePreview` |
 
 `POST` accepts `{ "name": "…" }`. `PATCH` accepts `{ "name"?, "agentsMd"? }` and leaves absent fields alone. Every
@@ -132,8 +135,11 @@ mutation answers with the whole set.
 `PUT …/items` accepts an `AgentItemBody` with `name` and `content`, and creates or replaces the skill under that name.
 DELETE removes it.
 
+`POST …/repos` accepts an `AgentRepoBody` with `url` and an optional `ref`, adds the repository, and pulls it. A failed
+pull is not an error of the request: the set's `repos` list shows it. `POST …/pull` pulls the repository again.
+
 The preview answers what a box that selects this [agent set](agent-sets.md) receives: the global set, with this set laid
-over it.
+over it. Each skill in `skills` names the repository it comes from, or `null`.
 
 ## Credentials
 

@@ -791,12 +791,11 @@ test('the preview shows the merge, overrides named', async () => {
     await orchestrator.app.inject({ url: `/api/agent-sets/${set.id}/preview` })
   ).json() as {
     agentsMd: string;
-    items: Array<{ name: string; content: string }>;
-    overrides: Array<{ name: string }>;
+    skills: Array<{ name: string; repo: string | null }>;
+    overrides: string[];
   };
   assert.equal(preview.agentsMd, 'House rules.\n\nGo rules.');
-  assert.equal(preview.items.length, 1);
-  assert.equal(preview.items[0]!.content, 'go');
+  assert.deepEqual(preview.skills, [{ name: 'review', repo: null }]);
   assert.deepEqual(preview.overrides, ['review']);
 });
 

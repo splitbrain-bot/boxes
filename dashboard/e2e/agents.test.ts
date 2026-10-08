@@ -26,6 +26,10 @@ beforeEach(async () => {
         name: 'Go projects',
         agentsMd: 'Use table-driven tests.\n',
         items: [{ name: 'review', content: '---\nname: review\n---\ngo\n' }],
+        repos: [
+          { url: 'https://github.com/example/go-skills', skills: ['bench', 'fuzz'] },
+          { url: 'https://github.com/example/gone', skills: [], error: 'repository not found' },
+        ],
       },
     ],
   );
@@ -143,6 +147,33 @@ test('a box is created against a named set, and the global one is not offered', 
       'Global set only',
       'Go projects',
     ]);
+  } finally {
+    await close();
+  }
+});
+
+test('the editor lists the repositories, their skills and a failed pull', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/as1');
+  try {
+    await expect
+      .poll(() => page.getByText('https://github.com/example/go-skills').isVisible())
+      .toBe(true);
+    await expect.poll(() => page.getByText('bench, fuzz', { exact: true }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('repository not found').isVisible()).toBe(true);
+    // The repository skills are part of what a box gets.
+    await expect.poll(() => page.getByText('bench, fuzz, review, ship').isVisible()).toBe(true);
+  } finally {
+    await close();
+  }
+});
+
+test('a repository URL that is not HTTPS is refused with the reason', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/as1');
+  try {
+    await page.getByLabel('Repository URL').fill('git@github.com:example/skills.git');
+    await page.getByRole('button', { name: 'Add' }).last().click();
+    await expect.poll(() => page.getByText('url must be an HTTPS URL').isVisible()).toBe(true);
+    expect((await stub.agentSet('as1')).repos).toHaveLength(2);
   } finally {
     await close();
   }

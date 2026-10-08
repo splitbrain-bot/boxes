@@ -1,23 +1,43 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
 import {
   GLOBAL_AGENT_SET,
   type AgentBundlePreview,
   type AgentItem,
   type AgentItemBody,
+  type AgentRepoBody,
   type AgentSetDetail,
   type AgentSetSummary,
 } from '../../shared/types.ts';
-import type { AgentItemRow, AgentSetRow, Db } from './db.ts';
+import type { AgentItemRow, AgentRepoRow, AgentSetRow, Db } from './db.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
+import { log } from './log.ts';
+import {
+  fetchRepo,
+  findSkills,
+  repoDir,
+  repoDirIds,
+  repoName,
+  repoTree,
+  type RepoFetcher,
+  type RepoSkill,
+} from './skill-repos.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
- * Agent sets: the AGENTS.md and skills a box's agent is
- * configured with. The database holds them, and the files a box gets are
- * derived from it.
+ * Agent sets: the AGENTS.md and skills a box's agent is configured with. The
+ * database holds them, and the files a box gets are derived from it. A set
+ * can also take skills from git repositories, which are pulled into
+ * checkouts under DATA_DIR.
  */
 
 /** Where the merged sets are materialized, under DATA_DIR. */
@@ -35,8 +55,38 @@ const MAX_SET_NAME = 100;
 /** Longest an AGENTS.md or one skill's content may be. */
 const MAX_CONTENT = 100_000;
 
-/** Most skills a single set may hold. */
+/** Most skills a single set may hold, and most a repository may give. */
 const MAX_ITEMS = 100;
+
+/** Most repositories a single set may take skills from. */
+const MAX_REPOS = 20;
+
+/** Longest a repository URL may be. */
+const MAX_URL = 500;
+
+/** A branch, tag or full commit hash, which cannot be read as a git option. */
+const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+
+/** How old the last pull of a repository may be before it is pulled again. */
+const PULL_EVERY_MS = 24 * 60 * 60_000;
+
+/**
+ * One skill of a merged set: written from its stored SKILL.md, or copied
+ * from a repository's checkout.
+ */
+type BundleSkill =
+  | { name: string; repo: null; content: string }
+  | { name: string; repo: string; dir: string };
+
+/** A merged set, with the source of each skill. */
+interface Bundle {
+  /** The merged AGENTS.md. */
+  agentsMd: string;
+  /** Every skill, by name. */
+  skills: BundleSkill[];
+  /** Names the selected set took over from the global one. */
+  overrides: string[];
+}
 
 /** The parent of every materialized set. */
 function agentsRoot(dataDir: string): string {
@@ -71,9 +121,15 @@ export class AgentStore {
   constructor(
     /** Where the sets are stored. */
     private readonly db: Db,
-    /** The DATA_DIR the merged sets are written under. */
+    /** The DATA_DIR the merged sets and the repository checkouts are written under. */
     private readonly dataDir: string,
+    /** Fetches a repository into its checkout. */
+    private readonly fetcher: RepoFetcher = (dir, url, ref, keep) =>
+      fetchRepo(dir, url, ref, null, keep),
   ) {}
+
+  /** The pulls running now, by repository id. */
+  private readonly pulls = new Map<string, Promise<void>>();
 
   // --- reading --------------------------------------------------------------
 
@@ -92,6 +148,15 @@ export class AgentStore {
       ...this.summarize(row),
       agentsMd: row.agents_md,
       items: this.items(id),
+      repos: this.repoRows(id).map((repo) => ({
+        id: repo.id,
+        url: repo.url,
+        ref: repo.ref,
+        commit: repo.commit_sha,
+        skills: repoSkills(repo).map((skill) => skill.name),
+        pulledAt: repo.pulled_at,
+        error: repo.error,
+      })),
     };
   }
 
@@ -116,11 +181,28 @@ export class AgentStore {
     }));
   }
 
+  /** A set's repositories, in the order they were added. */
+  private repoRows(setId: string): AgentRepoRow[] {
+    return this.db
+      .prepare('SELECT * FROM agent_repos WHERE set_id = ? ORDER BY created_at, rowid')
+      .all(setId) as AgentRepoRow[];
+  }
+
+  /** One repository's row, or undefined when it is gone. */
+  private repoRow(repoId: string): AgentRepoRow | undefined {
+    return this.db.prepare('SELECT * FROM agent_repos WHERE id = ?').get(repoId) as
+      | AgentRepoRow
+      | undefined;
+  }
+
   /** Counts and flags, without loading any content. */
   private summarize(row: AgentSetRow): AgentSetSummary {
     const counts = this.db
       .prepare('SELECT COUNT(*) AS skills FROM agent_items WHERE set_id = ?')
       .get(row.id) as { skills: number };
+    const repos = this.db
+      .prepare('SELECT COUNT(*) AS n FROM agent_repos WHERE set_id = ?')
+      .get(row.id) as { n: number };
     const used = this.db
       .prepare(
         "SELECT COUNT(*) AS n FROM boxes WHERE agent_set_id = ? AND status != 'deleted'",
@@ -132,6 +214,7 @@ export class AgentStore {
       global: row.id === GLOBAL_AGENT_SET,
       hasAgentsMd: row.agents_md.trim() !== '',
       skillCount: counts.skills,
+      repoCount: repos.n,
       boxCount: used.n,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -185,14 +268,17 @@ export class AgentStore {
    * it.
    *
    * The database clears the set from every box that named it. Those boxes
-   * get the global set alone at their next start.
+   * get the global set alone at their next start. The checkouts of the set's
+   * repositories are removed with it.
    */
   deleteSet(id: string): void {
     this.mustGet(id);
     if (id === GLOBAL_AGENT_SET) {
       throw new HttpError(400, 'The global set is applied to every box and cannot be deleted');
     }
+    const repos = this.repoRows(id);
     this.db.prepare('DELETE FROM agent_sets WHERE id = ?').run(id);
+    for (const repo of repos) rmSync(repoDir(this.dataDir, repo.id), { recursive: true, force: true });
   }
 
   /** Creates a skill, or replaces the one already under that name. */
@@ -239,18 +325,147 @@ export class AgentStore {
     return this.getSet(id);
   }
 
+  // --- repositories ---------------------------------------------------------
+
+  /**
+   * Adds a repository to a set and pulls it. A failed pull is recorded on the
+   * repository, which stays in the set.
+   */
+  async addRepo(setId: string, body: AgentRepoBody | undefined): Promise<AgentSetDetail> {
+    this.mustGet(setId);
+    const url = validRepoUrl(body?.url);
+    const ref = validRef(body?.ref);
+    const count = this.db
+      .prepare('SELECT COUNT(*) AS n FROM agent_repos WHERE set_id = ?')
+      .get(setId) as { n: number };
+    if (count.n >= MAX_REPOS) {
+      throw new HttpError(400, `A set takes skills from at most ${MAX_REPOS} repositories`);
+    }
+
+    const id = `ar${randomBytes(5).toString('hex')}`;
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO agent_repos (id, set_id, url, ref, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(id, setId, url, ref, now);
+      this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(now, setId);
+    })();
+    await this.pullRepo(id);
+    return this.getSet(setId);
+  }
+
+  /** Removes a repository from a set, with its checkout. */
+  deleteRepo(setId: string, repoId: string): AgentSetDetail {
+    this.mustGet(setId);
+    const info = this.db
+      .prepare('DELETE FROM agent_repos WHERE id = ? AND set_id = ?')
+      .run(repoId, setId);
+    if (info.changes === 0) throw new HttpError(404, 'No such repository');
+    rmSync(repoDir(this.dataDir, repoId), { recursive: true, force: true });
+    this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(Date.now(), setId);
+    return this.getSet(setId);
+  }
+
+  /** Pulls one repository of a set now. */
+  async refreshRepo(setId: string, repoId: string): Promise<AgentSetDetail> {
+    this.mustGet(setId);
+    if (this.repoRow(repoId)?.set_id !== setId) throw new HttpError(404, 'No such repository');
+    await this.pullRepo(repoId);
+    return this.getSet(setId);
+  }
+
+  /**
+   * Pulls every repository whose last pull is a day old, one after the
+   * other, and removes the checkouts that no repository owns.
+   */
+  async pullDue(now = Date.now()): Promise<void> {
+    const ids = this.db.prepare('SELECT id FROM agent_repos').all() as Array<{ id: string }>;
+    const known = new Set(ids.map((row) => row.id));
+    for (const id of repoDirIds(this.dataDir)) {
+      if (!known.has(id)) rmSync(repoDir(this.dataDir, id), { recursive: true, force: true });
+    }
+
+    const due = this.db
+      .prepare(
+        `SELECT id FROM agent_repos WHERE pulled_at IS NULL OR pulled_at <= ?
+          ORDER BY created_at, rowid`,
+      )
+      .all(now - PULL_EVERY_MS) as Array<{ id: string }>;
+    for (const { id } of due) await this.pullRepo(id);
+  }
+
+  /** Pulls one repository, or joins the pull of it that runs already. */
+  pullRepo(repoId: string): Promise<void> {
+    const running = this.pulls.get(repoId);
+    if (running) return running;
+    const pull = this.fetchAndRecord(repoId).finally(() => this.pulls.delete(repoId));
+    this.pulls.set(repoId, pull);
+    return pull;
+  }
+
+  /**
+   * Fetches one repository and records its commit and skills. A failed fetch
+   * is recorded, not thrown, and the last good checkout stays in use.
+   */
+  private async fetchAndRecord(repoId: string): Promise<void> {
+    const row = this.repoRow(repoId);
+    if (!row) return;
+    const exists = (): boolean => this.repoRow(repoId) !== undefined;
+
+    let commit: string;
+    try {
+      commit = await this.fetcher(repoDir(this.dataDir, repoId), row.url, row.ref, exists);
+    } catch (err) {
+      const error = (err as Error).message;
+      log.warn('could not pull a skill repository', { url: row.url, ref: row.ref, error });
+      this.db
+        .prepare('UPDATE agent_repos SET pulled_at = ?, error = ? WHERE id = ?')
+        .run(Date.now(), error, repoId);
+      return;
+    }
+    if (!exists()) return;
+
+    const skills = findSkills(
+      repoTree(this.dataDir, repoId),
+      repoName(row.url),
+      (name) => NAME_PATTERN.test(name),
+      MAX_ITEMS,
+    );
+    this.db
+      .prepare(
+        `UPDATE agent_repos SET commit_sha = ?, skills = ?, pulled_at = ?, error = NULL
+          WHERE id = ?`,
+      )
+      .run(commit, JSON.stringify(skills), Date.now(), repoId);
+  }
+
   // --- merging --------------------------------------------------------------
 
   /**
-   * What a box that selected `setId` gets: the global set with that one
-   * laid over it.
+   * What a box that selected `setId` gets, as the editor shows it: the
+   * global set with that one laid over it.
+   */
+  bundle(setId: string | null): AgentBundlePreview {
+    const { agentsMd, skills, overrides } = this.merge(setId);
+    return {
+      agentsMd,
+      skills: skills.map((skill) => ({ name: skill.name, repo: skill.repo })),
+      overrides,
+    };
+  }
+
+  /**
+   * The global set with the selected one laid over it.
    *
    * The two kinds of content merge differently. An AGENTS.md is prose and
    * accumulates: the global one comes first and the set's follows, separated
    * by a blank line. A skill is addressed by name, and two skills cannot
    * share one, so the set's wins.
    */
-  bundle(setId: string | null): AgentBundlePreview {
+  private merge(setId: string | null): Bundle {
     const global = this.db
       .prepare('SELECT * FROM agent_sets WHERE id = ?')
       .get(GLOBAL_AGENT_SET) as AgentSetRow | undefined;
@@ -266,18 +481,34 @@ export class AgentStore {
       .filter((part) => part !== '')
       .join('\n\n');
 
-    const byName = new Map<string, AgentItem>();
-    for (const item of global ? this.items(global.id) : []) {
-      byName.set(item.name, item);
-    }
+    const byName = global ? this.skillsOf(global.id) : new Map<string, BundleSkill>();
     const overrides: string[] = [];
-    for (const item of extra ? this.items(extra.id) : []) {
-      if (byName.has(item.name)) overrides.push(item.name);
-      byName.set(item.name, item);
+    for (const skill of extra ? this.skillsOf(extra.id).values() : []) {
+      if (byName.has(skill.name)) overrides.push(skill.name);
+      byName.set(skill.name, skill);
     }
 
-    const items = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-    return { agentsMd, items, overrides };
+    const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return { agentsMd, skills, overrides };
+  }
+
+  /**
+   * The skills of one set, by name. A skill of the set wins over a skill of
+   * its repositories, and a repository wins over the ones added after it.
+   */
+  private skillsOf(setId: string): Map<string, BundleSkill> {
+    const byName = new Map<string, BundleSkill>();
+    for (const repo of this.repoRows(setId)) {
+      const tree = repoTree(this.dataDir, repo.id);
+      for (const skill of repoSkills(repo)) {
+        if (byName.has(skill.name)) continue;
+        byName.set(skill.name, { name: skill.name, repo: repo.url, dir: join(tree, skill.path) });
+      }
+    }
+    for (const item of this.items(setId)) {
+      byName.set(item.name, { name: item.name, repo: null, content: item.content });
+    }
+    return byName;
   }
 
   // --- materializing --------------------------------------------------------
@@ -304,7 +535,7 @@ export class AgentStore {
     ensureAgentsRoot(this.dataDir);
     mkdirSync(dir, { recursive: true, mode: 0o755 });
 
-    const bundle = this.bundle(setId);
+    const bundle = this.merge(setId);
     const manifest: string[] = [];
 
     for (const { layout } of Object.values(HARNESSES)) {
@@ -314,11 +545,19 @@ export class AgentStore {
         this.write(dir, layout.agentsMd, bundle.agentsMd);
         manifest.push(layout.agentsMd);
       }
-      for (const item of bundle.items) {
+      for (const skill of bundle.skills) {
         // A skill is a directory, so the manifest names the directory and a
         // removal takes everything the skill carried with it.
-        const rel = `${layout.skills}/${item.name}`;
-        this.write(dir, `${rel}/SKILL.md`, item.content);
+        const rel = `${layout.skills}/${skill.name}`;
+        // A pull may have replaced the checkout this skill was found in.
+        if (skill.repo !== null && !existsSync(skill.dir)) continue;
+        rmSync(join(dir, rel), { recursive: true, force: true });
+        if (skill.repo === null) {
+          this.write(dir, `${rel}/SKILL.md`, skill.content);
+        } else {
+          this.makeParents(dir, rel);
+          copyTree(skill.dir, join(dir, rel));
+        }
         manifest.push(rel);
       }
     }
@@ -357,19 +596,50 @@ export class AgentStore {
   /** Writes one file under the materialized directory, agent-owned. */
   private write(dir: string, rel: string, content: string): void {
     const path = join(dir, rel);
+    this.makeParents(dir, rel);
+    writeFileSync(path, content.endsWith('\n') ? content : `${content}\n`, { mode: 0o644 });
+    chownToAgent(path);
+  }
+
+  /** Creates the directories above `rel` in the materialized directory, agent-owned. */
+  private makeParents(dir: string, rel: string): void {
+    const path = join(dir, rel);
     mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
     // Every directory on the way down has to be traversable by the agent user,
     // not only the leaf.
     for (let at = dirname(path); relative(dir, at) !== ''; at = dirname(at)) {
       chownToAgent(at);
     }
-    writeFileSync(path, content.endsWith('\n') ? content : `${content}\n`, { mode: 0o644 });
-    chownToAgent(path);
   }
 
   /** Drops a box's materialized directory, when the box is deleted. */
   removeMaterialized(boxId: string): void {
     rmSync(agentConfigPath(this.dataDir, boxId), { recursive: true, force: true });
+  }
+}
+
+/** The skills a repository's last good pull found. */
+function repoSkills(row: AgentRepoRow): RepoSkill[] {
+  return JSON.parse(row.skills) as RepoSkill[];
+}
+
+/**
+ * Copies a skill's directory from a checkout, agent-owned. Files keep their
+ * mode, so a script stays executable. Links are left out, because they could
+ * point anywhere on this host.
+ */
+function copyTree(src: string, dest: string): void {
+  mkdirSync(dest, { mode: 0o755 });
+  chownToAgent(dest);
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name);
+    const to = join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyTree(from, to);
+    } else if (entry.isFile()) {
+      copyFileSync(from, to);
+      chownToAgent(to);
+    }
   }
 }
 
@@ -415,6 +685,39 @@ function validItemName(value: unknown): string {
     );
   }
   return name;
+}
+
+/**
+ * Checks a repository URL. Only HTTPS is fetched, and credentials in the URL
+ * are refused, because the URL is stored and shown.
+ */
+function validRepoUrl(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new HttpError(400, 'url must be an HTTPS URL');
+  }
+  if (url.protocol !== 'https:') throw new HttpError(400, 'url must be an HTTPS URL');
+  if (raw.length > MAX_URL) {
+    throw new HttpError(400, `url must be ${MAX_URL} characters or fewer`);
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new HttpError(400, 'url must not contain credentials');
+  }
+  return raw;
+}
+
+/** Checks a branch, tag or commit. Absent or empty means the default branch. */
+function validRef(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new HttpError(400, 'ref must be a string');
+  const ref = value.trim();
+  if (ref !== '' && !REF_PATTERN.test(ref)) {
+    throw new HttpError(400, 'ref must be a branch, a tag or a full commit hash');
+  }
+  return ref;
 }
 
 /** Checks a file's content, which may legitimately be empty. */

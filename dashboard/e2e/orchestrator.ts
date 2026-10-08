@@ -296,6 +296,8 @@ export interface AgentSetSpec {
   agentsMd?: string;
   /** The skills the set holds. */
   items?: Array<{ name: string; content: string }>;
+  /** Repositories the set takes skills from, as if pulled already. */
+  repos?: Array<{ url: string; skills: string[]; error?: string }>;
 }
 
 /** A running orchestrator, with the handles a test drives it by. */
@@ -1077,6 +1079,7 @@ export async function startOrchestrator(
     logins,
     agentSets: async (global, named) => {
       db.prepare('DELETE FROM agent_items').run();
+      db.prepare('DELETE FROM agent_repos').run();
       db.prepare("DELETE FROM agent_sets WHERE id <> 'global'").run();
       for (const set of named) {
         db.prepare(
@@ -1088,6 +1091,21 @@ export async function startOrchestrator(
         await setup('PATCH', `/api/agent-sets/${set.id}`, { agentsMd: set.agentsMd ?? '' });
         for (const item of set.items ?? []) {
           await setup('PUT', `/api/agent-sets/${set.id}/items`, item);
+        }
+        for (const [i, repo] of (set.repos ?? []).entries()) {
+          db.prepare(
+            `INSERT INTO agent_repos
+               (id, set_id, url, ref, commit_sha, skills, pulled_at, error, created_at)
+             VALUES (?, ?, ?, '', 'c0ffee0', ?, ?, ?, ?)`,
+          ).run(
+            `ar-${set.id}-${i}`,
+            set.id,
+            repo.url,
+            JSON.stringify(repo.skills.map((name) => ({ name, path: name }))),
+            Date.now(),
+            repo.error ?? null,
+            i,
+          );
         }
       }
     },

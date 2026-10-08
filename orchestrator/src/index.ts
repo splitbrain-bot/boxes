@@ -16,6 +16,7 @@ import {
   startImageRefresher,
   startProxyReconciler,
   startReaper,
+  startSkillRepoRefresh,
 } from './reaper.ts';
 
 // --- the app and its database ----------------------------------------------
@@ -51,7 +52,10 @@ lockDataDir(cfg.DATA_DIR);
 const db = openDb(cfg.DATA_DIR);
 
 /** The HTTP app and the services it built. */
-const { app, manager, credentials, egress, logins, tunnels, setProxyWarnings } = buildApp(cfg, db);
+const { app, manager, agents, credentials, egress, logins, tunnels, setProxyWarnings } = buildApp(
+  cfg,
+  db,
+);
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
@@ -210,6 +214,7 @@ async function main(): Promise<void> {
   loops.push(startProxyReconciler(manager, egress, setProxyWarnings));
   loops.push(startCredentialRefresh(credentials));
   loops.push(startTunnelReconciler(tunnels));
+  loops.push(startSkillRepoRefresh(agents));
 
   await app.listen({ host: '0.0.0.0', port: cfg.PORT });
   log.info('orchestrator listening', { port: cfg.PORT });

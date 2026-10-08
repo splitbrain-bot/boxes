@@ -188,6 +188,28 @@ export interface AgentItemRow {
   updated_at: number;
 }
 
+/** One git repository an agent set takes skills from. */
+export interface AgentRepoRow {
+  /** The repository id, which also names its directory under DATA_DIR. */
+  id: string;
+  /** The set the repository belongs to. */
+  set_id: string;
+  /** The HTTPS URL it is fetched from. */
+  url: string;
+  /** The branch, tag or commit to fetch, or '' for the default branch. */
+  ref: string;
+  /** The commit of the current checkout, or null before the first good pull. */
+  commit_sha: string | null;
+  /** The skills found in the current checkout, as a JSON array of RepoSkill. */
+  skills: string;
+  /** Epoch milliseconds of the last pull, good or failed, or null before the first. */
+  pulled_at: number | null;
+  /** Why the last pull failed, or null when it did not. */
+  error: string | null;
+  /** Epoch milliseconds of creation. */
+  created_at: number;
+}
+
 /**
  * Schema migrations, applied in order and tracked by user_version. Exported,
  * so a test can build a database at an earlier version.
@@ -478,6 +500,22 @@ export const MIGRATIONS: string[] = [
       FROM agent_items WHERE kind = 'skill';
   DROP TABLE agent_items;
   ALTER TABLE agent_items_new RENAME TO agent_items;
+  `,
+  // Git repositories an agent set takes more skills from, in the order the
+  // user added them.
+  `
+  CREATE TABLE agent_repos (
+    id         TEXT PRIMARY KEY,
+    set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    url        TEXT NOT NULL,
+    ref        TEXT NOT NULL,
+    commit_sha TEXT,
+    skills     TEXT NOT NULL DEFAULT '[]',
+    pulled_at  INTEGER,
+    error      TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_agent_repos_set ON agent_repos(set_id, created_at);
   `,
 ];
 
