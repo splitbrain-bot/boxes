@@ -123,14 +123,14 @@ clears the base back to each repository's own HEAD. The answer says where the ex
 | PATCH | `/api/agent-sets/:setId` | `AgentSetDetail` |
 | DELETE | `/api/agent-sets/:setId` | 204 |
 | PUT | `/api/agent-sets/:setId/items` | `AgentSetDetail` |
-| DELETE | `/api/agent-sets/:setId/items?kind=<k>&name=<n>` | `AgentSetDetail` |
+| DELETE | `/api/agent-sets/:setId/items?name=<n>` | `AgentSetDetail` |
 | GET | `/api/agent-sets/:setId/preview` | `AgentBundlePreview` |
 
 `POST` accepts `{ "name": "…" }`. `PATCH` accepts `{ "name"?, "agentsMd"? }` and leaves absent fields alone. Every
 mutation answers with the whole set.
 
-`PUT …/items` accepts an `AgentItemBody` with `kind` (`skill` or `command`), `name`, and `content`, and creates or
-replaces the item under that name. DELETE removes it.
+`PUT …/items` accepts an `AgentItemBody` with `name` and `content`, and creates or replaces the skill under that name.
+DELETE removes it.
 
 The preview answers what a box that selects this [agent set](agent-sets.md) receives: the global set, with this set laid
 over it.

@@ -84,25 +84,25 @@ test('a set that adds no AGENTS.md leaves no blank joiner behind', () => {
   assert.equal(store.bundle(set.id).agentsMd, 'House rules.');
 });
 
-test('skills and commands are a union, and the set wins a name clash', () => {
-  store.putItem('global', { kind: 'skill', name: 'review', content: 'global review' });
-  store.putItem('global', { kind: 'command', name: 'ship', content: 'global ship' });
+test('skills are a union, and the set wins a name clash', () => {
+  store.putItem('global', { name: 'review', content: 'global review' });
+  store.putItem('global', { name: 'ship', content: 'global ship' });
   const set = store.createSet('go');
-  store.putItem(set.id, { kind: 'skill', name: 'review', content: 'go review' });
-  store.putItem(set.id, { kind: 'command', name: 'bench', content: 'go bench' });
+  store.putItem(set.id, { name: 'review', content: 'go review' });
+  store.putItem(set.id, { name: 'bench', content: 'go bench' });
 
   const bundle = store.bundle(set.id);
   assert.deepEqual(
-    bundle.items.map((i) => `${i.kind}/${i.name}`).sort(),
-    ['command/bench', 'command/ship', 'skill/review'],
+    bundle.items.map((i) => i.name),
+    ['bench', 'review', 'ship'],
   );
   assert.equal(bundle.items.find((i) => i.name === 'review')!.content, 'go review');
   // An override is silent in the merged result, so it is reported separately.
-  assert.deepEqual(bundle.overrides, [{ kind: 'skill', name: 'review' }]);
+  assert.deepEqual(bundle.overrides, ['review']);
 });
 
 test('naming the global set as the extra one changes nothing', () => {
-  store.putItem('global', { kind: 'skill', name: 'review', content: 'x' });
+  store.putItem('global', { name: 'review', content: 'x' });
   assert.deepEqual(store.bundle('global'), store.bundle(null));
 });
 
@@ -110,27 +110,26 @@ test('naming the global set as the extra one changes nothing', () => {
 
 test('a merged set is written in every harness layout the entrypoint copies', () => {
   store.updateSet('global', { agentsMd: 'House rules.' });
-  store.putItem('global', { kind: 'skill', name: 'review', content: '---\nname: review\n---\n' });
+  store.putItem('global', { name: 'review', content: '---\nname: review\n---\n' });
   const set = store.createSet('go');
-  store.putItem(set.id, { kind: 'command', name: 'bench', content: 'Run the benchmarks.' });
+  store.putItem(set.id, { name: 'bench', content: 'Run the benchmarks.' });
 
   store.materialize('s1', set.id);
 
   // Both layouts, always: a box holds threads of either harness, and which it
   // will hold is not known when this is written.
   assert.deepEqual(manifest('s1').sort(), [
+    '.agents/skills/bench',
     '.agents/skills/review',
     '.claude/CLAUDE.md',
-    '.claude/commands/bench.md',
+    '.claude/skills/bench',
     '.claude/skills/review',
     '.codex/AGENTS.md',
-    '.codex/prompts/bench.md',
   ]);
   // What the dashboard calls AGENTS.md lands as each agent's user-level memory.
   assert.equal(materialized('s1', '.claude/CLAUDE.md'), 'House rules.\n');
   assert.equal(materialized('s1', '.codex/AGENTS.md'), 'House rules.\n');
-  // A skill is a directory with a SKILL.md in it under both layouts; a command
-  // is one file, and only its extension and its directory differ.
+  // A skill is a directory with a SKILL.md in it under both layouts.
   assert.equal(
     materialized('s1', '.claude/skills/review/SKILL.md'),
     '---\nname: review\n---\n',
@@ -139,22 +138,20 @@ test('a merged set is written in every harness layout the entrypoint copies', ()
     materialized('s1', '.agents/skills/review/SKILL.md'),
     '---\nname: review\n---\n',
   );
-  assert.equal(materialized('s1', '.claude/commands/bench.md'), 'Run the benchmarks.\n');
-  assert.equal(materialized('s1', '.codex/prompts/bench.md'), 'Run the benchmarks.\n');
+  assert.equal(materialized('s1', '.claude/skills/bench/SKILL.md'), 'Run the benchmarks.\n');
 });
 
 test('every manifest path is home-relative and inside a layout', () => {
   // The entrypoint installs these relative to $HOME and skips any line
-  // outside these six prefixes.
+  // outside these four prefixes.
   store.updateSet('global', { agentsMd: 'House rules.' });
-  store.putItem('global', { kind: 'skill', name: 'review', content: 'x' });
-  store.putItem('global', { kind: 'command', name: 'ship', content: 'y' });
+  store.putItem('global', { name: 'review', content: 'x' });
   store.materialize('s1', null);
 
   for (const rel of manifest('s1')) {
     assert.match(
       rel,
-      /^(\.claude\/(CLAUDE\.md|skills\/|commands\/)|\.codex\/(AGENTS\.md|prompts\/)|\.agents\/skills\/)/,
+      /^(\.claude\/(CLAUDE\.md|skills\/)|\.codex\/AGENTS\.md|\.agents\/skills\/)/,
       `${rel} is not in a layout the entrypoint accepts`,
     );
   }
@@ -167,12 +164,19 @@ test('a box with nothing configured still gets a manifest', () => {
 });
 
 test('materializing again removes what the previous set left, in both layouts', () => {
-  store.putItem('global', { kind: 'command', name: 'ship', content: 'one' });
+  store.updateSet('global', { agentsMd: 'House rules.' });
+  store.putItem('global', { name: 'ship', content: 'one' });
   store.materialize('s1', null);
-  assert.deepEqual(manifest('s1').sort(), ['.claude/commands/ship.md', '.codex/prompts/ship.md']);
+  assert.deepEqual(manifest('s1').sort(), [
+    '.agents/skills/ship',
+    '.claude/CLAUDE.md',
+    '.claude/skills/ship',
+    '.codex/AGENTS.md',
+  ]);
 
-  store.deleteItem('global', 'command', 'ship');
-  store.putItem('global', { kind: 'skill', name: 'review', content: 'two' });
+  store.updateSet('global', { agentsMd: '' });
+  store.deleteItem('global', 'ship');
+  store.putItem('global', { name: 'review', content: 'two' });
   store.materialize('s1', null);
 
   // Gone from the manifest and from the directory the container reads, so the
@@ -189,7 +193,7 @@ test('materializing again removes what the previous set left, in both layouts', 
 test('re-materializing keeps the directory a running container is mounted on', () => {
   store.materialize('s1', null);
   const before = statSync(agentConfigPath(dir, 's1')).ino;
-  store.putItem('global', { kind: 'skill', name: 'review', content: 'x' });
+  store.putItem('global', { name: 'review', content: 'x' });
   store.materialize('s1', null);
   assert.equal(statSync(agentConfigPath(dir, 's1')).ino, before);
 });
@@ -202,10 +206,10 @@ test('deleting a box takes its materialized directory with it', () => {
 
 // --- validation --------------------------------------------------------------
 
-test('an item name that is not a safe path component is refused', () => {
+test('a skill name that is not a safe path component is refused', () => {
   for (const name of ['../escape', 'a/b', '-lead', 'sk ill', '.hidden', '', 'a'.repeat(65)]) {
     assert.throws(
-      () => store.putItem('global', { kind: 'skill', name, content: 'x' }),
+      () => store.putItem('global', { name, content: 'x' }),
       (err: unknown) => err instanceof HttpError && err.statusCode === 400,
       `expected ${JSON.stringify(name)} to be refused`,
     );
@@ -214,30 +218,18 @@ test('an item name that is not a safe path component is refused', () => {
 
 test('a name is lowercased rather than refused for its case alone', () => {
   // Only the lowercase form is stored.
-  const set = store.putItem('global', { kind: 'command', name: 'Review', content: 'x' });
+  const set = store.putItem('global', { name: 'Review', content: 'x' });
   assert.equal(set.items[0]!.name, 'review');
 });
 
-test('an unknown kind is refused rather than written somewhere', () => {
-  assert.throws(
-    () =>
-      store.putItem('global', {
-        kind: 'settings' as 'skill',
-        name: 'x',
-        content: 'x',
-      }),
-    (err: unknown) => err instanceof HttpError && err.statusCode === 400,
-  );
-});
-
 test('CRLF is normalised, because the agent reads these as files', () => {
-  store.putItem('global', { kind: 'command', name: 'ship', content: 'a\r\nb\rc' });
+  store.putItem('global', { name: 'ship', content: 'a\r\nb\rc' });
   assert.equal(store.getSet('global').items[0]!.content, 'a\nb\nc');
 });
 
-test('writing an item under a name that exists replaces it', () => {
-  store.putItem('global', { kind: 'command', name: 'ship', content: 'one' });
-  const set = store.putItem('global', { kind: 'command', name: 'ship', content: 'two' });
+test('writing a skill under a name that exists replaces it', () => {
+  store.putItem('global', { name: 'ship', content: 'one' });
+  const set = store.putItem('global', { name: 'ship', content: 'two' });
   assert.equal(set.items.length, 1);
   assert.equal(set.items[0]!.content, 'two');
 });
@@ -247,8 +239,8 @@ test('an unknown set is a 404 on every route into it', () => {
     () => store.getSet('nope'),
     () => store.updateSet('nope', { name: 'x' }),
     () => store.deleteSet('nope'),
-    () => store.putItem('nope', { kind: 'skill', name: 'x', content: '' }),
-    () => store.deleteItem('nope', 'skill', 'x'),
+    () => store.putItem('nope', { name: 'x', content: '' }),
+    () => store.deleteItem('nope', 'x'),
   ]) {
     assert.throws(
       call,
@@ -280,9 +272,9 @@ test('deleting a set leaves its boxes alone and falls them back to global', () =
   assert.equal(row.agent_set_id, null);
 });
 
-test('a set going away takes its items with it', () => {
+test('a set going away takes its skills with it', () => {
   const set = store.createSet('go');
-  store.putItem(set.id, { kind: 'skill', name: 'review', content: 'x' });
+  store.putItem(set.id, { name: 'review', content: 'x' });
   store.deleteSet(set.id);
   const rows = db.prepare('SELECT COUNT(*) AS n FROM agent_items').get() as { n: number };
   assert.equal(rows.n, 0);

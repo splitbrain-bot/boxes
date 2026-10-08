@@ -45,7 +45,7 @@ the background is not cancelled by this; see "Background work" below.
 Type `/` at the start of the text area to list the slash commands the agent's adapter accepts. The list filters as you
 type. Picking a command writes it into the text area without sending, because a command can take arguments.
 
-Skills and commands are configured in [agent sets](agent-sets.md), not per thread.
+Skills are configured in [agent sets](agent-sets.md), not per thread. The adapter lists them with its own commands.
 
 ### Modes and settings
 

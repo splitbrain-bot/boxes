@@ -26,8 +26,8 @@ work on the same checkout.
 - **Built-in review tool.** Read, comment on and edit the files of a workspace, with Git change marks, and hand the
   comments back to the agent.
 - **Terminal access.** A shell in the box, as the same user as the agent, attached to a persistent tmux session.
-- **Agent sets.** A named collection of an `AGENTS.md` file, skills and slash commands. One global set applies to every
-  box, and a box can add one more.
+- **Agent sets.** A named collection of an `AGENTS.md` file and skills. One global set applies to every box, and a box
+  can add one more.
 - **Push notifications.** The browser tells you when a thread needs a decision, even when no tab is open. You can
   install Boxes as a Progressive Web App (PWA).
 
@@ -51,7 +51,7 @@ work on the same checkout.
 - [Threads](doc/threads.md) — Start, fork and end a conversation with an agent
 - [Code review](doc/review.md) — Inspect, comment on and edit the files of a workspace
 - [Terminal](doc/terminal.md) — An interactive shell in a box
-- [Agent sets](doc/agent-sets.md) — Give the agents instructions, skills and slash commands
+- [Agent sets](doc/agent-sets.md) — Give the agents instructions and skills
 - [Built-in skills](doc/skills.md) — The skills the box image carries, and how to replace one
 - [Push notifications](doc/notifications.md) — Let the browser tell you when a thread needs you
 - [Glossary](doc/glossary.md) — The terms the documentation uses

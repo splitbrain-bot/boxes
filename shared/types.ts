@@ -467,7 +467,7 @@ export interface CreateBoxBody {
    */
   profile?: string;
   /**
-   * Id of the agent set whose AGENTS.md, skills and commands are merged over
+   * Id of the agent set whose AGENTS.md and skills are merged over
    * the global ones for this box. Absent, empty or the global set's id means
    * the global set alone, which every box gets.
    */
@@ -923,20 +923,15 @@ export interface ReviewBaseResponse {
  */
 export const GLOBAL_AGENT_SET = 'global';
 
-/** What an item of an agent set becomes inside the box container. */
-export type AgentItemKind = 'skill' | 'command';
-
-/** One skill or one slash command, as stored and as the API reports it. */
+/** One skill of an agent set, as stored and as the API reports it. */
 export interface AgentItem {
-  /** Whether the item is a skill or a command. */
-  kind: AgentItemKind;
   /**
-   * The name the agent sees: a skill's directory (`skills/<name>/SKILL.md`) and
-   * a command's file (`commands/<name>.md`), which is also what invokes it as
-   * `/<name>`. Lowercase, digits and dashes, so it is a safe path component.
+   * The skill's directory (`skills/<name>/SKILL.md`), which is also what
+   * invokes it as `/<name>`. Lowercase, digits and dashes, so it is a safe
+   * path component.
    */
   name: string;
-  /** The file's whole content: a SKILL.md, or a command's markdown. */
+  /** The whole SKILL.md. */
   content: string;
   /** When the item was last written, in epoch milliseconds. */
   updatedAt: number;
@@ -954,8 +949,6 @@ export interface AgentSetSummary {
   hasAgentsMd: boolean;
   /** How many skills the set holds. */
   skillCount: number;
-  /** How many commands the set holds. */
-  commandCount: number;
   /** How many live boxes were created with this set selected. */
   boxCount: number;
   /** When the set was created, in epoch milliseconds. */
@@ -968,7 +961,7 @@ export interface AgentSetSummary {
 export interface AgentSetDetail extends AgentSetSummary {
   /** This set's own AGENTS.md, or '' when it contributes none. */
   agentsMd: string;
-  /** Its skills and commands, by kind and then by name. */
+  /** Its skills, by name. */
   items: AgentItem[];
 }
 
@@ -986,13 +979,11 @@ export interface UpdateAgentSetBody {
   agentsMd?: string;
 }
 
-/** Body of an item write. Creates the item, or replaces it under its name. */
+/** Body of a skill write. Creates the skill, or replaces it under its name. */
 export interface AgentItemBody {
-  /** Whether the item is a skill or a command. */
-  kind: AgentItemKind;
-  /** The item's name. */
+  /** The skill's name. */
   name: string;
-  /** The item's whole file content. */
+  /** The skill's whole SKILL.md. */
   content: string;
 }
 
@@ -1003,10 +994,10 @@ export interface AgentItemBody {
 export interface AgentBundlePreview {
   /** The global AGENTS.md and the set's, joined by a blank line. */
   agentsMd: string;
-  /** Every item the box gets, after the selected set's overrides. */
+  /** Every skill the box gets, after the selected set's overrides. */
   items: AgentItem[];
-  /** Names the selected set took over from the global one, by kind. */
-  overrides: Array<{ kind: AgentItemKind; name: string }>;
+  /** Names of the skills the selected set took over from the global one. */
+  overrides: string[];
 }
 
 // --- the gateway's own ACP extensions ---------------------------------------

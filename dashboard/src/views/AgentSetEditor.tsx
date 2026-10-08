@@ -1,12 +1,7 @@
 import { FileText, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import type {
-  AgentBundlePreview,
-  AgentItem,
-  AgentItemKind,
-  AgentSetDetail,
-} from '../../../shared/types.ts';
+import type { AgentBundlePreview, AgentItem, AgentSetDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
 import { useUp } from '@/hooks/use-up';
@@ -28,7 +23,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 
 /**
- * Editor for one agent set: its AGENTS.md, its skills and its slash commands.
+ * Editor for one agent set: its AGENTS.md and its skills.
  *
  * Each section saves on its own. Saved changes reach a box the next time the
  * box starts.
@@ -47,9 +42,7 @@ export function AgentSetEditor() {
   const [agentsMd, setAgentsMd] = useState('');
   const [name, setName] = useState('');
 
-  const [editing, setEditing] = useState<{ kind: AgentItemKind; item: AgentItem | null } | null>(
-    null,
-  );
+  const [editing, setEditing] = useState<{ item: AgentItem | null } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<AgentItem | null>(null);
 
   /**
@@ -109,9 +102,7 @@ export function AgentSetEditor() {
     );
   }
 
-  const skills = set.items.filter((i) => i.kind === 'skill');
-  const commands = set.items.filter((i) => i.kind === 'command');
-  const overridden = new Set(preview?.overrides.map((o) => `${o.kind}/${o.name}`) ?? []);
+  const overridden = new Set(preview?.overrides ?? []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -179,26 +170,13 @@ export function AgentSetEditor() {
       </Card>
 
       <ItemSection
-        kind="skill"
         title="Skills"
-        blurb="A SKILL.md the agent loads on its own when the work matches. It needs YAML front matter with a name and a description — that description is the only thing the agent sees before deciding to read it."
-        items={skills}
+        blurb="A SKILL.md the agent loads on its own when the work matches, or when you type its name after a slash in the composer. It needs YAML front matter with a name and a description — that description is the only thing the agent sees before deciding to read it."
+        items={set.items}
         overridden={overridden}
         busy={busy}
-        onAdd={() => setEditing({ kind: 'skill', item: null })}
-        onEdit={(item) => setEditing({ kind: 'skill', item })}
-        onDelete={setConfirmDelete}
-      />
-
-      <ItemSection
-        kind="command"
-        title="Slash commands"
-        blurb="A prompt the agent runs when you type its name after a slash in the composer."
-        items={commands}
-        overridden={overridden}
-        busy={busy}
-        onAdd={() => setEditing({ kind: 'command', item: null })}
-        onEdit={(item) => setEditing({ kind: 'command', item })}
+        onAdd={() => setEditing({ item: null })}
+        onEdit={(item) => setEditing({ item })}
         onDelete={setConfirmDelete}
       />
 
@@ -206,7 +184,6 @@ export function AgentSetEditor() {
 
       {editing ? (
         <ItemDialog
-          kind={editing.kind}
           item={editing.item}
           busy={busy}
           onCancel={() => setEditing(null)}
@@ -218,7 +195,7 @@ export function AgentSetEditor() {
 
       {confirmDelete ? (
         <ConfirmDialog
-          title={`Delete ${confirmDelete.kind} ${confirmDelete.name}?`}
+          title={`Delete skill ${confirmDelete.name}?`}
           description="It is removed from this set, and from every box that uses the set at its next start."
           confirmLabel="Delete"
           danger
@@ -226,7 +203,7 @@ export function AgentSetEditor() {
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() =>
             void act(async () => {
-              await api.deleteAgentItem(setId, confirmDelete.kind, confirmDelete.name);
+              await api.deleteAgentItem(setId, confirmDelete.name);
               setConfirmDelete(null);
             })
           }
@@ -236,9 +213,8 @@ export function AgentSetEditor() {
   );
 }
 
-/** One list of skills or of commands, with its own add button. */
+/** The list of skills, with its own add button. */
 function ItemSection({
-  kind,
   title,
   blurb,
   items,
@@ -248,11 +224,10 @@ function ItemSection({
   onEdit,
   onDelete,
 }: {
-  kind: AgentItemKind;
   title: string;
   blurb: string;
   items: AgentItem[];
-  /** Keys of the items this set takes over from the global one. */
+  /** Names of the skills this set takes over from the global one. */
   overridden: Set<string>;
   busy: boolean;
   onAdd: () => void;
@@ -280,9 +255,9 @@ function ItemSection({
           className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
         >
           <span className="min-w-0 flex-1 truncate font-mono text-xs">
-            {kind === 'command' ? `/${item.name}` : item.name}
+            {item.name}
           </span>
-          {overridden.has(`${item.kind}/${item.name}`) ? (
+          {overridden.has(item.name) ? (
             <span className="shrink-0 text-xs text-muted-foreground">replaces the global one</span>
           ) : null}
           <Button
@@ -314,8 +289,6 @@ function ItemSection({
 
 /** Summary of the merged set that a box using this set gets. */
 function Merged({ preview }: { preview: AgentBundlePreview }) {
-  const skills = preview.items.filter((i) => i.kind === 'skill');
-  const commands = preview.items.filter((i) => i.kind === 'command');
   return (
     <Card className="flex flex-col gap-3 p-4">
       <h2 className="text-sm font-medium">Merged result</h2>
@@ -331,11 +304,7 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
         </dd>
         <dt className="text-xs text-muted-foreground">Skills</dt>
         <dd className="font-mono text-xs break-words">
-          {skills.length === 0 ? 'none' : skills.map((i) => i.name).join(', ')}
-        </dd>
-        <dt className="text-xs text-muted-foreground">Commands</dt>
-        <dd className="font-mono text-xs break-words">
-          {commands.length === 0 ? 'none' : commands.map((i) => `/${i.name}`).join(', ')}
+          {preview.items.length === 0 ? 'none' : preview.items.map((i) => i.name).join(', ')}
         </dd>
       </dl>
     </Card>
@@ -343,43 +312,36 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
 }
 
 /**
- * Dialog that edits one skill or command.
+ * Dialog that edits one skill.
  *
- * The name is fixed once the item exists. A rename in place would leave the
- * old item installed in every box until its next start.
+ * The name is fixed once the skill exists. A rename in place would leave the
+ * old skill installed in every box until its next start.
  */
 function ItemDialog({
-  kind,
   item,
   busy,
   onCancel,
   onSave,
 }: {
-  kind: AgentItemKind;
   item: AgentItem | null;
   busy: boolean;
   onCancel: () => void;
-  onSave: (body: { kind: AgentItemKind; name: string; content: string }) => void;
+  onSave: (body: { name: string; content: string }) => void;
 }) {
   const [name, setName] = useState(item?.name ?? '');
   const [content, setContent] = useState(item?.content ?? '');
 
-  const skill = kind === 'skill';
   // A skill without front matter fails silently in the box, so the dialog warns here.
-  const missingFrontMatter = skill && content.trim() !== '' && !content.startsWith('---');
+  const missingFrontMatter = content.trim() !== '' && !content.startsWith('---');
 
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent className="flex max-h-[85dvh] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {item ? `Edit ${skill ? 'skill' : 'command'} ${item.name}` : `New ${skill ? 'skill' : 'command'}`}
+            {item ? `Edit skill ${item.name}` : 'New skill'}
           </DialogTitle>
-          <DialogDescription>
-            {skill
-              ? 'Installed as skills/<name>/SKILL.md.'
-              : 'Installed as commands/<name>.md, and invoked as /<name>.'}
-          </DialogDescription>
+          <DialogDescription>Installed as skills/&lt;name&gt;/SKILL.md.</DialogDescription>
         </DialogHeader>
 
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -390,7 +352,7 @@ function ItemDialog({
               value={name}
               disabled={item !== null}
               maxLength={64}
-              placeholder={skill ? 'review-go' : 'ship'}
+              placeholder="review-go"
               onChange={(e) => setName(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
@@ -401,15 +363,13 @@ function ItemDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="item-content">{skill ? 'SKILL.md' : 'Prompt'}</Label>
+            <Label htmlFor="item-content">SKILL.md</Label>
             <Textarea
               id="item-content"
               value={content}
               className="min-h-64 font-mono text-xs"
               placeholder={
-                skill
-                  ? '---\nname: review-go\ndescription: Review Go code against the house style.\n---\n\nRead the diff and…\n'
-                  : 'Open a pull request for the current branch, using the template in .github/.\n'
+                '---\nname: review-go\ndescription: Review Go code against the house style.\n---\n\nRead the diff and…\n'
               }
               onChange={(e) => setContent(e.target.value)}
             />
@@ -429,7 +389,7 @@ function ItemDialog({
           <Button
             type="button"
             disabled={busy || name.trim() === ''}
-            onClick={() => onSave({ kind, name: name.trim(), content })}
+            onClick={() => onSave({ name: name.trim(), content })}
           >
             {busy ? 'Saving…' : 'Save'}
           </Button>

@@ -105,7 +105,7 @@ export function BoxCreate() {
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Merged over the global AGENTS.md, skills and commands, which every box gets.{' '}
+            Merged over the global AGENTS.md and skills, which every box gets.{' '}
             <Link to="/agents" className="underline hover:text-foreground">
               Edit the sets
             </Link>

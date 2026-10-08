@@ -294,8 +294,8 @@ export interface AgentSetSpec {
   name: string;
   /** The set's AGENTS.md. Empty when absent. */
   agentsMd?: string;
-  /** The skills and slash commands the set holds. */
-  items?: Array<{ kind: 'skill' | 'command'; name: string; content: string }>;
+  /** The skills the set holds. */
+  items?: Array<{ name: string; content: string }>;
 }
 
 /** A running orchestrator, with the handles a test drives it by. */

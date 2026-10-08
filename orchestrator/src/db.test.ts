@@ -372,6 +372,37 @@ test('boxes from before the token column each get one of their own', () => {
   }
 });
 
+test('stored slash commands are dropped, and the skills stay', () => {
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('agent_items_new'));
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  const insert = db.prepare(
+    `INSERT INTO agent_items (set_id, kind, name, content, created_at, updated_at)
+     VALUES ('global', ?, ?, ?, 1000, 2000)`,
+  );
+  insert.run('skill', 'review', 'a skill');
+  insert.run('command', 'ship', 'a command');
+  // A command could share its name with a skill, which the new key forbids.
+  insert.run('command', 'review', 'a command');
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    assert.deepEqual(upgraded.prepare('SELECT * FROM agent_items').all(), [
+      {
+        set_id: 'global',
+        name: 'review',
+        content: 'a skill',
+        created_at: 1000,
+        updated_at: 2000,
+      },
+    ]);
+  } finally {
+    upgraded.close();
+  }
+});
+
 test('a database written by a newer build is refused rather than opened', () => {
   // After a rollback, the queries of this build name columns a later
   // migration changed. Refusing at boot beats failing at the first request.

@@ -155,7 +155,7 @@ export interface PushSubscriptionRow {
 
 /**
  * One named collection of agent configuration: an AGENTS.md, plus any number
- * of skills and slash commands.
+ * of skills.
  *
  * The `global` set, seeded by its migration, applies to every box. A box may
  * name one more set at creation, whose contents are merged over the global
@@ -174,15 +174,13 @@ export interface AgentSetRow {
   updated_at: number;
 }
 
-/** One skill or slash command belonging to an agent set. */
+/** One skill belonging to an agent set. */
 export interface AgentItemRow {
-  /** The set the item belongs to. */
+  /** The set the skill belongs to. */
   set_id: string;
-  /** Whether it is a skill or a slash command. */
-  kind: 'skill' | 'command';
   /** A safe single path component. */
   name: string;
-  /** The markdown content. */
+  /** The SKILL.md content. */
   content: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
@@ -463,6 +461,23 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes DROP COLUMN home_volume;
   ALTER TABLE boxes DROP COLUMN workspace_dir;
   ALTER TABLE boxes DROP COLUMN home_dir;
+  `,
+  // Skills replace slash commands, so the stored commands are deleted and an
+  // item is always a skill.
+  `
+  CREATE TABLE agent_items_new (
+    set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (set_id, name)
+  );
+  INSERT INTO agent_items_new (set_id, name, content, created_at, updated_at)
+    SELECT set_id, name, content, created_at, updated_at
+      FROM agent_items WHERE kind = 'skill';
+  DROP TABLE agent_items;
+  ALTER TABLE agent_items_new RENAME TO agent_items;
   `,
 ];
 

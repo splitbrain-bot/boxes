@@ -6,7 +6,6 @@ import {
   type AgentBundlePreview,
   type AgentItem,
   type AgentItemBody,
-  type AgentItemKind,
   type AgentSetDetail,
   type AgentSetSummary,
 } from '../../shared/types.ts';
@@ -16,7 +15,7 @@ import { HttpError } from './http-error.ts';
 import { chownToAgent } from './workspaces.ts';
 
 /**
- * Agent sets: the AGENTS.md, skills and slash commands a box's agent is
+ * Agent sets: the AGENTS.md and skills a box's agent is
  * configured with. The database holds them, and the files a box gets are
  * derived from it.
  */
@@ -26,18 +25,18 @@ const AGENTS_SUBDIR = 'agents';
 
 /**
  * A name that is safe as a single path component and is what the agent will
- * call the thing: a skill directory, or the word after the slash.
+ * call the skill: its directory, and the word after the slash.
  */
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** Longest a set's display name may be. */
 const MAX_SET_NAME = 100;
 
-/** Longest an AGENTS.md or one item's content may be. */
+/** Longest an AGENTS.md or one skill's content may be. */
 const MAX_CONTENT = 100_000;
 
-/** Most items of one kind a single set may hold. */
-const MAX_ITEMS_PER_KIND = 100;
+/** Most skills a single set may hold. */
+const MAX_ITEMS = 100;
 
 /** The parent of every materialized set. */
 function agentsRoot(dataDir: string): string {
@@ -105,16 +104,12 @@ export class AgentStore {
     return row;
   }
 
-  /** A set's items, skills before commands and each kind by name. */
+  /** A set's skills, by name. */
   private items(setId: string): AgentItem[] {
     const rows = this.db
-      .prepare(
-        `SELECT * FROM agent_items WHERE set_id = ?
-          ORDER BY kind DESC, name COLLATE NOCASE ASC`,
-      )
+      .prepare('SELECT * FROM agent_items WHERE set_id = ? ORDER BY name COLLATE NOCASE ASC')
       .all(setId) as AgentItemRow[];
     return rows.map((row) => ({
-      kind: row.kind,
       name: row.name,
       content: row.content,
       updatedAt: row.updated_at,
@@ -124,13 +119,8 @@ export class AgentStore {
   /** Counts and flags, without loading any content. */
   private summarize(row: AgentSetRow): AgentSetSummary {
     const counts = this.db
-      .prepare(
-        `SELECT
-           SUM(kind = 'skill')   AS skills,
-           SUM(kind = 'command') AS commands
-         FROM agent_items WHERE set_id = ?`,
-      )
-      .get(row.id) as { skills: number | null; commands: number | null };
+      .prepare('SELECT COUNT(*) AS skills FROM agent_items WHERE set_id = ?')
+      .get(row.id) as { skills: number };
     const used = this.db
       .prepare(
         "SELECT COUNT(*) AS n FROM boxes WHERE agent_set_id = ? AND status != 'deleted'",
@@ -141,8 +131,7 @@ export class AgentStore {
       name: row.name,
       global: row.id === GLOBAL_AGENT_SET,
       hasAgentsMd: row.agents_md.trim() !== '',
-      skillCount: counts.skills ?? 0,
-      commandCount: counts.commands ?? 0,
+      skillCount: counts.skills,
       boxCount: used.n,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -206,50 +195,46 @@ export class AgentStore {
     this.db.prepare('DELETE FROM agent_sets WHERE id = ?').run(id);
   }
 
-  /** Creates a skill or command, or replaces the one already under that name. */
+  /** Creates a skill, or replaces the one already under that name. */
   putItem(id: string, body: AgentItemBody | undefined): AgentSetDetail {
     this.mustGet(id);
-    const kind = validKind(body?.kind);
     const name = validItemName(body?.name);
     const content = validContent(body?.content, 'content');
     const now = Date.now();
 
     const existing = this.db
-      .prepare('SELECT 1 FROM agent_items WHERE set_id = ? AND kind = ? AND name = ?')
-      .get(id, kind, name);
+      .prepare('SELECT 1 FROM agent_items WHERE set_id = ? AND name = ?')
+      .get(id, name);
     if (!existing) {
       const count = this.db
-        .prepare('SELECT COUNT(*) AS n FROM agent_items WHERE set_id = ? AND kind = ?')
-        .get(id, kind) as { n: number };
-      if (count.n >= MAX_ITEMS_PER_KIND) {
-        throw new HttpError(
-          400,
-          `A set holds at most ${MAX_ITEMS_PER_KIND} ${kind}s`,
-        );
+        .prepare('SELECT COUNT(*) AS n FROM agent_items WHERE set_id = ?')
+        .get(id) as { n: number };
+      if (count.n >= MAX_ITEMS) {
+        throw new HttpError(400, `A set holds at most ${MAX_ITEMS} skills`);
       }
     }
 
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO agent_items (set_id, kind, name, content, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(set_id, kind, name) DO UPDATE SET
+          `INSERT INTO agent_items (set_id, name, content, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(set_id, name) DO UPDATE SET
              content = excluded.content, updated_at = excluded.updated_at`,
         )
-        .run(id, kind, name, content, now, now);
+        .run(id, name, content, now, now);
       this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(now, id);
     })();
     return this.getSet(id);
   }
 
-  /** Removes one skill or command. Removing what is not there is a 404. */
-  deleteItem(id: string, kind: unknown, name: unknown): AgentSetDetail {
+  /** Removes one skill. Removing what is not there is a 404. */
+  deleteItem(id: string, name: unknown): AgentSetDetail {
     this.mustGet(id);
     const info = this.db
-      .prepare('DELETE FROM agent_items WHERE set_id = ? AND kind = ? AND name = ?')
-      .run(id, validKind(kind), validItemName(name));
-    if (info.changes === 0) throw new HttpError(404, 'No such skill or command');
+      .prepare('DELETE FROM agent_items WHERE set_id = ? AND name = ?')
+      .run(id, validItemName(name));
+    if (info.changes === 0) throw new HttpError(404, 'No such skill');
     this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(Date.now(), id);
     return this.getSet(id);
   }
@@ -262,8 +247,8 @@ export class AgentStore {
    *
    * The two kinds of content merge differently. An AGENTS.md is prose and
    * accumulates: the global one comes first and the set's follows, separated
-   * by a blank line. A skill or a command is addressed by name, and two files
-   * cannot share one, so the set's wins.
+   * by a blank line. A skill is addressed by name, and two skills cannot
+   * share one, so the set's wins.
    */
   bundle(setId: string | null): AgentBundlePreview {
     const global = this.db
@@ -281,20 +266,17 @@ export class AgentStore {
       .filter((part) => part !== '')
       .join('\n\n');
 
-    const byKey = new Map<string, AgentItem>();
+    const byName = new Map<string, AgentItem>();
     for (const item of global ? this.items(global.id) : []) {
-      byKey.set(`${item.kind}/${item.name}`, item);
+      byName.set(item.name, item);
     }
-    const overrides: AgentBundlePreview['overrides'] = [];
+    const overrides: string[] = [];
     for (const item of extra ? this.items(extra.id) : []) {
-      const key = `${item.kind}/${item.name}`;
-      if (byKey.has(key)) overrides.push({ kind: item.kind, name: item.name });
-      byKey.set(key, item);
+      if (byName.has(item.name)) overrides.push(item.name);
+      byName.set(item.name, item);
     }
 
-    const items = [...byKey.values()].sort(
-      (a, b) => b.kind.localeCompare(a.kind) || a.name.localeCompare(b.name),
-    );
+    const items = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
     return { agentsMd, items, overrides };
   }
 
@@ -335,11 +317,8 @@ export class AgentStore {
       for (const item of bundle.items) {
         // A skill is a directory, so the manifest names the directory and a
         // removal takes everything the skill carried with it.
-        const rel =
-          item.kind === 'skill'
-            ? `${layout.skills}/${item.name}`
-            : `${layout.commands}/${item.name}.md`;
-        this.write(dir, item.kind === 'skill' ? `${rel}/SKILL.md` : rel, item.content);
+        const rel = `${layout.skills}/${item.name}`;
+        this.write(dir, `${rel}/SKILL.md`, item.content);
         manifest.push(rel);
       }
     }
@@ -354,9 +333,9 @@ export class AgentStore {
    * Removes whatever an earlier bundle left in the directory and this one
    * does not have, so a skill deleted here disappears from the box.
    *
-   * Only the three places a layout names are looked at, once per harness:
-   * the instructions file, and the entries of the skills and commands
-   * directories, each of which is one skill or one command.
+   * Only the two places a layout names are looked at, once per harness:
+   * the instructions file, and the entries of the skills directory, each of
+   * which is one skill.
    *
    * @param dir The box's materialized directory.
    * @param keep Every path this bundle wrote, relative to `dir`.
@@ -365,12 +344,11 @@ export class AgentStore {
     const wanted = new Set(keep);
     for (const { layout } of Object.values(HARNESSES)) {
       if (!wanted.has(layout.agentsMd)) rmSync(join(dir, layout.agentsMd), { force: true });
-      for (const rel of [layout.skills, layout.commands]) {
-        if (!existsSync(join(dir, rel))) continue;
-        for (const child of readdirSync(join(dir, rel))) {
-          if (wanted.has(`${rel}/${child}`)) continue;
-          rmSync(join(dir, rel, child), { recursive: true, force: true });
-        }
+      const rel = layout.skills;
+      if (!existsSync(join(dir, rel))) continue;
+      for (const child of readdirSync(join(dir, rel))) {
+        if (wanted.has(`${rel}/${child}`)) continue;
+        rmSync(join(dir, rel, child), { recursive: true, force: true });
       }
     }
     removeEmptyDirs(dir);
@@ -424,9 +402,8 @@ function validSetName(value: unknown): string {
 }
 
 /**
- * Checks a skill or command name. The name becomes a path component and the
- * word after the slash, so a name that does not match is refused rather than
- * changed.
+ * Checks a skill name. The name becomes a path component and the word after
+ * the slash, so a name that does not match is refused rather than changed.
  */
 function validItemName(value: unknown): string {
   const name = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -438,14 +415,6 @@ function validItemName(value: unknown): string {
     );
   }
   return name;
-}
-
-/** Checks which kind of item is meant. */
-function validKind(value: unknown): AgentItemKind {
-  if (value !== 'skill' && value !== 'command') {
-    throw new HttpError(400, "kind must be 'skill' or 'command'");
-  }
-  return value;
 }
 
 /** Checks a file's content, which may legitimately be empty. */

@@ -16,8 +16,8 @@ beforeEach(async () => {
     {
       agentsMd: '# House rules\n\nRun the tests.\n',
       items: [
-        { kind: 'skill', name: 'review', content: '---\nname: review\n---\n' },
-        { kind: 'command', name: 'ship', content: 'Open a PR.\n' },
+        { name: 'review', content: '---\nname: review\n---\n' },
+        { name: 'ship', content: '---\nname: ship\n---\n' },
       ],
     },
     [
@@ -25,7 +25,7 @@ beforeEach(async () => {
         id: 'as1',
         name: 'Go projects',
         agentsMd: 'Use table-driven tests.\n',
-        items: [{ kind: 'skill', name: 'review', content: '---\nname: review\n---\ngo\n' }],
+        items: [{ name: 'review', content: '---\nname: review\n---\ngo\n' }],
       },
     ],
   );
@@ -54,7 +54,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/agents/as1', scheme);
     try {
       await expect.poll(() => page.getByText('AGENTS.md').first().isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('Slash commands').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('Skills').first().isVisible()).toBe(true);
       await shoot(page, `agent-set-editor-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -82,8 +82,8 @@ test('the editor shows the merge, and which of its items replaces a global one',
     );
     // `review` is defined in both sets; the named one wins, and says so.
     await expect.poll(() => page.getByText('replaces the global one').isVisible()).toBe(true);
-    // The merged commands come from the global set, which this one adds none to.
-    await expect.poll(() => page.getByText('/ship').isVisible()).toBe(true);
+    // `ship` comes from the global set, which this one adds nothing to.
+    await expect.poll(() => page.getByText('review, ship').isVisible()).toBe(true);
   } finally {
     await close();
   }
@@ -112,7 +112,7 @@ test('a skill is written through the dialog and appears in the set', async () =>
 
     await expect.poll(() => page.getByText('bench').first().isVisible()).toBe(true);
     const global = await stub.agentSet('global');
-    expect(global.items.some((i) => i.kind === 'skill' && i.name === 'bench')).toBe(true);
+    expect(global.items.some((i) => i.name === 'bench')).toBe(true);
   } finally {
     await close();
   }

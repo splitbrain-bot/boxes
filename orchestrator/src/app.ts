@@ -685,7 +685,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(204).send();
   });
 
-  /** Creates a skill or command, or replaces the one already under that name. */
+  /** Creates a skill, or replaces the one already under that name. */
   app.put('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
     return agents.putItem(setId, parseBody(agentItemBody, req.body));
@@ -693,8 +693,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   app.delete('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
-    const { kind, name } = req.query as { kind?: string; name?: string };
-    return agents.deleteItem(setId, kind, name);
+    const { name } = req.query as { name?: string };
+    return agents.deleteItem(setId, name);
   });
 
   /** What a box selecting this set gets, global set included, for the editor to show. */

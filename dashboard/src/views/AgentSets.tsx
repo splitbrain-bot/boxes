@@ -89,7 +89,7 @@ export function AgentSets() {
           An agent set defines an <code className="font-mono">AGENTS.md</code> and optionally some skills.
           The global set is used for every box by default, but you can select an additional set to be
           merged with the global one when starting a box. The AGENTS.md files are concatenated,
-          and a skill or command in the named set replaces the global one of the same name.
+          and a skill in the named set replaces the global one of the same name.
       </p>
 
       {creating ? (
@@ -187,9 +187,6 @@ function describe(set: AgentSetSummary): string {
   if (set.hasAgentsMd) parts.push('AGENTS.md');
   if (set.skillCount > 0) {
     parts.push(`${set.skillCount} ${set.skillCount === 1 ? 'skill' : 'skills'}`);
-  }
-  if (set.commandCount > 0) {
-    parts.push(`${set.commandCount} ${set.commandCount === 1 ? 'command' : 'commands'}`);
   }
   if (parts.length === 0) parts.push('empty');
   if (set.global) return `${parts.join(' · ')} — applied to every box`;

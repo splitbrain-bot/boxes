@@ -109,9 +109,8 @@ export const updateAgentSetBody = z.object({
   agentsMd: z.string().optional(),
 });
 
-/** PUT /api/agent-sets/:setId/items — the skill or command to write. */
+/** PUT /api/agent-sets/:setId/items — the skill to write. */
 export const agentItemBody = z.object({
-  kind: z.enum(['skill', 'command']),
   name: z.string(),
   content: z.string(),
 });

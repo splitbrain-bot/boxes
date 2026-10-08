@@ -26,7 +26,7 @@ volume.
 
 **[Agent set](agent-sets.md)**
 
-A named collection of agent instructions, skills, and commands. Boxes copies the selected set into each box when it
+A named collection of agent instructions and skills. Boxes copies the selected set into each box when it
 starts.
 
 **Harness**
