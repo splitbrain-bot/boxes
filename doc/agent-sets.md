@@ -1,7 +1,7 @@
 # Agent sets
 
-An agent set is a named collection of agent configuration: an `AGENTS.md` file, skills, and slash commands. The
-orchestrator stores sets in its [database](storage.md). The agent in a box reads its configuration from files in its
+An agent set is a named collection of agent configuration: an `AGENTS.md` file and skills. The orchestrator stores
+sets in its [database](storage.md). The agent in a box reads its configuration from files in its
 home directory. The orchestrator writes these files from the sets.
 
 ## The global set and named sets
@@ -9,8 +9,7 @@ home directory. The orchestrator writes these files from the sets.
 There is one set with the id `global`. It is seeded when the database is created. The global set applies to every box
 and cannot be deleted.
 
-More sets can be added in the dashboard. A set has a display name, an optional `AGENTS.md`, and any number of skills and
-slash commands.
+More sets can be added in the dashboard. A set has a display name, an optional `AGENTS.md`, and any number of skills.
 
 A set is selected when a [box is created](boxes.md). The selection is stored with the box and cannot change later. A box
 that selects no set gets the global set alone. Naming the global set is the same as naming nothing.
@@ -22,23 +21,42 @@ content merge differently:
 
 - The `AGENTS.md` files are concatenated: the global one first, the selected set's one after it, separated by a blank
   line.
-- A skill or command is addressed by its name. When the selected set has one of the same name as the global set, the
-  selected set's one wins.
+- A skill is addressed by its name. When two skills have the same name, one wins. The order, highest first:
+  1. a skill of the selected set
+  2. a skill from a repository of the selected set, in the order of the repository list
+  3. a skill of the global set
+  4. a skill from a repository of the global set, in the order of the repository list
 
 The editor of a named set shows the merged result under "Merged result".
 
-## Skills and commands
+## Skills
 
 A skill is a directory with a `SKILL.md` file. The file needs YAML front matter with a `name` and a `description`. The
 description is the only thing the agent sees before it decides to read the skill. A skill without front matter is not
-loaded at all.
+loaded at all. The user can also invoke a skill in the composer by typing its name after a slash.
 
-A slash command is a markdown file. The user invokes it in the composer by typing its name after a slash.
+Skill names must be lowercase letters, digits, and dashes, start with a letter or digit, and be 64 characters or fewer.
+A name is fixed once the skill exists. To rename a skill, delete it and add it again.
 
-Item names must be lowercase letters, digits, and dashes, start with a letter or digit, and be 64 characters or fewer. A
-name is fixed once the item exists. To rename an item, delete it and add it again.
+A set holds at most 100 skills. An `AGENTS.md` or one skill's content may be at most 100,000 characters.
 
-A set holds at most 100 items of each kind. An `AGENTS.md` or one item's content may be at most 100,000 characters.
+## Skills from repositories
+
+A set can also take skills from Git repositories, for example a Claude plugin repository. Such a skill can have more
+files than its `SKILL.md`, for example references or scripts.
+
+A repository is added by its HTTPS URL. A branch, a tag, or a full commit hash is optional. Without one, the default
+branch is used. To change the URL or the branch, remove the repository and add it again.
+
+The orchestrator pulls a repository when it is added, once a day, and when the user selects the pull button. Each
+directory with a `SKILL.md` file is one skill, at any depth. The directory name is the skill name. A `SKILL.md` at the
+root gets the name of the repository. The orchestrator copies the full directory, but no links.
+
+Private repositories on `github.com` use the GitHub [credential](credentials.md).
+
+When a pull fails, the editor shows the error on the repository. The skills of the last good pull stay in use.
+
+A set takes skills from at most 20 repositories, and the orchestrator takes at most 100 skills from one repository.
 
 ## File installation into a box
 
@@ -68,8 +86,18 @@ can be opened in its editor.
 
 ## Technical internals
 
-The implementation is `orchestrator/src/agents.ts`, over the `agent_sets` and `agent_items` tables. The database is the
-source of truth; the files are derived from it.
+The implementation is `orchestrator/src/agents.ts`, over the `agent_sets`, `agent_items` and `agent_repos` tables. The
+database is the source of truth; the files are derived from it.
+
+### Repository checkouts
+
+`orchestrator/src/skill-repos.ts` fetches a repository into `DATA_DIR/skill-repos/<repo id>/tree`. Each pull is a
+shallow fetch into a new git directory, and the new files replace the old checkout in one step. The `agent_repos` row
+keeps the commit, the skills found, and the error of the last pull.
+
+This is the one place where the orchestrator runs git itself. A repository cannot make git run a program here: the new
+git directory has no hooks, the configuration that names filters and helpers is never fetched, no system or user
+configuration is read, and submodules are not fetched.
 
 ### Materialization
 
@@ -81,7 +109,6 @@ other's directories:
 | --- | --- | --- |
 | Instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
 | Skills | `~/.claude/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
-| Commands | `~/.claude/commands/<name>.md` | `~/.codex/prompts/<name>.md` |
 
 The container mounts the directory read-only at `/boxes/agent`, and the entrypoint installs it into the home directory:
 mounting the home's own subdirectories read-only would break the box, and mounting them writable would let the agent
@@ -98,5 +125,6 @@ delete.
 
 ### Deleting a set
 
-The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items are deleted with it. A
-box that named the deleted set keeps its installed files and gets the global set alone at its next start.
+The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items and repositories are
+deleted with it, together with the repository checkouts. A box that named the deleted set keeps its installed files and
+gets the global set alone at its next start.

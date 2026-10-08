@@ -71,15 +71,25 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
     markerUrl.current = url.current;
   }, [open]);
 
+  /*
+   * The browser's own event, because the router applies a location change
+   * in a transition. A back press before the push reached the router leaves
+   * the router's location as it was, so an effect on it would not run.
+   */
   useEffect(() => {
-    if (!open || marker.current === null) return;
-    // Still on the marker, or on an entry pushed over it.
-    if (historyIndex() >= marker.current) return;
-    // Below the marker: back popped it.
-    marker.current = null;
-    popped.current = true;
-    close.current();
-  }, [location.key, open]);
+    if (!open) return;
+    const onPop = (): void => {
+      if (marker.current === null) return;
+      // Still on the marker, or on an entry pushed over it.
+      if (historyIndex() >= marker.current) return;
+      // Below the marker: back popped it.
+      marker.current = null;
+      popped.current = true;
+      close.current();
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [open]);
 
   useEffect(() => {
     if (open) return;

@@ -68,8 +68,8 @@ if ! mkdir -p "${CODEX_HOME:-/home/agent/.codex}"; then
 fi
 
 # --- agent configuration ----------------------------------------------------
-# The orchestrator writes this box's merged AGENTS.md, skills and commands to
-# a read-only bind at /boxes/agent, laid out as they appear under $HOME. The
+# The orchestrator writes this box's merged AGENTS.md and skills to a
+# read-only bind at /boxes/agent, laid out as they appear under $HOME. The
 # copy runs here, inside the box, so it cannot race the agent's own writes.
 AGENT_SRC=/boxes/agent
 HOME_DIR="${HOME:-/home/agent}"
@@ -91,8 +91,7 @@ safe_rel() {
   esac
   case "$1" in
     .claude/CLAUDE.md|.codex/AGENTS.md) return 0 ;;
-    .claude/skills/?*|.claude/commands/?*) return 0 ;;
-    .codex/prompts/?*|.agents/skills/?*) return 0 ;;
+    .claude/skills/?*|.agents/skills/?*) return 0 ;;
   esac
   return 1
 }

@@ -12,8 +12,6 @@ export interface AgentLayout {
   agentsMd: string;
   /** Home-relative directory a skill's `<name>/SKILL.md` goes under. */
   skills: string;
-  /** Home-relative directory a command's `<name>.md` goes in. */
-  commands: string;
 }
 
 /** Every harness-specific value the orchestrator needs. Values only, no behaviour. */
@@ -95,7 +93,6 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     layout: {
       agentsMd: '.claude/CLAUDE.md',
       skills: '.claude/skills',
-      commands: '.claude/commands',
     },
     alwaysBackground: new Set(['Monitor', 'Workflow']),
   },
@@ -145,7 +142,6 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     layout: {
       agentsMd: '.codex/AGENTS.md',
       skills: '.agents/skills',
-      commands: '.codex/prompts',
     },
     /** Codex has no tool that backgrounds itself regardless of its input. */
     alwaysBackground: new Set<string>(),

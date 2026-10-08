@@ -36,7 +36,6 @@ test('every harness fills in every field, in the right shape', () => {
     assert.equal(typeof h.env, 'function', `${h.id}: env`);
     assert.ok(h.layout.agentsMd.length > 0, `${h.id}: layout.agentsMd`);
     assert.ok(h.layout.skills.length > 0, `${h.id}: layout.skills`);
-    assert.ok(h.layout.commands.length > 0, `${h.id}: layout.commands`);
     assert.ok(h.alwaysBackground instanceof Set, `${h.id}: alwaysBackground`);
   }
 });

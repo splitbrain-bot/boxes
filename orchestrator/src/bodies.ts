@@ -109,9 +109,14 @@ export const updateAgentSetBody = z.object({
   agentsMd: z.string().optional(),
 });
 
-/** PUT /api/agent-sets/:setId/items — the skill or command to write. */
+/** POST /api/agent-sets/:setId/repos — the repository to take skills from. */
+export const agentRepoBody = z.object({
+  url: z.string(),
+  ref: z.string().optional(),
+});
+
+/** PUT /api/agent-sets/:setId/items — the skill to write. */
 export const agentItemBody = z.object({
-  kind: z.enum(['skill', 'command']),
   name: z.string(),
   content: z.string(),
 });

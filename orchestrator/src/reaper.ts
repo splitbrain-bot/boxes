@@ -1,3 +1,4 @@
+import type { AgentStore } from './agents.ts';
 import type { Config } from './config.ts';
 import { refreshCredentials, type CredentialStore } from './credentials.ts';
 import { boxTurnActive, boxesWithActiveTurns, type Db, type BoxRow } from './db.ts';
@@ -165,6 +166,17 @@ export function startProxyReconciler(
  */
 export function startCredentialRefresh(credentials: CredentialStore): { stop: () => void } {
   return loop('credential refresh', TICK_MS, () => refreshCredentials(credentials));
+}
+
+/**
+ * Starts the loop that pulls the skill repositories of the agent sets, and
+ * returns a handle that stops it.
+ *
+ * It looks every minute, and pulls a repository when its last pull is a day
+ * old.
+ */
+export function startSkillRepoRefresh(agents: AgentStore): { stop: () => void } {
+  return loop('skill repository refresh', TICK_MS, () => agents.pullDue());
 }
 
 /**

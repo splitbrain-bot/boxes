@@ -126,7 +126,7 @@ export class BoxManager {
     /** Sends the push notifications a thread raises. */
     private readonly notifier: Notifier,
     /**
-     * The AGENTS.md, skills and commands a box is given. The app creates it,
+     * The AGENTS.md and skills a box is given. The app creates it,
      * so the REST routes and the lifecycle share one store.
      */
     private readonly agents: AgentStore,

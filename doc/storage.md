@@ -14,6 +14,7 @@ keeps its rules and credentials in memory only.
 | `homes/<box id>` | the home directory of the agent account | `/home/agent`, read and write |
 | `nix/<box id>` | the Nix store of the box | `/nix`, read and write |
 | `agents/<box id>` | the agent set that the box was started with | `/boxes/agent`, read only |
+| `skill-repos/<repo id>` | the checkout of a skill repository of an [agent set](agent-sets.md) | not mounted |
 
 `/tmp` is the one path in the container with no source in the volume. It is memory, 512 MB large, and empty at each
 start. Every other path comes from the box image, and the root filesystem is read only, so an agent writes only in the

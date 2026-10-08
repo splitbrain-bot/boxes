@@ -20,6 +20,7 @@ import { AgentStore } from './agents.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
 import {
   agentItemBody,
+  agentRepoBody,
   backgroundStopBody,
   createAgentSetBody,
   createBoxBody,
@@ -64,6 +65,7 @@ import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { BoxManager } from './boxes.ts';
 import { deploymentId, patchSettings, readSettings } from './settings.ts';
+import { fetchRepo } from './skill-repos.ts';
 import { devTunnelsApi, TunnelReconciler } from './tunnels.ts';
 import { setBoxOwner } from './workspaces.ts';
 
@@ -208,6 +210,8 @@ export interface Orchestrator {
   app: ReturnType<typeof Fastify>;
   /** The box lifecycle behind the routes. */
   manager: BoxManager;
+  /** The agent sets, and the pulls of their repositories. */
+  agents: AgentStore;
   /** The config the app was built with. */
   cfg: Config;
   /** Owns the egress policy and keeps the proxy holding it. */
@@ -256,7 +260,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // the box image, so the one thing it needs from the deployment is which
   // image that is.
   const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.BOX_IMAGE));
-  const agents = new AgentStore(db, cfg.DATA_DIR);
+  // Private repositories on github.com are fetched with the GitHub credential.
+  const agents = new AgentStore(db, cfg.DATA_DIR, (dir, url, ref, keep) => {
+    const row = credentials.get('github');
+    return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
+  });
   // The closure lets the reconciler be built before the manager it reads.
   const tunnels = new TunnelReconciler(
     db,
@@ -685,7 +693,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(204).send();
   });
 
-  /** Creates a skill or command, or replaces the one already under that name. */
+  /** Creates a skill, or replaces the one already under that name. */
   app.put('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
     return agents.putItem(setId, parseBody(agentItemBody, req.body));
@@ -693,8 +701,25 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   app.delete('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
-    const { kind, name } = req.query as { kind?: string; name?: string };
-    return agents.deleteItem(setId, kind, name);
+    const { name } = req.query as { name?: string };
+    return agents.deleteItem(setId, name);
+  });
+
+  /** Adds a repository to take skills from, and pulls it. */
+  app.post('/api/agent-sets/:setId/repos', async (req, reply) => {
+    const { setId } = req.params as { setId: string };
+    return reply.code(201).send(await agents.addRepo(setId, parseBody(agentRepoBody, req.body)));
+  });
+
+  app.delete('/api/agent-sets/:setId/repos/:repoId', async (req) => {
+    const { setId, repoId } = req.params as { setId: string; repoId: string };
+    return agents.deleteRepo(setId, repoId);
+  });
+
+  /** Pulls one repository now, rather than at its daily pull. */
+  app.post('/api/agent-sets/:setId/repos/:repoId/pull', async (req) => {
+    const { setId, repoId } = req.params as { setId: string; repoId: string };
+    return agents.refreshRepo(setId, repoId);
   });
 
   /** What a box selecting this set gets, global set included, for the editor to show. */
@@ -932,6 +957,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   return {
     app,
     manager,
+    agents,
     cfg,
     egress,
     credentials,

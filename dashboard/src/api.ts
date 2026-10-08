@@ -1,7 +1,7 @@
 import type {
   AgentBundlePreview,
   AgentItemBody,
-  AgentItemKind,
+  AgentRepoBody,
   AgentSetDetail,
   AgentSetSummary,
   CreateBoxBody,
@@ -241,18 +241,29 @@ export const api = {
   /** Deletes an agent set. */
   deleteAgentSet: (setId: string) =>
     request<void>(`/api/agent-sets/${setId}`, { method: 'DELETE' }),
-  /** Adds or replaces one item of a set. */
+  /** Adds or replaces one skill of a set. */
   putAgentItem: (setId: string, body: AgentItemBody) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/items`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
-  /** Removes one item of a set. */
-  deleteAgentItem: (setId: string, kind: AgentItemKind, name: string) =>
-    request<AgentSetDetail>(
-      `/api/agent-sets/${setId}/items?kind=${kind}&name=${encodeURIComponent(name)}`,
-      { method: 'DELETE' },
-    ),
+  /** Removes one skill of a set. */
+  deleteAgentItem: (setId: string, name: string) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/items?name=${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+  /** Adds a repository to take skills from, and pulls it. */
+  addAgentRepo: (setId: string, body: AgentRepoBody) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/repos`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Removes a repository from a set. */
+  deleteAgentRepo: (setId: string, repoId: string) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/repos/${repoId}`, { method: 'DELETE' }),
+  /** Pulls one repository of a set now. */
+  pullAgentRepo: (setId: string, repoId: string) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/repos/${repoId}/pull`, { method: 'POST' }),
   /** Reads what a box that selects this set receives, global set included. */
   agentSetPreview: (setId: string) =>
     request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),

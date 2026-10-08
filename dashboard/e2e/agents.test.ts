@@ -16,8 +16,8 @@ beforeEach(async () => {
     {
       agentsMd: '# House rules\n\nRun the tests.\n',
       items: [
-        { kind: 'skill', name: 'review', content: '---\nname: review\n---\n' },
-        { kind: 'command', name: 'ship', content: 'Open a PR.\n' },
+        { name: 'review', content: '---\nname: review\n---\n' },
+        { name: 'ship', content: '---\nname: ship\n---\n' },
       ],
     },
     [
@@ -25,7 +25,11 @@ beforeEach(async () => {
         id: 'as1',
         name: 'Go projects',
         agentsMd: 'Use table-driven tests.\n',
-        items: [{ kind: 'skill', name: 'review', content: '---\nname: review\n---\ngo\n' }],
+        items: [{ name: 'review', content: '---\nname: review\n---\ngo\n' }],
+        repos: [
+          { url: 'https://github.com/example/go-skills', skills: ['bench', 'fuzz'] },
+          { url: 'https://github.com/example/gone', skills: [], error: 'repository not found' },
+        ],
       },
     ],
   );
@@ -54,7 +58,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/agents/as1', scheme);
     try {
       await expect.poll(() => page.getByText('AGENTS.md').first().isVisible()).toBe(true);
-      await expect.poll(() => page.getByText('Slash commands').isVisible()).toBe(true);
+      await expect.poll(() => page.getByText('Skills').first().isVisible()).toBe(true);
       await shoot(page, `agent-set-editor-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -82,8 +86,8 @@ test('the editor shows the merge, and which of its items replaces a global one',
     );
     // `review` is defined in both sets; the named one wins, and says so.
     await expect.poll(() => page.getByText('replaces the global one').isVisible()).toBe(true);
-    // The merged commands come from the global set, which this one adds none to.
-    await expect.poll(() => page.getByText('/ship').isVisible()).toBe(true);
+    // `ship` comes from the global set, which this one adds nothing to.
+    await expect.poll(() => page.getByText('review, ship').isVisible()).toBe(true);
   } finally {
     await close();
   }
@@ -112,7 +116,7 @@ test('a skill is written through the dialog and appears in the set', async () =>
 
     await expect.poll(() => page.getByText('bench').first().isVisible()).toBe(true);
     const global = await stub.agentSet('global');
-    expect(global.items.some((i) => i.kind === 'skill' && i.name === 'bench')).toBe(true);
+    expect(global.items.some((i) => i.name === 'bench')).toBe(true);
   } finally {
     await close();
   }
@@ -143,6 +147,33 @@ test('a box is created against a named set, and the global one is not offered', 
       'Global set only',
       'Go projects',
     ]);
+  } finally {
+    await close();
+  }
+});
+
+test('the editor lists the repositories, their skills and a failed pull', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/as1');
+  try {
+    await expect
+      .poll(() => page.getByText('https://github.com/example/go-skills').isVisible())
+      .toBe(true);
+    await expect.poll(() => page.getByText('bench, fuzz', { exact: true }).isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('repository not found').isVisible()).toBe(true);
+    // The repository skills are part of what a box gets.
+    await expect.poll(() => page.getByText('bench, fuzz, review, ship').isVisible()).toBe(true);
+  } finally {
+    await close();
+  }
+});
+
+test('a repository URL that is not HTTPS is refused with the reason', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/as1');
+  try {
+    await page.getByLabel('Repository URL').fill('git@github.com:example/skills.git');
+    await page.getByRole('button', { name: 'Add' }).last().click();
+    await expect.poll(() => page.getByText('url must be an HTTPS URL').isVisible()).toBe(true);
+    expect((await stub.agentSet('as1')).repos).toHaveLength(2);
   } finally {
     await close();
   }

@@ -742,7 +742,7 @@ test('a set is created, filled and read back over the API', async () => {
   const put = await orchestrator.app.inject({
     method: 'PUT',
     url: `/api/agent-sets/${set.id}/items`,
-    payload: { kind: 'command', name: 'bench', content: 'Run the benchmarks.' },
+    payload: { name: 'bench', content: 'Run the benchmarks.' },
   });
   assert.equal(put.statusCode, 200);
   // Every mutation answers with the whole set, so the editor needs one call.
@@ -767,7 +767,7 @@ test('the preview shows the merge, overrides named', async () => {
   await orchestrator.app.inject({
     method: 'PUT',
     url: '/api/agent-sets/global/items',
-    payload: { kind: 'skill', name: 'review', content: 'global' },
+    payload: { name: 'review', content: 'global' },
   });
   const set = (
     await orchestrator.app.inject({
@@ -784,20 +784,19 @@ test('the preview shows the merge, overrides named', async () => {
   await orchestrator.app.inject({
     method: 'PUT',
     url: `/api/agent-sets/${set.id}/items`,
-    payload: { kind: 'skill', name: 'review', content: 'go' },
+    payload: { name: 'review', content: 'go' },
   });
 
   const preview = (
     await orchestrator.app.inject({ url: `/api/agent-sets/${set.id}/preview` })
   ).json() as {
     agentsMd: string;
-    items: Array<{ name: string; content: string }>;
-    overrides: Array<{ name: string }>;
+    skills: Array<{ name: string; repo: string | null }>;
+    overrides: string[];
   };
   assert.equal(preview.agentsMd, 'House rules.\n\nGo rules.');
-  assert.equal(preview.items.length, 1);
-  assert.equal(preview.items[0]!.content, 'go');
-  assert.deepEqual(preview.overrides, [{ kind: 'skill', name: 'review' }]);
+  assert.deepEqual(preview.skills, [{ name: 'review', repo: null }]);
+  assert.deepEqual(preview.overrides, ['review']);
 });
 
 test('the global set is refused deletion, and an unknown set is a 404', async () => {
@@ -832,7 +831,7 @@ test('starting a container to reach into writes the current configuration first'
   await orchestrator.app.inject({
     method: 'PUT',
     url: '/api/agent-sets/global/items',
-    payload: { kind: 'command', name: 'ship', content: 'Open a PR.' },
+    payload: { name: 'ship', content: 'Open a PR.' },
   });
 
   await orchestrator.manager.execTarget('abc123');
@@ -841,7 +840,7 @@ test('starting a container to reach into writes the current configuration first'
   // orchestrator's own rather than this test's fresh one.
   assert.equal(
     readFileSync(
-      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', '.claude', 'commands', 'ship.md'),
+      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', '.claude', 'skills', 'ship', 'SKILL.md'),
       'utf8',
     ),
     'Open a PR.\n',

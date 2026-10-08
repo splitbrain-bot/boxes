@@ -155,7 +155,7 @@ export interface PushSubscriptionRow {
 
 /**
  * One named collection of agent configuration: an AGENTS.md, plus any number
- * of skills and slash commands.
+ * of skills.
  *
  * The `global` set, seeded by its migration, applies to every box. A box may
  * name one more set at creation, whose contents are merged over the global
@@ -174,20 +174,40 @@ export interface AgentSetRow {
   updated_at: number;
 }
 
-/** One skill or slash command belonging to an agent set. */
+/** One skill belonging to an agent set. */
 export interface AgentItemRow {
-  /** The set the item belongs to. */
+  /** The set the skill belongs to. */
   set_id: string;
-  /** Whether it is a skill or a slash command. */
-  kind: 'skill' | 'command';
   /** A safe single path component. */
   name: string;
-  /** The markdown content. */
+  /** The SKILL.md content. */
   content: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
   /** Epoch milliseconds of the last change. */
   updated_at: number;
+}
+
+/** One git repository an agent set takes skills from. */
+export interface AgentRepoRow {
+  /** The repository id, which also names its directory under DATA_DIR. */
+  id: string;
+  /** The set the repository belongs to. */
+  set_id: string;
+  /** The HTTPS URL it is fetched from. */
+  url: string;
+  /** The branch, tag or commit to fetch, or '' for the default branch. */
+  ref: string;
+  /** The commit of the current checkout, or null before the first good pull. */
+  commit_sha: string | null;
+  /** The skills found in the current checkout, as a JSON array of RepoSkill. */
+  skills: string;
+  /** Epoch milliseconds of the last pull, good or failed, or null before the first. */
+  pulled_at: number | null;
+  /** Why the last pull failed, or null when it did not. */
+  error: string | null;
+  /** Epoch milliseconds of creation. */
+  created_at: number;
 }
 
 /**
@@ -463,6 +483,39 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes DROP COLUMN home_volume;
   ALTER TABLE boxes DROP COLUMN workspace_dir;
   ALTER TABLE boxes DROP COLUMN home_dir;
+  `,
+  // Skills replace slash commands, so the stored commands are deleted and an
+  // item is always a skill.
+  `
+  CREATE TABLE agent_items_new (
+    set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (set_id, name)
+  );
+  INSERT INTO agent_items_new (set_id, name, content, created_at, updated_at)
+    SELECT set_id, name, content, created_at, updated_at
+      FROM agent_items WHERE kind = 'skill';
+  DROP TABLE agent_items;
+  ALTER TABLE agent_items_new RENAME TO agent_items;
+  `,
+  // Git repositories an agent set takes more skills from, in the order the
+  // user added them.
+  `
+  CREATE TABLE agent_repos (
+    id         TEXT PRIMARY KEY,
+    set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    url        TEXT NOT NULL,
+    ref        TEXT NOT NULL,
+    commit_sha TEXT,
+    skills     TEXT NOT NULL DEFAULT '[]',
+    pulled_at  INTEGER,
+    error      TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_agent_repos_set ON agent_repos(set_id, created_at);
   `,
 ];
 
