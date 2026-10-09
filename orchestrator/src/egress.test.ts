@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -58,14 +58,14 @@ function storeWith(
   cfg: Config,
   secrets: Partial<Record<CredentialId, string>> = {},
   onChange: () => void = () => {},
-): CredentialStore {
+): { store: CredentialStore; db: Db } {
   const db = openDb(cfg.DATA_DIR);
   dbs.push(db);
-  const store = new CredentialStore(db, onChange);
+  const store = new CredentialStore(db, onChange, cfg.credentialSet);
   for (const [id, secret] of Object.entries(secrets)) {
     store.put(id as CredentialId, 'token', secret);
   }
-  return store;
+  return { store, db };
 }
 
 /** The rows a store holds, which is what composePolicy is given. */
@@ -74,82 +74,61 @@ function rows(store: CredentialStore): CredentialRow[] {
 }
 
 describe('resolveEgressMaterial', () => {
-  const specs = [
-    { id: 'claude', placeholderPrefix: 'sk-ant-oat01-' },
-    { id: 'github', placeholderPrefix: 'ghp_' },
-  ];
-
-  it('generates a CA, placeholders and a control token, and stores them 0600', async () => {
-    const dir = dataDir();
-    const material = await resolveEgressMaterial(dir, specs);
+  it('generates a CA and a control token, and stores them in the database', async () => {
+    const { db } = storeWith(configFrom());
+    const material = await resolveEgressMaterial(db);
 
     expect(material.ca.cert).toContain('BEGIN CERTIFICATE');
     expect(material.ca.key).toContain('PRIVATE KEY');
-    expect(material.placeholders['claude']).toMatch(/^sk-ant-oat01-.{20,}$/);
-    expect(material.placeholders['github']).toMatch(/^ghp_.{20,}$/);
     expect(material.controlToken).toMatch(/^[0-9a-f]{64}$/);
 
-    const path = join(dir, 'egress-secrets.json');
-    expect(statSync(path).mode & 0o777).toBe(0o600);
+    const stored = db.prepare("SELECT value FROM app_keys WHERE key = 'egress'").get() as {
+      value: string;
+    };
+    expect(JSON.parse(stored.value)).toEqual(material);
   }, 30_000);
 
   it('reuses what it stored, because running boxes hold the old CA', async () => {
-    const dir = dataDir();
-    const first = await resolveEgressMaterial(dir, specs);
-    const second = await resolveEgressMaterial(dir, specs);
+    const { db } = storeWith(configFrom());
+    const first = await resolveEgressMaterial(db);
+    const second = await resolveEgressMaterial(db);
 
     expect(second.ca.cert).toBe(first.ca.cert);
-    expect(second.placeholders).toEqual(first.placeholders);
     expect(second.controlToken).toBe(first.controlToken);
   }, 30_000);
 
-  it('adds a placeholder for a credential configured later, keeping the rest', async () => {
-    const dir = dataDir();
-    const first = await resolveEgressMaterial(dir, [specs[0]!]);
-    expect(first.placeholders['github']).toBeUndefined();
-
-    const second = await resolveEgressMaterial(dir, specs);
-    expect(second.placeholders['claude']).toBe(first.placeholders['claude']);
-    expect(second.placeholders['github']).toMatch(/^ghp_/);
-  }, 30_000);
-
-  it('regenerates rather than crashing on an unreadable store', async () => {
-    const dir = dataDir();
-    writeFileSync(join(dir, 'egress-secrets.json'), 'not json at all');
-    const material = await resolveEgressMaterial(dir, specs);
-    expect(material.ca.cert).toContain('BEGIN CERTIFICATE');
-  }, 30_000);
-
-  it('never writes a real credential to the store', async () => {
-    const dir = dataDir();
-    await resolveEgressMaterial(dir, specs);
-    const stored = readFileSync(join(dir, 'egress-secrets.json'), 'utf8');
-    expect(stored).not.toContain(CLAUDE_TOKEN);
-    expect(stored).not.toContain(GH_TOKEN);
+  it('never writes a real credential to the material', async () => {
+    const { db } = storeWith(configFrom(), { claude: CLAUDE_TOKEN, github: GH_TOKEN });
+    await resolveEgressMaterial(db);
+    const stored = db.prepare("SELECT value FROM app_keys WHERE key = 'egress'").get() as {
+      value: string;
+    };
+    expect(stored.value).not.toContain(CLAUDE_TOKEN);
+    expect(stored.value).not.toContain(GH_TOKEN);
   }, 30_000);
 });
 
 describe('composePolicy', () => {
   it('translates only the credentials the store holds a secret for', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg, { github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg, { github: GH_TOKEN });
+    const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials.map((c) => c.id)).toEqual(['github']);
     expect(policy.credentials[0]?.secret).toBe(GH_TOKEN);
-    expect(policy.credentials[0]?.placeholder).toBe(material.placeholders['github']);
+    expect(policy.credentials[0]?.placeholder).toBe(store.get('github')?.placeholder);
   }, 30_000);
 
   it('carries a Dev Tunnels login as its access token, with the tunnel scheme passed', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg);
+    const { store, db } = storeWith(cfg);
     store.put(
       'devtunnels',
       'oauth',
       JSON.stringify({ access_token: 'ghu_theaccesstoken', refresh_token: 'ghr_refresh' }),
     );
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials).toHaveLength(1);
@@ -159,8 +138,8 @@ describe('composePolicy', () => {
 
   it('intercepts nothing when the store is empty, and still carries the CA', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg);
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg);
+    const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials).toEqual([]);
@@ -170,27 +149,17 @@ describe('composePolicy', () => {
     expect(policy.ca?.cert).toContain('BEGIN CERTIFICATE');
   }, 30_000);
 
-  it('holds a placeholder for every credential, configured or not', async () => {
-    const cfg = configFrom();
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
-    for (const spec of cfg.credentialSet) {
-      expect(material.placeholders[spec.id]).toMatch(
-        new RegExp(`^${spec.placeholderPrefix.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&')}`),
-      );
-    }
-  }, 30_000);
-
   it('leaves the allowlist off when none is configured', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
+    const material = await resolveEgressMaterial(db);
     expect(composePolicy(cfg, material, rows(store)).allowedHosts).toEqual([]);
   }, 30_000);
 
   it('adds the hosts a configured credential needs but never travels to', async () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
-    const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
+    const material = await resolveEgressMaterial(db);
     const { allowedHosts } = composePolicy(cfg, material, rows(store));
 
     expect(allowedHosts).toContain('registry.npmjs.org');
@@ -202,8 +171,8 @@ describe('composePolicy', () => {
 
   it('intercepts the GitLab the deployment names, and only that one', async () => {
     const cfg = configFrom({ GITLAB_HOST: 'gitlab.example.com' });
-    const store = storeWith(cfg, { gitlab: GITLAB_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg, { gitlab: GITLAB_TOKEN });
+    const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store));
 
     const gitlab = policy.credentials.find((c) => c.id === 'gitlab');
@@ -215,30 +184,30 @@ describe('composePolicy', () => {
 
   it('has nothing to swap for a subscription obtained by logging in', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg);
+    const { store, db } = storeWith(cfg);
     // `codex login --device-auth` leaves a document, not a header value. It
     // authenticates traffic to chatgpt.com, which the proxy does not intercept.
     store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store));
 
     expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
-    // The placeholder still exists, because a box holds one whether or not
-    // its credential does.
-    expect(material.placeholders['openai']).toMatch(/^sk-/);
+    // The row still has a placeholder, as a box holds one for every stored
+    // credential, deliverable or not.
+    expect(store.get('openai')?.placeholder).toMatch(/^sk-/);
   }, 30_000);
 
   it('intercepts the OpenAI key host, and only that one', async () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
-    const store = storeWith(cfg, { openai: OPENAI_KEY });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg, { openai: OPENAI_KEY });
+    const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store));
 
     const openai = policy.credentials.find((c) => c.id === 'openai');
     expect(openai?.hosts).toEqual(['api.openai.com']);
     expect(openai?.headers).toEqual(['authorization']);
     expect(openai?.secret).toBe(OPENAI_KEY);
-    expect(openai?.placeholder).toBe(material.placeholders['openai']);
+    expect(openai?.placeholder).toBe(store.get('openai')?.placeholder);
 
     // Codex logs in and refreshes at auth.openai.com and may talk to
     // chatgpt.com. Both stay reachable under a narrow allowlist, and the key
@@ -284,8 +253,8 @@ describe('the control channel, from the orchestrator side', () => {
       EGRESS_PROXY_CONTAINER: '127.0.0.1',
       EGRESS_CONTROL_PORT: String(port),
     });
-    const store = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
-    const material = await resolveEgressMaterial(cfg.DATA_DIR, cfg.credentialSet);
+    const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
+    const material = await resolveEgressMaterial(db);
     return { cfg, material, store, seen };
   }
 
@@ -321,14 +290,14 @@ describe('the control channel, from the orchestrator side', () => {
 });
 
 describe('EgressManager', () => {
-  it('hands a box a placeholder for every credential, and the CA', async () => {
+  it('hands a box a placeholder for every stored credential, and the CA', async () => {
     const cfg = configFrom();
-    const store = storeWith(cfg, {
+    const { store, db } = storeWith(cfg, {
       claude: CLAUDE_TOKEN,
       openai: OPENAI_KEY,
       github: GH_TOKEN,
     });
-    const manager = new EgressManager(cfg, store);
+    const manager = new EgressManager(cfg, store, db);
     await manager.prepare();
 
     const claude = manager.placeholderFor('claude');
@@ -340,31 +309,32 @@ describe('EgressManager', () => {
     expect(github).not.toBe(GH_TOKEN);
     expect(github.startsWith('ghp_')).toBe(true);
     expect(openai).not.toBe(OPENAI_KEY);
+    // Codex checks the shape of its key, so the placeholder carries the prefix
+    // a real one has.
     expect(openai.startsWith('sk-')).toBe(true);
     expect(manager.caCertificate()).toContain('BEGIN CERTIFICATE');
   }, 30_000);
 
-  it('has a placeholder before the credential exists, and the CA with it', async () => {
+  it('has the CA before any credential exists, and no placeholder', async () => {
     const cfg = configFrom();
-    const manager = new EgressManager(cfg, storeWith(cfg));
+    const { store, db } = storeWith(cfg);
+    const manager = new EgressManager(cfg, store, db);
     await manager.prepare();
 
-    // A box created before any token is entered has its environment fixed at
-    // creation.
-    expect(manager.placeholderFor('claude')).toMatch(/^sk-ant-oat01-/);
-    expect(manager.placeholderFor('github')).toMatch(/^ghp_/);
-    // Codex checks the shape of its key, so the placeholder carries the prefix
-    // a real one has. It exists whether or not a key has ever been entered.
-    expect(manager.placeholderFor('openai')).toMatch(/^sk-/);
+    // A box keeps the CA it was created with for its whole life. boxEnv drops
+    // a variable with an empty value, so the box gets no credential variable.
     expect(manager.caCertificate()).toContain('BEGIN CERTIFICATE');
+    expect(manager.placeholderFor('claude')).toBe('');
+    expect(manager.placeholderFor('github')).toBe('');
+    expect(manager.placeholderFor('openai')).toBe('');
   }, 30_000);
 
   it('has nothing for a credential this deployment cannot translate', async () => {
     const cfg = configFrom();
-    const manager = new EgressManager(cfg, storeWith(cfg));
+    const { store, db } = storeWith(cfg);
+    const manager = new EgressManager(cfg, store, db);
     await manager.prepare();
 
-    // boxEnv drops a variable with an empty value, so the box gets no variable.
     expect(manager.placeholderFor('gemini')).toBe('');
   }, 30_000);
 
@@ -403,8 +373,8 @@ describe('EgressManager', () => {
     });
     // The wiring the app builds: a write to the store pushes the policy.
     let manager: EgressManager | undefined;
-    const store = storeWith(cfg, {}, () => void manager?.sync());
-    manager = new EgressManager(cfg, store);
+    const { store, db } = storeWith(cfg, {}, () => void manager?.sync());
+    manager = new EgressManager(cfg, store, db);
     await manager.prepare();
 
     await manager.sync();
@@ -419,7 +389,8 @@ describe('EgressManager', () => {
 
   it('records why a push failed, for the health probe', async () => {
     const cfg = configFrom({ EGRESS_CONTROL_PORT: '1' });
-    const manager = new EgressManager(cfg, storeWith(cfg, { claude: CLAUDE_TOKEN }));
+    const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN });
+    const manager = new EgressManager(cfg, store, db);
     await manager.prepare();
 
     expect(manager.status()).toBeNull();

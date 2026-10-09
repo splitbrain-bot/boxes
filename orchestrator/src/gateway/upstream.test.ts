@@ -285,7 +285,7 @@ beforeEach(() => {
   manager = new BoxManager(
     db,
     cfg,
-    new EgressManager(cfg, new CredentialStore(db, () => {})),
+    new EgressManager(cfg, new CredentialStore(db, () => {}, cfg.credentialSet), db),
     new RecordingNotifier(db, cfg),
     new AgentStore(db, cfg.DATA_DIR),
   );

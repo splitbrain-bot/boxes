@@ -218,6 +218,6 @@ Box networks install no default route, so this address is on the Compose network
 above is enforced. The proxy itself is not configured with a token: the first push claims the channel with the bearer it
 presents, and the proxy refuses every later call that presents a different one.
 
-The orchestrator side (`orchestrator/src/egress.ts`) generates the CA, the placeholders and that token once, and stores
-them in `DATA_DIR/egress-secrets.json` with file mode 0600. A restarted proxy has lost the policy, so the reconciler
-pushes it again every minute.
+The orchestrator side (`orchestrator/src/egress.ts`) generates the CA and that token once, and stores them in the
+database. A placeholder is generated when a credential is stored, and is kept with it. A restarted proxy has lost the
+policy, so the reconciler pushes it again every minute.

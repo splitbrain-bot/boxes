@@ -71,9 +71,9 @@ window and navigates it to the thread's URL, or opens a new window.
 
 ### Housekeeping
 
-- The VAPID keypair is generated on first use and stored as `vapid-keys.json` in `DATA_DIR`. Replacing the data volume
-  generates a new keypair, which invalidates every subscription; the orchestrator drops subscriptions made under another
-  key on the next send, and the dashboard re-subscribes itself when it detects the key has changed.
+- The VAPID keypair is generated on first use and stored in the database. Replacing the data volume generates a new
+  keypair, which invalidates every subscription; the orchestrator drops subscriptions made under another key on the next
+  send, and the dashboard re-subscribes itself when it detects the key has changed.
 - A push service that answers 404 or 410 reports the subscription as gone, and the orchestrator deletes its row at once.
 - On every page load the dashboard re-posts its existing subscription, because a push service may replace it at any time
   and Safari expires subscriptions on its own schedule. The service worker also re-subscribes on the browser's

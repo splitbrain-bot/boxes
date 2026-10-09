@@ -6,10 +6,8 @@ import {
   randomBytes,
   sign as signWith,
 } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readAppKey, writeAppKey, type Db } from './db.ts';
 import { log } from './log.ts';
-import { writeSecretFile } from './secret.ts';
 
 /**
  * Web Push delivery on `node:crypto`: RFC 8291 payload encryption and RFC 8292
@@ -52,8 +50,8 @@ const REQUEST_TIMEOUT_MS = 10_000;
 /** Lifetime of a VAPID assertion. Well under the 24h RFC 8292 allows. */
 const VAPID_LIFETIME_SECONDS = 12 * 60 * 60;
 
-/** Filename under DATA_DIR holding the generated keypair. */
-const KEY_FILE = 'vapid-keys.json';
+/** The app key under which the generated keypair is stored. */
+const APP_KEY = 'vapid';
 
 /** Base64url of raw bytes, which is how every key and salt here travels. */
 function b64url(buf: Buffer): string {
@@ -88,34 +86,16 @@ function pad32(scalar: Buffer): Buffer {
 }
 
 /**
- * The deployment's keypair, generated once and kept under DATA_DIR. A new
+ * The deployment's keypair, generated once and kept in the database. A new
  * keypair invalidates every subscription.
  */
-export function loadVapidKeys(dataDir: string): VapidKeys {
-  const path = join(dataDir, KEY_FILE);
-  if (existsSync(path)) {
-    try {
-      const stored = JSON.parse(readFileSync(path, 'utf8')) as Partial<VapidKeys>;
-      if (
-        typeof stored.publicKey === 'string' &&
-        typeof stored.privateKey === 'string' &&
-        unb64url(stored.publicKey).length === 65 &&
-        unb64url(stored.privateKey).length === 32
-      ) {
-        return { publicKey: stored.publicKey, privateKey: stored.privateKey };
-      }
-      log.warn('stored VAPID keys are malformed; generating a replacement', { path });
-    } catch (err) {
-      log.warn('could not read the stored VAPID keys; generating a replacement', {
-        path,
-        error: (err as Error).message,
-      });
-    }
-  }
+export function loadVapidKeys(db: Db): VapidKeys {
+  const stored = readAppKey<VapidKeys>(db, APP_KEY);
+  if (stored) return stored;
 
   const keys = generateVapidKeys();
-  writeSecretFile(path, `${JSON.stringify(keys, null, 2)}\n`);
-  log.info('generated a VAPID keypair for this deployment', { path });
+  writeAppKey(db, APP_KEY, keys);
+  log.info('generated a VAPID keypair for this deployment');
   return keys;
 }
 

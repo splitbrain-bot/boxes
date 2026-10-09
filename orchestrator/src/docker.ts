@@ -138,15 +138,15 @@ export interface CreateContainerSpec {
 /**
  * The credential and identity part of a box's environment.
  *
- * Every harness adds its variables, even one no thread in the box uses. The
- * environment is fixed at container creation, and a credential entered later
- * must still reach the box. Each credential value is a placeholder that the
- * egress proxy swaps for the real secret.
+ * Every harness adds its variables, even one no thread in the box uses. Each
+ * credential value is a placeholder that the egress proxy swaps for the real
+ * secret. A credential that is not stored has none, and its variable is
+ * dropped: the environment is fixed at container creation, so a credential
+ * entered later reaches the box at its next restart.
  *
- * GH_TOKEN is for git and gh, and is set even without a stored GitHub
- * credential. GITLAB_TOKEN and GITLAB_HOST are the same for git and glab.
- * DEVTUNNELS_TOKEN is the GitHub token the Dev Tunnels API takes, for the
- * share-app skill.
+ * GH_TOKEN is for git and gh. GITLAB_TOKEN and GITLAB_HOST are the same for
+ * git and glab. DEVTUNNELS_TOKEN is the GitHub token the Dev Tunnels API
+ * takes, for the share-app skill.
  */
 export function credentialEnv(
   placeholderFor: (credentialId: string) => string,

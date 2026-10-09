@@ -6,8 +6,11 @@ dashboard and stored in the [orchestrator database](storage.md).
 ## The path of a credential into a box
 
 A real credential never enters a box container. The orchestrator places a generated placeholder in the environment of
-each [box](boxes.md), one per credential. The [egress proxy](egress.md) intercepts the requests to the hosts a
+each [box](boxes.md), one per stored credential. The [egress proxy](egress.md) intercepts the requests to the hosts a
 credential belongs to and replaces the placeholder with the stored secret.
+
+The placeholder is generated when the credential is stored and is deleted with it. The environment of a box is fixed
+when its container is created, so a credential that is stored or removed later takes effect in a box at its next start.
 
 ## The credentials
 

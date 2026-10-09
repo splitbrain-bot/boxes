@@ -620,9 +620,8 @@ export class BoxManager {
    * row and what the deployment currently holds. Both a new box and every
    * recreated container are built from it.
    *
-   * Every box gets the same placeholder for each credential, and the proxy
-   * swaps in the secret. So no container is rebuilt when a credential
-   * arrives.
+   * The placeholders are those of the credentials stored right now, so a
+   * credential that arrives later reaches a box at its next restart.
    */
   private containerSpec(row: BoxRow): dk.CreateContainerSpec {
     const settings = readSettings(this.db);

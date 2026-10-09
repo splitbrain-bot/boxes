@@ -164,7 +164,7 @@ let logins: LoginManager;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-login-'));
   db = openDb(dir);
-  store = new CredentialStore(db, () => {});
+  store = new CredentialStore(db, () => {}, []);
   fake = fakeRuntime();
   logins = new LoginManager(store, fake.runtime, 5_000);
 });

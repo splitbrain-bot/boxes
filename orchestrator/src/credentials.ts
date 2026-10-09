@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type {
   CredentialId,
   CredentialMethod,
@@ -57,6 +58,13 @@ export interface CredentialRow {
   status: CredentialStatus;
   /** Why it failed, for the settings page, or null. */
   last_error: string | null;
+  /**
+   * What a box holds in place of the secret. Shaped like a real token of the
+   * service, worth nothing on its own. Generated when the credential is first
+   * stored and kept for as long as the row exists, so a box created with it
+   * keeps working through every refresh.
+   */
+  placeholder: string;
   /** Epoch milliseconds of the first store. */
   created_at: number;
   /** Epoch milliseconds of the last write. */
@@ -65,6 +73,9 @@ export interface CredentialRow {
 
 /** How much of a pasted secret is shown, from the end. */
 const ACCOUNT_TAIL = 4;
+
+/** Random bytes in a generated placeholder, before its prefix. */
+const PLACEHOLDER_BYTES = 24;
 
 /** Owns the credentials table. */
 export class CredentialStore {
@@ -76,6 +87,11 @@ export class CredentialStore {
      * than at the reconciler's next tick.
      */
     private readonly onChange: () => void,
+    /**
+     * The credentials this deployment translates, for the prefix a new
+     * placeholder carries.
+     */
+    private readonly specs: readonly { id: string; placeholderPrefix: string }[],
   ) {}
 
   /** One credential, or undefined when the deployment holds none for it. */
@@ -117,15 +133,16 @@ export class CredentialStore {
       refreshed_at: extra.refreshed_at ?? null,
       status: extra.status ?? 'ok',
       last_error: extra.last_error ?? null,
+      placeholder: existing?.placeholder ?? this.generatePlaceholder(id),
       created_at: existing?.created_at ?? now,
       updated_at: now,
     };
     this.db
       .prepare(
         `INSERT INTO credentials (id, method, secret, account, expires_at,
-           refreshed_at, status, last_error, created_at, updated_at)
+           refreshed_at, status, last_error, placeholder, created_at, updated_at)
          VALUES (@id, @method, @secret, @account, @expires_at,
-           @refreshed_at, @status, @last_error, @created_at, @updated_at)
+           @refreshed_at, @status, @last_error, @placeholder, @created_at, @updated_at)
          ON CONFLICT(id) DO UPDATE SET
            method = excluded.method, secret = excluded.secret,
            account = excluded.account, expires_at = excluded.expires_at,
@@ -135,6 +152,22 @@ export class CredentialStore {
       .run(row);
     this.onChange();
     return row;
+  }
+
+  /**
+   * What a box holds in place of this credential, or the empty string when
+   * none is stored. The empty string drops the variable from the box's
+   * environment, so a box created now gets the credential at its next
+   * restart.
+   */
+  placeholderFor(id: string): string {
+    return isCredentialId(id) ? (this.get(id)?.placeholder ?? '') : '';
+  }
+
+  /** A new placeholder that starts with the prefix a real token of the service has. */
+  private generatePlaceholder(id: CredentialId): string {
+    const prefix = this.specs.find((spec) => spec.id === id)?.placeholderPrefix ?? '';
+    return `${prefix}${randomBytes(PLACEHOLDER_BYTES).toString('base64url')}`;
   }
 
   /** Forgets a credential. The hosts it travelled to stop being intercepted. */

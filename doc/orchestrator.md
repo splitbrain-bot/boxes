@@ -41,8 +41,9 @@ The orchestrator does no agent work itself. An agent runs in a box, and an adapt
 All state is in `DATA_DIR`:
 
 - `boxes.db`, an SQLite database in WAL mode. It holds metadata only: the boxes, threads, credentials, settings, agent
-  sets, push subscriptions and tunnels. The transcripts stay in the adapters, and the runtime state stays in Docker.
-- The files of each box, and the generated keys. See [storage](storage.md).
+  sets, push subscriptions, tunnels and the keys the orchestrator generates for itself. The transcripts stay in the
+  adapters, and the runtime state stays in Docker.
+- The files of each box. See [storage](storage.md).
 
 Everything else is in memory, among it the ACP message log and the unanswered permission requests. A restart loses it.
 
@@ -69,7 +70,7 @@ The boot has a fixed order:
 1. Read and validate the environment.
 2. Claim the data directory.
 3. Open the database and apply the pending migrations.
-4. Prepare the egress policy and push it. The placeholders must exist before the first box is created.
+4. Prepare the egress policy and push it. The CA must exist before the first box is created.
 5. Resolve the host-side path of `DATA_DIR`, because a bind mount names a path that the Docker daemon resolves.
 6. Pull the box image.
 7. Reconcile the database rows against Docker (see [boxes](boxes.md)).

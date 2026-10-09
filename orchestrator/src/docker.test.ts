@@ -33,6 +33,12 @@ const GH_TOKEN = 'ghp_therealgithubtoken';
 /** A real OpenAI API key as the store holds it. */
 const OPENAI_KEY = 'sk-therealopenaiapikey';
 
+/** A real GitLab token as the store holds it. */
+const GITLAB_TOKEN = 'glpat-therealgitlabtoken';
+
+/** A real Dev Tunnels token as the store holds it. */
+const DEVTUNNELS_TOKEN = 'ghu_therealdevtunnelstoken';
+
 let dirs: string[] = [];
 let dbs: Db[] = [];
 
@@ -61,11 +67,11 @@ async function deployment(
   const cfg = loadConfig({ DATA_DIR: dataDir(), ...over });
   const db = openDb(cfg.DATA_DIR);
   dbs.push(db);
-  const credentials = new CredentialStore(db, () => {});
+  const credentials = new CredentialStore(db, () => {}, cfg.credentialSet);
   for (const [id, secret] of Object.entries(secrets)) {
     credentials.put(id as CredentialId, 'token', secret);
   }
-  const egress = new EgressManager(cfg, credentials);
+  const egress = new EgressManager(cfg, credentials, db);
   await egress.prepare();
   return { cfg, db, egress };
 }
@@ -112,35 +118,35 @@ describe('boxEnv', () => {
     expect(everything).not.toContain(GH_TOKEN);
   }, 30_000);
 
-  it('carries every harness placeholder even where nothing is configured', async () => {
+  it('carries no credential variable where nothing is configured', async () => {
     const env = await envFor();
 
-    // A container's environment is fixed when it is created, so a box made
-    // before the first credential needs the placeholder for a token entered
-    // later.
-    expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toMatch(/^sk-ant-oat01-/);
-    expect(env['GH_TOKEN']).toMatch(/^ghp_/);
-    expect(env['CODEX_API_KEY']).toMatch(/^sk-/);
-    // And what each harness needs beside its credential, from the registry.
+    // A box holds a placeholder for a stored credential only. One entered
+    // later reaches the box at its next restart.
+    expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined();
+    expect(env['GH_TOKEN']).toBeUndefined();
+    expect(env['CODEX_API_KEY']).toBeUndefined();
+    // What each harness needs beside its credential still comes from the registry.
     expect(env['CLAUDE_CONFIG_DIR']).toBe('/home/agent/.claude');
     expect(env['CODEX_HOME']).toBe('/home/agent/.codex');
   }, 30_000);
 
-  it('carries the GitLab pair, at gitlab.com or at the named instance', async () => {
-    // The placeholder exists before any token is stored, as for GH_TOKEN.
+  it('carries the GitLab host always, and the token once one is stored', async () => {
     // glab reads the host, and the entrypoint points the credential helper at it.
     const env = await envFor();
-    expect(env['GITLAB_TOKEN']).toMatch(/^glpat-/);
+    expect(env['GITLAB_TOKEN']).toBeUndefined();
     expect(env['GITLAB_HOST']).toBe('gitlab.com');
 
-    const own = await envFor({}, { GITLAB_HOST: 'gitlab.example.com' });
+    const own = await envFor({ gitlab: GITLAB_TOKEN }, { GITLAB_HOST: 'gitlab.example.com' });
+    expect(own['GITLAB_TOKEN']).toMatch(/^glpat-/);
+    expect(own['GITLAB_TOKEN']).not.toBe(GITLAB_TOKEN);
     expect(own['GITLAB_HOST']).toBe('gitlab.example.com');
   }, 30_000);
 
   it('carries a Dev Tunnels placeholder for the share-app skill', async () => {
-    // Present before any login, so a box created now can share once one exists.
-    const env = await envFor();
+    const env = await envFor({ devtunnels: DEVTUNNELS_TOKEN });
     expect(env['DEVTUNNELS_TOKEN']).toMatch(/^ghu_/);
+    expect(env['DEVTUNNELS_TOKEN']).not.toBe(DEVTUNNELS_TOKEN);
   }, 30_000);
 
   it('carries what Codex needs to log itself in from the environment', async () => {

@@ -92,7 +92,7 @@ export class Notifier {
   private keys: VapidKeys | null = null;
 
   constructor(
-    /** Where the push subscriptions are stored. */
+    /** Where the push subscriptions and the keypair are stored. */
     private readonly db: Db,
     /** The deployment's configuration. */
     private readonly cfg: Config,
@@ -109,7 +109,7 @@ export class Notifier {
 
   /** The keypair, loaded or generated on first use. */
   private vapid(): VapidKeys {
-    if (!this.keys) this.keys = loadVapidKeys(this.cfg.DATA_DIR);
+    if (!this.keys) this.keys = loadVapidKeys(this.db);
     return this.keys;
   }
 

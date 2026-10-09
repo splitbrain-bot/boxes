@@ -30,7 +30,7 @@ function fakeFetch(answer: (url: string) => { status: number } | Error): void {
  * Stores one subscription row, with keys of the sizes the crypto needs.
  * `vapidKey` defaults to the deployment's current key.
  */
-function subscribe(endpoint: string, vapidKey = loadVapidKeys(dir).publicKey): void {
+function subscribe(endpoint: string, vapidKey = loadVapidKeys(db).publicKey): void {
   upsertPushSubscription(
     db,
     endpoint,
