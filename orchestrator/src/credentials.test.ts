@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
+import { loadConfig } from './config.ts';
 import {
   CODEX_CLIENT_ID,
   CODEX_TOKEN_URL,
@@ -25,9 +26,13 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-credentials-'));
   db = openDb(dir);
   changes = 0;
-  store = new CredentialStore(db, () => {
-    changes += 1;
-  });
+  store = new CredentialStore(
+    db,
+    () => {
+      changes += 1;
+    },
+    loadConfig({ DATA_DIR: dir }).credentialSet,
+  );
 });
 
 afterEach(() => {
@@ -82,6 +87,34 @@ test('a status is recorded without touching the secret', () => {
   // Still the token the proxy has to send, and still the one the page names.
   assert.equal(row?.secret, 'sk-ant-oat01-abcdefgh1234');
   assert.equal(row?.account, '1234');
+});
+
+test('a new credential gets a placeholder shaped like its token, kept across replacements', () => {
+  const first = store.put('claude', 'token', 'sk-ant-oat01-abcdefgh1234');
+  assert.match(first.placeholder, /^sk-ant-oat01-.{20,}$/);
+  assert.notEqual(first.placeholder, first.secret);
+  assert.equal(store.placeholderFor('claude'), first.placeholder);
+
+  // A box holds the placeholder in its environment, and Codex copies its own
+  // into auth.json, so neither a refresh nor a new paste may change it.
+  const second = store.put('claude', 'token', 'sk-ant-oat01-replaced5678');
+  assert.equal(second.placeholder, first.placeholder);
+  assert.equal(store.get('claude')?.placeholder, first.placeholder);
+});
+
+test('a credential entered again after removal gets a new placeholder', () => {
+  const before = store.put('github', 'token', 'ghp_thefirsttoken').placeholder;
+  store.remove('github');
+  assert.equal(store.placeholderFor('github'), '');
+
+  const after = store.put('github', 'token', 'ghp_thesecondtoken').placeholder;
+  assert.match(after, /^ghp_/);
+  assert.notEqual(after, before);
+});
+
+test('a credential that is not stored has no placeholder, nor has an unknown one', () => {
+  assert.equal(store.placeholderFor('claude'), '');
+  assert.equal(store.placeholderFor('gemini'), '');
 });
 
 test('a summary carries everything but the secret', () => {

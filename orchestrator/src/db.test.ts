@@ -500,6 +500,7 @@ test('the credential and settings tables arrive empty on an existing deployment'
       'last_error',
       'created_at',
       'updated_at',
+      'placeholder',
     ]);
 
     // The box is untouched. It gets a placeholder for every credential at its
@@ -588,5 +589,44 @@ test('the catalogue keeps the half an answer says nothing about', () => {
     assert.equal(readHarnessCatalog(db, 'codex'), null);
   } finally {
     db.close();
+  }
+});
+
+/**
+ * Builds a database at the version before the app keys, with one credential
+ * from before placeholders were stored with it.
+ */
+function atLastReleaseBeforeAppKeys(): void {
+  const db = new Database(join(dir, 'boxes.db'));
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('CREATE TABLE app_keys'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  db.prepare(
+    `INSERT INTO credentials (id, method, secret, account, status, created_at, updated_at)
+     VALUES ('github', 'token', 'ghp_therealtoken', 'oken', 'ok', 1000, 2000)`,
+  ).run();
+  db.close();
+}
+
+test('a stored credential gets a placeholder shaped like its token, and the app keys arrive empty', () => {
+  atLastReleaseBeforeAppKeys();
+
+  const upgraded = openDb(dir);
+  try {
+    // The credential stays, with a placeholder a box can be given. Its prefix
+    // is what the service's own tokens carry, so a client accepts its shape.
+    const row = upgraded
+      .prepare("SELECT secret, placeholder FROM credentials WHERE id = 'github'")
+      .get() as { secret: string; placeholder: string };
+    assert.equal(row.secret, 'ghp_therealtoken');
+    assert.match(row.placeholder, /^ghp_[0-9A-F]{36}$/);
+
+    // The keys on disk are not carried over: the orchestrator generates new
+    // ones at first use.
+    assert.deepEqual(columns(upgraded, 'app_keys'), ['key', 'value', 'created_at']);
+    const keys = upgraded.prepare('SELECT COUNT(*) AS n FROM app_keys').get() as { n: number };
+    assert.equal(keys.n, 0);
+  } finally {
+    upgraded.close();
   }
 });

@@ -517,6 +517,27 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_agent_repos_set ON agent_repos(set_id, created_at);
   `,
+  // The keys the orchestrator generates for itself, one JSON value per key.
+  // Each credential carries its own placeholder, and a box holds a
+  // placeholder only for the credentials stored when its container was
+  // created. Existing credentials get one here, with the prefix a real token
+  // of the service has.
+  `
+  CREATE TABLE app_keys (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  ALTER TABLE credentials ADD COLUMN placeholder TEXT NOT NULL DEFAULT '';
+  UPDATE credentials SET placeholder =
+    CASE id
+      WHEN 'claude'     THEN 'sk-ant-oat01-'
+      WHEN 'openai'     THEN 'sk-'
+      WHEN 'github'     THEN 'ghp_'
+      WHEN 'gitlab'     THEN 'glpat-'
+      WHEN 'devtunnels' THEN 'ghu_'
+    END || hex(randomblob(18));
+  `,
 ];
 
 /** An open database handle. */
@@ -951,4 +972,22 @@ export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog |
   } catch {
     return null;
   }
+}
+
+// --- the keys the orchestrator generates for itself ---------------------------
+
+/** The stored value under `key`, parsed from JSON, or undefined when there is none. */
+export function readAppKey<T>(db: Db, key: string): T | undefined {
+  const row = db.prepare('SELECT value FROM app_keys WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
+  return row ? (JSON.parse(row.value) as T) : undefined;
+}
+
+/** Stores `value` under `key` as JSON, replacing what was there. */
+export function writeAppKey(db: Db, key: string, value: unknown): void {
+  db.prepare(
+    `INSERT INTO app_keys (key, value, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(key, JSON.stringify(value), Date.now());
 }

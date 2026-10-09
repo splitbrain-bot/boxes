@@ -15,8 +15,9 @@ The orchestrator then creates the box's private network, its directories in the 
 starts it.
 
 The container runs as the unprivileged `agent` account. Its root filesystem is read-only. The orchestrator puts a
-credential placeholder for each known service into the environment; the [egress proxy](egress.md) replaces a placeholder
-with the real secret on the wire. No real credential enters a box.
+credential placeholder for each stored credential into the environment; the [egress proxy](egress.md) replaces a
+placeholder with the real secret on the wire. No real credential enters a box. The environment is fixed when the
+container is created, so a credential stored later reaches the box at its next start.
 
 The first thread is created in the same request. Creating a box does not require a working credential: the thread is a
 database row until a browser opens it.

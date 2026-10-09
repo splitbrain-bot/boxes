@@ -239,8 +239,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // The store and the egress manager need each other: the policy is composed
   // from the store's rows, and every write to the store re-pushes it. The
   // hoisted function below lets the store be built first.
-  const credentials = new CredentialStore(db, () => repushPolicy());
-  const egress = new EgressManager(cfg, credentials);
+  const credentials = new CredentialStore(db, () => repushPolicy(), cfg.credentialSet);
+  const egress = new EgressManager(cfg, credentials, db);
   const notifier = new Notifier(db, cfg);
 
   /**

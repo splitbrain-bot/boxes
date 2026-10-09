@@ -6,9 +6,7 @@ keeps its rules and credentials in memory only.
 
 | In the volume | Contents | In a box container |
 | --- | --- | --- |
-| `boxes.db` | the boxes, threads, settings and credentials | not mounted |
-| `vapid-keys.json` | the keys for [push notifications](notifications.md) | not mounted |
-| `egress-secrets.json` | the [certificate authority and the placeholders](egress.md) | not mounted |
+| `boxes.db` | the boxes, threads, settings, credentials and the generated keys | not mounted |
 | `orchestrator.lock` | the claim of the running orchestrator | not mounted |
 | `workspaces/<box id>` | the files an agent works on | `/workspace`, read and write |
 | `homes/<box id>` | the home directory of the agent account | `/home/agent`, read and write |

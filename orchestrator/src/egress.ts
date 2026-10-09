@@ -1,6 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { generateCACertificate } from 'mockttp';
 import type {
   EgressCredential,
@@ -10,94 +8,42 @@ import type {
 } from '../../shared/types.ts';
 import type { Config } from './config.ts';
 import { deliverableSecret, type CredentialRow, type CredentialStore } from './credentials.ts';
+import { readAppKey, writeAppKey, type Db } from './db.ts';
 import { log } from './log.ts';
-import { writeSecretFile } from './secret.ts';
 
 /** The orchestrator side of the egress proxy: its policy and key material. */
 
-/** Filename under DATA_DIR holding the CA, the placeholders and the control token. */
-const MATERIAL_FILE = 'egress-secrets.json';
-
-/** Random bytes in a generated placeholder, before its prefix. */
-const PLACEHOLDER_BYTES = 24;
+/** The app key under which the CA and the control token are stored. */
+const APP_KEY = 'egress';
 
 /** How long a control-channel call may take, in milliseconds. */
 const CONTROL_TIMEOUT_MS = 5_000;
 
 /**
  * Everything generated once and then reused for the life of a deployment.
- * Running boxes hold the CA and the placeholders, so both must survive a
- * restart.
+ * Running boxes trust the CA, so it must survive a restart.
  */
 export interface EgressMaterial {
   /** The deployment CA. Its certificate is public; its key is not. */
   ca: { key: string; cert: string };
-  /** One placeholder per credential id. Worth nothing on their own. */
-  placeholders: Record<string, string>;
   /** Bearer the orchestrator authenticates its pushes with. */
   controlToken: string;
 }
 
-/** Returns a new placeholder that starts with the credential's own prefix. */
-function generatePlaceholder(prefix: string): string {
-  return `${prefix}${randomBytes(PLACEHOLDER_BYTES).toString('base64url')}`;
-}
-
 /**
- * Loads the deployment's egress material, generating and storing whatever is
- * missing.
- *
- * Running boxes trust this CA, so it is kept across boots. Deleting the file
- * rotates it.
+ * Loads the deployment's egress material, generating and storing it on first
+ * use. Deleting the row rotates it.
  */
-export async function resolveEgressMaterial(
-  dataDir: string,
-  credentials: readonly { id: string; placeholderPrefix: string }[],
-): Promise<EgressMaterial> {
-  const path = join(dataDir, MATERIAL_FILE);
+export async function resolveEgressMaterial(db: Db): Promise<EgressMaterial> {
+  const stored = readAppKey<EgressMaterial>(db, APP_KEY);
+  if (stored) return stored;
 
-  let stored: Partial<EgressMaterial> = {};
-  if (existsSync(path)) {
-    try {
-      stored = JSON.parse(readFileSync(path, 'utf8')) as Partial<EgressMaterial>;
-    } catch (err) {
-      log.warn('stored egress material is unreadable; generating a replacement', {
-        path,
-        error: (err as Error).message,
-      });
-    }
-  }
-
-  let changed = false;
-
-  let ca = stored.ca;
-  if (!ca?.key || !ca?.cert) {
-    // The proxy's own library generates it, so the proxy accepts the key.
-    ca = await generateCACertificate({ subject: { commonName: 'Boxes egress proxy CA' } });
-    changed = true;
-    log.info('generated an egress CA for this deployment', { path });
-  }
-
-  // Placeholders are per deployment rather than per box, so the policy
-  // does not change as boxes come and go.
-  const placeholders: Record<string, string> = { ...stored.placeholders };
-  for (const { id, placeholderPrefix } of credentials) {
-    if (placeholders[id]) continue;
-    placeholders[id] = generatePlaceholder(placeholderPrefix);
-    changed = true;
-  }
-
-  const controlToken = stored.controlToken || randomBytes(32).toString('hex');
-  if (controlToken !== stored.controlToken) changed = true;
-
-  const material: EgressMaterial = { ca, placeholders, controlToken };
-  if (changed) writeMaterial(dataDir, material);
+  // The proxy's own library generates it, so the proxy accepts the key.
+  const ca = await generateCACertificate({ subject: { commonName: 'Boxes egress proxy CA' } });
+  const material: EgressMaterial = { ca, controlToken: randomBytes(32).toString('hex') };
+  writeAppKey(db, APP_KEY, material);
+  log.info('generated an egress CA for this deployment');
   return material;
-}
-
-/** Writes the material to MATERIAL_FILE, readable only by the orchestrator. */
-function writeMaterial(dataDir: string, material: EgressMaterial): void {
-  writeSecretFile(join(dataDir, MATERIAL_FILE), `${JSON.stringify(material, null, 2)}\n`);
 }
 
 /**
@@ -117,20 +63,15 @@ export function composePolicy(
   const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
   const configured = cfg.credentialSet.filter((spec) => (secrets.get(spec.id) ?? '') !== '');
 
-  const credentials: EgressCredential[] = configured.map((spec) => {
-    const placeholder = material.placeholders[spec.id];
-    if (!placeholder) {
-      throw new Error(`no placeholder was generated for the ${spec.id} credential`);
-    }
-    return {
-      id: spec.id,
-      hosts: [...spec.hosts],
-      headers: [...spec.headers],
-      ...(spec.passthroughSchemes ? { passthroughSchemes: [...spec.passthroughSchemes] } : {}),
-      placeholder,
-      secret: secrets.get(spec.id) ?? '',
-    };
-  });
+  const placeholders = new Map(stored.map((row) => [row.id, row.placeholder]));
+  const credentials: EgressCredential[] = configured.map((spec) => ({
+    id: spec.id,
+    hosts: [...spec.hosts],
+    headers: [...spec.headers],
+    ...(spec.passthroughSchemes ? { passthroughSchemes: [...spec.passthroughSchemes] } : {}),
+    placeholder: placeholders.get(spec.id) ?? '',
+    secret: secrets.get(spec.id) ?? '',
+  }));
 
   // The proxy allows a credential's own hosts. The other hosts its tools
   // need are added here, so an allowlist cannot break an OAuth refresh.
@@ -212,14 +153,13 @@ export class EgressManager {
      * compose.
      */
     private readonly credentials: CredentialStore,
+    /** Where the CA and the control token are kept. */
+    private readonly db: Db,
   ) {}
 
   /** Loads the material and composes the policy, without talking to the proxy. */
   async prepare(): Promise<void> {
-    // Every credential in the set gets a placeholder, configured or not. A
-    // box's environment is fixed at creation, and a later credential must
-    // still reach it.
-    this.material = await resolveEgressMaterial(this.cfg.DATA_DIR, this.cfg.credentialSet);
+    this.material = await resolveEgressMaterial(this.db);
     this.composed = composePolicy(this.cfg, this.material, this.credentials.list());
   }
 
@@ -240,15 +180,12 @@ export class EgressManager {
   }
 
   /**
-   * What a box holds in place of a credential, whether or not the credential
-   * is stored yet. A box created today then works with a token entered
-   * tomorrow.
-   *
-   * A credential outside the deployment's set has no placeholder. The empty
-   * string then drops the variable from the box's environment.
+   * What a box holds in place of a credential, or the empty string for one
+   * that is not stored. The empty string drops the variable from the box's
+   * environment.
    */
   placeholderFor(id: string): string {
-    return this.prepared().material.placeholders[id] ?? '';
+    return this.credentials.placeholderFor(id);
   }
 
   /** The last thing the proxy reported, for /healthz. */

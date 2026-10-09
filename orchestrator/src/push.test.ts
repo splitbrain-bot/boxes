@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { createDecipheriv, createECDH, createPublicKey, hkdfSync, verify } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'vitest';
+import { openDb } from './db.ts';
 import {
   encryptPayload,
   generateVapidKeys,
@@ -170,21 +171,17 @@ function withDataDir<T>(fn: (dir: string) => T): T {
 
 test('loadVapidKeys generates once and reuses after', () => {
   withDataDir((dir) => {
-    const first = loadVapidKeys(dir);
-    const second = loadVapidKeys(dir);
-    // Regenerating would invalidate every existing subscription.
-    assert.deepEqual(first, second);
-    assert.equal(statSync(join(dir, 'vapid-keys.json')).mode & 0o777, 0o600);
-  });
-});
-
-test('loadVapidKeys replaces a malformed keyfile rather than failing to boot', () => {
-  withDataDir((dir) => {
-    const path = join(dir, 'vapid-keys.json');
-    writeFileSync(path, 'not json at all');
-    const keys = loadVapidKeys(dir);
-    assert.equal(b64(keys.publicKey).length, 65);
-    assert.equal(JSON.parse(readFileSync(path, 'utf8')).publicKey, keys.publicKey);
+    const db = openDb(dir);
+    try {
+      const first = loadVapidKeys(db);
+      const second = loadVapidKeys(db);
+      // Regenerating would invalidate every existing subscription.
+      assert.deepEqual(first, second);
+      assert.equal(b64(first.publicKey).length, 65);
+      assert.equal(b64(first.privateKey).length, 32);
+    } finally {
+      db.close();
+    }
   });
 });
 
