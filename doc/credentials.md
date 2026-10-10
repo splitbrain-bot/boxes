@@ -19,20 +19,21 @@ runs.
 
 ### Claude
 
-Authenticates the Claude Code harness against `api.anthropic.com`. The placeholder is set as `CLAUDE_CODE_OAUTH_TOKEN`.
-Two ways to set it up:
+Authenticates the Claude Code harness against `api.anthropic.com`. Three ways to set it up:
 
 - **Log in**: the orchestrator runs `claude setup-token` in a throwaway container. You open the shown URL in a browser
-  and paste the code it gives you back into the dashboard. This is the convenient path: the token it produces
-  (`sk-ant-oat01-…`) is the only credential Claude Code accepts from this variable.
-- **Paste a token**: enter the token `claude setup-token` printed on another machine. The result is the same as logging
-  in.
+  and paste the code it gives you back into the dashboard. This is the convenient path for a subscription seat.
+- **Paste a token**: enter the token `claude setup-token` printed on another machine (`sk-ant-oat01-…`). The result is
+  the same as logging in.
+- **Paste an API key**: enter an Anthropic API key (`sk-ant-api03-…`). The key is billed per use, not against a
+  subscription seat.
 
-Either way the token expires one year after it was stored and cannot be refreshed. The credential is then marked
-`expired`; log in or paste again.
+A token is set as `CLAUDE_CODE_OAUTH_TOKEN` and an API key as `ANTHROPIC_API_KEY`; the placeholder goes in only one of
+the two. The settings page tells them apart by their prefix.
 
-Note: An Anthropic API key does not work here: the harness sends the variable as an OAuth bearer token, not as an API
-key.
+A token expires one year after it was stored and cannot be refreshed. The credential is then marked `expired`; log in or
+paste again. An API key can have an expiry date, set when the key is created. The orchestrator does not know this date
+and does not mark the key `expired`. When the key expires, paste a new one.
 
 ### OpenAI
 

@@ -5,6 +5,7 @@ import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { DockerState, ImageInfo } from '../../shared/types.ts';
 import type { Config } from './config.ts';
+import type { CredentialId, CredentialMethod } from './credentials.ts';
 import { HARNESSES } from './harness.ts';
 import { log } from './log.ts';
 import { boxOwner } from './workspaces.ts';
@@ -150,12 +151,14 @@ export interface CreateContainerSpec {
  */
 export function credentialEnv(
   placeholderFor: (credentialId: string) => string,
+  methodFor: (credentialId: CredentialId) => CredentialMethod | null,
   identity: { gitName: string; gitEmail: string },
   gitlabHost: string,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const harness of Object.values(HARNESSES)) {
-    Object.assign(env, harness.env(placeholderFor(harness.credentialId)));
+    const id = harness.credentialId;
+    Object.assign(env, harness.env(placeholderFor(id), methodFor(id)));
   }
   env['GH_TOKEN'] = placeholderFor('github');
   env['GITLAB_TOKEN'] = placeholderFor('gitlab');

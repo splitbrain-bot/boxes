@@ -636,6 +636,7 @@ export class BoxManager {
       homeSource: ws.hostHomePath(this.hostDataDir, row.id),
       env: dk.credentialEnv(
         (id) => this.egress.placeholderFor(id),
+        (id) => this.egress.methodFor(id),
         { gitName: settings.gitName, gitEmail: settings.gitEmail },
         this.cfg.GITLAB_HOST,
       ),

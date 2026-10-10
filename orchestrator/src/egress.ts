@@ -7,7 +7,13 @@ import type {
   EgressStatus,
 } from '../../shared/types.ts';
 import type { Config } from './config.ts';
-import { deliverableSecret, type CredentialRow, type CredentialStore } from './credentials.ts';
+import {
+  deliverableSecret,
+  type CredentialId,
+  type CredentialMethod,
+  type CredentialRow,
+  type CredentialStore,
+} from './credentials.ts';
 import { readAppKey, writeAppKey, type Db } from './db.ts';
 import { log } from './log.ts';
 
@@ -186,6 +192,11 @@ export class EgressManager {
    */
   placeholderFor(id: string): string {
     return this.credentials.placeholderFor(id);
+  }
+
+  /** How a stored credential was obtained, or null for one that is not stored. */
+  methodFor(id: CredentialId): CredentialMethod | null {
+    return this.credentials.get(id)?.method ?? null;
   }
 
   /** The last thing the proxy reported, for /healthz. */

@@ -1,7 +1,7 @@
 /** The harness registry. */
 
 import type { HarnessId } from '../../shared/types.ts';
-import type { CredentialId } from './credentials.ts';
+import type { CredentialId, CredentialMethod } from './credentials.ts';
 
 /** The harness id, re-exported from the shared API shapes. */
 export type { HarnessId };
@@ -43,9 +43,10 @@ export interface Harness {
   /**
    * Container environment this harness needs. `placeholder` is what the box
    * holds in place of the credential: the real secret never enters a box, and
-   * the egress proxy swaps the placeholder for it on the way out.
+   * the egress proxy swaps the placeholder for it on the way out. `method`
+   * is how the stored credential was obtained, or null when none is stored.
    */
-  env: (placeholder: string) => Record<string, string>;
+  env: (placeholder: string, method: CredentialMethod | null) => Record<string, string>;
   /** Where an agent set is installed, home-relative. */
   layout: AgentLayout;
   /** Tools that background their work whatever their input says. */
@@ -86,8 +87,14 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
       },
     },
     credentialId: 'claude',
-    env: (placeholder: string) => ({
-      CLAUDE_CODE_OAUTH_TOKEN: placeholder,
+    /**
+     * Claude Code sends `ANTHROPIC_API_KEY` as `x-api-key` and
+     * `CLAUDE_CODE_OAUTH_TOKEN` as a bearer token, so the variable follows
+     * the kind of the stored secret. Only one is set, as the API key would
+     * win over the token.
+     */
+    env: (placeholder: string, method: CredentialMethod | null) => ({
+      [method === 'api_key' ? 'ANTHROPIC_API_KEY' : 'CLAUDE_CODE_OAUTH_TOKEN']: placeholder,
       CLAUDE_CONFIG_DIR: '/home/agent/.claude',
     }),
     layout: {

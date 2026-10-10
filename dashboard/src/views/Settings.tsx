@@ -41,8 +41,13 @@ interface CredentialKind {
    * then gets no paste form.
    */
   hint: string | null;
-  /** What a pasted secret is stored as; a login decides its own. */
-  method: CredentialMethod;
+  /**
+   * What a pasted secret is stored as; a login decides its own.
+   *
+   * @param secret The pasted secret.
+   * @returns The method to store it with.
+   */
+  method: (secret: string) => CredentialMethod;
   /**
    * Whether the card offers an account login beside the paste form. The
    * orchestrator then runs the harness's own CLI to get the credential.
@@ -61,9 +66,11 @@ const KINDS: CredentialKind[] = [
     id: 'claude',
     label: 'Claude',
     harnesses: ['claude'],
-    blurb: 'Claude Code authentication. Use `claude setup-token` to use your subscription seat.',
-    hint: 'sk-ant-oat01-…, from claude setup-token',
-    method: 'token',
+    blurb:
+      'Claude Code authentication. Use `claude setup-token` to use your subscription seat, or paste an ' +
+      'Anthropic API key to pay as you go.',
+    hint: 'sk-ant-oat01-…, from claude setup-token, or sk-ant-api03-…, an API key',
+    method: (secret) => (secret.trim().startsWith('sk-ant-api') ? 'api_key' : 'token'),
     canLogin: true,
   },
   {
@@ -72,7 +79,7 @@ const KINDS: CredentialKind[] = [
     harnesses: ['codex'],
     blurb: 'OpenAI Codex authentication. Subscription seats are not supported yet.',
     hint: 'sk-…, an OpenAI API key',
-    method: 'api_key',
+    method: () => 'api_key',
     canLogin: CODEX_LOGIN_OFFERED,
   },
   {
@@ -82,7 +89,7 @@ const KINDS: CredentialKind[] = [
     harnesses: [],
     blurb: 'A personal access token to push and interact with GitHub.',
     hint: 'ghp_…, a classic personal access token',
-    method: 'token',
+    method: () => 'token',
     canLogin: false,
   },
   {
@@ -93,7 +100,7 @@ const KINDS: CredentialKind[] = [
       'A personal access token to push and interact with GitLab. Set a custom domain in the settings if your ' +
       'GitLab is self-hosted.',
     hint: 'glpat-…, a personal access token with the api and write_repository scopes',
-    method: 'token',
+    method: () => 'token',
     canLogin: false,
   },
   {
@@ -104,7 +111,7 @@ const KINDS: CredentialKind[] = [
       'Github based authentication with Microsoft Dev Tunnels service. Used to make box services temporarily '+
       'accessible from the outside',
     hint: null,
-    method: 'oauth',
+    method: () => 'oauth',
     canLogin: true,
   },
 ];
@@ -217,7 +224,7 @@ export function Settings() {
             stalled={harnesses.filter((h) => kind.harnesses.includes(h.id) && !h.runnable)}
             busy={busy}
             loginId={login?.id === kind.id ? login.loginId : null}
-            onSave={(secret) => act(() => api.putCredential(kind.id, kind.method, secret))}
+            onSave={(secret) => act(() => api.putCredential(kind.id, kind.method(secret), secret))}
             onLogin={() => void beginLogin(kind.id)}
             onLoginDone={finishLogin}
             onLoginClose={() => setLogin(null)}
