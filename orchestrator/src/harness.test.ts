@@ -51,7 +51,7 @@ test('every layout path is relative, so it can be resolved against a home', () =
 
 test('env() puts the placeholder in one of its values', () => {
   for (const h of all) {
-    const env = h.env('placeholder-value');
+    const env = h.env('placeholder-value', 'token');
     const values = Object.values(env);
     assert.ok(values.includes('placeholder-value'), `${h.id}: placeholder unused`);
     // Exactly one variable carries the credential; the rest are fixed.
@@ -68,8 +68,8 @@ test('env() puts the placeholder in one of its values', () => {
 });
 
 test('env() is a fresh object each call, so a caller can edit what it gets', () => {
-  const first = HARNESSES.claude.env('a');
-  const second = HARNESSES.claude.env('b');
+  const first = HARNESSES.claude.env('a', 'token');
+  const second = HARNESSES.claude.env('b', 'token');
   assert.notEqual(first, second);
   assert.equal(first['CLAUDE_CODE_OAUTH_TOKEN'], 'a');
   assert.equal(second['CLAUDE_CODE_OAUTH_TOKEN'], 'b');
@@ -77,7 +77,7 @@ test('env() is a fresh object each call, so a caller can edit what it gets', () 
 
 test('the CA variables stay out of the registry: they belong to the deployment', () => {
   for (const h of all) {
-    const names = Object.keys(h.env('placeholder-value'));
+    const names = Object.keys(h.env('placeholder-value', 'token'));
     assert.ok(!names.includes('CODEX_CA_CERTIFICATE'), `${h.id}: CA in the registry`);
     assert.ok(!names.includes('SSL_CERT_FILE'), `${h.id}: CA in the registry`);
   }
@@ -110,8 +110,12 @@ test('the Claude entry says what the orchestrator does today', () => {
       },
     },
   });
-  assert.deepEqual(h.env('tok'), {
+  assert.deepEqual(h.env('tok', 'token'), {
     CLAUDE_CODE_OAUTH_TOKEN: 'tok',
+    CLAUDE_CONFIG_DIR: '/home/agent/.claude',
+  });
+  assert.deepEqual(h.env('key', 'api_key'), {
+    ANTHROPIC_API_KEY: 'key',
     CLAUDE_CONFIG_DIR: '/home/agent/.claude',
   });
   assert.deepEqual([...h.alwaysBackground].sort(), ['Monitor', 'Workflow']);
@@ -124,7 +128,7 @@ test('the Codex entry matches what codex-acp reads', () => {
   assert.equal(h.forkModeId, 'read-only');
   assert.deepEqual(h.defaultConfig, {});
   assert.equal(h.threadMeta, undefined);
-  assert.deepEqual(h.env('key'), {
+  assert.deepEqual(h.env('key', 'api_key'), {
     CODEX_API_KEY: 'key',
     CODEX_HOME: '/home/agent/.codex',
     NO_BROWSER: '1',
@@ -132,7 +136,7 @@ test('the Codex entry matches what codex-acp reads', () => {
     DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
   });
   // The adapter's start mode and the mode of a new thread must match.
-  assert.equal(h.env('key')['INITIAL_AGENT_MODE'], h.defaultModeId);
+  assert.equal(h.env('key', 'api_key')['INITIAL_AGENT_MODE'], h.defaultModeId);
   assert.equal(h.alwaysBackground.size, 0);
 });
 

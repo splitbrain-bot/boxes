@@ -87,6 +87,26 @@ test('a pasted credential is stored and comes back as its last four characters',
   }
 });
 
+test('a pasted Anthropic API key is stored as an API key, a setup token as a token', async () => {
+  stub.state.claudeCredential = null;
+
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await page.getByLabel('Claude secret').fill('sk-ant-api03-pastedkey5432');
+    await page.getByRole('button', { name: 'Save' }).first().click();
+    await expect.poll(() => page.getByText(/Ends 5432/).isVisible()).toBe(true);
+    expect((await stub.credentials()).find((c) => c.id === 'claude')?.method).toBe('api_key');
+
+    await page.getByLabel('Claude secret').fill('sk-ant-oat01-pastedtoken9876');
+    await page.getByRole('button', { name: 'Replace' }).first().click();
+    await expect.poll(() => page.getByText(/Ends 9876/).isVisible()).toBe(true);
+    expect((await stub.credentials()).find((c) => c.id === 'claude')?.method).toBe('token');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a stored credential can be removed, and the warning comes back', async () => {
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {

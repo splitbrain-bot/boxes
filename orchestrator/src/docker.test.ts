@@ -6,7 +6,7 @@ import Docker from 'dockerode';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig, type Config } from './config.ts';
-import { CredentialStore, type CredentialId } from './credentials.ts';
+import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
 import { openDb, type Db } from './db.ts';
 import { EgressManager } from './egress.ts';
 import {
@@ -26,6 +26,9 @@ import { readSettings } from './settings.ts';
 
 /** A real Claude token as the store holds it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
+
+/** A real Anthropic API key as the store holds it. */
+const ANTHROPIC_KEY = 'sk-ant-api03-the-real-anthropic-key';
 
 /** A real GitHub token as the store holds it. */
 const GH_TOKEN = 'ghp_therealgithubtoken';
@@ -63,13 +66,14 @@ function dataDir(): string {
 async function deployment(
   secrets: Partial<Record<CredentialId, string>> = {},
   over: Record<string, string> = {},
+  methods: Partial<Record<CredentialId, CredentialMethod>> = {},
 ): Promise<{ cfg: Config; db: Db; egress: EgressManager }> {
   const cfg = loadConfig({ DATA_DIR: dataDir(), ...over });
   const db = openDb(cfg.DATA_DIR);
   dbs.push(db);
   const credentials = new CredentialStore(db, () => {}, cfg.credentialSet);
   for (const [id, secret] of Object.entries(secrets)) {
-    credentials.put(id as CredentialId, 'token', secret);
+    credentials.put(id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
   }
   const egress = new EgressManager(cfg, credentials, db);
   await egress.prepare();
@@ -80,8 +84,9 @@ async function deployment(
 async function envFor(
   secrets: Partial<Record<CredentialId, string>> = {},
   over: Record<string, string> = {},
+  methods: Partial<Record<CredentialId, CredentialMethod>> = {},
 ): Promise<Record<string, string>> {
-  const { cfg, db, egress } = await deployment(secrets, over);
+  const { cfg, db, egress } = await deployment(secrets, over, methods);
   const settings = readSettings(db);
   const spec: CreateContainerSpec = {
     boxId: 'abcd1234',
@@ -92,7 +97,12 @@ async function envFor(
     agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
     homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
     nixSource: '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234',
-    env: credentialEnv((id) => egress.placeholderFor(id), settings, cfg.GITLAB_HOST),
+    env: credentialEnv(
+      (id) => egress.placeholderFor(id),
+      (id) => egress.methodFor(id),
+      settings,
+      cfg.GITLAB_HOST,
+    ),
     caCertificate: egress.caCertificate(),
   };
 
@@ -118,12 +128,22 @@ describe('boxEnv', () => {
     expect(everything).not.toContain(GH_TOKEN);
   }, 30_000);
 
+  it('carries a Claude API key as ANTHROPIC_API_KEY instead of the OAuth token', async () => {
+    // Claude Code sends the API key as x-api-key, and it wins over a token.
+    const env = await envFor({ claude: ANTHROPIC_KEY }, {}, { claude: 'api_key' });
+
+    expect(env['ANTHROPIC_API_KEY']).toMatch(/^sk-ant-/);
+    expect(env['ANTHROPIC_API_KEY']).not.toBe(ANTHROPIC_KEY);
+    expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined();
+  }, 30_000);
+
   it('carries no credential variable where nothing is configured', async () => {
     const env = await envFor();
 
     // A box holds a placeholder for a stored credential only. One entered
     // later reaches the box at its next restart.
     expect(env['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined();
+    expect(env['ANTHROPIC_API_KEY']).toBeUndefined();
     expect(env['GH_TOKEN']).toBeUndefined();
     expect(env['CODEX_API_KEY']).toBeUndefined();
     // What each harness needs beside its credential still comes from the registry.
