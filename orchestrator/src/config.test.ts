@@ -32,6 +32,7 @@ test('an empty environment yields the documented defaults', () => {
     assert.equal(cfg.EGRESS_PROXY_CONTAINER, 'boxes-egress-proxy');
     assert.equal(cfg.EGRESS_PROXY_ALIAS, 'proxy');
     assert.equal(cfg.EGRESS_PROXY_PORT, 3128);
+    assert.equal(cfg.EGRESS_CONTROL_URL, 'http://boxes-egress-proxy:3129');
     assert.equal(cfg.GITLAB_HOST, 'gitlab.com');
     assert.equal(cfg.LOG_LEVEL, 'info');
   });

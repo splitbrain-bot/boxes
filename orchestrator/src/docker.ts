@@ -5,8 +5,6 @@ import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { DockerState, ImageInfo } from '../../shared/types.ts';
 import type { Config } from './config.ts';
-import type { CredentialId, CredentialMethod } from './credentials.ts';
-import { HARNESSES } from './harness.ts';
 import { log } from './log.ts';
 import { boxOwner } from './workspaces.ts';
 
@@ -124,100 +122,16 @@ export interface CreateContainerSpec {
   homeSource: string;
   /** Host-side path of the box's Nix store directory, bound at NIX_DIR. */
   nixSource: string;
-  /**
-   * The credential placeholders and the git identity, as built by
-   * credentialEnv().
-   */
+  /** The full environment of the box, as built by boxEnv(). */
   env: Record<string, string>;
-  /**
-   * PEM of the deployment CA this box trusts. It is set even before any
-   * credential exists, as the box keeps it for its whole life.
-   */
-  caCertificate: string;
-}
-
-/**
- * The credential and identity part of a box's environment.
- *
- * Every harness adds its variables, even one no thread in the box uses. Each
- * credential value is a placeholder that the egress proxy swaps for the real
- * secret. A credential that is not stored has none, and its variable is
- * dropped: the environment is fixed at container creation, so a credential
- * entered later reaches the box at its next restart.
- *
- * GH_TOKEN is for git and gh. GITLAB_TOKEN and GITLAB_HOST are the same for
- * git and glab. DEVTUNNELS_TOKEN is the GitHub token the Dev Tunnels API
- * takes, for the share-app skill.
- */
-export function credentialEnv(
-  placeholderFor: (credentialId: string) => string,
-  methodFor: (credentialId: CredentialId) => CredentialMethod | null,
-  identity: { gitName: string; gitEmail: string },
-  gitlabHost: string,
-): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const harness of Object.values(HARNESSES)) {
-    const id = harness.credentialId;
-    Object.assign(env, harness.env(placeholderFor(id), methodFor(id)));
-  }
-  env['GH_TOKEN'] = placeholderFor('github');
-  env['GITLAB_TOKEN'] = placeholderFor('gitlab');
-  env['GITLAB_HOST'] = gitlabHost;
-  env['DEVTUNNELS_TOKEN'] = placeholderFor('devtunnels');
-  env['GIT_NAME'] = identity.gitName;
-  env['GIT_EMAIL'] = identity.gitEmail;
-  return env;
 }
 
 /** The agent user's home inside a box container, where its own files and caches live. */
 export const HOME_DIR = '/home/agent';
 
-/**
- * Where the entrypoint writes the system authorities together with the
- * deployment CA, and where the CA env vars point.
- */
-const CA_PATH = `${HOME_DIR}/.boxes/ca-bundle.crt`;
-
-/**
- * Environment of a box container, as Docker's `KEY=value` list. Variables
- * with an empty value are left out.
- *
- * It carries the credential placeholders, never a real credential. The CA
- * travels here as a PEM, so it needs no file on the host.
- */
-export function boxEnv(spec: CreateContainerSpec, cfg: Config): string[] {
-  const proxyUrl = `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
-  const env: Record<string, string> = {
-    ...spec.env,
-    TERM: 'dumb',
-    // Every proxy-aware client honours these; anything else has no route
-    // out, which is the intended failure mode.
-    HTTP_PROXY: proxyUrl,
-    HTTPS_PROXY: proxyUrl,
-    http_proxy: proxyUrl,
-    https_proxy: proxyUrl,
-    NO_PROXY: 'localhost,127.0.0.1',
-    no_proxy: 'localhost,127.0.0.1',
-  };
-
-  if (spec.caCertificate !== '') {
-    // The entrypoint appends the PEM to the system authorities in CA_PATH;
-    // these are the variables that point node, gh, git, git-lfs, curl and
-    // Codex at it. A tool honouring none of them fails TLS against the
-    // intercepted hosts and nothing else.
-    env['BOXES_PROXY_CA'] = spec.caCertificate;
-    env['NODE_EXTRA_CA_CERTS'] = CA_PATH;
-    env['SSL_CERT_FILE'] = CA_PATH;
-    env['GIT_SSL_CAINFO'] = CA_PATH;
-    env['CURL_CA_BUNDLE'] = CA_PATH;
-    // Codex reads this one first and falls back to SSL_CERT_FILE. It is
-    // unconfirmed whether the published Codex binary reads either.
-    env['CODEX_CA_CERTIFICATE'] = CA_PATH;
-  }
-
-  return Object.entries(env)
-    .filter(([, v]) => v !== '')
-    .map(([k, v]) => `${k}=${v}`);
+/** The URL of the egress proxy, as a box on its network reaches it. */
+export function proxyUrl(cfg: Config): string {
+  return `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
 }
 
 /** Converts a Docker-style memory limit such as 4g into bytes. */
@@ -520,7 +434,7 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     Image: spec.image,
     User: boxUser(),
     WorkingDir: WORKSPACE_DIR,
-    Env: boxEnv(spec, cfg),
+    Env: Object.entries(spec.env).map(([k, v]) => `${k}=${v}`),
     Labels: {
       [LABEL]: spec.boxId,
       // Keeps Watchtower away. A recreated container would leave a stale id

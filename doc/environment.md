@@ -49,7 +49,7 @@ These variables are read by the orchestrator container.
 | `EGRESS_PROXY_CONTAINER` | `boxes-egress-proxy` | Non-empty container name | Name of the egress proxy container. Change this only when the proxy container is renamed too. |
 | `EGRESS_PROXY_ALIAS` | `proxy` | Non-empty hostname | Name boxes use for the egress proxy on their private networks. |
 | `EGRESS_PROXY_PORT` | `3128` | Positive integer | Egress proxy port used by boxes. Changing it requires matching proxy container configuration. |
-| `EGRESS_CONTROL_PORT` | `3129` | Positive integer | Egress proxy control port used by the orchestrator. Changing it requires matching proxy container configuration. |
+| `EGRESS_CONTROL_URL` | `http://boxes-egress-proxy:3129` | `http:` URL | Egress proxy control channel used by the orchestrator. Changing it requires matching proxy container configuration. |
 | `EGRESS_ALLOWED_HOSTS` | empty | Comma- or whitespace-separated hostnames | Optional [egress allowlist](egress.md). Exact hostnames and one-label wildcards such as `*.example.com` are accepted. Leave empty to allow all public hosts. Private ranges remain blocked. A bare `*` is invalid. |
 | `GITLAB_HOST` | `gitlab.com` | Bare hostname with at least two labels | GitLab host for the GitLab credential. Set this for a self-managed public GitLab instance. |
 
@@ -82,4 +82,5 @@ preserves the image entrypoint's expectations.
 The [egress proxy](egress.md) accepts `PORT`, `CONTROL_PORT`, and `CONTROL_BIND` directly. They default to `3128`,
 `3129`, and an automatically selected Compose-network address. The shipped Compose file does not pass these variables
 into the proxy. Use them only with a custom Compose configuration that changes the matching orchestrator settings:
-`EGRESS_PROXY_PORT` for `PORT` and `EGRESS_CONTROL_PORT` for `CONTROL_PORT`. `CONTROL_BIND` must be an IP address.
+`EGRESS_PROXY_PORT` for `PORT` and the port in `EGRESS_CONTROL_URL` for `CONTROL_PORT`. `CONTROL_BIND` must be an IP
+address.

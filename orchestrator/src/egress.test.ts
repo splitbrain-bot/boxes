@@ -249,10 +249,7 @@ describe('the control channel, from the orchestrator side', () => {
       server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
     });
 
-    const cfg = configFrom({
-      EGRESS_PROXY_CONTAINER: '127.0.0.1',
-      EGRESS_CONTROL_PORT: String(port),
-    });
+    const cfg = configFrom({ EGRESS_CONTROL_URL: `http://127.0.0.1:${port}` });
     const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
     const material = await resolveEgressMaterial(db);
     return { cfg, material, store, seen };
@@ -367,10 +364,7 @@ describe('EgressManager', () => {
       server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
     });
 
-    const cfg = configFrom({
-      EGRESS_PROXY_CONTAINER: '127.0.0.1',
-      EGRESS_CONTROL_PORT: String(port),
-    });
+    const cfg = configFrom({ EGRESS_CONTROL_URL: `http://127.0.0.1:${port}` });
     // The wiring the app builds: a write to the store pushes the policy.
     let manager: EgressManager | undefined;
     const { store, db } = storeWith(cfg, {}, () => void manager?.sync());
@@ -388,7 +382,7 @@ describe('EgressManager', () => {
   }, 30_000);
 
   it('records why a push failed, for the health probe', async () => {
-    const cfg = configFrom({ EGRESS_CONTROL_PORT: '1' });
+    const cfg = configFrom({ EGRESS_CONTROL_URL: 'http://127.0.0.1:1' });
     const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN });
     const manager = new EgressManager(cfg, store, db);
     await manager.prepare();

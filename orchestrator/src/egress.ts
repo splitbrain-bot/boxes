@@ -111,7 +111,7 @@ async function controlCall(
   path: string,
   body?: unknown,
 ): Promise<EgressStatus> {
-  const url = `http://${cfg.EGRESS_PROXY_CONTAINER}:${cfg.EGRESS_CONTROL_PORT}${path}`;
+  const url = new URL(path, cfg.EGRESS_CONTROL_URL);
   const res = await fetch(url, {
     method,
     headers: {
