@@ -12,6 +12,7 @@ import {
 } from '../../shared/types.ts';
 import { AgentStore, ensureAgentsRoot, hostAgentConfigPath } from './agents.ts';
 import type { Config } from './config.ts';
+import { boxEnv } from './boxenv.ts';
 import type { EgressManager } from './egress.ts';
 import {
   clearBoxTurns,
@@ -634,13 +635,14 @@ export class BoxManager {
       nixSource: ws.hostNixPath(this.hostDataDir, row.id),
       agentConfigSource: hostAgentConfigPath(this.hostDataDir, row.id),
       homeSource: ws.hostHomePath(this.hostDataDir, row.id),
-      env: dk.credentialEnv(
-        (id) => this.egress.placeholderFor(id),
-        (id) => this.egress.methodFor(id),
-        { gitName: settings.gitName, gitEmail: settings.gitEmail },
-        this.cfg.GITLAB_HOST,
-      ),
-      caCertificate: this.egress.caCertificate(),
+      env: boxEnv({
+        placeholderFor: (id) => this.egress.placeholderFor(id),
+        methodFor: (id) => this.egress.methodFor(id),
+        identity: { gitName: settings.gitName, gitEmail: settings.gitEmail },
+        gitlabHost: this.cfg.GITLAB_HOST,
+        proxyUrl: dk.proxyUrl(this.cfg),
+        caCertificate: this.egress.caCertificate(),
+      }),
     };
   }
 

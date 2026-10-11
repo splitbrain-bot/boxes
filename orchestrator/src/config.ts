@@ -178,10 +178,10 @@ const schema = z.object({
   /** Port boxes reach the egress proxy on. */
   EGRESS_PROXY_PORT: z.coerce.number().int().positive().default(3128),
   /**
-   * Port of the proxy's control channel on the compose network. Only the
+   * URL of the proxy's control channel on the compose network. Only the
    * orchestrator connects to it.
    */
-  EGRESS_CONTROL_PORT: z.coerce.number().int().positive().default(3129),
+  EGRESS_CONTROL_URL: z.url({ protocol: /^http$/ }).default('http://boxes-egress-proxy:3129'),
 
   /**
    * Hosts boxes may reach, comma or whitespace separated. Exact names and
