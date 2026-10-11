@@ -235,8 +235,8 @@ export interface BoxWork {
   pid: number;
   /** The whole command line, which is how a process is recognised. */
   command: string;
-  /** How long it has been running, or null where `ps` would not say. */
-  elapsedSeconds: number | null;
+  /** How long it has been running, in whole seconds. */
+  elapsedSeconds: number;
 }
 
 /** One conversation of a box, as the API reports it. */

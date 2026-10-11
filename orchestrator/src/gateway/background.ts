@@ -176,8 +176,8 @@ export interface BoxReading {
   /**
    * The work found, for the log and for a reader deciding whether to stop it.
    *
-   * The pids may be host pids, so a stop does not signal them. They tell two
-   * identical command lines apart.
+   * A stop does not signal these pids, because it reads the table again just
+   * before. They tell two identical command lines apart.
    */
   work: readonly BoxWork[];
 }
@@ -186,30 +186,25 @@ export interface BoxReading {
 const NOTHING: BoxReading = { busy: false, work: [] };
 
 /**
- * The `ps` that took a reading from inside the box, which appears in its own
- * output. It is not work and must not be killed.
+ * The `ps` that took the reading, which appears in its own output. It is not
+ * work and must not be killed.
  */
 const READING_ITSELF = /^(?:\S*\/)?ps(?:\s|$)/;
 
 /** The command the entrypoint execs to hold the container open. */
 const ENTRYPOINT_HOLD = 'sleep infinity';
 
-/**
- * The command of a box's init, or of the entrypoint where there is no init.
- *
- * Matched on the command rather than on PID 1, because `docker top` reports
- * host pids, where no process of the box is 1.
- */
-const BOX_INIT = /^(?:\S*\/)?(?:docker-init|tini)(?:\s|$)|entrypoint\.sh(?:\s|$)/;
+/** The pid of a box's init in the box's own numbering. */
+const INIT_PID = 1;
 
 /**
  * Whether one process belongs to the box itself rather than to work done in it.
  *
- * Resident processes are the box's init and its `sleep infinity`, every adapter, every
- * adapter's direct children (the agent processes), anything matching a
- * harness's `residentProcesses`, and the `ps` that took the reading.
- * Everything else is work, including a build orphaned by an adapter that died
- * and the sandbox wrappers around a Codex command.
+ * Resident processes are the box's init and the `sleep infinity` directly
+ * under it, every adapter, every adapter's direct children (the agent
+ * processes), anything matching a harness's `residentProcesses`, and the `ps`
+ * that took the reading. Everything else is work, including a build orphaned
+ * by an adapter that died and the sandbox wrappers around a Codex command.
  *
  * `harnesses` must list every harness. With one missing, a box running that
  * harness reads as empty.
@@ -218,36 +213,14 @@ function isResident(
   process: ContainerProcess,
   adapters: ReadonlySet<number>,
   harnesses: readonly Harness[],
-  inits: ReadonlySet<number>,
 ): boolean {
-  if (inits.has(process.pid)) return true;
-  if (inits.has(process.ppid) && process.command.trim() === ENTRYPOINT_HOLD) return true;
+  if (process.pid === INIT_PID) return true;
+  if (process.ppid === INIT_PID && process.command.trim() === ENTRYPOINT_HOLD) return true;
   if (adapters.has(process.pid)) return true;
   if (adapters.has(process.ppid)) return true;
   if (READING_ITSELF.test(process.command.trim())) return true;
   return harnesses.some((h) =>
     h.residentProcesses.some((pattern) => pattern.test(process.command)),
-  );
-}
-
-/**
- * The pids of whatever holds the box open: the init, or a `sleep infinity`
- * at the root of the tree where there is no init.
- *
- * A root is a process whose parent is not in the reading. This works with
- * pids from inside the box and with host pids. When no hold is found, the
- * `sleep infinity` counts as work, which keeps the box awake.
- */
-function initPids(processes: readonly ContainerProcess[]): Set<number> {
-  const listed = new Set(processes.map((p) => p.pid));
-  return new Set(
-    processes
-      .filter((p) => {
-        const command = p.command.trim();
-        if (BOX_INIT.test(command)) return true;
-        return command === ENTRYPOINT_HOLD && !listed.has(p.ppid);
-      })
-      .map((p) => p.pid),
   );
 }
 
@@ -297,9 +270,8 @@ export function readBox(
   harnesses: readonly Harness[],
 ): BoxReading {
   const adapters = adapterPids(processes, harnesses);
-  const inits = initPids(processes);
   const work = processes
-    .filter((p) => !isResident(p, adapters, harnesses, inits))
+    .filter((p) => !isResident(p, adapters, harnesses))
     .map((p) => ({
       pid: p.pid,
       command: p.command.trim(),
@@ -321,7 +293,6 @@ export function workPids(
   harnesses: readonly Harness[],
 ): number[] {
   const adapters = adapterPids(processes, harnesses);
-  const inits = initPids(processes);
   const byPid = new Map(processes.map((p) => [p.pid, p]));
   /** How far under the root a process sits; anything that loops is shallow. */
   const depth = (start: ContainerProcess): number => {
@@ -336,7 +307,7 @@ export function workPids(
     return steps;
   };
   return processes
-    .filter((p) => !isResident(p, adapters, harnesses, inits))
+    .filter((p) => !isResident(p, adapters, harnesses))
     .map((p) => ({ pid: p.pid, depth: depth(p) }))
     .sort((a, b) => b.depth - a.depth)
     .map((p) => p.pid);

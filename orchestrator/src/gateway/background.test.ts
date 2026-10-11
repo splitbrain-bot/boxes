@@ -162,7 +162,7 @@ test('an adapter that has gone takes every task it announced with it', () => {
 
 /** A process table, written parent-first. */
 function table(...rows: Array<[number, number, string]>): ContainerProcess[] {
-  return rows.map(([pid, ppid, command]) => ({ pid, ppid, command, elapsedSeconds: null }));
+  return rows.map(([pid, ppid, command]) => ({ pid, ppid, command, elapsedSeconds: 0 }));
 }
 
 /**
@@ -218,35 +218,22 @@ test('a box whose image starts it under tini is idle', () => {
   assert.deepEqual(reading.work, []);
 });
 
-test('a box numbered by the host rather than by itself is still idle', () => {
-  // `docker top` prints host pids, so no process of the box is 1.
+test('a process that only looks like the init or the hold is work', () => {
+  // The init is pid 1 and the hold sits directly under it. The same names
+  // anywhere else are something the agent started.
   const reading = readBox(
     table(
-      [175384, 175359, '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
-      [175415, 175384, 'sleep infinity'],
-      [175441, 175359, 'node /usr/local/bin/claude-agent-acp'],
-      [175478, 175441, CLAUDE_AGENT],
+      ...BOTH_IDLE,
+      [23490, 23019, shell('tini -- ./entrypoint.sh')],
+      [23492, 23490, 'tini -- ./entrypoint.sh'],
+      [23493, 23492, 'sleep infinity'],
     ),
     BOTH,
   );
-  assert.equal(reading.busy, false);
-  assert.deepEqual(reading.work, []);
-});
-
-test('a shell in a host-numbered box is still the only work in it', () => {
-  const reading = readBox(
-    table(
-      [175384, 175359, '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
-      [175415, 175384, 'sleep infinity'],
-      [175441, 175359, 'node /usr/local/bin/claude-agent-acp'],
-      [175478, 175441, CLAUDE_AGENT],
-      [175600, 175478, shell('npm run build')],
-    ),
-    BOTH,
+  assert.deepEqual(
+    reading.work.map((w) => w.pid),
+    [23490, 23492, 23493],
   );
-  assert.equal(reading.busy, true);
-  assert.equal(reading.work.length, 1);
-  assert.match(reading.work[0]?.command ?? '', /npm run build/);
 });
 
 test('a shell under either agent is work, and both are named', () => {
@@ -318,7 +305,7 @@ test('a box with nothing of ours in it is empty, not unreadable', () => {
 
 test('the ps that took the reading is not work the reading found', () => {
   // A stop reads the box through its own `ps`, which appears in its output.
-  const reading = readBox(table(...HELD, [4242, 0, 'ps -eo pid,ppid,args']), BOTH);
+  const reading = readBox(table(...HELD, [4242, 0, 'ps -eo pid,ppid,etimes,args']), BOTH);
   assert.equal(reading.busy, false);
 });
 

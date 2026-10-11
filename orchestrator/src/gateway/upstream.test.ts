@@ -117,9 +117,10 @@ class FakeAdapter extends Duplex {
 }
 
 /**
- * What `docker top` reports for the fake box, which is how the gateway learns
- * whether anything is still running in it. Written parent-first: the init,
- * the adapter Boxes launched, and the agent under it.
+ * What the box's own `ps` reports for the fake box, which is how the gateway
+ * learns whether anything is still running in it, and which pids a stop
+ * signals. Written parent-first: the init, the adapter Boxes launched, and
+ * the agent under it.
  */
 const BASE_PROCESSES: string[][] = [
   ['1', '0', '/sbin/docker-init'],
@@ -129,12 +130,6 @@ const BASE_PROCESSES: string[][] = [
 
 /** The box as this test is pretending to find it. Reset for every one. */
 let processes: string[][] = [...BASE_PROCESSES];
-
-/**
- * What the box's own `ps` would print. Its pids are the container's own
- * numbering, unlike those of `docker top`, so a stop kills by these.
- */
-let insideProcesses: string[][] = [];
 
 /** Every `kill` the orchestrator ran in the box, as its arguments. */
 let killed: string[][] = [];
@@ -191,15 +186,14 @@ function fakeDocker(adapter: Standins): void {
     getContainer: () => ({
       start: async () => undefined,
       inspect: async () => ({ State: { Running: containerRunning } }),
-      top: async () => ({ Titles: ['PID', 'PPID', 'COMMAND'], Processes: processes }),
       exec: async (opts: { Cmd?: string[] }) => {
         const cmd = opts?.Cmd ?? [];
-        // The stop's two calls. Everything else is an adapter, which is a
+        // The reading and the stop. Everything else is an adapter, which is a
         // long-lived stream rather than a command with an answer.
         if (cmd[0] === 'ps') {
-          const rows = insideProcesses.map(([pid, ppid, args]) => `${pid} ${ppid} ${args}`);
+          const rows = processes.map(([pid, ppid, args]) => `${pid} ${ppid} 0 ${args}`);
           return {
-            start: async () => execStream(['  PID  PPID COMMAND', ...rows].join('\n')),
+            start: async () => execStream(['  PID  PPID ELAPSED COMMAND', ...rows].join('\n')),
             inspect: async () => ({ ExitCode: 0 }),
           };
         }
@@ -278,7 +272,6 @@ beforeEach(() => {
   const cfg = config();
   announced = [];
   processes = [...BASE_PROCESSES];
-  insideProcesses = [];
   killed = [];
   spawned = [];
   containerRunning = true;
@@ -2297,9 +2290,7 @@ test('the box-level stop kills everything the box is running, leaves first', asy
   const up = manager.upstream('s1');
   await up.ensureStarted();
 
-  // The box read from inside: the same commands under the container's own
-  // pids. A kill in the box cannot use the host pids of `docker top`.
-  insideProcesses = [
+  processes = [
     ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
     ['7', '1', 'sleep infinity'],
     ['12', '1', 'node /usr/local/bin/claude-agent-acp'],
@@ -2312,7 +2303,7 @@ test('the box-level stop kills everything the box is running, leaves first', asy
     ['21', '20', 'codex app-server'],
     ['22', '21', 'bash -lc npm run watch'],
     // And the reading's own `ps`, which must never be one of the answers.
-    ['30', '1', 'ps -eo pid,ppid,args'],
+    ['30', '1', 'ps -eo pid,ppid,etimes,args'],
   ];
 
   assert.equal(await up.stopBoxWork(), 3);
@@ -2330,7 +2321,7 @@ test('a box-level stop over an empty box signals nothing', async () => {
 
   const up = manager.upstream('s1');
   await up.ensureStarted();
-  insideProcesses = [
+  processes = [
     ['1', '0', '/sbin/docker-init -- /usr/local/bin/entrypoint.sh'],
     ['7', '1', 'sleep infinity'],
   ];

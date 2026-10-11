@@ -20,9 +20,9 @@ export function BoxWorkList({ work }: { work: readonly BoxWork[] }) {
           <span className="min-w-0 flex-1 truncate font-mono" title={found.command}>
             {found.command}
           </span>
-          {/* Elapsed time as of the reading, or a dash where `ps` gave none. */}
+          {/* Elapsed time as of the reading. */}
           <span className="shrink-0 tabular-nums opacity-80">
-            {found.elapsedSeconds === null ? '—' : formatDuration(found.elapsedSeconds * 1000)}
+            {formatDuration(found.elapsedSeconds * 1000)}
           </span>
         </li>
       ))}
