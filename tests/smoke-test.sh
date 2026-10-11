@@ -52,13 +52,16 @@ must_fail() {
   fi
 }
 
-# Asserts a command run inside the box container SUCCEEDS.
+# Asserts a command run inside the box container SUCCEEDS. On failure, the
+# last line of the command's output shows the cause.
 must_pass() {
   local desc="$1"; shift
-  if docker exec -u agent "$CONTAINER" "$@" >/dev/null 2>&1; then
+  local out
+  if out=$(docker exec -u agent "$CONTAINER" "$@" 2>&1); then
     green "ok   (allowed as intended):    $desc"; pass=$((pass+1))
   else
     red   "FAIL (denied but must work):  $desc"; fail=$((fail+1))
+    grey  "     $(printf '%s' "$out" | tail -n 1 | head -c 200)"
   fi
 }
 
@@ -236,8 +239,11 @@ must_fail "touch /usr/local/bin/x (read-only rootfs)" \
 
 echo
 echo "== MUST SUCCEED: intended egress and writes (via injected proxy env) =="
+# No -f: GitHub answers an unauthenticated call with 403 or 429 when the
+# runner's shared address is over its rate limit, and an error status is
+# still the host answering through the proxy.
 must_pass "curl https://api.github.com" \
-  curl -fsS -m 15 https://api.github.com
+  curl -sS -m 15 -o /dev/null https://api.github.com
 must_pass "write to /workspace" \
   sh -c 'echo ok > /workspace/.smoke && rm /workspace/.smoke'
 must_pass "write to /home/agent" \
@@ -423,9 +429,10 @@ else
     curl -fsS -m 15 https://1.1.1.1
   must_pass "a listed host is still reachable" \
     curl -fsS -m 15 https://registry.npmjs.org/
-  # A narrow allowlist must never sever the credential hosts.
+  # A narrow allowlist must never sever the credential hosts. No -f, as
+  # above: a rate limited 403 is still GitHub answering.
   must_pass "a credential host is implied by the allowlist" \
-    curl -fsS -m 15 https://api.github.com
+    curl -sS -m 15 -o /dev/null https://api.github.com
   if [ -n "$REAL_OPENAI" ]; then
     # No -f: an unauthenticated call to OpenAI is a 401, which is the host
     # answering. What is under test is that the CONNECT is not refused here.
