@@ -30,7 +30,7 @@ function frame(text: string): Buffer {
 }
 
 /**
- * What the box's own `ps` prints, for the stop that reads it from inside.
+ * What the box's own `ps` prints, for the stop that reads it.
  * Reset for every test, like everything else the fake Docker answers with.
  */
 let insideBox = '';
@@ -883,16 +883,16 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
   insertBox('abc123');
   fakeDocker();
   insideBox = [
-    '  PID  PPID COMMAND',
-    '    1     0 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
-    '    7     1 sleep infinity',
-    '   12     1 node /usr/local/bin/claude-agent-acp',
-    '   13    12 claude --output-format stream-json --session-id=acp-1',
-    "   14    13 /bin/bash -c eval 'npm run build'",
-    '   20     1 node /usr/local/bin/codex-acp',
-    '   21    20 codex app-server',
-    '   22    21 bash -lc npm run watch',
-    '   30     1 ps -eo pid,ppid,args',
+    '  PID  PPID ELAPSED COMMAND',
+    '    1     0      60 /sbin/docker-init -- /usr/local/bin/entrypoint.sh',
+    '    7     1      60 sleep infinity',
+    '   12     1      60 node /usr/local/bin/claude-agent-acp',
+    '   13    12      60 claude --output-format stream-json --session-id=acp-1',
+    "   14    13      60 /bin/bash -c eval 'npm run build'",
+    '   20     1      60 node /usr/local/bin/codex-acp',
+    '   21    20      60 codex app-server',
+    '   22    21      60 bash -lc npm run watch',
+    '   30     1      60 ps -eo pid,ppid,etimes,args',
   ].join('\n');
 
   const res = await orchestrator.app.inject({

@@ -545,9 +545,9 @@ export class UpstreamBox implements AdapterHost {
    * Kills everything running in the box that Boxes did not put there, such as
    * work that no task names after an adapter respawn.
    *
-   * The pids are read from inside the container just before use. Each process
-   * gets TERM, deepest first, and whatever is left after
-   * {@link TERM_GRACE_MS} gets KILL. The call does not wait for the KILL.
+   * The pids are read again just before use. Each process gets TERM, deepest
+   * first, and whatever is left after {@link TERM_GRACE_MS} gets KILL. The
+   * call does not wait for the KILL.
    *
    * @returns How many processes got TERM. Zero when nothing was running.
    */
@@ -557,7 +557,7 @@ export class UpstreamBox implements AdapterHost {
     if ((await dk.containerState(containerId)) !== 'running') return 0;
 
     const doomed = workPids(
-      await dk.containerProcessesFromInside(containerId),
+      await dk.containerProcesses(containerId),
       ALL_HARNESSES,
     );
     if (doomed.length === 0) {
@@ -584,7 +584,7 @@ export class UpstreamBox implements AdapterHost {
       void (async () => {
         try {
           const left = workPids(
-            await dk.containerProcessesFromInside(containerId),
+            await dk.containerProcesses(containerId),
             ALL_HARNESSES,
           );
           if (left.length === 0) return;
