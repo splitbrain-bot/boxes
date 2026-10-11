@@ -31,6 +31,10 @@ The orchestrator accepts at most four simultaneous terminal connections per box.
 
 ## Reconnecting
 
+When the stream to the shell ends while the page stays open, the orchestrator attaches to the same tmux session again
+after one second. The page stays open and shows the same screen. When the box has stopped, the connection closes with
+"box stopped".
+
 If the terminal connection closes, the page shows its reason and offers **Reconnect**. Reconnecting opens another
 terminal connection to the box's shared tmux workspace.
 
@@ -54,6 +58,11 @@ The tmux mechanics: the orchestrator creates a detached shared session on first 
 session grouped with the shared one. This grouping makes a connection closable on its own: Docker offers no way to
 signal a running exec, so a closing terminal kills only its own session while the shared one keeps the windows. The tmux
 server socket sits in `/tmp`, which is a tmpfs, so stopping the box also stops the shell.
+
+The own session also outlives an exec that ends. When the exec ends while the WebSocket is open, the orchestrator opens
+a new exec with `tmux attach` to that session by its name. A reattach never starts a stopped box. When tmux reports no
+such session, the user ended the shell, and the socket closes with "shell ended". A reattach that fails for another
+reason is tried once more after five seconds.
 
 An open terminal prevents the idle reaper from stopping the box, so the orchestrator must find a dead browser sooner
 than TCP would find it: the server pings and drops a socket that stops answering. The orchestrator applies back pressure
