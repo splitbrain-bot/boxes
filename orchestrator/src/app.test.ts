@@ -17,6 +17,8 @@ import { buildApp, type Orchestrator } from './app.ts';
 import { config } from './config.ts';
 import { openDb, upsertHarnessCatalog, type Db } from './db.ts';
 import * as dk from './docker.ts';
+import { inProcessFileService } from './files-in-process.ts';
+import { setFileServiceSpawnerForTests } from './files.ts';
 import type { LoginExecSpec } from './login.ts';
 import * as ws from './workspaces.ts';
 
@@ -46,6 +48,7 @@ function fakeDocker(): void {
     modem,
     getContainer: () => ({
       start: async () => undefined,
+      stop: async () => undefined,
       inspect: async () => ({ State: { Running: true } }),
       exec: async (opts: { Cmd: string[] }) => {
         if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
@@ -108,6 +111,16 @@ beforeEach(() => {
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
+  // Every test box runs in the container c1, and the tests that reach its
+  // files use the box abc123.
+  const data = orchestrator.cfg.DATA_DIR;
+  setFileServiceSpawnerForTests(
+    inProcessFileService(() => ({
+      workspace: ws.workspacePath(data, 'abc123'),
+      home: ws.homePath(data, 'abc123'),
+      nix: ws.nixPath(data, 'abc123'),
+    })),
+  );
 });
 
 afterEach(async () => {
@@ -118,15 +131,18 @@ afterEach(async () => {
   await orchestrator.app.close();
   db.close();
   dk.setDockerForTests(null);
+  setFileServiceSpawnerForTests(null);
   rmSync(dir, { recursive: true, force: true });
 });
 
 /**
  * Inserts a box with its directories on disk, as an attachment or a start
- * needs, and returns the workspace path.
+ * needs, and returns the workspace path. The file service is reached through
+ * a started container, so the fake Docker is installed too.
  */
 function insertWorkspaceBox(id: string): string {
   insertBox(id);
+  fakeDocker();
   // config() is memoised for the process, so the app's DATA_DIR is whatever
   // the first test in this file set — not necessarily this test's `dir`.
   // Everything that reaches the disk has to go through the app's own copy.
@@ -167,7 +183,7 @@ async function measuredSize(id: string): Promise<number | null> {
   return null;
 }
 
-test('a box is measured off the request path and reported on the list', async () => {
+test('a running box is measured off the request path and reported on the list', async () => {
   const workspace = insertWorkspaceBox('abc123');
   writeFileSync(join(workspace, 'checkout.bin'), Buffer.alloc(4096));
   // The home counts too, and on a box that has been working it is the larger
@@ -188,22 +204,22 @@ test('a box is measured off the request path and reported on the list', async ()
   assert.equal(await measuredSize('abc123'), 4096 + 2048);
 });
 
-test('an upload is what says a workspace grew, since nothing else can say it', async () => {
+test('a stop measures the box first, and the list keeps that value with its time', async () => {
   const workspace = insertWorkspaceBox('abc123');
   writeFileSync(join(workspace, 'checkout.bin'), Buffer.alloc(4096));
-  assert.equal(await measuredSize('abc123'), 4096);
 
-  await orchestrator.app.inject({
-    method: 'POST',
-    url: '/api/boxes/abc123/attachments?name=shot.png',
-    headers: { 'content-type': 'application/octet-stream' },
-    payload: Buffer.alloc(2048),
-  });
+  const before = Date.now();
+  const res = await orchestrator.app.inject({ method: 'POST', url: '/api/boxes/abc123/stop' });
+  assert.equal(res.statusCode, 200);
 
-  // A measurement stands for a quarter of an hour, and for a stopped box as
-  // long as it is stopped. So the upload drops it.
-  const after = await measuredSize('abc123');
-  assert.ok(after !== null && after >= 4096 + 2048, `grew to ${String(after)}`);
+  const row = db
+    .prepare('SELECT disk_bytes, disk_measured_at FROM boxes WHERE id = ?')
+    .get('abc123') as { disk_bytes: number | null; disk_measured_at: number | null };
+  assert.equal(row.disk_bytes, 4096);
+  assert.ok((row.disk_measured_at ?? 0) >= before);
+  const listed = res.json() as { diskBytes: number | null; diskMeasuredAt: number | null };
+  assert.equal(listed.diskBytes, 4096);
+  assert.equal(listed.diskMeasuredAt, row.disk_measured_at);
 });
 
 test('an attachment name that is a path is reduced to a name', async () => {

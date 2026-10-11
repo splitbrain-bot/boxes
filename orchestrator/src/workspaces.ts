@@ -1,5 +1,4 @@
 import {
-  fchownSync,
   lchownSync,
   mkdirSync,
   readdirSync,
@@ -222,25 +221,6 @@ export function chownToAgent(path: string): void {
   } catch (err) {
     log.warn('could not give a workspace path to the agent user', {
       path,
-      uid: owner.uid,
-      error: (err as Error).message,
-    });
-  }
-}
-
-/**
- * Gives an open file to the box's agent user, by descriptor.
- *
- * The descriptor names the opened file even if its path now points
- * elsewhere, which a write into a directory the agent owns needs. It returns
- * at once or logs a failure as chownToAgent does.
- */
-export function chownFdToAgent(fd: number): void {
-  if (process.getuid?.() === owner.uid) return;
-  try {
-    fchownSync(fd, owner.uid, owner.gid);
-  } catch (err) {
-    log.warn('could not give a workspace file to the agent user', {
       uid: owner.uid,
       error: (err as Error).message,
     });

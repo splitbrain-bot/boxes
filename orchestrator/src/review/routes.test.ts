@@ -25,6 +25,8 @@ import { buildApp, type Orchestrator } from '../app.ts';
 import { loadConfig, setConfigForTests } from '../config.ts';
 import { openDb, type Db } from '../db.ts';
 import { BoxManager } from '../boxes.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { setFileServiceSpawnerForTests } from '../files.ts';
 import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
 
 /** Invocations addressed at anything but a box's own workspace. */
@@ -130,12 +132,18 @@ beforeEach(() => {
     return { containerId: id, workingDir: '/workspace' };
   });
   setGitRunnerForTests(localGit);
+  // The container id is the box id, so it names the workspace the file
+  // service works on.
+  setFileServiceSpawnerForTests(
+    inProcessFileService((id) => ({ workspace: workspace(id), home: dir, nix: dir })),
+  );
 });
 
 afterEach(async () => {
   await orchestrator.app.close();
   db.close();
   setGitRunnerForTests(null);
+  setFileServiceSpawnerForTests(null);
   vi.restoreAllMocks();
   setConfigForTests(null as never);
   rmSync(dir, { recursive: true, force: true });

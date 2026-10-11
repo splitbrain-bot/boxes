@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { inProcessFileService } from '../../orchestrator/src/files-in-process.ts';
+import { setFileServiceSpawnerForTests } from '../../orchestrator/src/files.ts';
 import {
   setGitRunnerForTests,
   type GitRunner,
@@ -161,4 +163,22 @@ export function installLocalGit(workspaceOf: (boxId: string) => string): void {
 /** Puts the shipped git runner back. */
 export function removeLocalGit(): void {
   setGitRunnerForTests(null);
+}
+
+/**
+ * Runs the file service of a box in this process, on its workspace on this
+ * machine, instead of inside its container. The container id names the box.
+ */
+export function installLocalFiles(workspaceOf: (boxId: string) => string): void {
+  setFileServiceSpawnerForTests(
+    inProcessFileService((containerId) => {
+      const workspace = workspaceOf(boxOfContainer(containerId));
+      return { workspace, home: workspace, nix: workspace };
+    }),
+  );
+}
+
+/** Puts the shipped file service back. */
+export function removeLocalFiles(): void {
+  setFileServiceSpawnerForTests(null);
 }

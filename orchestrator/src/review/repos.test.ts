@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
+import { inProcessFileService } from '../files-in-process.ts';
+import { fileService, setFileServiceSpawnerForTests } from '../files.ts';
 import { setGitRunnerForTests, type GitBox, type GitRunner } from './git.ts';
 import {
   discoverRepos,
@@ -49,11 +51,16 @@ let dir: string;
 
 beforeEach(() => {
   setGitRunnerForTests(localGit);
+  // The container id names the workspace the file service works on.
+  setFileServiceSpawnerForTests(
+    inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
+  );
   dir = mkdtempSync(join(tmpdir(), 'boxes-repos-'));
 });
 
 afterEach(() => {
   setGitRunnerForTests(null);
+  setFileServiceSpawnerForTests(null);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -74,7 +81,7 @@ function file(rel: string, content = 'x\n'): void {
 
 /** The discovered repositories as workspace-relative paths. */
 async function paths(workspace = dir): Promise<string[]> {
-  return (await discoverRepos(workspace, box(workspace))).repos.map((r) => r.path);
+  return (await discoverRepos(fileService(workspace), box(workspace))).repos.map((r) => r.path);
 }
 
 describe('discovery', () => {
@@ -113,7 +120,7 @@ describe('discovery', () => {
 
   test('a workspace with no repository has none, and says so', async () => {
     file('notes/todo.md');
-    const map = await discoverRepos(dir, box(dir));
+    const map = await discoverRepos(fileService(dir), box(dir));
     assert.deepEqual(map.repos, []);
     assert.equal(map.hasGit, false);
   });
@@ -189,12 +196,12 @@ describe('discovery', () => {
 
   test('a repository reports its own name, and the workspace one takes the directory name', async () => {
     repo('');
-    const map = await discoverRepos(dir, box(dir));
+    const map = await discoverRepos(fileService(dir), box(dir));
     assert.equal(map.repos[0]!.name, dir.split('/').pop());
 
     rmSync(join(dir, '.git'), { recursive: true, force: true });
     repo('repo-a');
-    const second = await discoverRepos(dir, box(dir));
+    const second = await discoverRepos(fileService(dir), box(dir));
     assert.equal(second.repos[0]!.name, 'repo-a');
   });
 });

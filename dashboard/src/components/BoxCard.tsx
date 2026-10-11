@@ -182,7 +182,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
           {box.diskBytes === null ? null : (
             <span
               className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-              title="Disk use of workspace, home and Nix store"
+              title={`Disk use of workspace, home and Nix store, measured ${new Date(box.diskMeasuredAt ?? 0).toLocaleString()}`}
             >
               <HardDrive className="size-3" aria-hidden />
               {shortSize(box.diskBytes)}

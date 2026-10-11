@@ -309,6 +309,16 @@ test('the ps that took the reading is not work the reading found', () => {
   assert.equal(reading.busy, false);
 });
 
+test('the file service is not work, and a stop never reaches it', () => {
+  // The orchestrator keeps it connected, so it would hold every box busy.
+  const files = table(...BOTH_IDLE, [4300, 0, 'node /usr/local/bin/boxes-files']);
+  assert.equal(readBox(files, BOTH).busy, false);
+  assert.deepEqual(workPids(files, BOTH), []);
+  // A command of the agent that only names it is still work.
+  const named = table(...HELD, [4301, 0, 'grep boxes-files notes.txt']);
+  assert.equal(readBox(named, BOTH).busy, true);
+});
+
 test('an agent an adapter left behind is still the harness, not work', () => {
   // `residentProcesses` matches wherever the process sits. The shell under
   // the agent is still work.

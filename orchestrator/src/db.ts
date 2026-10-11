@@ -50,6 +50,10 @@ export interface BoxRow {
   created_at: number;
   /** Epoch milliseconds of the last activity, read by the idle reaper. */
   last_active_at: number;
+  /** The last measured disk usage in bytes, or null before the first measurement. */
+  disk_bytes: number | null;
+  /** Epoch milliseconds of that measurement, or null before the first. */
+  disk_measured_at: number | null;
 }
 
 /** One conversation of a box, as stored. */
@@ -537,6 +541,13 @@ export const MIGRATIONS: string[] = [
       WHEN 'gitlab'     THEN 'glpat-'
       WHEN 'devtunnels' THEN 'ghu_'
     END || hex(randomblob(18));
+  `,
+  // The last measured disk usage of each box and when it was taken. The file
+  // service in the box measures it, so a stopped box keeps the value of its
+  // last measurement.
+  `
+  ALTER TABLE boxes ADD COLUMN disk_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_measured_at INTEGER;
   `,
 ];
 

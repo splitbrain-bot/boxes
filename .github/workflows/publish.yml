@@ -34,10 +34,10 @@ jobs:
     name: test (${{ matrix.package }})
     runs-on: ubuntu-latest
     strategy:
-      # One failing suite says more when the other two have still run.
+      # One failing suite says more when the others have still run.
       fail-fast: false
       matrix:
-        package: [orchestrator, proxy, dashboard]
+        package: [orchestrator, proxy, files, dashboard]
     steps:
       - uses: actions/checkout@v7
 
@@ -92,7 +92,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both Dockerfiles copy shared/ next to their own package, so the
+          # Each Dockerfile copies shared/ next to its own package, so the
           # context is the repository root.
           - image: orchestrator
             context: .
@@ -100,9 +100,8 @@ jobs:
           - image: egress-proxy
             context: .
             dockerfile: proxy/Dockerfile
-          # The box image copies only files from box-image/.
           - image: box
-            context: box-image
+            context: .
             dockerfile: box-image/Dockerfile
     steps:
       - uses: actions/checkout@v7

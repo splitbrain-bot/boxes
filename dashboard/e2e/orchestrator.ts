@@ -1,10 +1,7 @@
 import {
-  closeSync,
   existsSync,
-  ftruncateSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -25,7 +22,6 @@ import type {
   ReviewAnnotation,
   ReviewFileResponse,
   BoxWork,
-  BoxSummary,
   BoxTunnel,
   Settings,
   ThreadOptions,
@@ -54,7 +50,9 @@ import { FAKE_SELF_CONTAINER, installFakeDocker, type FakeDocker } from './fake-
 import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
 import {
   buildWorkspace,
+  installLocalFiles,
   installLocalGit,
+  removeLocalFiles,
   removeLocalGit,
   reviewWorkspace,
   type WorkspaceSpec,
@@ -219,7 +217,7 @@ export interface BoxSpec {
   attachedCount?: number;
   /** Whether the adapter advertises forking, which the list offers. */
   canFork?: boolean;
-  /** The size of a sparse file put into the workspace, which nothing reads. */
+  /** The disk usage the box was last measured at. */
   diskBytes?: number;
 }
 
@@ -577,13 +575,6 @@ function boxRow(db: Db, boxId: string): BoxRow | undefined {
     | undefined;
 }
 
-/** A file of the given apparent size, which costs no disk to make. */
-function sparseFile(path: string, bytes: number): void {
-  const fd = openSync(path, 'w');
-  ftruncateSync(fd, Math.round(bytes));
-  closeSync(fd);
-}
-
 /** Writes a file of a workspace, creating the directories above it. */
 function writeFile(root: string, path: string, content: string): void {
   const full = join(root, path);
@@ -661,24 +652,11 @@ function createBox(
   app.tunnels.setServedForTests(id, spec.tunnels ?? []);
 
   if (spec.diskBytes !== undefined) {
-    sparseFile(join(ws.workspacePath(cfg.DATA_DIR, id), 'checkout.bin'), spec.diskBytes);
-  }
-}
-
-/**
- * Lists boxes until every one that asked for a size reports one.
- *
- * The orchestrator measures disks in the background, so the first list has no
- * sizes. Waiting here means the first page a test opens shows them.
- */
-async function measureBoxes(app: Orchestrator, specs: BoxSpec[]): Promise<void> {
-  const wanted = specs.filter((spec) => spec.diskBytes !== undefined).length;
-  if (wanted === 0) return;
-  for (let attempt = 0; attempt < 200; attempt++) {
-    const res = await app.app.inject({ url: '/api/boxes' });
-    const listed = res.json() as BoxSummary[];
-    if (listed.filter((s) => s.diskBytes !== null).length >= wanted) return;
-    await new Promise((done) => setTimeout(done, 10));
+    db.prepare('UPDATE boxes SET disk_bytes = ?, disk_measured_at = ? WHERE id = ?').run(
+      Math.round(spec.diskBytes),
+      now,
+      id,
+    );
   }
 }
 
@@ -907,6 +885,7 @@ export async function startOrchestrator(
   // The bundle this run just built, rather than the copy a built image holds.
   const app = buildApp(cfg, db, { bundleDir: resolve(import.meta.dirname, '../dist') });
   installLocalGit((boxId) => ws.workspacePath(dataDir, boxId));
+  installLocalFiles((boxId) => ws.workspacePath(dataDir, boxId));
 
   /** The stand-in adapter for a box, made on first use and put in the manager's map. */
   const upstreamFor = (boxId: string): TestUpstream => {
@@ -1115,12 +1094,12 @@ export async function startOrchestrator(
       db.close();
       docker.close();
       removeLocalGit();
+      removeLocalFiles();
       setConfigForTests(null as never);
       rmSync(dataDir, { recursive: true, force: true });
     },
   };
 
   for (const spec of boxes) harness.createBox(spec);
-  await measureBoxes(app, boxes);
   return harness;
 }

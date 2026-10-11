@@ -134,9 +134,9 @@ restarted adapter has no record of what its predecessor started. The orchestrato
 `_session/async_task/stop` on the thread's own connection.
 
 For the same reason, the events cannot answer whether the box is busy: the orchestrator reads the process table with
-`ps` in the box, and everything that is not the init, an adapter, an agent process or a known resident helper counts as
-work and prevents the idle reaper from stopping the box. The box-level stop reads the table again, sends TERM to the
-deepest processes first, and sends KILL to what survives shortly after, without waiting.
+`ps` in the box, and everything that is not the init, an adapter, an agent process, the [file service](files.md) or a
+known resident helper counts as work and prevents the idle reaper from stopping the box. The box-level stop reads the
+table again, sends TERM to the deepest processes first, and sends KILL to what survives shortly after, without waiting.
 
 ### Forking
 

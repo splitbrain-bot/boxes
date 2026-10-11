@@ -6,7 +6,8 @@
 # A tool that must follow the image is installed outside the home.
 #
 # Three stages: image installs everything, test checks it, and the last stage
-# ships image once test has passed.
+# ships image once test has passed. The build context is the repository root,
+# because the file service is built from files/ and shared/.
 
 # Build arguments the test stage checks the image against. A stage sees one
 # only after it names it again with a bare ARG.
@@ -40,6 +41,19 @@ RUN case "$TARGETARCH" in \
     esac \
  && nix --extra-experimental-features nix-command copy --from https://cache.nixos.org "$path" \
  && cp -a "$path/bin" /out
+
+# The file service, type-checked and bundled like the orchestrator and the
+# proxy. The build mirrors the repository layout, so imports from files/src
+# into shared/ resolve as they do in a checkout.
+FROM node:${NODE_MAJOR}-alpine AS files-build
+WORKDIR /build
+COPY shared/ ./shared/
+COPY files/package.json files/package-lock.json* ./files/
+WORKDIR /build/files
+RUN npm ci
+COPY files/tsconfig.json files/vite.config.ts ./
+COPY files/src ./src
+RUN npm run check && npm run build
 
 FROM ubuntu:26.04 AS image
 
@@ -208,7 +222,7 @@ RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
 # Nix from the first stage, and its system configuration. With it, the agent
 # installs tools and services into the box's own /nix without privileges.
 COPY --from=nix-static /out/ /usr/local/bin/
-COPY nix.conf /etc/nix/nix.conf
+COPY box-image/nix.conf /etc/nix/nix.conf
 
 # The agent and the adapter, each pinned to a major line. Below 1.0, the caret
 # pins the minor instead. Do not switch to @zed-industries/claude-code-acp,
@@ -237,7 +251,7 @@ RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
 ENV CODEX_PATH=/usr/local/bin/codex
 
 # Codex's system configuration.
-COPY codex-config.toml /etc/codex/config.toml
+COPY box-image/codex-config.toml /etc/codex/config.toml
 
 # @playwright/cli and Chromium. The CLI is 0.1.x, so the caret pins the minor.
 #
@@ -291,11 +305,18 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
 
 # The CLI's base configuration. The entrypoint adds the egress proxy at
 # runtime.
-COPY playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
+COPY box-image/playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
 # Skills the image carries, such as how nix works in a box. The entrypoint
 # installs them into the home at every start.
-COPY skills /usr/local/share/boxes/skills
+COPY box-image/skills /usr/local/share/boxes/skills
+
+# The file service. The orchestrator starts it in the box and reaches all the
+# files of the box through it. The bundle has no npm dependencies. node runs
+# the link as the bundle itself, so the .mjs name makes it an ES module.
+COPY --from=files-build /build/files/dist/main.mjs /usr/local/lib/boxes-files/main.mjs
+RUN chmod 0755 /usr/local/lib/boxes-files/main.mjs \
+ && ln -s /usr/local/lib/boxes-files/main.mjs /usr/local/bin/boxes-files
 
 # The agent's own account, with the uid and gid from the top of this file.
 ARG AGENT_UID
@@ -329,7 +350,7 @@ ENV PATH=/home/agent/.local/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/
 # XDG layout.
 ENV PATH=/home/agent/.local/state/nix/profile/bin:$PATH
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY box-image/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 # Commands and the agent's shell tools run under bash -lc. An /etc/profile
@@ -339,7 +360,7 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 RUN mkdir -p /etc/boxes \
  && printf "BOXES_IMAGE_PATH='%s'\n" "$PATH" > /etc/boxes/image-path \
  && chmod 0644 /etc/boxes/image-path
-COPY profile-image-path.sh /etc/profile.d/boxes-image-path.sh
+COPY box-image/profile-image-path.sh /etc/profile.d/boxes-image-path.sh
 RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 
 # The root filesystem is read-only at runtime, so every mount point must
@@ -354,7 +375,7 @@ RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/age
 
 # Claude Code's user settings for a new box, without commit and pull request
 # attribution.
-COPY --chown=agent:agent claude-settings.json /home/agent/.claude/settings.json
+COPY --chown=agent:agent box-image/claude-settings.json /home/agent/.claude/settings.json
 
 # Numeric, so the uid is readable from the image itself.
 USER ${AGENT_UID}
@@ -384,6 +405,9 @@ RUN mkdir -p "$TMPDIR"
 #
 # codex --version runs the platform binary, so it fails if --omit=optional
 # left none. The match against CODEX_VERSION catches a followed range.
+#
+# The file service ends with exit code 0 when its input closes, so the run
+# with an empty input proves that node loads the bundle through the link.
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
@@ -396,6 +420,8 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(command -v codex-acp)" = "/usr/local/bin/codex-acp" \
  && test "$(command -v codex)" = "/usr/local/bin/codex" \
  && codex --version | grep -qF "${CODEX_VERSION}" \
+ && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
+ && boxes-files </dev/null \
  && ps -eo pid,ppid,args >/dev/null \
  && bash -lc 'set -eu; . /etc/boxes/image-path; IFS=:; for d in $BOXES_IMAGE_PATH; do \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \

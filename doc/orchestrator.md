@@ -30,7 +30,7 @@ API first.
 | [Agent sets](agent-sets.md) | Stores them, and writes the merged set into a box at each start. |
 | [Credentials](credentials.md) | Stores and refreshes the secrets, and runs the login flows. |
 | [Egress](egress.md) | Pushes the policy to the egress proxy, and attaches the proxy to each box network. |
-| [Review](review.md) | Reads the workspace, and runs git in the box. |
+| [Review](review.md) | Reads and writes the workspace through the [file service](files.md), and runs git in the box. |
 | [Notifications](notifications.md) | Sends a Web Push message when a thread needs a person. |
 | Tunnels | Remembers which box hosts which dev tunnel, and deletes the tunnels that nothing hosts. |
 

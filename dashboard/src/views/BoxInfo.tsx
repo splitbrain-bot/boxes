@@ -152,6 +152,10 @@ export function BoxInfo() {
                   : shortSize(box.diskBytes)
               }
             />
+            {/* A stopped box keeps the value of its last measurement, however old. */}
+            {box.diskMeasuredAt === null ? null : (
+              <Meta label="Measured" value={new Date(box.diskMeasuredAt).toLocaleString()} />
+            )}
           </dl>
         </CardContent>
       </Card>

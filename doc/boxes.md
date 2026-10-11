@@ -57,7 +57,8 @@ A box starts when:
 - a user selects **Start** on the details page,
 - a browser opens a thread of a stopped box,
 - a terminal opens on a stopped box,
-- a review asks for a Git command in a stopped box.
+- the review, an attachment or a download needs the files of a stopped box. The orchestrator reaches the files only
+  through the [file service](files.md) in the box.
 
 Before the container starts, the orchestrator repairs what drifted while the box was stopped, for example a container
 that Docker lost. A repair that would replace the container is deferred while the container runs, so a turn is never
