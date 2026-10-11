@@ -1016,6 +1016,8 @@ export async function spawnAdapterExec(
  * both directions, and there is nothing to demux.
  */
 export interface TerminalExec {
+  /** The name of this connection's own tmux session. */
+  client: string;
   /** The pty, readable and writable. */
   stream: Duplex;
   /** Tells the pty how large the window onto it is. */
@@ -1047,6 +1049,21 @@ function terminalShell(client: string): string {
   ].join('; ');
 }
 
+/** The exit code of a reattach that found no client session to attach to. */
+export const NO_TERMINAL_SESSION = 3;
+
+/**
+ * The shell that attaches one terminal connection to its own tmux session
+ * again. The session is gone when the user ended the shell, or when the box
+ * has no tmux.
+ */
+function reattachShell(client: string): string {
+  return [
+    `tmux has-session -t =${client} 2>/dev/null || exit ${NO_TERMINAL_SESSION}`,
+    `exec tmux attach-session -t =${client}`,
+  ].join('; ');
+}
+
 /**
  * Opens a pty in a box container, running the shell a reader types into.
  *
@@ -1056,19 +1073,24 @@ function terminalShell(client: string): string {
  *
  * The size is set on the exec, so the first prompt is drawn at the right
  * width.
+ *
+ * With `reattach`, the pty attaches to that client session of an earlier
+ * exec. The exec then ends with {@link NO_TERMINAL_SESSION} when the session
+ * is gone.
  */
 export async function openTerminalExec(
   containerId: string,
   workingDir: string,
   cols: number,
   rows: number,
+  reattach?: string,
 ): Promise<TerminalExec> {
   // Random rather than a counter, so the name cannot collide with a session
   // that an earlier orchestrator process left behind.
-  const client = `web-${randomBytes(4).toString('hex')}`;
+  const client = reattach ?? `web-${randomBytes(4).toString('hex')}`;
 
   const exec = await docker().getContainer(containerId).exec({
-    Cmd: ['bash', '-lc', terminalShell(client)],
+    Cmd: ['bash', '-lc', reattach ? reattachShell(client) : terminalShell(client)],
     AttachStdin: true,
     AttachStdout: true,
     AttachStderr: true,
@@ -1088,6 +1110,7 @@ export async function openTerminalExec(
   );
 
   return {
+    client,
     stream,
     // The daemon wants the size the way ioctl does, rows before columns. A
     // resize against an exec that has ended is left at debug: the stream
