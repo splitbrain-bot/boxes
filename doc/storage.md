@@ -21,13 +21,15 @@ mounted directories and in `/tmp`.
 `TMPDIR` names `/home/agent/.cache/tmp` and not `/tmp`, because the tmpfs counts against the memory limit of the
 container, while the home is on disk. The entrypoint empties that directory at each start.
 
-The four directories with a box id in the name are bind mounts, so the orchestrator has a file path to the work of each
-box, and does not need a running container to read it. Each box container gets the mounts of its own box, and nothing
-else of the volume.
+The four directories with a box id in the name are bind mounts. Each box container gets the mounts of its own box, and
+nothing else of the volume. The orchestrator reads and writes the files in the workspace, the home and the Nix store
+only through the [file service](files.md) in the box.
 
 ## Access to the data
 
-The orchestrator creates, reads, writes and deletes all of `/data`.
+The orchestrator creates and deletes all of `/data`. It reads and writes all of it, except the files in the workspace,
+the home and the Nix store of a box. It reads and writes those through the file service in the box, which runs as the
+agent.
 
 The agent and the [terminal](terminal.md) in a box read and write the workspace, the home and the Nix store. They run as
 the unprivileged `agent` account, which owns the files in them.
@@ -43,8 +45,12 @@ set directory together. This cannot be undone.
 
 ## Disk usage
 
-The box list shows the size of each box. It is the sum of the workspace, the home and the Nix store. The orchestrator
-re-measures a running box at most every 15 minutes, and measures a stopped box once.
+The box list shows the size of each box. It is the sum of the apparent file sizes in the workspace, the home and the
+Nix store. The [file service](files.md) in the box measures it. Symlinks count as nothing.
+
+The orchestrator measures a box before each stop. When the measurement takes longer than 60 seconds, the box stops and
+keeps its old value. The orchestrator measures a running box again at most every 15 minutes, when the box list asks for
+it. A stopped box keeps the value of its last measurement, and the details page shows when it was measured.
 
 ## Backups
 
@@ -84,14 +90,6 @@ Docker does not initialize ownership on a bind mount, so the orchestrator chowns
 directories to `BOX_UID`. The parent roots and each home directory are mode 0700 — a home holds the transcripts and
 whatever a login wrote — while a workspace and a Nix store are 0755. The orchestrator writes the generated secret files
 with mode 0600, atomically.
-
-### Disk usage numbers
-
-The size of a box is the sum of the apparent file sizes of its workspace, home and Nix store, gathered by a recursive
-walk (`orchestrator/src/diskusage.ts`). Symlinks count as nothing and are never followed. A walk is the one expensive
-operation on the box list's path, so walks are lazy — started only when a reader asks, never on a timer — and run one at
-a time. A measurement of a running box stays valid for a while; the orchestrator walks a stopped box once more after it
-stops and then not again, because nothing in it can change.
 
 ### The database
 

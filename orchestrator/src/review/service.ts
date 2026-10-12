@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import type {
   ReviewAnnotation,
   ReviewBaseResponse,
@@ -7,20 +6,19 @@ import type {
   ReviewRepo,
 } from '../../../shared/types.ts';
 import type { Db, BoxRow } from '../db.ts';
+import {
+  fileService,
+  FileServiceError,
+  isMissing,
+  isRefusedPath,
+  type FileService,
+  type FileStream,
+  type WriteCondition,
+} from '../files.ts';
 import { HttpError } from '../http-error.ts';
 import { log } from '../log.ts';
 import { emptyDiff, fileDiff } from './difflines.ts';
-import {
-  fileHash,
-  fileLines,
-  isDirectory,
-  MAX_FILE_BYTES,
-  MAX_REVIEW_BYTES,
-  readTextFile,
-  removeFile,
-  resolveInRoot,
-  writeFileAtomic,
-} from './fs.ts';
+import { fileLines, MAX_FILE_BYTES, MAX_REVIEW_BYTES } from './fs.ts';
 import { headCommit, type GitBox } from './git.ts';
 import {
   fileStatuses,
@@ -50,7 +48,7 @@ import {
   listedDir,
   listedFile,
   MAX_DIR_ENTRIES,
-  readDir,
+  reviewChildren,
   REVIEW_FILE,
   type DirChild,
 } from './tree.ts';
@@ -72,8 +70,6 @@ interface GitSnapshot {
 
 /** What the review needs of the boxes it is a view onto. */
 export interface ReviewBoxes {
-  /** Where a box's files are, or null for an unknown or deleted box. */
-  workspacePath(id: string): string | null;
   /**
    * The box's container, started if it was stopped, and the directory a
    * command runs in inside it.
@@ -84,14 +80,35 @@ export interface ReviewBoxes {
   execTarget(id: string): Promise<{ containerId: string; workingDir: string }>;
 }
 
+/** A running box as the review reaches it: git and the file service. */
+interface ReviewBox extends GitBox {
+  /** The file service in the box. */
+  files: FileService;
+}
+
+/** REVIEW.md as it was read, and the hash a write of it expects back. */
+interface ReviewRead {
+  /** The parsed review. Empty when there is no REVIEW.md. */
+  review: Review;
+  /** The hash of REVIEW.md, or '' when there is none. */
+  hash: string;
+}
+
+/** One directory of the workspace as the review lists it. */
+interface DirListing {
+  /** The children the review shows. */
+  children: DirChild[];
+  /** True when the file service left children out. */
+  truncated: boolean;
+}
+
 /**
  * Review operations over the boxes of one orchestrator.
  *
  * The review of a box is its whole workspace. REVIEW.md at the workspace root
  * is the only store of annotations, and the agent can edit it too. Files are
- * read and written on this process's filesystem. Git runs in the box's
- * container, so a request that needs git starts a stopped box and marks it
- * active.
+ * read and written by the file service in the box, and git runs in the box,
+ * so every request starts a stopped box and marks it active.
  */
 export class ReviewService {
   /**
@@ -130,34 +147,20 @@ export class ReviewService {
   }
 
   /**
-   * The box's workspace on this process's filesystem, which is the review
-   * root.
-   *
-   * A box whose directory is gone is a 409 rather than a 404, because the
-   * box exists.
-   */
-  private workspace(id: string): string {
-    const row = this.row(id);
-    const path = this.boxes.workspacePath(row.id);
-    if (!path || !isDirectory(path)) {
-      throw new HttpError(
-        409,
-        'The workspace directory of this box cannot be found. ' +
-          'Restore the files from a backup, or delete the box.',
-      );
-    }
-    return path;
-  }
-
-  /**
-   * The box's container to run git in, started if it was stopped.
+   * The box's container to run git and the file service in, started if it
+   * was stopped. An unknown or deleted box is a 404.
    *
    * Each request asks for it again, because a container can stop or be
    * replaced between two requests.
    */
-  private async box(id: string): Promise<GitBox> {
+  private async box(id: string): Promise<ReviewBox> {
+    this.row(id);
     const target = await this.boxes.execTarget(id);
-    return { containerId: target.containerId, workspaceDir: target.workingDir };
+    return {
+      containerId: target.containerId,
+      workspaceDir: target.workingDir,
+      files: fileService(target.containerId),
+    };
   }
 
   /**
@@ -168,11 +171,11 @@ export class ReviewService {
    * box. A new one is taken when `fresh` says the browser has just arrived,
    * after a save or a base change, and when {@link SNAPSHOT_MS} has passed.
    */
-  private async snapshot(box: GitBox, id: string, fresh: boolean): Promise<GitSnapshot> {
+  private async snapshot(box: ReviewBox, id: string, fresh: boolean): Promise<GitSnapshot> {
     const held = this.snapshots.get(id);
     if (!fresh && held && Date.now() - held.at < ReviewService.SNAPSHOT_MS) return held;
 
-    const map = await discoverRepos(this.workspace(id), box);
+    const map = await discoverRepos(box.files, box);
     const bases = await resolveBases(box, map, this.baseRev(id));
     const [repos, statuses] = await Promise.all([
       this.describeRepos(box, map, bases),
@@ -199,11 +202,6 @@ export class ReviewService {
     return this.row(id).review_base_rev ?? '';
   }
 
-  /** Where REVIEW.md is: at the workspace root. */
-  private reviewPath(workspace: string): string {
-    return join(workspace, REVIEW_FILE);
-  }
-
   // --- reading --------------------------------------------------------------
 
   /**
@@ -218,18 +216,17 @@ export class ReviewService {
    * drift check over every annotated file. Opening a folder does neither.
    */
   async dir(id: string, relDir: string, fresh: boolean): Promise<ReviewDirResponse> {
-    const workspace = this.workspace(id);
     const box = await this.box(id);
     const taken = await this.snapshot(box, id, fresh);
 
-    const review = fresh
-      ? await this.driftAll(id, workspace)
-      : await this.withLock(id, () => this.read(this.reviewPath(workspace)));
+    const { review, hash } = fresh
+      ? await this.driftAll(id, box.files)
+      : await this.withLock(id, () => this.read(box.files));
     const counts = annotationCounts(review);
 
-    const children = this.children(workspace, relDir, taken.statuses);
-    const listed = dirEntries(relDir, children, taken.statuses, counts, taken.map);
-    const truncated = listed.length > MAX_DIR_ENTRIES;
+    const listing = await this.children(box.files, relDir, taken.statuses);
+    const listed = dirEntries(relDir, listing.children, taken.statuses, counts, taken.map);
+    const truncated = listing.truncated || listed.length > MAX_DIR_ENTRIES;
 
     return {
       path: relDir,
@@ -238,7 +235,7 @@ export class ReviewService {
       repos: taken.repos,
       hasGit: taken.map.hasGit,
       base: { rev: this.baseRev(id) },
-      hasReview: fileHash(this.reviewPath(workspace)) !== '',
+      hasReview: hash !== '',
       started: review.started,
       commentCount: [...counts.values()].reduce((total, count) => total + count, 0),
     };
@@ -252,15 +249,13 @@ export class ReviewService {
    * neither. The content is plain text, and the browser does the highlighting.
    */
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
-    const workspace = this.workspace(id);
     const box = await this.box(id);
     const { map } = await this.snapshot(box, id, false);
     const repo = map.repoFor(relPath);
-    const path = await this.resolveFile(box, id, workspace, relPath);
-    if (path === null) {
-      return goneFile(relPath, repo, await this.annotationsOf(id, workspace, relPath));
+    if (!(await this.resolveFile(box, id, relPath))) {
+      return goneFile(relPath, repo, await this.annotationsOf(id, box.files, relPath));
     }
-    const read = readTextFile(path);
+    const read = await box.files.read(relPath, MAX_FILE_BYTES);
     const base = repo ? await this.baseIn(box, id, repo) : NO_BASE;
 
     // Only the owning repository is asked, so opening a file costs the same
@@ -276,14 +271,14 @@ export class ReviewService {
     // truncated file come back as they stand.
     const annotations =
       read.binary || read.truncated
-        ? await this.annotationsOf(id, workspace, relPath)
-        : await this.driftFile(id, workspace, relPath, fileLines(read.content));
+        ? await this.annotationsOf(id, box.files, relPath)
+        : await this.driftFile(id, box.files, relPath, fileLines(read.content));
 
     return {
       path: relPath,
       repo: repo?.path ?? null,
       content: read.content,
-      hash: fileHash(path),
+      hash: read.hash,
       truncated: read.truncated,
       binary: read.binary,
       deleted: false,
@@ -301,19 +296,21 @@ export class ReviewService {
   }
 
   /**
-   * Resolves a client-supplied path to a file on disk the review offers, for
-   * serving its bytes.
+   * The bytes of a file the review offers, as a stream.
    *
-   * It applies `listedFile` and `resolveInRoot` as {@link resolveFile} does,
-   * without asking git. A deleted file has no bytes to serve, so it gets the
-   * same 404 as any path the review does not offer.
+   * It applies `listedFile` as {@link resolveFile} does, without asking git.
+   * A deleted file has no bytes to serve, so it gets the same 404 as any path
+   * the review does not offer.
    */
-  rawFile(id: string, relPath: string): string {
-    const workspace = this.workspace(id);
+  async rawFile(id: string, relPath: string): Promise<FileStream> {
     if (!listedFile(relPath)) throw new HttpError(404, 'File not found');
-    const resolved = resolveInRoot(workspace, relPath);
-    if (!resolved.ok) throw new HttpError(404, 'File not found');
-    return resolved.path;
+    const box = await this.box(id);
+    try {
+      return await box.files.readStream(relPath);
+    } catch (err) {
+      if (isRefusedPath(err)) throw new HttpError(404, 'File not found');
+      throw err;
+    }
   }
 
   // --- mutation -------------------------------------------------------------
@@ -338,14 +335,12 @@ export class ReviewService {
       throw new HttpError(400, 'This file is larger than the display limit.');
     }
 
-    const workspace = this.workspace(id);
     const box = await this.box(id);
-    const path = await this.resolveFile(box, id, workspace, relPath);
-    if (path === null) {
+    if (!(await this.resolveFile(box, id, relPath))) {
       throw new HttpError(409, 'This file was deleted, so there is nothing to save.');
     }
 
-    const read = readTextFile(path);
+    const read = await box.files.read(relPath, MAX_FILE_BYTES);
     if (read.binary) throw new HttpError(409, 'This file is binary, so it cannot be edited.');
     if (read.truncated) {
       throw new HttpError(
@@ -354,12 +349,15 @@ export class ReviewService {
       );
     }
     // 412 rather than 409, because the reviewer can overrule this refusal and
-    // save anyway.
-    if (fileHash(path) !== hash) {
-      throw new HttpError(412, 'This file changed on disk while you were editing it.');
+    // save anyway. The file service checks the hash once more as it writes.
+    const changed = new HttpError(412, 'This file changed on disk while you were editing it.');
+    if (read.hash !== hash) throw changed;
+    try {
+      await box.files.write(relPath, content, { hash });
+    } catch (err) {
+      if (failedCondition(err)) throw changed;
+      throw err;
     }
-
-    writeFileAtomic(path, content);
     // The write can change this file's git status.
     this.invalidate(id);
     return this.file(id, relPath);
@@ -379,19 +377,18 @@ export class ReviewService {
     if (text === '') throw new HttpError(400, 'comment is required');
     if (text.length > 20_000) throw new HttpError(400, 'comment is too long');
 
-    const workspace = this.workspace(id);
+    const box = await this.box(id);
     // The path must name a file the review lists, or the comment could never
     // be shown.
-    const path = await this.resolveFile(await this.box(id), id, workspace, relPath);
-    if (path === null) {
+    if (!(await this.resolveFile(box, id, relPath))) {
       throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
     }
-    const source = fileLines(readTextFile(path).content);
+    const source = fileLines((await box.files.read(relPath, MAX_FILE_BYTES)).content);
 
-    await this.mutate(id, workspace, relPath, (review) => {
+    await this.mutate(id, box.files, relPath, (review) => {
       setAnnotation(review, relPath, line, text, source);
     });
-    return this.drifted(id, workspace, relPath);
+    return this.drifted(id, box.files, relPath);
   }
 
   /** Removes the comment on one line, and returns what is left for the file. */
@@ -399,11 +396,11 @@ export class ReviewService {
     if (!Number.isInteger(line) || line < 1) {
       throw new HttpError(400, 'line must be a positive integer');
     }
-    const workspace = this.workspace(id);
-    await this.mutate(id, workspace, relPath, (review) => {
+    const { files } = await this.box(id);
+    await this.mutate(id, files, relPath, (review) => {
       deleteAnnotation(review, relPath, line);
     });
-    return this.drifted(id, workspace, relPath);
+    return this.drifted(id, files, relPath);
   }
 
   /**
@@ -412,10 +409,10 @@ export class ReviewService {
    */
   private async drifted(
     id: string,
-    workspace: string,
+    files: FileService,
     relPath: string,
   ): Promise<ReviewAnnotation[]> {
-    const review = await this.driftAll(id, workspace);
+    const { review } = await this.driftAll(id, files);
     return toAnnotations(annotationsFor(review, relPath));
   }
 
@@ -424,9 +421,13 @@ export class ReviewService {
    * error.
    */
   async deleteReview(id: string): Promise<void> {
-    const workspace = this.workspace(id);
-    await this.withLock(id, () => {
-      removeFile(this.reviewPath(workspace));
+    const { files } = await this.box(id);
+    await this.withLock(id, async () => {
+      try {
+        await files.remove(REVIEW_FILE);
+      } catch (err) {
+        if (!isMissing(err)) throw err;
+      }
     });
   }
 
@@ -441,7 +442,6 @@ export class ReviewService {
    */
   async setBase(id: string, rev: string | null): Promise<ReviewBaseResponse> {
     // Checks the box first: a held snapshot would answer without checking it.
-    this.workspace(id);
     const box = await this.box(id);
     const { map } = await this.snapshot(box, id, false);
     if (rev === null || rev.trim() === '') {
@@ -476,21 +476,20 @@ export class ReviewService {
   /**
    * Applies one change to REVIEW.md and writes it back, under the box's lock.
    *
-   * The agent can edit or delete REVIEW.md at any time. The file's hash is
-   * compared before the read and before the write. When it moved, the change is
-   * applied once more to the new content. A second move gives a 409.
+   * The agent can edit or delete REVIEW.md at any time. The write expects the
+   * hash that was read, and the file service refuses it when the file moved.
+   * The change is then applied once more to the new content. A second move
+   * gives a 409.
    */
   private async mutate(
     id: string,
-    workspace: string,
+    files: FileService,
     relPath: string,
     apply: (review: Review) => void,
   ): Promise<ReviewAnnotation[]> {
-    const path = this.reviewPath(workspace);
-    return this.withLock(id, () => {
+    return this.withLock(id, async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
-        const before = fileHash(path);
-        const review = this.read(path);
+        const { review, hash } = await this.read(files);
         const asRead = serializeReview(review);
         apply(review);
         // A change that changed nothing, such as deleting a missing comment,
@@ -499,13 +498,14 @@ export class ReviewService {
           return toAnnotations(annotationsFor(review, relPath));
         }
         if (review.started === '') review.started = todayStamp();
-        const serialized = serializeReview(review);
 
-        if (fileHash(path) !== before) {
+        try {
+          await files.write(REVIEW_FILE, serializeReview(review), expecting(hash));
+        } catch (err) {
+          if (!failedCondition(err)) throw err;
           log.box(id).info('REVIEW.md changed mid-write; re-applying');
           continue;
         }
-        writeFileAtomic(path, serialized);
         return toAnnotations(annotationsFor(review, relPath));
       }
       throw new HttpError(
@@ -516,12 +516,16 @@ export class ReviewService {
   }
 
   /** Reads and parses REVIEW.md, or an empty review when there is none. */
-  private read(path: string): Review {
-    const hash = fileHash(path);
-    if (hash === '') return { data: new Map(), started: '' };
-    const read = readTextFile(path, MAX_REVIEW_BYTES);
-    if (read.binary) return { data: new Map(), started: '' };
-    return parseReview(read.content);
+  private async read(files: FileService): Promise<ReviewRead> {
+    const empty = (): Review => ({ data: new Map(), started: '' });
+    let read;
+    try {
+      read = await files.read(REVIEW_FILE, MAX_REVIEW_BYTES);
+    } catch (err) {
+      if (isMissing(err)) return { review: empty(), hash: '' };
+      throw err;
+    }
+    return { review: read.binary ? empty() : parseReview(read.content), hash: read.hash };
   }
 
   /**
@@ -533,56 +537,64 @@ export class ReviewService {
    */
   private async annotationsOf(
     id: string,
-    workspace: string,
+    files: FileService,
     relPath: string,
   ): Promise<ReviewAnnotation[]> {
-    const path = this.reviewPath(workspace);
-    return this.withLock(id, () => toAnnotations(annotationsFor(this.read(path), relPath)));
+    return this.withLock(id, async () =>
+      toAnnotations(annotationsFor((await this.read(files)).review, relPath)),
+    );
   }
 
   /**
    * Runs drift on every annotated file and writes the result once if anything
    * moved. Returns the review as it now stands.
+   *
+   * When the agent changed REVIEW.md in the meantime, the result is not
+   * written. The next drift check runs on the agent's version.
    */
-  private async driftAll(id: string, workspace: string): Promise<Review> {
-    const path = this.reviewPath(workspace);
-    return this.withLock(id, () => {
-      const before = fileHash(path);
-      const review = this.read(path);
-      if (review.data.size === 0) return review;
+  private async driftAll(id: string, files: FileService): Promise<ReviewRead> {
+    return this.withLock(id, async () => {
+      const read = await this.read(files);
+      if (read.review.data.size === 0) return read;
 
       let changed = false;
-      for (const [file, annotations] of review.data) {
-        const source = sourceLines(workspace, file);
+      for (const [file, annotations] of read.review.data) {
+        const source = await sourceLines(files, file);
         // Undefined is a binary or truncated file: skipped, not marked outdated.
         if (source === undefined) continue;
         if (checkDrift(annotations, source)) changed = true;
       }
-      if (changed && fileHash(path) === before) {
-        writeFileAtomic(path, serializeReview(review));
-      }
-      return review;
+      if (changed) await this.writeDrifted(files, read);
+      return read;
     });
   }
 
   /** Runs drift on one file and returns its comments as they now stand. */
   private async driftFile(
     id: string,
-    workspace: string,
+    files: FileService,
     relPath: string,
     source: string[],
   ): Promise<ReviewAnnotation[]> {
-    const path = this.reviewPath(workspace);
-    return this.withLock(id, () => {
-      const before = fileHash(path);
-      const review = this.read(path);
-      const annotations = review.data.get(relPath);
+    return this.withLock(id, async () => {
+      const read = await this.read(files);
+      const annotations = read.review.data.get(relPath);
       if (!annotations) return [];
-      if (checkDrift(annotations, source) && fileHash(path) === before) {
-        writeFileAtomic(path, serializeReview(review));
-      }
-      return toAnnotations(annotationsFor(review, relPath));
+      if (checkDrift(annotations, source)) await this.writeDrifted(files, read);
+      return toAnnotations(annotationsFor(read.review, relPath));
     });
+  }
+
+  /**
+   * Writes the result of a drift check, unless REVIEW.md changed since it was
+   * read.
+   */
+  private async writeDrifted(files: FileService, read: ReviewRead): Promise<void> {
+    try {
+      await files.write(REVIEW_FILE, serializeReview(read.review), expecting(read.hash));
+    } catch (err) {
+      if (!failedCondition(err)) throw err;
+    }
   }
 
   /**
@@ -640,36 +652,34 @@ export class ReviewService {
   // --- paths ----------------------------------------------------------------
 
   /**
-   * Resolves a client-supplied path to a file the review offers.
+   * Checks a client-supplied path to a file the review offers.
    *
    * {@link listedFile} applies the listing's rule, so the API serves only what
-   * a directory listing offers. `resolveInRoot` keeps the path inside the
+   * a directory listing offers. The file service keeps the path inside the
    * workspace. A directory is refused too. Every refusal is the same 404, so an
    * escape attempt learns no more than an unknown path would.
    *
-   * Returns null for a file that is missing on disk and that git reports
+   * Returns false for a file that is missing on disk and that git reports
    * deleted. The caller decides how to answer for it.
    */
-  private async resolveFile(
-    box: GitBox,
-    id: string,
-    workspace: string,
-    relPath: string,
-  ): Promise<string | null> {
+  private async resolveFile(box: ReviewBox, id: string, relPath: string): Promise<boolean> {
     if (!listedFile(relPath)) throw new HttpError(404, 'File not found');
 
-    const resolved = resolveInRoot(workspace, relPath);
-    if (resolved.ok) {
-      if (isDirectory(resolved.path)) throw new HttpError(404, 'File not found');
-      return resolved.path;
+    try {
+      if ((await box.files.stat(relPath)).type !== 'file') {
+        throw new HttpError(404, 'File not found');
+      }
+      return true;
+    } catch (err) {
+      if (!isRefusedPath(err)) throw err;
+      if (!isMissing(err)) throw new HttpError(404, 'File not found');
     }
-    if (resolved.reason !== 'missing') throw new HttpError(404, 'File not found');
 
     // Nothing on disk. Only git can tell a deleted file from a path that never
     // existed.
     const { statuses } = await this.snapshot(box, id, false);
     if (statuses[relPath] !== 'deleted') throw new HttpError(404, 'File not found');
-    return null;
+    return false;
   }
 
   /**
@@ -679,21 +689,23 @@ export class ReviewService {
    * under it, and {@link dirEntries} adds those files. Any other missing
    * directory is a 404.
    */
-  private children(
-    workspace: string,
+  private async children(
+    files: FileService,
     relDir: string,
     statuses: FileStatuses,
-  ): DirChild[] {
-    if (relDir === '') return readDir(workspace, '');
-    if (!listedDir(relDir)) throw new HttpError(404, 'Directory not found');
+  ): Promise<DirListing> {
+    if (relDir !== '' && !listedDir(relDir)) throw new HttpError(404, 'Directory not found');
 
-    const resolved = resolveInRoot(workspace, relDir);
-    if (resolved.ok) {
-      if (!isDirectory(resolved.path)) throw new HttpError(404, 'Directory not found');
-      return readDir(workspace, relDir);
+    try {
+      const listed = await files.list(relDir);
+      return { children: reviewChildren(relDir, listed.entries), truncated: listed.truncated };
+    } catch (err) {
+      if (!(err instanceof FileServiceError)) throw err;
+      if (isMissing(err) && relDir !== '' && holdsDeleted(statuses, relDir)) {
+        return { children: [], truncated: false };
+      }
+      throw new HttpError(404, 'Directory not found');
     }
-    if (resolved.reason === 'missing' && holdsDeleted(statuses, relDir)) return [];
-    throw new HttpError(404, 'Directory not found');
   }
 
   /** Drops the snapshot and the lock of a deleted box. */
@@ -734,20 +746,30 @@ function goneFile(
 /**
  * A file's current lines for a drift check.
  *
- * Null says the file is gone or unreadable, which marks every annotation on it
- * outdated. Undefined says the file is binary or longer than the display cap,
- * so the drift check skips it.
+ * Null says the file is gone or cannot be read, which marks every annotation
+ * on it outdated. Undefined says the file is binary or longer than the display
+ * cap, so the drift check skips it. A connection that fails throws, so it
+ * marks nothing outdated.
  */
-function sourceLines(workspace: string, relPath: string): string[] | null | undefined {
-  const resolved = resolveInRoot(workspace, relPath);
-  if (!resolved.ok || isDirectory(resolved.path)) return null;
+async function sourceLines(files: FileService, relPath: string): Promise<string[] | null | undefined> {
   try {
-    const read = readTextFile(resolved.path);
+    const read = await files.read(relPath, MAX_FILE_BYTES);
     if (read.binary || read.truncated) return undefined;
     return fileLines(read.content);
-  } catch {
-    return null;
+  } catch (err) {
+    if (err instanceof FileServiceError) return null;
+    throw err;
   }
+}
+
+/** The condition a write of a file read with this hash expects: '' is no file. */
+function expecting(hash: string): WriteCondition {
+  return hash === '' ? { absent: true } : { hash };
+}
+
+/** Whether an error is the file service refusing a write whose condition failed. */
+function failedCondition(err: unknown): boolean {
+  return err instanceof FileServiceError && err.status === 412;
 }
 
 /** One file's annotations, as the API reports them: a list, in line order. */

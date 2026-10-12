@@ -215,27 +215,28 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    for (const [prompt, name] of [
+    const prompts = [
       ['split into messages', 'quiet-rows-split'],
       ['all one message', 'quiet-rows-one-message'],
-    ]) {
+    ];
+    for (const [index, [prompt, name]] of prompts.entries()) {
       const input = page.getByLabel('Message input');
       await input.fill(prompt!);
       await input.press('Control+Enter');
+      // Counted, because the answer of the turn before is still on the page.
       await expect
-        .poll(() => page.getByText('and that is the answer').last().isVisible(), { timeout: 10_000 })
-        .toBe(true);
-      // Reasoning collapses over 200ms after the turn moves on, and its state
-      // flips at the start. So the wait is for the panels to have no height.
+        .poll(() => page.getByText('and that is the answer').count(), { timeout: 10_000 })
+        .toBe(index + 1);
+      // Reasoning collapses over 200ms after the turn moves on. A closed panel
+      // keeps its text until its animation has ended, so the wait is for the
+      // panels to have let go of it.
       await expect
         .poll(() =>
-          page.evaluate(() =>
-            [...document.querySelectorAll('[data-slot="reasoning-content"]')].every(
-              (el) => el.getBoundingClientRect().height === 0,
-            ),
+          page.evaluate(
+            () => document.querySelectorAll('[data-slot="reasoning-content"] .aui-md').length,
           ),
         )
-        .toBe(true);
+        .toBe(0);
 
       // Every gap between two rows of this turn, measured on the triggers so
       // it includes all margins. The turn before is still on the page.

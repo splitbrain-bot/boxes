@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
 import { setGitRunnerForTests, type GitBox, type GitRunner } from './git.ts';
+import { listDir } from '../../../files/src/ops.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { fileService, setFileServiceSpawnerForTests } from '../files.ts';
 import { discoverRepos, RepoMap } from './repos.ts';
 import {
   dirEntries,
@@ -13,7 +16,7 @@ import {
   listedDir,
   listedFile,
   MAX_DIR_ENTRIES,
-  readDir,
+  reviewChildren,
 } from './tree.ts';
 
 /**
@@ -84,7 +87,12 @@ describe('listedFile', () => {
   });
 });
 
-describe('readDir', () => {
+/** The children of one directory as the review lists them. */
+function readDir(root: string, relDir: string): Array<{ name: string; isDir: boolean }> {
+  return reviewChildren(relDir, listDir(root, relDir).entries);
+}
+
+describe('reviewChildren', () => {
   let dir: string;
 
   beforeEach(() => {
@@ -153,10 +161,6 @@ describe('readDir', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
-  });
-
-  test('a directory that is not there lists nothing rather than failing', () => {
-    assert.deepEqual(readDir(dir, 'nosuch'), []);
   });
 
   test('the cap is a real number, not a placeholder', () => {
@@ -279,11 +283,15 @@ describe('dirEntries over real repositories', () => {
 
   beforeEach(() => {
     setGitRunnerForTests(localGit);
+    setFileServiceSpawnerForTests(
+      inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
+    );
     dir = mkdtempSync(join(tmpdir(), 'boxes-rdir-'));
   });
 
   afterEach(() => {
     setGitRunnerForTests(null);
+    setFileServiceSpawnerForTests(null);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -311,7 +319,7 @@ describe('dirEntries over real repositories', () => {
     file('repo-a/src/x.ts');
     file('notes/todo.md');
 
-    const map = await discoverRepos(dir, box());
+    const map = await discoverRepos(fileService(dir), box());
     const root = dirEntries('', readDir(dir, ''), {}, new Map(), map);
     const byName = new Map(root.map((entry) => [entry.name, entry]));
     assert.equal(byName.get('repo-a')?.repo, true);
@@ -328,7 +336,7 @@ describe('dirEntries over real repositories', () => {
     repo('outer/inner');
     file('outer/inner/b.txt');
 
-    const map = await discoverRepos(dir, box());
+    const map = await discoverRepos(fileService(dir), box());
     const outer = dirEntries('outer', readDir(dir, 'outer'), {}, new Map(), map);
     assert.deepEqual(named(outer), ['d:inner', 'f:a.ts']);
     assert.equal(outer[0]!.repo, true);

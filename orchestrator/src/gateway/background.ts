@@ -191,6 +191,12 @@ const NOTHING: BoxReading = { busy: false, work: [] };
  */
 const READING_ITSELF = /^(?:\S*\/)?ps(?:\s|$)/;
 
+/**
+ * The file service, which the orchestrator starts in the box. Its script runs
+ * under node, so `ps` shows the interpreter first.
+ */
+const FILE_SERVICE = /^(?:\S*\/)?(?:node\s+)?(?:\S*\/)?boxes-files(?:\s|$)/;
+
 /** The command the entrypoint execs to hold the container open. */
 const ENTRYPOINT_HOLD = 'sleep infinity';
 
@@ -202,9 +208,10 @@ const INIT_PID = 1;
  *
  * Resident processes are the box's init and the `sleep infinity` directly
  * under it, every adapter, every adapter's direct children (the agent
- * processes), anything matching a harness's `residentProcesses`, and the `ps`
- * that took the reading. Everything else is work, including a build orphaned
- * by an adapter that died and the sandbox wrappers around a Codex command.
+ * processes), anything matching a harness's `residentProcesses`, the file
+ * service, and the `ps` that took the reading. Everything else is work,
+ * including a build orphaned by an adapter that died and the sandbox wrappers
+ * around a Codex command.
  *
  * `harnesses` must list every harness. With one missing, a box running that
  * harness reads as empty.
@@ -219,6 +226,7 @@ function isResident(
   if (adapters.has(process.pid)) return true;
   if (adapters.has(process.ppid)) return true;
   if (READING_ITSELF.test(process.command.trim())) return true;
+  if (FILE_SERVICE.test(process.command.trim())) return true;
   return harnesses.some((h) =>
     h.residentProcesses.some((pattern) => pattern.test(process.command)),
   );

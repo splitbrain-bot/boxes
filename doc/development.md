@@ -11,7 +11,8 @@ Each top-level directory is a self-contained package with its own lock file.
 | `orchestrator/` | The [backend service](orchestrator.md). Node.js and Fastify, written in TypeScript. Serves the REST API, the dashboard bundle and the `/ws` gateways, drives Docker through dockerode, stores state in SQLite (better-sqlite3). Request and response bodies are validated with zod. |
 | `dashboard/` | The frontend. A React 19 single-page app with React Router, zustand for state, assistant-ui (shadcn-style, sources committed under `src/components/assistant-ui/`) for the chat, Tailwind CSS 4 for styling, xterm.js for the terminal, shiki for syntax highlighting. |
 | `proxy/` | The [egress proxy](egress.md). Node.js and TypeScript, built on mockttp. The only route out of a box network; swaps placeholder tokens for real credentials on the wire. |
-| `shared/` | Plain TypeScript modules imported by both the orchestrator and the dashboard: the ACP vocabulary, the REST types, the terminal subprotocol. There is no build step; the consumers import the sources directly. |
+| `files/` | The [file service](files.md) `boxes-files`. The orchestrator reads and writes the files of a box through it. Node.js and TypeScript, no runtime dependencies. |
+| `shared/` | Plain TypeScript modules imported by the orchestrator, the dashboard and the file service: the ACP vocabulary, the REST types, the terminal subprotocol, the file service protocol. There is no build step; the consumers import the sources directly. |
 | `box-image/` | The Dockerfile and support files for the [box containers](boxes.md) the orchestrator creates at runtime. Ubuntu-based, ships the agent CLIs and their ACP adapters, Nix for agent-installed tooling, tmux for the terminal. |
 | `tests/` | `smoke-test.sh`, the security smoke test (see below). |
 | `doc/` | Topic documentation. |
@@ -20,9 +21,9 @@ Each top-level directory is a self-contained package with its own lock file.
 ## Technologies
 
 - **Language:** TypeScript (ESM) throughout. The images and CI use Node.js 26.
-- **Build:** Vite. The orchestrator and the proxy are bundled in SSR mode (dependencies stay external, the runtime
-  images install them); the dashboard is bundled as a browser app. Every package also type-checks with `tsc --noEmit`
-  (`npm run check`).
+- **Build:** Vite. The orchestrator, the proxy and the file service are bundled in SSR mode (dependencies stay
+  external, the runtime images install them); the dashboard is bundled as a browser app. Every package also
+  type-checks with `tsc --noEmit` (`npm run check`).
 - **Tests:** Vitest everywhere, Playwright for browser tests.
 - **Containers:** Docker with Compose v2 for deployment; the orchestrator talks to the daemon directly through the
   Docker socket.
@@ -42,6 +43,7 @@ Install each package from its directory:
 ```sh
 cd orchestrator && npm ci
 cd proxy && npm ci
+cd files && npm ci
 cd dashboard && npm ci
 ```
 
@@ -54,16 +56,17 @@ Each package builds from its directory:
 ```sh
 cd orchestrator && npm run build   # bundle in dist/
 cd proxy && npm run build          # bundle in dist/
+cd files && npm run build          # bundle in dist/
 cd dashboard && npm run build      # static app in dist/
 ```
 
-The three production images build from the repository root, because the orchestrator and proxy Dockerfiles also copy
-`shared/`:
+The three production images build from the repository root, because each Dockerfile also copies `shared/`. The box
+image builds the file service from `files/`:
 
 ```sh
 docker build -f orchestrator/Dockerfile .
 docker build -f proxy/Dockerfile .
-docker build -f box-image/Dockerfile box-image
+docker build -f box-image/Dockerfile .
 ```
 
 ## Running locally
@@ -88,6 +91,7 @@ Each package runs its own suite. Run them from the package directories:
 ```sh
 cd orchestrator && npm test
 cd proxy && npm test
+cd files && npm test
 cd dashboard && npm test
 ```
 
@@ -96,10 +100,12 @@ Type checking is separate, also run from each package directory:
 ```sh
 cd orchestrator && npm run check
 cd proxy && npm run check
+cd files && npm run check
 cd dashboard && npm run check
 ```
 
-The orchestrator and proxy suites are plain Vitest unit tests; Docker interactions are faked, no daemon is needed.
+The orchestrator, proxy and file service suites are plain Vitest unit tests; Docker interactions are faked, no daemon is
+needed. The orchestrator tests run the real file service in process, on a temporary directory.
 
 The dashboard suite has two projects, both run by `npm test`:
 
@@ -125,5 +131,5 @@ The header of the script documents the environment variables for credential tran
 
 ## CI
 
-`.github/workflows/publish.yml` runs the three test suites in parallel, builds the three images, runs the smoke test
+`.github/workflows/publish.yml` runs the four test suites in parallel, builds the three images, runs the smoke test
 against the built images, and publishes to GHCR on pushes to `main`.

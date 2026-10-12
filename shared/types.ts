@@ -381,14 +381,14 @@ export interface BoxSummary {
   agentSetName: string | null;
   /**
    * How much disk this box takes up, in bytes: its workspace, its home and its
-   * Nix store together. Null when there is no measurement yet, or no directory
-   * to measure.
+   * Nix store together. Null when there is no measurement yet.
    *
-   * The value is the last measurement, so it lags. A running box is measured
-   * again at most every fifteen minutes, and a stopped one is not measured
-   * again.
+   * The value is the last measurement, so it lags. A box is measured before
+   * each stop, and a running box again at most every fifteen minutes.
    */
   diskBytes: number | null;
+  /** When `diskBytes` was measured, in epoch milliseconds. Null when it is. */
+  diskMeasuredAt: number | null;
   /**
    * The dev tunnel ports the box hosts, as the orchestrator read them at its
    * last minute tick. Empty when it hosts none.

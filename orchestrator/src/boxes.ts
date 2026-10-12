@@ -33,6 +33,7 @@ import {
 } from './db.ts';
 import { BoxUsage, BOX_SIZE_TTL_MS } from './diskusage.ts';
 import * as dk from './docker.ts';
+import { fileService } from './files.ts';
 import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
@@ -98,10 +99,14 @@ export class BoxManager {
   /** Permission requests waiting for a browser, across all boxes. */
   readonly pending: PendingStore;
 
-  /** How big each box has got, measured off the request path. */
+  /** How big each box has got, measured by the file service in the box. */
   private readonly usage = new BoxUsage({
-    // Everything a box is on disk.
-    pathsOf: (id) => [this.workspacePathOf(id), this.homePathOf(id), this.nixPathOf(id)],
+    measure: (id) => this.measureDisk(id),
+    store: (id, bytes, at) => {
+      this.db
+        .prepare('UPDATE boxes SET disk_bytes = ?, disk_measured_at = ? WHERE id = ?')
+        .run(bytes, at, id);
+    },
     ttlMs: BOX_SIZE_TTL_MS,
     onTrouble: (id, error) =>
       log.box(id).warn('could not measure what a box is using', {
@@ -214,39 +219,6 @@ export class BoxManager {
     }
     this.hostDataDir = source;
     log.info('resolved the host path of the data directory', { hostDataDir: source });
-  }
-
-  /**
-   * Where a box's files are on this process's own filesystem.
-   *
-   * Derived from the current DATA_DIR and the box id, so moving the data
-   * volume moves the workspaces with it. An unknown or deleted box is null,
-   * and the caller answers that with its own 404.
-   */
-  workspacePathOf(id: string): string | null {
-    const row = this.getRow(id);
-    if (!row || row.status === 'deleted') return null;
-    return ws.workspacePath(this.cfg.DATA_DIR, row.id);
-  }
-
-  /**
-   * Where a box's home is on this process's own filesystem, on the same
-   * terms as its workspace.
-   */
-  homePathOf(id: string): string | null {
-    const row = this.getRow(id);
-    if (!row || row.status === 'deleted') return null;
-    return ws.homePath(this.cfg.DATA_DIR, row.id);
-  }
-
-  /**
-   * Where a box's Nix store is on this process's own filesystem, on the
-   * same terms as its workspace.
-   */
-  nixPathOf(id: string): string | null {
-    const row = this.getRow(id);
-    if (!row || row.status === 'deleted') return null;
-    return ws.nixPath(this.cfg.DATA_DIR, row.id);
   }
 
   // --- the box image ----------------------------------------------------
@@ -733,6 +705,8 @@ export class BoxManager {
       ws_token: generateWsToken(),
       created_at: now,
       last_active_at: now,
+      disk_bytes: null,
+      disk_measured_at: null,
     };
 
     this.db
@@ -909,7 +883,14 @@ export class BoxManager {
     // Everything queued before this has given up; what comes after may run.
     this.preempted.delete(id);
     const row = this.mustGet(id);
-    if (row.container_id) await dk.stopContainer(row.container_id);
+    if (row.container_id) {
+      // Nothing in a stopped box changes, so the value measured now stays
+      // correct until the next start.
+      if ((await dk.containerState(row.container_id)) === 'running') {
+        await this.usage.measureNow(id);
+      }
+      await dk.stopContainer(row.container_id);
+    }
     this.setStatus(id, 'stopped');
     log.box(id).info('box stopped');
     return this.detail(id);
@@ -938,7 +919,6 @@ export class BoxManager {
     for (const table of ['pending_requests', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE box_id = ?`).run(id);
     }
-    this.usage.forget(id);
     log.box(id).info('box deleted', { name: row.name });
   }
 
@@ -1019,6 +999,17 @@ export class BoxManager {
     return { containerId: row.container_id!, workingDir: dk.WORKSPACE_DIR };
   }
 
+  /**
+   * What a running box takes up on disk, in bytes, as the file service in it
+   * measures. It neither starts the box nor marks it active, so a
+   * measurement does not keep a box from the reaper.
+   */
+  private async measureDisk(id: string): Promise<number> {
+    const row = this.mustGet(id);
+    if (!row.container_id) throw new Error('the box has no container');
+    return fileService(row.container_id).size();
+  }
+
   /** Marks a box active, so reaching into the box holds off the reaper. */
   touch(id: string): void {
     touchBox(this.db, id);
@@ -1066,18 +1057,6 @@ export class BoxManager {
   }
 
   /**
-   * Says the orchestrator has written into a box's workspace, so its size
-   * is measured again rather than answered from what a stopped box was left
-   * at.
-   *
-   * A stopped box is measured once and then left alone, because it cannot
-   * grow on its own. An upload is the exception.
-   */
-  workspaceChanged(id: string): void {
-    this.usage.forget(id);
-  }
-
-  /**
    * The command lines running in every box that has not been deleted, for
    * the tunnel reconciler. A box whose container is not running has none. A
    * box whose state or processes cannot be read is reported as null.
@@ -1117,6 +1096,7 @@ export class BoxManager {
     turnActive: boolean,
   ): Promise<BoxSummary> {
     const dockerState = await dk.containerState(row.container_id);
+    if (dockerState === 'running') this.usage.refresh(row.id, row.disk_measured_at);
     const pendingByThread = this.pending.countsByThread(row.id);
     // The gateway's in-memory view of which threads are speaking and which
     // have tasks running, read once so every thread answers from the same
@@ -1152,12 +1132,8 @@ export class BoxManager {
       agentSetId: row.agent_set_id,
       agentSetName: this.agents.nameOf(row.agent_set_id),
       // What was last measured, and null until there is a measurement.
-      // 'unknown' counts as live: a Docker read that failed says nothing
-      // about whether the agent is working.
-      diskBytes: this.usage.bytes(
-        row.id,
-        dockerState !== 'exited' && dockerState !== 'missing',
-      ),
+      diskBytes: row.disk_bytes,
+      diskMeasuredAt: row.disk_measured_at,
       tunnels: this.tunnelsOf(row.id),
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,

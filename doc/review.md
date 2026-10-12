@@ -54,10 +54,10 @@ The review code lives in `orchestrator/src/review/`.
 ### REVIEW.md is the only store
 
 There is no annotation table. Every mutation reads, parses, applies, serializes and writes the whole `REVIEW.md` under a
-per-box lock, with the file's hash checked between read and write. A hash that changed means the agent wrote in between;
-the mutation is re-read and re-applied once. Writes are atomic and keep the file's permissions, and the file is chowned
-to the box user so the agent can edit or delete it. The format matches the desktop
-[`review`](https://github.com/splitbrain/review) tool byte for byte — the test fixtures are files that tool wrote.
+per-box lock. The write sends the hash that was read. When the agent changed the file in between, the
+[file service](files.md) refuses the write, and the mutation is read and applied once more. Writes are atomic and keep
+the file's permissions. The format matches the desktop [`review`](https://github.com/splitbrain/review) tool byte for
+byte — the test fixtures are files that tool wrote.
 
 ### One workspace, many repositories
 
@@ -79,14 +79,13 @@ fails only when it resolves nowhere.
 Every git invocation is a `docker exec` into the box's own container, as the box user, with a fixed argument vector
 built in `review/git.ts`. The orchestrator never runs git on the workspace itself: a repository's configuration can name
 programs for git to run (a clean filter is sufficient), and in the box such a command has only the agent's own
-privileges. This is why review endpoints that need git start a stopped box.
+privileges.
 
 ### Containment
 
-The orchestrator reads a tree the agent controls, so every client path goes through `resolveInRoot` in `review/fs.ts`:
-the path must stay under the workspace's real path, and the orchestrator refuses a symlink as the final component. The
-same check applies to the file endpoints and the attachment endpoint. The orchestrator caps file reads at 2 MiB; a NUL
-byte marks a file as binary.
+The [file service](files.md) in the box reads the tree with the rights of the agent. It keeps every path under the
+workspace's real path, and refuses a symlink as the final component. The review serves only the paths that a listing
+offers. The orchestrator caps file reads at 2 MiB; a NUL byte marks a file as binary.
 
 ### Drift
 

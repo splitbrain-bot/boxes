@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { fileService, setFileServiceSpawnerForTests } from '../files.ts';
 import { discoverRepos } from './repos.ts';
 import {
   baseRev,
@@ -254,11 +256,15 @@ describe('over a workspace of several repositories', () => {
 
   beforeEach(() => {
     setGitRunnerForTests(localGit);
+    setFileServiceSpawnerForTests(
+      inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
+    );
     dir = mkdtempSync(join(tmpdir(), 'boxes-wsstatus-'));
   });
 
   afterEach(() => {
     setGitRunnerForTests(null);
+    setFileServiceSpawnerForTests(null);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -300,7 +306,7 @@ describe('over a workspace of several repositories', () => {
    * without one, against HEAD.
    */
   async function statuses(rev = ''): Promise<Record<string, string>> {
-    const map = await discoverRepos(dir, box());
+    const map = await discoverRepos(fileService(dir), box());
     return workspaceStatuses(box(), map, await resolveBases(box(), map, rev));
   }
 
@@ -344,7 +350,7 @@ describe('over a workspace of several repositories', () => {
       git(name, 'commit', '-q', '-m', 'feature work');
     }
 
-    const map = await discoverRepos(dir, box());
+    const map = await discoverRepos(fileService(dir), box());
     const bases = await resolveBases(box(), map, 'main');
     assert.equal(bases.size, 2);
     // Different commits: `main` means main-in-each, not one shared id.
@@ -361,7 +367,7 @@ describe('over a workspace of several repositories', () => {
     git('repo-a', 'branch', 'release');
     file('repo-b/tracked.txt', 'changed\n');
 
-    const map = await discoverRepos(dir, box());
+    const map = await discoverRepos(fileService(dir), box());
     const bases = await resolveBases(box(), map, 'release');
     // Resolved in one, absent from the other — a soft failure rather than a
     // failed request, because that shape is ordinary.
@@ -373,7 +379,7 @@ describe('over a workspace of several repositories', () => {
 
   test('no revision resolves nothing anywhere', async () => {
     repo('repo-a');
-    const map = await discoverRepos(dir, box());
+    const map = await discoverRepos(fileService(dir), box());
     assert.equal((await resolveBases(box(), map, '')).size, 0);
     assert.equal((await resolveBases(box(), map, 'no-such-branch')).size, 0);
   });

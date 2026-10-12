@@ -86,8 +86,6 @@ The GET serves a stored attachment back, which is how the thread shows a picture
 
 ## Code review
 
-The [review](review.md) reads the box's workspace directory. Routes that ask git start a stopped box's container first.
-
 | Method | Path | Answer |
 | --- | --- | --- |
 | GET | `/api/boxes/:id/review/dir?path=<p>&fresh=1` | `ReviewDirResponse` |

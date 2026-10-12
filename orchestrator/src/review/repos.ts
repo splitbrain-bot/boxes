@@ -1,5 +1,4 @@
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import type { FileService } from '../files.ts';
 import { isTopLevel, type GitBox, type GitTarget } from './git.ts';
 
 /** One repository found in a workspace. */
@@ -136,66 +135,31 @@ export function inRepo(repo: Repo, path: string): string {
 /**
  * Finds every repository in a workspace, up to {@link MAX_REPOS}.
  *
- * The walk reads the workspace directory on this process's filesystem, which
- * is the same tree the box holds at `box.workspaceDir`. Every directory holding
- * a `.git` file or directory is a candidate. Git in the box then confirms that
+ * The file service in the box walks the workspace breadth first. It skips
+ * {@link PRUNED_DIRS} and stops at {@link MAX_REPO_DEPTH},
+ * {@link MAX_SCANNED_DIRS} or {@link MAX_REPOS}. Every directory holding a
+ * `.git` file or directory is a candidate. Git in the box then confirms that
  * each candidate is the top of a work tree.
  */
-export async function discoverRepos(workspace: string, box: GitBox): Promise<RepoMap> {
-  const candidates = candidateDirs(workspace, box);
+export async function discoverRepos(files: FileService, box: GitBox): Promise<RepoMap> {
+  const paths = await files.findRepos({
+    maxDepth: MAX_REPO_DEPTH,
+    maxScanned: MAX_SCANNED_DIRS,
+    maxRepos: MAX_REPOS,
+    pruned: [...PRUNED_DIRS],
+  });
+  const candidates = paths.map((path) => ({
+    path,
+    name: path === '' ? workspaceName(box.workspaceDir) : (path.split('/').pop() ?? ''),
+    git: gitTarget(box, path),
+  }));
   const confirmed = await Promise.all(
     candidates.map(async (candidate) => ((await isTopLevel(candidate.git)) ? candidate : null)),
   );
-  return new RepoMap(workspace, confirmed.filter((repo) => repo !== null).slice(0, MAX_REPOS));
-}
-
-/**
- * The directories under a workspace that hold a `.git`, breadth first.
- *
- * The walk skips {@link PRUNED_DIRS} and stops at {@link MAX_REPO_DEPTH},
- * {@link MAX_SCANNED_DIRS} or {@link MAX_REPOS}. Breadth first means a cap
- * leaves the deepest directories unread, where dependency trees sit.
- */
-function candidateDirs(workspace: string, box: GitBox): Repo[] {
-  const found: Repo[] = [];
-  let scanned = 0;
-  let queue: Array<{ absolute: string; path: string }> = [{ absolute: workspace, path: '' }];
-
-  for (let depth = 0; depth <= MAX_REPO_DEPTH && queue.length > 0; depth++) {
-    const next: typeof queue = [];
-    for (const dir of queue) {
-      if (scanned >= MAX_SCANNED_DIRS || found.length >= MAX_REPOS) return found;
-      scanned++;
-
-      let entries;
-      try {
-        entries = readdirSync(dir.absolute, { withFileTypes: true });
-      } catch {
-        continue; // unreadable directory: skipped, not fatal
-      }
-
-      for (const entry of entries) {
-        // A `.git` file marks a linked worktree or a submodule.
-        if (entry.name === '.git' && (entry.isDirectory() || entry.isFile())) {
-          found.push({
-            path: dir.path,
-            name: dir.path === '' ? workspaceName(workspace) : (dir.path.split('/').pop() ?? ''),
-            git: gitTarget(box, dir.path),
-          });
-        }
-        // `isDirectory` is false for a symlink, so the walk never follows a
-        // link out of the agent's tree.
-        if (!entry.isDirectory() || PRUNED_DIRS.has(entry.name)) continue;
-        next.push({
-          absolute: join(dir.absolute, entry.name),
-          path: dir.path === '' ? entry.name : `${dir.path}/${entry.name}`,
-        });
-      }
-    }
-    queue = next;
-  }
-
-  return found;
+  return new RepoMap(
+    box.workspaceDir,
+    confirmed.filter((repo) => repo !== null).slice(0, MAX_REPOS),
+  );
 }
 
 /** What to call a repository that is the workspace itself. */

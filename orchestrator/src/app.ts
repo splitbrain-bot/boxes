@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import type { FastifyReply } from 'fastify';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
+import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import type {
   CredentialSummary,
@@ -56,12 +57,13 @@ import {
 import * as dk from './docker.ts';
 import { EgressManager } from './egress.ts';
 import { HARNESSES } from './harness.ts';
+import { fileService, isRefusedPath } from './files.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
 import { dockerLoginRuntime, LoginManager } from './login.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
-import { MAX_FILE_BYTES, resolveInRoot } from './review/fs.ts';
+import { MAX_FILE_BYTES } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
 import { BoxManager } from './boxes.ts';
 import { deploymentId, patchSettings, readSettings } from './settings.ts';
@@ -155,10 +157,11 @@ const COMPRESS_THRESHOLD_BYTES = 1024;
 /**
  * Sends one file out of a workspace, typed by its name rather than its bytes.
  *
- * {@link servedTypeFor} decides the type and the policy. The caller has
- * already resolved the path inside the workspace and made sure it is a file.
+ * {@link servedTypeFor} decides the type and the policy. The stream comes
+ * from the file service and is piped to the browser, so a large file is not
+ * held in memory.
  */
-function sendWorkspaceFile(reply: FastifyReply, path: string, name: string, size: number) {
+function sendWorkspaceFile(reply: FastifyReply, stream: Readable, name: string, size: number) {
   const served = servedTypeFor(name);
   void reply.headers({
     'Content-Type': served.contentType,
@@ -173,7 +176,7 @@ function sendWorkspaceFile(reply: FastifyReply, path: string, name: string, size
     // Short, because the agent can rewrite the file under a stable name.
     'Cache-Control': 'private, max-age=60',
   });
-  return createReadStream(path);
+  return stream;
 }
 
 /** Whether the database answers a query, for the readiness probe. */
@@ -279,7 +282,6 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // The manager knows where a box's files are and how to get its container
   // running.
   const review = new ReviewService(db, {
-    workspacePath: (id) => manager.workspacePathOf(id),
     execTarget: (id) => manager.execTarget(id),
   });
 
@@ -517,9 +519,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * workspace.
    *
    * The body is the raw bytes of one file, and its name is in the query. The
-   * upload comes before the prompt that mentions it. It needs no container,
-   * because the workspace is a directory this process writes, so a stopped
-   * box takes attachments as well.
+   * upload comes before the prompt that mentions it. The file service in the
+   * box writes it, so the upload starts a stopped box.
    */
   app.post(
     '/api/boxes/:id/attachments',
@@ -534,15 +535,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
         throw new HttpError(400, 'an attachment body is required');
       }
 
-      const workspace = manager.workspacePathOf(id);
-      if (!workspace) throw new HttpError(404, 'Box not found');
-
-      const stored = await storeAttachment(workspace, name, body);
-      // An upload is somebody working in the box, so the reaper leaves it.
-      manager.touch(id);
-      // An upload can grow the workspace of a stopped box, which the size
-      // cache does not measure again on its own.
-      manager.workspaceChanged(id);
+      // This marks the box active: an upload is somebody working in the box,
+      // so the reaper leaves it.
+      const target = await manager.execTarget(id);
+      const stored = await storeAttachment(fileService(target.containerId), name, body);
       log.box(id).info('attachment stored', { path: stored.path, size: stored.size });
       return stored;
     },
@@ -550,11 +546,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   /**
    * Serves one stored attachment back, which is how the thread shows the
-   * picture the user attached.
-   *
-   * The agent controls this tree, so a link planted in the attachments
-   * directory could point at anything the orchestrator's uid can read.
-   * `resolveInRoot` keeps the read inside the directory.
+   * picture the user attached. The file service in the box reads it, so this
+   * starts a stopped box.
    */
   app.get('/api/boxes/:id/attachments/:name', async (req, reply) => {
     const { id, name } = req.params as { id: string; name: string };
@@ -563,15 +556,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       throw new HttpError(404, 'Attachment not found');
     }
 
-    const workspace = manager.workspacePathOf(id);
-    if (!workspace) throw new HttpError(404, 'Box not found');
-
-    const resolved = resolveInRoot(join(workspace, ATTACHMENTS_DIR), name);
-    if (!resolved.ok) throw new HttpError(404, 'Attachment not found');
-    const stat = statSync(resolved.path);
-    if (!stat.isFile()) throw new HttpError(404, 'Attachment not found');
-
-    return sendWorkspaceFile(reply, resolved.path, name, stat.size);
+    const target = await manager.execTarget(id);
+    let file;
+    try {
+      file = await fileService(target.containerId).readStream(`${ATTACHMENTS_DIR}/${name}`);
+    } catch (err) {
+      if (isRefusedPath(err)) throw new HttpError(404, 'Attachment not found');
+      throw err;
+    }
+    return sendWorkspaceFile(reply, file.stream, name, file.size);
   });
 
   // --- Code review over a box's workspace ---------------------------------
@@ -606,10 +599,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const { id } = req.params as { id: string };
     const { path } = req.query as { path?: string };
     if (!path) throw new HttpError(400, 'path is required');
-    const file = review.rawFile(id, path);
-    const stat = statSync(file);
-    if (!stat.isFile()) throw new HttpError(404, 'File not found');
-    return sendWorkspaceFile(reply, file, basename(path), stat.size);
+    const file = await review.rawFile(id, path);
+    return sendWorkspaceFile(reply, file.stream, basename(path), file.size);
   });
 
   /**

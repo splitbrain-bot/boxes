@@ -62,5 +62,6 @@ work on the same checkout.
 - [Agent communication](doc/acp.md) — The way the dashboard, the orchestrator and an agent speak ACP
 - [Egress proxy](doc/egress.md) — Host filtering and credential injection
 - [Storage](doc/storage.md) — The contents of the data volume, and the files a box keeps
+- [File service](doc/files.md) — The process in a box through which the orchestrator reads and writes its files
 - [REST API](doc/rests.md) — The HTTP API under `/api` used by the dashboard
 - [Development](doc/development.md) — Repository layout, technologies and tests

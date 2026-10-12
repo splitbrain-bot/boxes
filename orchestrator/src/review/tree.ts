@@ -1,5 +1,4 @@
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import type { DirChild } from '../../../shared/files.ts';
 import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
 import type { RepoMap } from './repos.ts';
 
@@ -12,19 +11,7 @@ export const REVIEW_FILE = 'REVIEW.md';
  */
 const SKIPPED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
 
-/**
- * How many entries one directory listing returns before the rest are left out.
- * The cap applies per directory, so a huge folder limits only that folder.
- */
-export const MAX_DIR_ENTRIES = 2000;
-
-/** One child of a directory, as the filesystem reports it. */
-export interface DirChild {
-  /** Its own name inside the directory. */
-  name: string;
-  /** True for a directory. */
-  isDir: boolean;
-}
+export { MAX_DIR_ENTRIES, type DirChild } from '../../../shared/files.ts';
 
 /** Whether any segment of a path names a directory the listing steps over. */
 function inSkippedDir(path: string): boolean {
@@ -51,34 +38,19 @@ export function listedDir(relDir: string): boolean {
 }
 
 /**
- * Reads one directory of the workspace into its children.
+ * The children of one directory of the workspace that the review lists.
  *
- * Only this directory is read, so a large tree beside the code costs nothing
- * until someone opens it. Only plain files and directories are listed. The
- * agent controls the tree, so a symlink could lead out of it. A directory that
- * cannot be read lists nothing.
+ * The file service lists only this directory, with its plain files and
+ * directories. This leaves out the directories the listing skips and the
+ * review file at the workspace root.
  */
-export function readDir(root: string, relDir: string): DirChild[] {
-  let entries;
-  try {
-    entries = readdirSync(relDir === '' ? root : join(root, relDir), { withFileTypes: true });
-  } catch {
-    return []; // unreadable directory: empty, not fatal
-  }
-
-  const children: DirChild[] = [];
-  for (const entry of entries) {
-    const name = entry.name;
-    if (entry.isDirectory()) {
-      if (SKIPPED_DIRS.has(name)) continue;
-      children.push({ name, isDir: true });
-    } else if (entry.isFile()) {
-      // A REVIEW.md deeper in the tree is a project file like any other.
-      if (relDir === '' && name === REVIEW_FILE) continue;
-      children.push({ name, isDir: false });
-    }
-  }
-  return children;
+export function reviewChildren(relDir: string, entries: readonly DirChild[]): DirChild[] {
+  return entries.filter((entry) =>
+    entry.isDir
+      ? !SKIPPED_DIRS.has(entry.name)
+      : // A REVIEW.md deeper in the tree is a project file like any other.
+        !(relDir === '' && entry.name === REVIEW_FILE),
+  );
 }
 
 /**

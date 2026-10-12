@@ -1,9 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { extname } from 'node:path';
 import type { StoredAttachment } from '../../shared/types.ts';
-import { resolveInRoot } from './review/fs.ts';
-import { chownToAgent } from './workspaces.ts';
+import { FileServiceError, type FileService } from './files.ts';
 
 /**
  * Files the user attaches to a prompt, stored in the box's own workspace,
@@ -129,9 +126,6 @@ export function servedTypeFor(name: string): ServedType {
 /** Longest a stored name may be, extension included. */
 const MAX_NAME = 100;
 
-/** How many times a colliding name is suffixed before the upload is refused. */
-const MAX_COLLISIONS = 100;
-
 /**
  * A client's filename, reduced to a name that is safe as a path component and
  * as a line of a prompt.
@@ -161,90 +155,33 @@ export function safeAttachmentName(name: string): string {
 }
 
 /**
- * Writes `bytes` under the first free name: `name`, `name-2`, `name-3`…
- * Returns the name used and the full path.
- *
- * The open is exclusive, so two uploads of the same name at once land on two
- * files. The write is asynchronous, because one process carries every box's
- * stream and a blocking write of a large attachment would stall them all.
- */
-async function writeUnderFreeName(
-  dir: string,
-  name: string,
-  bytes: Buffer,
-): Promise<{ name: string; path: string }> {
-  const ext = extname(name);
-  const stem = ext ? name.slice(0, -ext.length) : name;
-  for (let n = 1; n <= MAX_COLLISIONS; n++) {
-    const candidate = n === 1 ? name : `${stem}-${n}${ext}`;
-    const path = join(dir, candidate);
-    try {
-      await writeFile(path, bytes, { mode: 0o644, flag: 'wx' });
-      return { name: candidate, path };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    }
-  }
-  throw new Error(`too many attachments named ${name}`);
-}
-
-/**
- * One directory of the attachments chain, created if it is not there yet and
- * handed to the agent. Returns its resolved path.
- *
- * The agent writes the workspace, so any level of the chain can be a link.
- * Creating through a link would put the directory, the bytes and the chown
- * outside the workspace. So each level is resolved under the workspace, which
- * refuses a link at any level, and is created on its own rather than
- * recursively.
- */
-function containedDir(workspace: string, relative: string): string {
-  const resolved = resolveInRoot(workspace, relative, false);
-  if (!resolved.ok) {
-    throw new Error(
-      `cannot store an attachment: ${relative} is not a usable directory (${resolved.reason})`,
-    );
-  }
-  if (!existsSync(resolved.path)) {
-    mkdirSync(resolved.path, { mode: 0o755 });
-    chownToAgent(resolved.path);
-  }
-  return resolved.path;
-}
-
-/**
- * Writes one attachment into a workspace and returns where it landed.
+ * Writes one attachment into the workspace of a box and returns where it
+ * landed.
  *
  * The name is reduced to a single path component, so it cannot leave the
- * directory. The directories above it are resolved under the workspace,
- * because the agent can rearrange them.
+ * directory. The file service creates each directory of the chain on its
+ * own, and refuses a link at any level. It writes the file under the first
+ * free name: `name`, `name-2`, `name-3`, and so on.
  */
 export async function storeAttachment(
-  workspace: string,
+  files: FileService,
   name: string,
   bytes: Buffer,
 ): Promise<StoredAttachment> {
-  const boxes = containedDir(workspace, '.boxes');
-  const dir = containedDir(workspace, ATTACHMENTS_DIR);
+  await files.mkdir('.boxes');
+  await files.mkdir(ATTACHMENTS_DIR);
 
-  const ignore = join(boxes, '.gitignore');
-  // Exclusive, so a link planted under this name is refused rather than
-  // followed, and a file already there is left as it is.
+  // Only when there is none, so a file already there is left as it is.
   try {
-    writeFileSync(ignore, GITIGNORE, { mode: 0o644, flag: 'wx' });
-    chownToAgent(ignore);
+    await files.write('.boxes/.gitignore', GITIGNORE, { absent: true });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    if (!(err instanceof FileServiceError && err.status === 412)) throw err;
   }
 
-  const target = await writeUnderFreeName(dir, safeAttachmentName(name), bytes);
-  // The agent reads these, and in the normal deployment it is a different uid
-  // from the one that just wrote them.
-  chownToAgent(target.path);
-
+  const stored = await files.create(ATTACHMENTS_DIR, safeAttachmentName(name), bytes);
   return {
-    name: target.name,
-    path: `${ATTACHMENTS_DIR}/${target.name}`,
+    name: stored,
+    path: `${ATTACHMENTS_DIR}/${stored}`,
     size: bytes.byteLength,
   };
 }
