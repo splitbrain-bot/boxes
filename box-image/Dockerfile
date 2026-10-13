@@ -261,7 +261,7 @@ COPY box-image/codex-config.toml /etc/codex/config.toml
 #
 # The browsers live on the image at BOXES_IMAGE_BROWSERS, and
 # PLAYWRIGHT_BROWSERS_PATH points there only during the build. libnss3-tools
-# provides certutil, with which the entrypoint adds the deployment CA to
+# provides certutil, with which the setup adds the deployment CA to
 # Chromium's store.
 #
 # /usr/local/bin/chromium is a stable path to the image's Chromium, for a
@@ -300,16 +300,25 @@ RUN pw=/usr/local/lib/node_modules/@playwright/cli/node_modules/.bin/playwright 
  && rm -rf /var/lib/apt/lists/*
 
 # At runtime, Playwright uses a writable directory in the home, into which
-# the entrypoint links the image's builds at every start.
+# the setup links the image's builds at every start.
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
 
-# The CLI's base configuration. The entrypoint adds the egress proxy at
+# The CLI's base configuration. The setup adds the egress proxy at
 # runtime.
 COPY box-image/playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
-# Skills the image carries, such as how nix works in a box. The entrypoint
-# installs them into the home at every start.
+# Skills for the tools of the image, such as how nix works in a box. The file
+# service installs them into the home with each agent set.
 COPY box-image/skills /usr/local/share/boxes/skills
+
+# The skill of the browser CLI, with this image's browser notes appended,
+# beside the other image skills. The CLI installs its skill only into a home,
+# so a scratch home is used and removed.
+COPY box-image/playwright-skill-notes.md /tmp/playwright-skill-notes.md
+RUN HOME=/tmp/skill-home NO_UPDATE_NOTIFIER=1 playwright-cli install --skills --global \
+ && mv /tmp/skill-home/.claude/skills/playwright-cli /usr/local/share/boxes/skills/playwright-cli \
+ && cat /tmp/playwright-skill-notes.md >> /usr/local/share/boxes/skills/playwright-cli/SKILL.md \
+ && rm -rf /tmp/skill-home /tmp/playwright-skill-notes.md
 
 # The file service. The orchestrator starts it in the box and reaches all the
 # files of the box through it. The bundle has no npm dependencies. node runs
@@ -353,6 +362,11 @@ ENV PATH=/home/agent/.local/state/nix/profile/bin:$PATH
 COPY box-image/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
+# The setup of the home. The orchestrator runs it as the agent after each
+# start of the box, before the box is ready.
+COPY box-image/setup.sh /usr/local/bin/boxes-setup
+RUN chmod 0755 /usr/local/bin/boxes-setup
+
 # Commands and the agent's shell tools run under bash -lc. An /etc/profile
 # that assigns PATH outright would drop the directories above. The profile.d
 # snippet restores them from this snapshot of PATH, taken after the last ENV
@@ -364,12 +378,12 @@ COPY box-image/profile-image-path.sh /etc/profile.d/boxes-image-path.sh
 RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
 
 # The root filesystem is read-only at runtime, so every mount point must
-# exist in the image. /workspace, /home/agent and /nix are writable binds, /tmp
-# is a tmpfs, and /boxes/agent is the read-only agent configuration.
+# exist in the image. /workspace, /home/agent and /nix are writable binds, and
+# /tmp is a tmpfs.
 #
 # Codex refuses to start without its CODEX_HOME, and the check below runs
 # codex.
-RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude /boxes/agent \
+RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude \
  && chown agent:agent /workspace /nix /home/agent /home/agent/.local /home/agent/.local/bin \
       /home/agent/.codex /home/agent/.claude
 
@@ -395,8 +409,8 @@ ARG NIX_VERSION
 ARG CODEX_VERSION
 ARG NODE_MAJOR
 
-# The entrypoint creates TMPDIR at runtime. The Go and Rust builds below need
-# it now.
+# The setup creates TMPDIR at runtime. The Go and Rust builds below need it
+# now.
 RUN mkdir -p "$TMPDIR"
 
 # Checks the user, the writable directories, the npm prefix and the tool
@@ -408,6 +422,9 @@ RUN mkdir -p "$TMPDIR"
 #
 # The file service ends with exit code 0 when its input closes, so the run
 # with an empty input proves that node loads the bundle through the link.
+#
+# The setup runs as it does in a box, without a proxy CA, and the skill of
+# the browser CLI must hold this image's notes.
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
@@ -422,6 +439,9 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && codex --version | grep -qF "${CODEX_VERSION}" \
  && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
  && boxes-files </dev/null \
+ && test "$(command -v boxes-setup)" = "/usr/local/bin/boxes-setup" \
+ && boxes-setup \
+ && grep -qF '## Browsers in this container' /usr/local/share/boxes/skills/playwright-cli/SKILL.md \
  && ps -eo pid,ppid,args >/dev/null \
  && bash -lc 'set -eu; . /etc/boxes/image-path; IFS=:; for d in $BOXES_IMAGE_PATH; do \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \
@@ -453,7 +473,7 @@ RUN set -eu; \
 # A loopback python server serves the page, because the CLI blocks file: URLs.
 # The config goes into the working directory's .playwright/, because only open
 # takes --config. The browsers path points at the image's builds, because
-# only the entrypoint links them into the home.
+# only the setup links them into the home.
 RUN set -eu; \
     export PLAYWRIGHT_BROWSERS_PATH="$BOXES_IMAGE_BROWSERS"; \
     cd /tmp; \
@@ -496,7 +516,7 @@ RUN set -eu; \
       })().catch((e) => { console.error(e); process.exit(1); }); \
     ' "$deps/playwright-core"
 
-# Chromium resolves through a symlink of the kind the entrypoint writes. This
+# Chromium resolves through a symlink of the kind the setup writes. This
 # relies on Playwright not resolving the real path of its browsers directory,
 # which is undocumented.
 RUN set -eu; \

@@ -54,6 +54,11 @@ export interface BoxRow {
   disk_bytes: number | null;
   /** Epoch milliseconds of that measurement, or null before the first. */
   disk_measured_at: number | null;
+  /**
+   * Epoch milliseconds of when the setup in the box finished after its last
+   * container start, or null while the box is not ready.
+   */
+  ready_at: number | null;
 }
 
 /** One conversation of a box, as stored. */
@@ -548,6 +553,13 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE boxes ADD COLUMN disk_bytes INTEGER;
   ALTER TABLE boxes ADD COLUMN disk_measured_at INTEGER;
+  `,
+  // When the setup in the box finished after its last container start, so a
+  // restart of the orchestrator does not run it again. Every existing box is
+  // set up, so it counts as ready until its next start.
+  `
+  ALTER TABLE boxes ADD COLUMN ready_at INTEGER;
+  UPDATE boxes SET ready_at = created_at;
   `,
 ];
 

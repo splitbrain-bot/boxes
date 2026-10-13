@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -15,6 +16,7 @@ import { connect, type ClientHttp2Session, type OutgoingHttpHeaders } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Duplex, duplexPair } from 'node:stream';
+import { pack } from 'tar-stream';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import {
   FILE_ROUTES,
@@ -356,6 +358,40 @@ describe('size', () => {
     writeFileSync(join(dir, 'nix', 'store', 'n'), 'n');
     symlinkSync(join(dir, 'home', 'h'), join(workspace, 'l'));
     assert.deepEqual(json(await request('GET', FILE_ROUTES.size)), { bytes: 6 });
+  });
+});
+
+describe('setup files', () => {
+  test('writes the body into the home', async () => {
+    const reply = await request('POST', FILE_ROUTES.setupFiles, await tarOf('.config/git/config', '[user]\n'));
+    assert.equal(reply.status, 204);
+    assert.equal(readFileSync(join(dir, 'home', '.config/git/config'), 'utf8'), '[user]\n');
+  });
+});
+
+/** A tar with one file, relative to the home. */
+function tarOf(name: string, content: string): Promise<Buffer> {
+  const p = pack();
+  p.entry({ name, size: content.length }, content);
+  p.finalize();
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    p.on('data', (c) => chunks.push(c as Buffer));
+    p.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+describe('agent set', () => {
+  test('installs the body into the home', async () => {
+    const reply = await request('POST', FILE_ROUTES.agentSet, await tarOf('.claude/CLAUDE.md', 'rules'));
+    assert.equal(reply.status, 204);
+    assert.equal(readFileSync(join(dir, 'home', '.claude/CLAUDE.md'), 'utf8'), 'rules');
+  });
+
+  test('refuses an entry outside the layouts with a 400', async () => {
+    const reply = await request('POST', FILE_ROUTES.agentSet, await tarOf('.bashrc', 'rm -rf /'));
+    assert.equal(reply.status, 400);
+    assert.equal(existsSync(join(dir, 'home', '.bashrc')), false);
   });
 });
 

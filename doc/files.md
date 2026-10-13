@@ -11,12 +11,13 @@ runs as the `agent` account.
 | [Code review](review.md) | list a directory, find the repositories, read, download and save a file, read and write `REVIEW.md`, delete the review |
 | Attachments of a [thread](threads.md) | create the attachment directory, store an attachment, download it again |
 | [Disk usage](storage.md#disk-usage) | measure the size of the workspace, the home and the Nix store |
+| [Box setup](boxes.md#the-setup) | write the CA and the git configuration into the home |
+| [Agent sets](agent-sets.md) | install the merged set into the home |
 
 ## Lifetime
 
-A file operation starts the box when it is stopped, and starts the file service when it does not run. The file service
-then runs until the box stops. A file operation counts as activity, so the idle reaper waits `IDLE_STOP_MINUTES` from
-then.
+A file operation starts a stopped box, and starts the file service when it does not run. The file service then runs
+until the box stops. A file operation counts as activity, so the idle reaper waits `IDLE_STOP_MINUTES` from then.
 
 A disk measurement is the exception. It runs only on a running box, and it does not count as activity.
 
@@ -50,6 +51,8 @@ stream, so several requests run at the same time on one connection. A download i
 | `POST /mkdir` | create one directory |
 | `POST /create` | write the body under the first free name in a directory |
 | `GET /size` | the apparent size of the workspace, the home and the Nix store |
+| `POST /setup-files` | write the files of the orchestrator in the body into the home |
+| `POST /agent-set` | install the agent set in the body |
 
 Each reply has the header `boxes-files-version`.
 

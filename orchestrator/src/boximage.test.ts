@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -8,7 +8,10 @@ import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
 import { openDb, touchBox, type Db } from './db.ts';
+import { patchSettings } from './settings.ts';
 import * as dk from './docker.ts';
+import { inProcessFileService } from './files-in-process.ts';
+import { setFileServiceSpawnerForTests } from './files.ts';
 import * as ws from './workspaces.ts';
 
 /** The box image the test config names. */
@@ -46,6 +49,10 @@ interface Fake {
   networks: Set<string>;
   /** The counter behind the ids of created containers. */
   next: number;
+  /** The containers in which `boxes-setup` ran, in order. */
+  setups: string[];
+  /** What `boxes-setup` exits with, and what it writes. */
+  setupExit: { code: number; output: string };
 }
 
 /** An error shaped like the daemon's 404 for a missing object. */
@@ -108,6 +115,19 @@ function dockerFor(fake: Fake): Docker {
         fake.removed.push(id);
         fake.containers.delete(id);
       },
+      // The one exec this suite sees is the setup, under `timeout`.
+      exec: async (opts: { Cmd: string[] }) => {
+        assert.equal(opts.Cmd[3], 'boxes-setup');
+        fake.setups.push(id);
+        return {
+          start: async () => {
+            const stream = new PassThrough();
+            queueMicrotask(() => stream.end(frame(fake.setupExit.output)));
+            return stream;
+          },
+          inspect: async () => ({ ExitCode: fake.setupExit.code }),
+        };
+      },
     }),
     createContainer: async (opts: Record<string, unknown>) => {
       fake.onCreate?.();
@@ -142,8 +162,25 @@ function dockerFor(fake: Fake): Docker {
         _stream: NodeJS.ReadableStream,
         onFinished: (err: Error | null, out: unknown[]) => void,
       ) => onFinished(null, []),
+      demuxStream: new Docker({ socketPath: '/var/run/docker.sock' }).modem.demuxStream,
     },
   } as unknown as Docker;
+}
+
+/** One stderr frame of a demuxable Docker stream. */
+function frame(text: string): Buffer {
+  const payload = Buffer.from(text, 'utf8');
+  const header = Buffer.alloc(8);
+  header[0] = 2;
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
+}
+
+/** The managed file of a box's home, as lines. */
+function managed(boxId: string): string[] {
+  const path = join(ws.homePath(dir, boxId), '.boxes', 'managed');
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').split('\n').filter((line) => line !== '');
 }
 
 let dir: string;
@@ -183,17 +220,32 @@ beforeEach(async () => {
     imagesRemoved: [],
     networks: new Set(['bn-a1', 'bn-a2', 'bn-a3', 'bn-a4', 'bn-a5', 'bn-gone']),
     next: 0,
+    setups: [],
+    setupExit: { code: 0, output: '' },
   };
   install(fake);
   db = openDb(dir);
   orchestrator = buildApp(loadConfig({ DATA_DIR: dir, BOX_IMAGE: IMAGE }), db);
   await orchestrator.egress.prepare();
+  // The file service of every container works on the home of the one box
+  // that the test starts, which is what the agent set install writes to.
+  setFileServiceSpawnerForTests(
+    inProcessFileService(() => {
+      const [row] = db.prepare('SELECT id FROM boxes').all() as Array<{ id: string }>;
+      return {
+        workspace: ws.workspacePath(dir, row!.id),
+        home: ws.homePath(dir, row!.id),
+        nix: ws.nixPath(dir, row!.id),
+      };
+    }),
+  );
 });
 
 afterEach(async () => {
   await orchestrator.app.close();
   db.close();
   dk.setDockerForTests(null);
+  setFileServiceSpawnerForTests(null);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -228,9 +280,6 @@ describe('starting a box whose image has moved', () => {
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
       `${dir}/nix/a2:/nix`,
-      // The agent configuration comes from the database, but without the
-      // mount the box starts with nothing configured.
-      `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
   });
 
@@ -310,7 +359,6 @@ describe('starting a box Docker has forgotten', () => {
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
       `${dir}/nix/a2:/nix`,
-      `${dir}/agents/a2:/boxes/agent:ro`,
     ]);
   });
 
@@ -605,6 +653,89 @@ describe('one operation per box at a time', () => {
 
     // The tombstone is set before the teardown starts, so no write lands.
     assert.equal(active, before);
+  });
+});
+
+describe('making a box ready', () => {
+  it('writes its files, runs the setup and installs the agent set after a start, once', async () => {
+    insertBox('a1', 'c1', 'sha256:one');
+    orchestrator.agents.putItem('global', { name: 'ship', content: 'Open a PR.' });
+    patchSettings(db, { gitName: 'Some "One"', gitEmail: 'one@example.com' });
+
+    await orchestrator.manager.start('a1');
+
+    assert.deepEqual(fake.setups, ['c1']);
+    assert.match(readFileSync(join(ws.homePath(dir, 'a1'), '.boxes/proxy-ca.crt'), 'utf8'), /BEGIN CERTIFICATE/);
+    assert.equal(
+      readFileSync(join(ws.homePath(dir, 'a1'), '.config/git/config'), 'utf8'),
+      '[user]\n\tname = "Some \\"One\\""\n\temail = "one@example.com"\n[init]\n\tdefaultBranch = main\n' +
+        '[advice]\n\tdetachedHead = false\n[safe]\n\tdirectory = *\n',
+    );
+    // The diagrams skill of the orchestrator comes with every set.
+    assert.deepEqual(managed('a1'), [
+      '.agents/skills/diagrams',
+      '.agents/skills/ship',
+      '.claude/skills/diagrams',
+      '.claude/skills/ship',
+    ]);
+    assert.equal(
+      readFileSync(join(ws.homePath(dir, 'a1'), '.claude/skills/ship/SKILL.md'), 'utf8'),
+      'Open a PR.\n',
+    );
+    assert.equal((await orchestrator.manager.detail('a1')).status, 'running');
+
+    // The box is up and set up, so a terminal on it runs no setup again.
+    await orchestrator.manager.execTarget('a1');
+    assert.deepEqual(fake.setups, ['c1']);
+  });
+
+  it('runs the setup again after the next start', async () => {
+    insertBox('a1', 'c1', 'sha256:one');
+    await orchestrator.manager.start('a1');
+    await orchestrator.manager.stop('a1');
+    await orchestrator.manager.start('a1');
+    assert.deepEqual(fake.setups, ['c1', 'c1']);
+  });
+
+  it('sets up a running box that was not set up, for example after a crash', async () => {
+    insertBox('a1', 'c1', 'sha256:one');
+    fake.containers.get('c1')!.running = true;
+    await orchestrator.manager.execTarget('a1');
+    assert.deepEqual(fake.setups, ['c1']);
+  });
+
+  it('marks the box as an error when the setup fails, with its output', async () => {
+    insertBox('a1', 'c1', 'sha256:one');
+    fake.setupExit = { code: 1, output: '[setup] ERROR: /nix is not writable\n' };
+
+    await assert.rejects(orchestrator.manager.start('a1'), /nix is not writable/);
+
+    assert.equal((await orchestrator.manager.detail('a1')).status, 'error');
+    assert.deepEqual(managed('a1'), []);
+    // The next start tries again.
+    fake.setupExit = { code: 0, output: '' };
+    await orchestrator.manager.start('a1');
+    assert.equal((await orchestrator.manager.detail('a1')).status, 'running');
+  });
+
+  it('names an image without the setup', async () => {
+    insertBox('a1', 'c1', 'sha256:one');
+    fake.setupExit = { code: 127, output: '' };
+    await assert.rejects(orchestrator.manager.start('a1'), /has no boxes-setup/);
+    assert.equal((await orchestrator.manager.detail('a1')).status, 'error');
+  });
+
+  it('tells about the failed pull when the image is outdated', async () => {
+    insertBox('a1', 'c1', 'sha256:one');
+    fake.onPull = () => {
+      throw new Error('registry unreachable');
+    };
+    await assert.rejects(orchestrator.manager.refreshBoxImage(), /registry unreachable/);
+    fake.setupExit = { code: 127, output: '' };
+    await assert.rejects(
+      orchestrator.manager.start('a1'),
+      /has no boxes-setup.*The last pull of the box image failed: registry unreachable/,
+    );
   });
 });
 

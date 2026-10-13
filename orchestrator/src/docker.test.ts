@@ -76,7 +76,6 @@ describe('the container template', () => {
           networkName: 'bn-abcd1234',
           subnet: '10.200.0.0/29',
           workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
-          agentConfigSource: '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234',
           homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
           nixSource: '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234',
           env: {},
@@ -100,8 +99,6 @@ describe('the container template', () => {
       // At /nix and nowhere else: the binary cache is built against that
       // path, and nothing in it would substitute anywhere else.
       '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234:/nix',
-      // Read-only, so the agent cannot change what the dashboard configured.
-      '/var/lib/docker/volumes/boxes-data/_data/agents/abcd1234:/boxes/agent:ro',
     ]);
   }, 30_000);
 

@@ -10,7 +10,7 @@ import {
   type ThreadOptions,
   type ThreadSummary,
 } from '../../shared/types.ts';
-import { AgentStore, ensureAgentsRoot, hostAgentConfigPath } from './agents.ts';
+import type { AgentStore } from './agents.ts';
 import type { Config } from './config.ts';
 import { boxEnv } from './boxenv.ts';
 import type { EgressManager } from './egress.ts';
@@ -33,13 +33,14 @@ import {
 } from './db.ts';
 import { BoxUsage, BOX_SIZE_TTL_MS } from './diskusage.ts';
 import * as dk from './docker.ts';
-import { fileService } from './files.ts';
+import { fileService, OutdatedImageError } from './files.ts';
 import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
 import { generateWsToken } from './secret.ts';
+import { setUpBox } from './setup.ts';
 import { readSettings } from './settings.ts';
 import type { BoxReading } from './tunnels.ts';
 import * as ws from './workspaces.ts';
@@ -113,6 +114,9 @@ export class BoxManager {
         error: error.message,
       }),
   });
+
+  /** The error of the last pull of the box image, or null when it worked. */
+  private lastPullError: string | null = null;
 
   /**
    * Host-side path of DATA_DIR, which is what a workspace bind source has to
@@ -201,7 +205,6 @@ export class BoxManager {
    */
   async resolveHostDataDir(): Promise<void> {
     ws.ensureWorkspacesRoot(this.cfg.DATA_DIR);
-    ensureAgentsRoot(this.cfg.DATA_DIR);
     if (this.cfg.HOST_DATA_DIR) {
       log.info('using the configured host path for the data directory', {
         hostDataDir: this.hostDataDir,
@@ -248,7 +251,13 @@ export class BoxManager {
    */
   async refreshBoxImage(): Promise<void> {
     const before = await dk.imageId(this.cfg.BOX_IMAGE);
-    await dk.pullImage(this.cfg.BOX_IMAGE);
+    try {
+      await dk.pullImage(this.cfg.BOX_IMAGE);
+    } catch (err) {
+      this.lastPullError = (err as Error).message;
+      throw err;
+    }
+    this.lastPullError = null;
     const after = await dk.imageId(this.cfg.BOX_IMAGE);
     if (after && after !== before) {
       log.info('the box image moved; boxes adopt it as they are started', {
@@ -543,7 +552,8 @@ export class BoxManager {
    * Replaces a box's container with a fresh one built from `row`, and
    * returns the new container's id. The row names the new container before
    * it is started, so a start that fails cannot leave the row naming the
-   * removed container. The caller records whatever else changed.
+   * removed container. The caller records whatever else changed. The new
+   * container is not set up yet, so the ready mark goes with the old one.
    *
    * The old container is stopped before it is removed even when it is
    * already down; both calls tolerate a container that is gone.
@@ -555,7 +565,7 @@ export class BoxManager {
     }
     const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
     this.db
-      .prepare('UPDATE boxes SET container_id = ? WHERE id = ?')
+      .prepare('UPDATE boxes SET container_id = ?, ready_at = NULL WHERE id = ?')
       .run(containerId, row.id);
     await dk.startContainer(containerId);
     return containerId;
@@ -597,7 +607,6 @@ export class BoxManager {
    * credential that arrives later reaches a box at its next restart.
    */
   private containerSpec(row: BoxRow): dk.CreateContainerSpec {
-    const settings = readSettings(this.db);
     return {
       boxId: row.id,
       image: row.image,
@@ -605,15 +614,13 @@ export class BoxManager {
       subnet: row.subnet,
       workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
       nixSource: ws.hostNixPath(this.hostDataDir, row.id),
-      agentConfigSource: hostAgentConfigPath(this.hostDataDir, row.id),
       homeSource: ws.hostHomePath(this.hostDataDir, row.id),
       env: boxEnv({
         placeholderFor: (id) => this.egress.placeholderFor(id),
         methodFor: (id) => this.egress.methodFor(id),
-        identity: { gitName: settings.gitName, gitEmail: settings.gitEmail },
         gitlabHost: this.cfg.GITLAB_HOST,
         proxyUrl: dk.proxyUrl(this.cfg),
-        caCertificate: this.egress.caCertificate(),
+        hasCa: this.egress.caCertificate() !== '',
       }),
     };
   }
@@ -629,16 +636,9 @@ export class BoxManager {
         this.pending,
         this.notifier,
         (status) => this.setStatus(id, status),
-        async () => {
-          // Opening a thread starts a stopped box without start(), so the
-          // repairs run here too, under the same slot. The row is read inside
-          // the slot, because it can change while this waits.
-          await this.withSlot(id, async () => {
-            const row = this.getRow(id);
-            if (!row || row.status === 'deleted') return;
-            await this.prepareContainer(row);
-          });
-        },
+        // Opening a thread starts a stopped box without start(), so the
+        // repairs and the setup run here too, under the same slot.
+        () => this.withSlot(id, async () => (await this.bringUp(id)).container_id!),
       );
       this.upstreams.set(id, up);
     }
@@ -707,6 +707,7 @@ export class BoxManager {
       last_active_at: now,
       disk_bytes: null,
       disk_measured_at: null,
+      ready_at: null,
     };
 
     this.db
@@ -745,7 +746,7 @@ export class BoxManager {
 
   /**
    * Builds the network, the three directories and the container of a new
-   * box, and starts it.
+   * box, starts it and makes it ready.
    *
    * Runs under the box's slot. The network comes before the container that
    * joins it, and every directory before the container that binds it.
@@ -756,8 +757,6 @@ export class BoxManager {
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     ws.createWorkspace(this.cfg.DATA_DIR, id);
     ws.createNix(this.cfg.DATA_DIR, id);
-    // Before the container, because it is one of its mounts.
-    this.agents.materialize(id, row.agent_set_id);
     // The bind mount hides the image's /home/agent, so the image's home is
     // copied in.
     ws.createHome(this.cfg.DATA_DIR, id);
@@ -767,6 +766,7 @@ export class BoxManager {
     // the container and the teardown removes it.
     this.db.prepare('UPDATE boxes SET container_id = ? WHERE id = ?').run(containerId, id);
     await dk.startContainer(containerId);
+    await this.makeReady(this.mustGet(id));
   }
 
   // --- start / stop / delete ------------------------------------------------
@@ -784,10 +784,8 @@ export class BoxManager {
    */
   private async prepareContainer(row: BoxRow): Promise<BoxRow> {
     this.giveUpIfPreempted(row.id);
-    // Before any step that may create a container binding this directory,
+    // Before any step that may create a container binding the Nix store,
     // which the daemon would otherwise create empty and owned by root.
-    this.agents.materialize(row.id, row.agent_set_id);
-    // The Nix store likewise.
     ws.createNix(this.cfg.DATA_DIR, row.id);
     // Before anything binds the other two, for the same reason.
     this.requireDirectories(row);
@@ -839,16 +837,69 @@ export class BoxManager {
 
   /** The body of {@link start}, which runs under the box's slot. */
   private async startHeld(id: string): Promise<BoxDetail> {
-    const stored = this.mustGet(id);
-    if (!stored.container_id) throw new HttpError(409, 'Box has no container');
-    const row = await this.prepareContainer(stored);
-    this.giveUpIfPreempted(id);
-    await dk.startContainer(row.container_id!);
-    await dk.ensureProxyAttached(row.network_name, this.cfg);
+    await this.bringUp(id);
     this.setStatus(id, 'running');
     // The upstream reconnects on the next forwarded message, which sends
     // session/load again and restores the thread.
     return this.detail(id);
+  }
+
+  /**
+   * Brings a box up and makes it ready. Returns the row as it now stands,
+   * which names the container. Runs under the caller's slot.
+   *
+   * Every path into a box comes through here, so nothing reaches a box
+   * before its setup is complete.
+   */
+  private async bringUp(id: string): Promise<BoxRow> {
+    const stored = this.mustGet(id);
+    if (!stored.container_id) throw new HttpError(409, 'Box has no container');
+    const row = await this.prepareContainer(stored);
+    this.giveUpIfPreempted(id);
+    if ((await dk.containerState(row.container_id)) !== 'running') {
+      // Taken off before the start, so a crash between the two leaves the box
+      // not ready.
+      this.db.prepare('UPDATE boxes SET ready_at = NULL WHERE id = ?').run(id);
+      await dk.startContainer(row.container_id!);
+    }
+    await dk.ensureProxyAttached(row.network_name, this.cfg);
+    this.giveUpIfPreempted(id);
+    await this.makeReady(row);
+    return row;
+  }
+
+  /**
+   * Runs the setup in a started box, unless it is marked ready. A box whose
+   * setup fails is marked as an error, with the message.
+   *
+   * The mark survives a restart of the orchestrator, so a running box is not
+   * set up twice.
+   */
+  private async makeReady(row: BoxRow): Promise<void> {
+    if (this.mustGet(row.id).ready_at !== null) return;
+    const slog = log.box(row.id);
+    const settings = readSettings(this.db);
+    try {
+      await setUpBox(
+        row.container_id!,
+        {
+          caCertificate: this.egress.caCertificate(),
+          identity: { gitName: settings.gitName, gitEmail: settings.gitEmail },
+          agentSet: this.agents.pack(row.agent_set_id),
+        },
+        slog,
+      );
+    } catch (err) {
+      let message = (err as Error).message;
+      if (err instanceof OutdatedImageError && this.lastPullError) {
+        message += ` The last pull of the box image failed: ${this.lastPullError}`;
+      }
+      this.setStatus(row.id, 'error');
+      slog.error('the box setup failed', { error: message });
+      throw new HttpError(409, `This box cannot start: ${message}`);
+    }
+    this.db.prepare('UPDATE boxes SET ready_at = ? WHERE id = ?').run(Date.now(), row.id);
+    slog.info('box ready');
   }
 
   /**
@@ -958,11 +1009,6 @@ export class BoxManager {
     } catch (err) {
       slog.warn('nix store removal failed', { error: (err as Error).message });
     }
-    try {
-      this.agents.removeMaterialized(row.id);
-    } catch (err) {
-      slog.warn('agent configuration removal failed', { error: (err as Error).message });
-    }
   }
 
   // --- views ----------------------------------------------------------------
@@ -988,13 +1034,7 @@ export class BoxManager {
 
   /** The body of {@link execTarget}, which runs under the box's slot. */
   private async execTargetHeld(id: string): Promise<{ containerId: string; workingDir: string }> {
-    const stored = this.mustGet(id);
-    if (!stored.container_id) throw new HttpError(409, 'Box has no container');
-    // This starts a stopped container, so it runs the same repairs start()
-    // runs.
-    const row = await this.prepareContainer(stored);
-    this.giveUpIfPreempted(id);
-    await dk.startContainer(row.container_id!);
+    const row = await this.bringUp(id);
     this.touch(id);
     return { containerId: row.container_id!, workingDir: dk.WORKSPACE_DIR };
   }

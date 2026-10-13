@@ -48,8 +48,9 @@ Authenticates the Codex harness against `api.openai.com`. The placeholder is set
 
 A personal access token (`ghp_…`, paste only). The placeholder is set as `GH_TOKEN`.
 
-It authenticates git over HTTPS and the GitHub CLI (`gh`) in every box. The box entrypoint configures git's credential
-helper from the placeholder; the token travels to `github.com`, `api.github.com` and `*.githubusercontent.com`.
+It authenticates git over HTTPS and the GitHub CLI (`gh`) in every box. The [box setup](boxes.md#the-setup)
+configures git's credential helper from the placeholder; the token travels to `github.com`, `api.github.com` and
+`*.githubusercontent.com`.
 
 The orchestrator also uses the token to pull private skill repositories from `github.com` for
 [agent sets](agent-sets.md).
@@ -57,7 +58,8 @@ The orchestrator also uses the token to pull private skill repositories from `gi
 ### GitLab
 
 A personal access token (`glpat-…`, paste only) with the `api` and `write_repository` scopes. The placeholder is set as
-`GITLAB_TOKEN`. The box entrypoint points git's credential helper for the configured host at the GitLab CLI (`glab`).
+`GITLAB_TOKEN`. The [box setup](boxes.md#the-setup) points git's credential helper for the configured host at the
+GitLab CLI (`glab`).
 
 The token travels to `gitlab.com` by default. Set the `GITLAB_HOST` [environment variable](environment.md) of the
 orchestrator to a bare hostname to use a self-managed instance; the credential is then intercepted on that host instead.
@@ -87,9 +89,9 @@ Removing a credential on the settings page deletes it from the database; the pro
 
 ## Git identity
 
-The settings page also sets the identity git commits as. `GIT_NAME` and `GIT_EMAIL` are placed in the environment of
-every box, and the box entrypoint writes them to git's global configuration. Both are settings, not credentials: they
-authenticate nothing.
+The settings page also sets the identity git commits as. The orchestrator writes it to `~/.config/git/config` in every
+box at each start. Git reads that file as global configuration, and `~/.gitconfig` of the agent wins over it. Both are
+settings, not credentials: they authenticate nothing.
 
 ## Technical internals
 

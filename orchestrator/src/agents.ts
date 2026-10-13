@@ -1,13 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { dirname, join, posix, relative } from 'node:path';
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pack, type Pack } from 'tar-stream';
 import {
   GLOBAL_AGENT_SET,
   type AgentBundlePreview,
@@ -31,7 +26,7 @@ import {
   type RepoFetcher,
   type RepoSkill,
 } from './skill-repos.ts';
-import { chownToAgent } from './workspaces.ts';
+import type { BuiltinSkill } from './builtin-skills.ts';
 
 /**
  * Agent sets: the AGENTS.md and skills a box's agent is configured with. The
@@ -39,9 +34,6 @@ import { chownToAgent } from './workspaces.ts';
  * can also take skills from git repositories, which are pulled into
  * checkouts under DATA_DIR.
  */
-
-/** Where the merged sets are materialized, under DATA_DIR. */
-const AGENTS_SUBDIR = 'agents';
 
 /**
  * A name that is safe as a single path component and is what the agent will
@@ -88,29 +80,6 @@ interface Bundle {
   overrides: string[];
 }
 
-/** The parent of every materialized set. */
-function agentsRoot(dataDir: string): string {
-  return join(dataDir, AGENTS_SUBDIR);
-}
-
-/** Where a box's merged configuration is written, as this process sees it. */
-export function agentConfigPath(dataDir: string, boxId: string): string {
-  return join(agentsRoot(dataDir), boxId);
-}
-
-/**
- * The same directory as the Docker daemon sees it, which is the path a bind
- * source names.
- */
-export function hostAgentConfigPath(hostDataDir: string, boxId: string): string {
-  return posix.join(hostDataDir, AGENTS_SUBDIR, boxId);
-}
-
-/** Creates the parent of every materialized set, mode 0700. */
-export function ensureAgentsRoot(dataDir: string): void {
-  mkdirSync(agentsRoot(dataDir), { recursive: true, mode: 0o700 });
-}
-
 /**
  * Sets, their items, and the merged bundle a box is given.
  *
@@ -121,11 +90,13 @@ export class AgentStore {
   constructor(
     /** Where the sets are stored. */
     private readonly db: Db,
-    /** The DATA_DIR the merged sets and the repository checkouts are written under. */
+    /** The DATA_DIR the repository checkouts are written under. */
     private readonly dataDir: string,
     /** Fetches a repository into its checkout. */
     private readonly fetcher: RepoFetcher = (dir, url, ref, keep) =>
       fetchRepo(dir, url, ref, null, keep),
+    /** The skills of the orchestrator that a box gets now. */
+    private readonly builtins: () => BuiltinSkill[] = () => [],
   ) {}
 
   /** The pulls running now, by repository id. */
@@ -511,110 +482,38 @@ export class AgentStore {
     return byName;
   }
 
-  // --- materializing --------------------------------------------------------
+  // --- packing --------------------------------------------------------------
 
   /**
-   * Writes a box's merged set to its directory and returns that path. The
-   * container mounts the directory read-only, and the entrypoint installs it
-   * into the home at each start, so an edited set reaches a box at its next
-   * start.
+   * A box's merged set as a tar stream, which the file service in the box
+   * installs into the home. The set is packed once for each harness, in that
+   * harness's layout, because a box may hold threads of both. Every path is
+   * relative to the home.
    *
-   * The set is written once for each harness, in that harness's layout,
-   * because a box may hold threads of both. Every path is relative to the
-   * home and is already the path inside the box. The `manifest` file lists
-   * every path, and the entrypoint removes what the previous manifest
-   * installed before it installs the new one.
-   *
-   * The directory itself stays and only its contents change, because a
-   * running container has it bind-mounted. The new bundle is written before
-   * the old entries are removed, so the directory is never empty while a box
-   * may read it.
+   * The skills of the orchestrator are added, except where the set has a
+   * skill of the same name.
    */
-  materialize(boxId: string, setId: string | null): string {
-    const dir = agentConfigPath(this.dataDir, boxId);
-    ensureAgentsRoot(this.dataDir);
-    mkdirSync(dir, { recursive: true, mode: 0o755 });
-
+  pack(setId: string | null): Readable {
     const bundle = this.merge(setId);
-    const manifest: string[] = [];
-
+    const names = new Set(bundle.skills.map((skill) => skill.name));
+    for (const skill of this.builtins()) {
+      if (!names.has(skill.name)) bundle.skills.push({ name: skill.name, repo: null, content: skill.content });
+    }
+    const tar = pack();
     for (const { layout } of Object.values(HARNESSES)) {
-      if (bundle.agentsMd !== '') {
-        // The harness's user-level memory, so it applies in every directory
-        // the agent works in.
-        this.write(dir, layout.agentsMd, bundle.agentsMd);
-        manifest.push(layout.agentsMd);
-      }
+      if (bundle.agentsMd !== '') addText(tar, layout.agentsMd, bundle.agentsMd);
       for (const skill of bundle.skills) {
-        // A skill is a directory, so the manifest names the directory and a
-        // removal takes everything the skill carried with it.
         const rel = `${layout.skills}/${skill.name}`;
-        // A pull may have replaced the checkout this skill was found in.
-        if (skill.repo !== null && !existsSync(skill.dir)) continue;
-        rmSync(join(dir, rel), { recursive: true, force: true });
         if (skill.repo === null) {
-          this.write(dir, `${rel}/SKILL.md`, skill.content);
-        } else {
-          this.makeParents(dir, rel);
-          copyTree(skill.dir, join(dir, rel));
+          addText(tar, `${rel}/SKILL.md`, skill.content);
+        } else if (existsSync(skill.dir)) {
+          // A pull may have replaced the checkout this skill was found in.
+          addTree(tar, skill.dir, rel);
         }
-        manifest.push(rel);
       }
     }
-    this.write(dir, 'manifest', manifest.join('\n'));
-    this.prune(dir, [...manifest, 'manifest']);
-
-    chownToAgent(dir);
-    return dir;
-  }
-
-  /**
-   * Removes whatever an earlier bundle left in the directory and this one
-   * does not have, so a skill deleted here disappears from the box.
-   *
-   * Only the two places a layout names are looked at, once per harness:
-   * the instructions file, and the entries of the skills directory, each of
-   * which is one skill.
-   *
-   * @param dir The box's materialized directory.
-   * @param keep Every path this bundle wrote, relative to `dir`.
-   */
-  private prune(dir: string, keep: readonly string[]): void {
-    const wanted = new Set(keep);
-    for (const { layout } of Object.values(HARNESSES)) {
-      if (!wanted.has(layout.agentsMd)) rmSync(join(dir, layout.agentsMd), { force: true });
-      const rel = layout.skills;
-      if (!existsSync(join(dir, rel))) continue;
-      for (const child of readdirSync(join(dir, rel))) {
-        if (wanted.has(`${rel}/${child}`)) continue;
-        rmSync(join(dir, rel, child), { recursive: true, force: true });
-      }
-    }
-    removeEmptyDirs(dir);
-  }
-
-  /** Writes one file under the materialized directory, agent-owned. */
-  private write(dir: string, rel: string, content: string): void {
-    const path = join(dir, rel);
-    this.makeParents(dir, rel);
-    writeFileSync(path, content.endsWith('\n') ? content : `${content}\n`, { mode: 0o644 });
-    chownToAgent(path);
-  }
-
-  /** Creates the directories above `rel` in the materialized directory, agent-owned. */
-  private makeParents(dir: string, rel: string): void {
-    const path = join(dir, rel);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
-    // Every directory on the way down has to be traversable by the agent user,
-    // not only the leaf.
-    for (let at = dirname(path); relative(dir, at) !== ''; at = dirname(at)) {
-      chownToAgent(at);
-    }
-  }
-
-  /** Drops a box's materialized directory, when the box is deleted. */
-  removeMaterialized(boxId: string): void {
-    rmSync(agentConfigPath(this.dataDir, boxId), { recursive: true, force: true });
+    tar.finalize();
+    return Readable.from(tar);
   }
 }
 
@@ -623,39 +522,27 @@ function repoSkills(row: AgentRepoRow): RepoSkill[] {
   return JSON.parse(row.skills) as RepoSkill[];
 }
 
-/**
- * Copies a skill's directory from a checkout, agent-owned. Files keep their
- * mode, so a script stays executable. Links are left out, because they could
- * point anywhere on this host.
- */
-function copyTree(src: string, dest: string): void {
-  mkdirSync(dest, { mode: 0o755 });
-  chownToAgent(dest);
-  for (const entry of readdirSync(src, { withFileTypes: true })) {
-    const from = join(src, entry.name);
-    const to = join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyTree(from, to);
-    } else if (entry.isFile()) {
-      copyFileSync(from, to);
-      chownToAgent(to);
-    }
-  }
+/** Adds one text file to the tar, with a final newline. */
+function addText(tar: Pack, name: string, content: string): void {
+  const text = content.endsWith('\n') ? content : `${content}\n`;
+  tar.entry({ name, mode: 0o644, size: Buffer.byteLength(text) }, text);
 }
 
 /**
- * Removes every empty directory under `dir`, deepest first, leaving `dir`.
- *
- * A layout's directories nest, so the last skill of a harness leaving takes
- * the directory it was in and the harness directory above it: a harness with
- * nothing installed keeps nothing.
+ * Adds a skill's directory from a checkout to the tar. Files keep their
+ * mode, so a script stays executable. Links are left out, because they could
+ * point anywhere on this host.
  */
-function removeEmptyDirs(dir: string): void {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const path = join(dir, entry.name);
-    removeEmptyDirs(path);
-    if (readdirSync(path).length === 0) rmSync(path, { recursive: true, force: true });
+function addTree(tar: Pack, src: string, name: string): void {
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name);
+    const to = `${name}/${entry.name}`;
+    if (entry.isDirectory()) {
+      addTree(tar, from, to);
+    } else if (entry.isFile()) {
+      const bytes = readFileSync(from);
+      tar.entry({ name: to, mode: statSync(from).mode & 0o777, size: bytes.length }, bytes);
+    }
   }
 }
 

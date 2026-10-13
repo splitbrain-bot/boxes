@@ -88,10 +88,10 @@ The orchestrator creates a certificate authority once and stores it in the [data
 certificate and the key to the proxy with the rules. The proxy then creates a certificate for each host that it
 intercepts.
 
-The orchestrator also sends the certificate to each box container. The entrypoint of the container writes it to
-`~/.boxes/proxy-ca.crt`, and writes it together with the system certificates to `~/.boxes/ca-bundle.crt`. The
-environment variables `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` and `CURL_CA_BUNDLE` contain the path of
-that bundle. A tool that uses none of these variables fails on the intercepted hosts, and works on all other hosts.
+The orchestrator also writes the certificate to `~/.boxes/proxy-ca.crt` in each box, and the
+[box setup](boxes.md#the-setup) writes it together with the system certificates to `~/.boxes/ca-bundle.crt`. The
+environment variables `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` and `CURL_CA_BUNDLE` contain the path
+of that bundle. A tool that uses none of these variables fails on the intercepted hosts, and works on all other hosts.
 
 ## Settings
 

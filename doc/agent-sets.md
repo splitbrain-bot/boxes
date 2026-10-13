@@ -60,24 +60,16 @@ A set takes skills from at most 20 repositories, and the orchestrator takes at m
 
 ## File installation into a box
 
-When a box is created and before each start, the orchestrator writes the merged set into the box, once per
-[harness](glossary.md) in the layout that harness reads. Files the agent wrote in its own home stay in place.
+At each box start, the [file service](files.md) in the box installs the merged set into the home, in the layout of each
+[harness](glossary.md), together with the [built-in skills](skills.md). Files that the agent wrote stay.
 
 The practical effects:
 
 - Changes to a set reach a box the next time the box starts. A running box keeps what it has.
-- An item deleted from a set is removed from the box at the next start.
+- An item deleted from a set is removed from the box at the next start. A built-in skill whose condition no longer
+  holds is removed in the same way.
 - When a set is deleted, the boxes that selected it keep what is already installed, and get the global set alone at the
   next start.
-
-## Built-in skills
-
-The box image carries skills for common tasks, for example how to install software with nix. The entrypoint installs
-them into both skill layouts at every box start. A skill of the same name in the merged set wins: the entrypoint leaves
-the image's copy out when the manifest names that skill. This is how a project overrides a built-in skill with its own
-instructions.
-
-The built-in skills are described in [Built-in skills](skills.md).
 
 ## Managing sets
 
@@ -99,32 +91,27 @@ This is the one place where the orchestrator runs git itself. A repository canno
 git directory has no hooks, the configuration that names filters and helpers is never fetched, no system or user
 configuration is read, and submodules are not fetched.
 
-### Materialization
+### Installation
 
-The merged set is written to `DATA_DIR/agents/<box id>`, once per harness in the layouts the harness registry
-(`orchestrator/src/harness.ts`) names. A box can hold threads of different harnesses, and neither agent reads the
-other's directories:
+`AgentStore.pack` packs the merged set as a tar stream, with one copy for each layout of the harness registry
+(`orchestrator/src/harness.ts`). A box can have threads of both harnesses, and each agent reads only its own
+directories:
 
 | Content | Claude | Codex |
 | --- | --- | --- |
 | Instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
 | Skills | `~/.claude/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
 
-The container mounts the directory read-only at `/boxes/agent`, and the entrypoint installs it into the home directory:
-mounting the home's own subdirectories read-only would break the box, and mounting them writable would let the agent
-edit what the dashboard shows as configured. New content is written before old entries are pruned, and the directory's
-inode is kept, because a running container has it bind-mounted.
+The file service (`files/src/agentset.ts`) unpacks the stream into a stage directory first, so a refused path changes
+nothing.
 
 ### The reversible install
 
-A `manifest` file lists every installed path — a skill by its directory, so removal takes the whole directory. The
-entrypoint removes exactly what the previous start recorded in `~/.boxes/managed`, then installs the current manifest.
-Manifest lines are checked, not trusted: each line must stay inside one of the layout prefixes, a list written into the
-entrypoint itself, so a manifest naming `.claude` or `.ssh` as a whole is refused rather than turned into a recursive
-delete.
+`~/.boxes/managed` lists what the last install put into the home: each instructions file, and each skill as a
+directory. The next install removes these first. The file service accepts only paths inside the layouts. A stream or a
+managed file cannot name `.ssh` or all of `.claude`.
 
 ### Deleting a set
 
 The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items and repositories are
-deleted with it, together with the repository checkouts. A box that named the deleted set keeps its installed files and
-gets the global set alone at its next start.
+deleted with it, together with the repository checkouts.

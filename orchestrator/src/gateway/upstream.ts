@@ -202,12 +202,10 @@ export class UpstreamBox implements AdapterHost {
     /** Receives the box status reported by the adapter connections. */
     private readonly onStatusChange: (status: BoxRow['status']) => void,
     /**
-     * Runs, and is awaited, just before the container is started. It brings
-     * the container up to date, from writing the agent configuration to
-     * rebuilding a container Docker no longer has, so it may change the box's
-     * container id.
+     * Brings the box up and makes it ready, and returns the id of its
+     * container. It repairs the container first, so the id can be a new one.
      */
-    private readonly beforeStart: () => Promise<void>,
+    private readonly startBox: () => Promise<string>,
   ) {
     this.slog = log.box(boxId);
     this.downstreams = new Broadcast(boxId, (thread) => this.threadState(thread));
@@ -338,30 +336,16 @@ export class UpstreamBox implements AdapterHost {
   // --- what the connections ask of the box -------------------------------
 
   /**
-   * Starts the box container. Concurrent callers share one start, and a later
+   * Brings the box up, ready. Concurrent callers share one start, and a later
    * call starts it again.
    */
   ensureContainer(): Promise<string> {
     if (!this.containerStarting) {
-      this.containerStarting = this.startContainer().finally(() => {
+      this.containerStarting = this.startBox().finally(() => {
         this.containerStarting = null;
       });
     }
     return this.containerStarting;
-  }
-
-  /** Brings the box up and makes sure the egress proxy is on its network. */
-  private async startContainer(): Promise<string> {
-    if (!this.row().container_id) throw new Error('Box has no container');
-
-    // The row is read again, because this may have replaced the container.
-    await this.beforeStart();
-    const row = this.row();
-    if (!row.container_id) throw new Error('Box has no container');
-
-    await dk.startContainer(row.container_id);
-    await dk.ensureProxyAttached(row.network_name, this.cfg);
-    return row.container_id;
   }
 
   /** Every conversation a browser is watching, for a connection coming back up. */

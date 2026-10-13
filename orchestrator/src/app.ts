@@ -18,6 +18,7 @@ import type {
   StoredAttachment,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
+import { builtinSkills } from './builtin-skills.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
 import {
   agentItemBody,
@@ -264,10 +265,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // image that is.
   const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.BOX_IMAGE));
   // Private repositories on github.com are fetched with the GitHub credential.
-  const agents = new AgentStore(db, cfg.DATA_DIR, (dir, url, ref, keep) => {
-    const row = credentials.get('github');
-    return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
-  });
+  const agents = new AgentStore(
+    db,
+    cfg.DATA_DIR,
+    (dir, url, ref, keep) => {
+      const row = credentials.get('github');
+      return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
+    },
+    () => builtinSkills({ hasCredential: (id) => credentials.get(id) !== undefined }),
+  );
   // The closure lets the reconciler be built before the manager it reads.
   const tunnels = new TunnelReconciler(
     db,
