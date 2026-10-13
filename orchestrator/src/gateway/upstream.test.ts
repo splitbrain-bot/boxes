@@ -235,16 +235,17 @@ class RecordingNotifier extends Notifier {
 
 /**
  * A running box with two threads, the first of which was active last. Its
- * directories go under `dataDir`, which is the one the manager reads.
+ * directories go under `dataDir`, which is the one the manager reads. The
+ * box is set up already, so bringing it up spawns nothing but the adapter.
  */
 function seed(dataDir: string): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, status, created_at, last_active_at)
+       network_name, subnet, status, created_at, last_active_at, ready_at)
      VALUES ('s1', 'test', 'DEFAULT', 'img', 'c1',
-       'bn-s1', '10.200.0.0/24', 'running', ?, ?)`,
-  ).run(now, now);
+       'bn-s1', '10.200.0.0/24', 'running', ?, ?, ?)`,
+  ).run(now, now, now);
   // A start refuses a box whose directories are gone.
   ws.createWorkspace(dataDir, 's1');
   ws.createHome(dataDir, 's1');

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -8,7 +8,8 @@ import {
 } from 'node:http2';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { duplexPair, PassThrough } from 'node:stream';
+import { duplexPair, PassThrough, Readable } from 'node:stream';
+import { pack } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
 import { FILES_PROTOCOL_VERSION, VERSION_HEADER } from '../../shared/files.ts';
 import { inProcessFileService } from './files-in-process.ts';
@@ -34,6 +35,14 @@ afterEach(() => {
   setFileServiceSpawnerForTests(null);
   rmSync(workspace, { recursive: true, force: true });
 });
+
+/** A tar stream with one file, relative to the home. */
+function tarOf(name: string, content: string): Readable {
+  const p = pack();
+  p.entry({ name, size: content.length }, content);
+  p.finalize();
+  return Readable.from(p);
+}
 
 /** A file service that answers every request with `answer`. */
 function fake(
@@ -129,6 +138,19 @@ test('an image without the file service is refused as one of no version', async 
     return { io, exited: Promise.resolve(127), kill: () => io.destroy() };
   });
   await assert.rejects(fileService('c1').list(''), /version none/);
+});
+
+test('an agent set is installed from a stream, and a refused entry reports its path', async () => {
+  setFileServiceSpawnerForTests(real);
+  await fileService('c1').installAgentSet(tarOf('.claude/CLAUDE.md', 'rules'));
+  assert.equal(readFileSync(join(workspace, '.claude/CLAUDE.md'), 'utf8'), 'rules');
+
+  await assert.rejects(fileService('c1').installAgentSet(tarOf('.bashrc', 'x')), (err: unknown) => {
+    assert.ok(err instanceof FileServiceError);
+    assert.equal(err.status, 400);
+    assert.match(err.message, /\.bashrc/);
+    return true;
+  });
 });
 
 test('a read that sends more than its cap is refused', async () => {

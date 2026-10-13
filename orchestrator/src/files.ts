@@ -6,7 +6,8 @@ import {
   type IncomingHttpHeaders,
   type OutgoingHttpHeaders,
 } from 'node:http2';
-import { Duplex, PassThrough, type Readable } from 'node:stream';
+import { Duplex, PassThrough, Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import {
@@ -49,7 +50,7 @@ const MAX_JSON_REPLY = 4 * 1024 * 1024;
 const MAX_ERROR_REPLY = 64 * 1024;
 
 /** The exit codes of an exec whose command is not in the image. */
-const NOT_IN_IMAGE = new Set([126, 127]);
+export const NOT_IN_IMAGE = new Set([126, 127]);
 
 /** How long a lost connection waits for the exit code of the file service. */
 const EXIT_WAIT_MS = 2_000;
@@ -63,6 +64,17 @@ export class FileServiceError extends Error {
   ) {
     super(message);
     this.name = 'FileServiceError';
+  }
+}
+
+/**
+ * The box runs an image without the current file service or setup. The box
+ * needs a restart on the current image.
+ */
+export class OutdatedImageError extends HttpError {
+  constructor(message: string) {
+    super(409, message);
+    this.name = 'OutdatedImageError';
   }
 }
 
@@ -174,7 +186,8 @@ interface Request {
   route: string;
   query?: Record<string, string>;
   headers?: OutgoingHttpHeaders;
-  body?: string | Buffer;
+  /** The body. A stream is piped, so it is never held in memory as a whole. */
+  body?: string | Buffer | Readable;
   timeoutMs?: number;
 }
 
@@ -365,6 +378,22 @@ export class FileService {
     return reply.name;
   }
 
+  /**
+   * Writes the files of the orchestrator for the setup of the home, from a
+   * tar stream of files relative to the home.
+   */
+  async installSetupFiles(tar: Readable): Promise<void> {
+    await this.empty(await this.send({ method: 'POST', route: FILE_ROUTES.setupFiles, body: tar }));
+  }
+
+  /**
+   * Installs an agent set into the home, from a tar stream of files relative
+   * to the home, and removes what the last install put there.
+   */
+  async installAgentSet(tar: Readable): Promise<void> {
+    await this.empty(await this.send({ method: 'POST', route: FILE_ROUTES.agentSet, body: tar }));
+  }
+
   /** The apparent size of the workspace, the home and the Nix store, in bytes. */
   async size(): Promise<number> {
     const reply = await this.send({ method: 'GET', route: FILE_ROUTES.size, timeoutMs: SIZE_TIMEOUT_MS });
@@ -436,7 +465,11 @@ export class FileService {
         });
         stream.on('error', (err) => reject(err instanceof TimedOut ? err : new ConnectionLost()));
         stream.on('close', () => reject(new ConnectionLost()));
-        stream.end(req.body);
+        if (req.body instanceof Readable) {
+          pipeline(req.body, stream).catch(() => {});
+        } else {
+          stream.end(req.body);
+        }
       });
     } catch (err) {
       if (err instanceof ConnectionLost) await this.refuseMissingCommand();
@@ -539,9 +572,8 @@ function bodyOf(stream: ClientHttp2Stream): PassThrough {
  * The error for a file service that speaks another version of the protocol,
  * or for an image that has none.
  */
-function versionError(found: string): HttpError {
-  return new HttpError(
-    409,
+function versionError(found: string): OutdatedImageError {
+  return new OutdatedImageError(
     `This box has file service version ${found}, but the orchestrator needs version ` +
       `${FILES_PROTOCOL_VERSION}. The box needs an image with the current file service.`,
   );

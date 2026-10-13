@@ -8,7 +8,6 @@ import { CredentialStore, type CredentialId, type CredentialMethod } from './cre
 import { openDb, type Db } from './db.ts';
 import { EgressManager } from './egress.ts';
 import { proxyUrl } from './docker.ts';
-import { readSettings } from './settings.ts';
 
 /** A real Claude token as the store holds it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
@@ -72,14 +71,13 @@ async function envFor(
   over: Record<string, string> = {},
   methods: Partial<Record<CredentialId, CredentialMethod>> = {},
 ): Promise<Record<string, string>> {
-  const { cfg, db, egress } = await deployment(secrets, over, methods);
+  const { cfg, egress } = await deployment(secrets, over, methods);
   return boxEnv({
     placeholderFor: (id) => egress.placeholderFor(id),
     methodFor: (id) => egress.methodFor(id),
-    identity: readSettings(db),
     gitlabHost: cfg.GITLAB_HOST,
     proxyUrl: proxyUrl(cfg),
-    caCertificate: egress.caCertificate(),
+    hasCa: egress.caCertificate() !== '',
   });
 }
 
@@ -158,7 +156,6 @@ describe('boxEnv', () => {
   it('points every client at the CA, whether or not anything is intercepted', async () => {
     const path = '/home/agent/.boxes/ca-bundle.crt';
     for (const env of [await envFor({ github: GH_TOKEN }), await envFor()]) {
-      expect(env['BOXES_PROXY_CA']).toContain('BEGIN CERTIFICATE');
       expect(env['NODE_EXTRA_CA_CERTS']).toBe(path);
       expect(env['SSL_CERT_FILE']).toBe(path);
       expect(env['GIT_SSL_CAINFO']).toBe(path);
@@ -174,9 +171,4 @@ describe('boxEnv', () => {
     expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
   }, 30_000);
 
-  it('carries the git identity from the settings, which is not a credential', async () => {
-    const env = await envFor();
-    expect(env['GIT_NAME']).toBe('boxes-bot');
-    expect(env['GIT_EMAIL']).toBe('boxes-bot@users.noreply.github.com');
-  }, 30_000);
 });

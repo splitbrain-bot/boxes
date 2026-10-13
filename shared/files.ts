@@ -47,6 +47,19 @@ export const FILE_ROUTES = {
   create: '/create',
   /** GET: the apparent size of the workspace, the home and the Nix store, as a {@link SizeReply}. */
   size: '/size',
+  /**
+   * POST: writes the files of the orchestrator for the setup of the home,
+   * from a tar stream of files relative to the home. Only the CA of the
+   * egress proxy and the git configuration are accepted.
+   */
+  setupFiles: '/setup-files',
+  /**
+   * POST: installs the agent set in the body, a tar stream of files relative
+   * to the home, and removes what the last install put there. Only the
+   * instructions file and the skill directories of a harness layout are
+   * accepted.
+   */
+  agentSet: '/agent-set',
 } as const;
 
 /** The response header with the real size of a file that was read. */

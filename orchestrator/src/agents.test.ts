@@ -5,16 +5,14 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
-  readdirSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { AgentStore, agentConfigPath } from './agents.ts';
+import { extract } from 'tar-stream';
+import { AgentStore } from './agents.ts';
 import { openDb, type Db } from './db.ts';
 import { HttpError } from './http-error.ts';
 
@@ -56,15 +54,29 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** The materialized manifest of a box, as lines. */
-function manifest(boxId: string): string[] {
-  const text = readFileSync(join(agentConfigPath(dir, boxId), 'manifest'), 'utf8');
-  return text.split('\n').filter((line) => line !== '');
+/** The files of a packed set, by their home-relative path. */
+async function packed(setId: string | null): Promise<Map<string, { content: string; mode: number }>> {
+  const files = new Map<string, { content: string; mode: number }>();
+  const entries = extract();
+  entries.on('entry', (header, stream, next) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (c) => chunks.push(c as Buffer));
+    stream.on('end', () => {
+      files.set(header.name, { content: Buffer.concat(chunks).toString('utf8'), mode: header.mode });
+      next();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    entries.on('finish', resolve);
+    entries.on('error', reject);
+    store.pack(setId).pipe(entries);
+  });
+  return files;
 }
 
-/** One materialized file's content. */
-function materialized(boxId: string, rel: string): string {
-  return readFileSync(join(agentConfigPath(dir, boxId), rel), 'utf8');
+/** The home-relative paths of a packed set, sorted. */
+async function paths(setId: string | null): Promise<string[]> {
+  return [...(await packed(setId)).keys()].sort();
 }
 
 /** Inserts a box row, which is all the set's box count reads. */
@@ -118,7 +130,7 @@ test('a set that adds no AGENTS.md leaves no blank joiner behind', () => {
   assert.equal(store.bundle(set.id).agentsMd, 'House rules.');
 });
 
-test('skills are a union, and the set wins a name clash', () => {
+test('skills are a union, and the set wins a name clash', async () => {
   store.putItem('global', { name: 'review', content: 'global review' });
   store.putItem('global', { name: 'ship', content: 'global ship' });
   const set = store.createSet('go');
@@ -132,8 +144,7 @@ test('skills are a union, and the set wins a name clash', () => {
   );
   // An override is silent in the merged result, so it is reported separately.
   assert.deepEqual(bundle.overrides, ['review']);
-  store.materialize('s1', set.id);
-  assert.equal(materialized('s1', '.claude/skills/review/SKILL.md'), 'go review\n');
+  assert.equal((await packed(set.id)).get('.claude/skills/review/SKILL.md')?.content, 'go review\n');
 });
 
 test('naming the global set as the extra one changes nothing', () => {
@@ -141,102 +152,69 @@ test('naming the global set as the extra one changes nothing', () => {
   assert.deepEqual(store.bundle('global'), store.bundle(null));
 });
 
-// --- materializing -----------------------------------------------------------
+// --- packing -----------------------------------------------------------------
 
-test('a merged set is written in every harness layout the entrypoint copies', () => {
+test('a merged set is packed in every harness layout', async () => {
   store.updateSet('global', { agentsMd: 'House rules.' });
   store.putItem('global', { name: 'review', content: '---\nname: review\n---\n' });
   const set = store.createSet('go');
   store.putItem(set.id, { name: 'bench', content: 'Run the benchmarks.' });
 
-  store.materialize('s1', set.id);
+  const files = await packed(set.id);
 
   // Both layouts, always: a box holds threads of either harness, and which it
-  // will hold is not known when this is written.
-  assert.deepEqual(manifest('s1').sort(), [
-    '.agents/skills/bench',
-    '.agents/skills/review',
+  // will hold is not known when this is packed.
+  assert.deepEqual([...files.keys()].sort(), [
+    '.agents/skills/bench/SKILL.md',
+    '.agents/skills/review/SKILL.md',
     '.claude/CLAUDE.md',
-    '.claude/skills/bench',
-    '.claude/skills/review',
+    '.claude/skills/bench/SKILL.md',
+    '.claude/skills/review/SKILL.md',
     '.codex/AGENTS.md',
   ]);
   // What the dashboard calls AGENTS.md lands as each agent's user-level memory.
-  assert.equal(materialized('s1', '.claude/CLAUDE.md'), 'House rules.\n');
-  assert.equal(materialized('s1', '.codex/AGENTS.md'), 'House rules.\n');
+  assert.equal(files.get('.claude/CLAUDE.md')?.content, 'House rules.\n');
+  assert.equal(files.get('.codex/AGENTS.md')?.content, 'House rules.\n');
   // A skill is a directory with a SKILL.md in it under both layouts.
-  assert.equal(
-    materialized('s1', '.claude/skills/review/SKILL.md'),
-    '---\nname: review\n---\n',
-  );
-  assert.equal(
-    materialized('s1', '.agents/skills/review/SKILL.md'),
-    '---\nname: review\n---\n',
-  );
-  assert.equal(materialized('s1', '.claude/skills/bench/SKILL.md'), 'Run the benchmarks.\n');
+  assert.equal(files.get('.claude/skills/review/SKILL.md')?.content, '---\nname: review\n---\n');
+  assert.equal(files.get('.agents/skills/review/SKILL.md')?.content, '---\nname: review\n---\n');
+  assert.equal(files.get('.claude/skills/bench/SKILL.md')?.content, 'Run the benchmarks.\n');
 });
 
-test('every manifest path is home-relative and inside a layout', () => {
-  // The entrypoint installs these relative to $HOME and skips any line
+test('every packed path is home-relative and inside a layout', async () => {
+  // The file service installs these relative to the home and refuses a path
   // outside these four prefixes.
   store.updateSet('global', { agentsMd: 'House rules.' });
   store.putItem('global', { name: 'review', content: 'x' });
-  store.materialize('s1', null);
 
-  for (const rel of manifest('s1')) {
+  for (const rel of await paths(null)) {
     assert.match(
       rel,
       /^(\.claude\/(CLAUDE\.md|skills\/)|\.codex\/AGENTS\.md|\.agents\/skills\/)/,
-      `${rel} is not in a layout the entrypoint accepts`,
+      `${rel} is not in a layout the file service accepts`,
     );
   }
 });
 
-test('a box with nothing configured still gets a manifest', () => {
-  store.materialize('s1', null);
-  assert.deepEqual(manifest('s1'), []);
-  assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')), ['manifest']);
+test('a box with nothing configured gets an empty set', async () => {
+  assert.deepEqual(await paths(null), []);
 });
 
-test('materializing again removes what the previous set left, in both layouts', () => {
-  store.updateSet('global', { agentsMd: 'House rules.' });
-  store.putItem('global', { name: 'ship', content: 'one' });
-  store.materialize('s1', null);
-  assert.deepEqual(manifest('s1').sort(), [
-    '.agents/skills/ship',
-    '.claude/CLAUDE.md',
-    '.claude/skills/ship',
-    '.codex/AGENTS.md',
-  ]);
+test('the skills of the orchestrator are packed, and a skill of the set wins', async () => {
+  let builtins = [
+    { name: 'diagrams', content: 'orchestrator diagrams' },
+    { name: 'share-app', content: 'orchestrator share-app' },
+  ];
+  store = new AgentStore(db, dir, undefined, () => builtins);
+  store.putItem('global', { name: 'diagrams', content: 'own diagrams' });
 
-  store.updateSet('global', { agentsMd: '' });
-  store.deleteItem('global', 'ship');
-  store.putItem('global', { name: 'review', content: 'two' });
-  store.materialize('s1', null);
+  const files = await packed(null);
+  assert.equal(files.get('.claude/skills/diagrams/SKILL.md')?.content, 'own diagrams\n');
+  assert.equal(files.get('.agents/skills/share-app/SKILL.md')?.content, 'orchestrator share-app\n');
 
-  // Gone from the manifest and from the directory the container reads, so the
-  // next start removes it from both layouts in the home.
-  assert.deepEqual(manifest('s1').sort(), ['.agents/skills/review', '.claude/skills/review']);
-  assert.deepEqual(readdirSync(join(agentConfigPath(dir, 's1'), '.claude')), ['skills']);
-  assert.deepEqual(readdirSync(agentConfigPath(dir, 's1')).sort(), [
-    '.agents',
-    '.claude',
-    'manifest',
-  ]);
-});
-
-test('re-materializing keeps the directory a running container is mounted on', () => {
-  store.materialize('s1', null);
-  const before = statSync(agentConfigPath(dir, 's1')).ino;
-  store.putItem('global', { name: 'review', content: 'x' });
-  store.materialize('s1', null);
-  assert.equal(statSync(agentConfigPath(dir, 's1')).ino, before);
-});
-
-test('deleting a box takes its materialized directory with it', () => {
-  store.materialize('s1', null);
-  store.removeMaterialized('s1');
-  assert.equal(readdirSync(join(dir, 'agents')).includes('s1'), false);
+  // A skill whose condition no longer holds is not packed, so the next install removes it.
+  builtins = [];
+  assert.deepEqual(await paths(null), ['.agents/skills/diagrams/SKILL.md', '.claude/skills/diagrams/SKILL.md']);
 });
 
 // --- repositories ------------------------------------------------------------
@@ -292,14 +270,17 @@ test('a repository skill is copied with all its files, without its links', async
   chmodSync(join(tree, 'scripts', 'run.sh'), 0o755);
   symlinkSync('/etc/passwd', join(tree, 'passwd'));
 
-  store.materialize('s1', null);
+  const files = await packed(null);
 
-  assert.deepEqual(manifest('s1').sort(), ['.agents/skills/pdf', '.claude/skills/pdf']);
-  assert.equal(materialized('s1', '.claude/skills/pdf/SKILL.md'), 'pdf');
-  assert.equal(materialized('s1', '.agents/skills/pdf/scripts/run.sh'), '#!/bin/sh\n');
-  const mode = statSync(join(agentConfigPath(dir, 's1'), '.claude/skills/pdf/scripts/run.sh')).mode;
-  assert.equal(mode & 0o111, 0o111);
-  assert.equal(existsSync(join(agentConfigPath(dir, 's1'), '.claude/skills/pdf/passwd')), false);
+  assert.deepEqual([...files.keys()].sort(), [
+    '.agents/skills/pdf/SKILL.md',
+    '.agents/skills/pdf/scripts/run.sh',
+    '.claude/skills/pdf/SKILL.md',
+    '.claude/skills/pdf/scripts/run.sh',
+  ]);
+  assert.equal(files.get('.claude/skills/pdf/SKILL.md')?.content, 'pdf');
+  assert.equal(files.get('.agents/skills/pdf/scripts/run.sh')?.content, '#!/bin/sh\n');
+  assert.equal((files.get('.claude/skills/pdf/scripts/run.sh')?.mode ?? 0) & 0o111, 0o111);
 });
 
 test('a skill that changes source leaves no file of the old one behind', async () => {
@@ -308,13 +289,9 @@ test('a skill that changes source leaves no file of the old one behind', async (
     'pdf/extra.md': 'extra',
   };
   await store.addRepo('global', { url: 'https://example.com/skills' });
-  store.materialize('s1', null);
   store.putItem('global', { name: 'pdf', content: 'mine' });
-  store.materialize('s1', null);
 
-  assert.deepEqual(readdirSync(join(agentConfigPath(dir, 's1'), '.claude/skills/pdf')), [
-    'SKILL.md',
-  ]);
+  assert.deepEqual(await paths(null), ['.agents/skills/pdf/SKILL.md', '.claude/skills/pdf/SKILL.md']);
 });
 
 test('a failed pull is recorded, and the skills of the last good pull stay', async () => {
@@ -326,8 +303,7 @@ test('a failed pull is recorded, and the skills of the last good pull stay', asy
 
   assert.equal(after.repos[0]!.error, 'repository not found');
   assert.deepEqual(after.repos[0]!.skills, ['pdf']);
-  store.materialize('s1', null);
-  assert.equal(materialized('s1', '.claude/skills/pdf/SKILL.md'), 'pdf');
+  assert.equal((await packed(null)).get('.claude/skills/pdf/SKILL.md')?.content, 'pdf');
 });
 
 test('a repository that cannot be pulled at all is still added', async () => {

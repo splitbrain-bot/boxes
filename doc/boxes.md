@@ -92,7 +92,6 @@ adapters and their agents.
 | `/workspace` | the box's workspace directory | read and write |
 | `/home/agent` | the box's home directory | read and write |
 | `/nix` | the box's Nix store directory | read and write |
-| `/boxes/agent` | the merged agent set | read only |
 | `/tmp` | memory | read and write, empty at each start |
 
 The three persistent directories stay when a box stops and survive a box image change. They are removed only when the
@@ -128,10 +127,28 @@ A bind mount hides the home directory of the image, so the orchestrator seeds th
 container that runs as root: `cp -a` copies the image's home in, and a recursive `chown` to `BOX_UID:BOX_GID` makes it
 writable by the agent.
 
-Every start goes through a repair pass. The agent set is rewritten. A missing workspace or home directory marks the box
-`error` rather than being recreated — a fresh home would erase the agent's transcripts without a warning. A container
-the daemon reports missing is recreated together with its network. A container whose image id no longer matches the box
-image is replaced, but never while it runs, so a turn is never interrupted.
+Every start goes through a repair pass, `BoxManager.prepareContainer`, which `bringUp` runs before it starts the
+container. A missing workspace or home directory marks the box `error` rather than being
+recreated — a fresh home would erase the agent's transcripts without a warning. A container the daemon reports missing
+is recreated together with its network. A container whose image id no longer matches the box image is replaced, but
+never while it runs, so a turn is never interrupted.
+
+### The setup
+
+After each container start, `BoxManager.bringUp` sets up the box in three steps. The adapters, the terminal and the
+file operations wait for it. When a step fails, the box gets the status `error` with the output of the step.
+
+1. The orchestrator writes its own files into the home through the [file service](files.md): the CA of the
+   [egress proxy](egress.md) to `~/.boxes/proxy-ca.crt`, and the git configuration with the
+   [identity](credentials.md#git-identity) to `~/.config/git/config`.
+2. It runs `boxes-setup`, a shell script of the image at `/usr/local/bin/boxes-setup` (source `box-image/setup.sh`),
+   with a limit of 60 seconds. The script prepares the home for the tools of the image: it empties `TMPDIR`, builds the
+   CA bundle, adds the CA to the trust store of Chromium, links the browsers, and sets the credential helpers of `gh`
+   and `glab`.
+3. It installs the [agent set](agent-sets.md) and the [built-in skills](skills.md).
+
+The column `ready_at` records a complete setup, and each container start clears it, so a restart of the orchestrator
+does not set up a running box again.
 
 ### The operation queue
 
@@ -147,8 +164,7 @@ missing ones as stopped, marks an interrupted create as an error, and re-checks 
 live network. The periodic sweep uses the same label in the opposite direction: it removes every labelled container,
 network and box directory that has no live row, containers before networks. One guard: when the strays outnumber the
 known boxes by a wide margin, the sweep refuses, because that pattern usually means a wrongly mounted data volume rather
-than real garbage. The sweep removes login containers by age. It does not remove the materialized agent set directories;
-they are kilobytes of markdown, rewritten at every start.
+than real garbage. The sweep removes login containers by age.
 
 ### The subnet pool
 

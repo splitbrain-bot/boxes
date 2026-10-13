@@ -19,6 +19,7 @@ const server = serveFiles(io, {
   workspace: process.env.BOXES_FILES_WORKSPACE ?? '/workspace',
   home: process.env.BOXES_FILES_HOME ?? '/home/agent',
   nix: process.env.BOXES_FILES_NIX ?? '/nix',
+  imageSkills: process.env.BOXES_FILES_IMAGE_SKILLS ?? '/usr/local/share/boxes/skills',
 });
 server.on('session', (session) => session.on('close', () => process.exit(0)));
 process.stdin.on('end', () => process.exit(0));

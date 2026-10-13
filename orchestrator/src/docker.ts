@@ -53,15 +53,6 @@ function boxUser(): string {
 export const WORKSPACE_DIR = '/workspace';
 
 /**
- * Where the box's merged agent configuration is mounted, read-only.
- *
- * The entrypoint copies it into each harness's directories in `$HOME`. The
- * agent writes to those directories, so a read-only mount over them would
- * break the box.
- */
-export const AGENT_CONFIG_DIR = '/boxes/agent';
-
-/**
  * Where the box's Nix store is mounted, writable.
  *
  * The path is fixed: store paths are hashed against /nix/store, so the binary
@@ -111,13 +102,6 @@ export interface CreateContainerSpec {
    * name, because the orchestrator reads these files itself.
    */
   workspaceSource: string;
-  /**
-   * Host-side path of the box's materialized agent configuration, bound
-   * read-only at AGENT_CONFIG_DIR. Always present: a box with nothing
-   * configured gets an empty manifest, which is how the entrypoint learns to
-   * remove what a previous start installed.
-   */
-  agentConfigSource: string;
   /** Host-side path of the box's home directory, bound at `/home/agent`. */
   homeSource: string;
   /** Host-side path of the box's Nix store directory, bound at NIX_DIR. */
@@ -454,8 +438,6 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeSource}:${HOME_DIR}`,
         `${spec.nixSource}:${NIX_DIR}`,
-        // Read-only, so the agent cannot rewrite its configuration.
-        `${spec.agentConfigSource}:${AGENT_CONFIG_DIR}:ro`,
       ],
       ReadonlyRootfs: true,
       Tmpfs: { '/tmp': 'rw,size=512m,mode=1777' },

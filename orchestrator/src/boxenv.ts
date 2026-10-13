@@ -3,7 +3,7 @@ import { HOME_DIR } from './docker.ts';
 import { HARNESSES } from './harness.ts';
 
 /**
- * Where the entrypoint writes the system authorities together with the
+ * Where the box setup writes the system authorities together with the
  * deployment CA, and where the CA env vars point.
  */
 const CA_PATH = `${HOME_DIR}/.boxes/ca-bundle.crt`;
@@ -14,25 +14,19 @@ export interface BoxEnvInputs {
   placeholderFor: (credentialId: string) => string;
   /** The method a stored credential is used with, or null when none is stored. */
   methodFor: (credentialId: CredentialId) => CredentialMethod | null;
-  /** The git identity from the settings. */
-  identity: { gitName: string; gitEmail: string };
   /** The GitLab host the GitLab credential is for. */
   gitlabHost: string;
   /** The URL of the egress proxy, as a box reaches it. */
   proxyUrl: string;
-  /**
-   * PEM of the deployment CA this box trusts. It is set even before any
-   * credential exists, as the box keeps it for its whole life.
-   */
-  caCertificate: string;
+  /** True when the deployment has a CA, which the box trusts. */
+  hasCa: boolean;
 }
 
 /**
  * The full environment of a box, as a plain record. The runtime converts it
  * to its own format. Variables with an empty value are left out.
  *
- * It carries the credential placeholders, never a real credential. The CA
- * travels here as a PEM, so it needs no file on the host.
+ * It carries the credential placeholders, never a real credential.
  *
  * Every harness adds its variables, even one no thread in the box uses. Each
  * credential value is a placeholder that the egress proxy swaps for the real
@@ -54,8 +48,6 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   env['GITLAB_TOKEN'] = inputs.placeholderFor('gitlab');
   env['GITLAB_HOST'] = inputs.gitlabHost;
   env['DEVTUNNELS_TOKEN'] = inputs.placeholderFor('devtunnels');
-  env['GIT_NAME'] = inputs.identity.gitName;
-  env['GIT_EMAIL'] = inputs.identity.gitEmail;
 
   env['TERM'] = 'dumb';
   // Every proxy-aware client honours these; anything else has no route
@@ -67,12 +59,11 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   env['NO_PROXY'] = 'localhost,127.0.0.1';
   env['no_proxy'] = 'localhost,127.0.0.1';
 
-  if (inputs.caCertificate !== '') {
-    // The entrypoint appends the PEM to the system authorities in CA_PATH;
+  if (inputs.hasCa) {
+    // The box setup appends the CA to the system authorities in CA_PATH;
     // these are the variables that point node, gh, git, git-lfs, curl and
     // Codex at it. A tool honouring none of them fails TLS against the
     // intercepted hosts and nothing else.
-    env['BOXES_PROXY_CA'] = inputs.caCertificate;
     env['NODE_EXTRA_CA_CERTS'] = CA_PATH;
     env['SSL_CERT_FILE'] = CA_PATH;
     env['GIT_SSL_CAINFO'] = CA_PATH;

@@ -17,6 +17,8 @@ import {
   VERSION_HEADER,
   type FindReposRequest,
 } from '../../shared/files.ts';
+import { installAgentSet } from './agentset.ts';
+import { installSetupFiles } from './setupfiles.ts';
 import {
   createUnderFreeName,
   FileError,
@@ -40,6 +42,8 @@ export interface Roots {
   home: string;
   /** The Nix store, which only the size covers. */
   nix: string;
+  /** The skills of the box image, which each agent set install copies into the home. Absent when there are none. */
+  imageSkills?: string;
 }
 
 /** The most bytes of a JSON request body. */
@@ -142,6 +146,14 @@ async function handle(
       return reply(stream, 200, {
         bytes: await totalSize([roots.workspace, roots.home, roots.nix]),
       });
+
+    case `POST ${FILE_ROUTES.setupFiles}`:
+      await installSetupFiles(roots.home, stream);
+      return reply(stream, 204, null);
+
+    case `POST ${FILE_ROUTES.agentSet}`:
+      await installAgentSet(roots.home, roots.imageSkills, stream);
+      return reply(stream, 204, null);
 
     default:
       throw new FileError(404, `unknown operation: ${route}`);

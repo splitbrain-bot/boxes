@@ -67,9 +67,8 @@ added to the orchestrator environment.
 | Variables | Purpose |
 | --- | --- |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `NO_PROXY`, `no_proxy` | Route box traffic through the egress proxy while keeping local traffic direct. |
-| `BOXES_PROXY_CA`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`, `CODEX_CA_CERTIFICATE` | Trust the deployment certificate authority for TLS interception. |
+| `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`, `CODEX_CA_CERTIFICATE` | Trust the deployment certificate authority for TLS interception. |
 | `GH_TOKEN`, `GITLAB_TOKEN`, `GITLAB_HOST`, `DEVTUNNELS_TOKEN` | Credential placeholders and GitLab host for `git`, `gh`, `glab`, and Dev Tunnels. The proxy replaces placeholders with stored credentials only for approved destinations. |
-| `GIT_NAME`, `GIT_EMAIL` | Git identity selected on the dashboard. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `NO_BROWSER`, `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST` | Codex adapter configuration. |
 | `TERM` | Set to `dumb` for commands run through Boxes. |
 

@@ -595,11 +595,12 @@ function createBox(
   const now = Date.now();
   const containerId = `box-${id}`;
   const index = (db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }).n;
+  // A running box is set up already, so bringing it up runs no setup.
   db.prepare(
     `INSERT INTO boxes (id, name, profile, image, container_id,
        network_name, subnet, review_base_rev, status, agent_set_id, ws_token,
-       created_at, last_active_at)
-     VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)`,
+       created_at, last_active_at, ready_at)
+     VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)`,
   ).run(
     id,
     spec.name ?? DEFAULT_BOX.name,
@@ -609,6 +610,7 @@ function createBox(
     `10.200.${index}.0/24`,
     spec.status ?? 'running',
     WS_TOKEN,
+    now,
     now,
     now,
   );

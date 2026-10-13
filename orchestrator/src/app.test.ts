@@ -46,6 +46,11 @@ function fakeDocker(): void {
 
   dk.setDockerForTests({
     modem,
+    // Bringing a box up re-attaches the egress proxy to its network.
+    getNetwork: () => ({
+      inspect: async () => ({ Containers: {} }),
+      connect: async () => undefined,
+    }),
     getContainer: () => ({
       start: async () => undefined,
       stop: async () => undefined,
@@ -53,7 +58,9 @@ function fakeDocker(): void {
       exec: async (opts: { Cmd: string[] }) => {
         if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
         // The box-wide stop's two calls: a reading taken inside the container,
-        // and the signal it aims at what the reading found.
+        // and the signal it aims at what the reading found. The setup of a
+        // box that is brought up runs under `timeout`.
+        const command = opts.Cmd[0] === 'timeout' ? opts.Cmd[3] : opts.Cmd[0];
         const answers = opts.Cmd[0] === 'ps' ? insideBox : null;
         return {
           start: async () => {
@@ -67,9 +74,9 @@ function fakeDocker(): void {
             return stream;
           },
           inspect: async () => ({
-            // A `ps` or a `kill` the stop ran succeeded; anything else this fake
-            // does not answer for failed.
-            ExitCode: answers === null && opts.Cmd[0] !== 'kill' ? 1 : 0,
+            // A `ps` or a `kill` the stop ran and the setup succeeded; anything
+            // else this fake does not answer for failed.
+            ExitCode: answers === null && command !== 'kill' && command !== 'boxes-setup' ? 1 : 0,
           }),
         };
       },
@@ -103,7 +110,7 @@ function insertThread(boxId: string, threadId: string, ordinal: number): void {
   ).run(threadId, boxId, ordinal, now, now);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   insideBox = '';
   killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
@@ -111,6 +118,8 @@ beforeEach(() => {
   process.env['DATA_DIR'] = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
+  // The setup of a box writes the CA of the egress proxy into the home.
+  await orchestrator.egress.prepare();
   // Every test box runs in the container c1, and the tests that reach its
   // files use the box abc123.
   const data = orchestrator.cfg.DATA_DIR;
@@ -839,9 +848,9 @@ test('creating a box against an unknown set is refused before anything is built'
   assert.equal(rows.n, 0);
 });
 
-test('starting a container to reach into writes the current configuration first', async () => {
+test('starting a container to reach into installs the current configuration first', async () => {
   // Opening a thread and opening a terminal both start a stopped box without
-  // /start. The entrypoint installs what is on disk at that moment.
+  // /start. The file service installs what is configured at that moment.
   insertWorkspaceBox('abc123');
   fakeDocker();
   await orchestrator.app.inject({
@@ -856,7 +865,7 @@ test('starting a container to reach into writes the current configuration first'
   // orchestrator's own rather than this test's fresh one.
   assert.equal(
     readFileSync(
-      join(orchestrator.cfg.DATA_DIR, 'agents', 'abc123', '.claude', 'skills', 'ship', 'SKILL.md'),
+      join(ws.homePath(orchestrator.cfg.DATA_DIR, 'abc123'), '.claude', 'skills', 'ship', 'SKILL.md'),
       'utf8',
     ),
     'Open a PR.\n',

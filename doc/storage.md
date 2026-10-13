@@ -11,7 +11,6 @@ keeps its rules and credentials in memory only.
 | `workspaces/<box id>` | the files an agent works on | `/workspace`, read and write |
 | `homes/<box id>` | the home directory of the agent account | `/home/agent`, read and write |
 | `nix/<box id>` | the Nix store of the box | `/nix`, read and write |
-| `agents/<box id>` | the agent set that the box was started with | `/boxes/agent`, read only |
 | `skill-repos/<repo id>` | the checkout of a skill repository of an [agent set](agent-sets.md) | not mounted |
 
 `/tmp` is the one path in the container with no source in the volume. It is memory, 512 MB large, and empty at each
@@ -19,9 +18,9 @@ start. Every other path comes from the box image, and the root filesystem is rea
 mounted directories and in `/tmp`.
 
 `TMPDIR` names `/home/agent/.cache/tmp` and not `/tmp`, because the tmpfs counts against the memory limit of the
-container, while the home is on disk. The entrypoint empties that directory at each start.
+container, while the home is on disk. The [box setup](boxes.md#the-setup) empties that directory at each start.
 
-The four directories with a box id in the name are bind mounts. Each box container gets the mounts of its own box, and
+The three directories with a box id in the name are bind mounts. Each box container gets the mounts of its own box, and
 nothing else of the volume. The orchestrator reads and writes the files in the workspace, the home and the Nix store
 only through the [file service](files.md) in the box.
 
