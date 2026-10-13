@@ -61,6 +61,14 @@ jobs:
         working-directory: orchestrator
         run: npm ci
 
+      # The orchestrator's tests run the file service in process, so its
+      # type check and tests, and the dashboard's with it, need the file
+      # service's dependencies.
+      - name: Install file service dependencies
+        if: matrix.package == 'orchestrator' || matrix.package == 'dashboard'
+        working-directory: files
+        run: npm ci
+
       # The dashboard's e2e project drives the production bundle in a real
       # Chromium.
       #

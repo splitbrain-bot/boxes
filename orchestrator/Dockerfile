@@ -19,7 +19,10 @@ RUN npm run check:app && npm run build
 FROM node:26-bookworm AS orchestrator-build
 WORKDIR /build
 COPY shared/ ./shared/
-# The tests run the file service in process, and the check covers them.
+# The tests run the file service in process, and the check covers them, so
+# the file service's source and dependencies are here too.
+COPY files/package.json files/package-lock.json* ./files/
+RUN cd files && npm ci
 COPY files/src/ ./files/src/
 COPY orchestrator/package.json orchestrator/package-lock.json* ./orchestrator/
 WORKDIR /build/orchestrator
