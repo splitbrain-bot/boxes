@@ -37,10 +37,12 @@ ENV NODE_ENV=production
 # better-sqlite3 is a native module, so the production dependencies are
 # installed against the runtime image's own libc.
 COPY orchestrator/package.json orchestrator/package-lock.json* ./
-# git stays, because the review runs it over a box's workspace. The native
-# module's build toolchain is installed and removed in the same layer.
+# git stays, because the review runs it over a box's workspace and the
+# orchestrator fetches skill repositories with it. git needs ca-certificates to
+# verify HTTPS servers. The native module's build toolchain is installed and
+# removed in the same layer.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git \
+ && apt-get install -y --no-install-recommends git ca-certificates \
  && apt-get install -y --no-install-recommends python3 make g++ \
  && npm ci --omit=dev \
  && apt-get purge -y python3 make g++ \
