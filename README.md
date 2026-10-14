@@ -43,6 +43,7 @@ work on the same checkout.
 - [Docker Compose setup](doc/compose.md) — The services, the volume and the Docker socket
 - [Environment variables](doc/environment.md) — Every variable the orchestrator reads, and its default
 - [Credentials](doc/credentials.md) — The credentials Boxes uses, how to enter them, and their path into a box
+- [Custom box images](doc/custom-images.md) — Build a box image from the base image, with the tools of a project
 
 ### Use Boxes
 

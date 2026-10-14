@@ -45,7 +45,8 @@ flowchart TD
 If the dashboard cannot parse a block, the person sees only the source text.
 Before you send a diagram that is not trivial, render it to an image and look
 at it. This finds syntax errors and shows if the layout is too wide or
-crowded.
+crowded. Render only when `/usr/local/bin/chromium` exists. If it does not,
+check the source against the rules above.
 
 Write the source to a file, then render it with the mermaid CLI and the
 Chromium of the box:
