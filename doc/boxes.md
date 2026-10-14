@@ -74,10 +74,11 @@ A stopped box keeps its workspace, home, and Nix store. Opening a thread starts 
 
 ## The box image
 
-Every box is created from the image `BOX_IMAGE` names (default `ghcr.io/splitbrain/boxes/box:latest`). The orchestrator
-pulls it when it is missing, and again every `BOX_IMAGE_PULL_MINUTES` (default 60). A stopped box picks up the new image
-at its next start; the orchestrator does not replace a running box. Superseded image copies are removed when
-`BOX_IMAGE_PRUNE` is on.
+Every box is created from the image `BOX_IMAGE` names (default `ghcr.io/splitbrain/boxes/box:latest`). This full image
+has the tools for many projects. It is built from the base image `ghcr.io/splitbrain/boxes/box-base`. A
+[custom image](custom-images.md) also starts from the base image. The orchestrator pulls the image when it is missing,
+and again every `BOX_IMAGE_PULL_MINUTES` (default 60). A stopped box picks up the new image at its next start; the
+orchestrator does not replace a running box. Superseded image copies are removed when `BOX_IMAGE_PRUNE` is on.
 
 ## Resource limits
 
@@ -141,10 +142,12 @@ file operations wait for it. When a step fails, the box gets the status `error` 
 1. The orchestrator writes its own files into the home through the [file service](files.md): the CA of the
    [egress proxy](egress.md) to `~/.boxes/proxy-ca.crt`, and the git configuration with the
    [identity](credentials.md#git-identity) to `~/.config/git/config`.
-2. It runs `boxes-setup`, a shell script of the image at `/usr/local/bin/boxes-setup` (source `box-image/setup.sh`),
-   with a limit of 60 seconds. The script prepares the home for the tools of the image: it empties `TMPDIR`, builds the
-   CA bundle, adds the CA to the trust store of Chromium, links the browsers, and sets the credential helpers of `gh`
-   and `glab`.
+2. It runs `boxes-setup`, a shell script of the base image at `/usr/local/bin/boxes-setup` (source
+   `box-image/setup.sh`), with a limit of 60 seconds. The script prepares the home for the tools of the base
+   image: it empties `TMPDIR`, builds the CA bundle, and sets the credential helpers of `gh` and `glab`. Then it runs
+   the [setup steps](custom-images.md#setup-steps) of the image in `/usr/local/lib/boxes/setup.d/`. The steps of the
+   full image (source `box-image/setup.d/`) check `/nix`, add the CA to the trust store of Chromium, and link the
+   browsers.
 3. It installs the [agent set](agent-sets.md) and the [built-in skills](skills.md).
 
 The column `ready_at` records a complete setup, and each container start clears it, so a restart of the orchestrator

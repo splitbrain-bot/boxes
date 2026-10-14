@@ -1,15 +1,25 @@
-# Boxes box image: one long-lived container per box.
-# PID 1 only holds the container open. The gateway runs the ACP adapter as a
-# docker exec, so browser churn never restarts it.
+# Boxes box images: one long-lived container per box. PID 1 only holds the
+# container open. The gateway runs the ACP adapter as a docker exec, so
+# browser churn never restarts it.
+#
+# Two images from this file, selected with --target:
+#
+#   base   what a box needs to work with the orchestrator. A custom image is
+#          built from it.
+#   full   the base with the tools for projects: languages, nix, browsers,
+#          and tools for documents, archives and databases. The default of
+#          BOX_IMAGE.
+#
+# Each image has three stages: *-image installs everything, *-test checks it,
+# and the target ships the image once the test has passed.
 #
 # A new box's home is a copy of /home/agent, seeded once and never refreshed.
 # A tool that must follow the image is installed outside the home.
 #
-# Three stages: image installs everything, test checks it, and the last stage
-# ships image once test has passed. The build context is the repository root,
-# because the file service is built from files/ and shared/.
+# The build context is the repository root, because the file service is
+# built from files/ and shared/.
 
-# Build arguments the test stage checks the image against. A stage sees one
+# Build arguments the test stages check the images against. A stage sees one
 # only after it names it again with a bare ARG.
 ARG NODE_MAJOR=26
 ARG NIX_VERSION=2.34.8
@@ -24,24 +34,6 @@ ARG CODEX_VERSION=0.156.1
 ARG AGENT_UID=1020
 ARG AGENT_GID=1020
 
-# Nix as one statically linked binary from the official binary cache. /nix is
-# a per-box bind, so the binary lives in /usr/local/bin and follows the image.
-#
-# nix copy checks the cache's signature for the pinned store path. A bump
-# changes both paths and NIX_VERSION above. The stage runs on the build
-# platform, because copying a store path executes nothing.
-FROM --platform=$BUILDPLATFORM nixos/nix:2.35.2 AS nix-static
-ARG TARGETARCH
-ARG NIX_STATIC_AMD64=/nix/store/vx0h5sdb0r7qgsm9fp653f0fi2wn5v7k-nix-static-x86_64-unknown-linux-musl-2.34.8
-ARG NIX_STATIC_ARM64=/nix/store/x7ym2j54zsnws310rv7lg3sqbvhcfani-nix-static-aarch64-unknown-linux-musl-2.34.8
-RUN case "$TARGETARCH" in \
-      amd64) path="$NIX_STATIC_AMD64" ;; \
-      arm64) path="$NIX_STATIC_ARM64" ;; \
-      *) echo "no static nix pinned for $TARGETARCH" >&2; exit 1 ;; \
-    esac \
- && nix --extra-experimental-features nix-command copy --from https://cache.nixos.org "$path" \
- && cp -a "$path/bin" /out
-
 # The file service, type-checked and bundled like the orchestrator and the
 # proxy. The build mirrors the repository layout, so imports from files/src
 # into shared/ resolve as they do in a checkout.
@@ -55,10 +47,14 @@ COPY files/tsconfig.json files/vite.config.ts ./
 COPY files/src ./src
 RUN npm run check && npm run build
 
-FROM ubuntu:26.04 AS image
+# ---------------------------------------------------------------------------
+# The base image
+# ---------------------------------------------------------------------------
 
-# Marks copies of this image, so the orchestrator can find and remove an
-# untagged copy after a pull replaced it.
+FROM ubuntu:26.04 AS base-image
+
+# Marks copies of this image and of every image built from it, so the
+# orchestrator can find and remove an untagged copy after a pull replaced it.
 LABEL boxes.image=box
 
 # curl needs a trust store to add the repositories below. tini is PID 1;
@@ -87,19 +83,15 @@ RUN install -d -m 0755 /etc/apt/keyrings \
 #
 # The dashboard's terminal attaches to tmux, so a shell and its scrollback
 # outlive a closed tab.
+#
+# rg for searches, jq for the setup steps, and less as git's pager.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
       jq \
+      less \
       procps \
       tmux \
-      build-essential \
-      python3 \
-      python3-venv \
-      pipx \
-      less \
-      netcat-openbsd \
-      bind9-dnsutils \
  && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI from the official apt repository, for the fork and pull request
@@ -153,6 +145,214 @@ RUN apt-get update && apt-get install -y --no-install-recommends libicu78 \
  && chmod 0755 /usr/local/bin/devtunnel \
  && devtunnel --version | grep -qF "${DEVTUNNEL_VERSION}" \
  && rm -rf /root/.net /root/.local/share/DevTunnels
+
+# The agent and the adapter, each pinned to a major line. Below 1.0, the caret
+# pins the minor instead. Do not switch to @zed-industries/claude-code-acp,
+# which is stale.
+#
+# --prefix keeps the image's globals in /usr/local. Without it, npm derives the
+# prefix from the node binary in /usr/bin. The identity check below relies on
+# /usr/local.
+RUN npm install -g --prefix /usr/local \
+      @anthropic-ai/claude-code@^2 \
+      @agentclientprotocol/claude-agent-acp@^0.81.0 \
+ && npm cache clean --force
+
+# The Codex CLI and its ACP adapter, both pinned exactly.
+#
+# @openai/codex is a small launcher, and its platform binary arrives as an
+# optional dependency of several hundred megabytes. The adapter nests its own
+# @openai/codex. --omit=optional leaves that nested copy without a binary, and
+# CODEX_PATH points the adapter at the global one. A person's codex and the
+# adapter's codex are then the same build. The identity check below proves it.
+ARG CODEX_VERSION
+RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
+ && npm install -g --prefix /usr/local --omit=optional \
+      @agentclientprotocol/codex-acp@1.13.0 \
+ && npm cache clean --force
+ENV CODEX_PATH=/usr/local/bin/codex
+
+# Codex's system configuration.
+COPY box-image/codex-config.toml /etc/codex/config.toml
+
+# Skills for the tools of the image, which the file service installs into the
+# home with each agent set. The full image and a custom image add theirs here.
+RUN mkdir -p /usr/local/share/boxes/skills
+
+# The file service. The orchestrator starts it in the box and reaches all the
+# files of the box through it. The bundle has no npm dependencies. node runs
+# the link as the bundle itself, so the .mjs name makes it an ES module.
+COPY --from=files-build /build/files/dist/main.mjs /usr/local/lib/boxes-files/main.mjs
+RUN chmod 0755 /usr/local/lib/boxes-files/main.mjs \
+ && ln -s /usr/local/lib/boxes-files/main.mjs /usr/local/bin/boxes-files
+
+# The agent's own account, with the uid and gid from the top of this file.
+ARG AGENT_UID
+ARG AGENT_GID
+RUN groupadd -g "${AGENT_GID}" agent \
+ && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -m -d /home/agent -s /bin/bash agent
+
+# HOME is set outright, because the caches of many tools derive from it.
+# C.UTF-8 is built into glibc and keeps non-ASCII paths intact.
+# CLAUDE_CONFIG_DIR and CODEX_HOME make the adapter and a shell in the box use
+# the same directory.
+ENV HOME=/home/agent \
+    LANG=C.UTF-8 \
+    CLAUDE_CONFIG_DIR=/home/agent/.claude \
+    CODEX_HOME=/home/agent/.codex \
+    TERM=dumb \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+# The agent installs its own tools into the persistent home, because the
+# root filesystem is read-only and the agent is not root.
+#
+# Set after the global installs above, which belong on the image.
+ENV NPM_CONFIG_PREFIX=/home/agent/.local \
+    PATH=/home/agent/.local/bin:$PATH
+
+COPY box-image/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+# The setup of the home. The orchestrator runs it as the agent after each
+# start of the box, before the box is ready.
+COPY box-image/setup.sh /usr/local/bin/boxes-setup
+RUN chmod 0755 /usr/local/bin/boxes-setup
+
+# The setup steps of the full image or a custom image. boxes-setup runs each
+# executable file here after its own steps.
+RUN mkdir -p /usr/local/lib/boxes/setup.d
+
+# The root filesystem is read-only at runtime, so every mount point must
+# exist in the image. /workspace, /home/agent and /nix are writable binds, and
+# /tmp is a tmpfs.
+#
+# Codex refuses to start without its CODEX_HOME, and the check below runs
+# codex.
+RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude \
+ && chown agent:agent /workspace /nix /home/agent /home/agent/.local /home/agent/.local/bin \
+      /home/agent/.codex /home/agent/.claude
+
+# Claude Code's user settings for a new box, without commit and pull request
+# attribution.
+COPY --chown=agent:agent box-image/claude-settings.json /home/agent/.claude/settings.json
+
+# Numeric, so the uid is readable from the image itself.
+USER ${AGENT_UID}
+WORKDIR /workspace
+
+# Temporary files go to disk rather than to the 512 MB /tmp tmpfs, which
+# counts against the box's memory limit. Set at the end of the stage, so no
+# install step writes into the home.
+ENV TMPDIR=/home/agent/.cache/tmp
+
+# Checks the base image. Nothing here reaches a shipped image, so the
+# checks need no cleanup.
+FROM base-image AS base-test
+ARG AGENT_UID
+ARG AGENT_GID
+ARG CODEX_VERSION
+ARG NODE_MAJOR
+
+# Checks the user, the writable directories, the npm prefix and the tool
+# locations. Each failure here would be silent otherwise: an ARG out of scope
+# leaves USER empty, which means root.
+#
+# codex --version runs the platform binary, so it fails if --omit=optional
+# left none. The match against CODEX_VERSION catches a followed range.
+#
+# The file service ends with exit code 0 when its input closes, so the run
+# with an empty input proves that node loads the bundle through the link.
+#
+# The setup runs as it does in a box, without a proxy CA and without steps.
+#
+# A login shell keeps every directory of the image's PATH.
+RUN test "$(id -u)" = "${AGENT_UID}" \
+ && test "$(id -g)" = "${AGENT_GID}" \
+ && test "$(id -un)" = "agent" \
+ && test -w /workspace && test -w /home/agent && test -w /nix \
+ && test -w /home/agent/.local/bin \
+ && test "$(npm config get prefix)" = "/home/agent/.local" \
+ && test "$(command -v claude-agent-acp)" = "/usr/local/bin/claude-agent-acp" \
+ && test "$(command -v codex-acp)" = "/usr/local/bin/codex-acp" \
+ && test "$(command -v codex)" = "/usr/local/bin/codex" \
+ && codex --version | grep -qF "${CODEX_VERSION}" \
+ && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
+ && boxes-files </dev/null \
+ && test "$(command -v boxes-setup)" = "/usr/local/bin/boxes-setup" \
+ && boxes-setup \
+ && test -d /usr/local/share/boxes/skills \
+ && ps -eo pid,ppid,args >/dev/null \
+ && bash -lc 'set -eu; IFS=:; for d in $0; do \
+      case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \
+    done' "$PATH"
+
+# Node has the requested major and comes from NodeSource. Ubuntu's nodejs has
+# the same major, so the vendor check catches apt preferring it.
+RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
+ && test "$(command -v node)" = "/usr/bin/node" \
+ && dpkg-query -W -f='${Version}' nodejs | grep -q nodesource \
+ && npm --version >/dev/null
+
+# Every tool resolves by the name the agent uses. timeout comes from Ubuntu's
+# coreutils, and the orchestrator relies on it.
+RUN set -eu; \
+    for t in git rg jq less ps tmux curl gh glab devtunnel claude timeout; do \
+      command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
+    done
+
+RUN touch /tmp/checks-passed
+
+# The shipped base image. Copying the marker makes this stage depend on the
+# test stage, so a failed check fails the build.
+FROM base-image AS base
+COPY --from=base-test /tmp/checks-passed /etc/boxes/checks-passed-base
+# tini as PID 1, because the kernel discards default-disposition signals for
+# PID 1: the entrypoint's sleep would never see SIGTERM, and every stop would
+# wait out the grace period. tini also reaps the processes orphaned in the
+# box, which would otherwise stay zombies and count against the pids limit.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+# ---------------------------------------------------------------------------
+# The full image
+# ---------------------------------------------------------------------------
+
+# Nix as one statically linked binary from the official binary cache. /nix is
+# a per-box bind, so the binary lives in /usr/local/bin and follows the image.
+#
+# nix copy checks the cache's signature for the pinned store path. A bump
+# changes both paths and NIX_VERSION above. The stage runs on the build
+# platform, because copying a store path executes nothing.
+FROM --platform=$BUILDPLATFORM nixos/nix:2.35.2 AS nix-static
+ARG TARGETARCH
+ARG NIX_STATIC_AMD64=/nix/store/vx0h5sdb0r7qgsm9fp653f0fi2wn5v7k-nix-static-x86_64-unknown-linux-musl-2.34.8
+ARG NIX_STATIC_ARM64=/nix/store/x7ym2j54zsnws310rv7lg3sqbvhcfani-nix-static-aarch64-unknown-linux-musl-2.34.8
+RUN case "$TARGETARCH" in \
+      amd64) path="$NIX_STATIC_AMD64" ;; \
+      arm64) path="$NIX_STATIC_ARM64" ;; \
+      *) echo "no static nix pinned for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && nix --extra-experimental-features nix-command copy --from https://cache.nixos.org "$path" \
+ && cp -a "$path/bin" /out
+
+# From the shipped base, so the full image has everything a custom image has.
+FROM base AS full-image
+
+# The base ends as the agent, with HOME and TMPDIR in the agent's home. The
+# installs here run as root with both outside the home, because the home is
+# copied into every new box.
+USER root
+ENV HOME=/root \
+    TMPDIR=/tmp
+
+# Build tools, Python, and tools to debug the network.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      python3 \
+      python3-venv \
+      pipx \
+      netcat-openbsd \
+      bind9-dnsutils \
+ && rm -rf /var/lib/apt/lists/*
 
 # Go, Rust and PHP from the distribution, which carries their security
 # updates. pkg-config and libssl-dev are what common native crates and
@@ -224,35 +424,6 @@ RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin pipx install uv \
 COPY --from=nix-static /out/ /usr/local/bin/
 COPY box-image/nix.conf /etc/nix/nix.conf
 
-# The agent and the adapter, each pinned to a major line. Below 1.0, the caret
-# pins the minor instead. Do not switch to @zed-industries/claude-code-acp,
-# which is stale.
-#
-# --prefix keeps the image's globals in /usr/local. Without it, npm derives the
-# prefix from the node binary in /usr/bin. The identity check below relies on
-# /usr/local.
-RUN npm install -g --prefix /usr/local \
-      @anthropic-ai/claude-code@^2 \
-      @agentclientprotocol/claude-agent-acp@^0.81.0 \
- && npm cache clean --force
-
-# The Codex CLI and its ACP adapter, both pinned exactly.
-#
-# @openai/codex is a small launcher, and its platform binary arrives as an
-# optional dependency of several hundred megabytes. The adapter nests its own
-# @openai/codex. --omit=optional leaves that nested copy without a binary, and
-# CODEX_PATH points the adapter at the global one. A person's codex and the
-# adapter's codex are then the same build. The identity check below proves it.
-ARG CODEX_VERSION
-RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
- && npm install -g --prefix /usr/local --omit=optional \
-      @agentclientprotocol/codex-acp@1.13.0 \
- && npm cache clean --force
-ENV CODEX_PATH=/usr/local/bin/codex
-
-# Codex's system configuration.
-COPY box-image/codex-config.toml /etc/codex/config.toml
-
 # @playwright/cli and Chromium. The CLI is 0.1.x, so the caret pins the minor.
 #
 # Playwright's Chromium, because Ubuntu's chromium package is a snap wrapper
@@ -307,10 +478,6 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
 # runtime.
 COPY box-image/playwright-cli.config.json /usr/local/share/boxes/playwright-cli.config.json
 
-# Skills for the tools of the image, such as how nix works in a box. The file
-# service installs them into the home with each agent set.
-COPY box-image/skills /usr/local/share/boxes/skills
-
 # The skill of the browser CLI, with this image's browser notes appended,
 # beside the other image skills. The CLI installs its skill only into a home,
 # so a scratch home is used and removed.
@@ -320,149 +487,63 @@ RUN HOME=/tmp/skill-home NO_UPDATE_NOTIFIER=1 playwright-cli install --skills --
  && cat /tmp/playwright-skill-notes.md >> /usr/local/share/boxes/skills/playwright-cli/SKILL.md \
  && rm -rf /tmp/skill-home /tmp/playwright-skill-notes.md
 
-# The file service. The orchestrator starts it in the box and reaches all the
-# files of the box through it. The bundle has no npm dependencies. node runs
-# the link as the bundle itself, so the .mjs name makes it an ES module.
-COPY --from=files-build /build/files/dist/main.mjs /usr/local/lib/boxes-files/main.mjs
-RUN chmod 0755 /usr/local/lib/boxes-files/main.mjs \
- && ln -s /usr/local/lib/boxes-files/main.mjs /usr/local/bin/boxes-files
+# The skills of the image's tools, beside the playwright-cli skill.
+COPY box-image/skills/ /usr/local/share/boxes/skills/
 
-# The agent's own account, with the uid and gid from the top of this file.
-ARG AGENT_UID
-ARG AGENT_GID
-RUN groupadd -g "${AGENT_GID}" agent \
- && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -m -d /home/agent -s /bin/bash agent
+# The setup steps of the image's tools.
+COPY box-image/setup.d/ /usr/local/lib/boxes/setup.d/
+RUN chmod 0755 /usr/local/lib/boxes/setup.d/*
 
-# HOME is set outright, because GOPATH, GOCACHE, CARGO_HOME and COMPOSER_HOME
-# derive from it. C.UTF-8 is built into glibc and keeps non-ASCII paths intact.
-# CLAUDE_CONFIG_DIR and CODEX_HOME make the adapter and a shell in the box use
-# the same directory.
-ENV HOME=/home/agent \
-    LANG=C.UTF-8 \
-    CLAUDE_CONFIG_DIR=/home/agent/.claude \
-    CODEX_HOME=/home/agent/.codex \
-    TERM=dumb \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
-
-# The agent installs its own tools into the persistent home, because the
-# root filesystem is read-only and the agent is not root.
-#
-# Set after the global installs above, which belong on the image.
-ENV NPM_CONFIG_PREFIX=/home/agent/.local \
-    PIPX_HOME=/home/agent/.local/pipx \
+# The agent installs Python tools with pipx into the persistent home.
+ENV PIPX_HOME=/home/agent/.local/pipx \
     PIPX_BIN_DIR=/home/agent/.local/bin
 
-# Where Go, Cargo and Composer install binaries.
-ENV PATH=/home/agent/.local/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/agent/.config/composer/vendor/bin:$PATH
+# Where nix profile add links what the agent installs, and where Go, Cargo
+# and Composer install binaries. nix.conf selects the XDG layout of nix.
+ENV PATH=/home/agent/.local/state/nix/profile/bin:/home/agent/go/bin:/home/agent/.cargo/bin:/home/agent/.config/composer/vendor/bin:$PATH
 
-# Where nix profile add links what the agent installs. nix.conf selects the
-# XDG layout.
-ENV PATH=/home/agent/.local/state/nix/profile/bin:$PATH
-
-COPY box-image/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh
-
-# The setup of the home. The orchestrator runs it as the agent after each
-# start of the box, before the box is ready.
-COPY box-image/setup.sh /usr/local/bin/boxes-setup
-RUN chmod 0755 /usr/local/bin/boxes-setup
-
-# Commands and the agent's shell tools run under bash -lc. An /etc/profile
-# that assigns PATH outright would drop the directories above. The profile.d
-# snippet restores them from this snapshot of PATH, taken after the last ENV
-# that changes PATH.
-RUN mkdir -p /etc/boxes \
- && printf "BOXES_IMAGE_PATH='%s'\n" "$PATH" > /etc/boxes/image-path \
- && chmod 0644 /etc/boxes/image-path
-COPY box-image/profile-image-path.sh /etc/profile.d/boxes-image-path.sh
-RUN chmod 0644 /etc/profile.d/boxes-image-path.sh
-
-# The root filesystem is read-only at runtime, so every mount point must
-# exist in the image. /workspace, /home/agent and /nix are writable binds, and
-# /tmp is a tmpfs.
-#
-# Codex refuses to start without its CODEX_HOME, and the check below runs
-# codex.
-RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude \
- && chown agent:agent /workspace /nix /home/agent /home/agent/.local /home/agent/.local/bin \
-      /home/agent/.codex /home/agent/.claude
-
-# Claude Code's user settings for a new box, without commit and pull request
-# attribution.
-COPY --chown=agent:agent box-image/claude-settings.json /home/agent/.claude/settings.json
-
-# Numeric, so the uid is readable from the image itself.
-USER ${AGENT_UID}
-WORKDIR /workspace
-
-# Temporary files go to disk rather than to the 512 MB /tmp tmpfs, which
-# counts against the box's memory limit. Set at the end of the stage, so no
-# install step writes into the home.
-ENV TMPDIR=/home/agent/.cache/tmp
-
-# Checks the image. Nothing here reaches the shipped image, so the checks
-# need no cleanup.
-FROM image AS test
+# Back to the account, HOME and TMPDIR of the base.
 ARG AGENT_UID
-ARG AGENT_GID
+USER ${AGENT_UID}
+ENV HOME=/home/agent \
+    TMPDIR=/home/agent/.cache/tmp
+
+# Checks the full image.
+FROM full-image AS full-test
+ARG AGENT_UID
 ARG NIX_VERSION
-ARG CODEX_VERSION
-ARG NODE_MAJOR
 
 # The setup creates TMPDIR at runtime. The Go and Rust builds below need it
 # now.
 RUN mkdir -p "$TMPDIR"
 
-# Checks the user, the writable directories, the npm prefix and the tool
-# locations. Each failure here would be silent otherwise: an ARG out of scope
-# leaves USER empty, which means root.
+# Checks the user, that no install wrote into the home, nix, the setup with
+# the steps of the full image, and the skills. The setup runs as it does in a
+# box, without a proxy CA, and the skill of the browser CLI must hold this
+# image's notes.
 #
-# codex --version runs the platform binary, so it fails if --omit=optional
-# left none. The match against CODEX_VERSION catches a followed range.
-#
-# The file service ends with exit code 0 when its input closes, so the run
-# with an empty input proves that node loads the bundle through the link.
-#
-# The setup runs as it does in a box, without a proxy CA, and the skill of
-# the browser CLI must hold this image's notes.
+# A login shell keeps every directory of the image's PATH.
 RUN test "$(id -u)" = "${AGENT_UID}" \
- && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
- && test -w /workspace && test -w /home/agent && test -w /nix \
- && test -w /home/agent/.local/bin \
- && test "$(npm config get prefix)" = "/home/agent/.local" \
+ && test "$HOME" = "/home/agent" \
+ && test -z "$(find /home/agent ! -user agent -print -quit)" \
  && test "$(command -v nix)" = "/usr/local/bin/nix" \
  && nix --version | grep -qF "${NIX_VERSION}" \
- && test "$(command -v claude-agent-acp)" = "/usr/local/bin/claude-agent-acp" \
- && test "$(command -v codex-acp)" = "/usr/local/bin/codex-acp" \
- && test "$(command -v codex)" = "/usr/local/bin/codex" \
- && codex --version | grep -qF "${CODEX_VERSION}" \
- && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
- && boxes-files </dev/null \
- && test "$(command -v boxes-setup)" = "/usr/local/bin/boxes-setup" \
  && boxes-setup \
+ && test -f /home/agent/.playwright/cli.config.json \
+ && test -f /usr/local/share/boxes/skills/nix/SKILL.md \
  && grep -qF '## Browsers in this container' /usr/local/share/boxes/skills/playwright-cli/SKILL.md \
- && ps -eo pid,ppid,args >/dev/null \
- && bash -lc 'set -eu; . /etc/boxes/image-path; IFS=:; for d in $BOXES_IMAGE_PATH; do \
+ && bash -lc 'set -eu; IFS=:; for d in $0; do \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \
-    done'
-
-# Node has the requested major and comes from NodeSource. Ubuntu's nodejs has
-# the same major, so the vendor check catches apt preferring it.
-RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
- && test "$(command -v node)" = "/usr/bin/node" \
- && dpkg-query -W -f='${Version}' nodejs | grep -q nodesource \
- && npm --version >/dev/null
+    done' "$PATH"
 
 # Every added tool resolves by the name the agent uses. This catches a package
 # renamed to a virtual one that installs nothing useful.
-#
-# timeout comes from the base image, and the orchestrator relies on it.
 RUN set -eu; \
     for t in pdftotext pdftoppm pdfinfo qpdf mutool gs pandoc tesseract ocrmypdf \
              magick dot unzip zip xz zstd 7z file tree patch wget git-lfs \
-             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig playwright-cli playwright \
-             certutil timeout devtunnel; do \
+             sqlite3 fd fdfind shellcheck yq cmake uv uvx dig nc python3 make \
+             go cargo php composer playwright-cli playwright chromium certutil; do \
       command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; \
     done
 
@@ -557,12 +638,6 @@ RUN set -eu; \
 
 RUN touch /tmp/checks-passed
 
-# The shipped image. Copying the marker makes this stage depend on the test
-# stage, so a failed check fails the build.
-FROM image
-COPY --from=test /tmp/checks-passed /etc/boxes/checks-passed
-# tini as PID 1, because the kernel discards default-disposition signals for
-# PID 1: the entrypoint's sleep would never see SIGTERM, and every stop would
-# wait out the grace period. tini also reaps the processes orphaned in the
-# box, which would otherwise stay zombies and count against the pids limit.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+# The shipped full image.
+FROM full-image AS full
+COPY --from=full-test /tmp/checks-passed /etc/boxes/checks-passed-full

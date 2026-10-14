@@ -72,9 +72,8 @@ added to the orchestrator environment.
 | `CODEX_API_KEY`, `CODEX_HOME`, `NO_BROWSER`, `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST` | Codex adapter configuration. |
 | `TERM` | Set to `dumb` for commands run through Boxes. |
 
-The box image also defines standard runtime variables such as `HOME`, `PATH`, `TMPDIR`, `PLAYWRIGHT_BROWSERS_PATH`, and
-`BOXES_IMAGE_BROWSERS`. Treat these as image implementation details. Override them only in a derived image that also
-preserves the image entrypoint's expectations.
+The box images also set variables, for example `HOME`, `PATH` and `TMPDIR`. [Custom images](custom-images.md) lists
+the values that an image built from the base image must keep.
 
 ## Custom proxy deployments
 

@@ -37,8 +37,8 @@ Skill instructions: [diagrams](../orchestrator/skills/diagrams/SKILL.md)
 
 ## Skills of the box image
 
-These skills describe tools of the [box image](boxes.md). The image has them in `/usr/local/share/boxes/skills`, one
-directory per skill, and a box gets all of them.
+These skills describe tools of the full [box image](boxes.md). A box gets all skills in
+`/usr/local/share/boxes/skills` of its image, one directory per skill. A [custom image](custom-images.md) adds its own.
 
 ### Nix
 

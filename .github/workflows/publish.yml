@@ -1,10 +1,11 @@
-# CI workflow: runs the test suites, builds the three Boxes images, runs the
+# CI workflow: runs the test suites, builds the four Boxes images, runs the
 # security smoke test against them, and publishes them to GHCR on every push
 # to main. A pull request builds and tests the images without pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
 #   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
-#   ghcr.io/<owner>/boxes/box            what a box container runs
+#   ghcr.io/<owner>/boxes/box-base       what a box needs, for custom images
+#   ghcr.io/<owner>/boxes/box            the base with the tools for projects
 #
 # Every image gets latest and an immutable sha-<short> tag. The test job gates
 # the build and the smoke test gates the publishing, because something else
@@ -108,9 +109,6 @@ jobs:
           - image: egress-proxy
             context: .
             dockerfile: proxy/Dockerfile
-          - image: box
-            context: .
-            dockerfile: box-image/Dockerfile
     steps:
       - uses: actions/checkout@v7
 
@@ -158,11 +156,86 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The two box images are targets of one Dockerfile, so one job builds
+  # both and the second build reuses the layers of the first.
+  box-images:
+    name: image (box-base, box)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - id: base-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/box-base
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=boxes-box-base
+
+      - id: box-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/box
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=boxes-box
+
+      # One cache scope for both targets, because the full image holds every
+      # layer of the base.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: box-image/Dockerfile
+          target: base
+          outputs: type=docker,dest=${{ runner.temp }}/box-base.tar
+          tags: ${{ steps.base-meta.outputs.tags }}
+          labels: ${{ steps.base-meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=box
+          cache-to: type=gha,mode=max,scope=box
+          provenance: false
+          sbom: false
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: box-image/Dockerfile
+          target: full
+          outputs: type=docker,dest=${{ runner.temp }}/box.tar
+          tags: ${{ steps.box-meta.outputs.tags }}
+          labels: ${{ steps.box-meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=box
+          cache-to: type=gha,mode=max,scope=box
+          provenance: false
+          sbom: false
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-box-base
+          path: ${{ runner.temp }}/box-base.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-box
+          path: ${{ runner.temp }}/box.tar
+          if-no-files-found: error
+          retention-days: 1
+
   # Checks the isolation of a box on a real Docker host, with the images this
   # run built.
   smoke:
     name: smoke test
-    needs: images
+    needs: [images, box-images]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -172,6 +245,11 @@ jobs:
           pattern: image-*
           path: ${{ runner.temp }}/images
           merge-multiple: true
+
+      # The smoke test does not use the base image, and the runner's disk is
+      # small.
+      - name: Remove the base image
+        run: rm "$RUNNER_TEMP/images/box-base.tar"
 
       # Compose looks for the image of a service under the name it would
       # build it as, so the orchestrator and the proxy get those names. The
@@ -236,7 +314,7 @@ jobs:
       - name: Push the images
         run: |
           set -eu
-          for image in orchestrator egress-proxy box; do
+          for image in orchestrator egress-proxy box-base box; do
             docker load -i "$RUNNER_TEMP/images/$image.tar"
             rm "$RUNNER_TEMP/images/$image.tar"
             docker push --all-tags "$REGISTRY/${{ github.repository }}/$image"

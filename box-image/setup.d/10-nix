@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Setup step of the full image for nix. boxes-setup runs it as the agent
+# after its own steps.
+set -uo pipefail
+
+# The orchestrator binds in a /nix of the box's own. Nix creates the store
+# in it on first use.
+if [ ! -w /nix ]; then
+  printf '[setup] ERROR: /nix is not writable; nix would not work in this box\n' >&2
+  exit 1
+fi

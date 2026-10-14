@@ -13,7 +13,7 @@ Each top-level directory is a self-contained package with its own lock file.
 | `proxy/` | The [egress proxy](egress.md). Node.js and TypeScript, built on mockttp. The only route out of a box network; swaps placeholder tokens for real credentials on the wire. |
 | `files/` | The [file service](files.md) `boxes-files`. The orchestrator reads and writes the files of a box through it. Node.js and TypeScript, no runtime dependencies. |
 | `shared/` | Plain TypeScript modules imported by the orchestrator, the dashboard and the file service: the ACP vocabulary, the REST types, the terminal subprotocol, the file service protocol. There is no build step; the consumers import the sources directly. |
-| `box-image/` | The Dockerfile and support files for the [box containers](boxes.md) the orchestrator creates at runtime. Ubuntu-based, ships the agent CLIs and their ACP adapters, Nix for agent-installed tooling, tmux for the terminal. |
+| `box-image/` | The Dockerfile and support files of the [box images](custom-images.md), the base image and the full image. |
 | `tests/` | `smoke-test.sh`, the security smoke test (see below). |
 | `doc/` | Topic documentation. |
 | `.github/workflows/` | The CI pipeline. |
@@ -60,13 +60,14 @@ cd files && npm run build          # bundle in dist/
 cd dashboard && npm run build      # static app in dist/
 ```
 
-The three production images build from the repository root, because each Dockerfile also copies `shared/`. The box
-image builds the file service from `files/`:
+The images build from the repository root, because the Dockerfiles copy `shared/`. The two box images are the targets
+`base` and `full` of one Dockerfile:
 
 ```sh
 docker build -f orchestrator/Dockerfile .
 docker build -f proxy/Dockerfile .
-docker build -f box-image/Dockerfile .
+docker build -f box-image/Dockerfile --target base .
+docker build -f box-image/Dockerfile --target full .
 ```
 
 ## Running locally
@@ -115,8 +116,8 @@ The dashboard suite has two projects, both run by `npm test`:
   vitest run --project unit` or `--project e2e`. The e2e project needs a Chromium; `npx playwright install --with-deps
   chromium` installs it, or set `CHROMIUM_PATH` to an existing binary.
 
-The box image carries its own checks: its Dockerfile has a `test` stage between the build and the shipped stage, so a
-failed property fails the image build.
+Each box image has its own checks: the Dockerfile has a test stage between the build and the shipped stage of each
+target, so a failed property fails the image build.
 
 ### Smoke test
 

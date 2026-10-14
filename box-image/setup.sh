@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Box setup. The orchestrator runs it as the agent after each start of the
 # box, before the box is ready. It prepares the home for the tools of the
-# image.
+# base image, then runs the steps that an image adds in setup.d.
 #
 # A step that breaks the box fails it, and the orchestrator marks the box as
 # an error with this output. A step that breaks one tool only warns. The
@@ -34,9 +34,9 @@ fi
 # --- the CA bundle -------------------------------------------------------------
 # The system authorities and the deployment CA together. The orchestrator
 # writes the CA to ~/.boxes/proxy-ca.crt and points the CA env vars at the
-# bundle, and nix.conf names it for nix. Some tools, such as git-lfs, trust
-# only the file they are pointed at, so it must hold every authority. Written
-# even without a CA, because nix.conf always names the file.
+# bundle. Some tools, such as git-lfs, trust only the file they are pointed
+# at, so it must hold every authority. Written even without a CA, because
+# nix.conf of the full image names the file.
 proxy_ca=/home/agent/.boxes/proxy-ca.crt
 bundle=/home/agent/.boxes/ca-bundle.crt
 if mkdir -p /home/agent/.boxes \
@@ -49,13 +49,6 @@ else
   fail "could not write $bundle; TLS would fail for nix, git, curl and other tools"
 fi
 
-# --- the nix store -----------------------------------------------------------
-# The orchestrator binds in a /nix of the box's own. Nix creates the store
-# in it on first use.
-if [ ! -w /nix ]; then
-  fail "/nix is not writable; nix would not work in this box"
-fi
-
 # --- directories an agent needs to find already there ------------------------
 # npm install -g needs its prefix to exist, and Codex fails on a missing
 # CODEX_HOME. A home seeded from an older image may lack either.
@@ -64,92 +57,6 @@ if ! mkdir -p /home/agent/.local/bin; then
 fi
 if ! mkdir -p "${CODEX_HOME:-/home/agent/.codex}"; then
   fail "could not create ${CODEX_HOME:-/home/agent/.codex}; Codex would not start"
-fi
-
-# --- chromium's trust store -------------------------------------------------
-# Chromium ignores the CA variables and reads its own NSS database. The
-# entry is deleted first, so a restart replaces it.
-if [ -f "$proxy_ca" ] && command -v certutil >/dev/null 2>&1; then
-  nssdb=/home/agent/.pki/nssdb
-  if mkdir -p "$nssdb"; then
-    [ -f "$nssdb/cert9.db" ] || certutil -N -d "sql:$nssdb" --empty-password >/dev/null 2>&1
-    certutil -D -n boxes-egress-proxy -d "sql:$nssdb" >/dev/null 2>&1
-    if certutil -A -n boxes-egress-proxy -t C,, -i "$proxy_ca" \
-         -d "sql:$nssdb" 2>/dev/null; then
-      log "trusted the egress proxy CA in the browser's certificate store"
-    else
-      log "WARNING: could not add the egress proxy CA to $nssdb; intercepted hosts will fail TLS in the browser"
-    fi
-  fi
-fi
-
-# --- the browser CLI ---------------------------------------------------------
-
-# Links the image's browser builds into the writable PLAYWRIGHT_BROWSERS_PATH
-# and drops links that no longer resolve.
-#
-# A project can then download its own revision beside the links. This runs at
-# every start, because a newer image may carry other revisions. Only links
-# are swept, because a real directory is a browser a project downloaded.
-link_image_browsers() {
-  browsers="${PLAYWRIGHT_BROWSERS_PATH:-}"
-  image="${BOXES_IMAGE_BROWSERS:-}"
-  if [ -z "$browsers" ] || [ -z "$image" ] || [ ! -d "$image" ]; then
-    return 0
-  fi
-  if ! mkdir -p "$browsers"; then
-    log "WARNING: could not create $browsers; the image's browsers will not resolve"
-    return 0
-  fi
-  for link in "$browsers"/*; do
-    if [ -L "$link" ] && [ ! -e "$link" ]; then
-      rm -f "$link"
-      log "dropped a browser link the image no longer carries: $(basename "$link")"
-    fi
-  done
-  linked=0
-  for build in "$image"/*/; do
-    if [ ! -d "$build" ]; then
-      continue
-    fi
-    target="$browsers/$(basename "$build")"
-    if [ -e "$target" ]; then
-      continue
-    fi
-    if ln -s "${build%/}" "$target"; then
-      linked=$((linked + 1))
-    else
-      log "WARNING: could not link $(basename "$build") into $browsers"
-    fi
-  done
-  if [ "$linked" -gt 0 ]; then
-    log "linked $linked browser build(s) from the image into $browsers"
-  fi
-}
-link_image_browsers
-
-# The CLI's global config: the image's base config plus the egress proxy,
-# which is known only at runtime. Written at every start, so a newer image's
-# base reaches an existing home.
-cli_base=/usr/local/share/boxes/playwright-cli.config.json
-cli_config=/home/agent/.playwright/cli.config.json
-if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
-  proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
-  if [ -n "$proxy" ]; then
-    if jq --arg server "$proxy" --arg bypass "${NO_PROXY:-}" \
-         '.browser.launchOptions.proxy = (if $bypass == "" then { server: $server }
-                                          else { server: $server, bypass: $bypass } end)' \
-         "$cli_base" > "$cli_config.tmp" \
-       && mv "$cli_config.tmp" "$cli_config"; then
-      log "wrote the browser CLI config, pointed at the egress proxy"
-    else
-      rm -f "$cli_config.tmp"
-      log "WARNING: could not write the browser CLI config; the browser uses its own defaults"
-    fi
-  else
-    cp "$cli_base" "$cli_config" \
-      && log "wrote the browser CLI config; no egress proxy is configured"
-  fi
 fi
 
 # --- github auth ------------------------------------------------------------
@@ -171,5 +78,18 @@ if [ -n "${GITLAB_TOKEN:-}" ] && [ -n "${GITLAB_HOST:-}" ]; then
     log "WARNING: could not configure the glab credential helper; https pushes to $GITLAB_HOST may prompt"
   fi
 fi
+
+# --- the steps of the image ----------------------------------------------------
+# An image built from this one adds its steps as executable files. Each runs
+# in name order, under the same rules as this script: a non-zero exit code
+# is an error of the box, and a WARNING: line is a warning.
+for step in /usr/local/lib/boxes/setup.d/*; do
+  if [ ! -f "$step" ] || [ ! -x "$step" ]; then
+    continue
+  fi
+  if ! "$step"; then
+    fail "the setup step $(basename "$step") failed"
+  fi
+done
 
 exit "$failed"
