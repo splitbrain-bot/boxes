@@ -956,11 +956,17 @@ function execCompletion(
   };
 }
 
-/** Starts the adapter inside a running container and demuxes its streams. */
+/**
+ * Starts the adapter inside a running container and demuxes its streams.
+ *
+ * `env` holds `NAME=value` entries that replace the variables of the
+ * container for this process only.
+ */
 export async function spawnAdapterExec(
   containerId: string,
   cmd: string[],
   workingDir: string,
+  env: string[] = [],
 ): Promise<AdapterExec> {
   const exec = await docker().getContainer(containerId).exec({
     Cmd: cmd,
@@ -970,6 +976,7 @@ export async function spawnAdapterExec(
     Tty: false,
     User: boxUser(),
     WorkingDir: workingDir,
+    Env: env,
   });
 
   const stream = (await exec.start({ hijack: true, stdin: true })) as Duplex;

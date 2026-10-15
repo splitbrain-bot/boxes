@@ -123,9 +123,18 @@ export interface FileServiceProcess {
  */
 export type FileServiceSpawner = (containerId: string) => Promise<FileServiceProcess>;
 
-/** The spawner this module ships with: one exec in the box, as the agent. */
+/**
+ * The spawner this module ships with: one exec in the box, as the agent.
+ *
+ * The file service starts before the box setup writes the CA bundle that
+ * NODE_EXTRA_CA_CERTS names, and Node warns about a missing file. The file
+ * service makes no TLS connections, so the variable is emptied, which makes
+ * Node skip it.
+ */
 const inBoxContainer: FileServiceSpawner = async (containerId) => {
-  const exec = await dk.spawnAdapterExec(containerId, [FILES_COMMAND], dk.WORKSPACE_DIR);
+  const exec = await dk.spawnAdapterExec(containerId, [FILES_COMMAND], dk.WORKSPACE_DIR, [
+    'NODE_EXTRA_CA_CERTS=',
+  ]);
   exec.stderr.on('data', (chunk: Buffer) => {
     log.warn('file service', { containerId, stderr: chunk.toString('utf8').trim() });
   });
