@@ -7,6 +7,9 @@
 #   ghcr.io/<owner>/boxes/box-base       what a box needs, for custom images
 #   ghcr.io/<owner>/boxes/box            the base with the tools for projects
 #
+# The build cache of main is in ghcr.io/<owner>/boxes/cache, one tag per image.
+# Each push to main deletes its old, untagged versions.
+#
 # Every image gets latest and an immutable sha-<short> tag. The test job gates
 # the build and the smoke test gates the publishing, because something else
 # deploys latest unattended.
@@ -93,81 +96,55 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: npm test
 
+  # One job builds the images, runs the smoke test and publishes, so the
+  # images never leave the runner between those steps. The builder keeps
+  # every layer it built, so the publishing steps export from it without a
+  # second build.
   images:
-    name: image (${{ matrix.image }})
+    name: images
     needs: test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Each Dockerfile copies shared/ next to its own package, so the
-          # context is the repository root.
-          - image: orchestrator
-            context: .
-            dockerfile: orchestrator/Dockerfile
-          - image: egress-proxy
-            context: .
-            dockerfile: proxy/Dockerfile
+    # A push to main writes the build cache and the images to GHCR. The token
+    # of a pull request from a fork can only read.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # Derived from the repository, so a fork publishes to its own
       # namespace. GHCR needs lowercase names, and github.repository is
-      # lowercase.
-      - id: meta
+      # lowercase. The tags are computed on a pull request too, so it tests
+      # everything but the upload.
+      - id: orchestrator-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
           labels: |
-            org.opencontainers.image.title=boxes-${{ matrix.image }}
+            org.opencontainers.image.title=boxes-orchestrator
 
-      # Written to a file instead of pushed, so the smoke test runs the same
-      # image the publish job uploads. The tags are computed on a pull
-      # request too, so it tests everything but the upload.
-      - uses: docker/build-push-action@v7
+      - id: egress-proxy-meta
+        uses: docker/metadata-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image }}.tar
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # The deployment host runs linux/amd64.
-          platforms: linux/amd64
-          # One cache scope per image, so the builds do not evict each
-          # other's layers.
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-          # A plain single-platform manifest, because watchtower compares the
-          # digest to decide whether an image is new.
-          provenance: false
-          sbom: false
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/egress-proxy
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=boxes-egress-proxy
 
-      # Kept for one day, because only the later jobs of this run need it.
-      - uses: actions/upload-artifact@v7
-        with:
-          name: image-${{ matrix.image }}
-          path: ${{ runner.temp }}/${{ matrix.image }}.tar
-          if-no-files-found: error
-          retention-days: 1
-
-  # The two box images are targets of one Dockerfile, so one job builds
-  # both and the second build reuses the layers of the first.
-  box-images:
-    name: image (box-base, box)
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: docker/setup-buildx-action@v4
-
-      - id: base-meta
+      - id: box-base-meta
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}/box-base
@@ -187,92 +164,97 @@ jobs:
           labels: |
             org.opencontainers.image.title=boxes-box
 
-      # One cache scope for both targets, because the full image holds every
-      # layer of the base.
-      - uses: docker/build-push-action@v7
+      # Each build loads its image into the Docker daemon for the smoke test.
+      # Each Dockerfile copies shared/ next to its own package, so the
+      # context is the repository root. The deployment host runs linux/amd64.
+      #
+      # Main writes the cache to the registry, which a pull request can read
+      # and which does not count against the cache limit of GitHub Actions.
+      # A pull request writes its own layers to the cache of GitHub Actions,
+      # so its next push reuses them. One cache per image, so the builds do
+      # not evict each other's layers.
+      #
+      # A plain single-platform manifest, because watchtower compares the
+      # digest to decide whether an image is new.
+      #
+      # Compose looks for the image of a service under the name it would
+      # build it as, so the orchestrator and the proxy get those names too.
+      - name: Build the orchestrator image
+        uses: docker/build-push-action@v7
         with:
           context: .
-          file: box-image/Dockerfile
-          target: base
-          outputs: type=docker,dest=${{ runner.temp }}/box-base.tar
-          tags: ${{ steps.base-meta.outputs.tags }}
-          labels: ${{ steps.base-meta.outputs.labels }}
+          file: orchestrator/Dockerfile
+          load: true
+          tags: |
+            ${{ steps.orchestrator-meta.outputs.tags }}
+            boxes-orchestrator
+          labels: ${{ steps.orchestrator-meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha,scope=box
-          cache-to: type=gha,mode=max,scope=box
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/cache:orchestrator
+            type=gha,scope=orchestrator
+          cache-to: >-
+            ${{ github.event_name == 'push'
+            && format('type=registry,ref={0}/{1}/cache:orchestrator,mode=max', env.REGISTRY, github.repository)
+            || 'type=gha,mode=max,scope=orchestrator' }}
           provenance: false
           sbom: false
 
-      - uses: docker/build-push-action@v7
+      - name: Build the egress proxy image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: proxy/Dockerfile
+          load: true
+          tags: |
+            ${{ steps.egress-proxy-meta.outputs.tags }}
+            boxes-egress-proxy
+          labels: ${{ steps.egress-proxy-meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/cache:egress-proxy
+            type=gha,scope=egress-proxy
+          cache-to: >-
+            ${{ github.event_name == 'push'
+            && format('type=registry,ref={0}/{1}/cache:egress-proxy,mode=max', env.REGISTRY, github.repository)
+            || 'type=gha,mode=max,scope=egress-proxy' }}
+          provenance: false
+          sbom: false
+
+      # The full image builds on every stage of the base, its checks
+      # included, so this one build also covers the base image. The smoke
+      # test does not use the base image, so only the full one is loaded.
+      - name: Build the box image
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: box-image/Dockerfile
           target: full
-          outputs: type=docker,dest=${{ runner.temp }}/box.tar
+          load: true
           tags: ${{ steps.box-meta.outputs.tags }}
           labels: ${{ steps.box-meta.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha,scope=box
-          cache-to: type=gha,mode=max,scope=box
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/cache:box
+            type=gha,scope=box
+          cache-to: >-
+            ${{ github.event_name == 'push'
+            && format('type=registry,ref={0}/{1}/cache:box,mode=max', env.REGISTRY, github.repository)
+            || 'type=gha,mode=max,scope=box' }}
           provenance: false
           sbom: false
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: image-box-base
-          path: ${{ runner.temp }}/box-base.tar
-          if-no-files-found: error
-          retention-days: 1
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: image-box
-          path: ${{ runner.temp }}/box.tar
-          if-no-files-found: error
-          retention-days: 1
-
-  # Checks the isolation of a box on a real Docker host, with the images this
-  # run built.
-  smoke:
-    name: smoke test
-    needs: [images, box-images]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: image-*
-          path: ${{ runner.temp }}/images
-          merge-multiple: true
-
-      # The smoke test does not use the base image, and the runner's disk is
-      # small.
-      - name: Remove the base image
-        run: rm "$RUNNER_TEMP/images/box-base.tar"
-
-      # Compose looks for the image of a service under the name it would
-      # build it as, so the orchestrator and the proxy get those names. The
-      # box image under test is on no registry, so the orchestrator must never
-      # pull it. Each file is removed once loaded, to save the runner's disk.
-      # BOXES_ENV points compose at the settings file for the later steps.
-      - name: Load the images
+      # Checks the isolation of a box on a real Docker host, with the images
+      # this job built. The box image under test is on no registry, so the
+      # orchestrator must never pull it. BOXES_ENV points compose at the
+      # settings file for the later steps.
+      - name: Start the stack
         run: |
           set -eu
           BOXES_ENV="$RUNNER_TEMP/boxes.env"
           echo "BOXES_ENV=$BOXES_ENV" >> "$GITHUB_ENV"
-          load() {
-            docker load -i "$RUNNER_TEMP/images/$1.tar" | sed -n 's/^Loaded image: //p' | head -1
-            rm "$RUNNER_TEMP/images/$1.tar"
-          }
-          docker tag "$(load orchestrator)" boxes-orchestrator
-          docker tag "$(load egress-proxy)" boxes-egress-proxy
-          echo "BOX_IMAGE=$(load box)" >> "$BOXES_ENV"
+          echo "BOX_IMAGE=$BOX_IMAGE" >> "$BOXES_ENV"
           echo "BOX_IMAGE_PULL_MINUTES=0" >> "$BOXES_ENV"
-
-      - name: Start the stack
-        run: |
-          set -eu
           docker compose up -d --no-build
           for _ in $(seq 1 60); do
             if curl -fs -o /dev/null http://localhost:3000/healthz; then exit 0; fi
@@ -280,6 +262,8 @@ jobs:
           done
           echo 'The orchestrator did not answer on /healthz.'
           exit 1
+        env:
+          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
 
       - name: Run the smoke test
         run: ./tests/smoke-test.sh
@@ -288,43 +272,82 @@ jobs:
         if: failure()
         run: docker compose logs
 
-  # Pushes the images the smoke test ran, so what is published is what was
-  # tested.
-  publish:
-    name: publish
-    needs: smoke
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/download-artifact@v8
+      # Pushes the images the smoke test ran. Every layer is in the builder
+      # from the builds above, so these steps only export and upload. The
+      # base image is pushed from the stages the box build already built.
+      - name: Push the orchestrator image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
         with:
-          pattern: image-*
-          path: ${{ runner.temp }}/images
-          merge-multiple: true
+          context: .
+          file: orchestrator/Dockerfile
+          push: true
+          tags: ${{ steps.orchestrator-meta.outputs.tags }}
+          labels: ${{ steps.orchestrator-meta.outputs.labels }}
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
 
-      - uses: docker/login-action@v4
+      - name: Push the egress proxy image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          context: .
+          file: proxy/Dockerfile
+          push: true
+          tags: ${{ steps.egress-proxy-meta.outputs.tags }}
+          labels: ${{ steps.egress-proxy-meta.outputs.labels }}
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
 
-      - name: Push the images
-        run: |
-          set -eu
-          for image in orchestrator egress-proxy box-base box; do
-            docker load -i "$RUNNER_TEMP/images/$image.tar"
-            rm "$RUNNER_TEMP/images/$image.tar"
-            docker push --all-tags "$REGISTRY/${{ github.repository }}/$image"
-          done
+      - name: Push the base box image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: box-image/Dockerfile
+          target: base
+          push: true
+          tags: ${{ steps.box-base-meta.outputs.tags }}
+          labels: ${{ steps.box-base-meta.outputs.labels }}
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+
+      - name: Push the box image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: box-image/Dockerfile
+          target: full
+          push: true
+          tags: ${{ steps.box-meta.outputs.tags }}
+          labels: ${{ steps.box-meta.outputs.labels }}
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+
+      # Each cache export moves its tag and leaves the old manifest as an
+      # untagged version. The newest untagged versions stay, because a build
+      # that started before the export can still read them. The repository
+      # that published the package has admin access to it, so the token can
+      # delete versions.
+      - name: Delete old build caches
+        if: github.event_name == 'push'
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}/cache
+          package-type: container
+          delete-only-untagged-versions: 'true'
+          min-versions-to-keep: 3
 
   # Tells the deployment's watchtower to pull at once, instead of at its next
   # poll.
   watchtower:
     name: watchtower
-    needs: publish
+    needs: images
     # A partly failed push skips this job, because a mix of new and old
     # images needs fixing rather than deploying.
     if: github.event_name != 'pull_request'
