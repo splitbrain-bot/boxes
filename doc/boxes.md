@@ -124,10 +124,6 @@ the label `boxes.box=<id>`.
 orphan sweep can always tell a stray object from one that is being created. Every directory exists before the container
 that binds it. A failed step removes everything it created and marks the row `error`.
 
-A bind mount hides the home directory of the image, so the orchestrator seeds the home through a one-shot helper
-container that runs as root: `cp -a` copies the image's home in, and a recursive `chown` to `BOX_UID:BOX_GID` makes it
-writable by the agent.
-
 Every start goes through a repair pass, `BoxManager.prepareContainer`, which `bringUp` runs before it starts the
 container. A missing workspace or home directory marks the box `error` rather than being
 recreated — a fresh home would erase the agent's transcripts without a warning. A container the daemon reports missing
@@ -143,8 +139,10 @@ file operations wait for it. When a step fails, the box gets the status `error` 
    [egress proxy](egress.md) to `~/.boxes/proxy-ca.crt`, and the git configuration with the
    [identity](credentials.md#git-identity) to `~/.config/git/config`.
 2. It runs `boxes-setup`, a shell script of the base image at `/usr/local/bin/boxes-setup` (source
-   `box-image/setup.sh`), with a limit of 60 seconds. The script prepares the home for the tools of the base
-   image: it empties `TMPDIR`, builds the CA bundle, and sets the credential helpers of `gh` and `glab`. Then it runs
+   `box-image/setup.sh`), with a limit of 60 seconds. The script first seeds a new home with the files of
+   `/usr/local/share/boxes/home`, once: the marker `~/.boxes/seeded` records the seed, and the copy overwrites no file.
+   Then it prepares the home for the tools of the base image: it empties `TMPDIR`, builds the CA bundle, and sets the
+   credential helpers of `gh` and `glab`. Then it runs
    the [setup steps](custom-images.md#setup-steps) of the image in `/usr/local/lib/boxes/setup.d/`. The steps of the
    full image (source `box-image/setup.d/`) check `/nix`, add the CA to the trust store of Chromium, and link the
    browsers.

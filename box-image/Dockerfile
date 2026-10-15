@@ -13,8 +13,9 @@
 # Each image has three stages: *-image installs everything, *-test checks it,
 # and the target ships the image once the test has passed.
 #
-# A new box's home is a copy of /home/agent, seeded once and never refreshed.
-# A tool that must follow the image is installed outside the home.
+# A new box's home gets the files of /usr/local/share/boxes/home, seeded once
+# and never refreshed. /home/agent in the image is an empty mount point. A
+# tool that must follow the image is installed outside the home.
 #
 # The build context is the repository root, because the file service is
 # built from files/ and shared/.
@@ -25,12 +26,9 @@ ARG NODE_MAJOR=26
 ARG NIX_VERSION=2.34.8
 ARG CODEX_VERSION=0.156.1
 
-# The agent's own account. 1020 keeps clear of the ubuntu user at 1000, which
-# is often a person on the host.
-#
-# The numbers are the defaults of the orchestrator's BOX_UID and BOX_GID but
-# need not match them: a box runs as BOX_UID:BOX_GID and the orchestrator
-# chowns its home, workspace and Nix store to those numbers.
+# The agent's own account, and the defaults of the orchestrator's BOX_UID and
+# BOX_GID. 1020 keeps clear of the ubuntu user at 1000, which is often a
+# person on the host.
 ARG AGENT_UID=1020
 ARG AGENT_GID=1020
 
@@ -191,7 +189,7 @@ RUN chmod 0755 /usr/local/lib/boxes-files/main.mjs \
 ARG AGENT_UID
 ARG AGENT_GID
 RUN groupadd -g "${AGENT_GID}" agent \
- && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -m -d /home/agent -s /bin/bash agent
+ && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -M -d /home/agent -s /bin/bash agent
 
 # HOME is set outright, because the caches of many tools derive from it.
 # C.UTF-8 is built into glibc and keeps non-ASCII paths intact.
@@ -225,17 +223,22 @@ RUN mkdir -p /usr/local/lib/boxes/setup.d
 
 # The root filesystem is read-only at runtime, so every mount point must
 # exist in the image. /workspace, /home/agent and /nix are writable binds, and
-# /tmp is a tmpfs.
-#
-# Codex refuses to start without its CODEX_HOME, and the check below runs
-# codex.
-RUN mkdir -p /workspace /nix /home/agent/.local/bin /home/agent/.codex /home/agent/.claude \
- && chown agent:agent /workspace /nix /home/agent /home/agent/.local /home/agent/.local/bin \
-      /home/agent/.codex /home/agent/.claude
+# /tmp is a tmpfs. The home stays empty: the mount hides it in a box.
+RUN mkdir -p /workspace /nix /home/agent \
+ && chown agent:agent /workspace /nix /home/agent
 
-# Claude Code's user settings for a new box, without commit and pull request
-# attribution.
-COPY --chown=agent:agent box-image/claude-settings.json /home/agent/.claude/settings.json
+# The files of a new home. boxes-setup copies them into a home that has no
+# seed marker, and overwrites nothing. They belong to root and are readable
+# by every uid, so the copy works for any BOX_UID.
+#
+# The empty .gitconfig makes git config --global write there, and not into
+# ~/.config/git/config, which the orchestrator writes at each start.
+#
+# The Claude Code user settings disable commit and pull request attribution.
+COPY box-image/claude-settings.json /usr/local/share/boxes/home/.claude/settings.json
+RUN cp -R /etc/skel/. /usr/local/share/boxes/home/ \
+ && touch /usr/local/share/boxes/home/.gitconfig \
+ && chmod -R a+rX,go-w /usr/local/share/boxes/home
 
 # Numeric, so the uid is readable from the image itself.
 USER ${AGENT_UID}
@@ -264,13 +267,24 @@ ARG NODE_MAJOR
 # The file service ends with exit code 0 when its input closes, so the run
 # with an empty input proves that node loads the bundle through the link.
 #
-# The setup runs as it does in a box, without a proxy CA and without steps.
+# The setup runs first, as it does in a box, without a proxy CA and without
+# steps. It seeds the empty home, so the checks after it see the home of a
+# new box. A second setup does not copy a file of the seed again.
 #
 # A login shell keeps every directory of the image's PATH.
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -g)" = "${AGENT_GID}" \
  && test "$(id -un)" = "agent" \
  && test -w /workspace && test -w /home/agent && test -w /nix \
+ && test -z "$(ls -A /home/agent)" \
+ && test "$(command -v boxes-setup)" = "/usr/local/bin/boxes-setup" \
+ && boxes-setup \
+ && test -f /home/agent/.boxes/seeded \
+ && test -f /home/agent/.profile \
+ && test -f /home/agent/.claude/settings.json \
+ && test -f /home/agent/.gitconfig && test ! -s /home/agent/.gitconfig \
+ && test -z "$(find /home/agent ! -user agent -print -quit)" \
+ && rm /home/agent/.bashrc && boxes-setup && test ! -e /home/agent/.bashrc \
  && test -w /home/agent/.local/bin \
  && test "$(npm config get prefix)" = "/home/agent/.local" \
  && test "$(command -v claude-agent-acp)" = "/usr/local/bin/claude-agent-acp" \
@@ -279,8 +293,6 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && codex --version | grep -qF "${CODEX_VERSION}" \
  && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
  && boxes-files </dev/null \
- && test "$(command -v boxes-setup)" = "/usr/local/bin/boxes-setup" \
- && boxes-setup \
  && test -d /usr/local/share/boxes/skills \
  && ps -eo pid,ppid,args >/dev/null \
  && bash -lc 'set -eu; IFS=:; for d in $0; do \
@@ -339,8 +351,8 @@ RUN case "$TARGETARCH" in \
 FROM base AS full-image
 
 # The base ends as the agent, with HOME and TMPDIR in the agent's home. The
-# installs here run as root with both outside the home, because the home is
-# copied into every new box.
+# installs here run as root with both outside the home, because the home of
+# the image must stay empty.
 USER root
 ENV HOME=/root \
     TMPDIR=/tmp
@@ -514,20 +526,17 @@ FROM full-image AS full-test
 ARG AGENT_UID
 ARG NIX_VERSION
 
-# The setup creates TMPDIR at runtime. The Go and Rust builds below need it
-# now.
-RUN mkdir -p "$TMPDIR"
-
 # Checks the user, that no install wrote into the home, nix, the setup with
 # the steps of the full image, and the skills. The setup runs as it does in a
 # box, without a proxy CA, and the skill of the browser CLI must hold this
-# image's notes.
+# image's notes. It also creates the TMPDIR that the Go and Rust builds below
+# need.
 #
 # A login shell keeps every directory of the image's PATH.
 RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(id -un)" = "agent" \
  && test "$HOME" = "/home/agent" \
- && test -z "$(find /home/agent ! -user agent -print -quit)" \
+ && test -z "$(ls -A /home/agent)" \
  && test "$(command -v nix)" = "/usr/local/bin/nix" \
  && nix --version | grep -qF "${NIX_VERSION}" \
  && boxes-setup \

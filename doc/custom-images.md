@@ -33,9 +33,10 @@ ENV HOME=/home/agent \
 ## Installs
 
 The base image ends as the agent, with `HOME` and `TMPDIR` in the home of the agent. Run the installs as root with
-`HOME` and `TMPDIR` outside the home, as in the example. At the end, set `USER`, `HOME` and `TMPDIR` back. The
-orchestrator copies `/home/agent` of the image into each new box, so a file that an install writes there goes into every
-box.
+`HOME` and `TMPDIR` outside the home, as in the example. At the end, set `USER`, `HOME` and `TMPDIR` back.
+
+`/home/agent` in the image is only a mount point and must stay empty. To put a file into each new home, put it into
+`/usr/local/share/boxes/home`. `boxes-setup` copies these files into a new home once.
 
 ## The account and the mount points
 
@@ -53,6 +54,7 @@ Do not replace or remove these files of the base image:
 | `/usr/local/bin/entrypoint.sh` | Holds the container open, under `tini` as PID 1. Keep the `ENTRYPOINT` of the base. |
 | `/usr/local/bin/boxes-files` | The [file service](files.md). |
 | `/usr/local/bin/boxes-setup` | The setup of the home after each start of a box. |
+| `/usr/local/share/boxes/home` | The files of a new home. Add files here, but keep the files of the base. |
 
 ## Skills
 

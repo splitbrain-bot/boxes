@@ -53,10 +53,6 @@ const schema = z.object({
    * uid box containers run as, and so the owner of every file in a
    * workspace.
    *
-   * The box image needs no matching uid: seedHomeFromImage() chowns the home
-   * it copies out of the image, and every other writable path is a bind this
-   * process owns.
-   *
    * When this is the uid the orchestrator runs as, the orchestrator needs no
    * root to hand files to the agent.
    */
