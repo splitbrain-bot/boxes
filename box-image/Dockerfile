@@ -39,10 +39,11 @@ ARG AGENT_GID=1020
 # into shared/ resolve as they do in a checkout.
 FROM node:${NODE_MAJOR}-alpine AS files-build
 WORKDIR /build
-COPY shared/ ./shared/
 COPY files/package.json files/package-lock.json* ./files/
 WORKDIR /build/files
 RUN npm ci
+# After npm ci, so a change in shared/ keeps the installed dependencies.
+COPY shared/ /build/shared/
 COPY files/tsconfig.json files/vite.config.ts ./
 COPY files/src ./src
 RUN npm run check && npm run build
