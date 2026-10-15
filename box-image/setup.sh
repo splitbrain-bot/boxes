@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Box setup. The orchestrator runs it as the agent after each start of the
-# box, before the box is ready. It prepares the home for the tools of the
-# base image, then runs the steps that an image adds in setup.d.
+# box, before the box is ready. It seeds a new home, prepares the home for
+# the tools of the base image, then runs the steps that an image adds in
+# setup.d.
 #
 # A step that breaks the box fails it, and the orchestrator marks the box as
 # an error with this output. A step that breaks one tool only warns. The
@@ -18,6 +19,23 @@ fail() {
   log "ERROR: $*"
   failed=1
 }
+
+# --- the home seed ----------------------------------------------------------
+# A new home gets the files of the image's seed directory, once. The marker
+# keeps a file that the agent deleted from coming back. The copy overwrites
+# nothing and keeps the mode of the home itself, so a home that has files
+# keeps them.
+seed=/usr/local/share/boxes/home
+marker=/home/agent/.boxes/seeded
+if [ ! -e "$marker" ]; then
+  if cp -R --update=none "$seed/." /home/agent/ \
+     && mkdir -p /home/agent/.boxes \
+     && touch "$marker"; then
+    log "seeded the home from $seed"
+  else
+    fail "could not seed the home from $seed; the shell and the harnesses would miss their files"
+  fi
+fi
 
 # --- scratch space ----------------------------------------------------------
 # TMPDIR lies on the persistent home, so it is emptied at every start. It is

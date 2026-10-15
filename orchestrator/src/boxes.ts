@@ -757,10 +757,7 @@ export class BoxManager {
     await dk.ensureProxyAttached(row.network_name, this.cfg);
     ws.createWorkspace(this.cfg.DATA_DIR, id);
     ws.createNix(this.cfg.DATA_DIR, id);
-    // The bind mount hides the image's /home/agent, so the image's home is
-    // copied in.
     ws.createHome(this.cfg.DATA_DIR, id);
-    await dk.seedHomeFromImage(ws.hostHomePath(this.hostDataDir, id), row.image, id);
     const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
     // Recorded before the start, so a start that fails leaves a row naming
     // the container and the teardown removes it.
@@ -1322,11 +1319,7 @@ export class BoxManager {
    */
   async reconcile(): Promise<void> {
     this.pending.clearStale();
-    // Helpers are left out: one that outlived its job is labelled with the
-    // box too, and adopting it would leave the row naming a copy script.
-    const live = new Map(
-      (await dk.listBoxContainers()).filter((c) => !c.helper).map((c) => [c.boxId, c]),
-    );
+    const live = new Map((await dk.listBoxContainers()).map((c) => [c.boxId, c]));
     for (const row of this.allRows()) {
       // A turn cannot survive an orchestrator restart, because the upstream
       // connection that owned it is gone.

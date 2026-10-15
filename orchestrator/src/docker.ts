@@ -14,13 +14,6 @@ import { boxOwner } from './workspaces.ts';
 export const LABEL = 'boxes.box';
 
 /**
- * Label on the short-lived helper containers that copy a box's files.
- * They carry the box label too, so the orphan sweep takes them, and this
- * one so boot reconciliation never adopts one as the box's container.
- */
-export const HELPER_LABEL = 'boxes.helper';
-
-/**
  * Label the box image carries in its own config. It still marks a copy that
  * a pull has left untagged, so the orchestrator can prune that copy without
  * touching images that other users of the host own.
@@ -41,8 +34,7 @@ export const LOGIN_LABEL = 'boxes.login';
  * The `uid:gid` every box process runs as, as Docker wants it written.
  *
  * Numbers rather than the image's `agent` user, so BOX_UID decides without an
- * image rebuild. The image user must still match, because a new home is a
- * `cp -a` copy of the image's home and keeps its owner.
+ * image rebuild.
  */
 function boxUser(): string {
   const { uid, gid } = boxOwner();
@@ -329,83 +321,6 @@ export async function resolveHostMountSource(destination: string): Promise<strin
   if (!info) return null;
   const mount = (info.Mounts ?? []).find((m) => m.Destination === destination);
   return mount?.Source ?? null;
-}
-
-/**
- * Fills a box's empty home directory from the image's own `/home/agent` and
- * hands the whole copy to the agent.
- *
- * A bind mount hides what the image has at that path, so the copy is needed.
- * It matters most for `.profile`: it puts `~/.local/bin` back on the PATH that
- * Debian's `/etc/profile` resets, and the agent's `npm install -g` tools live
- * there.
- *
- * The copy runs as root, so this process needs no right to chown. The chown
- * is recursive, because `cp -a` keeps the uid the image was built on and the
- * agent must be able to write every file, not only the directory.
- */
-export async function seedHomeFromImage(
-  hostDirectory: string,
-  image: string,
-  boxId: string,
-): Promise<void> {
-  const { uid, gid } = boxOwner();
-  await oneShot({
-    what: 'home seed',
-    image,
-    boxId,
-    binds: [`${hostDirectory}:/to`],
-    script: `cp -a ${HOME_DIR}/. /to/ && chown -R ${uid}:${gid} /to`,
-  });
-}
-
-/**
- * Runs one short-lived container over a box's files and waits for it.
- *
- * The helper runs as root, because it copies and chowns a box's files. It
- * has no network and a read-only rootfs. Each call site fixes the script, and
- * no part of it comes from user input.
- */
-async function oneShot(spec: {
-  what: string;
-  image: string;
-  boxId: string;
-  binds: string[];
-  script: string;
-}): Promise<void> {
-  const container = await docker().createContainer({
-    Image: spec.image,
-    User: 'root',
-    // The image's entrypoint holds a container open, so it is replaced.
-    Entrypoint: ['sh', '-c'],
-    Cmd: [spec.script],
-    Labels: { [LABEL]: spec.boxId, [HELPER_LABEL]: spec.what },
-    HostConfig: {
-      Binds: spec.binds,
-      NetworkMode: 'none',
-      ReadonlyRootfs: true,
-      SecurityOpt: ['no-new-privileges:true'],
-      Privileged: false,
-      RestartPolicy: { Name: 'no' },
-      // The entrypoint, and tini with it, is replaced above, so the init
-      // comes from Docker.
-      Init: true,
-    },
-  });
-  try {
-    await container.start();
-    const { StatusCode } = (await container.wait()) as { StatusCode: number };
-    if (StatusCode !== 0) {
-      const logs = await container.logs({ stdout: true, stderr: true, tail: 20 });
-      throw new Error(`${spec.what} exited ${StatusCode}: ${logs.toString('utf8').trim()}`);
-    }
-  } finally {
-    try {
-      await container.remove({ force: true, v: false });
-    } catch {
-      // already gone
-    }
-  }
 }
 
 /**
@@ -816,11 +731,10 @@ async function runExec(
 
 /**
  * Every labelled box container Docker knows about, for boot
- * reconciliation and the orphan sweep. `helper` marks a copy container that
- * outlived its job rather than the box's own.
+ * reconciliation and the orphan sweep.
  */
 export async function listBoxContainers(): Promise<
-  Array<{ id: string; boxId: string; running: boolean; helper: boolean }>
+  Array<{ id: string; boxId: string; running: boolean }>
 > {
   const containers = await docker().listContainers({
     all: true,
@@ -834,7 +748,6 @@ export async function listBoxContainers(): Promise<
         id: c.Id,
         boxId,
         running: c.State === 'running',
-        helper: c.Labels?.[HELPER_LABEL] !== undefined,
       },
     ];
   });

@@ -148,9 +148,6 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     remove: async () => {
       containers.delete(id);
     },
-    // The orchestrator waits for a helper container and reads its logs only on failure.
-    wait: async () => ({ StatusCode: 0 }),
-    logs: async () => Buffer.from(''),
     inspect: async () => {
       const container = must(id);
       return { Image: container.image, State: { Running: container.running } };
@@ -192,17 +189,14 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
           RepoDigests: [`boxes@${found.repoDigest}`],
           Created: found.builtAt,
           Size: found.sizeBytes,
-          // The orchestrator warns when this uid differs from BOX_UID.
-          Config: { User: String(process.getuid?.() ?? 0) },
         };
       },
       remove: async () => undefined,
     }),
-    createContainer: async (spec: { name?: string; Labels?: Record<string, string> }) => {
+    createContainer: async (spec: { name: string }) => {
       // A box container is named after its box, so the review's git runner
-      // can find the workspace from the id. A helper has no name.
-      const box = spec.Labels?.[dk.LABEL] ?? '';
-      const id = spec.name ?? `helper-${box}-${containers.size}`;
+      // can find the workspace from the id.
+      const id = spec.name;
       containers.set(id, { image: BOX_IMAGE.id, running: false });
       return handle(id);
     },

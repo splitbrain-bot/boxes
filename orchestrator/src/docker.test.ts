@@ -14,7 +14,6 @@ import {
   createLoginContainer,
   createContainer,
   killInContainer,
-  seedHomeFromImage,
   setDockerForTests,
 } from './docker.ts';
 
@@ -100,45 +99,6 @@ describe('the container template', () => {
       // path, and nothing in it would substitute anywhere else.
       '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234:/nix',
     ]);
-  }, 30_000);
-
-  it('seeds a new home from the image, as root, and hands it to the agent', async () => {
-    let opts: Record<string, unknown> = {};
-    setDockerForTests({
-      createContainer: async (o: Record<string, unknown>) => {
-        opts = o;
-        return {
-          start: async () => {},
-          wait: async () => ({ StatusCode: 0 }),
-          remove: async () => {},
-        };
-      },
-    } as unknown as Docker);
-    try {
-      await seedHomeFromImage(
-        '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
-        'boxes-box:latest',
-        'abcd1234',
-      );
-    } finally {
-      setDockerForTests(null);
-    }
-
-    const host = opts['HostConfig'] as { Binds: string[]; NetworkMode: string };
-    assert.deepEqual(host.Binds, [
-      '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234:/to',
-    ]);
-    // A bind mount hides what the image put in /home/agent, so the home is
-    // copied from the image. Its skeleton .profile puts ~/.local/bin, where
-    // `npm install -g` installs, on the PATH of a login shell.
-    //
-    // The chown is recursive: `cp -a` keeps the uid the image was built on,
-    // which is not BOX_UID when the two were set apart.
-    assert.deepEqual(opts['Cmd'], ['cp -a /home/agent/. /to/ && chown -R 1020:1020 /to']);
-    // As root, so the copy and the chown both work. The orchestrator may not
-    // run as root itself.
-    assert.equal(opts['User'], 'root');
-    assert.equal(host.NetworkMode, 'none');
   }, 30_000);
 
   it('runs as the configured uid and gid, not the image\'s user name', async () => {

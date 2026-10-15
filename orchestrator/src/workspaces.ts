@@ -15,13 +15,7 @@ import { log } from './log.ts';
  * ordinary files with no container running.
  */
 
-/**
- * Default uid the box container runs as, and the default of BOX_UID.
- *
- * The box image's own `agent` user is built on the same number, but a
- * BOX_UID set away from it works too, as every path a box writes to is
- * chowned to BOX_UID.
- */
+/** Default uid the box container runs as, and the default of BOX_UID. */
 export const DEFAULT_BOX_UID = 1020;
 
 /** Default gid the box container runs as, and the default of BOX_GID. */
@@ -128,7 +122,7 @@ export function createWorkspace(dataDir: string, boxId: string): string {
 
 /**
  * Creates a box's home directory, empty. Returns the path as this process
- * sees it. The home is not usable until seedHomeFromImage fills it.
+ * sees it. boxes-setup fills it at the first start of the box.
  */
 export function createHome(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);
