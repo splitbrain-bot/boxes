@@ -251,7 +251,7 @@ jobs:
       - name: Start the stack
         run: |
           set -eu
-          BOXES_ENV="$RUNNER_TEMP/boxes.env"
+          export BOXES_ENV="$RUNNER_TEMP/boxes.env"
           echo "BOXES_ENV=$BOXES_ENV" >> "$GITHUB_ENV"
           echo "BOX_IMAGE=$BOX_IMAGE" >> "$BOXES_ENV"
           echo "BOX_IMAGE_PULL_MINUTES=0" >> "$BOXES_ENV"
