@@ -6,6 +6,7 @@ import { basename, dirname, join, normalize, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import type {
+  BootResponse,
   CredentialSummary,
   HarnessHealth,
   HarnessInfo,
@@ -18,6 +19,7 @@ import type {
   StoredAttachment,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
+import { BOOT_PAGE, BOOT_PAGE_CSP, BootState } from './boot.ts';
 import { builtinSkills } from './builtin-skills.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
 import {
@@ -115,6 +117,9 @@ function cacheControlFor(path: string): string {
  */
 const THEME_SCRIPT_HASH = "'sha256-4AdoNi/wvSpHLY3qRCPU3bCPtiW7L8VuMIcRP0Slv5s='";
 
+/** The paths that are served while the orchestrator starts. */
+const BOOT_OPEN_PATHS = new Set(['/api/boot', '/healthz', '/readyz']);
+
 /** A Host header worth putting in a header this process writes. */
 const SAFE_HOST = /^[A-Za-z0-9.\-[\]]+(:\d+)?$/;
 
@@ -206,6 +211,12 @@ async function dockerAnswers(): Promise<boolean> {
 export interface BuildOptions {
   /** Where the dashboard bundle is, for a caller serving one it built itself. */
   bundleDir?: string;
+  /**
+   * Whether the orchestrator has started. Until it has, the app serves only
+   * the starting page, the boot endpoint and the probes. Without it, the app
+   * serves everything at once.
+   */
+  boot?: BootState;
 }
 
 /** What one orchestrator process hands its boot and its tests, wired together. */
@@ -236,6 +247,7 @@ export interface Orchestrator {
  */
 export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestrator {
   const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
+  const boot = opts.boot ?? new BootState(true);
   // Before anything creates a workspace directory or a container: everything
   // that writes files for the agent, or runs a process as it, reads this.
   setBoxOwner(cfg.BOX_UID, cfg.BOX_GID);
@@ -322,6 +334,29 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     });
   });
 
+  /**
+   * Holds back every request until the orchestrator has started, except the
+   * boot endpoint and the probes.
+   *
+   * A browser that asks for a page gets the starting page, which loads the
+   * dashboard when the start is complete. Every other request gets a 503.
+   */
+  app.addHook('onRequest', async (req, reply) => {
+    if (boot.ready) return;
+    const path = req.url.split('?')[0] ?? '/';
+    if (BOOT_OPEN_PATHS.has(path)) return;
+    if (req.method === 'GET' && !path.startsWith('/api') && req.headers.accept?.includes('text/html')) {
+      return reply
+        .headers({
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': BOOT_PAGE_CSP,
+        })
+        .send(BOOT_PAGE);
+    }
+    return reply.code(503).header('Retry-After', '5').send({ error: 'Boxes is starting' });
+  });
+
   // --- REST: unauthenticated here, the deployment puts auth in front ----------
 
   app.setErrorHandler((err, _req, reply) => {
@@ -380,6 +415,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const ready = Object.values(checks).every(Boolean);
     return reply.code(ready ? 200 : 503).send({ ready, version: VERSION, checks });
   });
+
+  /** Whether the orchestrator has started, and how far the pull of the box image has come. */
+  app.get('/api/boot', async (): Promise<BootResponse> => boot.status());
 
   /**
    * What each harness needs, and whether it has it.

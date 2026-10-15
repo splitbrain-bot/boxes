@@ -4,6 +4,7 @@ import { WebSocketServer } from 'ws';
 import { ACP_SUBPROTOCOL } from '../../shared/acp.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { buildApp } from './app.ts';
+import { BootState } from './boot.ts';
 import { config } from './config.ts';
 import { openDb, boxesWithActiveTurns } from './db.ts';
 import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
@@ -51,10 +52,14 @@ lockDataDir(cfg.DATA_DIR);
 /** The database under DATA_DIR. */
 const db = openDb(cfg.DATA_DIR);
 
+/** Whether the orchestrator has started, for the app and the gateway. */
+const boot = new BootState();
+
 /** The HTTP app and the services it built. */
 const { app, manager, agents, credentials, egress, logins, tunnels, setProxyWarnings } = buildApp(
   cfg,
   db,
+  { boot },
 );
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
@@ -111,6 +116,11 @@ const TERMINAL_PATH = /^\/ws\/boxes\/([A-Za-z0-9_-]{1,64})\/terminal$/;
 const MAX_TERMINALS_PER_BOX = 4;
 
 app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+  if (!boot.ready) {
+    socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   const url = req.url ?? '';
   const path = url.split('?')[0] ?? '';
   const match = WS_PATH.exec(path);
@@ -176,8 +186,16 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
 /** The background loops, so shutdown can stop them before anything else. */
 const loops: Array<{ stop: () => void }> = [];
 
-/** Reconciles against Docker, starts the background loops, and listens. */
+/**
+ * Listens, reconciles against Docker, and starts the background loops.
+ *
+ * The app listens first, so a browser gets the starting page while the rest
+ * runs. The app serves everything once the boot state is ready.
+ */
 async function main(): Promise<void> {
+  await app.listen({ host: '0.0.0.0', port: cfg.PORT });
+  log.info('orchestrator listening', { port: cfg.PORT });
+
   // The policy has to exist before the first box is created, because a
   // box's environment is built from it. Pushing it can fail — the proxy
   // may still be booting — and the reconciler retries every minute.
@@ -199,8 +217,10 @@ async function main(): Promise<void> {
   // restart pick up a moved tag. It is skipped when the periodic refresh is
   // off, which means the image is built on this host.
   try {
-    if (cfg.BOX_IMAGE_PULL_MINUTES > 0) await manager.refreshBoxImage();
-    await manager.ensureBoxImage();
+    if (cfg.BOX_IMAGE_PULL_MINUTES > 0) {
+      await manager.refreshBoxImage(boot.trackPull(cfg.BOX_IMAGE));
+    }
+    await manager.ensureBoxImage(boot.trackPull(cfg.BOX_IMAGE));
   } catch (err) {
     log.warn('could not pull the box image at boot', {
       image: cfg.BOX_IMAGE,
@@ -216,8 +236,8 @@ async function main(): Promise<void> {
   loops.push(startTunnelReconciler(tunnels));
   loops.push(startSkillRepoRefresh(agents));
 
-  await app.listen({ host: '0.0.0.0', port: cfg.PORT });
-  log.info('orchestrator listening', { port: cfg.PORT });
+  boot.markReady();
+  log.info('orchestrator started');
 }
 
 /**

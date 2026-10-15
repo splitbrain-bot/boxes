@@ -238,17 +238,33 @@ export function selfContainerId(): string | null {
   return null;
 }
 
+/** One progress event of a pull, as the daemon sends it. */
+export interface PullEvent {
+  /** What happens, such as `Downloading` or `Pull complete`. */
+  status?: string;
+  /** The layer the event is about. Some events name the tag instead, or nothing. */
+  id?: string;
+  /** The bytes done and the bytes in all, for the events that move. */
+  progressDetail?: { current?: number; total?: number };
+}
+
 /**
  * Pulls an image, resolving once the daemon has finished with it.
  *
  * It passes no registry auth. A private registry needs credentials in the
  * daemon's own configuration.
+ *
+ * @param image The image reference to pull.
+ * @param onProgress Called with each progress event of the pull.
  */
-export async function pullImage(image: string): Promise<void> {
+export async function pullImage(
+  image: string,
+  onProgress?: (event: PullEvent) => void,
+): Promise<void> {
   const stream = await docker().pull(image);
   await new Promise<void>((resolve, reject) => {
     // The pull call returns when the transfer starts; the stream ends with it.
-    docker().modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
+    docker().modem.followProgress(stream, (err) => (err ? reject(err) : resolve()), onProgress);
   });
 }
 

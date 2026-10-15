@@ -232,13 +232,15 @@ export class BoxManager {
    * Absent, there is nothing to create a box out of, so this is the one
    * pull that is allowed to fail loudly. Present, it costs one inspect and
    * says nothing.
+   *
+   * @param onProgress Called with each progress event of the pull.
    */
-  async ensureBoxImage(): Promise<void> {
+  async ensureBoxImage(onProgress?: (event: dk.PullEvent) => void): Promise<void> {
     if (!(await dk.imageId(this.cfg.BOX_IMAGE))) {
       log.info('the box image is not on this host; pulling it', {
         image: this.cfg.BOX_IMAGE,
       });
-      await dk.pullImage(this.cfg.BOX_IMAGE);
+      await dk.pullImage(this.cfg.BOX_IMAGE, onProgress);
       log.info('pulled the box image', { image: this.cfg.BOX_IMAGE });
     }
   }
@@ -248,11 +250,13 @@ export class BoxManager {
    *
    * Best effort, because the image already on the host still works. A box
    * moves onto the new image at its next start.
+   *
+   * @param onProgress Called with each progress event of the pull.
    */
-  async refreshBoxImage(): Promise<void> {
+  async refreshBoxImage(onProgress?: (event: dk.PullEvent) => void): Promise<void> {
     const before = await dk.imageId(this.cfg.BOX_IMAGE);
     try {
-      await dk.pullImage(this.cfg.BOX_IMAGE);
+      await dk.pullImage(this.cfg.BOX_IMAGE, onProgress);
     } catch (err) {
       this.lastPullError = (err as Error).message;
       throw err;

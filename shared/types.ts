@@ -540,6 +540,37 @@ export interface HealthResponse {
   images: DeploymentImages;
 }
 
+/** How far a pull of an image has come. */
+export interface PullProgress {
+  /** The image reference that is pulled. */
+  image: string;
+  /** The layers of the image. */
+  layers: {
+    /** The layers that are on the host now. */
+    done: number;
+    /** The layers the daemon has named so far. */
+    total: number;
+  };
+  /**
+   * The bytes of the layers that are downloaded. The daemon gives the size of
+   * a layer only when its download starts, so the total can increase.
+   */
+  bytes: {
+    /** The bytes downloaded. */
+    current: number;
+    /** The bytes to download, as far as known. */
+    total: number;
+  };
+}
+
+/** What the orchestrator answers while it starts, and once it has started. */
+export interface BootResponse {
+  /** True once the orchestrator serves the dashboard and the API. */
+  ready: boolean;
+  /** The last pull of the box image during the start, or null when there was none. */
+  pull: PullProgress | null;
+}
+
 /**
  * What the readiness probe answers, ready or not.
  *
