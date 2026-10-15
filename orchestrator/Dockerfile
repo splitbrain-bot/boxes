@@ -5,11 +5,12 @@
 
 FROM node:26-bookworm AS dashboard-build
 WORKDIR /build
-COPY shared/ ./shared/
 COPY dashboard/package.json dashboard/package-lock.json* ./dashboard/
 WORKDIR /build/dashboard
 # ci, so the image uses the lock file versions.
 RUN npm ci
+# After npm ci, so a change in shared/ keeps the installed dependencies.
+COPY shared/ /build/shared/
 COPY dashboard/ ./
 # check:app, because the full check also covers the browser suite, which
 # needs the orchestrator's source.
@@ -18,7 +19,6 @@ RUN npm run check:app && npm run build
 # --- orchestrator ------------------------------------------------------------
 FROM node:26-bookworm AS orchestrator-build
 WORKDIR /build
-COPY shared/ ./shared/
 # The tests run the file service in process, and the check covers them, so
 # the file service's source and dependencies are here too.
 COPY files/package.json files/package-lock.json* ./files/
@@ -27,6 +27,8 @@ COPY files/src/ ./files/src/
 COPY orchestrator/package.json orchestrator/package-lock.json* ./orchestrator/
 WORKDIR /build/orchestrator
 RUN npm ci
+# After npm ci, so a change in shared/ keeps the installed dependencies.
+COPY shared/ /build/shared/
 COPY orchestrator/ ./
 RUN npm run check && npm run build
 

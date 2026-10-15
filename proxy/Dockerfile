@@ -4,10 +4,11 @@
 # shared/ resolve as they do in a checkout.
 FROM node:26-alpine AS build
 WORKDIR /build
-COPY shared/ ./shared/
 COPY proxy/package.json proxy/package-lock.json* ./proxy/
 WORKDIR /build/proxy
 RUN npm ci
+# After npm ci, so a change in shared/ keeps the installed dependencies.
+COPY shared/ /build/shared/
 COPY proxy/tsconfig.json proxy/vite.config.ts ./
 COPY proxy/src ./src
 RUN npm run check && npm run build
