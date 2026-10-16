@@ -36,9 +36,9 @@ API first.
 
 The orchestrator does no agent work itself. An agent runs in a box, and an adapter makes it available over ACP.
 
-The orchestrator reaches a box only through its runtime layer (`orchestrator/src/runtime/`). The runtime keeps the
-container lifecycle, the storage, the network isolation, the exec, the image lifecycle and the inventory. Docker is the
-only runtime.
+The orchestrator reaches a box only through its [runtime](runtime.md) layer (`orchestrator/src/runtime/`). The runtime
+keeps the container lifecycle, the storage, the network isolation, the exec, the image lifecycle and the inventory.
+Docker is the only runtime.
 
 ## State
 

@@ -61,6 +61,7 @@ work on the same checkout.
 
 - [Orchestrator](doc/orchestrator.md) — The service that serves the dashboard and drives Docker
 - [Agent communication](doc/acp.md) — The way the dashboard, the orchestrator and an agent speak ACP
+- [Runtime](doc/runtime.md) — The layer through which the orchestrator runs, stores and isolates the boxes
 - [Egress proxy](doc/egress.md) — Host filtering and credential injection
 - [Storage](doc/storage.md) — The contents of the data volume, and the files a box keeps
 - [File service](doc/files.md) — The process in a box through which the orchestrator reads and writes its files
