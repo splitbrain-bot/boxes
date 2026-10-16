@@ -30,9 +30,31 @@ describe('the progress of a pull', () => {
 
     assert.deepEqual(boot.status().pull, {
       image: 'example/box:latest',
-      layers: { done: 2, total: 3 },
+      layers: { downloaded: 2, done: 2, total: 3 },
       bytes: { current: 110, total: 400 },
+      unpacking: null,
     });
+  });
+
+  it('shows the layer that is unpacked now', () => {
+    const boot = new BootState();
+    const progress = boot.trackPull('example/box:latest');
+    progress({ status: 'Pulling fs layer', id: 'l1' });
+    progress({ status: 'Pulling fs layer', id: 'l2' });
+    progress({ status: 'Download complete', id: 'l1' });
+    progress({ status: 'Download complete', id: 'l2' });
+    progress({ status: 'Extracting', id: 'l1', progressDetail: { current: 30, total: 100 } });
+
+    assert.deepEqual(boot.status().pull?.layers, { downloaded: 2, done: 0, total: 2 });
+    assert.deepEqual(boot.status().pull?.unpacking, { current: 30, total: 100, unit: 'bytes' });
+  });
+
+  it('takes the seconds when the daemon gives no size for the unpacking', () => {
+    const boot = new BootState();
+    const progress = boot.trackPull('example/box:latest');
+    progress({ status: 'Extracting', id: 'l1', progressDetail: { current: 4, units: 's' } });
+
+    assert.deepEqual(boot.status().pull?.unpacking, { current: 4, total: 0, unit: 'seconds' });
   });
 
   it('shows the pull that reported last', () => {

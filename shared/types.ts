@@ -546,7 +546,9 @@ export interface PullProgress {
   image: string;
   /** The layers of the image. */
   layers: {
-    /** The layers that are on the host now. */
+    /** The layers that are downloaded. */
+    downloaded: number;
+    /** The layers that are on the host now, unpacked. */
     done: number;
     /** The layers the daemon has named so far. */
     total: number;
@@ -561,6 +563,18 @@ export interface PullProgress {
     /** The bytes to download, as far as known. */
     total: number;
   };
+  /**
+   * The layer that the daemon unpacks now, or null when it unpacks none. The
+   * daemon unpacks one layer at a time, in order.
+   */
+  unpacking: {
+    /** How far the unpacking has come, in the unit. */
+    current: number;
+    /** The value at the end, or 0 when the daemon does not give it. */
+    total: number;
+    /** The unit of the values. Some daemons give only the seconds since the start. */
+    unit: 'bytes' | 'seconds';
+  } | null;
 }
 
 /** What the orchestrator answers while it starts, and once it has started. */

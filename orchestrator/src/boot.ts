@@ -8,8 +8,20 @@ interface LayerProgress {
   current: number;
   /** The size of the layer, or 0 while it is not known. */
   total: number;
-  /** Whether the layer is on the host. */
+  /** Whether the layer is downloaded. */
+  downloaded: boolean;
+  /** Whether the layer is on the host, unpacked. */
   done: boolean;
+}
+
+/** One pull of an image. */
+interface Pull {
+  /** The image reference that is pulled. */
+  image: string;
+  /** The layers of the image by id. */
+  layers: Map<string, LayerProgress>;
+  /** The id of the layer that the daemon unpacks now, and its progress. */
+  unpacking: { id: string; progress: NonNullable<PullProgress['unpacking']> } | null;
 }
 
 /**
@@ -20,8 +32,8 @@ export class BootState {
   /** True once the orchestrator serves the dashboard and the API. */
   ready: boolean;
 
-  /** The pull that reported last, and its layers by id. */
-  private pull: { image: string; layers: Map<string, LayerProgress> } | null = null;
+  /** The pull that reported last. */
+  private pull: Pull | null = null;
 
   /**
    * @param ready Whether the orchestrator has started already.
@@ -45,15 +57,15 @@ export class BootState {
    * @returns The callback for the progress events of the pull.
    */
   trackPull(image: string): (event: PullEvent) => void {
-    const layers = new Map<string, LayerProgress>();
+    const pull: Pull = { image, layers: new Map(), unpacking: null };
     return (event) => {
-      this.pull = { image, layers };
+      this.pull = pull;
       // The first event names the tag, not a layer.
       if (!event.id || !event.status || event.status.startsWith('Pulling from')) return;
-      let layer = layers.get(event.id);
+      let layer = pull.layers.get(event.id);
       if (!layer) {
-        layer = { current: 0, total: 0, done: false };
-        layers.set(event.id, layer);
+        layer = { current: 0, total: 0, downloaded: false, done: false };
+        pull.layers.set(event.id, layer);
       }
       switch (event.status) {
         case 'Downloading':
@@ -62,10 +74,23 @@ export class BootState {
           break;
         case 'Download complete':
           layer.current = layer.total;
+          layer.downloaded = true;
+          break;
+        case 'Extracting':
+          pull.unpacking = {
+            id: event.id,
+            progress: {
+              current: event.progressDetail?.current ?? 0,
+              total: event.progressDetail?.total ?? 0,
+              unit: event.progressDetail?.units === 's' ? 'seconds' : 'bytes',
+            },
+          };
           break;
         case 'Pull complete':
         case 'Already exists':
+          layer.downloaded = true;
           layer.done = true;
+          if (pull.unpacking?.id === event.id) pull.unpacking = null;
           break;
       }
     };
@@ -78,13 +103,15 @@ export class BootState {
 }
 
 /** Adds the progress of the layers of a pull together. */
-function summarize(pull: { image: string; layers: Map<string, LayerProgress> }): PullProgress {
+function summarize(pull: Pull): PullProgress {
   const progress: PullProgress = {
     image: pull.image,
-    layers: { done: 0, total: pull.layers.size },
+    layers: { downloaded: 0, done: 0, total: pull.layers.size },
     bytes: { current: 0, total: 0 },
+    unpacking: pull.unpacking?.progress ?? null,
   };
   for (const layer of pull.layers.values()) {
+    if (layer.downloaded) progress.layers.downloaded++;
     if (layer.done) progress.layers.done++;
     progress.bytes.current += layer.current;
     progress.bytes.total += layer.total;
@@ -95,7 +122,8 @@ function summarize(pull: { image: string; layers: Map<string, LayerProgress> }):
 /**
  * The script of the starting page. It polls the boot endpoint, shows the
  * progress of the pull, and loads the dashboard once the orchestrator has
- * started.
+ * started. The bar counts the unpacked layers, because the daemon downloads
+ * ahead and the unpacking takes the most time.
  */
 const BOOT_SCRIPT = `
 const pull = document.getElementById('pull');
@@ -114,10 +142,19 @@ async function poll() {
     if (boot.pull) {
       pull.hidden = false;
       image.textContent = boot.pull.image;
-      bar.max = boot.pull.bytes.total || 1;
-      bar.value = boot.pull.bytes.current;
-      detail.textContent = boot.pull.layers.done + ' of ' + boot.pull.layers.total + ' layers, ' +
-        mb(boot.pull.bytes.current) + ' of ' + mb(boot.pull.bytes.total);
+      const { layers, bytes, unpacking } = boot.pull;
+      const part = unpacking && unpacking.total ? unpacking.current / unpacking.total : 0;
+      bar.max = layers.total || 1;
+      bar.value = layers.done + part;
+      if (layers.downloaded < layers.total) {
+        detail.textContent = mb(bytes.current) + ' of ' + mb(bytes.total) + ' downloaded, ' +
+          layers.done + ' of ' + layers.total + ' layers unpacked';
+      } else {
+        let text = 'Unpacking layer ' + Math.min(layers.done + 1, layers.total) + ' of ' + layers.total;
+        if (unpacking && unpacking.unit === 'seconds') text += ', ' + unpacking.current + ' s';
+        else if (unpacking) text += ', ' + mb(unpacking.current) + ' of ' + mb(unpacking.total);
+        detail.textContent = text;
+      }
     }
   } catch {
     // The orchestrator may restart. The next poll tries again.
@@ -147,7 +184,7 @@ export const BOOT_PAGE = `<!doctype html>
 <h1>Boxes is starting</h1>
 <p>The dashboard opens when the start is complete.</p>
 <section id="pull" hidden>
-<p>Downloading the box image <span id="image"></span></p>
+<p>Pulling the box image <span id="image"></span></p>
 <progress id="bar" value="0" max="1"></progress>
 <p id="detail"></p>
 </section>
