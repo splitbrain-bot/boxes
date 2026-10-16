@@ -4,10 +4,13 @@ import { PassThrough } from 'node:stream';
 import { expect, test, vi } from 'vitest';
 import type { WebSocket } from 'ws';
 import { parseTerminalControl } from '../../../shared/terminal.ts';
+import { loadConfig } from '../config.ts';
 import * as dk from '../docker.ts';
 import { setLogLevel } from '../log.ts';
 import type { BoxManager } from '../boxes.ts';
-import { attachTerminal } from './terminal.ts';
+import { DockerRuntime } from '../runtime/docker.ts';
+import { setRuntime } from '../runtime/runtime.ts';
+import { attachTerminal, NO_TERMINAL_SESSION } from './terminal.ts';
 
 // The connection logs every path these tests drive, so only errors are
 // written.
@@ -156,8 +159,9 @@ function fakeDocker(): FakePty {
       inspect: async () => ({ State: { Running: running } }),
       exec: async (opts: { Cmd: string[]; Tty?: boolean; ConsoleSize?: [number, number] }) => {
         if (!opts.Tty) {
-          // A short exec, such as the one that ends this terminal's tmux session.
-          ran.push(opts.Cmd);
+          // A short exec, such as the one that ends this terminal's tmux
+          // session, without the `timeout` it runs under.
+          ran.push(opts.Cmd[0] === 'timeout' ? opts.Cmd.slice(3) : opts.Cmd);
           const done = new PassThrough();
           queueMicrotask(() => done.end());
           return { start: async () => done, inspect: async () => ({ ExitCode: 0 }) };
@@ -182,6 +186,7 @@ function fakeDocker(): FakePty {
       },
     }),
   } as unknown as Parameters<typeof dk.setDockerForTests>[0]);
+  setRuntime(new DockerRuntime(loadConfig({})));
 
   return {
     typed: () => Buffer.concat(last().written).toString('utf8'),
@@ -236,7 +241,7 @@ function fakeManager(opts: { fail?: string } = {}): FakeManager {
     execTarget: async () => {
       targets++;
       if (opts.fail) throw new Error(opts.fail);
-      return { containerId: 'c1', workingDir: '/workspace' };
+      return { boxId: 'box-1', workingDir: '/workspace' };
     },
   } as unknown as BoxManager;
   return { manager, held: () => open, touches: () => touches, targets: () => targets };
@@ -390,7 +395,7 @@ test('a reattach that finds no tmux session closes the socket as the shell ended
 
     pty.end();
     await vi.advanceTimersByTimeAsync(1_000);
-    pty.end(dk.NO_TERMINAL_SESSION);
+    pty.end(NO_TERMINAL_SESSION);
     await vi.advanceTimersByTimeAsync(0);
 
     assert.deepEqual(ws.closes, [{ code: 1000, reason: 'shell ended' }]);

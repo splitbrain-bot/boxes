@@ -12,7 +12,7 @@ import type {
 
 /**
  * SQLite persistence in WAL mode. The database holds box metadata only:
- * Docker holds the runtime state, and the adapter holds the transcripts.
+ * the runtime holds the runtime state, and the adapter holds the transcripts.
  */
 
 /** A row of the boxes table. */
@@ -23,14 +23,6 @@ export interface BoxRow {
   name: string;
   /** The credential profile. Every box is DEFAULT. */
   profile: string;
-  /** The image the container was last created from. */
-  image: string;
-  /** The Docker container id, or null when there is no container. */
-  container_id: string | null;
-  /** The name of the box network. */
-  network_name: string;
-  /** The /24 subnet of the box network. */
-  subnet: string;
   /**
    * The revision the review is compared against, as the user gave it, such as
    * a branch, a tag or a short id. Null means each repository's working tree.
@@ -561,6 +553,15 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN ready_at INTEGER;
   UPDATE boxes SET ready_at = created_at;
   `,
+  // The runtime finds the container, the network and the image of a box by
+  // the box id, and picks the subnet of a new network from the free ones.
+  `
+  ALTER TABLE boxes DROP COLUMN image;
+  ALTER TABLE boxes DROP COLUMN container_id;
+  ALTER TABLE boxes DROP COLUMN network_name;
+  ALTER TABLE boxes DROP COLUMN subnet;
+  DROP TABLE counters;
+  `,
 ];
 
 /** An open database handle. */
@@ -602,29 +603,6 @@ function migrate(db: Db): void {
       throw err;
     }
   }
-}
-
-/**
- * The subnets of the boxes that are not deleted, which the allocator skips.
- * A deleted box gave its subnet back with its network.
- */
-export function takenSubnets(db: Db): Set<string> {
-  const rows = db
-    .prepare("SELECT subnet FROM boxes WHERE status != 'deleted'")
-    .all() as Array<{ subnet: string }>;
-  return new Set(rows.map((row) => row.subnet));
-}
-
-/** Returns the next value of the subnet counter, incrementing it in place. */
-export function nextSubnetIndex(db: Db): number {
-  const row = db
-    .prepare(
-      `INSERT INTO counters (name, value) VALUES ('subnet', 0)
-       ON CONFLICT(name) DO UPDATE SET value = value + 1
-       RETURNING value`,
-    )
-    .get() as { value: number } | undefined;
-  return row?.value ?? 0;
 }
 
 /**

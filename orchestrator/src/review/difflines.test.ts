@@ -34,7 +34,7 @@ const localGit: GitRunner = async (target, argv, env) => {
 
 /** A directory addressed the way the service addresses a repository. */
 function at(dir: string): GitTarget {
-  return { containerId: 'box-1', dir };
+  return { boxId: 'box-1', dir };
 }
 
 describe('parseDiff line markers', () => {

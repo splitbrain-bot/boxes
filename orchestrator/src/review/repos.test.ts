@@ -44,7 +44,7 @@ const localGit: GitRunner = async (target, argv, env) => {
 
 /** The box a workspace would be reviewed in. */
 function box(workspaceDir: string): GitBox {
-  return { containerId: 'box-1', workspaceDir };
+  return { boxId: 'box-1', workspaceDir };
 }
 
 let dir: string;
@@ -224,11 +224,11 @@ describe('repoFor', () => {
   test('a repository is addressed by its path inside the container', () => {
     // Git gets the path inside the box, not the host path the walk read.
     assert.deepEqual(mapOf('').repos[0]!.git, {
-      containerId: 'box-1',
+      boxId: 'box-1',
       dir: '/workspace',
     });
     assert.deepEqual(mapOf('repo-a/inner').repos[0]!.git, {
-      containerId: 'box-1',
+      boxId: 'box-1',
       dir: '/workspace/repo-a/inner',
     });
   });

@@ -4,15 +4,14 @@ import type { FileServiceSpawner } from './files.ts';
 
 /**
  * A spawner for tests: it runs the real file service in this process, on
- * directories of this machine, and needs no Docker.
+ * directories of this machine, and needs no runtime.
  *
- * `rootsOf` names the directories for a container id. A test that uses the
- * box id as the container id can derive them from the box.
+ * `rootsOf` names the directories for a box id.
  */
-export function inProcessFileService(rootsOf: (containerId: string) => Roots): FileServiceSpawner {
-  return async (containerId) => {
+export function inProcessFileService(rootsOf: (boxId: string) => Roots): FileServiceSpawner {
+  return async (boxId) => {
     const [server, client] = duplexPair();
-    serveFiles(server, rootsOf(containerId));
+    serveFiles(server, rootsOf(boxId));
     let end: (code: number | null) => void = () => {};
     const exited = new Promise<number | null>((resolve) => {
       end = resolve;

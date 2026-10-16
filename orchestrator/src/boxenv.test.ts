@@ -7,7 +7,7 @@ import { loadConfig, type Config } from './config.ts';
 import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
 import { openDb, type Db } from './db.ts';
 import { EgressManager } from './egress.ts';
-import { proxyUrl } from './docker.ts';
+import { DockerRuntime } from './runtime/docker.ts';
 
 /** A real Claude token as the store holds it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
@@ -76,7 +76,7 @@ async function envFor(
     placeholderFor: (id) => egress.placeholderFor(id),
     methodFor: (id) => egress.methodFor(id),
     gitlabHost: cfg.GITLAB_HOST,
-    proxyUrl: proxyUrl(cfg),
+    proxyUrl: new DockerRuntime(cfg).proxyUrl(),
     hasCa: egress.caCertificate() !== '',
   });
 }

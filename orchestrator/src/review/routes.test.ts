@@ -39,21 +39,21 @@ let invocations = 0;
  * A runner that starts git here, in the host directory that the container
  * path names.
  *
- * The workspace is at `/workspace` inside a box, and the stubbed container id
- * is the box's own, so the two together say which directory on this
+ * The workspace is at `/workspace` inside a box, and the target names the
+ * box, so the two together say which directory on this
  * machine an invocation means. One addressed anywhere else is recorded and
  * refused rather than run.
  */
 const localGit: GitRunner = async (target, argv, env) => {
   invocations++;
   const inside = target.dir === '/workspace' || target.dir.startsWith('/workspace/');
-  if (!inside || !existsSync(workspace(target.containerId))) {
+  if (!inside || !existsSync(workspace(target.boxId))) {
     misaddressed.push(target);
     return { ok: false, stdout: '', stderr: 'misaddressed', code: null };
   }
   try {
     const stdout = execFileSync(argv[0]!, argv.slice(1), {
-      cwd: join(workspace(target.containerId), target.dir.slice('/workspace'.length)),
+      cwd: join(workspace(target.boxId), target.dir.slice('/workspace'.length)),
       env: { ...process.env, ...env },
       encoding: 'utf8',
       stdio: 'pipe',
@@ -83,11 +83,9 @@ function workspace(id: string): string {
 function insertBox(id: string): string {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, review_base_rev, status, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', NULL, 'running', ?, ?)`,
-  ).run(id, `bn-${id}`, now, now);
+    `INSERT INTO boxes (id, name, profile, review_base_rev, status, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', NULL, 'running', ?, ?)`,
+  ).run(id, now, now);
   const path = workspace(id);
   mkdirSync(path, { recursive: true });
   return path;
@@ -122,18 +120,17 @@ beforeEach(() => {
   orchestrator = buildApp(cfg, db);
   misaddressed = [];
   invocations = 0;
-  // No container starts here, so the box id stands in for the container id.
-  // The stub marks the box active, as the real execTarget does.
+  // No box starts here. The stub marks the box active, as the real
+  // execTarget does.
   vi.spyOn(BoxManager.prototype, 'execTarget').mockImplementation(async function (
     this: BoxManager,
     id: string,
   ) {
     this.touch(id);
-    return { containerId: id, workingDir: '/workspace' };
+    return { boxId: id, workingDir: '/workspace' };
   });
   setGitRunnerForTests(localGit);
-  // The container id is the box id, so it names the workspace the file
-  // service works on.
+  // The box id names the workspace the file service works on.
   setFileServiceSpawnerForTests(
     inProcessFileService((id) => ({ workspace: workspace(id), home: dir, nix: dir })),
   );

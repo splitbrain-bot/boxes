@@ -116,24 +116,15 @@ export function buildWorkspace(root: string, spec: WorkspaceSpec): void {
 }
 
 /**
- * The box a container id belongs to, or an empty string for any other id.
- *
- * A box container is named `box-<id>`, so the name carries the box.
- */
-function boxOfContainer(containerId: string): string {
-  return containerId.startsWith('box-') ? containerId.slice('box-'.length) : '';
-}
-
-/**
  * Makes the review run git on this machine instead of inside a box container.
  *
- * The container id names the box, and the path under `/workspace` names the
+ * The target names the box, and the path under `/workspace` names the
  * directory in its workspace. A call addressed anywhere else fails without
  * running.
  */
 export function installLocalGit(workspaceOf: (boxId: string) => string): void {
   const runner: GitRunner = async (target, argv, env) => {
-    const root = workspaceOf(boxOfContainer(target.containerId));
+    const root = workspaceOf(target.boxId);
     const inside = target.dir === '/workspace' || target.dir.startsWith('/workspace/');
     const cwd = join(root, target.dir.slice('/workspace'.length));
     if (!inside || !existsSync(cwd)) {
@@ -167,12 +158,12 @@ export function removeLocalGit(): void {
 
 /**
  * Runs the file service of a box in this process, on its workspace on this
- * machine, instead of inside its container. The container id names the box.
+ * machine, instead of inside its container.
  */
 export function installLocalFiles(workspaceOf: (boxId: string) => string): void {
   setFileServiceSpawnerForTests(
-    inProcessFileService((containerId) => {
-      const workspace = workspaceOf(boxOfContainer(containerId));
+    inProcessFileService((boxId) => {
+      const workspace = workspaceOf(boxId);
       return { workspace, home: workspace, nix: workspace };
     }),
   );

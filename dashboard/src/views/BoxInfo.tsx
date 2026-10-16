@@ -101,7 +101,7 @@ export function BoxInfo() {
     );
   }
 
-  const running = box.dockerState === 'running';
+  const running = box.runtimeState === 'running';
 
   return (
     <div className="flex flex-col gap-4">
@@ -120,10 +120,10 @@ export function BoxInfo() {
         <Notice className="rounded-md border px-3 py-2">{error}</Notice>
       ) : null}
 
-      {running && !box.proxyAttached ? (
+      {running && !box.isolated ? (
         <Notice tone="warn" className="rounded-md border px-3 py-2">
-          The egress proxy is not attached to this box&apos;s network — the agent has no
-          internet access until the reconcile loop reattaches it.
+          The network isolation of this box is not complete. The agent has no internet access
+          until the repair loop fixes it.
         </Notice>
       ) : null}
 
@@ -135,11 +135,9 @@ export function BoxInfo() {
           <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-2">
             <Meta label="Box" value={box.id} />
             <Meta label="ACP thread" value={box.acpSessionId ?? 'not started'} />
-            <Meta
-              label="Container"
-              value={box.containerId ? box.containerId.slice(0, 12) : '—'}
-            />
-            <Meta label="Network" value={`${box.networkName} (${box.subnet})`} />
+            {box.runtimeDetails.map(([label, value]) => (
+              <Meta key={label} label={label} value={value} />
+            ))}
             {/* Every box gets the global set, so no named set reads as "global only". */}
             <Meta label="Agent set" value={box.agentSetName ?? 'global only'} />
             <Meta label="Last active" value={new Date(box.lastActiveAt).toLocaleString()} />

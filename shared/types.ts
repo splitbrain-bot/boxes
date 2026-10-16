@@ -10,8 +10,11 @@ export type BoxStatus =
   | 'error'
   | 'deleted';
 
-/** What Docker reports right now, independent of what the DB believes. */
-export type DockerState = 'running' | 'exited' | 'missing' | 'unknown';
+/**
+ * The state of a box as the runtime reports it right now, independent of the
+ * stored status. `unknown` means the runtime did not answer.
+ */
+export type RuntimeState = 'running' | 'stopped' | 'unknown';
 
 /** An agent harness a box can run. */
 export type HarnessId = 'claude' | 'codex';
@@ -335,8 +338,8 @@ export interface BoxSummary {
   profile: string;
   /** Lifecycle status, as stored. */
   status: BoxStatus;
-  /** Live container state, resolved against Docker on every request. */
-  dockerState: DockerState;
+  /** Live state of the box, resolved against the runtime on every request. */
+  runtimeState: RuntimeState;
   /**
    * True while a prompt this gateway forwarded is open on any of the
    * box's threads. Derived from the threads rather than stored.
@@ -402,18 +405,15 @@ export interface BoxSummary {
 
 /** A single box with the extra detail the detail view needs. */
 export interface BoxDetail extends BoxSummary {
-  /** The image the box's container runs. */
-  image: string;
-  /** The Docker container's id, or null while there is none. */
-  containerId: string | null;
-  /** The box's own Docker network. */
-  networkName: string;
-  /** The subnet of that network. */
-  subnet: string;
+  /**
+   * Facts the runtime knows about the box, as label and value, for example
+   * the container and the network. A fact the runtime cannot read is left out.
+   */
+  runtimeDetails: Array<[string, string]>;
   /** The adapter's id for the box's most recently active thread, or null before one exists. */
   acpSessionId: string | null;
-  /** True when the egress proxy is attached to this box's network. */
-  proxyAttached: boolean;
+  /** True when the network isolation of the box is complete, so the agent reaches the egress proxy. */
+  isolated: boolean;
   /**
    * What the last reading found running in the box, which is what the
    * box-wide stop would signal. Empty for a box that is not up or has not
@@ -522,8 +522,8 @@ export interface HealthResponse {
   version: string;
   /** How many boxes exist that are not deleted. */
   boxes: number;
-  /** Box ids whose network is missing the egress proxy. */
-  proxyWarnings: string[];
+  /** Box ids whose network isolation the repair loop could not complete. */
+  isolationWarnings: string[];
   /** Egress policy state, or null before the first push has been attempted. */
   egress: EgressHealth | null;
   /**
@@ -588,8 +588,8 @@ export interface ReadyResponse {
     database: boolean;
     /** The proxy holds the egress policy this orchestrator composed. */
     egress: boolean;
-    /** The Docker daemon answered. */
-    docker: boolean;
+    /** The runtime answered. */
+    runtime: boolean;
   };
 }
 

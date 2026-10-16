@@ -1,14 +1,25 @@
 import Docker from 'dockerode';
-import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
-import type { DockerState, ImageInfo } from '../../shared/types.ts';
+import type { ImageInfo } from '../../shared/types.ts';
 import type { Config } from './config.ts';
 import { log } from './log.ts';
+import {
+  HOME_DIR,
+  NIX_DIR,
+  WORKSPACE_DIR,
+  type ProcessStream,
+  type PullEvent,
+  type RunOptions,
+  type RunOutput,
+} from './runtime/runtime.ts';
 import { boxOwner } from './workspaces.ts';
 
-/** The Docker layer: containers, networks, volumes, images and execs. */
+/**
+ * The Docker layer: containers, networks, images and execs. Only the Docker
+ * runtime uses it.
+ */
 
 /** Docker label carrying the box id on every object Boxes creates. */
 export const LABEL = 'boxes.box';
@@ -40,18 +51,6 @@ function boxUser(): string {
   const { uid, gid } = boxOwner();
   return `${uid}:${gid}`;
 }
-
-/** The box's writable workspace, and the working directory of everything in it. */
-export const WORKSPACE_DIR = '/workspace';
-
-/**
- * Where the box's Nix store is mounted, writable.
- *
- * The path is fixed: store paths are hashed against /nix/store, so the binary
- * cache has nothing for a store elsewhere. The mount is a per-box directory on
- * the data volume.
- */
-export const NIX_DIR = '/nix';
 
 /** The shared Docker client, or null before first use. */
 let client: Docker | null = null;
@@ -87,8 +86,6 @@ export interface CreateContainerSpec {
   image: string;
   /** The box network the container joins. */
   networkName: string;
-  /** The subnet of the box network. */
-  subnet: string;
   /**
    * Host-side path bind-mounted at WORKSPACE_DIR. A path rather than a volume
    * name, because the orchestrator reads these files itself.
@@ -100,14 +97,6 @@ export interface CreateContainerSpec {
   nixSource: string;
   /** The full environment of the box, as built by boxEnv(). */
   env: Record<string, string>;
-}
-
-/** The agent user's home inside a box container, where its own files and caches live. */
-export const HOME_DIR = '/home/agent';
-
-/** The URL of the egress proxy, as a box on its network reaches it. */
-export function proxyUrl(cfg: Config): string {
-  return `http://${cfg.EGRESS_PROXY_ALIAS}:${cfg.EGRESS_PROXY_PORT}`;
 }
 
 /** Converts a Docker-style memory limit such as 4g into bytes. */
@@ -130,24 +119,6 @@ export async function createNetwork(networkName: string, subnet: string, boxId: 
     IPAM: { Driver: 'default', Config: [{ Subnet: subnet }] },
     Labels: { [LABEL]: boxId },
   });
-}
-
-/**
- * Creates a box's network if the daemon no longer has it, and returns whether
- * it had to.
- *
- * A prune removes a network with no containers, so a box that lost its
- * container has usually lost its network too.
- */
-export async function ensureNetwork(
-  networkName: string,
-  subnet: string,
-  boxId: string,
-): Promise<boolean> {
-  const existing = await inspecting(() => docker().getNetwork(networkName).inspect());
-  if (existing) return false;
-  await createNetwork(networkName, subnet, boxId);
-  return true;
 }
 
 /** Whether a network's inspect lists the egress proxy container on it. */
@@ -238,16 +209,6 @@ export function selfContainerId(): string | null {
   return null;
 }
 
-/** One progress event of a pull, as the daemon sends it. */
-export interface PullEvent {
-  /** What happens, such as `Downloading` or `Pull complete`. */
-  status?: string;
-  /** The layer the event is about. Some events name the tag instead, or nothing. */
-  id?: string;
-  /** The bytes done and the bytes in all, for the events that move. */
-  progressDetail?: { current?: number; total?: number };
-}
-
 /**
  * Pulls an image, resolving once the daemon has finished with it.
  *
@@ -311,10 +272,26 @@ export async function imageInfo(image: string): Promise<ImageInfo | null> {
 }
 
 /** The id of the image a container was created from, or null when it is gone. */
-export async function containerImageId(containerId: string): Promise<string | null> {
+export async function containerImageId(container: string): Promise<string | null> {
   return inspecting(
-    async () => (await docker().getContainer(containerId).inspect()).Image ?? null,
+    async () => (await docker().getContainer(container).inspect()).Image ?? null,
   );
+}
+
+/** The full id of a container, by name or id, or null when it is gone. */
+export async function containerId(container: string): Promise<string | null> {
+  return inspecting(async () => (await docker().getContainer(container).inspect()).Id ?? null);
+}
+
+/** True when a network exists. */
+export async function networkExists(networkName: string): Promise<boolean> {
+  return (await inspecting(() => docker().getNetwork(networkName).inspect())) !== null;
+}
+
+/** The subnet of a network, or null when the network is gone or has none. */
+export async function networkSubnet(networkName: string): Promise<string | null> {
+  const info = await inspecting(() => docker().getNetwork(networkName).inspect());
+  return info?.IPAM?.Config?.[0]?.Subnet ?? null;
 }
 
 /** Whether this process is running inside a container. */
@@ -352,8 +329,8 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     Env: Object.entries(spec.env).map(([k, v]) => `${k}=${v}`),
     Labels: {
       [LABEL]: spec.boxId,
-      // Keeps Watchtower away. A recreated container would leave a stale id
-      // in the database and lose its proxy attachment.
+      // Keeps Watchtower away. Only the orchestrator replaces a box
+      // container, and only while the box is stopped.
       'com.centurylinklabs.watchtower.enable': 'false',
     },
     // The adapter is a separate exec; PID 1 only holds the container open.
@@ -474,73 +451,6 @@ export async function createLoginContainer(spec: {
 }
 
 /**
- * One exec driving a login CLI: its merged output, and a way to answer it.
- * Which stream a CLI prints its URL on is not an API, so the flows read both.
- */
-export interface LoginExec {
-  /** stdout and stderr, demuxed and merged in arrival order. */
-  output: Readable;
-  /** Writable only on a TTY exec; null otherwise. */
-  stdin: Duplex | null;
-  /** Resolves when the exec's stream ends, with the exit code if known. */
-  exited: Promise<number | null>;
-  /** Drops the exec's stream. */
-  kill(): void;
-}
-
-/**
- * Runs one command in a login container.
- *
- * `tty` is for `claude setup-token`, an interactive UI that refuses to run
- * without a terminal and reads the code from stdin. Under a TTY the output is
- * one raw stream, with the CLI's redraws and escape sequences.
- */
-export async function spawnLoginExec(
-  containerId: string,
-  cmd: readonly string[],
-  opts: { env?: Record<string, string>; tty?: boolean } = {},
-): Promise<LoginExec> {
-  const tty = opts.tty === true;
-  const exec = await docker().getContainer(containerId).exec({
-    Cmd: [...cmd],
-    AttachStdin: tty,
-    AttachStdout: true,
-    AttachStderr: true,
-    Tty: tty,
-    Env: Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
-    User: boxUser(),
-    WorkingDir: '/home/agent',
-  });
-
-  // Tty on the start request too: the daemon reads it there to decide
-  // whether to frame the output. Frame headers would corrupt the text.
-  const stream = (await exec.start({ hijack: true, stdin: tty, Tty: tty })) as Duplex;
-  const output = new PassThrough();
-  if (tty) {
-    // A login URL is longer than the default 80 columns, and a wrapped URL
-    // reads as two lines. Best effort: a refusal leaves the default width.
-    try {
-      await exec.resize({ h: 50, w: 400 });
-    } catch (err) {
-      log.debug('could not widen the login terminal', { error: (err as Error).message });
-    }
-    // Raw bytes both ways, so there is no frame header to strip.
-    stream.pipe(output, { end: false });
-  } else {
-    docker().modem.demuxStream(stream, output, output);
-  }
-
-  const { exited, kill } = execCompletion(
-    stream,
-    exec,
-    () => output.end(),
-    (err) => log.warn('login exec stream error', { error: err.message }),
-  );
-
-  return { output, stdin: tty ? stream : null, exited, kill };
-}
-
-/**
  * Every login container Docker still has, with its creation time in epoch
  * milliseconds. The orphan sweep reads it.
  */
@@ -575,11 +485,16 @@ export async function removeNetwork(networkName: string, cfg: Config): Promise<v
   }
 }
 
+/**
+ * The state Docker reports for a container. `missing` means the daemon does
+ * not have it, `unknown` that the daemon did not answer.
+ */
+export type ContainerState = 'running' | 'exited' | 'missing' | 'unknown';
+
 /** Resolves a container's live state, mapping every lookup failure onto a state. */
-export async function containerState(containerId: string | null): Promise<DockerState> {
-  if (!containerId) return 'missing';
+export async function containerState(container: string): Promise<ContainerState> {
   try {
-    const info = await docker().getContainer(containerId).inspect();
+    const info = await docker().getContainer(container).inspect();
     if (info.State?.Running) return 'running';
     return 'exited';
   } catch (err) {
@@ -588,108 +503,20 @@ export async function containerState(containerId: string | null): Promise<Docker
   }
 }
 
-/** One process inside a container, as the box's own `ps` reports it. */
-export interface ContainerProcess {
-  /** The pid, in the container's own numbering, as a `kill` inside the box needs it. */
-  pid: number;
-  /** The parent pid, in the same numbering. */
-  ppid: number;
-  /** The whole command line, which is how a process is recognised. */
-  command: string;
-  /** How long it has been running, in whole seconds. */
-  elapsedSeconds: number;
-}
-
-/**
- * Every process running inside a container, with the container's own pids.
- *
- * It runs the box image's `ps`, which appears in its own output. A container
- * that cannot be reached, or one without `ps`, throws, so the caller cannot
- * mistake it for one with nothing running.
- */
-export async function containerProcesses(containerId: string): Promise<ContainerProcess[]> {
-  const ps = ['ps', '-eo', 'pid,ppid,etimes,args'];
-  const { stdout, stderr, code } = await execInContainer(containerId, ps);
-  if (code !== 0) {
-    throw new Error(
-      `ps in the container exited ${code ?? 'unknown'}: ${`${stdout}${stderr}`.trim()}`,
-    );
-  }
-
-  const processes: ContainerProcess[] = [];
-  for (const line of stdout.split('\n').slice(1)) {
-    // Three left-padded numbers, then the command with its spaces.
-    const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-    if (!row) continue;
-    processes.push({
-      pid: Number(row[1]),
-      ppid: Number(row[2]),
-      command: row[4] ?? '',
-      elapsedSeconds: Number(row[3]),
-    });
-  }
-  return processes;
-}
-
-/**
- * Signals processes inside a container, as the agent user.
- *
- * The pids must be the container's own. They are passed to `kill` as separate
- * arguments, never through a shell. A non-zero exit, for example for a pid
- * that has already gone, is only logged at debug level.
- */
-export async function killInContainer(
-  containerId: string,
-  signal: 'TERM' | 'KILL',
-  pids: readonly number[],
-): Promise<void> {
-  if (pids.length === 0) return;
-  const { stdout, stderr, code } = await execInContainer(containerId, [
-    'kill',
-    `-${signal}`,
-    ...pids.map((pid) => String(pid)),
-  ]);
-  if (code !== 0) {
-    const error = `${stdout}${stderr}`.trim();
-    log.debug('kill in container reported trouble', { signal, pids, code, error });
-  }
-}
-
-/** How a short exec runs, and how much of what it writes is kept. */
-export interface ExecOptions {
-  /** The directory it runs in, as the container names it. */
-  workingDir?: string;
-  /** Variables set for it, on top of the container's own environment. */
-  env?: Record<string, string>;
-  /** How long it may run before it is signalled. Unbounded when absent. */
-  timeoutMs?: number;
-  /** How many bytes of each stream are kept. The rest is read and dropped. */
-  maxOutput?: number;
-}
-
-/** What a short exec wrote, and how it ended. */
-export interface ExecOutput {
-  /** What the command wrote to stdout, up to maxOutput bytes. */
-  stdout: string;
-  /** What the command wrote to stderr, up to maxOutput bytes. */
-  stderr: string;
-  /** Null when the exit code could not be read. */
-  code: number | null;
-}
-
 /**
  * Runs one command in a container as the agent user and collects its output.
  *
  * The command is an argument vector, never a shell line. `timeoutMs` is
  * enforced inside the container by `timeout`, because the daemon cannot
  * signal a running exec. The limit is rounded up to whole seconds. A command
- * that survives SIGTERM is killed five seconds later.
+ * that survives SIGTERM is killed five seconds later. Without `timeoutMs`,
+ * the command is unbounded.
  */
 export async function execInContainer(
   containerId: string,
-  cmd: string[],
-  opts: ExecOptions = {},
-): Promise<ExecOutput> {
+  cmd: readonly string[],
+  opts: RunOptions = {},
+): Promise<RunOutput> {
   const { stdout, stderr, exited } = await runExec(containerId, cmd, opts);
   const [out, err, code] = await Promise.all([
     readAll(stdout, opts.maxOutput),
@@ -713,16 +540,16 @@ async function readAll(stream: Readable, cap = Infinity): Promise<string> {
 }
 
 /** A command wrapped in the container's own `timeout`, when it is given a limit. */
-function withTimeout(cmd: string[], timeoutMs?: number): string[] {
-  if (timeoutMs === undefined) return cmd;
+function withTimeout(cmd: readonly string[], timeoutMs?: number): string[] {
+  if (timeoutMs === undefined) return [...cmd];
   return ['timeout', '--kill-after=5s', `${Math.ceil(timeoutMs / 1000)}s`, ...cmd];
 }
 
 /** One short exec with its stdout and its stderr demuxed apart. */
 async function runExec(
   containerId: string,
-  cmd: string[],
-  opts: ExecOptions,
+  cmd: readonly string[],
+  opts: RunOptions,
 ): Promise<{ stdout: Readable; stderr: Readable; exited: Promise<number | null> }> {
   const exec = await docker().getContainer(containerId).exec({
     Cmd: withTimeout(cmd, opts.timeoutMs),
@@ -769,12 +596,15 @@ export async function listBoxContainers(): Promise<
   });
 }
 
-/** Box networks Boxes created, by the box each is labelled with. */
-export async function listBoxNetworks(): Promise<Array<{ name: string; boxId: string }>> {
+/** Box networks Boxes created, by the box each is labelled with, and their subnets. */
+export async function listBoxNetworks(): Promise<
+  Array<{ name: string; boxId: string; subnet: string | null }>
+> {
   const networks = await docker().listNetworks({ filters: { label: [LABEL] } });
   return networks.flatMap((n) => {
     const boxId = (n.Labels as Record<string, string> | undefined)?.[LABEL];
-    return boxId && n.Name ? [{ name: n.Name, boxId }] : [];
+    const subnet = n.IPAM?.Config?.[0]?.Subnet ?? null;
+    return boxId && n.Name ? [{ name: n.Name, boxId, subnet }] : [];
   });
 }
 
@@ -814,26 +644,6 @@ export async function removeImage(id: string): Promise<boolean> {
     if (status === 404 || status === 409) return false;
     throw err;
   }
-}
-
-/**
- * A demuxed, long-lived exec carrying the ACP adapter's stdio.
- *
- * Tty is false, so Docker frames stdout and stderr into a single stream that
- * has to be demuxed. stdout carries newline-delimited JSON-RPC and nothing
- * else; the adapter sends all its logging to stderr.
- */
-export interface AdapterExec {
-  /** Newline-delimited JSON-RPC from the adapter. */
-  stdout: Readable;
-  /** Log-only. */
-  stderr: Readable;
-  /** Write newline-delimited JSON-RPC to the adapter. */
-  stdin: Duplex;
-  /** Resolves when the exec's stream ends, with the exit code if known. */
-  exited: Promise<number | null>;
-  /** Drops the exec's stream. */
-  kill(): void;
 }
 
 /**
@@ -886,170 +696,69 @@ function execCompletion(
 }
 
 /**
- * Starts the adapter inside a running container and demuxes its streams.
+ * Starts a long-lived process in a container as the agent user.
  *
- * `env` holds `NAME=value` entries that replace the variables of the
- * container for this process only.
+ * Without a terminal, Docker frames stdout and stderr into one stream, and
+ * the two are demuxed apart. With a terminal, Docker does no framing: the
+ * stream is the pty's bytes in both directions, and it is both stdout and
+ * stdin. The size is set on the exec, so the first prompt is drawn at the
+ * right width.
  */
-export async function spawnAdapterExec(
-  containerId: string,
-  cmd: string[],
-  workingDir: string,
-  env: string[] = [],
-): Promise<AdapterExec> {
-  const exec = await docker().getContainer(containerId).exec({
-    Cmd: cmd,
+export async function spawnExec(
+  container: string,
+  cmd: readonly string[],
+  opts: { workingDir: string; env?: Record<string, string>; tty?: { cols: number; rows: number } },
+): Promise<ProcessStream> {
+  const tty = opts.tty !== undefined;
+  const exec = await docker().getContainer(container).exec({
+    Cmd: [...cmd],
     AttachStdin: true,
     AttachStdout: true,
     AttachStderr: true,
-    Tty: false,
+    Tty: tty,
     User: boxUser(),
-    WorkingDir: workingDir,
-    Env: env,
+    WorkingDir: opts.workingDir,
+    Env: Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
+    // The daemon wants the size the way ioctl does, rows before columns.
+    ...(opts.tty ? { ConsoleSize: [opts.tty.rows, opts.tty.cols] } : {}),
   });
 
-  const stream = (await exec.start({ hijack: true, stdin: true })) as Duplex;
-  const stdout = new PassThrough();
+  // Tty on the start request too: the daemon reads it there to decide
+  // whether to frame the output. Frame headers would corrupt the text.
+  const stream = (await exec.start({ hijack: true, stdin: true, Tty: tty })) as Duplex;
+  let stdout: Readable = stream;
   const stderr = new PassThrough();
-  docker().modem.demuxStream(stream, stdout, stderr);
+  if (!tty) {
+    const demuxed = new PassThrough();
+    docker().modem.demuxStream(stream, demuxed, stderr);
+    stdout = demuxed;
+  }
 
   const { exited, kill } = execCompletion(
     stream,
     exec,
     () => {
-      stdout.end();
+      if (stdout !== stream) (stdout as PassThrough).end();
       stderr.end();
     },
-    (err) => log.warn('adapter exec stream error', { error: err.message }),
-  );
-
-  return { stdout, stderr, stdin: stream, exited, kill };
-}
-
-
-/**
- * A pty inside a box container, as the terminal endpoint holds one.
- *
- * Tty is true, so Docker does no framing: the stream is the pty's bytes in
- * both directions, and there is nothing to demux.
- */
-export interface TerminalExec {
-  /** The name of this connection's own tmux session. */
-  client: string;
-  /** The pty, readable and writable. */
-  stream: Duplex;
-  /** Tells the pty how large the window onto it is. */
-  resize(cols: number, rows: number): Promise<void>;
-  /** Resolves when the stream ends, with the exit code if known. */
-  exited: Promise<number | null>;
-  /** Ends this terminal's shell and drops the stream. */
-  close(): Promise<void>;
-}
-
-/** The tmux session every terminal on a box shares, and which outlives them. */
-const SHARED_TMUX_SESSION = 'boxes';
-
-/**
- * The shell one terminal connection runs.
- *
- * `client` is this connection's own tmux session, grouped with the shared one
- * so both show the same windows. The shared session keeps the windows when
- * every client has gone, so a build carries on with nobody watching.
- *
- * The own session lets close() end the client by name, as Docker cannot
- * signal a running exec. Without tmux, the shell is a plain login shell.
- */
-function terminalShell(client: string): string {
-  return [
-    'if ! command -v tmux >/dev/null 2>&1; then exec bash -l; fi',
-    `tmux new-session -d -s ${SHARED_TMUX_SESSION} 2>/dev/null`,
-    `exec tmux new-session -s ${client} -t ${SHARED_TMUX_SESSION}`,
-  ].join('; ');
-}
-
-/** The exit code of a reattach that found no client session to attach to. */
-export const NO_TERMINAL_SESSION = 3;
-
-/**
- * The shell that attaches one terminal connection to its own tmux session
- * again. The session is gone when the user ended the shell, or when the box
- * has no tmux.
- */
-function reattachShell(client: string): string {
-  return [
-    `tmux has-session -t =${client} 2>/dev/null || exit ${NO_TERMINAL_SESSION}`,
-    `exec tmux attach-session -t =${client}`,
-  ].join('; ');
-}
-
-/**
- * Opens a pty in a box container, running the shell a reader types into.
- *
- * The pty runs inside the container's isolation, so it reaches no further
- * than the agent does. The command is an argument vector, and the only part
- * this process composes is a name it generated itself.
- *
- * The size is set on the exec, so the first prompt is drawn at the right
- * width.
- *
- * With `reattach`, the pty attaches to that client session of an earlier
- * exec. The exec then ends with {@link NO_TERMINAL_SESSION} when the session
- * is gone.
- */
-export async function openTerminalExec(
-  containerId: string,
-  workingDir: string,
-  cols: number,
-  rows: number,
-  reattach?: string,
-): Promise<TerminalExec> {
-  // Random rather than a counter, so the name cannot collide with a session
-  // that an earlier orchestrator process left behind.
-  const client = reattach ?? `web-${randomBytes(4).toString('hex')}`;
-
-  const exec = await docker().getContainer(containerId).exec({
-    Cmd: ['bash', '-lc', reattach ? reattachShell(client) : terminalShell(client)],
-    AttachStdin: true,
-    AttachStdout: true,
-    AttachStderr: true,
-    Tty: true,
-    User: boxUser(),
-    WorkingDir: workingDir,
-    // Without this an editor, a pager and everything else that draws degrade
-    // to plain scrolling text.
-    Env: ['TERM=xterm-256color'],
-    ConsoleSize: [rows, cols],
-  });
-
-  // The daemon frames the output unless the start request says Tty too.
-  const stream = (await exec.start({ hijack: true, stdin: true, Tty: true })) as Duplex;
-  const { exited, kill } = execCompletion(stream, exec, () => {}, (err) =>
-    log.warn('terminal exec stream error', { error: err.message }),
+    (err) => log.warn('exec stream error', { command: cmd[0], error: err.message }),
   );
 
   return {
-    client,
-    stream,
-    // The daemon wants the size the way ioctl does, rows before columns. A
-    // resize against an exec that has ended is left at debug: the stream
+    stdout,
+    stderr,
+    stdin: stream,
+    exited,
+    // A resize against an exec that has ended is left at debug: the stream
     // ending is what the caller acts on.
-    resize: async (nextCols, nextRows) => {
+    resize: async (cols, rows) => {
+      if (!tty) return;
       try {
-        await exec.resize({ h: nextRows, w: nextCols });
+        await exec.resize({ h: rows, w: cols });
       } catch (err) {
         log.debug('terminal resize failed', { error: (err as Error).message });
       }
     },
-    exited,
-    close: async () => {
-      // The stream is dropped either way: a box that stopped under the
-      // terminal answers nothing, and has no client left to end.
-      try {
-        await execInContainer(containerId, ['tmux', 'kill-session', '-t', client]);
-      } catch (err) {
-        log.debug('could not end a terminal session', { error: (err as Error).message });
-      }
-      kill();
-    },
+    kill,
   };
 }

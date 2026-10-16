@@ -20,7 +20,7 @@ import {
 } from './git.ts';
 
 /** A target naming a container and a path inside it, as the service builds one. */
-const target: GitTarget = { containerId: 'box-1', dir: '/workspace/project' };
+const target: GitTarget = { boxId: 'box-1', dir: '/workspace/project' };
 
 /**
  * Installs a runner that records each call and answers with `result`, by
@@ -199,7 +199,7 @@ describe('over a repository git really answers about', () => {
 
   /** The repository this test built, addressed the way the service addresses one. */
   function here(sub = ''): GitTarget {
-    return { containerId: 'box-1', dir: sub === '' ? dir : join(dir, sub) };
+    return { boxId: 'box-1', dir: sub === '' ? dir : join(dir, sub) };
   }
 
   test('a subcommand runs in the directory and reports its output', async () => {
@@ -224,8 +224,8 @@ describe('over a repository git really answers about', () => {
   test('outside a repository there is no top level and no HEAD', async () => {
     const bare = mkdtempSync(join(tmpdir(), 'boxes-nogit-'));
     try {
-      assert.equal(await isTopLevel({ containerId: 'box-1', dir: bare }), false);
-      assert.equal(await headCommit({ containerId: 'box-1', dir: bare }), '');
+      assert.equal(await isTopLevel({ boxId: 'box-1', dir: bare }), false);
+      assert.equal(await headCommit({ boxId: 'box-1', dir: bare }), '');
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }

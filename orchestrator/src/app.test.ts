@@ -20,6 +20,7 @@ import * as dk from './docker.ts';
 import { inProcessFileService } from './files-in-process.ts';
 import { setFileServiceSpawnerForTests } from './files.ts';
 import type { LoginExecSpec } from './login.ts';
+import { runtime } from './runtime/runtime.ts';
 import * as ws from './workspaces.ts';
 
 /** One frame of a demuxable Docker stream. */
@@ -56,12 +57,13 @@ function fakeDocker(): void {
       stop: async () => undefined,
       inspect: async () => ({ State: { Running: true } }),
       exec: async (opts: { Cmd: string[] }) => {
-        if (opts.Cmd[0] === 'kill') killedInBox.push(opts.Cmd.slice(1));
+        // Every short command runs under `timeout`.
+        const cmd = opts.Cmd[0] === 'timeout' ? opts.Cmd.slice(3) : opts.Cmd;
+        const command = cmd[0];
         // The box-wide stop's two calls: a reading taken inside the container,
-        // and the signal it aims at what the reading found. The setup of a
-        // box that is brought up runs under `timeout`.
-        const command = opts.Cmd[0] === 'timeout' ? opts.Cmd[3] : opts.Cmd[0];
-        const answers = opts.Cmd[0] === 'ps' ? insideBox : null;
+        // and the signal it aims at what the reading found.
+        if (command === 'kill') killedInBox.push(cmd.slice(1));
+        const answers = command === 'ps' ? insideBox : null;
         return {
           start: async () => {
             const stream = new PassThrough();
@@ -92,11 +94,9 @@ let orchestrator: Orchestrator;
 function insertBox(id: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, status, ws_token, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', 'running', ?, ?, ?)`,
-  ).run(id, `bn-${id}`, `token-${id}`, now, now);
+    `INSERT INTO boxes (id, name, profile, status, ws_token, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'running', ?, ?, ?)`,
+  ).run(id, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 
@@ -1139,25 +1139,28 @@ function fakeLogins(): {
 } {
   const execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> = [];
   const removed: string[] = [];
-  orchestrator.logins.setRuntimeForTests({
-    start: async () => 'login-container',
-    exec: async (_id, spec) => {
+  // The rest of the runtime stays as buildApp set it.
+  runtime().startLogin = async () => ({
+    spawn: async (cmd, opts = {}) => {
+      const spec: LoginExecSpec = { cmd, ...(opts.tty ? { tty: true } : {}) };
       const output = new PassThrough();
       const record = { spec, output, input: '' };
       execs.push(record);
-      const stdin = spec.tty ? new PassThrough() : null;
-      stdin?.on('data', (chunk: Buffer) => {
+      const stdin = new PassThrough();
+      stdin.on('data', (chunk: Buffer) => {
         record.input += chunk.toString('utf8');
       });
       return {
-        output,
+        stdout: output,
+        stderr: new PassThrough().end() as PassThrough,
         stdin,
         exited: new Promise<number | null>(() => {}),
+        resize: async () => undefined,
         kill: () => output.destroy(),
       };
     },
-    remove: async (id) => {
-      removed.push(id);
+    remove: async () => {
+      removed.push('login-container');
     },
   });
   return { execs, removed };

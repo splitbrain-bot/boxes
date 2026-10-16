@@ -458,7 +458,7 @@ fi
 
 echo
 echo "== proxy attachment =="
-if api "$API_BASE/api/boxes/$BOX_ID" | jq -e '.proxyAttached' >/dev/null; then
+if api "$API_BASE/api/boxes/$BOX_ID" | jq -e '.isolated' >/dev/null; then
   green "ok   proxy attached to box network"; pass=$((pass+1))
 else
   red   "FAIL: egress proxy is not attached to the box network"; fail=$((fail+1))

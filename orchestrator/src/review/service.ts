@@ -71,13 +71,13 @@ interface GitSnapshot {
 /** What the review needs of the boxes it is a view onto. */
 export interface ReviewBoxes {
   /**
-   * The box's container, started if it was stopped, and the directory a
-   * command runs in inside it.
+   * The box, started if it was stopped, and the directory a command runs in
+   * inside it.
    *
    * Asking for it marks the box active, so a review that keeps asking
    * keeps the box it is asking about.
    */
-  execTarget(id: string): Promise<{ containerId: string; workingDir: string }>;
+  execTarget(id: string): Promise<{ boxId: string; workingDir: string }>;
 }
 
 /** A running box as the review reaches it: git and the file service. */
@@ -157,9 +157,9 @@ export class ReviewService {
     this.row(id);
     const target = await this.boxes.execTarget(id);
     return {
-      containerId: target.containerId,
+      boxId: target.boxId,
       workspaceDir: target.workingDir,
-      files: fileService(target.containerId),
+      files: fileService(target.boxId),
     };
   }
 
@@ -167,7 +167,7 @@ export class ReviewService {
    * What a review knows from git: which repositories the workspace holds, what
    * each is compared against, and the status of every changed file in it.
    *
-   * The snapshot is reused, because each git call is a `docker exec` into the
+   * The snapshot is reused, because each git call is an exec into the
    * box. A new one is taken when `fresh` says the browser has just arrived,
    * after a save or a base change, and when {@link SNAPSHOT_MS} has passed.
    */

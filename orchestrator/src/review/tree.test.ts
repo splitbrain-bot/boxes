@@ -297,7 +297,7 @@ describe('dirEntries over real repositories', () => {
 
   /** The box this workspace would be reviewed in. */
   function box(): GitBox {
-    return { containerId: 'box-1', workspaceDir: dir };
+    return { boxId: 'box-1', workspaceDir: dir };
   }
 
   /** Initialises a repository at a workspace-relative path. */

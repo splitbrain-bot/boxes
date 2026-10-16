@@ -14,6 +14,8 @@ import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { AgentStore } from '../agents.ts';
 import { BoxManager } from '../boxes.ts';
+import { DockerRuntime } from '../runtime/docker.ts';
+import { setRuntime } from '../runtime/runtime.ts';
 import * as ws from '../workspaces.ts';
 import { HISTORY_LOADING, THREAD_WORKING, type DownstreamHandle } from './upstream.ts';
 import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
@@ -187,7 +189,8 @@ function fakeDocker(adapter: Standins): void {
       start: async () => undefined,
       inspect: async () => ({ State: { Running: containerRunning } }),
       exec: async (opts: { Cmd?: string[] }) => {
-        const cmd = opts?.Cmd ?? [];
+        // A short command runs under `timeout`.
+        const cmd = opts?.Cmd?.[0] === 'timeout' ? opts.Cmd.slice(3) : (opts?.Cmd ?? []);
         // The reading and the stop. Everything else is an adapter, which is a
         // long-lived stream rather than a command with an answer.
         if (cmd[0] === 'ps') {
@@ -241,10 +244,8 @@ class RecordingNotifier extends Notifier {
 function seed(dataDir: string): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, status, created_at, last_active_at, ready_at)
-     VALUES ('s1', 'test', 'DEFAULT', 'img', 'c1',
-       'bn-s1', '10.200.0.0/24', 'running', ?, ?, ?)`,
+    `INSERT INTO boxes (id, name, profile, status, created_at, last_active_at, ready_at)
+     VALUES ('s1', 'test', 'DEFAULT', 'running', ?, ?, ?)`,
   ).run(now, now, now);
   // A start refuses a box whose directories are gone.
   ws.createWorkspace(dataDir, 's1');
@@ -261,7 +262,7 @@ function seed(dataDir: string): void {
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   written = [];
   vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
     written.push(String(chunk));
@@ -276,10 +277,14 @@ beforeEach(() => {
   killed = [];
   spawned = [];
   containerRunning = true;
+  setRuntime(new DockerRuntime(cfg));
+  // The environment of a box is built from the prepared policy.
+  const egress = new EgressManager(cfg, new CredentialStore(db, () => {}, cfg.credentialSet), db);
+  await egress.prepare();
   manager = new BoxManager(
     db,
     cfg,
-    new EgressManager(cfg, new CredentialStore(db, () => {}, cfg.credentialSet), db),
+    egress,
     new RecordingNotifier(db, cfg),
     new AgentStore(db, cfg.DATA_DIR),
   );

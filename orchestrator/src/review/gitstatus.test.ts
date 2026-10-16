@@ -46,7 +46,7 @@ const localGit: GitRunner = async (target, argv, env) => {
 
 /** A directory addressed the way the service addresses a repository. */
 function at(dir: string): GitTarget {
-  return { containerId: 'box-1', dir };
+  return { boxId: 'box-1', dir };
 }
 
 describe('parsePorcelain', () => {
@@ -269,8 +269,8 @@ describe('over a workspace of several repositories', () => {
   });
 
   /** The box these repositories would be reviewed in. */
-  function box(): { containerId: string; workspaceDir: string } {
-    return { containerId: 'box-1', workspaceDir: dir };
+  function box(): { boxId: string; workspaceDir: string } {
+    return { boxId: 'box-1', workspaceDir: dir };
   }
 
   /** Runs git in a workspace-relative directory. */

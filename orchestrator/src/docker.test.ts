@@ -3,19 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Docker from 'dockerode';
-import { Readable } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, it } from 'vitest';
 import { loadConfig, type Config } from './config.ts';
 import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
 import { openDb, type Db } from './db.ts';
 import { EgressManager } from './egress.ts';
-import {
-  containerProcesses,
-  createLoginContainer,
-  createContainer,
-  killInContainer,
-  setDockerForTests,
-} from './docker.ts';
+import { createLoginContainer, createContainer, setDockerForTests } from './docker.ts';
 
 let dirs: string[] = [];
 let dbs: Db[] = [];
@@ -73,7 +66,6 @@ describe('the container template', () => {
           boxId: 'abcd1234',
           image: cfg.BOX_IMAGE,
           networkName: 'bn-abcd1234',
-          subnet: '10.200.0.0/29',
           workspaceSource: '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
           homeSource: '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234',
           nixSource: '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234',
@@ -189,76 +181,4 @@ describe('the login container', () => {
     // It is not a box, so nothing that reads the box label finds it.
     assert.equal(labels['boxes.box'], undefined);
   }, 30_000);
-});
-
-/**
- * How the box's process table is read, which is what says whether a
- * conversation has anything still running in it, and which pids a stop
- * signals.
- */
-describe('reading and signalling what is running in a container', () => {
-  afterEach(() => setDockerForTests(null));
-
-  /** A daemon whose execs answer with `output` and record their commands. */
-  function fakeExec(output: string, exitCode = 0): { ran: string[][] } {
-    const ran: string[][] = [];
-    const modem = new Docker({ socketPath: '/var/run/docker.sock' }).modem;
-    setDockerForTests({
-      modem,
-      getContainer: () => ({
-        exec: async ({ Cmd }: { Cmd: string[] }) => {
-          ran.push(Cmd);
-          const payload = Buffer.from(output, 'utf8');
-          const header = Buffer.alloc(8);
-          header[0] = 1;
-          header.writeUInt32BE(payload.length, 4);
-          return {
-            start: async () => Readable.from([Buffer.concat([header, payload])]),
-            inspect: async () => ({ ExitCode: exitCode }),
-          };
-        },
-      }),
-    } as unknown as Docker);
-    return { ran };
-  }
-
-  it('parses what the box\'s own ps prints, spaces and all', async () => {
-    const { ran } = fakeExec(
-      [
-        '    PID    PPID ELAPSED COMMAND',
-        '      1       0     900 /sbin/docker-init',
-        '  23490   23019     154 /bin/bash -c eval \'sleep 300; echo done\'',
-      ].join('\n'),
-    );
-    const processes = await containerProcesses('c1');
-    assert.deepEqual(ran, [['ps', '-eo', 'pid,ppid,etimes,args']]);
-    assert.deepEqual(processes, [
-      { pid: 1, ppid: 0, command: '/sbin/docker-init', elapsedSeconds: 900 },
-      {
-        pid: 23490,
-        ppid: 23019,
-        command: "/bin/bash -c eval 'sleep 300; echo done'",
-        elapsedSeconds: 154,
-      },
-    ]);
-  });
-
-  it('says so when the box has no ps to ask', async () => {
-    // "Nothing is running" would make a stop look like its target was
-    // already gone.
-    fakeExec('ps: command not found', 127);
-    await expect(containerProcesses('c1')).rejects.toThrow(/exited 127/);
-  });
-
-  it('signals pids as arguments, never as a line for a shell to take apart', async () => {
-    const { ran } = fakeExec('');
-    await killInContainer('c1', 'TERM', [15, 14]);
-    assert.deepEqual(ran, [['kill', '-TERM', '15', '14']]);
-  });
-
-  it('has nothing to signal for an empty list', async () => {
-    const { ran } = fakeExec('');
-    await killInContainer('c1', 'KILL', []);
-    assert.deepEqual(ran, []);
-  });
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { BootResponse, PullProgress } from '../../shared/types.ts';
-import type { PullEvent } from './docker.ts';
+import type { PullEvent } from './runtime/runtime.ts';
 
 /** The progress of one layer of a pull. */
 interface LayerProgress {
