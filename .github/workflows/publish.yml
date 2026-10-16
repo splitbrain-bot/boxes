@@ -1,6 +1,7 @@
 # CI workflow: runs the test suites, builds the four Boxes images, runs the
-# security smoke test against them, and publishes them to GHCR on every push
-# to main. A pull request builds and tests the images without pushing them.
+# runtime conformance suite and the security smoke test against them, and
+# publishes them to GHCR on every push to main. A pull request builds and
+# tests the images without pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
 #   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
@@ -243,6 +244,32 @@ jobs:
             || 'type=gha,mode=max,scope=box' }}
           provenance: false
           sbom: false
+
+      # The conformance suite checks the Docker runtime against this daemon
+      # and the box image this job built. It needs the proxy of the stack,
+      # and it runs before the orchestrator starts, because the orphan sweep
+      # of the orchestrator removes the boxes of the suite. It runs as root,
+      # as the orchestrator does in its container, so that it can give the
+      # new box directories to the box user. sudo resets PATH, so the PATH of
+      # setup-node is passed on.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: orchestrator/package-lock.json
+
+      - name: Install orchestrator dependencies
+        working-directory: orchestrator
+        run: npm ci
+
+      - name: Start the egress proxy
+        run: docker compose up -d --no-build egress-proxy
+
+      - name: Run the runtime conformance suite
+        working-directory: orchestrator
+        run: sudo --preserve-env env "PATH=$PATH" npm run test:conformance
+        env:
+          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
 
       # Checks the isolation of a box on a real Docker host, with the images
       # this job built. The box image under test is on no registry, so the
