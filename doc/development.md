@@ -130,7 +130,19 @@ API_BASE=http://localhost:3000 ./tests/smoke-test.sh
 
 The header of the script documents the environment variables for credential translation checks and optional probes.
 
+### Runtime conformance suite
+
+`orchestrator/src/runtime/conformance.ts` checks the rules of the [runtime](runtime.md) against a real runtime and the
+real box image. `docker.conformance.ts` runs it against the Docker daemon of the host. It needs the box image that
+`BOX_IMAGE` names and a running egress proxy, and no orchestrator on the same daemon, because the orphan sweep removes
+the boxes of the suite. It must run as root:
+
+```sh
+docker compose up -d egress-proxy
+cd orchestrator && sudo env "PATH=$PATH" BOX_IMAGE=... npm run test:conformance
+```
+
 ## CI
 
-`.github/workflows/publish.yml` runs the four test suites in parallel, builds the three images, runs the smoke test
-against the built images, and publishes to GHCR on pushes to `main`.
+`.github/workflows/publish.yml` runs the four test suites in parallel, builds the four images, runs the runtime
+conformance suite and the smoke test against the built images, and publishes to GHCR on pushes to `main`.

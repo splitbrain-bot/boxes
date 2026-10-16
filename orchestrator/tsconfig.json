@@ -26,6 +26,7 @@
   "include": [
     "src/**/*.ts",
     "../shared/**/*.ts",
-    "vite.config.ts"
+    "vite.config.ts",
+    "vitest.conformance.config.ts"
   ]
 }
