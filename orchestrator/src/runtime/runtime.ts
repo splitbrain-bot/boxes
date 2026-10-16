@@ -139,8 +139,11 @@ export interface PullEvent {
   status?: string;
   /** The layer the event is about. Some events name the tag instead, or nothing. */
   id?: string;
-  /** The bytes done and the bytes in all, for the events that move. */
-  progressDetail?: { current?: number; total?: number };
+  /**
+   * The progress done and the progress in all, for the events that move. The
+   * unit is bytes, unless `units` names another one.
+   */
+  progressDetail?: { current?: number; total?: number; units?: string };
 }
 
 /** Everything the orchestrator needs from what runs its boxes. */
