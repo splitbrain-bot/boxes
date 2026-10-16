@@ -36,6 +36,10 @@ API first.
 
 The orchestrator does no agent work itself. An agent runs in a box, and an adapter makes it available over ACP.
 
+The orchestrator reaches a box only through its runtime layer (`orchestrator/src/runtime/`). The runtime keeps the
+container lifecycle, the storage, the network isolation, the exec, the image lifecycle and the inventory. Docker is the
+only runtime.
+
 ## State
 
 All state is in `DATA_DIR`:
@@ -58,7 +62,7 @@ its work. A tick that is slower than the interval skips the next tick.
 | Loop | Interval | Each tick |
 | --- | --- | --- |
 | Idle reaper | 1 minute | Stops the idle boxes, drops unused gateway state, and removes stray Docker objects. |
-| Proxy reconcile | 1 minute | Attaches the egress proxy to each box network again, and pushes the policy. |
+| Proxy reconcile | 1 minute | Repairs the isolation of each running box, which attaches the egress proxy to its network again, and pushes the policy. A box with an operation in flight is skipped until the next tick. |
 | Credential refresh | 1 minute | Renews the stored access tokens before they expire. |
 | Tunnel reconcile | 1 minute | Reads the dev tunnels that the boxes host, and deletes the unused ones. |
 | Image refresh | `BOX_IMAGE_PULL_MINUTES` | Pulls `BOX_IMAGE` again. |
