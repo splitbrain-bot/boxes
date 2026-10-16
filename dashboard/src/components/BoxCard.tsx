@@ -56,7 +56,7 @@ export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string
     badges.push({ kind: 'shared', label: counted(s.tunnels.length, 'tunnel') });
   }
   if (s.status === 'error') badges.push({ kind: 'error', label: 'error' });
-  else if (s.dockerState === 'running') badges.push({ kind: 'running', label: 'up' });
+  else if (s.runtimeState === 'running') badges.push({ kind: 'running', label: 'up' });
   else badges.push({ kind: 'idle', label: s.status });
   if (s.attachedCount > 0) {
     badges.push({ kind: 'idle', label: counted(s.attachedCount, 'viewer') });

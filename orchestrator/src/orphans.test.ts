@@ -55,6 +55,12 @@ function install(fake: Fake): void {
       }));
     },
     getContainer: (id: string) => ({
+      // A container is named after its box, so its id here is its name.
+      inspect: async () => {
+        const c = fake.containers.get(id);
+        if (!c) throw Object.assign(new Error('no such container'), { statusCode: 404 });
+        return { Id: id, State: { Running: c.running } };
+      },
       remove: async () => {
         refuse(id);
         fake.removed.push(id);
@@ -63,6 +69,13 @@ function install(fake: Fake): void {
       },
     }),
     getNetwork: (name: string) => ({
+      inspect: async () => {
+        if (!fake.networks.has(name)) {
+          throw Object.assign(new Error('no such network'), { statusCode: 404 });
+        }
+        return { Containers: {} };
+      },
+      connect: async () => {},
       disconnect: async () => {},
       remove: async () => {
         refuse(name);
@@ -78,27 +91,18 @@ let db: Db;
 let orchestrator: Orchestrator;
 let fake: Fake;
 
-/** Inserts a box row that names the objects Boxes would create for it. */
+/** Inserts a box row. */
 function insertBox(id: string, status = 'stopped'): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, status, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', ?,
-       ?, '10.200.0.0/24', ?, ?, ?)`,
-  ).run(
-    id,
-    `c-${id}`,
-    `bn-${id}`,
-    status,
-    now,
-    now,
-  );
+    `INSERT INTO boxes (id, name, profile, status, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', ?, ?, ?)`,
+  ).run(id, status, now, now);
 }
 
 /** The Docker objects and the directories one box owns. */
 function insertObjects(id: string): void {
-  fake.containers.set(`c-${id}`, { boxId: id, running: false });
+  fake.containers.set(`box-${id}`, { boxId: id, running: false });
   fake.networks.set(`bn-${id}`, id);
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
   writeFileSync(join(workspace, 'work.txt'), 'the agent was here');
@@ -157,7 +161,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
+    assert.deepEqual(fake.removed, ['box-gone', 'bn-gone']);
     assert.ok(!existsSync(workspaceOf('gone')));
     // The home and the store are the bigger part: the caches and whatever
     // the agent installed at runtime are in them.
@@ -167,7 +171,7 @@ describe('sweeping objects no box owns', () => {
     assert.ok(existsSync(workspaceOf('live')));
     assert.ok(existsSync(homeOf('live')));
     assert.ok(existsSync(nixOf('live')));
-    assert.ok(fake.containers.has('c-live'));
+    assert.ok(fake.containers.has('box-live'));
   });
 
   it('removes the container before the network it is on', async () => {
@@ -178,7 +182,7 @@ describe('sweeping objects no box owns', () => {
     await orchestrator.manager.sweepOrphans();
 
     // Docker refuses to remove a network that a container uses.
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
+    assert.deepEqual(fake.removed, ['box-gone', 'bn-gone']);
   });
 
   it('leaves a box that is still being created alone', async () => {
@@ -219,7 +223,7 @@ describe('sweeping objects no box owns', () => {
     await orchestrator.manager.sweepOrphans();
 
     // The network stays for the next sweep; nothing behind it is held up.
-    assert.deepEqual(fake.removed, ['c-gone']);
+    assert.deepEqual(fake.removed, ['box-gone']);
     assert.ok(fake.networks.has('bn-gone'));
     assert.ok(!existsSync(workspaceOf('gone')));
   });
@@ -296,7 +300,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
+    assert.deepEqual(fake.removed, ['box-gone', 'bn-gone']);
     assert.ok(!existsSync(homeOf('gone')));
   });
 
@@ -306,7 +310,7 @@ describe('sweeping objects no box owns', () => {
     // network first, so a box it gave up on halfway is its directories and
     // nothing else.
     insertObjects('half-torn-down');
-    fake.containers.delete('c-half-torn-down');
+    fake.containers.delete('box-half-torn-down');
     fake.networks.delete('bn-half-torn-down');
 
     await orchestrator.manager.sweepOrphans();
@@ -324,7 +328,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    assert.deepEqual(fake.removed, ['c-gone', 'bn-gone']);
+    assert.deepEqual(fake.removed, ['box-gone', 'bn-gone']);
   });
 });
 
@@ -334,7 +338,7 @@ describe('boot reconciliation', () => {
     // throws, so a row still saying `creating` at boot has lost its creator.
     insertBox('newborn', 'creating');
     insertObjects('newborn');
-    fake.containers.delete('c-newborn');
+    fake.containers.delete('box-newborn');
 
     await orchestrator.manager.reconcile();
 
@@ -349,7 +353,9 @@ describe('boot reconciliation', () => {
   it('adopts a half-created box whose container is up', async () => {
     insertBox('newborn', 'creating');
     insertObjects('newborn');
-    fake.containers.set('c-newborn', { boxId: 'newborn', running: true });
+    fake.containers.set('box-newborn', { boxId: 'newborn', running: true });
+    // The repair of its isolation builds the environment of the box.
+    await orchestrator.egress.prepare();
 
     await orchestrator.manager.reconcile();
 

@@ -1,7 +1,9 @@
+import { randomBytes } from 'node:crypto';
+import type { Readable, Writable } from 'node:stream';
 import type { WebSocket } from 'ws';
 import { parseTerminalControl } from '../../../shared/terminal.ts';
-import * as dk from '../docker.ts';
 import { log } from '../log.ts';
+import { runtime } from '../runtime/runtime.ts';
 import type { BoxManager } from '../boxes.ts';
 
 /**
@@ -46,6 +48,106 @@ const REATTACH_RETRY_MS = 5_000;
 /** Where the pty of a terminal runs. */
 type Target = Awaited<ReturnType<BoxManager['execTarget']>>;
 
+/**
+ * A pty inside a box, as the terminal endpoint holds one. It carries the raw
+ * bytes in both directions.
+ */
+interface TerminalExec {
+  /** The name of this connection's own tmux session. */
+  client: string;
+  /** The output of the pty. */
+  output: Readable;
+  /** The input of the pty, which the browser types into. */
+  input: Writable;
+  /** Tells the pty how large the window onto it is. */
+  resize(cols: number, rows: number): Promise<void>;
+  /** Resolves when the stream ends, with the exit code if known. */
+  exited: Promise<number | null>;
+  /** Ends this terminal's shell and drops the stream. */
+  close(): Promise<void>;
+}
+
+/** The tmux session every terminal on a box shares, and which outlives them. */
+const SHARED_TMUX_SESSION = 'boxes';
+
+/**
+ * The shell one terminal connection runs.
+ *
+ * `client` is this connection's own tmux session, grouped with the shared one
+ * so both show the same windows. The shared session keeps the windows when
+ * every client has gone, so a build carries on with nobody watching.
+ *
+ * The own session lets close() end the client by name, as the runtime cannot
+ * signal a running exec. Without tmux, the shell is a plain login shell.
+ */
+function terminalShell(client: string): string {
+  return [
+    'if ! command -v tmux >/dev/null 2>&1; then exec bash -l; fi',
+    `tmux new-session -d -s ${SHARED_TMUX_SESSION} 2>/dev/null`,
+    `exec tmux new-session -s ${client} -t ${SHARED_TMUX_SESSION}`,
+  ].join('; ');
+}
+
+/** The exit code of a reattach that found no client session to attach to. */
+export const NO_TERMINAL_SESSION = 3;
+
+/**
+ * The shell that attaches one terminal connection to its own tmux session
+ * again. The session is gone when the user ended the shell, or when the box
+ * has no tmux.
+ */
+function reattachShell(client: string): string {
+  return [
+    `tmux has-session -t =${client} 2>/dev/null || exit ${NO_TERMINAL_SESSION}`,
+    `exec tmux attach-session -t =${client}`,
+  ].join('; ');
+}
+
+/**
+ * Opens a pty in a box, running the shell a reader types into.
+ *
+ * The pty runs inside the box's isolation, so it reaches no further than the
+ * agent does. The command is an argument vector, and the only part this
+ * process composes is a name it generated itself.
+ *
+ * With `reattach`, the pty attaches to that client session of an earlier
+ * exec. The exec then ends with {@link NO_TERMINAL_SESSION} when the session
+ * is gone.
+ */
+async function openTerminal(target: Target, cols: number, rows: number, reattach?: string): Promise<TerminalExec> {
+  // Random rather than a counter, so the name cannot collide with a session
+  // that an earlier orchestrator process left behind.
+  const client = reattach ?? `web-${randomBytes(4).toString('hex')}`;
+  const pty = await runtime().spawn(
+    target.boxId,
+    ['bash', '-lc', reattach ? reattachShell(client) : terminalShell(client)],
+    {
+      workingDir: target.workingDir,
+      // Without this an editor, a pager and everything else that draws degrade
+      // to plain scrolling text.
+      env: { TERM: 'xterm-256color' },
+      tty: { cols, rows },
+    },
+  );
+  return {
+    client,
+    output: pty.stdout,
+    input: pty.stdin,
+    resize: (nextCols, nextRows) => pty.resize(nextCols, nextRows),
+    exited: pty.exited,
+    close: async () => {
+      // The stream is dropped either way: a box that stopped under the
+      // terminal answers nothing, and has no client left to end.
+      try {
+        await runtime().run(target.boxId, ['tmux', 'kill-session', '-t', client]);
+      } catch (err) {
+        log.debug('could not end a terminal session', { error: (err as Error).message });
+      }
+      pty.kill();
+    },
+  };
+}
+
 /** Resolves after `ms` milliseconds. */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -81,7 +183,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   const release = manager.holdTerminal(boxId);
 
   /** The last pty that was opened. Null while the box is still being started. */
-  let terminal: dk.TerminalExec | null = null;
+  let terminal: TerminalExec | null = null;
   /** True while the exec of the pty runs. */
   let live = false;
   /** Bytes the browser sent before the pty was there. */
@@ -123,7 +225,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     if (isBinary) {
       // Typing marks the box as used, which holds off the reaper later.
       manager.touchThrottled(boxId);
-      if (live) terminal?.stream.write(data);
+      if (live) terminal?.input.write(data);
       else queued.push(Buffer.from(data));
       return;
     }
@@ -170,25 +272,25 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   // --- the box's side ---------------------------------------------------
 
   /** Connects an opened pty to the browser, and acts on the end of its exec. */
-  const wire = (opened: dk.TerminalExec, target: Target): void => {
+  const wire = (opened: TerminalExec, target: Target): void => {
     terminal = opened;
     live = true;
-    for (const chunk of queued) opened.stream.write(chunk);
+    for (const chunk of queued) opened.input.write(chunk);
     queued.length = 0;
 
-    opened.stream.on('data', (chunk: Buffer) => {
+    opened.output.on('data', (chunk: Buffer) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(chunk, { binary: true });
       if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return;
       // Pauses the pty until the browser has caught up.
-      opened.stream.pause();
+      opened.output.pause();
       const resume = (): void => {
         if (closed) return;
         if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
           setTimeout(resume, 50).unref?.();
           return;
         }
-        opened.stream.resume();
+        opened.output.resume();
       };
       setTimeout(resume, 50).unref?.();
     });
@@ -196,7 +298,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     void opened.exited.then((code) => {
       live = false;
       if (closed) return;
-      if (code === dk.NO_TERMINAL_SESSION) {
+      if (code === NO_TERMINAL_SESSION) {
         slog.info('terminal shell ended');
         close(1000, 'shell ended');
         return;
@@ -213,15 +315,15 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     for (const wait of [REATTACH_DELAY_MS, REATTACH_RETRY_MS]) {
       await delay(wait);
       if (closed) return;
-      const state = await dk.containerState(target.containerId);
-      if (state === 'exited' || state === 'missing') {
+      const state = await runtime().state(target.boxId);
+      if (state === 'stopped') {
         slog.info('terminal ended with its box');
         close(1000, 'box stopped');
         return;
       }
       let opened;
       try {
-        opened = await dk.openTerminalExec(target.containerId, target.workingDir, cols, rows, client);
+        opened = await openTerminal(target, cols, rows, client);
       } catch (err) {
         slog.warn('could not attach a terminal again', { error: (err as Error).message });
         if (wait === REATTACH_RETRY_MS) close(CLOSE.unavailable, (err as Error).message);
@@ -252,7 +354,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
 
     let opened;
     try {
-      opened = await dk.openTerminalExec(target.containerId, target.workingDir, cols, rows);
+      opened = await openTerminal(target, cols, rows);
     } catch (err) {
       slog.warn('could not open a terminal', { error: (err as Error).message });
       close(CLOSE.unavailable, (err as Error).message);

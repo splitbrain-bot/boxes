@@ -40,23 +40,14 @@ export function formatIpv4(value: number): string {
 }
 
 /**
- * Returns the first free /24 inside pool, starting at the index-th and
- * wrapping around, or null when `taken` holds every one of them.
- *
- * The index comes from a counter that only rises, while deleted boxes give
- * their subnets back. The wrap reuses those subnets, and `taken` keeps it
- * from handing out one that a box still holds.
+ * Returns the first /24 inside pool that `taken` does not hold, or null when
+ * it holds every one of them.
  */
-export function allocateSubnet(
-  pool: string,
-  index: number,
-  taken: ReadonlySet<string>,
-): string | null {
+export function allocateSubnet(pool: string, taken: ReadonlySet<string>): string | null {
   const { base, prefix } = parseCidr(pool);
   if (prefix > 24) throw new Error(`Pool ${pool} is smaller than a /24`);
   const slots = 2 ** (24 - prefix);
-  for (let step = 0; step < slots; step++) {
-    const slot = (((index + step) % slots) + slots) % slots;
+  for (let slot = 0; slot < slots; slot++) {
     const subnet = `${formatIpv4((base + slot * 256) >>> 0)}/24`;
     if (!taken.has(subnet)) return subnet;
   }

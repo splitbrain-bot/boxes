@@ -1,24 +1,24 @@
-import * as dk from '../docker.ts';
+import { runtime } from '../runtime/runtime.ts';
 import { log } from '../log.ts';
 
-/** A box's container and the workspace inside it: where review runs git. */
+/** A box and the workspace inside it: where review runs git. */
 export interface GitBox {
-  /** The running container git is executed in. */
-  containerId: string;
-  /** The workspace root, as the container names it. */
+  /** The running box git is executed in. */
+  boxId: string;
+  /** The workspace root, as the box names it. */
   workspaceDir: string;
 }
 
 /**
- * The container and the directory one git invocation runs in.
+ * The box and the directory one git invocation runs in.
  *
  * It is all a caller says about where git runs. {@link git} builds the command
  * line and the environment itself.
  */
 export interface GitTarget {
-  /** The running container git is executed in. */
-  containerId: string;
-  /** The directory git runs in, as the container names it. */
+  /** The running box git is executed in. */
+  boxId: string;
+  /** The directory git runs in, as the box names it. */
   dir: string;
 }
 
@@ -89,7 +89,7 @@ export interface GitResult {
 
 /**
  * A function that runs one git command line and reports what it produced.
- * Tests replace the default runner with one that needs no Docker.
+ * Tests replace the default runner with one that needs no runtime.
  */
 export type GitRunner = (
   target: GitTarget,
@@ -98,16 +98,15 @@ export type GitRunner = (
 ) => Promise<GitResult>;
 
 /**
- * The runner review ships with: one exec in the box container, as the agent
- * user.
+ * The runner review ships with: one command in the box, as the agent user.
  *
  * A repository's configuration can make git run commands, for example a clean
  * filter on `diff` or an fsmonitor hook on `status`. In the box, such a command
  * can do only what the agent could do anyway. In this process, it would run
- * next to the Docker socket.
+ * next to the runtime's credentials.
  */
 const inBoxContainer: GitRunner = async (target, argv, env) => {
-  const result = await dk.execInContainer(target.containerId, argv, {
+  const result = await runtime().run(target.boxId, argv, {
     workingDir: target.dir,
     env,
     timeoutMs: TIMEOUT_MS,

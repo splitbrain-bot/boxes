@@ -419,11 +419,9 @@ test('a database written by a newer build is refused rather than opened', () => 
 /** A live box row, in the shape today's schema wants. */
 function insertLiveBox(db: Db, id: string): void {
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, status, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', 'c1',
-       ?, '10.200.0.0/24', 'running', 1000, 2000)`,
-  ).run(id, `bn-${id}`);
+    `INSERT INTO boxes (id, name, profile, status, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'running', 1000, 2000)`,
+  ).run(id);
 }
 
 test('a deleted box takes no more writes', () => {

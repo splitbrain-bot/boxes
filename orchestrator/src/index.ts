@@ -11,6 +11,7 @@ import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
 import { attachTerminal } from './gateway/terminal.ts';
 import { claimDataDir } from './lock.ts';
 import { log, setLogLevel } from './log.ts';
+import { runtime } from './runtime/runtime.ts';
 import {
   startCredentialRefresh,
   startTunnelReconciler,
@@ -56,7 +57,7 @@ const db = openDb(cfg.DATA_DIR);
 const boot = new BootState();
 
 /** The HTTP app and the services it built. */
-const { app, manager, agents, credentials, egress, logins, tunnels, setProxyWarnings } = buildApp(
+const { app, manager, agents, credentials, egress, logins, tunnels, setIsolationWarnings } = buildApp(
   cfg,
   db,
   { boot },
@@ -187,7 +188,7 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
 const loops: Array<{ stop: () => void }> = [];
 
 /**
- * Listens, reconciles against Docker, and starts the background loops.
+ * Listens, reconciles against the runtime, and starts the background loops.
  *
  * The app listens first, so a browser gets the starting page while the rest
  * runs. The app serves everything once the boot state is ready.
@@ -208,9 +209,9 @@ async function main(): Promise<void> {
     });
   }
 
-  // Before anything creates or starts a container: a workspace bind names a
-  // host-side path, and this is what resolves it.
-  await manager.resolveHostDataDir();
+  // Before the first box is created or started, as both depend on what
+  // prepare() resolves.
+  await runtime().prepare();
 
   // Best effort, so a deployment with an unreachable registry still boots.
   // Creating a box pulls again and reports the error. The refresh lets a
@@ -231,7 +232,7 @@ async function main(): Promise<void> {
   await manager.reconcile();
   loops.push(startReaper(db, cfg, manager));
   loops.push(startImageRefresher(cfg, manager));
-  loops.push(startProxyReconciler(manager, egress, setProxyWarnings));
+  loops.push(startProxyReconciler(manager, egress, setIsolationWarnings));
   loops.push(startCredentialRefresh(credentials));
   loops.push(startTunnelReconciler(tunnels));
   loops.push(startSkillRepoRefresh(agents));

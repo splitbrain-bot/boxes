@@ -29,17 +29,9 @@ afterEach(() => {
 function insertBox(id: string, idleMinutes: number): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, status, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'img', ?,
-       ?, '10.200.0.0/24', 'running', ?, ?)`,
-  ).run(
-    id,
-    `c-${id}`,
-    `bn-${id}`,
-    now - idleMinutes * 60_000,
-    now - idleMinutes * 60_000,
-  );
+    `INSERT INTO boxes (id, name, profile, status, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'running', ?, ?)`,
+  ).run(id, now - idleMinutes * 60_000, now - idleMinutes * 60_000);
 }
 
 /** One of a box's threads, with or without a turn running on it. */

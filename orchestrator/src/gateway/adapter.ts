@@ -13,7 +13,7 @@ import {
   type Db,
   type ThreadRow,
 } from '../db.ts';
-import * as dk from '../docker.ts';
+import { runtime, WORKSPACE_DIR, type ProcessStream } from '../runtime/runtime.ts';
 import { HARNESS_IDS, type Harness, type HarnessId } from '../harness.ts';
 import type { Logger } from '../log.ts';
 import { ACP_METHOD } from '../../../shared/acp.ts';
@@ -162,10 +162,10 @@ export interface AdapterHost {
   /** The orchestrator's database. */
   readonly db: Db;
   /**
-   * Starts the box and attaches the egress proxy, and resolves to the
-   * container id. Two adapters starting at once start one container.
+   * Starts the box and resolves when it is ready. Two adapters starting at
+   * once start the box once.
    */
-  ensureContainer(): Promise<string>;
+  ensureContainer(): Promise<void>;
   /** The box's most recently active thread, or null before it has one. */
   latestThread(): ThreadRow | null;
   /** Every conversation a browser is watching, by the adapter's own id. */
@@ -223,7 +223,7 @@ export interface AdapterHost {
  */
 export class AdapterConnection {
   /** The adapter process, while it runs. */
-  private exec: dk.AdapterExec | null = null;
+  private exec: ProcessStream | null = null;
   /** The ACP connection over the exec's stdio, while it is open. */
   private conn: ClientConnection | null = null;
   /** The adapter's answer to `initialize`, once the handshake is done. */
@@ -394,10 +394,7 @@ export class AdapterConnection {
   /** Spawns the adapter and brings back its threads, retrying with a backoff. */
   private async start(): Promise<void> {
     this.stopping = false;
-    const containerId = await this.host.ensureContainer();
-    // A repair that replaces the container stops this connection and sets
-    // the flag. Cleared again, so the spawn below reacts to its exec exiting.
-    this.stopping = false;
+    await this.host.ensureContainer();
 
     let lastError: unknown = null;
     for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
@@ -408,7 +405,7 @@ export class AdapterConnection {
         await new Promise((r) => setTimeout(r, wait));
       }
       try {
-        await this.spawnAndInitialize(containerId);
+        await this.spawnAndInitialize();
       } catch (err) {
         lastError = err;
         this.slog.error('adapter spawn failed', { attempt, error: (err as Error).message });
@@ -454,12 +451,10 @@ export class AdapterConnection {
   }
 
   /** Spawns the adapter exec and performs the ACP handshake. */
-  private async spawnAndInitialize(containerId: string): Promise<void> {
-    const exec = await dk.spawnAdapterExec(
-      containerId,
-      [...this.harness.cmd],
-      dk.WORKSPACE_DIR,
-    );
+  private async spawnAndInitialize(): Promise<void> {
+    const exec = await runtime().spawn(this.host.boxId, this.harness.cmd, {
+      workingDir: WORKSPACE_DIR,
+    });
     this.exec = exec;
 
     // The adapter logs to stderr and keeps stdout for the protocol.
@@ -491,7 +486,7 @@ export class AdapterConnection {
       protocolVersion: 1,
       clientCapabilities: CLIENT_CAPABILITIES,
     });
-    this.slog.info('adapter initialized', { workingDir: dk.WORKSPACE_DIR });
+    this.slog.info('adapter initialized', { workingDir: WORKSPACE_DIR });
   }
 
   /**
@@ -631,7 +626,7 @@ export class AdapterConnection {
     const method = from ? ACP_METHOD.sessionFork : ACP_METHOD.sessionNew;
     const res = (await this.request(method, {
       ...(from ? { sessionId: from } : {}),
-      cwd: dk.WORKSPACE_DIR,
+      cwd: WORKSPACE_DIR,
       mcpServers: [],
       ...this.meta(),
     })) as {
@@ -703,7 +698,7 @@ export class AdapterConnection {
     return (await this.whileReplaying(acpThreadId, () =>
       this.request(ACP_METHOD.sessionLoad, {
         sessionId: acpThreadId,
-        cwd: dk.WORKSPACE_DIR,
+        cwd: WORKSPACE_DIR,
         mcpServers: [],
         ...this.meta(),
       }),
@@ -996,7 +991,7 @@ export class AdapterConnection {
   }
 
   /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
-  private makeStream(exec: dk.AdapterExec): Stream {
+  private makeStream(exec: ProcessStream): Stream {
     const readable = Readable.toWeb(
       this.siftExtensions(exec.stdout),
     ) as ReadableStream<Uint8Array>;

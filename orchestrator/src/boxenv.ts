@@ -1,5 +1,5 @@
 import type { CredentialId, CredentialMethod } from './credentials.ts';
-import { HOME_DIR } from './docker.ts';
+import { HOME_DIR } from './runtime/runtime.ts';
 import { HARNESSES } from './harness.ts';
 
 /**

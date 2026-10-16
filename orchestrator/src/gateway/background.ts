@@ -1,4 +1,4 @@
-import type { ContainerProcess } from '../docker.ts';
+import type { ContainerProcess } from '../processes.ts';
 import type { Harness } from '../harness.ts';
 import type { BackgroundProcess, BoxWork } from '../../../shared/types.ts';
 

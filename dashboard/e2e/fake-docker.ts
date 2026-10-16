@@ -150,7 +150,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     },
     inspect: async () => {
       const container = must(id);
-      return { Image: container.image, State: { Running: container.running } };
+      return { Id: id, Image: container.image, State: { Running: container.running } };
     },
     // A terminal asks for a pty. Every other exec produces no output here.
     // Review runs git through its own injected runner.
@@ -168,7 +168,10 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
 
   /** One network's handle. The egress proxy is always on it. */
   const network = (): unknown => ({
-    inspect: async () => ({ Containers: { proxy: { Name: PROXY_CONTAINER } } }),
+    inspect: async () => ({
+      Containers: { proxy: { Name: PROXY_CONTAINER } },
+      IPAM: { Config: [{ Subnet: '10.200.0.0/24' }] },
+    }),
     connect: async () => undefined,
     remove: async () => undefined,
   });

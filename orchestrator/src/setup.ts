@@ -1,12 +1,12 @@
 import { Readable } from 'node:stream';
 import { pack } from 'tar-stream';
-import * as dk from './docker.ts';
 import { fileService, NOT_IN_IMAGE, OutdatedImageError } from './files.ts';
 import type { Logger } from './log.ts';
+import { runtime } from './runtime/runtime.ts';
 
 /**
- * The setup of a box after its container started. The start and this setup
- * make a box ready.
+ * The setup of a box after it started. The start and this setup make a box
+ * ready.
  */
 
 /** The command in the box image that sets up the home for the tools of the image. */
@@ -47,11 +47,11 @@ export interface SetupInputs {
  * Each warning of the setup goes to the log, because the exec output does
  * not reach the container log.
  */
-export async function setUpBox(containerId: string, inputs: SetupInputs, slog: Logger): Promise<void> {
-  const files = fileService(containerId);
+export async function setUpBox(boxId: string, inputs: SetupInputs, slog: Logger): Promise<void> {
+  const files = fileService(boxId);
   await files.installSetupFiles(setupFiles(inputs));
 
-  const result = await dk.execInContainer(containerId, [SETUP_COMMAND], {
+  const result = await runtime().run(boxId, [SETUP_COMMAND], {
     timeoutMs: SETUP_TIMEOUT_MS,
     maxOutput: SETUP_OUTPUT_BYTES,
   });

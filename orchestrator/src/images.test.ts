@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, it } from 'vitest';
 import { loadConfig, type Config } from './config.ts';
 import * as dk from './docker.ts';
 import { deploymentImages, resetImagesForTests } from './images.ts';
+import { DockerRuntime } from './runtime/docker.ts';
+import { setRuntime } from './runtime/runtime.ts';
 
 /** The box image the test config names. */
 const BOX_IMAGE = 'ghcr.io/example/boxes/box:latest';
@@ -72,6 +74,12 @@ function cfg(): Config {
   });
 }
 
+/** The images, read by the Docker runtime with this config. */
+function imagesOf(config: Config): ReturnType<typeof deploymentImages> {
+  setRuntime(new DockerRuntime(config));
+  return deploymentImages();
+}
+
 beforeEach(() => {
   fake = { images: new Map(), containers: new Map(), inspected: [] };
   install();
@@ -95,7 +103,7 @@ describe('deploymentImages', () => {
       Size: 4_509_715_661,
     });
 
-    const images = await deploymentImages(cfg());
+    const images = await imagesOf(cfg());
 
     // A deployment that follows the tag compares against the published digest.
     // The config id means nothing off this host.
@@ -115,7 +123,7 @@ describe('deploymentImages', () => {
       Created: '2026-08-12T22:40:00Z',
     });
 
-    const images = await deploymentImages(cfg());
+    const images = await imagesOf(cfg());
 
     assert.equal(images.box?.digest, 'sha256:builthere');
   });
@@ -129,7 +137,7 @@ describe('deploymentImages', () => {
       Size: 188_743_680,
     });
 
-    const images = await deploymentImages(cfg());
+    const images = await imagesOf(cfg());
 
     assert.deepEqual(images.proxy, {
       digest: 'sha256:proxypublished',
@@ -139,7 +147,7 @@ describe('deploymentImages', () => {
   });
 
   it('says nothing for an image the daemon does not have', async () => {
-    const images = await deploymentImages(cfg());
+    const images = await imagesOf(cfg());
 
     // Both are normal states: no proxy container is up, and the box image is
     // not pulled yet.
@@ -162,7 +170,7 @@ describe('deploymentImages', () => {
     } as unknown as Docker);
 
     // The health probe calls this and must still answer.
-    const images = await deploymentImages(cfg());
+    const images = await imagesOf(cfg());
 
     assert.deepEqual(images, { orchestrator: null, proxy: null, box: null });
   });
@@ -171,7 +179,7 @@ describe('deploymentImages', () => {
     // Both would reach JSON as null anyway. Returning null keeps the type true.
     fake.images.set(BOX_IMAGE, { Id: 'sha256:nodate', Created: '' });
 
-    const images = await deploymentImages(cfg());
+    const images = await imagesOf(cfg());
 
     assert.equal(images.box?.builtAt, null);
     assert.equal(images.box?.sizeBytes, null);
@@ -181,9 +189,9 @@ describe('deploymentImages', () => {
     fake.images.set(BOX_IMAGE, { Id: 'sha256:one', Created: '2026-08-12T22:40:00Z' });
     const config = cfg();
 
-    await deploymentImages(config);
+    await imagesOf(config);
     const first = fake.inspected.length;
-    await deploymentImages(config);
+    await imagesOf(config);
 
     // Every open tab polls the health probe, and these values rarely change.
     assert.equal(fake.inspected.length, first);

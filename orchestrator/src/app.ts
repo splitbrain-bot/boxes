@@ -57,13 +57,14 @@ import {
   upsertPushSubscription,
   type Db,
 } from './db.ts';
-import * as dk from './docker.ts';
 import { EgressManager } from './egress.ts';
 import { HARNESSES } from './harness.ts';
 import { fileService, isRefusedPath } from './files.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
-import { dockerLoginRuntime, LoginManager } from './login.ts';
+import { LoginManager } from './login.ts';
+import { createRuntime } from './runtime/index.ts';
+import { runtime, setRuntime } from './runtime/runtime.ts';
 import { log } from './log.ts';
 import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES } from './review/fs.ts';
@@ -196,13 +197,13 @@ function databaseAnswers(db: Db): boolean {
   }
 }
 
-/** Whether the Docker daemon answers, for the readiness probe. */
-async function dockerAnswers(): Promise<boolean> {
+/** True when the runtime answers, for the readiness probe. */
+async function runtimeAnswers(): Promise<boolean> {
   try {
-    await dk.docker().ping();
+    await runtime().health();
     return true;
   } catch (err) {
-    log.warn('the Docker daemon did not answer', { error: (err as Error).message });
+    log.warn('the runtime did not answer', { error: (err as Error).message });
     return false;
   }
 }
@@ -237,13 +238,14 @@ export interface Orchestrator {
   logins: LoginManager;
   /** Which dev tunnels each box hosts, and the removal of unserved ones. */
   tunnels: TunnelReconciler;
-  /** Box ids whose network is missing the egress proxy. */
-  setProxyWarnings(warnings: string[]): void;
+  /** Box ids whose network isolation the repair loop could not complete. */
+  setIsolationWarnings(warnings: string[]): void;
 }
 
 /**
  * Builds the HTTP app and the objects behind it, without listening or
- * touching Docker, so a test can drive the real routes over a real database.
+ * touching the runtime, so a test can drive the real routes over a real
+ * database. It sets the runtime that the boxes run on.
  */
 export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestrator {
   const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
@@ -251,6 +253,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // Before anything creates a workspace directory or a container: everything
   // that writes files for the agent, or runs a process as it, reads this.
   setBoxOwner(cfg.BOX_UID, cfg.BOX_GID);
+  setRuntime(createRuntime(cfg));
 
   // The store and the egress manager need each other: the policy is composed
   // from the store's rows, and every write to the store re-pushes it. The
@@ -273,9 +276,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     });
   }
   // A login runs the harness's own CLI in a throwaway container built from
-  // the box image, so the one thing it needs from the deployment is which
-  // image that is.
-  const logins = new LoginManager(credentials, dockerLoginRuntime(cfg.BOX_IMAGE));
+  // the box image.
+  const logins = new LoginManager(credentials);
   // Private repositories on github.com are fetched with the GitHub credential.
   const agents = new AgentStore(
     db,
@@ -303,7 +305,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     execTarget: (id) => manager.execTarget(id),
   });
 
-  let proxyWarnings: string[] = [];
+  let isolationWarnings: string[] = [];
 
   const app = Fastify({ logger: false });
 
@@ -384,15 +386,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       ok: true,
       version: VERSION,
       boxes,
-      proxyWarnings,
+      isolationWarnings,
       egress: egress.status(),
       harnesses: harnessHealth(),
       credentials: credentials.list().map((row) => credentials.summarize(row)),
       pushSubscriptions: countPushSubscriptions(db),
-      // The one thing here that asks the daemon anything. Cached for a minute
+      // The one thing here that asks the runtime anything. Cached for a minute
       // and null on every failure, so the probe answers at the same speed and
-      // stays green on a host whose Docker socket is not there.
-      images: await deploymentImages(cfg),
+      // stays green where the runtime cannot be reached.
+      images: await deploymentImages(),
     };
   });
 
@@ -400,7 +402,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * Readiness: whether this deployment can serve boxes, as a status code.
    *
    * The database has to answer, the proxy has to hold the current egress
-   * policy, and the Docker daemon has to be reachable. A box started against
+   * policy, and the runtime has to be reachable. A box started against
    * a stale policy reaches hosts the deployment has stopped allowing.
    *
    * Missing harness credentials and proxy warnings do not count, because
@@ -410,7 +412,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const checks = {
       database: databaseAnswers(db),
       egress: egress.status()?.inSync === true,
-      docker: await dockerAnswers(),
+      runtime: await runtimeAnswers(),
     };
     const ready = Object.values(checks).every(Boolean);
     return reply.code(ready ? 200 : 503).send({ ready, version: VERSION, checks });
@@ -582,7 +584,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       // This marks the box active: an upload is somebody working in the box,
       // so the reaper leaves it.
       const target = await manager.execTarget(id);
-      const stored = await storeAttachment(fileService(target.containerId), name, body);
+      const stored = await storeAttachment(fileService(target.boxId), name, body);
       log.box(id).info('attachment stored', { path: stored.path, size: stored.size });
       return stored;
     },
@@ -603,7 +605,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const target = await manager.execTarget(id);
     let file;
     try {
-      file = await fileService(target.containerId).readStream(`${ATTACHMENTS_DIR}/${name}`);
+      file = await fileService(target.boxId).readStream(`${ATTACHMENTS_DIR}/${name}`);
     } catch (err) {
       if (isRefusedPath(err)) throw new HttpError(404, 'Attachment not found');
       throw err;
@@ -998,8 +1000,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     credentials,
     logins,
     tunnels,
-    setProxyWarnings: (warnings) => {
-      proxyWarnings = warnings;
+    setIsolationWarnings: (warnings) => {
+      isolationWarnings = warnings;
     },
   };
 }

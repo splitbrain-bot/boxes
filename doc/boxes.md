@@ -37,9 +37,10 @@ The info icon on a card opens the box's details page.
 
 ## Box details
 
-The details page shows the box's identity and runtime state: container id, network name and subnet, agent set, last
-activity, disk use, and the ACP session id of the most recently active thread. It lists the dev tunnels the box hosts
-and the processes the orchestrator last read in the box.
+The details page shows the box's identity and runtime state: the facts of the runtime (on Docker the container id, the
+network name with its subnet, and the image id), agent set, last activity, disk use, and the ACP session id of the most
+recently active thread. It lists the dev tunnels the box hosts and the processes the orchestrator last read in the box.
+For a running box whose network isolation is not complete, it shows a warning.
 
 The page has three controls:
 
@@ -126,9 +127,10 @@ that binds it. A failed step removes everything it created and marks the row `er
 
 Every start goes through a repair pass, `BoxManager.prepareContainer`, which `bringUp` runs before it starts the
 container. A missing workspace or home directory marks the box `error` rather than being
-recreated — a fresh home would erase the agent's transcripts without a warning. A container the daemon reports missing
-is recreated together with its network. A container whose image id no longer matches the box image is replaced, but
-never while it runs, so a turn is never interrupted.
+recreated — a fresh home would erase the agent's transcripts without a warning. Then `ensure` of the runtime
+(`orchestrator/src/runtime/docker.ts`) repairs the box. A container the daemon reports missing is recreated together
+with its network. A container whose image id no longer matches the box image is replaced, but never while it runs, so a
+turn is never interrupted.
 
 ### The setup
 
@@ -161,16 +163,15 @@ tick.
 ### Boot and sweep
 
 At boot the orchestrator reconciles its rows with Docker by the `boxes.box` label: it adopts live containers, marks
-missing ones as stopped, marks an interrupted create as an error, and re-checks the egress proxy's attachment to every
-live network. The periodic sweep uses the same label in the opposite direction: it removes every labelled container,
+missing ones as stopped, marks an interrupted create as an error, and repairs the isolation of every running box. The periodic sweep uses the same label in the opposite direction: it removes every labelled container,
 network and box directory that has no live row, containers before networks. One guard: when the strays outnumber the
 known boxes by a wide margin, the sweep refuses, because that pattern usually means a wrongly mounted data volume rather
 than real garbage. The sweep removes login containers by age.
 
 ### The subnet pool
 
-Each box's network gets one `/24` out of `BOX_SUBNET_POOL`. A counter in the database selects the next candidate; the
-allocator skips the subnets of live boxes, and a full pool fails the create.
+Each box's network gets one `/24` out of `BOX_SUBNET_POOL`: the first one that no box network uses. A full pool fails
+the create.
 
 ### Image refresh
 

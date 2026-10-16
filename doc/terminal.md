@@ -50,8 +50,8 @@ gateway](acp.md), offered as a `bearer.<token>` subprotocol entry. Binary frames
 text frames are JSON control messages, and only one type exists: `resize`. The implementation is
 `orchestrator/src/gateway/terminal.ts`; the frame vocabulary is `shared/terminal.ts`.
 
-`openTerminalExec` in `orchestrator/src/docker.ts` starts the shell as a `docker exec` with `Tty` enabled, so the daemon
-does no stream framing. The shell runs as the numeric box user, in the container's existing isolation — no new privilege
+`openTerminal` in `orchestrator/src/gateway/terminal.ts` starts the shell through the runtime, with a TTY. On Docker,
+this is a `docker exec` with `Tty` enabled, so the daemon does no stream framing. The shell runs as the numeric box user, in the container's existing isolation — no new privilege
 is introduced, because anyone holding the box's token can already ask the agent to run anything.
 
 The tmux mechanics: the orchestrator creates a detached shared session on first use, and each connection opens its own

@@ -20,33 +20,36 @@ import {
   getThread,
   insertThread,
   listThreads,
-  nextSubnetIndex,
   boxTurnActive,
   boxesWithActiveTurns,
   setThreadDone,
   threadConfig,
-  takenSubnets,
   touchBox,
   type Db,
   type BoxRow,
   type ThreadRow,
 } from './db.ts';
 import { BoxUsage, BOX_SIZE_TTL_MS } from './diskusage.ts';
-import * as dk from './docker.ts';
 import { fileService, OutdatedImageError } from './files.ts';
 import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import { log } from './log.ts';
 import type { Notifier } from './notify.ts';
+import { boxProcesses } from './processes.ts';
+import {
+  runtime,
+  WORKSPACE_DIR,
+  type BoxSpec,
+  type PullEvent,
+  type RuntimeObject,
+} from './runtime/runtime.ts';
 import { generateWsToken } from './secret.ts';
 import { setUpBox } from './setup.ts';
 import { readSettings } from './settings.ts';
 import type { BoxReading } from './tunnels.ts';
-import * as ws from './workspaces.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamBox } from './gateway/upstream.ts';
-import { allocateSubnet } from './subnet.ts';
 
 /**
  * How many times more boxes the host may hold than the database knows of
@@ -69,7 +72,7 @@ const TOUCH_INTERVAL_MS = 60_000;
 
 /**
  * Creates, starts, stops and describes boxes, and owns every UpstreamBox.
- * Docker holds the runtime state; the boxes table holds the metadata.
+ * The runtime holds the runtime state; the boxes table holds the metadata.
  */
 export class BoxManager {
   /** The gateway connection of each box, created on first use. */
@@ -118,14 +121,6 @@ export class BoxManager {
   /** The error of the last pull of the box image, or null when it worked. */
   private lastPullError: string | null = null;
 
-  /**
-   * Host-side path of DATA_DIR, which is what a workspace bind source has to
-   * name. Starts as this process's own path — the truth outside a container,
-   * where `npm run dev` and the tests run — and is replaced at boot by
-   * resolveHostDataDir().
-   */
-  private hostDataDir: string;
-
   constructor(
     /** Where the boxes and their threads are stored. */
     private readonly db: Db,
@@ -144,7 +139,6 @@ export class BoxManager {
     private readonly tunnelsOf: (boxId: string) => BoxTunnel[] = () => [],
   ) {
     this.pending = new PendingStore(db);
-    this.hostDataDir = cfg.HOST_DATA_DIR || cfg.DATA_DIR;
   }
 
   // --- one operation per box at a time -----------------------------------
@@ -153,7 +147,7 @@ export class BoxManager {
    * Runs `fn` with the box to itself, after whatever is already queued
    * for it.
    *
-   * Container repairs check the daemon's state and act on it a moment later.
+   * Container repairs check the runtime's state and act on it a moment later.
    * Start, a local command and the gateway all reach them, and the reaper
    * stops boxes under all three. So every operation that changes a box runs
    * alone, in arrival order. Reads are not queued. A request for a busy box
@@ -192,157 +186,63 @@ export class BoxManager {
     throw new HttpError(409, 'This box was stopped while the request was in flight');
   }
 
-  // --- workspaces -----------------------------------------------------------
-
-  /**
-   * Resolves the host-side path of DATA_DIR, once, at boot.
-   *
-   * Inside a container, the orchestrator's path for its data volume is not
-   * the path the daemon resolves a bind source against. A wrong path fails
-   * silently: the daemon creates an empty directory there and mounts it, and
-   * the agent's files end up where the orchestrator cannot see them. So a
-   * failure here is fatal, and the message names the setting that fixes it.
-   */
-  async resolveHostDataDir(): Promise<void> {
-    ws.ensureWorkspacesRoot(this.cfg.DATA_DIR);
-    if (this.cfg.HOST_DATA_DIR) {
-      log.info('using the configured host path for the data directory', {
-        hostDataDir: this.hostDataDir,
-      });
-      return;
-    }
-    if (!dk.inContainer()) return;
-    const source = await dk.resolveHostMountSource(this.cfg.DATA_DIR);
-    if (!source) {
-      throw new Error(
-        `Could not resolve the host-side path of ${this.cfg.DATA_DIR}: this process is in a ` +
-          'container but has no mount there, or its own container could not be identified. ' +
-          'Mount the data directory, or set HOST_DATA_DIR to the path the Docker daemon knows it by.',
-      );
-    }
-    this.hostDataDir = source;
-    log.info('resolved the host path of the data directory', { hostDataDir: source });
-  }
-
   // --- the box image ----------------------------------------------------
 
   /**
-   * Makes sure the box image is on this host, pulling it when it is not.
+   * Makes the box image available, and throws when it cannot. Without the
+   * image, no box can be created.
    *
-   * Absent, there is nothing to create a box out of, so this is the one
-   * pull that is allowed to fail loudly. Present, it costs one inspect and
-   * says nothing.
-   *
-   * @param onProgress Called with each progress event of the pull.
+   * @param onProgress Called with each progress event of a pull.
    */
-  async ensureBoxImage(onProgress?: (event: dk.PullEvent) => void): Promise<void> {
-    if (!(await dk.imageId(this.cfg.BOX_IMAGE))) {
-      log.info('the box image is not on this host; pulling it', {
-        image: this.cfg.BOX_IMAGE,
-      });
-      await dk.pullImage(this.cfg.BOX_IMAGE, onProgress);
-      log.info('pulled the box image', { image: this.cfg.BOX_IMAGE });
-    }
+  async ensureBoxImage(onProgress?: (event: PullEvent) => void): Promise<void> {
+    await runtime().ensureImage(onProgress);
   }
 
   /**
-   * Pulls the box image again, so a moving tag moves here.
+   * Asks the runtime for a new image behind the tag of the box image. A box
+   * moves onto the new image at its next start. The manager keeps the error
+   * of a failed pull for the error message of a failed setup.
    *
-   * Best effort, because the image already on the host still works. A box
-   * moves onto the new image at its next start.
-   *
-   * @param onProgress Called with each progress event of the pull.
+   * @param onProgress Called with each progress event of a pull.
    */
-  async refreshBoxImage(onProgress?: (event: dk.PullEvent) => void): Promise<void> {
-    const before = await dk.imageId(this.cfg.BOX_IMAGE);
+  async refreshBoxImage(onProgress?: (event: PullEvent) => void): Promise<void> {
     try {
-      await dk.pullImage(this.cfg.BOX_IMAGE, onProgress);
+      await runtime().refreshImage(onProgress);
     } catch (err) {
       this.lastPullError = (err as Error).message;
       throw err;
     }
     this.lastPullError = null;
-    const after = await dk.imageId(this.cfg.BOX_IMAGE);
-    if (after && after !== before) {
-      log.info('the box image moved; boxes adopt it as they are started', {
-        image: this.cfg.BOX_IMAGE,
-      });
-      // The copy it moved off is now untagged, on this host, and a gigabyte
-      // or two that nothing else reclaims.
-      await this.pruneSupersededImages(before);
-    }
   }
 
   /**
-   * Removes copies of the box image that a pull has superseded.
+   * Removes the runtime objects of boxes that no longer exist, and the login
+   * containers that nothing waits for.
    *
-   * Called after a refresh that moved the tag. `supersededId` is the image
-   * that pull replaced. The labelled images also include those an earlier
-   * process replaced and did not clean up.
+   * reconcile() looks up what the runtime has for each row; this looks up the
+   * row for each object of the inventory. It finds what a crash during a create, or a
+   * teardown that failed halfway, left behind.
    *
-   * Nothing is forced. The daemon refuses to remove an image a container was
-   * created from, so a box that has not started since the tag moved keeps
-   * its old image. That image goes on a later sweep, after the box's next
-   * start has moved it onto the new one.
-   */
-  private async pruneSupersededImages(supersededId: string | null): Promise<void> {
-    if (!this.cfg.BOX_IMAGE_PRUNE) return;
-    const current = await dk.imageId(this.cfg.BOX_IMAGE);
-    const candidates = new Set(await dk.listSupersededBoxImages());
-    // An image built without the label is found only here, by its id.
-    if (supersededId) candidates.add(supersededId);
-    candidates.delete(current ?? '');
-
-    for (const id of candidates) {
-      try {
-        if (await dk.removeImage(id)) {
-          log.info('removed a superseded box image', { image: id });
-        }
-      } catch (err) {
-        log.warn('could not remove a superseded box image', {
-          image: id,
-          error: (err as Error).message,
-        });
-      }
-    }
-  }
-
-  /**
-   * Removes Docker objects and workspace directories belonging to boxes
-   * that no longer exist.
-   *
-   * Everything Boxes creates is labelled with its box. reconcile() looks up
-   * what Docker has for each row; this looks up the row for each labelled
-   * object. It finds what a crash during a create, or a teardown that failed
-   * halfway, left behind.
-   *
-   * create() inserts the row before any Docker object exists, so an object
+   * create() inserts the row before any runtime object exists, so an object
    * whose box has no live row is never one being created. A deleted box's
    * tombstone counts as no row, so a failed teardown is swept too.
    *
-   * Containers go first, because the daemon refuses to remove a network a
-   * container still uses.
+   * The objects go in the order of the inventory, which is the order the
+   * runtime can remove them in.
    */
   async sweepOrphans(): Promise<void> {
-    // A login container belongs to no box, so the rules below do not apply.
-    await this.sweepLoginContainers();
+    const inventory = await runtime().inventory();
+    // A login belongs to no box, so the rules below do not apply to it.
+    await this.sweepLogins(inventory);
 
-    const containers = await dk.listBoxContainers();
-    const networks = await dk.listBoxNetworks();
-    // A teardown removes the Docker objects first, so a box it gave up on
-    // halfway may have only its directories left.
-    const directories = ws.boxDirectoryIds(this.cfg.DATA_DIR);
-    // Read last: a box created while the readings above ran has its row by
+    // Read last: a box created while the inventory was read has its row by
     // now, so its objects are not taken for orphans.
     const live = new Set(this.allRows().map((row) => row.id));
-    const orphaned = <T extends { boxId: string }>(all: T[]): T[] =>
-      all.filter((o) => !live.has(o.boxId));
-    const strayContainers = orphaned(containers);
-    const strayNetworks = orphaned(networks);
-    const strayDirectories = directories.filter((id) => !live.has(id));
-
-    const strays = [...strayContainers, ...strayNetworks];
-    const boxes = new Set([...strays.map((o) => o.boxId), ...strayDirectories]);
+    const strays = inventory.filter(
+      (obj): obj is Exclude<RuntimeObject, { kind: 'login' }> =>
+        obj.kind !== 'login' && !live.has(obj.boxId),
+    );
+    const boxes = new Set(strays.map((obj) => obj.boxId));
     if (boxes.size === 0) return;
 
     // Tombstones count, so a deployment whose boxes were all deleted still
@@ -351,39 +251,19 @@ export class BoxManager {
       this.db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }
     ).n;
     if (boxes.size > known * STRAY_BOX_RATIO) {
-      log.warn('not sweeping: the host holds far more boxes than this database knows of', {
+      log.warn('not sweeping: the runtime holds far more boxes than this database knows of', {
         strays: boxes.size,
         known,
         ratio: STRAY_BOX_RATIO,
         boxes: [...boxes],
-        containers: strayContainers.length,
-        networks: strayNetworks.length,
-        directories: strayDirectories.length,
+        objects: strays.length,
       });
       return;
     }
 
     log.info('sweeping what is left of boxes that are gone', { boxes: [...boxes] });
-    for (const container of strayContainers) {
-      await this.sweeping(container.boxId, 'container', () =>
-        dk.removeContainer(container.id),
-      );
-    }
-    for (const network of strayNetworks) {
-      await this.sweeping(network.boxId, 'network', () =>
-        dk.removeNetwork(network.name, this.cfg),
-      );
-    }
-    for (const boxId of boxes) {
-      await this.sweeping(boxId, 'workspace', () =>
-        Promise.resolve(ws.removeWorkspace(this.cfg.DATA_DIR, boxId)),
-      );
-      await this.sweeping(boxId, 'home', () =>
-        Promise.resolve(ws.removeHome(this.cfg.DATA_DIR, boxId)),
-      );
-      await this.sweeping(boxId, 'nix store', () =>
-        Promise.resolve(ws.removeNix(this.cfg.DATA_DIR, boxId)),
-      );
+    for (const obj of strays) {
+      await this.sweeping(obj.boxId, obj.kind, () => runtime().removeObject(obj));
     }
   }
 
@@ -397,26 +277,19 @@ export class BoxManager {
    * cutoff is longer than the ten minutes a flow may take, so a login in
    * progress is never swept.
    */
-  private async sweepLoginContainers(): Promise<void> {
+  private async sweepLogins(inventory: RuntimeObject[]): Promise<void> {
     const cutoff = Date.now() - LOGIN_CONTAINER_MAX_AGE_MS;
-    let containers: Awaited<ReturnType<typeof dk.listLoginContainers>>;
-    try {
-      containers = await dk.listLoginContainers();
-    } catch (err) {
-      log.warn('could not list login containers', { error: (err as Error).message });
-      return;
-    }
-    for (const container of containers) {
-      if (container.createdAt > cutoff) continue;
+    for (const obj of inventory) {
+      if (obj.kind !== 'login' || obj.createdAt > cutoff) continue;
       try {
-        await dk.removeContainer(container.id);
+        await runtime().removeObject(obj);
         log.info('swept an abandoned login container', {
-          credential: container.credentialId,
-          container: container.id,
+          credential: obj.credentialId,
+          container: obj.ref,
         });
       } catch (err) {
         log.warn('could not sweep an abandoned login container', {
-          container: container.id,
+          container: obj.ref,
           error: (err as Error).message,
         });
       }
@@ -442,137 +315,6 @@ export class BoxManager {
         error: (err as Error).message,
       });
     }
-  }
-
-  /**
-   * Rebuilds a box's container when Docker no longer has the one the row
-   * names, and returns the row as it now stands.
-   *
-   * A box container is built entirely from the row and the box's
-   * directories, so losing one costs nothing durable. `docker container
-   * prune` removes every stopped container, which includes every idle box.
-   * `docker system prune` removes the network too, so this recreates the
-   * network as well.
-   *
-   * Only for a container the daemon reports as missing. `unknown` means the
-   * daemon did not answer, and the container may be running.
-   */
-  private async restoreMissingContainer(row: BoxRow): Promise<BoxRow> {
-    if (!row.container_id) return row;
-    if ((await dk.containerState(row.container_id)) !== 'missing') return row;
-
-    const slog = log.box(row.id);
-    slog.warn('the container is gone; rebuilding it from the box row', {
-      container: row.container_id,
-    });
-    // A prune that removed the container may have removed the network too.
-    if (await dk.ensureNetwork(row.network_name, row.subnet, row.id)) {
-      slog.info('the box network was gone too; made it again', {
-        network: row.network_name,
-        subnet: row.subnet,
-      });
-    }
-    const containerId = await this.recreateContainer(row);
-    this.db
-      .prepare('UPDATE boxes SET container_id = ? WHERE id = ?')
-      .run(containerId, row.id);
-    slog.info('rebuilt the container', { container: containerId });
-    return this.mustGet(row.id);
-  }
-
-  /**
-   * Moves a box onto the current box image, when what its container
-   * was created from is no longer what BOX_IMAGE resolves to.
-   *
-   * A running box is left alone until its next start.
-   *
-   * The comparison is on image ids rather than the tag, because a tag such
-   * as `latest` moves without changing its name.
-   */
-  private async rollOntoCurrentImage(row: BoxRow): Promise<BoxRow> {
-    if (!row.container_id) return row;
-    const slog = log.box(row.id);
-
-    let wanted: string | null;
-    let current: string | null;
-    try {
-      wanted = await dk.imageId(this.cfg.BOX_IMAGE);
-      current = await dk.containerImageId(row.container_id);
-    } catch (err) {
-      // A box that already has a container can start without the comparison.
-      slog.warn('could not compare the box image; starting as it is', {
-        error: (err as Error).message,
-      });
-      return row;
-    }
-    // Nothing on the host to move to, or a container Docker no longer has:
-    // either way there is nothing to decide, and start() surfaces the second.
-    if (!wanted || !current || wanted === current) return row;
-
-    if (await this.deferredWhileRunning(row, 'box image change')) return row;
-
-    slog.info('recreating the container on the current box image', {
-      from: current,
-      image: this.cfg.BOX_IMAGE,
-    });
-    // The adapter ran as an exec inside the container about to be removed, so
-    // anything the gateway still holds for this box is already dead.
-    this.upstreams.get(row.id)?.stop();
-
-    const containerId = await this.recreateContainer({
-      ...row,
-      image: this.cfg.BOX_IMAGE,
-    });
-    this.db
-      .prepare('UPDATE boxes SET container_id = ?, image = ? WHERE id = ?')
-      .run(containerId, this.cfg.BOX_IMAGE, row.id);
-    slog.info('box moved onto the current box image', {
-      image: this.cfg.BOX_IMAGE,
-    });
-    return this.mustGet(row.id);
-  }
-
-  // --- recreating a container -----------------------------------------------
-  //
-  // A container's image and mounts are fixed at creation, so changing either
-  // replaces the container. The rootfs is read-only and everything durable
-  // lives in the mounts, so nothing is lost.
-
-  /**
-   * Whether a change that has to replace the container must wait, because the
-   * container is still running. Says so in the log when it does.
-   *
-   * Killing a live container would take the adapter exec, and any turn in it,
-   * with it. The change comes through at the box's next stop/start cycle,
-   * which the idle reaper produces on its own within IDLE_STOP_MINUTES.
-   */
-  private async deferredWhileRunning(row: BoxRow, what: string): Promise<boolean> {
-    if ((await dk.containerState(row.container_id)) !== 'running') return false;
-    log.box(row.id).info(`${what} deferred: the container is still running`);
-    return true;
-  }
-
-  /**
-   * Replaces a box's container with a fresh one built from `row`, and
-   * returns the new container's id. The row names the new container before
-   * it is started, so a start that fails cannot leave the row naming the
-   * removed container. The caller records whatever else changed. The new
-   * container is not set up yet, so the ready mark goes with the old one.
-   *
-   * The old container is stopped before it is removed even when it is
-   * already down; both calls tolerate a container that is gone.
-   */
-  private async recreateContainer(row: BoxRow): Promise<string> {
-    if (row.container_id) {
-      await dk.stopContainer(row.container_id);
-      await dk.removeContainer(row.container_id);
-    }
-    const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
-    this.db
-      .prepare('UPDATE boxes SET container_id = ?, ready_at = NULL WHERE id = ?')
-      .run(containerId, row.id);
-    await dk.startContainer(containerId);
-    return containerId;
   }
 
   // --- helpers --------------------------------------------------------------
@@ -603,27 +345,21 @@ export class BoxManager {
   }
 
   /**
-   * Everything createContainer needs about a box, built from its stored
-   * row and what the deployment currently holds. Both a new box and every
-   * recreated container are built from it.
+   * Everything the runtime needs to create or repair the container of a box.
+   * Both a new box and every recreated container are built from it.
    *
    * The placeholders are those of the credentials stored right now, so a
-   * credential that arrives later reaches a box at its next restart.
+   * credential that arrives later reaches a box when its container is next
+   * created.
    */
-  private containerSpec(row: BoxRow): dk.CreateContainerSpec {
+  private boxSpec(id: string): BoxSpec {
     return {
-      boxId: row.id,
-      image: row.image,
-      networkName: row.network_name,
-      subnet: row.subnet,
-      workspaceSource: ws.hostWorkspacePath(this.hostDataDir, row.id),
-      nixSource: ws.hostNixPath(this.hostDataDir, row.id),
-      homeSource: ws.hostHomePath(this.hostDataDir, row.id),
+      boxId: id,
       env: boxEnv({
-        placeholderFor: (id) => this.egress.placeholderFor(id),
-        methodFor: (id) => this.egress.methodFor(id),
+        placeholderFor: (credential) => this.egress.placeholderFor(credential),
+        methodFor: (credential) => this.egress.methodFor(credential),
         gitlabHost: this.cfg.GITLAB_HOST,
-        proxyUrl: dk.proxyUrl(this.cfg),
+        proxyUrl: runtime().proxyUrl(),
         hasCa: this.egress.caCertificate() !== '',
       }),
     };
@@ -642,7 +378,7 @@ export class BoxManager {
         (status) => this.setStatus(id, status),
         // Opening a thread starts a stopped box without start(), so the
         // repairs and the setup run here too, under the same slot.
-        () => this.withSlot(id, async () => (await this.bringUp(id)).container_id!),
+        () => this.withSlot(id, () => this.bringUp(id)),
       );
       this.upstreams.set(id, up);
     }
@@ -652,8 +388,8 @@ export class BoxManager {
   // --- create ---------------------------------------------------------------
 
   /**
-   * Creates the network, directories and container for a new box. Any
-   * failed step tears the whole box down and marks it as an error.
+   * Creates the storage and the container of a new box. Any failed step
+   * tears the whole box down and marks it as an error.
    */
   async create(body: CreateBoxBody): Promise<BoxDetail> {
     const name = body.name?.trim();
@@ -682,24 +418,14 @@ export class BoxManager {
       );
     }
 
-    // Server-generated: user input never reaches a Docker object name.
+    // Server-generated: user input never reaches a runtime object name.
     const id = randomBytes(4).toString('hex');
     const now = Date.now();
-    const subnet = allocateSubnet(
-      this.cfg.BOX_SUBNET_POOL,
-      nextSubnetIndex(this.db),
-      takenSubnets(this.db),
-    );
-    if (!subnet) throw new HttpError(503, 'No free subnet in the pool');
     const row: BoxRow = {
       id,
       name,
       // Every box is DEFAULT: the deployment has one set of credentials.
       profile: 'DEFAULT',
-      image: this.cfg.BOX_IMAGE,
-      container_id: null,
-      network_name: dk.names.network(id),
-      subnet,
       // No base revision until the reviewer picks one. A review compares
       // each repository against its own HEAD by default.
       review_base_rev: null,
@@ -716,18 +442,16 @@ export class BoxManager {
 
     this.db
       .prepare(
-        `INSERT INTO boxes (id, name, profile, image, container_id,
-           network_name, subnet, status, agent_set_id, ws_token,
-           created_at, last_active_at)
-         VALUES (@id, @name, @profile, @image, @container_id,
-           @network_name, @subnet, @status, @agent_set_id, @ws_token,
-           @created_at, @last_active_at)`,
+        `INSERT INTO boxes (id, name, profile, status, agent_set_id,
+           ws_token, created_at, last_active_at)
+         VALUES (@id, @name, @profile, @status, @agent_set_id,
+           @ws_token, @created_at, @last_active_at)`,
       )
       .run(row);
 
     const slog = log.box(id);
     try {
-      await this.withSlot(id, () => this.createResources(row));
+      await this.withSlot(id, () => this.createResources(id));
       this.setStatus(id, 'running');
       // The first conversation, as a row only. The first browser to open it
       // starts the adapter, so a box can be created for a harness whose
@@ -749,78 +473,46 @@ export class BoxManager {
   }
 
   /**
-   * Builds the network, the three directories and the container of a new
-   * box, starts it and makes it ready.
-   *
-   * Runs under the box's slot. The network comes before the container that
-   * joins it, and every directory before the container that binds it.
+   * Builds the storage and the container of a new box, starts it and makes
+   * it ready. Runs under the box's slot. The storage comes before the
+   * container that mounts it.
    */
-  private async createResources(row: BoxRow): Promise<void> {
-    const id = row.id;
-    await dk.createNetwork(row.network_name, row.subnet, id);
-    await dk.ensureProxyAttached(row.network_name, this.cfg);
-    ws.createWorkspace(this.cfg.DATA_DIR, id);
-    ws.createNix(this.cfg.DATA_DIR, id);
-    ws.createHome(this.cfg.DATA_DIR, id);
-    const containerId = await dk.createContainer(this.containerSpec(row), this.cfg);
-    // Recorded before the start, so a start that fails leaves a row naming
-    // the container and the teardown removes it.
-    this.db.prepare('UPDATE boxes SET container_id = ? WHERE id = ?').run(containerId, id);
-    await dk.startContainer(containerId);
+  private async createResources(id: string): Promise<void> {
+    await runtime().createStorage(id);
+    await runtime().ensure(this.boxSpec(id));
+    await runtime().start(id);
     await this.makeReady(this.mustGet(id));
   }
 
   // --- start / stop / delete ------------------------------------------------
 
   /**
-   * Everything a box's container has to be brought up to date on before
-   * it is started, in the one order that is safe. Returns the row as it now
-   * stands, which is what names the container to start.
-   *
-   * Every repair does nothing for a box that does not need it, and each is
-   * put off while the container runs, so a turn is never cut off.
+   * Brings a box's container and isolation up to date before it is started.
    *
    * Runs under the caller's slot and takes none of its own. A stop or a
-   * delete that arrives meanwhile takes effect between the repairs.
+   * delete that arrives meanwhile takes effect before the repair.
    */
-  private async prepareContainer(row: BoxRow): Promise<BoxRow> {
-    this.giveUpIfPreempted(row.id);
-    // Before any step that may create a container binding the Nix store,
-    // which the daemon would otherwise create empty and owned by root.
-    ws.createNix(this.cfg.DATA_DIR, row.id);
-    // Before anything binds the other two, for the same reason.
-    this.requireDirectories(row);
-    // Before the image check, which needs a container to ask the daemon about.
-    const current = await this.restoreMissingContainer(row);
-    this.giveUpIfPreempted(row.id);
-    return this.rollOntoCurrentImage(current);
+  private async prepareContainer(id: string): Promise<void> {
+    this.giveUpIfPreempted(id);
+    // Before anything mounts the storage.
+    await this.requireStorage(id);
+    this.giveUpIfPreempted(id);
+    await runtime().ensure(this.boxSpec(id));
   }
 
   /**
-   * Refuses to go on when a box's bind sources are gone, naming what is
-   * missing, and marks the box as an error.
+   * Refuses to go on when a box's storage is gone, naming what is missing,
+   * and marks the box as an error.
    *
-   * Docker creates a missing bind source, empty and owned by root. The box
-   * then looks healthy while every turn fails. A crash during a delete, a
-   * partly restored backup, or a wrong HOST_DATA_DIR all cause this.
-   *
-   * The directories are not recreated, because a fresh home would erase the
+   * The storage is not created again, because a fresh home would erase the
    * adapter's thread transcripts.
    */
-  private requireDirectories(row: BoxRow): void {
-    const missing: string[] = [];
-    const workspace = ws.workspacePath(this.cfg.DATA_DIR, row.id);
-    const home = ws.homePath(this.cfg.DATA_DIR, row.id);
-    if (!ws.directoryExists(workspace)) {
-      missing.push(`its workspace directory (${workspace})`);
-    }
-    if (!ws.directoryExists(home)) {
-      missing.push(`its home directory (${home})`);
-    }
+  private async requireStorage(id: string): Promise<void> {
+    const missing = await runtime().missingStorage(id);
     if (missing.length === 0) return;
 
-    this.setStatus(row.id, 'error');
-    log.box(row.id).error('refusing to start a box whose files are gone', { missing });
+    this.setStatus(id, 'error');
+    log.box(id).error('refusing to start a box whose files are gone', { missing });
     throw new HttpError(
       409,
       `This box cannot start: ${missing.join(' and ')} cannot be found. ` +
@@ -829,7 +521,7 @@ export class BoxManager {
   }
 
   /**
-   * Starts a stopped box's container and re-attaches the egress proxy.
+   * Starts a stopped box, after its container and isolation are repaired.
    * Waits for whatever else the box is in the middle of.
    */
   async start(id: string): Promise<BoxDetail> {
@@ -846,27 +538,23 @@ export class BoxManager {
   }
 
   /**
-   * Brings a box up and makes it ready. Returns the row as it now stands,
-   * which names the container. Runs under the caller's slot.
+   * Brings a box up and makes it ready. Runs under the caller's slot.
    *
    * Every path into a box comes through here, so nothing reaches a box
    * before its setup is complete.
    */
-  private async bringUp(id: string): Promise<BoxRow> {
-    const stored = this.mustGet(id);
-    if (!stored.container_id) throw new HttpError(409, 'Box has no container');
-    const row = await this.prepareContainer(stored);
+  private async bringUp(id: string): Promise<void> {
+    this.mustGet(id);
+    await this.prepareContainer(id);
     this.giveUpIfPreempted(id);
-    if ((await dk.containerState(row.container_id)) !== 'running') {
+    if ((await runtime().state(id)) !== 'running') {
       // Taken off before the start, so a crash between the two leaves the box
       // not ready.
       this.db.prepare('UPDATE boxes SET ready_at = NULL WHERE id = ?').run(id);
-      await dk.startContainer(row.container_id!);
+      await runtime().start(id);
     }
-    await dk.ensureProxyAttached(row.network_name, this.cfg);
     this.giveUpIfPreempted(id);
-    await this.makeReady(row);
-    return row;
+    await this.makeReady(this.mustGet(id));
   }
 
   /**
@@ -882,7 +570,7 @@ export class BoxManager {
     const settings = readSettings(this.db);
     try {
       await setUpBox(
-        row.container_id!,
+        row.id,
         {
           caCertificate: this.egress.caCertificate(),
           identity: { gitName: settings.gitName, gitEmail: settings.gitEmail },
@@ -904,7 +592,7 @@ export class BoxManager {
   }
 
   /**
-   * Stops the container and drops the upstream connection.
+   * Stops the box and drops the upstream connection.
    *
    * Overtakes what the box is in the middle of rather than queueing behind
    * it. The flag and the upstream's stop are set before the slot is asked
@@ -934,22 +622,20 @@ export class BoxManager {
   private async stopHeld(id: string): Promise<BoxDetail> {
     // Everything queued before this has given up; what comes after may run.
     this.preempted.delete(id);
-    const row = this.mustGet(id);
-    if (row.container_id) {
-      // Nothing in a stopped box changes, so the value measured now stays
-      // correct until the next start.
-      if ((await dk.containerState(row.container_id)) === 'running') {
-        await this.usage.measureNow(id);
-      }
-      await dk.stopContainer(row.container_id);
+    this.mustGet(id);
+    // Nothing in a stopped box changes, so the value measured now stays
+    // correct until the next start.
+    if ((await runtime().state(id)) === 'running') {
+      await this.usage.measureNow(id);
     }
+    await runtime().stop(id);
     this.setStatus(id, 'stopped');
     log.box(id).info('box stopped');
     return this.detail(id);
   }
 
   /**
-   * Deletes a box and everything it is made of, its volumes included.
+   * Deletes a box and everything it is made of, its storage included.
    * Overtakes what the box is in the middle of, the way a stop does.
    */
   async remove(id: string): Promise<void> {
@@ -975,40 +661,21 @@ export class BoxManager {
   }
 
   /**
-   * Removes a box's container, network, directories and volumes. Every
-   * failure is logged rather than thrown, so teardown always finishes.
+   * Removes a box's container, isolation and storage. Every failure is
+   * logged rather than thrown, so teardown always finishes.
    */
   private async teardownResources(id: string): Promise<void> {
-    const row = this.getRow(id);
-    if (!row) return;
+    if (!this.getRow(id)) return;
     const slog = log.box(id);
-    if (row.container_id) {
-      try {
-        await dk.stopContainer(row.container_id);
-        await dk.removeContainer(row.container_id);
-      } catch (err) {
-        slog.warn('container teardown failed', { error: (err as Error).message });
-      }
+    try {
+      await runtime().remove(id);
+    } catch (err) {
+      slog.warn('container and isolation teardown failed', { error: (err as Error).message });
     }
     try {
-      await dk.removeNetwork(row.network_name, this.cfg);
+      await runtime().removeStorage(id);
     } catch (err) {
-      slog.warn('network teardown failed', { error: (err as Error).message });
-    }
-    try {
-      ws.removeWorkspace(this.cfg.DATA_DIR, row.id);
-    } catch (err) {
-      slog.warn('workspace removal failed', { error: (err as Error).message });
-    }
-    try {
-      ws.removeHome(this.cfg.DATA_DIR, row.id);
-    } catch (err) {
-      slog.warn('home removal failed', { error: (err as Error).message });
-    }
-    try {
-      ws.removeNix(this.cfg.DATA_DIR, row.id);
-    } catch (err) {
-      slog.warn('nix store removal failed', { error: (err as Error).message });
+      slog.warn('storage removal failed', { error: (err as Error).message });
     }
   }
 
@@ -1022,22 +689,21 @@ export class BoxManager {
   }
 
   /**
-   * Where a local command should run for this box, starting the
-   * container if it is stopped. The workspace root, which is where the
-   * adapter runs too.
+   * Where a local command should run for this box, starting the box if it
+   * is stopped. The workspace root, which is where the adapter runs too.
    *
    * Marks the box active, because everything that asks for this is about
    * to work in the box: a terminal opening a shell, or a review running git.
    */
-  async execTarget(id: string): Promise<{ containerId: string; workingDir: string }> {
+  async execTarget(id: string): Promise<{ boxId: string; workingDir: string }> {
     return this.withSlot(id, () => this.execTargetHeld(id));
   }
 
   /** The body of {@link execTarget}, which runs under the box's slot. */
-  private async execTargetHeld(id: string): Promise<{ containerId: string; workingDir: string }> {
-    const row = await this.bringUp(id);
+  private async execTargetHeld(id: string): Promise<{ boxId: string; workingDir: string }> {
+    await this.bringUp(id);
     this.touch(id);
-    return { containerId: row.container_id!, workingDir: dk.WORKSPACE_DIR };
+    return { boxId: id, workingDir: WORKSPACE_DIR };
   }
 
   /**
@@ -1046,9 +712,8 @@ export class BoxManager {
    * measurement does not keep a box from the reaper.
    */
   private async measureDisk(id: string): Promise<number> {
-    const row = this.mustGet(id);
-    if (!row.container_id) throw new Error('the box has no container');
-    return fileService(row.container_id).size();
+    this.mustGet(id);
+    return fileService(id).size();
   }
 
   /** Marks a box active, so reaching into the box holds off the reaper. */
@@ -1099,17 +764,17 @@ export class BoxManager {
 
   /**
    * The command lines running in every box that has not been deleted, for
-   * the tunnel reconciler. A box whose container is not running has none. A
-   * box whose state or processes cannot be read is reported as null.
+   * the tunnel reconciler. A box that is not running has none. A box whose
+   * state or processes cannot be read is reported as null.
    */
   async processReadings(): Promise<BoxReading[]> {
     return Promise.all(
       this.allRows().map(async (row): Promise<BoxReading> => {
-        const state = await dk.containerState(row.container_id);
-        if (state === 'exited' || state === 'missing') return { boxId: row.id, commands: [] };
-        if (state !== 'running' || !row.container_id) return { boxId: row.id, commands: null };
+        const state = await runtime().state(row.id);
+        if (state === 'stopped') return { boxId: row.id, commands: [] };
+        if (state !== 'running') return { boxId: row.id, commands: null };
         try {
-          const processes = await dk.containerProcesses(row.container_id);
+          const processes = await boxProcesses(row.id);
           return { boxId: row.id, commands: processes.map((p) => p.command) };
         } catch {
           return { boxId: row.id, commands: null };
@@ -1130,14 +795,14 @@ export class BoxManager {
     );
   }
 
-  /** Builds a summary, resolving the container state against Docker. */
+  /** Builds a summary, resolving the state against the runtime. */
   private async summarize(
     row: BoxRow,
     pendingCount: number,
     turnActive: boolean,
   ): Promise<BoxSummary> {
-    const dockerState = await dk.containerState(row.container_id);
-    if (dockerState === 'running') this.usage.refresh(row.id, row.disk_measured_at);
+    const runtimeState = await runtime().state(row.id);
+    if (runtimeState === 'running') this.usage.refresh(row.id, row.disk_measured_at);
     const pendingByThread = this.pending.countsByThread(row.id);
     // The gateway's in-memory view of which threads are speaking and which
     // have tasks running, read once so every thread answers from the same
@@ -1150,7 +815,7 @@ export class BoxManager {
       name: row.name,
       profile: row.profile,
       status: row.status,
-      dockerState,
+      runtimeState,
       // True when any of the box's threads has a turn running.
       turnActive,
       speaking: speaking.size > 0,
@@ -1181,7 +846,7 @@ export class BoxManager {
     };
   }
 
-  /** A summary plus the Docker object names the detail view shows. */
+  /** A summary plus the runtime facts the detail view shows. */
   async detail(id: string): Promise<BoxDetail> {
     const row = this.mustGet(id);
     const summary = await this.summarize(
@@ -1191,12 +856,9 @@ export class BoxManager {
     );
     return {
       ...summary,
-      image: row.image,
-      containerId: row.container_id,
-      networkName: row.network_name,
-      subnet: row.subnet,
+      runtimeDetails: await runtime().details(id),
       acpSessionId: latestThread(this.db, id)?.acp_session_id ?? null,
-      proxyAttached: await dk.isProxyAttached(row.network_name, this.cfg),
+      isolated: await runtime().isolated(id),
       // `upstreams.get` rather than `upstream()`, which would create one. A
       // box without an upstream has no reading, so the list is empty.
       boxWork: [...(this.upstreams.get(id)?.boxWork ?? [])],
@@ -1316,20 +978,24 @@ export class BoxManager {
   // --- boot reconciliation --------------------------------------------------
 
   /**
-   * Aligns the stored rows with what Docker runs: adopts live containers,
+   * Aligns the stored rows with what the runtime runs: adopts live boxes,
    * marks missing ones stopped, fails a create that was interrupted, and
-   * re-attaches the egress proxy. Upstream connections are re-established on
-   * first use.
+   * repairs the isolation of every box that runs. Upstream connections are
+   * re-established on first use.
    */
   async reconcile(): Promise<void> {
     this.pending.clearStale();
-    const live = new Map((await dk.listBoxContainers()).map((c) => [c.boxId, c]));
+    const live = new Map(
+      (await runtime().inventory()).flatMap((obj) =>
+        obj.kind === 'box' ? [[obj.boxId, obj] as const] : [],
+      ),
+    );
     for (const row of this.allRows()) {
       // A turn cannot survive an orchestrator restart, because the upstream
       // connection that owned it is gone.
       clearBoxTurns(this.db, row.id);
-      const container = live.get(row.id);
-      if (!container) {
+      const box = live.get(row.id);
+      if (!box) {
         if (row.status === 'running') {
           log.box(row.id).warn('container missing at boot; marking stopped');
           this.setStatus(row.id, 'stopped');
@@ -1340,26 +1006,42 @@ export class BoxManager {
         }
         continue;
       }
-      if (container.id !== row.container_id) {
-        this.db
-          .prepare('UPDATE boxes SET container_id = ? WHERE id = ?')
-          .run(container.id, row.id);
+      this.setStatus(row.id, box.running ? 'running' : 'stopped');
+      // A stopped box gets its repair at its next start. A failed repair is
+      // retried by the isolation loop, so it does not stop the boot.
+      if (!box.running) continue;
+      try {
+        await this.withSlot(row.id, () => runtime().ensure(this.boxSpec(row.id)));
+      } catch (err) {
+        log.box(row.id).warn('could not repair the box at boot', { error: (err as Error).message });
       }
-      this.setStatus(row.id, container.running ? 'running' : 'stopped');
-      await dk.ensureProxyAttached(row.network_name, this.cfg);
     }
     log.info('boot reconciliation complete', { boxes: this.allRows().length });
   }
 
   /**
-   * Re-attaches the egress proxy to every running box's network. Returns
-   * the ids of the boxes where that failed.
+   * Repairs the isolation of every running box. Returns the ids of the boxes
+   * where that failed.
+   *
+   * A box with an operation in flight is skipped, so the loop never waits.
+   * That operation is a start, which repairs the isolation itself, or a stop
+   * or a delete, after which there is nothing to repair. The state is read
+   * under the slot, so a box that stopped meanwhile is left alone.
    */
-  async reconcileProxyAttachments(): Promise<string[]> {
+  async reconcileIsolation(): Promise<string[]> {
     const warnings: string[] = [];
     for (const row of this.allRows()) {
-      if (row.status !== 'running') continue;
-      const ok = await dk.ensureProxyAttached(row.network_name, this.cfg);
+      if (row.status !== 'running' || this.slots.has(row.id)) continue;
+      const ok = await this.withSlot(row.id, async () => {
+        try {
+          if ((await runtime().state(row.id)) !== 'running') return true;
+          await runtime().ensure(this.boxSpec(row.id));
+          return await runtime().isolated(row.id);
+        } catch (err) {
+          log.box(row.id).warn('could not repair the isolation', { error: (err as Error).message });
+          return false;
+        }
+      });
       if (!ok) warnings.push(row.id);
     }
     return warnings;

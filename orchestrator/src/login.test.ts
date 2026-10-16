@@ -21,10 +21,9 @@ import {
   stripAnsi,
   visitUrlIn,
   type GitHubClient,
-  type LoginExec,
   type LoginExecSpec,
-  type LoginRuntime,
 } from './login.ts';
+import { setRuntime, type ProcessStream, type Runtime } from './runtime/runtime.ts';
 
 /** The escape byte, spelled rather than typed, so the source stays printable. */
 const ESC = String.fromCharCode(27);
@@ -35,11 +34,13 @@ function coloured(text: string): string {
 }
 
 /** One scripted command: what it prints, what it is told, and how it ends. */
-class FakeExec implements LoginExec {
+class FakeExec implements ProcessStream {
   /** What the command prints. */
-  readonly output = new PassThrough();
-  /** The command's stdin, present only for a terminal exec. */
-  readonly stdin: PassThrough | null;
+  readonly stdout = new PassThrough();
+  /** The stderr of the command, which stays empty. */
+  readonly stderr = new PassThrough().end() as PassThrough;
+  /** The command's stdin. Only a terminal exec reaches the flow with it. */
+  readonly stdin = new PassThrough();
   /** Everything the flow wrote back to the CLI. */
   input = '';
   /**
@@ -55,8 +56,7 @@ class FakeExec implements LoginExec {
   private settle: (code: number | null) => void = () => {};
 
   constructor(readonly spec: LoginExecSpec) {
-    this.stdin = spec.tty ? new PassThrough() : null;
-    this.stdin?.on('data', (chunk: Buffer) => {
+    this.stdin.on('data', (chunk: Buffer) => {
       this.input += chunk.toString('utf8');
       this.chunks.push(chunk.toString('utf8'));
     });
@@ -67,27 +67,30 @@ class FakeExec implements LoginExec {
 
   /** Writes text to the command's output. */
   print(text: string): void {
-    this.output.write(text);
+    this.stdout.write(text);
   }
 
   /** The command exits, which is what ends its output. */
   end(code = 0): void {
-    this.output.end();
+    this.stdout.end();
     this.settle(code);
   }
 
   /** Records the kill and ends the command without an exit code. */
   kill(): void {
     this.killed = true;
-    this.output.destroy();
+    this.stdout.destroy();
     this.settle(null);
   }
+
+  /** Ignores a resize. */
+  async resize(): Promise<void> {}
 }
 
-/** The daemon this suite pretends to talk to. */
+/** The runtime this suite pretends to talk to. */
 interface Fake {
-  /** The runtime handed to the login manager. */
-  runtime: LoginRuntime;
+  /** The runtime the login manager starts its containers on. */
+  runtime: Runtime;
   /** The ids of the started containers, in order. */
   started: string[];
   /** The ids of the removed containers, in order. */
@@ -96,27 +99,33 @@ interface Fake {
   execs: FakeExec[];
 }
 
-/** Creates a fake daemon with nothing started. */
+/** Creates a fake runtime with nothing started. */
 function fakeRuntime(): Fake {
   const fake: Fake = {
     started: [],
     removed: [],
     execs: [],
     runtime: {
-      async start(credentialId) {
+      async startLogin(credentialId: string) {
         const id = `login-${credentialId}-${fake.started.length + 1}`;
         fake.started.push(id);
-        return id;
+        return {
+          async spawn(cmd: readonly string[], opts: { env?: Record<string, string>; tty?: object } = {}) {
+            const spec: LoginExecSpec = {
+              cmd,
+              ...(opts.env ? { env: opts.env } : {}),
+              ...(opts.tty ? { tty: true } : {}),
+            };
+            const exec = new FakeExec(spec);
+            fake.execs.push(exec);
+            return exec;
+          },
+          async remove() {
+            fake.removed.push(id);
+          },
+        };
       },
-      async exec(_containerId, spec) {
-        const exec = new FakeExec(spec);
-        fake.execs.push(exec);
-        return exec;
-      },
-      async remove(containerId) {
-        fake.removed.push(containerId);
-      },
-    },
+    } as unknown as Runtime,
   };
   return fake;
 }
@@ -166,7 +175,8 @@ beforeEach(() => {
   db = openDb(dir);
   store = new CredentialStore(db, () => {}, []);
   fake = fakeRuntime();
-  logins = new LoginManager(store, fake.runtime, 5_000);
+  setRuntime(fake.runtime);
+  logins = new LoginManager(store, 5_000);
 });
 
 afterEach(() => {
@@ -388,7 +398,7 @@ test('a code the CLI refuses is shown, and the login stays open for another', as
 });
 
 test('a login that never finishes fails, and takes its container with it', async () => {
-  const quick = new LoginManager(store, fake.runtime, 10);
+  const quick = new LoginManager(store, 10);
   const loginId = quick.start('openai');
 
   await until('the timeout', () => quick.state('openai', loginId).state === 'failed');
@@ -464,7 +474,7 @@ test('the Dev Tunnels flow shows GitHub’s code and stores both tokens', async 
     { error: 'authorization_pending' },
     { access_token: 'ghu_access', refresh_token: 'ghr_refresh', expires_in: 28_800 },
   ]);
-  const manager = new LoginManager(store, fake.runtime, 5_000, github);
+  const manager = new LoginManager(store, 5_000, github);
   const loginId = manager.start('devtunnels');
 
   await until('the code', () => manager.state('devtunnels', loginId).state === 'awaiting_browser');
@@ -500,7 +510,7 @@ test('a Dev Tunnels login GitHub ends fails with GitHub’s reason', async () =>
   const { github } = fakeGitHub([
     { error: 'access_denied', error_description: 'The authorization request was denied.' },
   ]);
-  const manager = new LoginManager(store, fake.runtime, 5_000, github);
+  const manager = new LoginManager(store, 5_000, github);
   const loginId = manager.start('devtunnels');
 
   await until('the failure', () => manager.state('devtunnels', loginId).state === 'failed');
@@ -511,7 +521,7 @@ test('a Dev Tunnels login GitHub ends fails with GitHub’s reason', async () =>
 
 test('a cancelled Dev Tunnels login stops polling and stores nothing', async () => {
   const { github, calls } = fakeGitHub([]);
-  const manager = new LoginManager(store, fake.runtime, 5_000, github);
+  const manager = new LoginManager(store, 5_000, github);
   const loginId = manager.start('devtunnels');
   await until('the code', () => manager.state('devtunnels', loginId).state === 'awaiting_browser');
 

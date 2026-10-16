@@ -24,7 +24,7 @@ import {
   type FindReposRequest,
   type StatReply,
 } from '../../shared/files.ts';
-import * as dk from './docker.ts';
+import { runtime, RUN_TIMEOUT_MS } from './runtime/runtime.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 
@@ -40,8 +40,8 @@ import { log } from './log.ts';
 /** How long a request may wait for its reply, or for its next bytes. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
-/** How long the walk for the disk usage may take. */
-const SIZE_TIMEOUT_MS = 60_000;
+/** How long the walk for the disk usage may take: as long as a short command in the box. */
+const SIZE_TIMEOUT_MS = RUN_TIMEOUT_MS;
 
 /** The most bytes of a JSON reply. A full directory listing fits easily. */
 const MAX_JSON_REPLY = 4 * 1024 * 1024;
@@ -118,10 +118,10 @@ export interface FileServiceProcess {
 }
 
 /**
- * A function that starts the file service in a container. Tests replace the
- * default with one that needs no Docker.
+ * A function that starts the file service in a box. Tests replace the
+ * default with one that needs no runtime.
  */
-export type FileServiceSpawner = (containerId: string) => Promise<FileServiceProcess>;
+export type FileServiceSpawner = (boxId: string) => Promise<FileServiceProcess>;
 
 /**
  * The spawner this module ships with: one exec in the box, as the agent.
@@ -131,12 +131,10 @@ export type FileServiceSpawner = (containerId: string) => Promise<FileServicePro
  * service makes no TLS connections, so the variable is emptied, which makes
  * Node skip it.
  */
-const inBoxContainer: FileServiceSpawner = async (containerId) => {
-  const exec = await dk.spawnAdapterExec(containerId, [FILES_COMMAND], dk.WORKSPACE_DIR, [
-    'NODE_EXTRA_CA_CERTS=',
-  ]);
+const inBoxContainer: FileServiceSpawner = async (boxId) => {
+  const exec = await runtime().spawn(boxId, [FILES_COMMAND], { env: { NODE_EXTRA_CA_CERTS: '' } });
   exec.stderr.on('data', (chunk: Buffer) => {
-    log.warn('file service', { containerId, stderr: chunk.toString('utf8').trim() });
+    log.box(boxId).warn('file service', { stderr: chunk.toString('utf8').trim() });
   });
   // Node accepts a pair of Node streams here. Its type declarations know only
   // the web stream pair.
@@ -157,21 +155,21 @@ export function setFileServiceSpawnerForTests(next: FileServiceSpawner | null): 
   services.clear();
 }
 
-/** The file service of each container, by container id. */
+/** The file service of each box, by box id. */
 const services = new Map<string, FileService>();
 
 /**
- * The file service of a running container.
+ * The file service of a running box.
  *
  * The first request starts it, and it stays for the next requests. After the
- * connection ended, for example because the container stopped, the next
- * request starts it again.
+ * connection ended, for example because the box stopped, the next request
+ * starts it again.
  */
-export function fileService(containerId: string): FileService {
-  let service = services.get(containerId);
+export function fileService(boxId: string): FileService {
+  let service = services.get(boxId);
   if (!service) {
-    service = new FileService(containerId);
-    services.set(containerId, service);
+    service = new FileService(boxId);
+    services.set(boxId, service);
   }
   return service;
 }
@@ -254,7 +252,7 @@ const createReply = z.object({ name: component });
 /** The shape of a size. */
 const sizeReply = z.object({ bytes: z.number().int().nonnegative() });
 
-/** The file service of one container, and its connection while it lasts. */
+/** The file service of one box, and its connection while it lasts. */
 export class FileService {
   /** The connection, while it is open. */
   private session: ClientHttp2Session | null = null;
@@ -264,8 +262,8 @@ export class FileService {
   private process: FileServiceProcess | null = null;
 
   constructor(
-    /** The container the file service runs in. */
-    private readonly containerId: string,
+    /** The box the file service runs in. */
+    private readonly boxId: string,
   ) {}
 
   /** The plain files and directories in one directory of the workspace. */
@@ -436,15 +434,15 @@ export class FileService {
 
   /** Starts the file service and connects to it. */
   private async open(): Promise<ClientHttp2Session> {
-    const spawned = await spawner(this.containerId);
+    const spawned = await spawner(this.boxId);
     const session = connect('http://boxes-files', { createConnection: () => spawned.io });
     session.on('error', (err: Error) => {
-      log.debug('file service connection failed', { containerId: this.containerId, error: err.message });
+      log.box(this.boxId).debug('file service connection failed', { error: err.message });
     });
     session.on('close', () => {
       spawned.kill();
       if (this.session === session) this.session = null;
-      if (services.get(this.containerId) === this) services.delete(this.containerId);
+      if (services.get(this.boxId) === this) services.delete(this.boxId);
     });
     this.session = session;
     this.process = spawned;

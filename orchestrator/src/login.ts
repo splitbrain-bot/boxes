@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Readable, Writable } from 'node:stream';
+import { finished, PassThrough, type Readable, type Writable } from 'node:stream';
 import type { CredentialId, LoginState } from '../../shared/types.ts';
 import {
   DEVTUNNELS_CLIENT_ID,
@@ -9,8 +9,8 @@ import {
   type CredentialStore,
   type TokenPost,
 } from './credentials.ts';
-import * as dk from './docker.ts';
 import { HttpError } from './http-error.ts';
+import { runtime, type Login } from './runtime/runtime.ts';
 import { Screen } from './screen.ts';
 import { log } from './log.ts';
 
@@ -114,6 +114,12 @@ export function hasLoginFlow(id: CredentialId): boolean {
 
 // --- the container and exec layer -------------------------------------------
 
+/**
+ * The terminal size of an interactive login. A login URL is longer than the
+ * default 80 columns, and a wrapped URL reads as two lines.
+ */
+const LOGIN_TERMINAL = { cols: 400, rows: 50 };
+
 /** One command a login runs in its container. */
 export interface LoginExecSpec {
   /** The argument vector. */
@@ -124,7 +130,10 @@ export interface LoginExecSpec {
   tty?: boolean;
 }
 
-/** A running login command: what it prints, what it can be told, and its end. */
+/**
+ * A running login command: what it prints, what it can be told, and its end.
+ * Which stream a CLI prints its URL on is not an API, so the flows read both.
+ */
 export interface LoginExec {
   /** stdout and stderr merged, in the order they were written. */
   output: Readable;
@@ -137,44 +146,27 @@ export interface LoginExec {
 }
 
 /**
- * Everything a login needs from Docker. An interface, so tests can drive the
- * flows over scripted streams.
+ * Runs one command in a login container.
+ *
+ * `tty` is for `claude setup-token`, an interactive UI that refuses to run
+ * without a terminal and reads the code from stdin. Under a TTY the output is
+ * one raw stream, with the CLI's redraws and escape sequences.
  */
-export interface LoginRuntime {
-  /** Creates and starts the throwaway container, and returns its id. */
-  start(credentialId: CredentialId): Promise<string>;
-  /** Runs one command in the container. */
-  exec(containerId: string, spec: LoginExecSpec): Promise<LoginExec>;
-  /** Removes it, whatever state it is in. Never throws. */
-  remove(containerId: string): Promise<void>;
-}
-
-/** The real thing: a container from the box image, driven over the socket. */
-export function dockerLoginRuntime(image: string): LoginRuntime {
-  return {
-    async start(credentialId) {
-      const id = await dk.createLoginContainer({ image, credentialId });
-      await dk.startContainer(id);
-      return id;
-    },
-    async exec(containerId, spec) {
-      const exec = await dk.spawnLoginExec(containerId, spec.cmd, {
-        ...(spec.env ? { env: spec.env } : {}),
-        ...(spec.tty ? { tty: true } : {}),
-      });
-      return exec;
-    },
-    async remove(containerId) {
-      try {
-        await dk.removeContainer(containerId);
-      } catch (err) {
-        log.warn('could not remove a login container', {
-          container: containerId,
-          error: (err as Error).message,
-        });
-      }
-    },
-  };
+async function spawnLogin(login: Login, spec: LoginExecSpec): Promise<LoginExec> {
+  const proc = await login.spawn(spec.cmd, {
+    ...(spec.env ? { env: spec.env } : {}),
+    ...(spec.tty ? { tty: LOGIN_TERMINAL } : {}),
+  });
+  const output = new PassThrough();
+  let open = 2;
+  for (const stream of [proc.stdout, proc.stderr]) {
+    stream.pipe(output, { end: false });
+    finished(stream, () => {
+      open -= 1;
+      if (open === 0) output.end();
+    });
+  }
+  return { output, stdin: spec.tty ? proc.stdin : null, exited: proc.exited, kill: () => proc.kill() };
 }
 
 // --- GitHub, for the device login ------------------------------------------
@@ -216,7 +208,7 @@ interface Flow {
   /** Where the login has got to. */
   state: LoginState;
   /** The login container, or null before it starts and after removal. */
-  containerId: string | null;
+  login: Login | null;
   /** The running CLI, or null. */
   exec: LoginExec | null;
   /** Set once the state is `done` or `failed`; nothing moves it afterwards. */
@@ -240,18 +232,11 @@ export class LoginManager {
   constructor(
     /** Where a finished login stores its credential. */
     private readonly credentials: CredentialStore,
-    /** Runs the login containers and commands. */
-    private runtime: LoginRuntime,
     /** How long a login may take, in milliseconds. */
     private readonly timeoutMs: number = LOGIN_TIMEOUT_MS,
     /** Where the Dev Tunnels login talks to GitHub. */
     private readonly github: GitHubClient = gitHubClient,
   ) {}
-
-  /** Test seam: installs a runtime the tests script. */
-  setRuntimeForTests(runtime: LoginRuntime): void {
-    this.runtime = runtime;
-  }
 
   /**
    * Starts a login and returns the id the page polls. It returns before the
@@ -271,7 +256,7 @@ export class LoginManager {
       id: randomUUID(),
       credentialId,
       state: { state: 'starting' },
-      containerId: null,
+      login: null,
       exec: null,
       settled: false,
       refusal: null,
@@ -362,7 +347,7 @@ export class LoginManager {
       return;
     }
     try {
-      flow.containerId = await this.runtime.start(flow.credentialId);
+      flow.login = await runtime().startLogin(flow.credentialId);
       if (flow.settled) return;
       if (flow.credentialId === 'openai') await this.codexLogin(flow);
       else await this.claudeLogin(flow);
@@ -371,10 +356,10 @@ export class LoginManager {
     } finally {
       // The container always goes, as its home holds new credential material.
       this.release(flow);
-      if (flow.containerId) {
-        const containerId = flow.containerId;
-        flow.containerId = null;
-        await this.runtime.remove(containerId);
+      if (flow.login) {
+        const login = flow.login;
+        flow.login = null;
+        await login.remove();
       }
     }
   }
@@ -387,7 +372,7 @@ export class LoginManager {
    * reason on stderr.
    */
   private async codexLogin(flow: Flow): Promise<void> {
-    const exec = await this.runtime.exec(flow.containerId!, {
+    const exec = await spawnLogin(flow.login!, {
       // The Codex CLI fails when CODEX_HOME does not exist.
       cmd: ['bash', '-lc', `mkdir -p "$CODEX_HOME" && exec codex login --device-auth`],
       env: { CODEX_HOME },
@@ -413,7 +398,7 @@ export class LoginManager {
       return;
     }
 
-    const read = await this.runtime.exec(flow.containerId!, {
+    const read = await spawnLogin(flow.login!, {
       cmd: ['cat', `${CODEX_HOME}/auth.json`],
     });
     const document = await readOutput(read.output, () => {});
@@ -527,7 +512,7 @@ export class LoginManager {
    * rebuilt screen, as the UI redraws only the cells it changes.
    */
   private async claudeLogin(flow: Flow): Promise<void> {
-    const exec = await this.runtime.exec(flow.containerId!, {
+    const exec = await spawnLogin(flow.login!, {
       cmd: ['bash', '-lc', 'exec claude setup-token'],
       env: { CLAUDE_CONFIG_DIR },
       tty: true,
@@ -635,9 +620,9 @@ export class LoginManager {
    */
   private abort(flow: Flow, reason: string): void {
     this.fail(flow, reason);
-    const containerId = flow.containerId;
-    flow.containerId = null;
-    if (containerId) void this.runtime.remove(containerId);
+    const login = flow.login;
+    flow.login = null;
+    if (login) void login.remove();
     if (this.flows.get(flow.credentialId) === flow) this.flows.delete(flow.credentialId);
   }
 

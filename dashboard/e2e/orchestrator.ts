@@ -44,6 +44,7 @@ import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
 import { setLogLevel } from '../../orchestrator/src/log.ts';
 import type { LoginExecSpec } from '../../orchestrator/src/login.ts';
 import type { BoxManager } from '../../orchestrator/src/boxes.ts';
+import { runtime } from '../../orchestrator/src/runtime/runtime.ts';
 import * as ws from '../../orchestrator/src/workspaces.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { FAKE_SELF_CONTAINER, installFakeDocker, type FakeDocker } from './fake-docker.ts';
@@ -593,21 +594,14 @@ function createBox(
   const cfg: Config = app.cfg;
   const id = spec.id ?? DEFAULT_BOX.id;
   const now = Date.now();
-  const containerId = `box-${id}`;
-  const index = (db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }).n;
   // A running box is set up already, so bringing it up runs no setup.
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, image, container_id,
-       network_name, subnet, review_base_rev, status, agent_set_id, ws_token,
+    `INSERT INTO boxes (id, name, profile, review_base_rev, status, agent_set_id, ws_token,
        created_at, last_active_at, ready_at)
-     VALUES (?, ?, 'DEFAULT', ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)`,
+     VALUES (?, ?, 'DEFAULT', NULL, ?, NULL, ?, ?, ?, ?)`,
   ).run(
     id,
     spec.name ?? DEFAULT_BOX.name,
-    cfg.BOX_IMAGE,
-    containerId,
-    `bn-${id}`,
-    `10.200.${index}.0/24`,
     spec.status ?? 'running',
     WS_TOKEN,
     now,
@@ -618,7 +612,7 @@ function createBox(
   ws.createWorkspace(cfg.DATA_DIR, id);
   ws.createHome(cfg.DATA_DIR, id);
   ws.createNix(cfg.DATA_DIR, id);
-  docker.addContainer(containerId, spec.containerRunning ?? spec.status !== 'stopped');
+  docker.addContainer(`box-${id}`, spec.containerRunning ?? spec.status !== 'stopped');
 
   const upstream = upstreamFor(id);
   upstream.canFork = spec.canFork ?? true;
@@ -793,62 +787,49 @@ function installHooks(
  * ends it with a status. A `cat` of the file Codex wrote answers with
  * {@link LOGIN_DOCUMENT}, so a finished Codex login stores an account.
  */
-function installLoginRuntime(app: Orchestrator): TestLogin[] {
+function installLoginRuntime(): TestLogin[] {
   const logins: TestLogin[] = [];
-  const byContainer = new Map<string, TestLogin>();
-  app.logins.setRuntimeForTests({
-    start: async (id) => {
-      const containerId = `login-${logins.length + 1}`;
-      const output = new PassThrough();
-      let exit: (code: number | null) => void = () => {};
-      const exited = new Promise<number | null>((resolve) => {
-        exit = resolve;
-      });
-      const login: TestLogin & { output: PassThrough; exited: Promise<number | null> } = {
-        id,
-        spec: { cmd: [] },
-        input: '',
-        cancelled: false,
-        output,
-        exited,
-        print: (text) => output.write(text),
-        exit: (code) => {
-          output.end();
-          exit(code);
-        },
-      };
-      logins.push(login);
-      byContainer.set(containerId, login);
-      return containerId;
-    },
-    exec: async (containerId, spec) => {
-      const login = byContainer.get(containerId) as
-        | (TestLogin & { output: PassThrough; exited: Promise<number | null> })
-        | undefined;
-      if (!login) throw new Error(`no login container ${containerId}`);
-      if (spec.cmd[0] === 'cat') {
-        // What the Codex CLI left behind, read back once it has exited.
-        const output = new PassThrough();
-        output.end(LOGIN_DOCUMENT);
-        return { output, stdin: null, exited: Promise.resolve(0), kill: () => undefined };
-      }
-      login.spec = spec;
-      const stdin = spec.tty ? new PassThrough() : null;
-      stdin?.on('data', (chunk: Buffer) => {
-        login.input += chunk.toString('utf8');
-      });
-      return {
-        output: login.output,
-        stdin,
-        exited: login.exited,
-        kill: () => login.exit(null),
-      };
-    },
-    remove: async (containerId) => {
-      const login = byContainer.get(containerId);
-      if (login) login.cancelled = true;
-    },
-  });
+  /** A finished stream, for the stderr the stand-in CLIs never write. */
+  const silent = (): PassThrough => new PassThrough().end() as PassThrough;
+  runtime().startLogin = async (id) => {
+    const output = new PassThrough();
+    let exit: (code: number | null) => void = () => {};
+    const exited = new Promise<number | null>((resolve) => {
+      exit = resolve;
+    });
+    const login: TestLogin = {
+      id: id as CredentialId,
+      spec: { cmd: [] },
+      input: '',
+      cancelled: false,
+      print: (text) => output.write(text),
+      exit: (code) => {
+        output.end();
+        exit(code);
+      },
+    };
+    logins.push(login);
+    return {
+      spawn: async (cmd, opts = {}) => {
+        const stdin = new PassThrough();
+        const pipes = { stdin, stderr: silent(), resize: async () => undefined };
+        if (cmd[0] === 'cat') {
+          // What the Codex CLI left behind, read back once it has exited.
+          const document = new PassThrough();
+          document.end(LOGIN_DOCUMENT);
+          return { ...pipes, stdout: document, exited: Promise.resolve(0), kill: () => undefined };
+        }
+        login.spec = { cmd, ...(opts.env ? { env: opts.env } : {}), ...(opts.tty ? { tty: true } : {}) };
+        stdin.on('data', (chunk: Buffer) => {
+          login.input += chunk.toString('utf8');
+        });
+        return { ...pipes, stdout: output, exited, kill: () => login.exit(null) };
+      },
+      remove: async () => {
+        login.cancelled = true;
+      },
+    };
+  };
   return logins;
 }
 
@@ -982,7 +963,7 @@ export async function startOrchestrator(
   attachTerminalEndpoint(app, db);
 
   installHooks(app, state, calls);
-  const logins = installLoginRuntime(app);
+  const logins = installLoginRuntime();
 
   // As at boot: creating a box fails until the egress policy exists.
   await app.egress.prepare();

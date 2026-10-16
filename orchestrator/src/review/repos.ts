@@ -112,12 +112,12 @@ export function inWorkspace(repo: Repo, path: string): string {
 /**
  * Where one repository's git runs, from its workspace-relative path.
  *
- * The container holds the workspace at `box.workspaceDir`, so the repository
+ * The box holds the workspace at `box.workspaceDir`, so the repository
  * root inside the box is the two joined.
  */
 export function gitTarget(box: GitBox, repoPath: string): GitTarget {
   return {
-    containerId: box.containerId,
+    boxId: box.boxId,
     dir: repoPath === '' ? box.workspaceDir : `${box.workspaceDir}/${repoPath}`,
   };
 }

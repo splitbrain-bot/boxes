@@ -16,10 +16,11 @@ import {
   type BoxRow,
   type ThreadRow,
 } from '../db.ts';
-import * as dk from '../docker.ts';
 import { DEFAULT_HARNESS, harness, HARNESS_IDS, type HarnessId } from '../harness.ts';
 import { log, type Logger } from '../log.ts';
 import type { NotifyKind, Notifier } from '../notify.ts';
+import { boxProcesses, killInBox, type ContainerProcess } from '../processes.ts';
+import { runtime } from '../runtime/runtime.ts';
 import { Activity } from './activity.ts';
 import {
   AdapterConnection,
@@ -166,7 +167,7 @@ export class UpstreamBox implements AdapterHost {
   /** One adapter process per harness a thread of this box runs. */
   private readonly connections = new Map<HarnessId, AdapterConnection>();
   /** The container start, shared by every connection that wants one. */
-  private containerStarting: Promise<string> | null = null;
+  private containerStarting: Promise<void> | null = null;
   /** Who each adapter update goes to. */
   private readonly downstreams: Broadcast;
   /** Whether this box still has work running in it. */
@@ -201,11 +202,8 @@ export class UpstreamBox implements AdapterHost {
     private readonly notifier: Notifier,
     /** Receives the box status reported by the adapter connections. */
     private readonly onStatusChange: (status: BoxRow['status']) => void,
-    /**
-     * Brings the box up and makes it ready, and returns the id of its
-     * container. It repairs the container first, so the id can be a new one.
-     */
-    private readonly startBox: () => Promise<string>,
+    /** Brings the box up and makes it ready. It repairs the container first. */
+    private readonly startBox: () => Promise<void>,
   ) {
     this.slog = log.box(boxId);
     this.downstreams = new Broadcast(boxId, (thread) => this.threadState(thread));
@@ -339,7 +337,7 @@ export class UpstreamBox implements AdapterHost {
    * Brings the box up, ready. Concurrent callers share one start, and a later
    * call starts it again.
    */
-  ensureContainer(): Promise<string> {
+  ensureContainer(): Promise<void> {
     if (!this.containerStarting) {
       this.containerStarting = this.startBox().finally(() => {
         this.containerStarting = null;
@@ -536,14 +534,9 @@ export class UpstreamBox implements AdapterHost {
    * @returns How many processes got TERM. Zero when nothing was running.
    */
   async stopBoxWork(): Promise<number> {
-    const containerId = this.row().container_id;
-    if (!containerId) return 0;
-    if ((await dk.containerState(containerId)) !== 'running') return 0;
+    if ((await runtime().state(this.boxId)) !== 'running') return 0;
 
-    const doomed = workPids(
-      await dk.containerProcesses(containerId),
-      ALL_HARNESSES,
-    );
+    const doomed = workPids(await boxProcesses(this.boxId), ALL_HARNESSES);
     if (doomed.length === 0) {
       // The card shows an outdated reading, so a fresh one corrects it.
       void this.background.refresh();
@@ -551,10 +544,10 @@ export class UpstreamBox implements AdapterHost {
     }
 
     this.slog.info('stopping everything running in the box', { pids: doomed });
-    await dk.killInContainer(containerId, 'TERM', doomed);
+    await killInBox(this.boxId, 'TERM', doomed);
     // No reading yet, because the signalled processes are likely still in
     // the table. The escalation takes one when it settles.
-    this.escalate(containerId);
+    this.escalate();
     return doomed.length;
   }
 
@@ -562,18 +555,15 @@ export class UpstreamBox implements AdapterHost {
    * Sends KILL, after {@link TERM_GRACE_MS}, to whatever work is still
    * running. It reads the work again rather than reusing the TERM pids.
    */
-  private escalate(containerId: string): void {
+  private escalate(): void {
     const timer = setTimeout(() => {
       this.escalations.delete(timer);
       void (async () => {
         try {
-          const left = workPids(
-            await dk.containerProcesses(containerId),
-            ALL_HARNESSES,
-          );
+          const left = workPids(await boxProcesses(this.boxId), ALL_HARNESSES);
           if (left.length === 0) return;
           this.slog.info('work in the box ignored TERM; killing', { pids: left });
-          await dk.killInContainer(containerId, 'KILL', left);
+          await killInBox(this.boxId, 'KILL', left);
         } catch (err) {
           this.slog.warn('could not finish stopping what the box was running', {
             error: (err as Error).message,
@@ -587,15 +577,10 @@ export class UpstreamBox implements AdapterHost {
     this.escalations.add(timer);
   }
 
-  /**
-   * What is running in this box's container, for the probe. Null when the box
-   * has no container or it is not running.
-   */
-  private async containerProcesses(): Promise<dk.ContainerProcess[] | null> {
-    const containerId = this.row().container_id;
-    if (!containerId) return null;
-    if ((await dk.containerState(containerId)) !== 'running') return null;
-    return dk.containerProcesses(containerId);
+  /** The processes in this box, for the probe. Null when the box is not running. */
+  private async containerProcesses(): Promise<ContainerProcess[] | null> {
+    if ((await runtime().state(this.boxId)) !== 'running') return null;
+    return boxProcesses(this.boxId);
   }
 
   /** The threads of this box the agent is talking on. */

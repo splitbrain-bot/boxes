@@ -39,7 +39,7 @@ function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop:
  * no attached browser, no open terminal, no background task still believed to
  * be running, and no activity for IDLE_STOP_MINUTES. It never deletes a box.
  *
- * The same tick removes the Docker objects and directories of boxes that no
+ * The same tick removes the runtime objects and the storage of boxes that no
  * longer exist. No row names them, so reconcile() at boot cannot find them.
  */
 export function startReaper(
@@ -132,9 +132,9 @@ export function startImageRefresher(
 
 /**
  * Starts the loop that re-asserts the proxy's state every minute, and returns
- * a handle that stops it. The state is the proxy's attachment to each box
- * network, and its policy. A proxy restart loses the policy, and a recreate
- * by compose loses the attachments.
+ * a handle that stops it. The state is the isolation of each running box,
+ * which connects it to the proxy, and the proxy's policy. A proxy restart
+ * loses the policy, and a recreate by compose loses the connections.
  */
 export function startProxyReconciler(
   manager: BoxManager,
@@ -142,10 +142,10 @@ export function startProxyReconciler(
   onWarnings: (ids: string[]) => void,
 ): { stop: () => void } {
   const tick = async (): Promise<void> => {
-    const warnings = await manager.reconcileProxyAttachments();
+    const warnings = await manager.reconcileIsolation();
     onWarnings(warnings);
     if (warnings.length > 0) {
-      log.warn('boxes missing egress proxy attachment', { boxes: warnings });
+      log.warn('boxes with incomplete network isolation', { boxes: warnings });
     }
     try {
       await egress.sync();
