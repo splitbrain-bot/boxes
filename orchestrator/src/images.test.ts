@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Docker from 'dockerode';
+import type Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { type Config, loadConfig } from './config.ts';
 import * as dk from './docker.ts';

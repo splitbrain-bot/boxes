@@ -62,7 +62,7 @@ import {
   upsertPushSubscription,
 } from './db.ts';
 import { EgressManager } from './egress.ts';
-import { fileService, isRefusedPath } from './files.ts';
+import { type FileStream, fileService, isRefusedPath } from './files.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
@@ -119,7 +119,7 @@ function cacheControlFor(path: string): string {
  * still refuses every script it does not know. Editing that script means
  * editing this.
  */
-const THEME_SCRIPT_HASH = "'sha256-4AdoNi/wvSpHLY3qRCPU3bCPtiW7L8VuMIcRP0Slv5s='";
+const THEME_SCRIPT_HASH = "'sha256-CnZHNPAF6WOocb4/bNl9c3BRy4DGumb4xxVfhF7huZc='";
 
 /** The paths that are served while the orchestrator starts. */
 const BOOT_OPEN_PATHS = new Set(['/api/boot', '/healthz', '/readyz']);
@@ -611,7 +611,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     }
 
     const target = await manager.execTarget(id);
-    let file;
+    let file: FileStream;
     try {
       file = await fileService(target.boxId).readStream(`${ATTACHMENTS_DIR}/${name}`);
     } catch (err) {

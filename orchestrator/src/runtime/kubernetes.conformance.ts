@@ -19,7 +19,7 @@ import { connect, KubernetesRuntime, names } from './kubernetes.ts';
 const CONTROL_PORT = 3129;
 
 /** The kubeconfig context the suite runs against. */
-const context = process.env['BOXES_CONFORMANCE_CONTEXT'];
+const context = process.env.BOXES_CONFORMANCE_CONTEXT;
 
 if (context) {
   runtimeConformance('Kubernetes', async () => {

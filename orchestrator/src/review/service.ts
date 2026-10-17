@@ -7,6 +7,7 @@ import type {
 } from '../../../shared/types.ts';
 import type { BoxRow, Db } from '../db.ts';
 import {
+  type FileRead,
   type FileService,
   FileServiceError,
   type FileStream,
@@ -513,7 +514,7 @@ export class ReviewService {
   /** Reads and parses REVIEW.md, or an empty review when there is none. */
   private async read(files: FileService): Promise<ReviewRead> {
     const empty = (): Review => ({ data: new Map(), started: '' });
-    let read;
+    let read: FileRead;
     try {
       read = await files.read(REVIEW_FILE, MAX_REVIEW_BYTES);
     } catch (err) {

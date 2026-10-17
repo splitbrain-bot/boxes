@@ -50,7 +50,7 @@ const CONTROL_PORT = portFromEnv('CONTROL_PORT', 3129);
  * Address the control channel binds to. Left unset it is derived from the
  * default route, which is the compose network and not any box's.
  */
-const CONTROL_BIND = process.env['CONTROL_BIND']?.trim() ?? '';
+const CONTROL_BIND = process.env.CONTROL_BIND?.trim() ?? '';
 if (CONTROL_BIND !== '' && net.isIP(CONTROL_BIND) === 0) {
   fatalConfig(`CONTROL_BIND must be an IP address, not ${CONTROL_BIND}`);
 }

@@ -1,6 +1,6 @@
 import { XIcon } from 'lucide-react';
 import { Dialog as SheetPrimitive } from 'radix-ui';
-import * as React from 'react';
+import type * as React from 'react';
 import { useOverlayState } from '@/hooks/use-history-overlay';
 import { cn } from '@/lib/utils';
 

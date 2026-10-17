@@ -115,7 +115,7 @@ beforeEach(async () => {
   killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
   // Before config(), which reads DATA_DIR once and keeps it for the process.
-  process.env['DATA_DIR'] = dir;
+  process.env.DATA_DIR = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
   // The setup of a box writes the CA of the egress proxy into the home.
@@ -596,8 +596,8 @@ test('a deployment that cannot serve boxes is live but not ready', async () => {
   const body = ready.json() as { ready: boolean; checks: Record<string, boolean> };
   assert.equal(body.ready, false);
   // Of the three checks, only the database passes here.
-  assert.equal(body.checks['database'], true);
-  assert.equal(body.checks['egress'], false);
+  assert.equal(body.checks.database, true);
+  assert.equal(body.checks.egress, false);
 
   // Liveness says this process serves. A probe must not restart an
   // orchestrator that is only unconfigured.
@@ -621,18 +621,18 @@ test('every response is logged with what was asked and what came back', async ()
 
   const logged = lines
     .map((line) => JSON.parse(line) as Record<string, unknown>)
-    .filter((line) => line['msg'] === 'request');
+    .filter((line) => line.msg === 'request');
 
-  const ok = logged.find((line) => line['status'] === 200);
-  assert.equal(ok?.['method'], 'GET');
+  const ok = logged.find((line) => line.status === 200);
+  assert.equal(ok?.method, 'GET');
   // The query string is left off: it carries what the reader typed.
-  assert.equal(ok?.['path'], '/api/boxes');
-  assert.equal(typeof ok?.['ms'], 'number');
+  assert.equal(ok?.path, '/api/boxes');
+  assert.equal(typeof ok?.ms, 'number');
 
   // A refusal is the caller's problem, not the deployment's, so it is logged
   // as a warning.
-  const refused = logged.find((line) => line['status'] === 404);
-  assert.equal(refused?.['level'], 'warn');
+  const refused = logged.find((line) => line.status === 404);
+  assert.equal(refused?.level, 'warn');
 });
 
 // --- Web Push registration --------------------------------------------------
@@ -678,7 +678,7 @@ test('a browser registers once however many times it subscribes', async () => {
   // Re-subscribing hands back the same endpoint with fresh keys, which has to
   // update the row rather than add one.
   const rotated = subscription();
-  (rotated['keys'] as Record<string, string>)['auth'] = Buffer.alloc(16, 1).toString('base64url');
+  (rotated.keys as Record<string, string>).auth = Buffer.alloc(16, 1).toString('base64url');
   await orchestrator.app.inject({
     method: 'POST',
     url: '/api/push/subscribe',
@@ -687,7 +687,7 @@ test('a browser registers once however many times it subscribes', async () => {
 
   const rows = subscriptions();
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!['auth'], (rotated['keys'] as Record<string, string>)['auth']);
+  assert.equal(rows[0]!.auth, (rotated.keys as Record<string, string>).auth);
 });
 
 test('the health probe counts subscribed browsers', async () => {
@@ -720,7 +720,7 @@ test('an endpoint the orchestrator must not be aimed at is refused', async () =>
 
 test('a subscription with keys of the wrong size is refused', async () => {
   const bad = subscription();
-  (bad['keys'] as Record<string, string>)['p256dh'] = Buffer.alloc(32).toString('base64url');
+  (bad.keys as Record<string, string>).p256dh = Buffer.alloc(32).toString('base64url');
   const res = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/push/subscribe',
@@ -1196,7 +1196,7 @@ test('a login is started, polled, and cancelled over its own routes', async () =
       url: `/api/credentials/openai/login/${loginId}`,
     });
     state = res.json() as Record<string, unknown>;
-    return state['state'] === 'awaiting_browser';
+    return state.state === 'awaiting_browser';
   });
   assert.deepEqual(state, {
     state: 'awaiting_browser',

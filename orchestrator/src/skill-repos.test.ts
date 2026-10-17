@@ -37,7 +37,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync(
     'git',
     ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args],
-    { cwd, env: { PATH: process.env['PATH'], GIT_CONFIG_GLOBAL: '/dev/null' }, encoding: 'utf8' },
+    { cwd, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null' }, encoding: 'utf8' },
   ).trim();
 }
 

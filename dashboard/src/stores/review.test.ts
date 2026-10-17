@@ -162,7 +162,7 @@ test('opening a folder asks for that folder and nothing else', async () => {
 
   assert.equal(hits('/review/dir'), before + 1);
   assert.deepEqual(useReview.getState().expanded, ['src']);
-  assert.equal(useReview.getState().dirs['src']?.entries.length, 1);
+  assert.equal(useReview.getState().dirs.src?.entries.length, 1);
 });
 
 test('a folder that is closed and opened again is not refetched', async () => {

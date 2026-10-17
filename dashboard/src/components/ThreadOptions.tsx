@@ -160,7 +160,7 @@ export function useThreadOptions(): ThreadOptionsState {
  * @param config The block's chosen values.
  * @returns The value to select, or an empty string without choices.
  */
-function valueOf(option: ThreadConfigOption, config: Record<string, string>): string {
+function selectedValue(option: ThreadConfigOption, config: Record<string, string>): string {
   const offered = (value: string | undefined): boolean =>
     value !== undefined && (option.options?.some((entry) => entry.value === value) ?? false);
   const chosen = config[option.id];
@@ -212,7 +212,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
       {/* A harness that cannot run stays in the list, disabled, with its reason. */}
       <div className="flex flex-col gap-1 text-xs">
         <span className="font-medium">Agent</span>
-        <div role="group" aria-label="Agent" className="flex flex-wrap gap-1.5">
+        <fieldset aria-label="Agent" className="flex flex-wrap gap-1.5">
           {harnesses.map((harness) => {
             const reason = unavailableReason(harness);
             return (
@@ -230,7 +230,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
               </Button>
             );
           })}
-        </div>
+        </fieldset>
         {blocked.length > 0 ? (
           <p className="text-muted-foreground">
             {blocked.map((harness) => harness.label).join(' and ')} cannot run a turn until a
@@ -261,7 +261,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         <Setting key={option.id} name={optionName(option)} description={option.description}>
           <ConfigSelect
             option={option}
-            value={valueOf(option, config)}
+            value={selectedValue(option, config)}
             className="mt-0.5 py-1.5"
             onSet={(value) => state.setConfig(option.id, value)}
           />

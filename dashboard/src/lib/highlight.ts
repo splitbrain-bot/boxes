@@ -1,4 +1,4 @@
-import type { HighlighterCore, ThemedToken } from 'shiki/core';
+import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core';
 
 /**
  * Client-side syntax highlighting for the review's code pane.
@@ -24,7 +24,7 @@ export interface Token {
 }
 
 /** The grammars worth loading, by the language name the API reports. */
-const GRAMMARS: Record<string, () => Promise<unknown>> = {
+const GRAMMARS: Record<string, LanguageInput> = {
   typescript: () => import('@shikijs/langs/typescript'),
   javascript: () => import('@shikijs/langs/javascript'),
   json: () => import('@shikijs/langs/json'),
@@ -107,8 +107,7 @@ async function loadGrammar(language: string): Promise<void> {
   if (!pending) {
     pending = (async () => {
       const core = await highlighter();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await core.loadLanguage((await grammar()) as any);
+      await core.loadLanguage(grammar);
     })();
     loaded.set(language, pending);
   }

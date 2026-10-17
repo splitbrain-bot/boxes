@@ -13,7 +13,7 @@ import {
 let browser: Browser | null = null;
 
 /** The Chromium binary CHROMIUM_PATH names. It overrides every other choice. */
-const NAMED_CHROMIUM = process.env['CHROMIUM_PATH'];
+const NAMED_CHROMIUM = process.env.CHROMIUM_PATH;
 
 /** The Chromium binary the box image ships. Launching it needs no download. */
 const IMAGE_CHROMIUM = '/usr/local/bin/chromium';

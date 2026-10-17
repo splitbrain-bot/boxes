@@ -198,7 +198,7 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   // read-only rootfs allows.
   assert.equal(cli.spec.tty, undefined);
   assert.match(cli.spec.cmd.join(' '), /codex login --device-auth/);
-  assert.equal(cli.spec.env?.['CODEX_HOME'], '/home/agent/.codex');
+  assert.equal(cli.spec.env?.CODEX_HOME, '/home/agent/.codex');
 
   // Coloured and split across reads, as the CLI writes it. The reader would
   // join writes it has not read yet, so each piece is flushed on its own.

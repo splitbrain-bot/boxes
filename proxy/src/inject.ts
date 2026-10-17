@@ -38,7 +38,7 @@ const URL_LINKED_HEADERS = ['host', ':authority'];
  * out here because the engine does not export its callback result type.
  */
 type RequestDecision =
-  | void
+  | undefined
   | { headers: Headers }
   | {
       response: {

@@ -4,6 +4,7 @@ import {
   constants,
   createReadStream,
   createWriteStream,
+  type Dirent,
   fchmodSync,
   fstatSync,
   linkSync,
@@ -82,7 +83,7 @@ function asFileError(err: unknown, relPath: string): FileError {
  */
 export function listDir(root: string, relDir: string): ListReply {
   const dir = resolved(root, relDir);
-  let entries;
+  let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
   } catch (err) {
@@ -120,7 +121,7 @@ export function findRepos(root: string, limits: FindReposRequest): FindReposRepl
       if (scanned >= limits.maxScanned || found.length >= limits.maxRepos) return { paths: found };
       scanned++;
 
-      let entries;
+      let entries: Dirent[];
       try {
         entries = readdirSync(dir.absolute, { withFileTypes: true });
       } catch {
@@ -409,7 +410,7 @@ async function directorySize(root: string): Promise<number> {
   const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
-    let entries;
+    let entries: Dirent[];
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch (err) {

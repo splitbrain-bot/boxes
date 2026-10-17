@@ -126,9 +126,9 @@ test('vapidHeader signs a JWT the public key verifies', () => {
   const claims = JSON.parse(b64(encodedClaims!).toString('utf8')) as Record<string, unknown>;
   // The audience is the push service's origin. The endpoint path is a
   // capability and stays out of the token.
-  assert.equal(claims['aud'], 'https://push.example.net');
-  assert.equal(claims['sub'], 'mailto:a@b.c');
-  assert.ok((claims['exp'] as number) > Date.now() / 1000);
+  assert.equal(claims.aud, 'https://push.example.net');
+  assert.equal(claims.sub, 'mailto:a@b.c');
+  assert.ok((claims.exp as number) > Date.now() / 1000);
 
   const publicKey = b64(keys.publicKey);
   const verifier = createPublicKey({

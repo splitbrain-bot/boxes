@@ -127,7 +127,7 @@ export async function fetchRepo(
  */
 function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    PATH: process.env['PATH'],
+    PATH: process.env.PATH,
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
@@ -135,9 +135,9 @@ function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
   };
   if (token && new URL(url).hostname === 'github.com') {
     const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
-    env['GIT_CONFIG_COUNT'] = '1';
-    env['GIT_CONFIG_KEY_0'] = 'http.https://github.com/.extraheader';
-    env['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${basic}`;
+    env.GIT_CONFIG_COUNT = '1';
+    env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader';
+    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`;
   }
   return env;
 }

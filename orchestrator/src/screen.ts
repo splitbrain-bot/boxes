@@ -72,7 +72,8 @@ export class Screen {
 
   /** Puts one character where the cursor is, and steps over it. */
   private put(ch: string): void {
-    const cells = (this.rows[this.row] ??= []);
+    const cells = this.rows[this.row] ?? [];
+    this.rows[this.row] = cells;
     for (let c = cells.length; c < this.col; c++) cells[c] = ' ';
     cells[this.col] = ch;
     this.col += 1;

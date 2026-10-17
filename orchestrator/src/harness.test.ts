@@ -72,8 +72,8 @@ test('env() is a fresh object each call, so a caller can edit what it gets', () 
   const first = HARNESSES.claude.env('a', 'token');
   const second = HARNESSES.claude.env('b', 'token');
   assert.notEqual(first, second);
-  assert.equal(first['CLAUDE_CODE_OAUTH_TOKEN'], 'a');
-  assert.equal(second['CLAUDE_CODE_OAUTH_TOKEN'], 'b');
+  assert.equal(first.CLAUDE_CODE_OAUTH_TOKEN, 'a');
+  assert.equal(second.CLAUDE_CODE_OAUTH_TOKEN, 'b');
 });
 
 test('the CA variables stay out of the registry: they belong to the deployment', () => {
@@ -137,7 +137,7 @@ test('the Codex entry matches what codex-acp reads', () => {
     DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
   });
   // The adapter's start mode and the mode of a new thread must match.
-  assert.equal(h.env('key', 'api_key')['INITIAL_AGENT_MODE'], h.defaultModeId);
+  assert.equal(h.env('key', 'api_key').INITIAL_AGENT_MODE, h.defaultModeId);
   assert.equal(h.alwaysBackground.size, 0);
 });
 

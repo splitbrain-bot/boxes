@@ -1,6 +1,6 @@
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from 'lucide-react';
 import { Select as SelectPrimitive } from 'radix-ui';
-import * as React from 'react';
+import type * as React from 'react';
 import { useOverlayState } from '@/hooks/use-history-overlay';
 import { cn } from '@/lib/utils';
 

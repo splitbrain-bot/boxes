@@ -165,7 +165,7 @@ const HOP_BY_HOP_HEADERS = [
  */
 export function forwardableHeaders(headers: http.IncomingHttpHeaders): http.IncomingHttpHeaders {
   const drop = new Set(HOP_BY_HOP_HEADERS);
-  const connection = headers['connection'];
+  const connection = headers.connection;
   const named = Array.isArray(connection) ? connection.join(',') : (connection ?? '');
   for (const name of named.split(',')) {
     const trimmed = name.trim().toLowerCase();
@@ -225,7 +225,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       return;
     }
 
-    if (req.headers['upgrade']) {
+    if (req.headers.upgrade) {
       // A forwarded upgrade would leave this proxy with a protocol it cannot
       // vet, and the request would never reach its response callback.
       res.writeHead(501, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -261,7 +261,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       if (res.destroyed) return;
 
       const headers = forwardableHeaders(req.headers);
-      headers['host'] = url.host;
+      headers.host = url.host;
 
       const upstream = http.request(
         {

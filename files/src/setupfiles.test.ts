@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pack } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
-import { FileError } from './ops.ts';
+import type { FileError } from './ops.ts';
 import { installSetupFiles } from './setupfiles.ts';
 
 let home: string;

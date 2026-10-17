@@ -131,9 +131,9 @@ function dockerFor(fake: Fake): Docker {
       fake.onCreate?.();
       fake.created.push(opts);
       // Docker finds a container by its name too, so the name stands in for the id.
-      const id = opts['name'] as string;
+      const id = opts.name as string;
       fake.containers.set(id, {
-        image: fake.images.get(opts['Image'] as string) ?? 'unresolved',
+        image: fake.images.get(opts.Image as string) ?? 'unresolved',
         running: false,
       });
       return { id };
@@ -259,7 +259,7 @@ describe('starting a box whose image has moved', () => {
 
     assert.deepEqual(fake.removed, ['box-a1']);
     assert.equal(fake.created.length, 1);
-    assert.equal(fake.created[0]!['Image'], IMAGE);
+    assert.equal(fake.created[0]!.Image, IMAGE);
     assert.equal(fake.containers.get('box-a1')?.image, 'sha256:two');
     // It is running, not only created.
     assert.equal(fake.containers.get('box-a1')?.running, true);
@@ -273,7 +273,7 @@ describe('starting a box whose image has moved', () => {
 
     // Everything durable about a box lives in these three mounts, which is
     // what makes recreating the container cheap rather than destructive.
-    const host = fake.created[0]!['HostConfig'] as { Binds: string[] };
+    const host = fake.created[0]!.HostConfig as { Binds: string[] };
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
@@ -291,7 +291,7 @@ describe('starting a box whose image has moved', () => {
 
     assert.deepEqual(fake.removed, ['box-a1']);
     assert.equal(fake.containers.get('box-a1')?.image, 'sha256:two');
-    assert.equal(fake.created[0]!['Image'], IMAGE);
+    assert.equal(fake.created[0]!.Image, IMAGE);
   });
 
   it('leaves a box already on the current image alone', async () => {
@@ -350,7 +350,7 @@ describe('starting a box Docker has forgotten', () => {
 
     // The row describes the container. What it cannot reproduce is in these
     // directories, which the new container mounts as the old one did.
-    const host = fake.created[0]!['HostConfig'] as { Binds: string[] };
+    const host = fake.created[0]!.HostConfig as { Binds: string[] };
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
       `${dir}/homes/a2:/home/agent`,
@@ -368,7 +368,7 @@ describe('starting a box Docker has forgotten', () => {
     await orchestrator.manager.start('a3');
 
     assert.ok(fake.networks.has('bn-a3'));
-    const host = fake.created[0]!['HostConfig'] as { NetworkMode: string };
+    const host = fake.created[0]!.HostConfig as { NetworkMode: string };
     assert.equal(host.NetworkMode, 'bn-a3');
   });
 

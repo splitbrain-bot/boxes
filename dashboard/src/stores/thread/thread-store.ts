@@ -1,6 +1,6 @@
 import { ACP_METHOD, UPDATE_KIND } from '../../../../shared/acp.ts';
 import type { BackgroundProcess } from '../../../../shared/types.ts';
-import { AcpClient, type ConnectionState, loadParams } from './acp-client.ts';
+import { type AcpClient, type ConnectionState, loadParams } from './acp-client.ts';
 import type {
   AvailableCommand,
   ContentBlock,

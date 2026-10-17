@@ -65,7 +65,7 @@ test('a dialog is stored per harness and merged rather than replaced', () => {
 
   // One dialog's answer is replaced whole: it is one screen's state.
   patchSettings(db, { dialogs: { claude: { modeId: 'auto' } } });
-  assert.deepEqual(readSettings(db).dialogs['claude'], { modeId: 'auto' });
+  assert.deepEqual(readSettings(db).dialogs.claude, { modeId: 'auto' });
 });
 
 test('a stored value that is not a dialog is ignored rather than fatal', () => {

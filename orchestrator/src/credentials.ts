@@ -215,7 +215,7 @@ export class CredentialStore {
 export function deliverableSecret(row: CredentialRow): string | null {
   if (row.method !== 'oauth') return row.secret;
   if (row.id !== 'devtunnels') return null;
-  const token = authObject(row.secret)?.['access_token'];
+  const token = authObject(row.secret)?.access_token;
   return typeof token === 'string' && token !== '' ? token : null;
 }
 
@@ -272,7 +272,7 @@ export function parseAuthDocument(document: string): AuthDocument | null {
   const { access_token: access, id_token: id } = tokens as Record<string, unknown>;
   if (typeof access !== 'string' || access === '') return null;
 
-  const exp = jwtClaims(access)?.['exp'];
+  const exp = jwtClaims(access)?.exp;
   const lastRefresh = Date.parse(String((parsed as { last_refresh?: unknown }).last_refresh ?? ''));
   return {
     account: typeof id === 'string' ? emailIn(jwtClaims(id)) : null,
@@ -302,7 +302,7 @@ export function jwtClaims(token: string): Record<string, unknown> | null {
  */
 function emailIn(claims: Record<string, unknown> | null): string | null {
   if (!claims) return null;
-  const plain = claims['email'];
+  const plain = claims.email;
   if (typeof plain === 'string' && plain !== '') return plain;
   for (const value of Object.values(claims)) {
     if (typeof value !== 'object' || value === null) continue;
@@ -444,8 +444,8 @@ async function refreshCodex(
   const parsed = parseAuthDocument(row.secret);
   const doc = authObject(row.secret);
   const refreshToken =
-    doc && typeof doc['tokens'] === 'object' && doc['tokens'] !== null
-      ? (doc['tokens'] as Record<string, unknown>)['refresh_token']
+    doc && typeof doc.tokens === 'object' && doc.tokens !== null
+      ? (doc.tokens as Record<string, unknown>).refresh_token
       : undefined;
 
   if (typeof refreshToken !== 'string' || refreshToken === '') {
@@ -478,10 +478,10 @@ async function refreshCodex(
     return;
   }
 
-  const tokens = { ...(doc?.['tokens'] as Record<string, unknown>) };
-  tokens['access_token'] = answer.access_token;
-  if (answer.refresh_token) tokens['refresh_token'] = answer.refresh_token;
-  if (answer.id_token) tokens['id_token'] = answer.id_token;
+  const tokens = { ...(doc?.tokens as Record<string, unknown>) };
+  tokens.access_token = answer.access_token;
+  if (answer.refresh_token) tokens.refresh_token = answer.refresh_token;
+  if (answer.id_token) tokens.id_token = answer.id_token;
   const updated = {
     ...doc,
     tokens,
@@ -510,7 +510,7 @@ async function refreshDevTunnels(
   post: TokenPost,
   now: number,
 ): Promise<void> {
-  const refreshToken = authObject(row.secret)?.['refresh_token'];
+  const refreshToken = authObject(row.secret)?.refresh_token;
   if (typeof refreshToken !== 'string' || refreshToken === '') {
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {

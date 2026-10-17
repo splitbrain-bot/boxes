@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import type { Duplex } from 'node:stream';
-import { PassThrough, Readable } from 'node:stream';
+import { PassThrough, type Readable } from 'node:stream';
 import Docker from 'dockerode';
 import type { ImageInfo } from '../../shared/types.ts';
 import type { Config } from './config.ts';
@@ -176,7 +176,7 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
  * The container id a test installed for selfContainerId, or undefined to read
  * the real sources.
  */
-let selfIdForTests: string | null | undefined = undefined;
+let selfIdForTests: string | null | undefined;
 
 /**
  * Test seam: makes selfContainerId return id. Undefined restores the real

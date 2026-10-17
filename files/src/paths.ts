@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, realpathSync, type Stats } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { validRelativePath } from '../../shared/files.ts';
 
@@ -34,7 +34,7 @@ export function resolveInRoot(root: string, relPath: string, mustExist = true): 
 
   // A link is refused even when it stays inside the root, because its target
   // can change after the tree was listed.
-  let stats;
+  let stats: Stats;
   try {
     stats = lstatSync(candidate);
   } catch {

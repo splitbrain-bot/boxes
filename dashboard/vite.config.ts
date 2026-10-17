@@ -7,7 +7,7 @@ import { defineConfig } from 'vitest/config';
  * The orchestrator the dev server proxies the API, health and WebSocket
  * routes to, so the dev page has the single origin of a deployment.
  */
-const orchestrator = process.env['ORCHESTRATOR_URL'] ?? 'http://localhost:3000';
+const orchestrator = process.env.ORCHESTRATOR_URL ?? 'http://localhost:3000';
 
 /** Vite and Vitest configuration of the dashboard. */
 export default defineConfig({

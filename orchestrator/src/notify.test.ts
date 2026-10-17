@@ -82,7 +82,7 @@ test('one event reaches every subscribed browser', async () => {
   assert.deepEqual(urls, ['https://push.example.net/a', 'https://push.example.org/b']);
   const push = calls.find((c) => c.url.includes('push.example.net'))!;
   assert.equal(push.headers['Content-Encoding'], 'aes128gcm');
-  assert.match(push.headers['Authorization']!, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
+  assert.match(push.headers.Authorization!, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
 });
 
 test('the thread is named in the message, not just the box', () => {

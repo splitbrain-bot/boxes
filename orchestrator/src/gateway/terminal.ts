@@ -326,7 +326,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
         close(1000, 'box stopped');
         return;
       }
-      let opened;
+      let opened: TerminalExec;
       try {
         opened = await openTerminal(target, cols, rows, client);
       } catch (err) {
@@ -346,7 +346,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   };
 
   void (async () => {
-    let target;
+    let target: Target;
     try {
       target = await manager.execTarget(boxId);
     } catch (err) {
@@ -357,7 +357,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     await knownSize;
     if (closed) return;
 
-    let opened;
+    let opened: TerminalExec;
     try {
       opened = await openTerminal(target, cols, rows);
     } catch (err) {

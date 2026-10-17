@@ -11,6 +11,7 @@ import {
   type V1Pod,
   type V1PodSecurityContext,
   type V1SecurityContext,
+  type V1Service,
   type V1Status,
 } from '@kubernetes/client-node';
 import type { DeploymentImages, ImageInfo, RuntimeState } from '../../../shared/types.ts';
@@ -170,7 +171,7 @@ export class KubernetesRuntime implements Runtime {
   async prepare(): Promise<void> {
     const name = this.cfg.EGRESS_PROXY_SERVICE;
     const where = `the Service ${name} in the namespace ${this.kube.namespace}`;
-    let service;
+    let service: V1Service;
     try {
       service = await this.kube.core.readNamespacedService({
         name,
@@ -597,7 +598,7 @@ export class KubernetesRuntime implements Runtime {
     const facts: Array<[string, string]> = [];
     if (pod) facts.push(['Pod', pod.spec?.nodeName ? `${name} (on ${pod.spec.nodeName})` : name]);
     if (claim)
-      facts.push(['Volume claim', `${name} (${claim.status?.capacity?.['storage'] ?? 'pending'})`]);
+      facts.push(['Volume claim', `${name} (${claim.status?.capacity?.storage ?? 'pending'})`]);
     const image = pod ? podImageId(pod) : null;
     if (image)
       facts.push([

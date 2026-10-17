@@ -149,6 +149,7 @@ function Level({
                 ) : null}
                 {entry.status ? (
                   <span
+                    role="img"
                     aria-label={STATUS[entry.status].label}
                     title={STATUS[entry.status].label}
                     className={cn('shrink-0 font-mono text-xs', STATUS[entry.status].className)}
@@ -166,6 +167,7 @@ function Level({
                 ) : null}
                 {entry.comments ? (
                   <span
+                    role="img"
                     className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-primary/15 px-1.5 text-xs text-primary"
                     aria-label={entry.comments === 1 ? '1 comment' : `${entry.comments} comments`}
                   >

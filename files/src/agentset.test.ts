@@ -15,7 +15,7 @@ import { Readable } from 'node:stream';
 import { pack } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
 import { installAgentSet, MANAGED_FILE, unitOf } from './agentset.ts';
-import { FileError } from './ops.ts';
+import type { FileError } from './ops.ts';
 
 let dir: string;
 let home: string;

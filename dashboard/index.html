@@ -39,13 +39,13 @@
       // light and dark does not need a reload. Tailwind's dark variant is the
       // .dark class (globals.css).
       try {
-        var scheme = window.matchMedia('(prefers-color-scheme: dark)');
-        var apply = function () {
+        const scheme = window.matchMedia('(prefers-color-scheme: dark)');
+        const apply = () => {
           document.documentElement.classList.toggle('dark', scheme.matches);
         };
         apply();
         scheme.addEventListener('change', apply);
-      } catch (e) {
+      } catch {
         /* matchMedia is absent in some embedded browsers */
       }
     </script>

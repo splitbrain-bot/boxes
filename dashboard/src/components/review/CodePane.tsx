@@ -200,6 +200,7 @@ export function CodePane({
 
           {lines.map((text, index) => (
             <Row
+              // biome-ignore lint/suspicious/noArrayIndexKey: the line number is the identity
               key={index + 1}
               line={index + 1}
               text={text}
@@ -468,6 +469,7 @@ function Tokens({ tokens }: { tokens: Token[] }) {
     <>
       {tokens.map((token, i) => (
         // The span carries both theme colours, and globals.css picks one.
+        // biome-ignore lint/suspicious/noArrayIndexKey: tokens have no id, and a line is replaced whole
         <span key={i} style={token.style as React.CSSProperties}>
           {token.content}
         </span>

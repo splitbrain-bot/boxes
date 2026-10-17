@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Docker from 'dockerode';
+import type Docker from 'dockerode';
 import { afterEach, describe, it } from 'vitest';
 import { ApiKeyStore } from './api-keys.ts';
 import { type Config, loadConfig } from './config.ts';
@@ -82,7 +82,7 @@ describe('the container template', () => {
 
   it('binds the workspace, the home and the nix store from host paths', async () => {
     const opts = await capture();
-    const host = opts['HostConfig'] as { Binds: string[] };
+    const host = opts.HostConfig as { Binds: string[] };
     // Paths, not volume names: the orchestrator reads these files itself, for
     // review and to measure the size of a box.
     assert.deepEqual(host.Binds, [
@@ -98,12 +98,12 @@ describe('the container template', () => {
     const opts = await capture();
     // Numbers, so BOX_UID alone decides who a box runs as. The default avoids
     // 1000, which on a host usually belongs to a person.
-    assert.equal(opts['User'], '1020:1020');
+    assert.equal(opts.User, '1020:1020');
   }, 30_000);
 
   it('tells an outside updater to leave box containers alone', async () => {
     const opts = await capture();
-    const labels = opts['Labels'] as Record<string, string>;
+    const labels = opts.Labels as Record<string, string>;
     // The box id is how Boxes finds its own containers again.
     assert.equal(labels['boxes.box'], 'abcd1234');
     // This label tells an updater to leave the container alone. A recreated
@@ -115,12 +115,12 @@ describe('the container template', () => {
 
   it('keeps the isolation the workspace change does not touch', async () => {
     const opts = await capture();
-    const host = opts['HostConfig'] as Record<string, unknown>;
-    assert.equal(opts['User'], '1020:1020');
-    assert.equal(host['ReadonlyRootfs'], true);
-    assert.deepEqual(host['CapDrop'], ['ALL']);
-    assert.equal(host['Privileged'], false);
-    assert.deepEqual(host['SecurityOpt'], ['no-new-privileges:true']);
+    const host = opts.HostConfig as Record<string, unknown>;
+    assert.equal(opts.User, '1020:1020');
+    assert.equal(host.ReadonlyRootfs, true);
+    assert.deepEqual(host.CapDrop, ['ALL']);
+    assert.equal(host.Privileged, false);
+    assert.deepEqual(host.SecurityOpt, ['no-new-privileges:true']);
   }, 30_000);
 
   // The box image drops Playwright's --disable-dev-shm-usage because of this
@@ -128,8 +128,8 @@ describe('the container template', () => {
   // exhaustion as a closed target on a large page.
   it('gives the browser enough shared memory to not need the flag', async () => {
     const opts = await capture();
-    const host = opts['HostConfig'] as Record<string, unknown>;
-    assert.equal(host['ShmSize'], 512 * 1024 * 1024);
+    const host = opts.HostConfig as Record<string, unknown>;
+    assert.equal(host.ShmSize, 512 * 1024 * 1024);
   }, 30_000);
 });
 
@@ -153,31 +153,31 @@ describe('the login container', () => {
 
   it("is nobody's box: no bind, no credential, and a home it can write", async () => {
     const opts = await capture();
-    const host = opts['HostConfig'] as Record<string, unknown>;
+    const host = opts.HostConfig as Record<string, unknown>;
 
     // The CLI authenticates a person to their own service. The container
     // holds no deployment secret for an egress policy to protect.
-    assert.equal(host['Binds'], undefined);
-    assert.deepEqual(opts['Env'], []);
+    assert.equal(host.Binds, undefined);
+    assert.deepEqual(opts.Env, []);
     // The rootfs is read-only, and both CLIs write their state under $HOME.
-    const tmpfs = host['Tmpfs'] as Record<string, string>;
+    const tmpfs = host.Tmpfs as Record<string, string>;
     assert.match(tmpfs['/home/agent'] ?? '', /rw/);
-    assert.equal(host['ReadonlyRootfs'], true);
-    assert.deepEqual(host['CapDrop'], ['ALL']);
-    assert.equal(host['Privileged'], false);
-    assert.equal(opts['User'], '1020:1020');
+    assert.equal(host.ReadonlyRootfs, true);
+    assert.deepEqual(host.CapDrop, ['ALL']);
+    assert.equal(host.Privileged, false);
+    assert.equal(opts.User, '1020:1020');
   }, 30_000);
 
   it('sits on the default bridge, which is the point of it', async () => {
     const opts = await capture();
     // The one container Boxes creates with a route out of its own: the login
     // hosts are the service's, not the deployment's, and it lives for minutes.
-    assert.equal((opts['HostConfig'] as Record<string, unknown>)['NetworkMode'], 'bridge');
+    assert.equal((opts.HostConfig as Record<string, unknown>).NetworkMode, 'bridge');
   }, 30_000);
 
   it('carries the credential it is for, so a crash mid-flow can be swept', async () => {
     const opts = await capture();
-    const labels = opts['Labels'] as Record<string, string>;
+    const labels = opts.Labels as Record<string, string>;
     assert.equal(labels['boxes.login'], 'openai');
     // It is not a box, so nothing that reads the box label finds it.
     assert.equal(labels['boxes.box'], undefined);

@@ -52,13 +52,13 @@ test('an existing conversation becomes the box first thread', () => {
   try {
     const threads = db.prepare('SELECT * FROM threads').all() as Array<Record<string, unknown>>;
     assert.equal(threads.length, 1);
-    assert.equal(threads[0]!['box_id'], 's1');
-    assert.equal(threads[0]!['acp_session_id'], 'acp-abc');
-    assert.equal(threads[0]!['ordinal'], 1);
+    assert.equal(threads[0]!.box_id, 's1');
+    assert.equal(threads[0]!.acp_session_id, 'acp-abc');
+    assert.equal(threads[0]!.ordinal, 1);
     // The box's own timestamps carry over: the thread is that box's
     // conversation, not a new one made today.
-    assert.equal(threads[0]!['created_at'], 1000);
-    assert.equal(threads[0]!['last_active_at'], 2000);
+    assert.equal(threads[0]!.created_at, 1000);
+    assert.equal(threads[0]!.last_active_at, 2000);
 
     // The column it replaces is gone, so nothing can keep writing to it.
     assert.ok(!columns(db, 'boxes').includes('acp_session_id'));
@@ -112,12 +112,12 @@ test('a running turn moves onto the threads, starting cleared', () => {
       string,
       unknown
     >;
-    assert.equal(thread['turn_active'], 0);
+    assert.equal(thread.turn_active, 0);
     // The column it replaces is gone, so nothing can keep writing to it.
     assert.ok(!columns(db, 'boxes').includes('turn_active'));
     // The thread's conversation and identity are untouched.
-    assert.equal(thread['acp_session_id'], 'acp-abc');
-    assert.equal(thread['ordinal'], 1);
+    assert.equal(thread.acp_session_id, 'acp-abc');
+    assert.equal(thread.ordinal, 1);
   } finally {
     db.close();
   }

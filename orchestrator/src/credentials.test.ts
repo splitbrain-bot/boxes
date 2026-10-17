@@ -229,9 +229,9 @@ test('a Codex access token about to expire is refreshed, whole document and all'
   };
   // The whole document is kept: the rotated refresh token is what the next
   // refresh needs, and last_refresh is what the eight-day rule reads.
-  assert.equal(stored.tokens['access_token'], fresh);
-  assert.equal(stored.tokens['refresh_token'], 'rotated');
-  assert.equal(stored.tokens['account_id'], 'acct_123');
+  assert.equal(stored.tokens.access_token, fresh);
+  assert.equal(stored.tokens.refresh_token, 'rotated');
+  assert.equal(stored.tokens.account_id, 'acct_123');
   assert.equal(stored.last_refresh, new Date(NOW).toISOString());
   assert.equal(row?.expires_at, IN_FIVE_HOURS * 1000);
   assert.equal(row?.refreshed_at, NOW);

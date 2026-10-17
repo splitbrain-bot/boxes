@@ -184,7 +184,7 @@ test('the dialog opens on what the last one chose, from the deployment', async (
 
     // Stored in the deployment per harness, so any device opens on it.
     await expect
-      .poll(async () => (await stub.settings()).dialogs['claude'])
+      .poll(async () => (await stub.settings()).dialogs.claude)
       .toEqual({
         modeId: 'plan',
         // No effort: nobody changed it, and the registry has no default for it.

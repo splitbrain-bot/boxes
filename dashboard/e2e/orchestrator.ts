@@ -478,14 +478,10 @@ class TestUpstream {
   }
 
   /** Does nothing, because the stand-in spawns nothing. */
-  stop(): void {
-    return undefined;
-  }
+  stop(): void {}
 
   /** Does nothing, like {@link stop}. */
-  close(): void {
-    return undefined;
-  }
+  close(): void {}
 
   /** Stores a minted conversation. */
   private mint(
@@ -747,7 +743,7 @@ function installHooks(
 
     const stop = /^\/api\/boxes\/([^/]+)\/threads\/([^/]+)\/background\/stop$/.exec(path);
     if (stop && req.method === 'POST') {
-      const asked = (body as Record<string, unknown> | undefined)?.['processId'];
+      const asked = (body as Record<string, unknown> | undefined)?.processId;
       calls.backgroundStops.push({
         boxId: stop[1]!,
         threadId: stop[2]!,

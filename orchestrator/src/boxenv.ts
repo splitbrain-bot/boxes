@@ -63,33 +63,33 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
     const id = harness.credentialId;
     Object.assign(env, harness.env(inputs.placeholderFor(id), inputs.methodFor(id)));
   }
-  env['GH_TOKEN'] = inputs.placeholderFor('github');
-  env['GITLAB_TOKEN'] = inputs.placeholderFor('gitlab');
-  env['GITLAB_HOST'] = inputs.gitlabHost;
-  env['DEVTUNNELS_TOKEN'] = inputs.placeholderFor('devtunnels');
+  env.GH_TOKEN = inputs.placeholderFor('github');
+  env.GITLAB_TOKEN = inputs.placeholderFor('gitlab');
+  env.GITLAB_HOST = inputs.gitlabHost;
+  env.DEVTUNNELS_TOKEN = inputs.placeholderFor('devtunnels');
 
-  env['TERM'] = 'dumb';
+  env.TERM = 'dumb';
   // Every proxy-aware client honours these; anything else has no route
   // out, which is the intended failure mode.
-  env['HTTP_PROXY'] = inputs.proxyUrl;
-  env['HTTPS_PROXY'] = inputs.proxyUrl;
-  env['http_proxy'] = inputs.proxyUrl;
-  env['https_proxy'] = inputs.proxyUrl;
-  env['NO_PROXY'] = 'localhost,127.0.0.1';
-  env['no_proxy'] = 'localhost,127.0.0.1';
+  env.HTTP_PROXY = inputs.proxyUrl;
+  env.HTTPS_PROXY = inputs.proxyUrl;
+  env.http_proxy = inputs.proxyUrl;
+  env.https_proxy = inputs.proxyUrl;
+  env.NO_PROXY = 'localhost,127.0.0.1';
+  env.no_proxy = 'localhost,127.0.0.1';
 
   if (inputs.hasCa) {
     // The box setup appends the CA to the system authorities in CA_PATH;
     // these are the variables that point node, gh, git, git-lfs, curl and
     // Codex at it. A tool honouring none of them fails TLS against the
     // intercepted hosts and nothing else.
-    env['NODE_EXTRA_CA_CERTS'] = CA_PATH;
-    env['SSL_CERT_FILE'] = CA_PATH;
-    env['GIT_SSL_CAINFO'] = CA_PATH;
-    env['CURL_CA_BUNDLE'] = CA_PATH;
+    env.NODE_EXTRA_CA_CERTS = CA_PATH;
+    env.SSL_CERT_FILE = CA_PATH;
+    env.GIT_SSL_CAINFO = CA_PATH;
+    env.CURL_CA_BUNDLE = CA_PATH;
     // Codex reads this one first and falls back to SSL_CERT_FILE. It is
     // unconfirmed whether the published Codex binary reads either.
-    env['CODEX_CA_CERTIFICATE'] = CA_PATH;
+    env.CODEX_CA_CERTIFICATE = CA_PATH;
   }
 
   return Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));

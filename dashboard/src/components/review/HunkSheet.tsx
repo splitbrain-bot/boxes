@@ -41,6 +41,7 @@ export function HunkSheet({
               // A trailing empty line is the terminator, not a diff line.
               i === lines.length - 1 && line === '' ? null : (
                 <div
+                  // biome-ignore lint/suspicious/noArrayIndexKey: diff lines have no id, and a hunk is replaced whole
                   key={i}
                   className={cn(
                     // Indents the rest of a wrapped line past the +/− column.

@@ -972,7 +972,10 @@ test('the review header gives way to reading the file, and returns', async () =>
           new Promise<void>((done) => {
             let left = count;
             const step = (): void => {
-              if (left-- <= 0) return done();
+              if (left-- <= 0) {
+                done();
+                return;
+              }
               el.scrollTop += by;
               requestAnimationFrame(step);
             };
@@ -1036,7 +1039,10 @@ test('the review header stays where it is on a wide screen', async () => {
         new Promise<void>((done) => {
           let left = 4;
           const step = (): void => {
-            if (left-- <= 0) return done();
+            if (left-- <= 0) {
+              done();
+              return;
+            }
             el.scrollTop += 100;
             requestAnimationFrame(step);
           };

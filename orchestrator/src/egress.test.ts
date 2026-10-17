@@ -260,7 +260,7 @@ describe('the control channel, from the orchestrator side', () => {
         seen.push({
           method: req.method ?? '',
           url: req.url ?? '',
-          auth: String(req.headers['authorization'] ?? ''),
+          auth: String(req.headers.authorization ?? ''),
           body,
         });
         res.writeHead(answer.status, { 'content-type': 'application/json' });

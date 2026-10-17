@@ -47,6 +47,7 @@ export function Setting({
   children: React.ReactNode;
 }) {
   return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: the control is the children
     <label className="flex flex-col gap-1 text-xs">
       <span className="font-medium">{name}</span>
       {description ? <span className="text-muted-foreground">{description}</span> : null}

@@ -107,16 +107,16 @@ describe('the environment', () => {
   const env = gitEnv();
 
   test('reads, never writes, and never waits for a lock or a prompt', () => {
-    assert.equal(env['GIT_OPTIONAL_LOCKS'], '0');
-    assert.equal(env['GIT_TERMINAL_PROMPT'], '0');
+    assert.equal(env.GIT_OPTIONAL_LOCKS, '0');
+    assert.equal(env.GIT_TERMINAL_PROMPT, '0');
   });
 
   test('a pathspec is a path, not a glob', () => {
-    assert.equal(env['GIT_LITERAL_PATHSPECS'], '1');
+    assert.equal(env.GIT_LITERAL_PATHSPECS, '1');
   });
 
   test('git writes one language, whatever the box is set to', () => {
-    assert.equal(env['LC_ALL'], 'C');
+    assert.equal(env.LC_ALL, 'C');
   });
 
   test('nothing of this process travels into the box', () => {

@@ -1,4 +1,4 @@
-import { UPDATE_KIND } from '../../../../shared/acp.ts';
+import type { UPDATE_KIND } from '../../../../shared/acp.ts';
 
 /**
  * The part of the ACP schema the browser reads and sends, written out by hand

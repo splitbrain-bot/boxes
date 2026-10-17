@@ -632,20 +632,20 @@ test('the model selector sets the option optimistically and rolls back on failur
   const { store, client } = makeStore((c) => {
     c.configOptions = configOptions;
   });
-  const valueOf = (): string | undefined =>
+  const currentModel = (): string | undefined =>
     store.getSnapshot().configOptions.find((o) => o.id === 'model')?.currentValue;
-  assert.equal(valueOf(), 'sonnet');
+  assert.equal(currentModel(), 'sonnet');
 
   await store.setConfigOption('model', 'opus');
   assert.deepEqual(client.requests.at(-1), {
     method: 'session/set_config_option',
     params: { sessionId: 'acp-1', configId: 'model', value: 'opus' },
   });
-  assert.equal(valueOf(), 'opus');
+  assert.equal(currentModel(), 'opus');
 
   client.fail = 'no such model';
   await store.setConfigOption('model', 'sonnet');
-  assert.equal(valueOf(), 'opus');
+  assert.equal(currentModel(), 'opus');
   assert.equal(store.getSnapshot().error, 'no such model');
 });
 

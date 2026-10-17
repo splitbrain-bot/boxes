@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Docker from 'dockerode';
+import type Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
