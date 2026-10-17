@@ -9,13 +9,13 @@ import {
   CODEX_TOKEN_URL,
   CredentialStore,
   DEVTUNNELS_CLIENT_ID,
-  GITHUB_TOKEN_URL,
   deliverableSecret,
+  GITHUB_TOKEN_URL,
   refreshCredentials,
-  undeliverableReason,
   type TokenAnswer,
+  undeliverableReason,
 } from './credentials.ts';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 
 let dir: string;
 let db: Db;
@@ -204,7 +204,7 @@ const IN_FIVE_HOURS = Math.floor((NOW + 5 * 60 * 60_000) / 1000);
 test('a Codex access token about to expire is refreshed, whole document and all', async () => {
   store.put('openai', 'oauth', authJson(IN_TEN_MINUTES, '2026-09-12T11:00:00Z'), {
     account: 'someone@example.com',
-    expires_at: (IN_TEN_MINUTES) * 1000,
+    expires_at: IN_TEN_MINUTES * 1000,
   });
   const fresh = jwt({ exp: IN_FIVE_HOURS });
   const { calls, post } = posts({ access_token: fresh, refresh_token: 'rotated' });

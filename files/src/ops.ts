@@ -10,27 +10,27 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  type ReadStream,
   readdirSync,
   readSync,
   renameSync,
+  type Stats,
   statSync,
   unlinkSync,
-  type ReadStream,
-  type Stats,
 } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
-  HASH_BYTES,
-  MAX_CREATE_COLLISIONS,
-  MAX_DIR_ENTRIES,
-  validRelativePath,
   type FindReposReply,
   type FindReposRequest,
+  HASH_BYTES,
   type ListReply,
+  MAX_CREATE_COLLISIONS,
+  MAX_DIR_ENTRIES,
   type StatReply,
+  validRelativePath,
 } from '../../shared/files.ts';
 import { resolveInRoot } from './paths.ts';
 
@@ -469,8 +469,7 @@ const TMP_ATTEMPTS = 5;
  */
 async function streamToTemp(path: string, body: Readable, mode = 0o644): Promise<string> {
   const tmp = `${path}.${process.pid}.${tmpFiles++}.tmp`;
-  const flags =
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
   let fd: number | null = null;
   for (let attempt = 0; attempt < TMP_ATTEMPTS && fd === null; attempt++) {
     try {

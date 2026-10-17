@@ -1,6 +1,6 @@
-import type { HarnessId, ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 import { modeDescription, modeLabel } from '@/lib/harness';
 import { cn } from '@/lib/utils';
+import type { HarnessId, ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 
 /**
  * Controls for an agent's mode and config options, shared by the thread header

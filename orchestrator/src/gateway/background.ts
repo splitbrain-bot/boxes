@@ -1,6 +1,6 @@
-import type { ContainerProcess } from '../processes.ts';
-import type { Harness } from '../harness.ts';
 import type { BackgroundProcess, BoxWork } from '../../../shared/types.ts';
+import type { Harness } from '../harness.ts';
+import type { ContainerProcess } from '../processes.ts';
 
 // --- what the adapters say -------------------------------------------------
 
@@ -261,9 +261,7 @@ function adapterPids(
     }
     return false;
   };
-  return new Set(
-    processes.filter((p) => carries(p) && !named(p) && !under(p)).map((p) => p.pid),
-  );
+  return new Set(processes.filter((p) => carries(p) && !named(p) && !under(p)).map((p) => p.pid));
 }
 
 /**

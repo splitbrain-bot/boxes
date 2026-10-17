@@ -1,11 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import type { AgentSetSummary } from '../../../shared/types.ts';
-import { api } from '../api.ts';
-import { refresh } from '../stores/boxes.ts';
 import { Notice } from '@/components/Notice';
 import { ThreadOptions, useThreadOptions } from '@/components/ThreadOptions';
-import { useUp } from '@/hooks/use-up';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,6 +12,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { useUp } from '@/hooks/use-up';
+import type { AgentSetSummary } from '../../../shared/types.ts';
+import { api } from '../api.ts';
+import { refresh } from '../stores/boxes.ts';
 
 /** Picker value for no extra set. The form sends it as null. */
 const NO_SET = 'none';
@@ -119,9 +119,7 @@ export function BoxCreate() {
         <ThreadOptions state={thread} />
       </div>
 
-      {error ? (
-        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-      ) : null}
+      {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
 
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={up.go} disabled={busy}>

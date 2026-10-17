@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import {
+  type FollowState,
   followGrew,
   followScrolled,
   followStart,
   followTouched,
   isFollowing,
-  type FollowState,
 } from './follow-output.ts';
 
 /** A turn arriving into a thread, a chunk at a time, on a clock stepped by hand. */

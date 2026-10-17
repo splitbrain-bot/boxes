@@ -110,9 +110,7 @@ export class PendingStore {
 
   /** The answerable entries of one thread. */
   listForThread(boxId: string, acpSessionId: string): PendingEntry[] {
-    return this.listForBox(boxId).filter(
-      (e) => e.row.acp_session_id === acpSessionId,
-    );
+    return this.listForBox(boxId).filter((e) => e.row.acp_session_id === acpSessionId);
   }
 
   /** How many requests of one box are waiting. */

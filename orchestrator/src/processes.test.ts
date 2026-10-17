@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, expect, it } from 'vitest';
 import { boxProcesses, killInBox } from './processes.ts';
-import { setRuntime, type Runtime } from './runtime/runtime.ts';
+import { type Runtime, setRuntime } from './runtime/runtime.ts';
 
 /**
  * How the box's process table is read, which is what says whether a
@@ -21,12 +21,12 @@ describe('reading and signalling what is running in a box', () => {
     return { ran };
   }
 
-  it('parses what the box\'s own ps prints, spaces and all', async () => {
+  it("parses what the box's own ps prints, spaces and all", async () => {
     const { ran } = fakeRun(
       [
         '    PID    PPID ELAPSED COMMAND',
         '      1       0     900 /sbin/docker-init',
-        '  23490   23019     154 /bin/bash -c eval \'sleep 300; echo done\'',
+        "  23490   23019     154 /bin/bash -c eval 'sleep 300; echo done'",
       ].join('\n'),
     );
     const processes = await boxProcesses('b1');

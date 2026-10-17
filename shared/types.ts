@@ -3,12 +3,7 @@
  */
 
 /** Lifecycle status of a box, as stored in the boxes table. */
-export type BoxStatus =
-  | 'creating'
-  | 'running'
-  | 'stopped'
-  | 'error'
-  | 'deleted';
+export type BoxStatus = 'creating' | 'running' | 'stopped' | 'error' | 'deleted';
 
 /**
  * The state of a box as the runtime reports it right now, independent of the

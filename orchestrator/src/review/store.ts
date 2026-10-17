@@ -168,7 +168,11 @@ function splitBody(
   let end = body.length;
   while (end > 0 && body[end - 1]!.trim() === '') end--;
 
-  const whole = { comment: joinComment(body.slice(0, end)), context: [] as string[], contextFrom: 0 };
+  const whole = {
+    comment: joinComment(body.slice(0, end)),
+    context: [] as string[],
+    contextFrom: 0,
+  };
 
   const block = lastFencedBlock(body.slice(0, end));
   if (!block || block.close !== end - 1) return whole;
@@ -315,7 +319,9 @@ export function serializeReview(review: Review): string {
 
     for (const lineNum of [...lines.keys()].sort((a, b) => a - b)) {
       const ann = lines.get(lineNum)!;
-      out.push(ann.outdated ? `\n#### Line ${lineNum} (outdated)\n\n` : `\n#### Line ${lineNum}\n\n`);
+      out.push(
+        ann.outdated ? `\n#### Line ${lineNum} (outdated)\n\n` : `\n#### Line ${lineNum}\n\n`,
+      );
       const { text, openFence } = escapeComment(ann.comment);
       out.push(text);
       if (ann.context.length > 0) {

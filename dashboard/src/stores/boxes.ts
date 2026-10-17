@@ -1,9 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type {
-  DeploymentImages,
-  HarnessHealth,
-  BoxSummary,
-} from '../../../shared/types.ts';
+import type { BoxSummary, DeploymentImages, HarnessHealth } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { pollWhileVisible } from '../lib/poll.ts';
 
@@ -70,9 +66,7 @@ export function useBoxes(): BoxesState {
  * message from the server passes through unchanged.
  */
 function reachable(error: Error): string {
-  return error instanceof TypeError
-    ? 'Could not reach Boxes. Still trying.'
-    : error.message;
+  return error instanceof TypeError ? 'Could not reach Boxes. Still trying.' : error.message;
 }
 
 /**

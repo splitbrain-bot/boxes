@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight, File, GitBranch, MessageSquare } from 'lucide-react';
-import type { ReviewDirResponse, ReviewFileStatus } from '../../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
 import { cn } from '@/lib/utils';
+import type { ReviewDirResponse, ReviewFileStatus } from '../../../../shared/types.ts';
 
 /** The text colour class, the letter and the label for each git status. */
 const STATUS: Record<ReviewFileStatus, { className: string; mark: string; label: string }> = {
@@ -46,8 +46,7 @@ export function ReviewTree({
   if (root.entries.length === 0) {
     return (
       <p className="px-3 py-4 text-sm text-muted-foreground">
-        This workspace is empty. Once the agent has cloned or written something, it shows up
-        here.
+        This workspace is empty. Once the agent has cloned or written something, it shows up here.
       </p>
     );
   }
@@ -152,10 +151,7 @@ function Level({
                   <span
                     aria-label={STATUS[entry.status].label}
                     title={STATUS[entry.status].label}
-                    className={cn(
-                      'shrink-0 font-mono text-xs',
-                      STATUS[entry.status].className,
-                    )}
+                    className={cn('shrink-0 font-mono text-xs', STATUS[entry.status].className)}
                   >
                     {STATUS[entry.status].mark}
                   </span>
@@ -171,9 +167,7 @@ function Level({
                 {entry.comments ? (
                   <span
                     className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-primary/15 px-1.5 text-xs text-primary"
-                    aria-label={
-                      entry.comments === 1 ? '1 comment' : `${entry.comments} comments`
-                    }
+                    aria-label={entry.comments === 1 ? '1 comment' : `${entry.comments} comments`}
                   >
                     <MessageSquare className="size-3" />
                     {entry.comments}

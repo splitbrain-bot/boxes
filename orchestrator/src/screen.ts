@@ -61,7 +61,12 @@ export class Screen {
    */
   get text(): string {
     return this.rows
-      .map((cells) => cells.map((c) => c ?? ' ').join('').replace(/\s+$/, ''))
+      .map((cells) =>
+        cells
+          .map((c) => c ?? ' ')
+          .join('')
+          .replace(/\s+$/, ''),
+      )
       .join('\n');
   }
 

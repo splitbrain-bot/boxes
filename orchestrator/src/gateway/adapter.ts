@@ -1,27 +1,26 @@
-import { client as acpClient, type ClientConnection } from '@agentclientprotocol/sdk';
-import type { Stream } from '@agentclientprotocol/sdk';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
 import { PassThrough, Readable } from 'node:stream';
-import {
-  getThread,
-  insertThread,
-  setThreadAcpId,
-  setThreadConfig,
-  threadByAcpId,
-  threadConfig,
-  upsertHarnessCatalog,
-  type Db,
-  type ThreadRow,
-} from '../db.ts';
-import { runtime, WORKSPACE_DIR, type ProcessStream } from '../runtime/runtime.ts';
-import { HARNESS_IDS, type Harness, type HarnessId } from '../harness.ts';
-import type { Logger } from '../log.ts';
+import type { Stream } from '@agentclientprotocol/sdk';
+import { client as acpClient, type ClientConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { ACP_METHOD } from '../../../shared/acp.ts';
 import type {
   BackgroundProcess,
   ThreadConfigOption,
   ThreadModeState,
 } from '../../../shared/types.ts';
+import {
+  type Db,
+  getThread,
+  insertThread,
+  setThreadAcpId,
+  setThreadConfig,
+  type ThreadRow,
+  threadByAcpId,
+  threadConfig,
+  upsertHarnessCatalog,
+} from '../db.ts';
+import { HARNESS_IDS, type Harness, type HarnessId } from '../harness.ts';
+import type { Logger } from '../log.ts';
+import { type ProcessStream, runtime, WORKSPACE_DIR } from '../runtime/runtime.ts';
 import { TaskBoard } from './background.ts';
 import { threadOf } from './broadcast.ts';
 import type { AdapterOptions } from './thread-log.ts';
@@ -112,11 +111,7 @@ export function pickModel(
  * The chain matters for a fork of a fork that has not been prompted, because
  * the middle thread has no transcript either.
  */
-export function inheritedSource(
-  db: Db,
-  boxId: string,
-  thread: ThreadRow,
-): ThreadRow | null {
+export function inheritedSource(db: Db, boxId: string, thread: ThreadRow): ThreadRow | null {
   let row: ThreadRow | undefined = thread;
   for (let hop = 0; hop < MAX_INHERIT_HOPS; hop++) {
     const next: string | null = row?.inherits_from ?? null;
@@ -573,8 +568,7 @@ export class AdapterConnection {
     const row = getThread(this.host.db, threadId);
     const source = row ? inheritedSource(this.host.db, this.host.boxId, row) : null;
     // The row's recorded mode wins over the default for the thread's kind.
-    const modeId =
-      row?.mode_id ?? (source ? this.harness.forkModeId : this.harness.defaultModeId);
+    const modeId = row?.mode_id ?? (source ? this.harness.forkModeId : this.harness.defaultModeId);
     const config = row ? threadConfig(row) : { ...this.harness.defaultConfig };
     let branched: string | null = null;
     if (source?.acp_session_id) {
@@ -992,9 +986,7 @@ export class AdapterConnection {
 
   /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
   private makeStream(exec: ProcessStream): Stream {
-    const readable = Readable.toWeb(
-      this.siftExtensions(exec.stdout),
-    ) as ReadableStream<Uint8Array>;
+    const readable = Readable.toWeb(this.siftExtensions(exec.stdout)) as ReadableStream<Uint8Array>;
     const writable = new WritableStream<Uint8Array>({
       write: (chunk) =>
         new Promise<void>((resolve, reject) => {

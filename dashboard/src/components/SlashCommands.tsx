@@ -4,7 +4,7 @@ import {
   type Unstable_TriggerItem,
   type Unstable_TriggerMatcher,
 } from '@assistant-ui/react';
-import { createContext, useContext, useMemo, type FC, type ReactNode } from 'react';
+import { createContext, type FC, type ReactNode, useContext, useMemo } from 'react';
 import type { AvailableCommand } from '../stores/thread/acp-types.ts';
 
 /** Composer completion for the slash commands the adapter advertises. */

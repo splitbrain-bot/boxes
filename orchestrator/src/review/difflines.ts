@@ -1,6 +1,6 @@
-import { git, gitOut, type GitTarget } from './git.ts';
 import { fileLines } from './fs.ts';
-import { baseRev, type Base } from './gitstatus.ts';
+import { type GitTarget, git, gitOut } from './git.ts';
+import { type Base, baseRev } from './gitstatus.ts';
 
 /** What happened to a line of the new file. */
 export type LineChange = 'added' | 'modified';

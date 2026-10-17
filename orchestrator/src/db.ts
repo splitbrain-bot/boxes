@@ -1,13 +1,13 @@
-import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import type {
+  BoxStatus,
   HarnessCatalog,
   HarnessId,
   ThreadConfigOption,
   ThreadModeState,
-  BoxStatus,
 } from '../../shared/types.ts';
 
 /**
@@ -640,9 +640,7 @@ export function listThreads(db: Db, boxId: string): ThreadRow[] {
 
 /** One thread by id, whichever box it belongs to. */
 export function getThread(db: Db, threadId: string): ThreadRow | undefined {
-  return db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as
-    | ThreadRow
-    | undefined;
+  return db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as ThreadRow | undefined;
 }
 
 /**
@@ -656,9 +654,7 @@ export function threadByAcpId(
   acpSessionId: string,
 ): ThreadRow | undefined {
   return db
-    .prepare(
-      'SELECT * FROM threads WHERE box_id = ? AND harness = ? AND acp_session_id = ?',
-    )
+    .prepare('SELECT * FROM threads WHERE box_id = ? AND harness = ? AND acp_session_id = ?')
     .get(boxId, harness, acpSessionId) as ThreadRow | undefined;
 }
 
@@ -729,10 +725,7 @@ export function insertThread(db: Db, boxId: string, thread: NewThread): ThreadRo
 
 /** Records the adapter's own id for a thread, or clears it. */
 export function setThreadAcpId(db: Db, threadId: string, acpSessionId: string | null): void {
-  db.prepare('UPDATE threads SET acp_session_id = ? WHERE id = ?').run(
-    acpSessionId,
-    threadId,
-  );
+  db.prepare('UPDATE threads SET acp_session_id = ? WHERE id = ?').run(acpSessionId, threadId);
 }
 
 /**
@@ -764,15 +757,8 @@ export function setThreadMode(db: Db, threadId: string, modeId: string | null): 
  * Records a thread's other options, replacing the whole map. The adapter
  * answers a change with its full list of options.
  */
-export function setThreadConfig(
-  db: Db,
-  threadId: string,
-  config: Record<string, string>,
-): void {
-  db.prepare('UPDATE threads SET config = ? WHERE id = ?').run(
-    JSON.stringify(config),
-    threadId,
-  );
+export function setThreadConfig(db: Db, threadId: string, config: Record<string, string>): void {
+  db.prepare('UPDATE threads SET config = ? WHERE id = ?').run(JSON.stringify(config), threadId);
 }
 
 /**
@@ -836,9 +822,7 @@ export function clearBoxTurns(db: Db, boxId: string): void {
 /** Whether any of a box's threads has a turn running. */
 export function boxTurnActive(db: Db, boxId: string): boolean {
   const row = db
-    .prepare(
-      'SELECT 1 AS hit FROM threads WHERE box_id = ? AND turn_active = 1 LIMIT 1',
-    )
+    .prepare('SELECT 1 AS hit FROM threads WHERE box_id = ? AND turn_active = 1 LIMIT 1')
     .get(boxId) as { hit: number } | undefined;
   return row !== undefined;
 }
@@ -883,9 +867,8 @@ export function upsertPushSubscription(
  * its next visit.
  */
 export function dropOtherKeySubscriptions(db: Db, vapidKey: string): number {
-  return db
-    .prepare('DELETE FROM push_subscriptions WHERE vapid_key IS NOT ?')
-    .run(vapidKey).changes;
+  return db.prepare('DELETE FROM push_subscriptions WHERE vapid_key IS NOT ?').run(vapidKey)
+    .changes;
 }
 
 /** Every subscription this deployment would push to. */
@@ -910,9 +893,9 @@ export function touchPushSubscription(db: Db, endpoint: string): void {
 
 /** How many boxes exist that have not been deleted. */
 export function countLiveBoxes(db: Db): number {
-  const row = db
-    .prepare("SELECT COUNT(*) AS n FROM boxes WHERE status != 'deleted'")
-    .get() as { n: number };
+  const row = db.prepare("SELECT COUNT(*) AS n FROM boxes WHERE status != 'deleted'").get() as {
+    n: number;
+  };
   return row.n;
 }
 

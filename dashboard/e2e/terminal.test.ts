@@ -53,7 +53,10 @@ test('a terminal opens on the box and carries what is typed both ways', async ()
 });
 
 test('the terminal is opened from the thread and steps back to it', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 

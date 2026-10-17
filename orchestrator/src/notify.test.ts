@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
-import { loadConfig, type Config } from './config.ts';
-import { openDb, upsertPushSubscription, type Db } from './db.ts';
-import { Notifier, wording, type NotifyEvent } from './notify.ts';
+import { type Config, loadConfig } from './config.ts';
+import { type Db, openDb, upsertPushSubscription } from './db.ts';
+import { Notifier, type NotifyEvent, wording } from './notify.ts';
 import { loadVapidKeys } from './push.ts';
 
 let dir: string;
@@ -127,9 +127,9 @@ test('a push service that is merely down keeps its subscription', async () => {
   await new Notifier(db, cfg).notify(event);
   await new Notifier(db, cfg).notify(event);
 
-  const remaining = db
-    .prepare('SELECT COUNT(*) AS n FROM push_subscriptions')
-    .get() as { n: number };
+  const remaining = db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as {
+    n: number;
+  };
   assert.equal(remaining.n, 1);
 });
 

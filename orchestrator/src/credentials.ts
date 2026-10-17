@@ -104,9 +104,7 @@ export class CredentialStore {
   /** Every stored credential, in the order the settings page lists them. */
   list(): CredentialRow[] {
     const rows = this.db.prepare('SELECT * FROM credentials').all() as CredentialRow[];
-    return rows.sort(
-      (a, b) => CREDENTIAL_IDS.indexOf(a.id) - CREDENTIAL_IDS.indexOf(b.id),
-    );
+    return rows.sort((a, b) => CREDENTIAL_IDS.indexOf(a.id) - CREDENTIAL_IDS.indexOf(b.id));
   }
 
   /**
@@ -275,9 +273,7 @@ export function parseAuthDocument(document: string): AuthDocument | null {
   if (typeof access !== 'string' || access === '') return null;
 
   const exp = jwtClaims(access)?.['exp'];
-  const lastRefresh = Date.parse(
-    String((parsed as { last_refresh?: unknown }).last_refresh ?? ''),
-  );
+  const lastRefresh = Date.parse(String((parsed as { last_refresh?: unknown }).last_refresh ?? ''));
   return {
     account: typeof id === 'string' ? emailIn(jwtClaims(id)) : null,
     expiresAt: typeof exp === 'number' ? exp * 1000 : null,
@@ -315,7 +311,6 @@ function emailIn(claims: Record<string, unknown> | null): string | null {
   }
   return null;
 }
-
 
 // --- keeping an account credential alive ------------------------------------
 
@@ -387,7 +382,8 @@ export const postToken: TokenPost = async (url, body) => {
     signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} from the token endpoint: ${text.trim().slice(0, 300)}`);
+  if (!res.ok)
+    throw new Error(`${res.status} from the token endpoint: ${text.trim().slice(0, 300)}`);
   return JSON.parse(text) as TokenAnswer;
 };
 
@@ -447,14 +443,19 @@ async function refreshCodex(
 ): Promise<void> {
   const parsed = parseAuthDocument(row.secret);
   const doc = authObject(row.secret);
-  const refreshToken = doc && typeof doc['tokens'] === 'object' && doc['tokens'] !== null
-    ? (doc['tokens'] as Record<string, unknown>)['refresh_token']
-    : undefined;
+  const refreshToken =
+    doc && typeof doc['tokens'] === 'object' && doc['tokens'] !== null
+      ? (doc['tokens'] as Record<string, unknown>)['refresh_token']
+      : undefined;
 
   if (typeof refreshToken !== 'string' || refreshToken === '') {
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
-      store.markStatus(row.id, 'failing', 'the stored login carries no refresh token: log in again');
+      store.markStatus(
+        row.id,
+        'failing',
+        'the stored login carries no refresh token: log in again',
+      );
     }
     return;
   }
@@ -491,9 +492,7 @@ async function refreshCodex(
   store.put(row.id, 'oauth', JSON.stringify(updated), {
     // The new id token names the account, if it came back.
     account: described?.account ?? row.account,
-    expires_at:
-      described?.expiresAt ??
-      (answer.expires_in ? now + answer.expires_in * 1000 : null),
+    expires_at: described?.expiresAt ?? (answer.expires_in ? now + answer.expires_in * 1000 : null),
     refreshed_at: now,
   });
 }
@@ -515,7 +514,11 @@ async function refreshDevTunnels(
   if (typeof refreshToken !== 'string' || refreshToken === '') {
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
-      store.markStatus(row.id, 'failing', 'the stored login carries no refresh token: log in again');
+      store.markStatus(
+        row.id,
+        'failing',
+        'the stored login carries no refresh token: log in again',
+      );
     }
     return;
   }
@@ -535,7 +538,11 @@ async function refreshDevTunnels(
 
   if (!answer.access_token) {
     const reason = answer.error_description ?? answer.error ?? 'no access token in the answer';
-    store.markStatus(row.id, 'failing', `could not refresh: ${reason}. Log in again if this persists`);
+    store.markStatus(
+      row.id,
+      'failing',
+      `could not refresh: ${reason}. Log in again if this persists`,
+    );
     return;
   }
 

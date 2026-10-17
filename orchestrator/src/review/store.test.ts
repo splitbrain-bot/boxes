@@ -1,19 +1,19 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'vitest';
 import {
+  type Annotation,
   annotationCounts,
   checkDrift,
   contextAround,
   deleteAnnotation,
   detectLang,
   parseReview,
+  type Review,
   serializeReview,
   setAnnotation,
   todayStamp,
-  type Annotation,
-  type Review,
 } from './store.ts';
 
 /**
@@ -258,7 +258,7 @@ describe('a comment survives a write and a read', () => {
     'tilde fence': 'try:\n\n~~~go\nfoo()\n~~~\n\ndone',
     'nested fences': 'outer:\n\n````md\n```go\nfoo()\n```\n````',
     'trailing whitespace inside a fence': 'see:\n\n```\nx   \n```',
-    'unicode': 'schöner Kommentar — mit Gedankenstrich und 🎉',
+    unicode: 'schöner Kommentar — mit Gedankenstrich und 🎉',
   };
 
   for (const [name, comment] of Object.entries(cases)) {
@@ -273,7 +273,13 @@ describe('a comment survives a write and a read', () => {
 
   test('neighbouring annotations stay separated', () => {
     const review = emptyReview('2026-08-31');
-    setAnnotation(review, 'a.go', 1, 'first\n\n```\n#### Line 42\n```', lines('l1\nl2\nl3\nl4\nl5\n'));
+    setAnnotation(
+      review,
+      'a.go',
+      1,
+      'first\n\n```\n#### Line 42\n```',
+      lines('l1\nl2\nl3\nl4\nl5\n'),
+    );
     setAnnotation(review, 'a.go', 4, 'second', lines('l1\nl2\nl3\nl4\nl5\n'));
     setAnnotation(review, 'b.go', 2, 'third\n---', lines('x1\nx2\nx3\n'));
 
@@ -295,7 +301,8 @@ describe('a comment survives a write and a read', () => {
   });
 
   test('the comment is written as prose, never quoted', () => {
-    const comment = 'Prefer a logger:\n\n```go\nlog.Println("hi")\n```\n\nIt keeps output consistent.';
+    const comment =
+      'Prefer a logger:\n\n```go\nlog.Println("hi")\n```\n\nIt keeps output consistent.';
     const review = emptyReview('2026-08-31');
     setAnnotation(review, 'a.go', 3, comment, lines('l1\nl2\nl3\nl4\nl5\n'));
     const written = serializeReview(review);
@@ -390,13 +397,10 @@ describe('mutation', () => {
     setAnnotation(review, 'a.go', 1, 'x', null);
     setAnnotation(review, 'a.go', 2, 'y', null);
     setAnnotation(review, 'b.go', 1, 'z', null);
-    assert.deepEqual(
-      [...annotationCounts(review).entries()].toSorted(),
-      [
-        ['a.go', 2],
-        ['b.go', 1],
-      ],
-    );
+    assert.deepEqual([...annotationCounts(review).entries()].toSorted(), [
+      ['a.go', 2],
+      ['b.go', 1],
+    ]);
   });
 
   test('context is taken with radius 3 and clamped to the file', () => {
@@ -431,15 +435,7 @@ describe('checkDrift', () => {
   test('context that moved relocates the annotation with it', () => {
     const anns = annotated(3, ['line2', 'line3', 'line4'], 2);
     // Two lines inserted at the top.
-    const changed = checkDrift(anns, [
-      'new1',
-      'new2',
-      'line1',
-      'line2',
-      'line3',
-      'line4',
-      'line5',
-    ]);
+    const changed = checkDrift(anns, ['new1', 'new2', 'line1', 'line2', 'line3', 'line4', 'line5']);
     assert.equal(changed, true);
     assert.ok(anns.has(5));
     assert.ok(!anns.has(3));
@@ -571,10 +567,7 @@ describe('checkDrift', () => {
       [8, { comment: 'stays', context: ['dup'], contextFrom: 8, outdated: false }],
     ]);
     checkDrift(anns, ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h']);
-    assert.deepEqual(
-      [...anns.values()].map((ann) => ann.comment).toSorted(),
-      ['moves', 'stays'],
-    );
+    assert.deepEqual([...anns.values()].map((ann) => ann.comment).toSorted(), ['moves', 'stays']);
   });
 
   test('a chain of relocations keeps every annotation', () => {

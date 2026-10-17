@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import {
   DIFF_PARSE_FLAGS,
+  type GitResult,
+  type GitRunner,
+  type GitTarget,
   git,
   gitArgv,
   gitEnv,
@@ -14,9 +17,6 @@ import {
   headCommit,
   isTopLevel,
   setGitRunnerForTests,
-  type GitResult,
-  type GitRunner,
-  type GitTarget,
 } from './git.ts';
 
 /** A target naming a container and a path inside it, as the service builds one. */

@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import type { BoxDetail } from '../../../shared/types.ts';
-import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
+import { boxBadges } from '@/components/BoxCard';
 import { BoxWorkList } from '@/components/BoxWorkList';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
-import { boxBadges } from '@/components/BoxCard';
 import { StatusBadge } from '@/components/StatusBadge';
-import { useUp } from '@/hooks/use-up';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useUp } from '@/hooks/use-up';
 import { pollWhileVisible } from '@/lib/poll';
 import { shortSize } from '@/lib/rough';
+import type { BoxDetail } from '../../../shared/types.ts';
+import { api } from '../api.ts';
 import { refresh } from '../stores/boxes.ts';
 
 /** How often the detail view re-reads the box, while its tab is visible. */
@@ -116,14 +116,12 @@ export function BoxInfo() {
         </div>
       </div>
 
-      {error ? (
-        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-      ) : null}
+      {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
 
       {running && !box.isolated ? (
         <Notice tone="warn" className="rounded-md border px-3 py-2">
-          The network isolation of this box is not complete. The agent has no internet access
-          until the repair loop fixes it.
+          The network isolation of this box is not complete. The agent has no internet access until
+          the repair loop fixes it.
         </Notice>
       ) : null}
 
@@ -144,11 +142,7 @@ export function BoxInfo() {
             {/* Null before the first measurement. */}
             <Meta
               label="On disk"
-              value={
-                box.diskBytes === null
-                  ? 'not measured'
-                  : shortSize(box.diskBytes)
-              }
+              value={box.diskBytes === null ? 'not measured' : shortSize(box.diskBytes)}
             />
             {/* A stopped box keeps the value of its last measurement, however old. */}
             {box.diskMeasuredAt === null ? null : (
@@ -170,7 +164,12 @@ export function BoxInfo() {
                   <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
                     Port {t.port}
                   </span>
-                  <a href={t.url} target="_blank" rel="noreferrer" className="truncate font-mono text-xs">
+                  <a
+                    href={t.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="truncate font-mono text-xs"
+                  >
                     {t.url}
                   </a>
                 </li>

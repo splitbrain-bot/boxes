@@ -1,12 +1,12 @@
-import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
+import { type WebSocket, WebSocketServer } from 'ws';
 import {
-  BOXES_META,
-  REPLAY_METHOD,
-  TURN_STATE_METHOD,
   type BackgroundProcess,
+  BOXES_META,
   type LoadMeta,
+  REPLAY_METHOD,
   type ReplayParams,
+  TURN_STATE_METHOD,
 } from '../../shared/types.ts';
 import type {
   ThreadConfigOption,
@@ -365,10 +365,7 @@ export function attachStubGateway(
         const modeId = String(params(msg)['modeId'] ?? '');
         if (script.modes) script.modes = { ...script.modes, currentModeId: modeId };
         reply({});
-        return void emit(
-          { sessionUpdate: 'current_mode_update', currentModeId: modeId },
-          pinned,
-        );
+        return void emit({ sessionUpdate: 'current_mode_update', currentModeId: modeId }, pinned);
       }
 
       case 'session/set_config_option': {

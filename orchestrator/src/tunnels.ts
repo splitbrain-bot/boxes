@@ -102,9 +102,7 @@ export function devTunnelsApi(token: () => string | null): TunnelApi {
       method: init.method ?? 'GET',
       headers: {
         authorization: `github ${secret}`,
-        ...(init.body === undefined
-          ? {}
-          : { 'content-type': 'application/json', 'if-match': '*' }),
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json', 'if-match': '*' }),
       },
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -151,7 +149,9 @@ export function toRemote(raw: unknown): RemoteTunnel {
   return {
     id: String(t.tunnelId ?? ''),
     cluster: String(t.clusterId ?? ''),
-    labels: Array.isArray(t.labels) ? t.labels.filter((l): l is string => typeof l === 'string') : [],
+    labels: Array.isArray(t.labels)
+      ? t.labels.filter((l): l is string => typeof l === 'string')
+      : [],
     ports: (t.ports ?? []).map((p) => ({
       port: Number(p.portNumber ?? 0),
       url: Array.isArray(p.portForwardingUris)
@@ -215,7 +215,9 @@ export class TunnelReconciler {
   /** The ports of the tunnels a box serves. */
   forBox(boxId: string): BoxTunnel[] {
     const rows = this.db
-      .prepare('SELECT * FROM tunnels WHERE box_id = ? AND unserved_since IS NULL ORDER BY created_at')
+      .prepare(
+        'SELECT * FROM tunnels WHERE box_id = ? AND unserved_since IS NULL ORDER BY created_at',
+      )
       .all(boxId) as TunnelRow[];
     return rows.flatMap((row) => toBoxTunnels(row));
   }
@@ -260,7 +262,10 @@ export class TunnelReconciler {
         this.db.prepare('DELETE FROM tunnels WHERE id = ?').run(row.id);
         log.info('deleted a tunnel no box serves any more', { tunnel: row.id, box: row.box_id });
       } catch (err) {
-        log.warn('could not delete an unserved tunnel', { tunnel: row.id, error: (err as Error).message });
+        log.warn('could not delete an unserved tunnel', {
+          tunnel: row.id,
+          error: (err as Error).message,
+        });
       }
     }
   }
@@ -270,7 +275,9 @@ export class TunnelReconciler {
    * one and remembers it. A tunnel the API does not know is skipped.
    */
   private async serve(boxId: string, ref: TunnelRef): Promise<void> {
-    const row = this.db.prepare('SELECT * FROM tunnels WHERE id = ?').get(ref.id) as TunnelRow | undefined;
+    const row = this.db.prepare('SELECT * FROM tunnels WHERE id = ?').get(ref.id) as
+      | TunnelRow
+      | undefined;
     if (row && row.box_id === boxId) {
       if (row.unserved_since !== null) {
         this.db.prepare('UPDATE tunnels SET unserved_since = NULL WHERE id = ?').run(ref.id);
@@ -282,7 +289,11 @@ export class TunnelReconciler {
     try {
       remote = await this.api.get(ref);
     } catch (err) {
-      log.warn('could not read a tunnel a box hosts', { box: boxId, tunnel: ref.id, error: (err as Error).message });
+      log.warn('could not read a tunnel a box hosts', {
+        box: boxId,
+        tunnel: ref.id,
+        error: (err as Error).message,
+      });
       return;
     }
     if (!remote) return;
@@ -299,7 +310,11 @@ export class TunnelReconciler {
       await this.api.setLabels(ref, labels);
     } catch (err) {
       // The cleanup works without the label.
-      log.warn('could not label a tunnel a box hosts', { box: boxId, tunnel: ref.id, error: (err as Error).message });
+      log.warn('could not label a tunnel a box hosts', {
+        box: boxId,
+        tunnel: ref.id,
+        error: (err as Error).message,
+      });
     }
     this.remember(boxId, ref, remote.ports);
   }

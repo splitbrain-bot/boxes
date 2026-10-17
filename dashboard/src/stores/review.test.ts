@@ -436,7 +436,10 @@ test('a new review clears the comments and reloads the tree', async () => {
   // The whole review is gone, so the counts have to come from the server
   // rather than be adjusted locally.
   assert.equal(hits('/review/dir'), before + 1);
-  assert.equal(requested.some((url) => url.includes('/review') && !url.includes('/review/')), true);
+  assert.equal(
+    requested.some((url) => url.includes('/review') && !url.includes('/review/')),
+    true,
+  );
 });
 
 // --- the base revision ------------------------------------------------------

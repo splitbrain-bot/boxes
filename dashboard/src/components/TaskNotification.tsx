@@ -1,11 +1,11 @@
-import { useCallback, useRef, useState } from 'react';
 import type { DataMessagePartComponent } from '@assistant-ui/react';
 import { ActivityIcon, CheckIcon, ChevronDownIcon, HandIcon, XIcon } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { useDisclosureLock } from '@/hooks/use-disclosure-lock';
-import type { TaskNotification } from '../../../shared/task-notifications.ts';
 import { formatUsage } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
+import type { TaskNotification } from '../../../shared/task-notifications.ts';
 
 /** How long the body takes to fold, in milliseconds, as the tool rows do. */
 const ANIMATION_DURATION = 200;

@@ -54,10 +54,7 @@ export function hostAllowed(host: string, policy: EgressPolicy): boolean {
 }
 
 /** The credentials configured for a host, in policy order. */
-export function credentialsForHost(
-  host: string,
-  policy: EgressPolicy,
-): EgressCredential[] {
+export function credentialsForHost(host: string, policy: EgressPolicy): EgressCredential[] {
   return policy.credentials.filter((c) => hostMatchesAny(host, c.hosts));
 }
 
@@ -267,7 +264,8 @@ export function parsePolicy(input: unknown): EgressPolicy {
   const rawCredentials = raw['credentials'] ?? [];
   if (!Array.isArray(rawCredentials)) return fail('credentials must be an array');
   const credentials = rawCredentials.map((entry, i): EgressCredential => {
-    if (typeof entry !== 'object' || entry === null) return fail(`credential ${i} is not an object`);
+    if (typeof entry !== 'object' || entry === null)
+      return fail(`credential ${i} is not an object`);
     const c = entry as Record<string, unknown>;
     const id = c['id'];
     const placeholder = c['placeholder'];

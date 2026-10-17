@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { test } from 'vitest';
-import { loadConfig } from './config.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { test } from 'vitest';
+import { loadConfig } from './config.ts';
 
 /** Runs a case against a throwaway data dir, so no case names a real one. */
 function withDataDir<T>(fn: (dir: string) => T): T {
@@ -97,9 +97,18 @@ test('a provided value wins over the default', () => {
 
 test('a genuinely invalid value still fails the boot', () => {
   withDataDir((dir) => {
-    assert.throws(() => loadConfig({ DATA_DIR: dir, BOX_MEM_LIMIT: 'lots' }), /Invalid configuration/);
-    assert.throws(() => loadConfig({ DATA_DIR: dir, PERMISSION_FALLBACK: 'maybe' }), /Invalid configuration/);
-    assert.throws(() => loadConfig({ DATA_DIR: dir, LOG_LEVEL: 'verbose' }), /Invalid configuration/);
+    assert.throws(
+      () => loadConfig({ DATA_DIR: dir, BOX_MEM_LIMIT: 'lots' }),
+      /Invalid configuration/,
+    );
+    assert.throws(
+      () => loadConfig({ DATA_DIR: dir, PERMISSION_FALLBACK: 'maybe' }),
+      /Invalid configuration/,
+    );
+    assert.throws(
+      () => loadConfig({ DATA_DIR: dir, LOG_LEVEL: 'verbose' }),
+      /Invalid configuration/,
+    );
     assert.throws(() => loadConfig({ DATA_DIR: dir, BOX_CPUS: '-1' }), /Invalid configuration/);
     assert.throws(
       () => loadConfig({ DATA_DIR: dir, PUSH_SUBJECT: 'ops@example.com' }),

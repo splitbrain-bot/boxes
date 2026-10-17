@@ -18,18 +18,18 @@ import type { Config } from '../config.ts';
 import { log } from '../log.ts';
 import { readAll, withTimeout } from './exec.ts';
 import {
-  HOME_DIR,
-  NIX_DIR,
-  RUN_TIMEOUT_MS,
-  WORKSPACE_DIR,
   type BoxSpec,
+  HOME_DIR,
   type Login,
+  NIX_DIR,
   type ProcessStream,
+  RUN_TIMEOUT_MS,
   type RunOptions,
   type RunOutput,
   type Runtime,
   type RuntimeObject,
   type SpawnOptions,
+  WORKSPACE_DIR,
 } from './runtime.ts';
 
 /** Label that holds the box id, on the pod, the policy and the claim of a box. */
@@ -353,30 +353,38 @@ export class KubernetesRuntime implements Runtime {
         return value && ref ? [{ item, value, ref }] : [];
       });
     return [
-      ...labelled(pods.items, LABEL).map(({ item, value, ref }): RuntimeObject => ({
-        kind: 'box',
-        boxId: value,
-        ref,
-        running: isLive(item),
-      })),
-      ...labelled(policies.items, LABEL).map(({ value, ref }): RuntimeObject => ({
-        kind: 'isolation',
-        boxId: value,
-        ref,
-      })),
-      ...labelled(claims.items, LABEL).map(({ value, ref }): RuntimeObject => ({
-        kind: 'storage',
-        boxId: value,
-        ref,
-      })),
-      ...labelled(logins.items, LOGIN_LABEL).map(({ item, value, ref }): RuntimeObject => ({
-        kind: 'login',
-        credentialId: value,
-        ref,
-        createdAt: item.metadata?.creationTimestamp
-          ? new Date(item.metadata.creationTimestamp).getTime()
-          : 0,
-      })),
+      ...labelled(pods.items, LABEL).map(
+        ({ item, value, ref }): RuntimeObject => ({
+          kind: 'box',
+          boxId: value,
+          ref,
+          running: isLive(item),
+        }),
+      ),
+      ...labelled(policies.items, LABEL).map(
+        ({ value, ref }): RuntimeObject => ({
+          kind: 'isolation',
+          boxId: value,
+          ref,
+        }),
+      ),
+      ...labelled(claims.items, LABEL).map(
+        ({ value, ref }): RuntimeObject => ({
+          kind: 'storage',
+          boxId: value,
+          ref,
+        }),
+      ),
+      ...labelled(logins.items, LOGIN_LABEL).map(
+        ({ item, value, ref }): RuntimeObject => ({
+          kind: 'login',
+          credentialId: value,
+          ref,
+          createdAt: item.metadata?.creationTimestamp
+            ? new Date(item.metadata.creationTimestamp).getTime()
+            : 0,
+        }),
+      ),
     ];
   }
 

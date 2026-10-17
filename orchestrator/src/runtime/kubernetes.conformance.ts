@@ -1,7 +1,7 @@
 import { describe, it } from 'vitest';
 import { loadConfig } from '../config.ts';
 import { runtimeConformance } from './conformance.ts';
-import { KubernetesRuntime, connect, names } from './kubernetes.ts';
+import { connect, KubernetesRuntime, names } from './kubernetes.ts';
 
 /**
  * The conformance suite against the Kubernetes cluster of the kubeconfig

@@ -1,10 +1,15 @@
 import { UPDATE_KIND, type UpdateKind } from '../../../../shared/acp.ts';
 import {
+  parseTaskNotifications,
+  type TaskNotification,
+} from '../../../../shared/task-notifications.ts';
+import { parseEnvelope } from '../../lib/attachments.ts';
+import {
+  type AvailableCommand,
   blockText,
+  type ContentBlock,
   imageFallbackText,
   imageSrc,
-  type AvailableCommand,
-  type ContentBlock,
   type PermissionOption,
   type PlanEntry,
   type ThreadConfigOption,
@@ -16,11 +21,6 @@ import {
   type ToolCallUpdate,
   type ToolKind,
 } from './acp-types.ts';
-import { parseEnvelope } from '../../lib/attachments.ts';
-import {
-  parseTaskNotifications,
-  type TaskNotification,
-} from '../../../../shared/task-notifications.ts';
 
 /** Folds ACP session/update notifications into the thread's message model. */
 

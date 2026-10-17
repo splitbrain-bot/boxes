@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 import {
   DEFAULT_GIT_EMAIL,
   DEFAULT_GIT_NAME,

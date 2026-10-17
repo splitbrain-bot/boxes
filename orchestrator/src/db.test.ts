@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'vitest';
-import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
+import { afterEach, beforeEach, test } from 'vitest';
 import {
+  type Db,
   MIGRATIONS,
   openDb,
   readHarnessCatalog,
   touchBox,
   upsertHarnessCatalog,
-  type Db,
 } from './db.ts';
 
 let dir: string;
@@ -208,9 +208,9 @@ test('a deployment on the previous release upgrades cleanly', () => {
     // The migration that shipped first kept its index, so what it created is
     // still there and still holds its rows.
     assert.ok(columns(upgraded, 'push_subscriptions').includes('endpoint'));
-    const push = upgraded
-      .prepare('SELECT COUNT(*) AS n FROM push_subscriptions')
-      .get() as { n: number };
+    const push = upgraded.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as {
+      n: number;
+    };
     assert.equal(push.n, 1);
   } finally {
     upgraded.close();
@@ -244,9 +244,10 @@ test('threads from before the mode column upgrade to the deployment default', ()
     // No backfill: a null mode means the mode its harness starts a thread in.
     // A later migration moves the model into the config map, and a thread
     // without a model gets an empty map.
-    const row = upgraded
-      .prepare("SELECT mode_id, config FROM threads WHERE id = 't1'")
-      .get() as { mode_id: string | null; config: string };
+    const row = upgraded.prepare("SELECT mode_id, config FROM threads WHERE id = 't1'").get() as {
+      mode_id: string | null;
+      config: string;
+    };
     assert.deepEqual(row, { mode_id: null, config: '{}' });
   } finally {
     upgraded.close();
@@ -276,9 +277,9 @@ test('the agent tables arrive with a global set, and existing boxes select none'
     // A box that predates the feature gets the global set and nothing
     // else, which is what a null column means.
     assert.ok(columns(upgraded, 'boxes').includes('agent_set_id'));
-    const row = upgraded
-      .prepare("SELECT agent_set_id FROM boxes WHERE id = 'live'")
-      .get() as { agent_set_id: string | null };
+    const row = upgraded.prepare("SELECT agent_set_id FROM boxes WHERE id = 'live'").get() as {
+      agent_set_id: string | null;
+    };
     assert.equal(row.agent_set_id, null);
   } finally {
     upgraded.close();
@@ -340,7 +341,6 @@ test('threads from before the done column read as not done', () => {
   }
 });
 
-
 test('boxes from before the token column each get one of their own', () => {
   const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN ws_token'));
   const db = new Database(join(dir, 'boxes.db'));
@@ -360,9 +360,10 @@ test('boxes from before the token column each get one of their own', () => {
   try {
     // An existing box stays reachable, so it needs a token now rather than at
     // its next start.
-    const rows = upgraded
-      .prepare('SELECT id, ws_token FROM boxes ORDER BY id')
-      .all() as Array<{ id: string; ws_token: string }>;
+    const rows = upgraded.prepare('SELECT id, ws_token FROM boxes ORDER BY id').all() as Array<{
+      id: string;
+      ws_token: string;
+    }>;
     assert.equal(rows.length, 2);
     for (const row of rows) assert.match(row.ws_token, /^[0-9a-f]{64}$/);
     // One each, so a leaked token cannot open another box.
@@ -477,9 +478,9 @@ test('the credential and settings tables arrive empty on an existing deployment'
   try {
     // Nothing is carried over from the environment. A deployment that had
     // credentials in its .env enters them again on the settings page.
-    const credentials = upgraded
-      .prepare('SELECT COUNT(*) AS n FROM credentials')
-      .get() as { n: number };
+    const credentials = upgraded.prepare('SELECT COUNT(*) AS n FROM credentials').get() as {
+      n: number;
+    };
     assert.equal(credentials.n, 0);
     const settings = upgraded.prepare('SELECT COUNT(*) AS n FROM settings').get() as {
       n: number;
@@ -545,9 +546,9 @@ test('a thread from before harnesses is Claude, on the model it was left on', ()
       'config_options',
       'seen_at',
     ]);
-    const cached = upgraded
-      .prepare('SELECT COUNT(*) AS n FROM harness_catalog')
-      .get() as { n: number };
+    const cached = upgraded.prepare('SELECT COUNT(*) AS n FROM harness_catalog').get() as {
+      n: number;
+    };
     assert.equal(cached.n, 0);
   } finally {
     upgraded.close();

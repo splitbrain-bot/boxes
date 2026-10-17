@@ -172,11 +172,7 @@ export interface ThreadNotification {
 }
 
 /** What a permission option would do if chosen. */
-export type PermissionOptionKind =
-  | 'allow_once'
-  | 'allow_always'
-  | 'reject_once'
-  | 'reject_always';
+export type PermissionOptionKind = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
 
 /** One answer the user may give to a permission request. */
 export interface PermissionOption {

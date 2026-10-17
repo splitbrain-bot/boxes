@@ -7,21 +7,21 @@ import {
   SquareTerminal,
 } from 'lucide-react';
 import { Link } from 'react-router';
-import type { HarnessId } from '../../../shared/types.ts';
-import type { ThreadConfigOption, ThreadModeState } from '../stores/thread/acp-types.ts';
-import type { ConnectionState } from '../stores/thread/acp-client.ts';
-import type { Up } from '@/hooks/use-up';
 import {
   ConfigSelect,
-  ModeSelect,
-  Setting,
   currentModeDescription,
   isSelectable,
+  ModeSelect,
   optionName,
+  Setting,
 } from '@/components/AgentSettings';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import type { Up } from '@/hooks/use-up';
 import { cn } from '@/lib/utils';
+import type { HarnessId } from '../../../shared/types.ts';
+import type { ConnectionState } from '../stores/thread/acp-client.ts';
+import type { ThreadConfigOption, ThreadModeState } from '../stores/thread/acp-types.ts';
 
 /** What the connection dot says, and the colour it says it in. */
 const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
@@ -96,8 +96,7 @@ export function ThreadHeader({
   // Every other selectable option. The mode option is left out, because
   // `modes` already carries the mode.
   const rest = configOptions.filter(
-    (option) =>
-      option !== model && option.category !== 'mode' && isSelectable(option),
+    (option) => option !== model && option.category !== 'mode' && isSelectable(option),
   );
 
   // All settings sit behind one button, because they do not fit a phone's header.

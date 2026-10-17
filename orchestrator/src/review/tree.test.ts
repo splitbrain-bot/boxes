@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
-import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
-import { setGitRunnerForTests, type GitBox, type GitRunner } from './git.ts';
 import { listDir } from '../../../files/src/ops.ts';
-import { inProcessFileService } from '../files-in-process.ts';
+import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
 import { fileService, setFileServiceSpawnerForTests } from '../files.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { type GitBox, type GitRunner, setGitRunnerForTests } from './git.ts';
 import { discoverRepos, RepoMap } from './repos.ts';
 import {
   dirEntries,
@@ -74,7 +74,7 @@ describe('listedFile', () => {
     assert.equal(listedFile('REVIEW.md'), false);
   });
 
-  test("a REVIEW.md deeper in the tree is a file of the project", () => {
+  test('a REVIEW.md deeper in the tree is a file of the project', () => {
     assert.equal(listedFile('docs/REVIEW.md'), true);
   });
 
@@ -114,14 +114,20 @@ describe('reviewChildren', () => {
     file('a.txt');
     file('src/main.ts');
     file('src/util/helpers.ts');
-    assert.deepEqual(readDir(dir, '').toSorted((a, b) => (a.name < b.name ? -1 : 1)), [
-      { name: 'a.txt', isDir: false },
-      { name: 'src', isDir: true },
-    ]);
-    assert.deepEqual(readDir(dir, 'src').toSorted((a, b) => (a.name < b.name ? -1 : 1)), [
-      { name: 'main.ts', isDir: false },
-      { name: 'util', isDir: true },
-    ]);
+    assert.deepEqual(
+      readDir(dir, '').toSorted((a, b) => (a.name < b.name ? -1 : 1)),
+      [
+        { name: 'a.txt', isDir: false },
+        { name: 'src', isDir: true },
+      ],
+    );
+    assert.deepEqual(
+      readDir(dir, 'src').toSorted((a, b) => (a.name < b.name ? -1 : 1)),
+      [
+        { name: 'main.ts', isDir: false },
+        { name: 'util', isDir: true },
+      ],
+    );
   });
 
   test('git metadata stays out, and nothing else does', () => {

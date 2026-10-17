@@ -1,5 +1,5 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { allocateSubnet, formatIpv4, parseCidr } from './subnet.ts';
 
 test('parses and normalises a CIDR', () => {

@@ -1,11 +1,4 @@
-import {
-  lchownSync,
-  mkdirSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  type Dirent,
-} from 'node:fs';
+import { type Dirent, lchownSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { log } from './log.ts';
 

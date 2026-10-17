@@ -1,54 +1,47 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { Duplex } from 'node:stream';
-import { WebSocketServer } from 'ws';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import type { Duplex } from 'node:stream';
 import { PassThrough } from 'node:stream';
+import { WebSocketServer } from 'ws';
+import { buildApp, type Orchestrator } from '../../orchestrator/src/app.ts';
+import type { BoxManager } from '../../orchestrator/src/boxes.ts';
+import { type Config, loadConfig, setConfigForTests } from '../../orchestrator/src/config.ts';
+import {
+  type BoxRow,
+  type Db,
+  getThread,
+  latestThread,
+  listThreads,
+  openDb,
+  setThreadAcpId,
+  type ThreadRow,
+  upsertHarnessCatalog,
+} from '../../orchestrator/src/db.ts';
+import { checkUpgrade } from '../../orchestrator/src/gateway/downstream.ts';
+import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
+import { setLogLevel } from '../../orchestrator/src/log.ts';
+import type { LoginExecSpec } from '../../orchestrator/src/login.ts';
+import { runtime } from '../../orchestrator/src/runtime/runtime.ts';
+import * as ws from '../../orchestrator/src/workspaces.ts';
+import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import type {
   AgentSetDetail,
   ApiKeySummary,
+  BoxTunnel,
+  BoxWork,
   CredentialId,
   CredentialStatus,
   CredentialSummary,
   HarnessId,
   ReviewAnnotation,
   ReviewFileResponse,
-  BoxWork,
-  BoxTunnel,
   Settings,
   ThreadOptions,
 } from '../../shared/types.ts';
-import { buildApp, type Orchestrator } from '../../orchestrator/src/app.ts';
-import { loadConfig, setConfigForTests, type Config } from '../../orchestrator/src/config.ts';
-import {
-  getThread,
-  latestThread,
-  listThreads,
-  openDb,
-  setThreadAcpId,
-  upsertHarnessCatalog,
-  type Db,
-  type BoxRow,
-  type ThreadRow,
-} from '../../orchestrator/src/db.ts';
-import { checkUpgrade } from '../../orchestrator/src/gateway/downstream.ts';
-import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
-import { setLogLevel } from '../../orchestrator/src/log.ts';
-import type { LoginExecSpec } from '../../orchestrator/src/login.ts';
-import type { BoxManager } from '../../orchestrator/src/boxes.ts';
-import { runtime } from '../../orchestrator/src/runtime/runtime.ts';
-import * as ws from '../../orchestrator/src/workspaces.ts';
-import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
-import { FAKE_SELF_CONTAINER, installFakeDocker, type FakeDocker } from './fake-docker.ts';
+import { FAKE_SELF_CONTAINER, type FakeDocker, installFakeDocker } from './fake-docker.ts';
 import { attachStubGateway, type GatewayScript, type StubGateway } from './stub-gateway.ts';
 import {
   buildWorkspace,
@@ -73,7 +66,8 @@ const OPENAI_KEY = 'sk-proj-a-key-for-the-tests-abcd';
  * The auth.json a finished Codex login is read back from: an id token naming
  * the account, and an access token that has not expired.
  */
-const LOGIN_DOCUMENT = "{\"tokens\": {\"access_token\": \"eyJhbGciOiAibm9uZSJ9.eyJleHAiOiA0MTAyNDQ0ODAwfQ.\", \"id_token\": \"eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJhZ2VudEBleGFtcGxlLmNvbSIsICJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOiB7ImVtYWlsIjogImFnZW50QGV4YW1wbGUuY29tIn19.\", \"refresh_token\": \"r\"}, \"last_refresh\": \"2026-09-12T10:00:00Z\"}";
+const LOGIN_DOCUMENT =
+  '{"tokens": {"access_token": "eyJhbGciOiAibm9uZSJ9.eyJleHAiOiA0MTAyNDQ0ODAwfQ.", "id_token": "eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJhZ2VudEBleGFtcGxlLmNvbSIsICJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOiB7ImVtYWlsIjogImFnZW50QGV4YW1wbGUuY29tIn19.", "refresh_token": "r"}, "last_refresh": "2026-09-12T10:00:00Z"}';
 
 /**
  * The modes and settings each adapter advertises, as the harness catalogue
@@ -122,7 +116,11 @@ const CATALOG: Record<
     modes: {
       currentModeId: 'agent-full-access',
       availableModes: [
-        { id: 'read-only', name: 'Ask for approval', description: 'Every command waits for a human.' },
+        {
+          id: 'read-only',
+          name: 'Ask for approval',
+          description: 'Every command waits for a human.',
+        },
         { id: 'agent', name: 'Approve for me', description: 'Codex approves its own work.' },
         {
           id: 'agent-full-access',
@@ -574,9 +572,7 @@ function insertThread(
 
 /** The stored box behind an id, or nothing where the deployment has none. */
 function boxRow(db: Db, boxId: string): BoxRow | undefined {
-  return db.prepare('SELECT * FROM boxes WHERE id = ?').get(boxId) as
-    | BoxRow
-    | undefined;
+  return db.prepare('SELECT * FROM boxes WHERE id = ?').get(boxId) as BoxRow | undefined;
 }
 
 /** Writes a file of a workspace, creating the directories above it. */
@@ -602,15 +598,7 @@ function createBox(
     `INSERT INTO boxes (id, name, profile, review_base_rev, status, agent_set_id, ws_token,
        created_at, last_active_at, ready_at)
      VALUES (?, ?, 'DEFAULT', NULL, ?, NULL, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    spec.name ?? DEFAULT_BOX.name,
-    spec.status ?? 'running',
-    WS_TOKEN,
-    now,
-    now,
-    now,
-  );
+  ).run(id, spec.name ?? DEFAULT_BOX.name, spec.status ?? 'running', WS_TOKEN, now, now, now);
 
   ws.createWorkspace(cfg.DATA_DIR, id);
   ws.createHome(cfg.DATA_DIR, id);
@@ -768,9 +756,7 @@ function installHooks(
       return;
     }
 
-    const review = /^\/api\/boxes\/([^/]+)\/review(?:\/(dir|file|annotations|base))?$/.exec(
-      path,
-    );
+    const review = /^\/api\/boxes\/([^/]+)\/review(?:\/(dir|file|annotations|base))?$/.exec(path);
     const named = review ? reviewCallOf(req.method, review[2] ?? '') : null;
     if (review && named) {
       // A delete carries its subject in the query.
@@ -822,7 +808,11 @@ function installLoginRuntime(): TestLogin[] {
           document.end(LOGIN_DOCUMENT);
           return { ...pipes, stdout: document, exited: Promise.resolve(0), kill: () => undefined };
         }
-        login.spec = { cmd, ...(opts.env ? { env: opts.env } : {}), ...(opts.tty ? { tty: true } : {}) };
+        login.spec = {
+          cmd,
+          ...(opts.env ? { env: opts.env } : {}),
+          ...(opts.tty ? { tty: true } : {}),
+        };
         stdin.on('data', (chunk: Buffer) => {
           login.input += chunk.toString('utf8');
         });

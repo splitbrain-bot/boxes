@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'vitest';
 import type { HarnessHealth } from '../../../shared/types.ts';
-import { MAY_BE_UNAVAILABLE, harnessLabel, modeDescription, modeLabel, unavailableReason } from './harness.ts';
+import {
+  harnessLabel,
+  MAY_BE_UNAVAILABLE,
+  modeDescription,
+  modeLabel,
+  unavailableReason,
+} from './harness.ts';
 
 /** A harness as the health probe reports one. */
 function health(over: Partial<HarnessHealth> = {}): HarnessHealth {
@@ -16,9 +22,9 @@ function health(over: Partial<HarnessHealth> = {}): HarnessHealth {
 describe('mode labels', () => {
   test('say what the mode does, in the adapter’s own words', () => {
     expect(modeLabel('claude', { id: 'plan', name: 'Plan' })).toBe('Plan');
-    expect(modeDescription('claude', { id: 'plan', name: 'Plan', description: 'Reads only.' })).toBe(
-      'Reads only.',
-    );
+    expect(
+      modeDescription('claude', { id: 'plan', name: 'Plan', description: 'Reads only.' }),
+    ).toBe('Reads only.');
   });
 
   test('fall back to the id for an adapter that names nothing', () => {
@@ -34,7 +40,9 @@ describe('mode labels', () => {
       'may be unavailable here',
     );
     // The one that needs no sandbox is offered without a caveat.
-    expect(modeLabel('codex', { id: 'agent-full-access', name: 'Full access' })).toBe('Full access');
+    expect(modeLabel('codex', { id: 'agent-full-access', name: 'Full access' })).toBe(
+      'Full access',
+    );
     expect(
       modeDescription('codex', { id: 'read-only', name: 'Ask for approval', description: 'Asks.' }),
     ).toBe(`Asks. ${MAY_BE_UNAVAILABLE}`);
@@ -79,7 +87,9 @@ describe('why a harness cannot run', () => {
 
 describe('the label on a thread', () => {
   test('is the deployment’s own name for the agent', () => {
-    expect(harnessLabel([health(), health({ id: 'codex', label: 'Codex' })], 'codex')).toBe('Codex');
+    expect(harnessLabel([health(), health({ id: 'codex', label: 'Codex' })], 'codex')).toBe(
+      'Codex',
+    );
   });
 
   test('is null while nothing has said, rather than an id nobody recognises', () => {

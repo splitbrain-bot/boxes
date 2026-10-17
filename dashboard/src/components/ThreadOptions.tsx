@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
+import {
+  ConfigSelect,
+  currentModeDescription,
+  isSelectable,
+  ModeSelect,
+  optionName,
+  Setting,
+} from '@/components/AgentSettings';
+import { Notice } from '@/components/Notice';
+import { Button } from '@/components/ui/button';
+import { unavailableReason } from '@/lib/harness';
 import type {
   HarnessId,
   HarnessInfo,
@@ -7,17 +18,6 @@ import type {
   ThreadDialogDefaults,
   ThreadOptions as ThreadOptionsBody,
 } from '../../../shared/types.ts';
-import {
-  ConfigSelect,
-  ModeSelect,
-  Setting,
-  currentModeDescription,
-  isSelectable,
-  optionName,
-} from '@/components/AgentSettings';
-import { Notice } from '@/components/Notice';
-import { Button } from '@/components/ui/button';
-import { unavailableReason } from '@/lib/harness';
 import { rememberDialog, useHarnesses } from '../stores/harnesses.ts';
 
 /** The block's state, held by the hook and rendered by the component. */
@@ -90,15 +90,12 @@ export function useThreadOptions(): ThreadOptionsState {
 
   const chosen = harnesses?.find((harness) => harness.id === harnessId) ?? null;
 
-  const choose = useCallback(
-    (info: HarnessInfo, saved: ThreadDialogDefaults | undefined) => {
-      const start = prefill(info, saved);
-      setHarnessId(info.id);
-      setModeId(start.modeId);
-      setConfigMap(start.config);
-    },
-    [],
-  );
+  const choose = useCallback((info: HarnessInfo, saved: ThreadDialogDefaults | undefined) => {
+    const start = prefill(info, saved);
+    setHarnessId(info.id);
+    setModeId(start.modeId);
+    setConfigMap(start.config);
+  }, []);
 
   // The first harness list picks the first harness that can run. An agent
   // without a working credential fails at its first prompt. When none can
@@ -248,10 +245,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
 
       {/* The mode comes next, because it decides what the agent may do without asking. */}
       {modes && hasModes ? (
-        <Setting
-          name="Agent mode"
-          description={currentModeDescription(modes, chosen?.id ?? null)}
-        >
+        <Setting name="Agent mode" description={currentModeDescription(modes, chosen?.id ?? null)}>
           <ModeSelect
             modes={modes}
             harness={chosen?.id ?? null}

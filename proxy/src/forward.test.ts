@@ -44,9 +44,9 @@ describe('parseHostPort', () => {
 describe('vetTarget', () => {
   it('allows only ports 80 and 443', async () => {
     resolvesTo('93.184.216.34');
-    await expect(vetTarget({ host: 'example.com', port: 443 }, EMPTY_POLICY)).resolves.toMatchObject(
-      { ok: true },
-    );
+    await expect(
+      vetTarget({ host: 'example.com', port: 443 }, EMPTY_POLICY),
+    ).resolves.toMatchObject({ ok: true });
     await expect(vetTarget({ host: 'example.com', port: 22 }, EMPTY_POLICY)).resolves.toEqual({
       ok: false,
       category: 'port',

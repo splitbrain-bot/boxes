@@ -4,9 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
-import { inProcessFileService } from '../files-in-process.ts';
 import { fileService, setFileServiceSpawnerForTests } from '../files.ts';
-import { setGitRunnerForTests, type GitBox, type GitRunner } from './git.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { type GitBox, type GitRunner, setGitRunnerForTests } from './git.ts';
 import {
   discoverRepos,
   gitTarget,
@@ -14,8 +14,8 @@ import {
   inWorkspace,
   MAX_REPO_DEPTH,
   MAX_SCANNED_DIRS,
-  RepoMap,
   type Repo,
+  RepoMap,
 } from './repos.ts';
 
 /**

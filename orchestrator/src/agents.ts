@@ -2,16 +2,17 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { pack, type Pack } from 'tar-stream';
+import { type Pack, pack } from 'tar-stream';
 import {
-  GLOBAL_AGENT_SET,
   type AgentBundlePreview,
   type AgentItem,
   type AgentItemBody,
   type AgentRepoBody,
   type AgentSetDetail,
   type AgentSetSummary,
+  GLOBAL_AGENT_SET,
 } from '../../shared/types.ts';
+import type { BuiltinSkill } from './builtin-skills.ts';
 import type { AgentItemRow, AgentRepoRow, AgentSetRow, Db } from './db.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
@@ -19,14 +20,13 @@ import { log } from './log.ts';
 import {
   fetchRepo,
   findSkills,
+  type RepoFetcher,
+  type RepoSkill,
   repoDir,
   repoDirIds,
   repoName,
   repoTree,
-  type RepoFetcher,
-  type RepoSkill,
 } from './skill-repos.ts';
-import type { BuiltinSkill } from './builtin-skills.ts';
 
 /**
  * Agent sets: the AGENTS.md and skills a box's agent is configured with. The
@@ -175,9 +175,7 @@ export class AgentStore {
       .prepare('SELECT COUNT(*) AS n FROM agent_repos WHERE set_id = ?')
       .get(row.id) as { n: number };
     const used = this.db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM boxes WHERE agent_set_id = ? AND status != 'deleted'",
-      )
+      .prepare("SELECT COUNT(*) AS n FROM boxes WHERE agent_set_id = ? AND status != 'deleted'")
       .get(row.id) as { n: number };
     return {
       id: row.id,
@@ -249,7 +247,8 @@ export class AgentStore {
     }
     const repos = this.repoRows(id);
     this.db.prepare('DELETE FROM agent_sets WHERE id = ?').run(id);
-    for (const repo of repos) rmSync(repoDir(this.dataDir, repo.id), { recursive: true, force: true });
+    for (const repo of repos)
+      rmSync(repoDir(this.dataDir, repo.id), { recursive: true, force: true });
   }
 
   /** Creates a skill, or replaces the one already under that name. */
@@ -437,9 +436,9 @@ export class AgentStore {
    * share one, so the set's wins.
    */
   private merge(setId: string | null): Bundle {
-    const global = this.db
-      .prepare('SELECT * FROM agent_sets WHERE id = ?')
-      .get(GLOBAL_AGENT_SET) as AgentSetRow | undefined;
+    const global = this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(GLOBAL_AGENT_SET) as
+      | AgentSetRow
+      | undefined;
     const extra =
       setId && setId !== GLOBAL_AGENT_SET
         ? (this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(setId) as
@@ -497,7 +496,8 @@ export class AgentStore {
     const bundle = this.merge(setId);
     const names = new Set(bundle.skills.map((skill) => skill.name));
     for (const skill of this.builtins()) {
-      if (!names.has(skill.name)) bundle.skills.push({ name: skill.name, repo: null, content: skill.content });
+      if (!names.has(skill.name))
+        bundle.skills.push({ name: skill.name, repo: null, content: skill.content });
     }
     const tar = pack();
     for (const { layout } of Object.values(HARNESSES)) {

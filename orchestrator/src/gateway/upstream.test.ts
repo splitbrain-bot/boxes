@@ -1,25 +1,25 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import Docker from 'dockerode';
-import { Duplex, Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { config } from '../config.ts';
-import { setLogLevel } from '../log.ts';
-import { openDb, readHarnessCatalog, type Db } from '../db.ts';
-import * as dk from '../docker.ts';
-import { ApiKeyStore } from '../api-keys.ts';
-import { CredentialStore } from '../credentials.ts';
-import { EgressManager } from '../egress.ts';
-import { Notifier, type NotifyEvent } from '../notify.ts';
+import { Duplex, Readable } from 'node:stream';
+import Docker from 'dockerode';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 import { AgentStore } from '../agents.ts';
+import { ApiKeyStore } from '../api-keys.ts';
 import { BoxManager } from '../boxes.ts';
+import { config } from '../config.ts';
+import { CredentialStore } from '../credentials.ts';
+import { type Db, openDb, readHarnessCatalog } from '../db.ts';
+import * as dk from '../docker.ts';
+import { EgressManager } from '../egress.ts';
+import { setLogLevel } from '../log.ts';
+import { Notifier, type NotifyEvent } from '../notify.ts';
 import { DockerRuntime } from '../runtime/docker.ts';
 import { setRuntime } from '../runtime/runtime.ts';
 import * as ws from '../workspaces.ts';
-import { HISTORY_LOADING, THREAD_WORKING, type DownstreamHandle } from './upstream.ts';
-import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
+import { type DownstreamHandle, HISTORY_LOADING, THREAD_WORKING } from './upstream.ts';
 
 // A turn is announced once its thread has gone quiet, so these tests wait for
 // that. Set to the shortest the config allows, before anything reads it.
@@ -1138,9 +1138,9 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
 test('re-minting the latest thread keeps the mode and model its row remembers', async () => {
   // A thread minted and never prompted: the row remembers what it was put
   // into, and the adapter has no transcript to bring back.
-  db.prepare(
-    `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
-  ).run('t1');
+  db.prepare(`UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`).run(
+    't1',
+  );
   const asked: string[] = [];
   fakeDocker(twoThreadAdapter(asked, new Set(['acp-gone'])));
   const up = manager.upstream('s1');
@@ -2007,8 +2007,8 @@ test('a task the adapter announces belongs to the thread it names', async () => 
   // The other conversation of the same box is told nothing.
   assert.deepEqual(up.threadState('acp-kept').background, []);
   // The watching browser is told without asking.
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(
     told.at(-1)?.background.map((task) => task.command),
@@ -2041,8 +2041,8 @@ test('a task that ends takes its own bar away', async () => {
     update: { sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' },
   });
   await expect.poll(() => up.threadState('acp-gone').background.length).toBe(0);
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(told.at(-1)?.background, []);
 });
@@ -2067,8 +2067,8 @@ test('an adapter that dies drops its tasks and re-sends the threads it had', asy
 
   live.destroy();
   await expect.poll(() => up.threadState('acp-gone').background.length).toBe(0);
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(told.at(-1)?.background, []);
 });
@@ -2252,8 +2252,8 @@ test('a task that was already over is taken off the bar anyway', async () => {
 
   assert.equal(await up.stopBackgroundWork('acp-gone', 'task-1'), 0);
   assert.deepEqual(up.threadState('acp-gone').background, []);
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(told.at(-1)?.background, []);
 });
@@ -2742,47 +2742,42 @@ test('initialize is answered by the adapter holding the thread that asked', asyn
   );
 });
 
-test(
-  'an adapter that will not start costs the box only its own threads',
-  async () => {
-    seedThread('t3', 'codex', 'cx-1', 3);
-    const seen: string[] = [];
-    fakeDocker({
-      'claude-agent-acp': harnessAdapter(seen, 'claude'),
-      // The stand-in throws on every message, so no handshake succeeds.
-      'codex-acp': () =>
-        new FakeAdapter(() => {
-          throw new Error('codex-acp: not installed in this image');
-        }),
-    });
+test('an adapter that will not start costs the box only its own threads', async () => {
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    // The stand-in throws on every message, so no handshake succeeds.
+    'codex-acp': () =>
+      new FakeAdapter(() => {
+        throw new Error('codex-acp: not installed in this image');
+      }),
+  });
 
-    const up = manager.upstream('s1');
-    await up.ensureStarted();
-    const handle = fakeHandle(1, null);
-    up.attach(handle);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
 
-    // Three attempts and then the box is in error, because a thread of
-    // this box cannot be opened at all.
-    await assert.rejects(() => up.pin(handle, 't3'));
-    assert.deepEqual(
-      spawned.filter((cmd) => cmd === 'codex-acp'),
-      ['codex-acp', 'codex-acp', 'codex-acp'],
-    );
+  // Three attempts and then the box is in error, because a thread of
+  // this box cannot be opened at all.
+  await assert.rejects(() => up.pin(handle, 't3'));
+  assert.deepEqual(
+    spawned.filter((cmd) => cmd === 'codex-acp'),
+    ['codex-acp', 'codex-acp', 'codex-acp'],
+  );
 
-    // And the other adapter is untouched: its conversation is still up, and a
-    // prompt on it runs.
-    seen.length = 0;
-    await up.forwardRequest('session/prompt', {
-      sessionId: 'acp-gone',
-      prompt: [{ type: 'text', text: 'carry on' }],
-    });
-    assert.deepEqual(seen, ['claude session/prompt acp-gone']);
-    assert.equal(up.initializeFor('acp-gone') !== null, true);
-    assert.equal(up.initializeFor('cx-1'), null);
-  },
-  // Two backoffs — one second and three — between the three attempts.
-  20_000,
-);
+  // And the other adapter is untouched: its conversation is still up, and a
+  // prompt on it runs.
+  seen.length = 0;
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-gone',
+    prompt: [{ type: 'text', text: 'carry on' }],
+  });
+  assert.deepEqual(seen, ['claude session/prompt acp-gone']);
+  assert.equal(up.initializeFor('acp-gone') !== null, true);
+  assert.equal(up.initializeFor('cx-1'), null);
+}, 20_000); // Two backoffs — one second and three — between the three attempts.
 
 test('an adapter with no credential is not retried, and is kept up', async () => {
   seedThread('t3', 'codex', 'cx-1', 3);
@@ -2982,9 +2977,7 @@ test('a setting the adapter reports on its own is recorded, the mode excluded', 
     },
   });
 
-  await expect
-    .poll(() => thread('t1')['config'])
-    .toBe('{"model":"sonnet","effort":"high"}');
+  await expect.poll(() => thread('t1')['config']).toBe('{"model":"sonnet","effort":"high"}');
   // The mode in the same message is skipped, because it is not a setting.
   assert.equal(thread('t1')['mode_id'], null);
 });

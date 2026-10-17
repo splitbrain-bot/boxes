@@ -1,5 +1,5 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { allAddressesAllowed, isBlockedAddress } from './cidr.ts';
 
 test('blocks RFC1918 IPv4 ranges', () => {

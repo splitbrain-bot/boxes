@@ -1,12 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { inProcessFileService } from '../../orchestrator/src/files-in-process.ts';
 import { setFileServiceSpawnerForTests } from '../../orchestrator/src/files.ts';
-import {
-  setGitRunnerForTests,
-  type GitRunner,
-} from '../../orchestrator/src/review/git.ts';
+import { inProcessFileService } from '../../orchestrator/src/files-in-process.ts';
+import { type GitRunner, setGitRunnerForTests } from '../../orchestrator/src/review/git.ts';
 
 /** A workspace as a test wants it: files, history and repositories. */
 export interface WorkspaceSpec {

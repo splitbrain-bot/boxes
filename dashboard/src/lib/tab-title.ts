@@ -25,11 +25,7 @@ const SYMBOL: Record<TabState, string> = {
  * The symbol comes first, because a narrow tab still shows the start of its
  * title. The box comes before the thread, as in the thread's header.
  */
-export function threadTitle(
-  state: TabState,
-  boxName: string,
-  threadLabel: string | null,
-): string {
+export function threadTitle(state: TabState, boxName: string, threadLabel: string | null): string {
   const where = [boxName, threadLabel].filter(Boolean).join(' · ');
   return `${SYMBOL[state]} ${where}`;
 }

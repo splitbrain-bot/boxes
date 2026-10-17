@@ -1,6 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import type { CredentialId, LoginState } from '../../../shared/types.ts';
-import { api } from '../api.ts';
+import { type FormEvent, useEffect, useState } from 'react';
 import { CopyField } from '@/components/CopyField';
 import { Notice } from '@/components/Notice';
 import { Spinner } from '@/components/Spinner';
@@ -8,6 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { pollWhileVisible } from '@/lib/poll';
+import type { CredentialId, LoginState } from '../../../shared/types.ts';
+import { api } from '../api.ts';
 
 /**
  * How often the login state is polled, in milliseconds. Faster than other
@@ -191,9 +191,7 @@ export function CredentialLogin({
         </>
       ) : null}
 
-      {state.state === 'done' ? (
-        <p className="text-xs text-muted-foreground">Signed in.</p>
-      ) : null}
+      {state.state === 'done' ? <p className="text-xs text-muted-foreground">Signed in.</p> : null}
 
       {state.state === 'failed' ? (
         <Notice className="rounded-md border px-3 py-2 text-xs">{state.error}</Notice>

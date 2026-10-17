@@ -1,5 +1,5 @@
 import { UPDATE_KIND } from '../../../shared/acp.ts';
-import { harness, type HarnessId } from '../harness.ts';
+import { type HarnessId, harness } from '../harness.ts';
 import { startsBackgroundWork, type ToolCallUpdate } from './background.ts';
 
 /** Cancels a delayed call, and is safe to run after it has already fired. */
@@ -99,9 +99,7 @@ export class Activity {
 
   /** The threads where the agent is producing output. */
   get speakingThreads(): string[] {
-    return [...this.threads]
-      .filter(([, state]) => state.speaking)
-      .map(([thread]) => thread);
+    return [...this.threads].filter(([, state]) => state.speaking).map(([thread]) => thread);
   }
 
   /**

@@ -1,6 +1,6 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { HARNESS_IDS, HARNESSES, harness, type Harness } from './harness.ts';
+import { test } from 'vitest';
+import { HARNESS_IDS, HARNESSES, type Harness, harness } from './harness.ts';
 
 /** Every harness in the registry. */
 const all: Harness[] = HARNESS_IDS.map((id) => HARNESSES[id]);
@@ -18,7 +18,8 @@ test('every harness fills in every field, in the right shape', () => {
     // that nothing in the box runs.
     assert.equal(h.processToken, h.cmd[0], `${h.id}: processToken`);
     assert.ok(Array.isArray(h.residentProcesses), `${h.id}: residentProcesses`);
-    for (const re of h.residentProcesses) assert.ok(re instanceof RegExp, `${h.id}: resident entry`);
+    for (const re of h.residentProcesses)
+      assert.ok(re instanceof RegExp, `${h.id}: resident entry`);
     assert.ok(h.defaultModeId.length > 0, `${h.id}: defaultModeId`);
     assert.ok(h.forkModeId.length > 0, `${h.id}: forkModeId`);
     // A fork asks questions about work the original is still doing, so it

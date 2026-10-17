@@ -5,18 +5,18 @@ import { log } from '../log.ts';
 import { allocateSubnet } from '../subnet.ts';
 import * as ws from '../workspaces.ts';
 import {
-  HOME_DIR,
-  RUN_TIMEOUT_MS,
-  WORKSPACE_DIR,
   type BoxSpec,
+  HOME_DIR,
   type Login,
   type ProcessStream,
   type PullEvent,
+  RUN_TIMEOUT_MS,
   type RunOptions,
   type RunOutput,
   type Runtime,
   type RuntimeObject,
   type SpawnOptions,
+  WORKSPACE_DIR,
 } from './runtime.ts';
 
 /**
@@ -337,22 +337,26 @@ export class DockerRuntime implements Runtime {
     const networks = await dk.listBoxNetworks();
     const logins = await dk.listLoginContainers();
     return [
-      ...containers.map((c): RuntimeObject => ({
-        kind: 'box',
-        boxId: c.boxId,
-        ref: c.id,
-        running: c.running,
-      })),
-      ...networks.map((n): RuntimeObject => ({ kind: 'isolation', boxId: n.boxId, ref: n.name })),
-      ...ws.boxDirectoryIds(this.cfg.DATA_DIR).map(
-        (boxId): RuntimeObject => ({ kind: 'storage', boxId, ref: boxId }),
+      ...containers.map(
+        (c): RuntimeObject => ({
+          kind: 'box',
+          boxId: c.boxId,
+          ref: c.id,
+          running: c.running,
+        }),
       ),
-      ...logins.map((l): RuntimeObject => ({
-        kind: 'login',
-        credentialId: l.credentialId,
-        ref: l.id,
-        createdAt: l.createdAt,
-      })),
+      ...networks.map((n): RuntimeObject => ({ kind: 'isolation', boxId: n.boxId, ref: n.name })),
+      ...ws
+        .boxDirectoryIds(this.cfg.DATA_DIR)
+        .map((boxId): RuntimeObject => ({ kind: 'storage', boxId, ref: boxId })),
+      ...logins.map(
+        (l): RuntimeObject => ({
+          kind: 'login',
+          credentialId: l.credentialId,
+          ref: l.id,
+          createdAt: l.createdAt,
+        }),
+      ),
     ];
   }
 
@@ -383,7 +387,11 @@ export class DockerRuntime implements Runtime {
   }
 
   /** One long-lived exec in the box container. */
-  async spawn(boxId: string, cmd: readonly string[], opts: SpawnOptions = {}): Promise<ProcessStream> {
+  async spawn(
+    boxId: string,
+    cmd: readonly string[],
+    opts: SpawnOptions = {},
+  ): Promise<ProcessStream> {
     return dk.spawnExec(dk.names.container(boxId), cmd, {
       ...opts,
       workingDir: opts.workingDir ?? WORKSPACE_DIR,

@@ -1,5 +1,5 @@
-import { runtime } from '../runtime/runtime.ts';
 import { log } from '../log.ts';
+import { runtime } from '../runtime/runtime.ts';
 
 /** A box and the workspace inside it: where review runs git. */
 export interface GitBox {

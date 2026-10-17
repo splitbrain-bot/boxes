@@ -5,13 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'vitest';
 import { openDb } from './db.ts';
-import {
-  encryptPayload,
-  generateVapidKeys,
-  loadVapidKeys,
-  sendPush,
-  vapidHeader,
-} from './push.ts';
+import { encryptPayload, generateVapidKeys, loadVapidKeys, sendPush, vapidHeader } from './push.ts';
 
 /** The example from RFC 8291 section 5, with its intermediates from appendix A. */
 const RFC8291 = {
@@ -92,9 +86,7 @@ test('a subscriber can decrypt what encryptPayload produced', () => {
     b64(RFC8291.uaPublic),
     senderPublic,
   ]);
-  const ikm = Buffer.from(
-    hkdfSync('sha256', shared, b64(RFC8291.authSecret), keyInfo, 32),
-  );
+  const ikm = Buffer.from(hkdfSync('sha256', shared, b64(RFC8291.authSecret), keyInfo, 32));
   const cek = Buffer.from(
     hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: aes128gcm\0'), 16),
   );

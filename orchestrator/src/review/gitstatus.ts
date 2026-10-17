@@ -1,15 +1,9 @@
-import { git, gitOut, type GitBox, type GitTarget } from './git.ts';
+import { type GitBox, type GitTarget, git, gitOut } from './git.ts';
 import { gitTarget, inWorkspace, type RepoMap } from './repos.ts';
 import { REVIEW_FILE } from './tree.ts';
 
 /** The git status of a file, as the tree shows it. */
-type FileStatus =
-  | 'modified'
-  | 'staged'
-  | 'untracked'
-  | 'added'
-  | 'deleted'
-  | 'conflict';
+type FileStatus = 'modified' | 'staged' | 'untracked' | 'added' | 'deleted' | 'conflict';
 
 /** Git statuses by file path, relative to a repository or to the workspace. */
 export type FileStatuses = Record<string, FileStatus>;

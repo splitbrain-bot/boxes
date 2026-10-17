@@ -2,7 +2,7 @@ import { afterAll, afterEach, expect, test } from 'vitest';
 import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
-import { reply, type GatewayScript } from './stub-gateway.ts';
+import { type GatewayScript, reply } from './stub-gateway.ts';
 
 /** Browser tests for how the thread view behaves in use. */
 
@@ -28,7 +28,10 @@ afterAll(async () => {
 // reserves Ctrl/Cmd+Enter for the send.
 test('Enter opens a line in the composer, Ctrl+Enter sends it', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -51,7 +54,10 @@ test('Enter opens a line in the composer, Ctrl+Enter sends it', async () => {
 
 test('ArrowUp walks back through what was sent, ArrowDown returns', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('ok') }] });
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -62,9 +68,7 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
       await expect.poll(() => input.inputValue()).toBe('');
       // Recall reads the thread's user messages, which arrive only with the
       // gateway's echo. The longer timeout covers that round trip.
-      await expect
-        .poll(() => page.getByText(text).isVisible(), { timeout: 10_000 })
-        .toBe(true);
+      await expect.poll(() => page.getByText(text).isVisible(), { timeout: 10_000 }).toBe(true);
     }
 
     await input.press('ArrowUp');
@@ -83,7 +87,10 @@ test('ArrowUp walks back through what was sent, ArrowDown returns', async () => 
 
 test('the composer is focused on arrival and stays focused after a send', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('done') }] });
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -152,7 +159,10 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -163,7 +173,9 @@ test('an agent tool call shows its streamed output collapsibly', async () => {
     await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
     await expect.poll(() => page.getByText('ok 2 - subnet').isVisible()).toBe(true);
     // The arguments are shown too.
-    await expect.poll(() => page.getByText('npm test', { exact: false }).first().isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText('npm test', { exact: false }).first().isVisible())
+      .toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -211,7 +223,10 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -333,7 +348,10 @@ test('a row run stays a list across a message that speaks, and the prose in it s
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -431,7 +449,10 @@ test('a tool call that never reported back is not offered as a decision', async 
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -444,9 +465,9 @@ test('a tool call that never reported back is not offered as a decision', async 
     await page.locator('[data-slot="tool-group-trigger"]').first().click();
     await page.locator('[data-slot="tool-fallback-trigger"]').first().click();
     // Opened by hand, and there is nothing to answer inside it.
-    await expect.poll(() => page.getByText('npm test', { exact: false }).first().isVisible()).toBe(
-      true,
-    );
+    await expect
+      .poll(() => page.getByText('npm test', { exact: false }).first().isVisible())
+      .toBe(true);
     expect(await page.locator('[data-slot="tool-fallback-approval"]').count()).toBe(0);
     expect(await page.getByText('Wants to run:').count()).toBe(0);
     await expect.poll(() => page.getByText('Unfinished tool:').first().isVisible()).toBe(true);
@@ -464,7 +485,10 @@ test('a turn still running is still running after a detour away and back', async
     prompts: [{ match: () => true, updates: reply('working on it'), hold: true }],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -503,7 +527,12 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     prompts: [{ match: () => true, updates: reply(`here it is\n\n${header}\n${rule}\n${row}\n`) }],
   });
 
-  const wide = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`, 'dark', 'desktop');
+  const wide = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+    'dark',
+    'desktop',
+  );
   try {
     const input = wide.page.getByLabel('Message input');
     await input.fill('show me the table');
@@ -529,7 +558,12 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     await wide.close();
   }
 
-  const phone = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`, 'dark', 'phone');
+  const phone = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+    'dark',
+    'phone',
+  );
   try {
     const input = phone.page.getByLabel('Message input');
     await input.fill('show me the table');
@@ -554,7 +588,8 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
 // An agent draws a diagram as a mermaid code block. Half a diagram does not
 // parse, so the source shows until the message is complete.
 test('a mermaid block shows its source while streaming, then a diagram that opens full screen', async () => {
-  const diagram = '```mermaid\nflowchart LR\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Answer]\n  B -->|no| D[Fetch]\n```';
+  const diagram =
+    '```mermaid\nflowchart LR\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Answer]\n  B -->|no| D[Fetch]\n```';
   const broken = '```mermaid\nflowchart LR\n  A --> -->\n```';
   await start({
     prompts: [
@@ -566,7 +601,10 @@ test('a mermaid block shows its source while streaming, then a diagram that open
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     const input = page.getByLabel('Message input');
     await input.fill('draw it');
@@ -583,7 +621,9 @@ test('a mermaid block shows its source while streaming, then a diagram that open
     expect(await image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
     // The broken one keeps its source, and says why.
     expect(await page.locator('.aui-md-mermaid').count()).toBe(1);
-    await expect.poll(() => page.getByText('This diagram could not be drawn.').isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText('This diagram could not be drawn.').isVisible())
+      .toBe(true);
     await shoot(page, 'mermaid-phone');
 
     await image.click();
@@ -608,7 +648,10 @@ test('the mode switcher lists the advertised modes and sets one', async () => {
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     // Behind the settings button, with the model and the rest.
     await page.getByLabel('Agent settings').click();
@@ -671,7 +714,10 @@ test('the model selector lists the advertised models and sets one', async () => 
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await page.getByLabel('Agent settings').click();
     const models = page.getByRole('combobox', { name: 'Model' });
@@ -691,13 +737,14 @@ test('the model selector lists the advertised models and sets one', async () => 
 test('the tab says which box and thread it is, and what that thread is doing', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('done'), hold: true }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     // The box's name and the conversation's, in the header's own order and
     // with the header's own names for them.
-    await expect
-      .poll(() => page.title())
-      .toBe('\u25cb refactor auth \u00b7 Thread 1');
+    await expect.poll(() => page.title()).toBe('\u25cb refactor auth \u00b7 Thread 1');
 
     const input = page.getByLabel('Message input');
     await input.fill('go');
@@ -735,7 +782,10 @@ test('a thread waiting on a decision says so in its tab', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -769,7 +819,10 @@ test('a thread asked which way to go says that instead', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -834,7 +887,10 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     const settings = page.getByLabel('Agent settings');
     await expect.poll(() => settings.isVisible()).toBe(true);
@@ -940,7 +996,10 @@ test('a permission request renders its options and the choice answers the agent'
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -986,7 +1045,10 @@ test('a permission request queued while nobody watched is delivered on attach', 
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     const approval = page.locator('[data-slot="tool-fallback-approval"]');
     await expect.poll(() => approval.isVisible(), { timeout: 10_000 }).toBe(true);
@@ -1003,7 +1065,10 @@ test('a permission request queued while nobody watched is delivered on attach', 
 test('typing a slash lists the adapter commands and completes the one picked', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     stub.gateway.emit({

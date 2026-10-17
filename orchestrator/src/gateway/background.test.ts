@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
+import { HARNESSES, type Harness } from '../harness.ts';
+import type { ContainerProcess } from '../processes.ts';
 import {
   BackgroundProbe,
-  TaskBoard,
   readBox,
   startsBackgroundWork,
+  TaskBoard,
   workPids,
 } from './background.ts';
-import type { ContainerProcess } from '../processes.ts';
-import { HARNESSES, type Harness } from '../harness.ts';
 
 /** Both harnesses, which is what a reading of a box is taken against. */
 const BOTH: readonly Harness[] = [HARNESSES.claude, HARNESSES.codex];

@@ -64,10 +64,9 @@ function emit(level: Level, msg: string, fields?: Record<string, unknown>): void
 }
 
 /** Builds the four level methods, each adding tag to the fields of every line. */
-function levels(tag?: Record<string, unknown>): Record<
-  Level,
-  (msg: string, fields?: Record<string, unknown>) => void
-> {
+function levels(
+  tag?: Record<string, unknown>,
+): Record<Level, (msg: string, fields?: Record<string, unknown>) => void> {
   const at =
     (level: Level) =>
     (msg: string, fields?: Record<string, unknown>): void =>

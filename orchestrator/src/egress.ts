@@ -9,13 +9,13 @@ import type {
 import type { ApiKeyRow, ApiKeyStore } from './api-keys.ts';
 import type { Config } from './config.ts';
 import {
-  deliverableSecret,
   type CredentialId,
   type CredentialMethod,
   type CredentialRow,
   type CredentialStore,
+  deliverableSecret,
 } from './credentials.ts';
-import { readAppKey, writeAppKey, type Db } from './db.ts';
+import { type Db, readAppKey, writeAppKey } from './db.ts';
 import { log } from './log.ts';
 
 /** The orchestrator side of the egress proxy: its policy and key material. */

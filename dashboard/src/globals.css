@@ -146,7 +146,9 @@
 
 /* Installed by `npx assistant-ui add`, for styling open and closed elements. */
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
-@custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+@custom-variant data-closed (
+  &:where([data-state="closed"], [data-closed]:not([data-closed="false"]))
+);
 
 /*
  * The review's code pane. Shiki puts the light and the dark colour of each
@@ -196,7 +198,7 @@
  * content-visibility brings paint containment, which clips a wide block to
  * the message. A message with a wide block therefore does not get it.
  */
-[data-slot='aui_assistant-message-root']:not(:has(.aui-md-bleed)) {
+[data-slot="aui_assistant-message-root"]:not(:has(.aui-md-bleed)) {
   content-visibility: auto;
   contain-intrinsic-size: auto 200px;
 }
@@ -210,29 +212,24 @@
  * the space. The indicator counts as quiet, so a row keeps its height when
  * the spinner goes away.
  */
-[data-slot='aui_assistant-message-root']:not(
-    :has(
-        > [data-slot='aui_assistant-message-content']
-          > :not(
-              [data-slot='aui_chain-of-thought'],
-              [data-slot='aui_assistant-message-indicator']
-            )
-      )
-  ) {
+[data-slot="aui_assistant-message-root"]:not(
+  :has(
+    > [data-slot="aui_assistant-message-content"]
+      > :not([data-slot="aui_chain-of-thought"], [data-slot="aui_assistant-message-indicator"])
+  )
+) {
   /* The negative margin goes with the padding it cancels. On its own, it
      would pull the next row up over this one. */
   padding-bottom: 0;
   margin-bottom: 0;
 
-  & > [data-slot='aui_assistant-message-footer'] {
+  & > [data-slot="aui_assistant-message-footer"] {
     display: none;
   }
 
   /* An open row keeps a little space under its body, so the text reads as
      part of its own row and not of the row below. */
-  &:has(
-      :is([data-slot='reasoning-content'], [data-slot='tool-group-content'])[data-state='open']
-    ) {
+  &:has(:is([data-slot="reasoning-content"], [data-slot="tool-group-content"])[data-state="open"]) {
     padding-bottom: calc(2 * var(--spacing));
   }
 }
@@ -250,22 +247,19 @@
  * bottom of the padding box that pb-7.5 holds and -mb-7.5 cancels. The row
  * then has the same 24px gap under it as a quiet one.
  */
-[data-slot='aui_assistant-message-root']:has(
-    > [data-slot='aui_assistant-message-content']
-      > :not(
-          [data-slot='aui_chain-of-thought'],
-          [data-slot='aui_assistant-message-indicator']
-        )
-  ):has(> [data-slot='aui_assistant-message-content'] > [data-slot='aui_chain-of-thought']):not(
-    :has(
-        > [data-slot='aui_assistant-message-content']
-          > :last-child:not(
-              [data-slot='aui_chain-of-thought'],
-              [data-slot='aui_assistant-message-indicator']
-            )
+[data-slot="aui_assistant-message-root"]:has(
+  > [data-slot="aui_assistant-message-content"]
+    > :not([data-slot="aui_chain-of-thought"], [data-slot="aui_assistant-message-indicator"])
+):has(> [data-slot="aui_assistant-message-content"] > [data-slot="aui_chain-of-thought"]):not(
+  :has(
+    > [data-slot="aui_assistant-message-content"]
+      > :last-child:not(
+        [data-slot="aui_chain-of-thought"],
+        [data-slot="aui_assistant-message-indicator"]
       )
-  ) {
-  & > [data-slot='aui_assistant-message-footer'] {
+  )
+) {
+  & > [data-slot="aui_assistant-message-footer"] {
     position: absolute;
     inset-block-end: 0;
     inset-inline-start: 0;
@@ -274,7 +268,7 @@
   /* Out of the flow, the bar covers the first row of the next message. It
      moves to the right end, where a short row leaves empty space. The last
      message has nothing under it and keeps the bar on the left. */
-  &:not(:last-child) > [data-slot='aui_assistant-message-footer'] {
+  &:not(:last-child) > [data-slot="aui_assistant-message-footer"] {
     inset-inline: auto 0;
     background-color: var(--background);
   }
@@ -287,9 +281,7 @@
 
   /* The space an open row keeps under its body in the rule above, plus the
      30px band, which no longer holds space here. */
-  &:has(
-      :is([data-slot='reasoning-content'], [data-slot='tool-group-content'])[data-state='open']
-    ) {
+  &:has(:is([data-slot="reasoning-content"], [data-slot="tool-group-content"])[data-state="open"]) {
     padding-bottom: calc(9.5 * var(--spacing));
   }
 }
@@ -299,21 +291,20 @@
  * that starts with rows. The two runs then read as one list, spaced by the
  * 6px padding of each trigger. The gap stays next to prose.
  */
-[data-slot='aui_assistant-message-root']:has(
-    > [data-slot='aui_assistant-message-content'] > [data-slot='aui_chain-of-thought']
-  ):not(
-    :has(
-        > [data-slot='aui_assistant-message-content']
-          > :last-child:not(
-              [data-slot='aui_chain-of-thought'],
-              [data-slot='aui_assistant-message-indicator']
-            )
+[data-slot="aui_assistant-message-root"]:has(
+  > [data-slot="aui_assistant-message-content"] > [data-slot="aui_chain-of-thought"]
+):not(
+  :has(
+    > [data-slot="aui_assistant-message-content"]
+      > :last-child:not(
+        [data-slot="aui_chain-of-thought"],
+        [data-slot="aui_assistant-message-indicator"]
       )
   )
-  + [data-slot='aui_assistant-message-root']:has(
-    > [data-slot='aui_assistant-message-content']
-      > :first-child[data-slot='aui_chain-of-thought']
-  ) {
+)
++ [data-slot="aui_assistant-message-root"]:has(
+  > [data-slot="aui_assistant-message-content"] > :first-child[data-slot="aui_chain-of-thought"]
+) {
   margin-top: calc(-6 * var(--spacing));
 }
 
@@ -321,7 +312,7 @@
  * The space under a chain-of-thought block with more content after it in the
  * same message. The rules above space a block that ends a message.
  */
-[data-slot='aui_chain-of-thought']:not(:last-child) {
+[data-slot="aui_chain-of-thought"]:not(:last-child) {
   margin-bottom: 1rem;
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import { loadConfig, type Config } from './config.ts';
+import { type Config, loadConfig } from './config.ts';
 import * as dk from './docker.ts';
 import { deploymentImages, resetImagesForTests } from './images.ts';
 import { DockerRuntime } from './runtime/docker.ts';

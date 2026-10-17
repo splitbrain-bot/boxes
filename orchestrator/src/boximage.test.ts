@@ -7,11 +7,11 @@ import Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
-import { openDb, touchBox, type Db } from './db.ts';
-import { patchSettings } from './settings.ts';
+import { type Db, openDb, touchBox } from './db.ts';
 import * as dk from './docker.ts';
-import { inProcessFileService } from './files-in-process.ts';
 import { setFileServiceSpawnerForTests } from './files.ts';
+import { inProcessFileService } from './files-in-process.ts';
+import { patchSettings } from './settings.ts';
 import * as ws from './workspaces.ts';
 
 /** The box image the test config names. */
@@ -180,7 +180,9 @@ function frame(text: string): Buffer {
 function managed(boxId: string): string[] {
   const path = join(ws.homePath(dir, boxId), '.boxes', 'managed');
   if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8').split('\n').filter((line) => line !== '');
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => line !== '');
 }
 
 let dir: string;
@@ -537,10 +539,7 @@ describe('starting a box whose files are gone', () => {
     // the box would start, look healthy, and the agent could not write in it.
     rmSync(ws.workspacePath(dir, 'a1'), { recursive: true, force: true });
 
-    await assert.rejects(
-      () => orchestrator.manager.start('a1'),
-      /workspace directory/,
-    );
+    await assert.rejects(() => orchestrator.manager.start('a1'), /workspace directory/);
     assert.deepEqual(fake.created, []);
     assert.equal(status('a1'), 'error');
     // The orchestrator does not recreate the missing directory.
@@ -659,7 +658,10 @@ describe('making a box ready', () => {
     await orchestrator.manager.start('a1');
 
     assert.deepEqual(fake.setups, ['box-a1']);
-    assert.match(readFileSync(join(ws.homePath(dir, 'a1'), '.boxes/proxy-ca.crt'), 'utf8'), /BEGIN CERTIFICATE/);
+    assert.match(
+      readFileSync(join(ws.homePath(dir, 'a1'), '.boxes/proxy-ca.crt'), 'utf8'),
+      /BEGIN CERTIFICATE/,
+    );
     assert.equal(
       readFileSync(join(ws.homePath(dir, 'a1'), '.config/git/config'), 'utf8'),
       '[user]\n\tname = "Some \\"One\\""\n\temail = "one@example.com"\n[init]\n\tdefaultBranch = main\n' +

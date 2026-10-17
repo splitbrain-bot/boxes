@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { expect, test, vi } from 'vitest';
+import type { TurnStateParams } from '../../../../shared/types.ts';
+import type { AcpClient, AcpClientHandlers } from './acp-client.ts';
 import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -7,11 +9,9 @@ import type {
   ThreadModeState,
   ThreadUpdate,
 } from './acp-types.ts';
-import type { TurnStateParams } from '../../../../shared/types.ts';
-import type { AcpClient, AcpClientHandlers } from './acp-client.ts';
-import { ThreadStore, type ThreadStoreDeps } from './thread-store.ts';
 import { convertMessage } from './convert.ts';
-import { resetIds, type Message } from './translate.ts';
+import { ThreadStore, type ThreadStoreDeps } from './thread-store.ts';
+import { type Message, resetIds } from './translate.ts';
 
 /** A stand-in AcpClient that records what the store asks of it. */
 class FakeClient {
@@ -204,7 +204,7 @@ function threadState(patch: Partial<TurnStateParams> = {}): TurnStateParams {
   return { sessionId: 'acp-1', active: false, speaking: false, background: [], ...patch };
 }
 
-test('a prompt of this browser\'s own does not claim the agent is talking', async () => {
+test("a prompt of this browser's own does not claim the agent is talking", async () => {
   const { store, client } = makeStore((c) => {
     c.hold = true;
   });
@@ -244,18 +244,14 @@ test("the gateway's turn state runs the thread a browser did not prompt", () => 
 test('a thread that has stopped talking with work still in it is not running', () => {
   const { store, client } = makeStore();
   // The agent has finished, and a build still runs in the box.
-  client.handlers.onTurnState(
-    threadState({ active: true, speaking: false, background: [BUILD] }),
-  );
+  client.handlers.onTurnState(threadState({ active: true, speaking: false, background: [BUILD] }));
   assert.equal(store.getSnapshot().isRunning, false);
   assert.deepEqual(store.getSnapshot().background, [BUILD]);
 });
 
 test('a replay drops the turn state it was told before it', () => {
   const { store, client } = makeStore();
-  client.handlers.onTurnState(
-    threadState({ speaking: true, background: [BUILD] }),
-  );
+  client.handlers.onTurnState(threadState({ speaking: true, background: [BUILD] }));
   assert.equal(store.getSnapshot().isRunning, true);
 
   // A reconnect. The gateway states the thread again after the replay.
@@ -743,9 +739,7 @@ test("a tool call's image is converted as a part beside the card, not inside it"
     title: 'Read .playwright-cli/page.png',
     kind: 'read',
     status: 'completed',
-    content: [
-      { type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } },
-    ],
+    content: [{ type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } }],
   } as ThreadUpdate);
 
   const message = store.getSnapshot().messages.at(-1)!;
@@ -766,32 +760,21 @@ test("an update that replaces a call's content replaces its images with it", () 
     sessionUpdate: 'tool_call',
     toolCallId: 't-shot2',
     title: 'Screenshot',
-    content: [
-      { type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } },
-    ],
+    content: [{ type: 'content', content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } }],
   } as ThreadUpdate);
   push(client, {
     sessionUpdate: 'tool_call_update',
     toolCallId: 't-shot2',
     status: 'completed',
-    content: [
-      { type: 'content', content: { type: 'image', data: 'BBBB', mimeType: 'image/png' } },
-    ],
+    content: [{ type: 'content', content: { type: 'image', data: 'BBBB', mimeType: 'image/png' } }],
   } as ThreadUpdate);
 
   const parts = partsOf(store.getSnapshot().messages.at(-1)!);
-  assert.deepEqual(
-    parts.map((p) => p.image).filter(Boolean),
-    ['data:image/png;base64,BBBB'],
-  );
+  assert.deepEqual(parts.map((p) => p.image).filter(Boolean), ['data:image/png;base64,BBBB']);
 });
 
 /** One named message of a transcript, as the adapter replays it. */
-function said(
-  role: 'user' | 'agent',
-  messageId: string,
-  text: string,
-): ThreadUpdate {
+function said(role: 'user' | 'agent', messageId: string, text: string): ThreadUpdate {
   return {
     sessionUpdate: `${role}_message_chunk`,
     messageId,
@@ -941,7 +924,6 @@ test('a resume gives up the questions the dead connection was showing', async ()
   assert.ok(tool);
   assert.equal(tool.approval, undefined);
 });
-
 
 test('a cut thread says so, and a resume keeps what the store holds', () => {
   const { store, client } = makeStore((c) => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import { ApiKeyStore, placeholderFor } from './api-keys.ts';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 
 let dir: string;
 let db: Db;

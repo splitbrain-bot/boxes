@@ -1,4 +1,3 @@
-import type { ReviewDiffHunk } from '../../../../shared/types.ts';
 import {
   Sheet,
   SheetContent,
@@ -7,6 +6,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
+import type { ReviewDiffHunk } from '../../../../shared/types.ts';
 
 /**
  * A bottom sheet that shows one diff hunk. It is the only place where deleted

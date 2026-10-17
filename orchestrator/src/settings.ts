@@ -88,9 +88,11 @@ export function deploymentId(db: Db): string {
   const stored = readAll(db)[DEPLOYMENT_ID];
   if (stored) return stored;
   const id = randomBytes(4).toString('hex');
-  db.prepare(
-    'INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)',
-  ).run(DEPLOYMENT_ID, id, Date.now());
+  db.prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run(
+    DEPLOYMENT_ID,
+    id,
+    Date.now(),
+  );
   return readAll(db)[DEPLOYMENT_ID] ?? id;
 }
 

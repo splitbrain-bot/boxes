@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import type { Page } from 'playwright';
+import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, VIEWPORTS } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
@@ -69,7 +69,10 @@ test('the thread header pops the thread rather than pushing the list over it', a
 });
 
 test('a file is a step on a phone: back to the tree, then to the thread', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await page.getByLabel("Review this box's code").click();
     await page.waitForURL(`**/boxes/${BOX}/review`);
@@ -84,7 +87,9 @@ test('a file is a step on a phone: back to the tree, then to the thread', async 
 
     await page.goBack();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
-    await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
+      .toBe(true);
 
     await page.goBack();
     await page.waitForURL(`**/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
@@ -123,7 +128,10 @@ test('a file is not a step on a pointer, where the tree never left', async () =>
 });
 
 test('leaving the review leaves none of its files behind to fall into', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await page.getByLabel("Review this box's code").click();
     await page.waitForURL(`**/boxes/${BOX}/review`);
@@ -160,7 +168,9 @@ test('a pasted link with nothing beneath it steps up instead of out of the app',
 
     await page.getByLabel('Back to the file list').click();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
-    await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
+      .toBe(true);
     // Rewritten in place rather than pushed: a step out must not add a step.
     expect(await stackIndex(page)).toBe(0);
 
@@ -300,7 +310,10 @@ test('a deleted box is not what the entry left behind leads to', async () => {
 test('the handoff prompt is staged once, not replayed by back and forward', async () => {
   await stub.comment(BOX, 'app/src/app.ts', 2, 'please fix');
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await page.getByLabel("Review this box's code").click();
     // Icon-only at this width, so the title is what names it.

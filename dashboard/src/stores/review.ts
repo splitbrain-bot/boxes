@@ -7,7 +7,7 @@ import type {
   ReviewFileResponse,
 } from '../../../shared/types.ts';
 import { ApiError, api } from '../api.ts';
-import { tokenizeLines, type Token } from '../lib/highlight.ts';
+import { type Token, tokenizeLines } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
 /** Store for the review view: the tree, folder by folder, and the open file. */

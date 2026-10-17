@@ -1,11 +1,6 @@
 import { Bell, BellOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  disablePush,
-  enablePush,
-  usePush,
-  type PushBlocker,
-} from '../stores/push.ts';
+import { disablePush, enablePush, type PushBlocker, usePush } from '../stores/push.ts';
 
 /**
  * Why this browser cannot be notified, in terms of what the user would have to
@@ -44,9 +39,7 @@ export function PushToggle() {
         onClick={() => void (subscribed ? disablePush() : enablePush())}
         aria-pressed={subscribed}
         title={
-          subscribed
-            ? 'Stop notifying this browser'
-            : 'Notify this browser when a box needs you'
+          subscribed ? 'Stop notifying this browser' : 'Notify this browser when a box needs you'
         }
       >
         {subscribed ? <Bell /> : <BellOff />}

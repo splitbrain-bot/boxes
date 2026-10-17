@@ -1,50 +1,50 @@
-import type { Config } from '../config.ts';
-import {
-  clearBoxTurns,
-  clearThreadInheritance,
-  latestThread,
-  getThread,
-  insertThread,
-  setThreadMode,
-  setThreadTitle,
-  setThreadTurnActive,
-  threadByAcpId,
-  threadConfig,
-  touchBox,
-  touchThread,
-  type Db,
-  type BoxRow,
-  type ThreadRow,
-} from '../db.ts';
-import { DEFAULT_HARNESS, harness, HARNESS_IDS, type HarnessId } from '../harness.ts';
-import { log, type Logger } from '../log.ts';
-import type { NotifyKind, Notifier } from '../notify.ts';
-import { boxProcesses, killInBox, type ContainerProcess } from '../processes.ts';
-import { runtime } from '../runtime/runtime.ts';
-import { Activity } from './activity.ts';
-import {
-  AdapterConnection,
-  NOTHING_TO_FORK,
-  THREAD_NOT_FOUND,
-  answeredOptions,
-  optionsOf,
-  type AdapterHost,
-  type LoadAnswer,
-} from './adapter.ts';
-import { BackgroundProbe, workPids } from './background.ts';
-import { Broadcast, threadOf } from './broadcast.ts';
-import type { PendingStore } from './pending.ts';
-import type { AdapterOptions } from './thread-log.ts';
 import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import {
-  BOXES_META,
   type BackgroundProcess,
+  BOXES_META,
   type BoxWork,
   type LoadMeta,
   type ThreadConfigOption,
   type ThreadOptions,
   type TurnStateParams,
 } from '../../../shared/types.ts';
+import type { Config } from '../config.ts';
+import {
+  type BoxRow,
+  clearBoxTurns,
+  clearThreadInheritance,
+  type Db,
+  getThread,
+  insertThread,
+  latestThread,
+  setThreadMode,
+  setThreadTitle,
+  setThreadTurnActive,
+  type ThreadRow,
+  threadByAcpId,
+  threadConfig,
+  touchBox,
+  touchThread,
+} from '../db.ts';
+import { DEFAULT_HARNESS, HARNESS_IDS, type HarnessId, harness } from '../harness.ts';
+import { type Logger, log } from '../log.ts';
+import type { Notifier, NotifyKind } from '../notify.ts';
+import { boxProcesses, type ContainerProcess, killInBox } from '../processes.ts';
+import { runtime } from '../runtime/runtime.ts';
+import { Activity } from './activity.ts';
+import {
+  AdapterConnection,
+  type AdapterHost,
+  answeredOptions,
+  type LoadAnswer,
+  NOTHING_TO_FORK,
+  optionsOf,
+  THREAD_NOT_FOUND,
+} from './adapter.ts';
+import { BackgroundProbe, workPids } from './background.ts';
+import { Broadcast, threadOf } from './broadcast.ts';
+import type { PendingStore } from './pending.ts';
+import type { AdapterOptions } from './thread-log.ts';
 
 /** How much of one tapped ACP message a debug line carries. */
 const MAX_TAPPED_CHARS = 64_000;
@@ -244,11 +244,7 @@ export class UpstreamBox implements AdapterHost {
   private connection(id: HarnessId): AdapterConnection {
     let conn = this.connections.get(id);
     if (!conn) {
-      conn = new AdapterConnection(
-        harness(id),
-        this,
-        log.tagged({ box: this.boxId, harness: id }),
-      );
+      conn = new AdapterConnection(harness(id), this, log.tagged({ box: this.boxId, harness: id }));
       this.connections.set(id, conn);
     }
     return conn;
@@ -693,9 +689,9 @@ export class UpstreamBox implements AdapterHost {
 
   /** This box's stored row. Throws once the box is gone. */
   private row(): BoxRow {
-    const row = this.db
-      .prepare('SELECT * FROM boxes WHERE id = ?')
-      .get(this.boxId) as BoxRow | undefined;
+    const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(this.boxId) as
+      | BoxRow
+      | undefined;
     if (!row) throw new Error(`Box ${this.boxId} not found`);
     return row;
   }
@@ -782,11 +778,7 @@ export class UpstreamBox implements AdapterHost {
     // The fork's log is copied from the source's, so the source must be held.
     if (!(await conn.hold(source))) throw new Error(NOTHING_TO_FORK);
     const config = threadConfig(source);
-    const acpSessionId = await conn.mintAcpThread(
-      source.acp_session_id,
-      wanted.forkModeId,
-      config,
-    );
+    const acpSessionId = await conn.mintAcpThread(source.acp_session_id, wanted.forkModeId, config);
     // The source is recorded, because the adapter writes the fork no
     // transcript until its first prompt. The mode is recorded, because an
     // empty column means the harness's default mode.
@@ -1027,11 +1019,7 @@ export class UpstreamBox implements AdapterHost {
    * @param from The browser that asked. It gets the log for a load, and its
    *   thread picks the adapter for a request that names no thread.
    */
-  async forwardRequest(
-    method: string,
-    params: unknown,
-    from?: DownstreamHandle,
-  ): Promise<unknown> {
+  async forwardRequest(method: string, params: unknown, from?: DownstreamHandle): Promise<unknown> {
     const conn = this.connectionFor(params, from);
     await conn.ensureStarted();
     this.tap('down', method, params);

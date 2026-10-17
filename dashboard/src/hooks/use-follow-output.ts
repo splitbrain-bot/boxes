@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
 import {
+  type FollowState,
   followGrew,
   followScrolled,
   followStart,
   followTouched,
   isFollowing,
-  type FollowState,
 } from '@/lib/follow-output.ts';
 
 /**

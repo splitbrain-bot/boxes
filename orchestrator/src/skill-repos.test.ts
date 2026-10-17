@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -12,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { afterEach, beforeEach, test } from 'vitest';
 import { fetchRepo, findSkills, repoName } from './skill-repos.ts';
 
 let dir: string;

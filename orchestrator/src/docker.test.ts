@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import Docker from 'dockerode';
 import { afterEach, describe, it } from 'vitest';
 import { ApiKeyStore } from './api-keys.ts';
-import { loadConfig, type Config } from './config.ts';
-import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
-import { openDb, type Db } from './db.ts';
+import { type Config, loadConfig } from './config.ts';
+import { type CredentialId, type CredentialMethod, CredentialStore } from './credentials.ts';
+import { type Db, openDb } from './db.ts';
+import { createContainer, createLoginContainer, setDockerForTests } from './docker.ts';
 import { EgressManager } from './egress.ts';
-import { createLoginContainer, createContainer, setDockerForTests } from './docker.ts';
 
 let dirs: string[] = [];
 let dbs: Db[] = [];
@@ -94,7 +94,7 @@ describe('the container template', () => {
     ]);
   }, 30_000);
 
-  it('runs as the configured uid and gid, not the image\'s user name', async () => {
+  it("runs as the configured uid and gid, not the image's user name", async () => {
     const opts = await capture();
     // Numbers, so BOX_UID alone decides who a box runs as. The default avoids
     // 1000, which on a host usually belongs to a person.
@@ -151,7 +151,7 @@ describe('the login container', () => {
     return opts;
   }
 
-  it('is nobody\'s box: no bind, no credential, and a home it can write', async () => {
+  it("is nobody's box: no bind, no credential, and a home it can write", async () => {
     const opts = await capture();
     const host = opts['HostConfig'] as Record<string, unknown>;
 

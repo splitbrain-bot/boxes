@@ -1,4 +1,3 @@
-import type { ThreadOptions as ThreadOptionsBody } from '../../../shared/types.ts';
 import { ThreadOptions, useThreadOptions } from '@/components/ThreadOptions';
 import { Button } from '@/components/ui/button';
 import {
@@ -9,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import type { ThreadOptions as ThreadOptionsBody } from '../../../shared/types.ts';
 
 /**
  * Dialog that starts a new thread in a box.

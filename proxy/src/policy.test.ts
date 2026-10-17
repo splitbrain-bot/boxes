@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { EgressPolicy } from '../../shared/types.ts';
 import {
-  EMPTY_POLICY,
   credentialsForHost,
   decideCredentials,
+  EMPTY_POLICY,
   hostAllowed,
   hostMatches,
   isInjectionHost,
@@ -162,7 +162,9 @@ describe('swapCredentialValue', () => {
   });
 
   it('reports a value that does not carry the placeholder', () => {
-    expect(swapCredentialValue('Bearer somebody-elses-token', GITHUB.placeholder, GITHUB.secret)).toBeNull();
+    expect(
+      swapCredentialValue('Bearer somebody-elses-token', GITHUB.placeholder, GITHUB.secret),
+    ).toBeNull();
     const basic = `Basic ${Buffer.from('user:somebody-elses-token').toString('base64')}`;
     expect(swapCredentialValue(basic, GITHUB.placeholder, GITHUB.secret)).toBeNull();
     expect(swapCredentialValue('Bearer x', '', GITHUB.secret)).toBeNull();
@@ -171,9 +173,9 @@ describe('swapCredentialValue', () => {
 
 describe('decideCredentials', () => {
   it('passes a host with no credential configured straight through', () => {
-    expect(decideCredentials('example.com', { authorization: 'Bearer anything' }, policy())).toEqual(
-      { action: 'pass' },
-    );
+    expect(
+      decideCredentials('example.com', { authorization: 'Bearer anything' }, policy()),
+    ).toEqual({ action: 'pass' });
   });
 
   it('passes an unauthenticated request to a credential host', () => {
@@ -280,7 +282,8 @@ describe('decideCredentials', () => {
       credentialIds: ['claude'],
     });
     expect(
-      decideCredentials('api.anthropic.com', { 'x-api-key': 'sk-ant-someoneelse' }, policy()).action,
+      decideCredentials('api.anthropic.com', { 'x-api-key': 'sk-ant-someoneelse' }, policy())
+        .action,
     ).toBe('deny');
   });
 
@@ -306,7 +309,12 @@ describe('decideCredentials', () => {
   it('still refuses a foreign value under any other scheme, or under none', () => {
     const tunnels = policy({ credentials: [DEVTUNNELS] });
     const host = 'global.rel.tunnels.api.visualstudio.com';
-    for (const value of ['github ghu_someoneelse', 'Bearer ghu_someoneelse', 'tunnel', 'tunnelx y']) {
+    for (const value of [
+      'github ghu_someoneelse',
+      'Bearer ghu_someoneelse',
+      'tunnel',
+      'tunnelx y',
+    ]) {
       expect(decideCredentials(host, { authorization: value }, tunnels).action).toBe('deny');
     }
     // A pass-through scheme belongs to its own credential's hosts only.

@@ -1,8 +1,8 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
-import { withinLineLimit, type Token } from '@/lib/highlight';
+import { type Token, withinLineLimit } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
+import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
 /** The gutter bar class and row background class for each kind of changed line. */
@@ -522,4 +522,3 @@ function splitLines(content: string): string[] {
   if (lines.at(-1) === '') lines.pop();
   return lines;
 }
-

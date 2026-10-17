@@ -1,5 +1,6 @@
 import { ACP_METHOD, UPDATE_KIND } from '../../../../shared/acp.ts';
 import type { BackgroundProcess } from '../../../../shared/types.ts';
+import { AcpClient, type ConnectionState, loadParams } from './acp-client.ts';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -11,15 +12,14 @@ import type {
   ThreadModeState,
   ThreadNotification,
 } from './acp-types.ts';
-import { AcpClient, loadParams, type ConnectionState } from './acp-client.ts';
 import {
   applyUpdate,
   emptyModel,
   findTool,
-  messageOfTool,
-  truncateFrom,
   type Message,
+  messageOfTool,
   type ThreadModel,
+  truncateFrom,
 } from './translate.ts';
 
 /**

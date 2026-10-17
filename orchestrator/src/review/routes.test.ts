@@ -22,12 +22,12 @@ import type {
   ReviewFileResponse,
 } from '../../../shared/types.ts';
 import { buildApp, type Orchestrator } from '../app.ts';
-import { loadConfig, setConfigForTests } from '../config.ts';
-import { openDb, type Db } from '../db.ts';
 import { BoxManager } from '../boxes.ts';
-import { inProcessFileService } from '../files-in-process.ts';
+import { loadConfig, setConfigForTests } from '../config.ts';
+import { type Db, openDb } from '../db.ts';
 import { setFileServiceSpawnerForTests } from '../files.ts';
-import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { type GitRunner, type GitTarget, setGitRunnerForTests } from './git.ts';
 
 /** Invocations addressed at anything but a box's own workspace. */
 let misaddressed: GitTarget[] = [];
@@ -220,7 +220,10 @@ describe('the directory endpoint', () => {
 
     const { body } = await openDir('bbb');
     assert.equal(body.hasGit, true);
-    assert.deepEqual(body.repos.map((r) => r.path), ['']);
+    assert.deepEqual(
+      body.repos.map((r) => r.path),
+      [''],
+    );
     assert.deepEqual(named(body), ['f:a.txt']);
   });
 
@@ -250,7 +253,10 @@ describe('the directory endpoint', () => {
     }
     const { body } = await openDir('ddd');
     assert.equal(body.hasGit, true);
-    assert.deepEqual(body.repos.map((r) => r.path), ['one', 'two']);
+    assert.deepEqual(
+      body.repos.map((r) => r.path),
+      ['one', 'two'],
+    );
     // The folders say their subtrees hold a change, without either being read.
     assert.equal(entry(body, 'one')!.changed, true);
     assert.equal(entry(body, 'two')!.changed, true);
@@ -285,7 +291,10 @@ describe('the directory endpoint', () => {
     write(repo, 'a.txt', 'x\n');
 
     const { body } = await openDir('dpt');
-    assert.deepEqual(body.repos.map((r) => r.path), ['projects/foo']);
+    assert.deepEqual(
+      body.repos.map((r) => r.path),
+      ['projects/foo'],
+    );
     const deep = await openDir('dpt', 'projects/foo');
     assert.equal(entry(deep.body, 'a.txt')!.status, 'untracked');
   });
@@ -300,7 +309,10 @@ describe('the directory endpoint', () => {
     write(inner, 'b.txt', 'y\n');
 
     const { body } = await openDir('nst');
-    assert.deepEqual(body.repos.map((r) => r.path), ['', 'inner']);
+    assert.deepEqual(
+      body.repos.map((r) => r.path),
+      ['', 'inner'],
+    );
     // The inner repository is a folder with its own root mark, and the outer
     // one reports nothing for it as a file.
     assert.deepEqual(named(body), ['d:inner', 'f:a.txt']);
@@ -359,7 +371,10 @@ describe('the directory endpoint', () => {
     assert.equal((await openDir('ggg', '', false)).body.hasGit, false);
     const { body } = await openDir('ggg');
     assert.equal(body.hasGit, true);
-    assert.deepEqual(body.repos.map((r) => r.path), ['project']);
+    assert.deepEqual(
+      body.repos.map((r) => r.path),
+      ['project'],
+    );
   });
 
   test('opening a folder runs no git at all', async () => {
@@ -498,10 +513,15 @@ describe('the directory endpoint', () => {
   test('an unknown box is a 404, a deleted one too', async () => {
     insertBox('ggg');
     db.prepare("UPDATE boxes SET status = 'deleted' WHERE id = ?").run('ggg');
-    assert.equal((await orchestrator.app.inject({ url: '/api/boxes/ggg/review/dir' })).statusCode, 404);
-    assert.equal((await orchestrator.app.inject({ url: '/api/boxes/nope/review/dir' })).statusCode, 404);
+    assert.equal(
+      (await orchestrator.app.inject({ url: '/api/boxes/ggg/review/dir' })).statusCode,
+      404,
+    );
+    assert.equal(
+      (await orchestrator.app.inject({ url: '/api/boxes/nope/review/dir' })).statusCode,
+      404,
+    );
   });
-
 });
 
 // --- the file ---------------------------------------------------------------
@@ -1216,9 +1236,9 @@ describe('the base revision', () => {
 
     // Only the expression is stored: what it resolves to is a different commit
     // in every repository, so it is derived rather than kept.
-    const row = db
-      .prepare('SELECT review_base_rev FROM boxes WHERE id = ?')
-      .get('aaa') as { review_base_rev: string };
+    const row = db.prepare('SELECT review_base_rev FROM boxes WHERE id = ?').get('aaa') as {
+      review_base_rev: string;
+    };
     assert.equal(row.review_base_rev, 'main');
   });
 
@@ -1256,7 +1276,10 @@ describe('the base revision', () => {
     await setBase('ddd', 'main');
     const { body } = await setBase('ddd', null);
     assert.equal(body.rev, '');
-    assert.deepEqual(body.repos.map((r) => r.baseCommit), ['']);
+    assert.deepEqual(
+      body.repos.map((r) => r.baseCommit),
+      [''],
+    );
     assert.deepEqual((await openDir('ddd')).body.base, { rev: '' });
   });
 
@@ -1313,7 +1336,10 @@ describe('the base revision', () => {
     assert.equal(entry(listing.body, 'b.txt')!.status, 'modified');
     // And every directory reports the same resolution, so the header can say
     // where the revision landed.
-    assert.deepEqual(listing.body.repos.map((r) => r.baseCommit !== ''), [true, false]);
+    assert.deepEqual(
+      listing.body.repos.map((r) => r.baseCommit !== ''),
+      [true, false],
+    );
   });
 
   test('a workspace with no repository cannot have a base', async () => {

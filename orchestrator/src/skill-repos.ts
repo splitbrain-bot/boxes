@@ -146,7 +146,10 @@ function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
 function gitError(err: unknown): string {
   const e = err as { stderr?: string; killed?: boolean; message?: string };
   if (e.killed) return 'git took too long and was stopped';
-  const lines = (e.stderr ?? '').trim().split('\n').filter((l) => l.trim() !== '');
+  const lines = (e.stderr ?? '')
+    .trim()
+    .split('\n')
+    .filter((l) => l.trim() !== '');
   return lines.at(-1) ?? e.message ?? String(err);
 }
 
@@ -195,6 +198,10 @@ export function findSkills(
 
 /** The last path segment of a repository URL without `.git`, the name of a skill at its root. */
 export function repoName(url: string): string {
-  const last = new URL(url).pathname.split('/').filter((p) => p !== '').at(-1) ?? '';
+  const last =
+    new URL(url).pathname
+      .split('/')
+      .filter((p) => p !== '')
+      .at(-1) ?? '';
   return last.replace(/\.git$/, '');
 }

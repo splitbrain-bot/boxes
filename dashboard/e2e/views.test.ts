@@ -47,9 +47,7 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect.poll(() => page.getByText('thinking').isVisible()).toBe(true);
       await expect.poll(() => page.getByText('1 job').isVisible()).toBe(true);
       // The thread that is running it, said in a dot and readable as words.
-      await expect
-        .poll(() => page.getByRole('img', { name: 'jobs' }).isVisible())
-        .toBe(true);
+      await expect.poll(() => page.getByRole('img', { name: 'jobs' }).isVisible()).toBe(true);
       // Time since each thread was active, and disk use per box. The seconds
       // are matched by shape, because the clock moves while the page loads.
       await expect.poll(() => page.getByText(/^\d+s$/).isVisible()).toBe(true);
@@ -80,9 +78,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { page, errors, close } = await openPage(stub.url, '/boxes/a1b2c3d4/info', scheme);
     try {
       await expect.poll(() => page.getByText('Details').isVisible()).toBe(true);
-      await expect
-        .poll(() => page.getByText('348 MB', { exact: true }).isVisible())
-        .toBe(true);
+      await expect.poll(() => page.getByText('348 MB', { exact: true }).isVisible()).toBe(true);
       await shoot(page, `info-${scheme}`);
       expect(errors).toEqual([]);
     } finally {
@@ -156,7 +152,8 @@ test('the box list says which build of each image is running', async () => {
     const proxy = page.getByText(/^proxy 9f8e7d6c5b4a · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 180 MB$/);
     await expect.poll(() => proxy.isVisible()).toBe(true);
     // In gigabytes.
-    await expect.poll(() => page.getByText(/^box 001122334455 · .* · 4.2 GB$/).isVisible())
+    await expect
+      .poll(() => page.getByText(/^box 001122334455 · .* · 4.2 GB$/).isVisible())
       .toBe(true);
     // The whole digest shows on hover, for pasting into a comparison.
     expect(await proxy.getAttribute('title')).toBe(
@@ -190,9 +187,7 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
     await stop.click();
     // The confirmation lists the processes with their age, because no other
     // place in the dashboard names them.
-    await expect
-      .poll(() => page.getByText('james -config conf/james.yaml').isVisible())
-      .toBe(true);
+    await expect.poll(() => page.getByText('james -config conf/james.yaml').isVisible()).toBe(true);
     expect(await page.getByText('4h 39m').count()).toBe(2);
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(() => stub.boxStops).toEqual(['orphan01']);
@@ -254,9 +249,7 @@ test('the info view lists what the box is running, whoever left it there', async
   const { page, errors, close } = await openPage(stub.url, '/boxes/orphan02/info');
   try {
     await expect.poll(() => page.getByText('Running in the box').isVisible()).toBe(true);
-    await expect
-      .poll(() => page.getByText('james -config conf/james.yaml').isVisible())
-      .toBe(true);
+    await expect.poll(() => page.getByText('james -config conf/james.yaml').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('4h 39m').isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {

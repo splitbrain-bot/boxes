@@ -1,5 +1,5 @@
 import { duplexPair } from 'node:stream';
-import { serveFiles, type Roots } from '../../files/src/server.ts';
+import { type Roots, serveFiles } from '../../files/src/server.ts';
 import type { FileServiceSpawner } from './files.ts';
 
 /**

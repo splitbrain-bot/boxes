@@ -4,10 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
-import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
-import { inProcessFileService } from '../files-in-process.ts';
 import { fileService, setFileServiceSpawnerForTests } from '../files.ts';
-import { discoverRepos } from './repos.ts';
+import { inProcessFileService } from '../files-in-process.ts';
+import { type GitRunner, type GitTarget, setGitRunnerForTests } from './git.ts';
 import {
   baseRev,
   fileStatuses,
@@ -19,6 +18,7 @@ import {
   resolveBases,
   workspaceStatuses,
 } from './gitstatus.ts';
+import { discoverRepos } from './repos.ts';
 
 /**
  * A runner that starts git on this machine, in the directory the target names,

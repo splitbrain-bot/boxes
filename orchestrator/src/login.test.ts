@@ -11,19 +11,19 @@ import {
   parseAuthDocument,
   type TokenAnswer,
 } from './credentials.ts';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 import { HttpError } from './http-error.ts';
 import {
   deviceCodeIn,
   deviceUrlIn,
+  type GitHubClient,
   grown,
+  type LoginExecSpec,
   LoginManager,
   stripAnsi,
   visitUrlIn,
-  type GitHubClient,
-  type LoginExecSpec,
 } from './login.ts';
-import { setRuntime, type ProcessStream, type Runtime } from './runtime/runtime.ts';
+import { type ProcessStream, type Runtime, setRuntime } from './runtime/runtime.ts';
 
 /** The escape byte, spelled rather than typed, so the source stays printable. */
 const ESC = String.fromCharCode(27);
@@ -110,7 +110,10 @@ function fakeRuntime(): Fake {
         const id = `login-${credentialId}-${fake.started.length + 1}`;
         fake.started.push(id);
         return {
-          async spawn(cmd: readonly string[], opts: { env?: Record<string, string>; tty?: object } = {}) {
+          async spawn(
+            cmd: readonly string[],
+            opts: { env?: Record<string, string>; tty?: object } = {},
+          ) {
             const spec: LoginExecSpec = {
               cmd,
               ...(opts.env ? { env: opts.env } : {}),
@@ -326,9 +329,7 @@ test('the prompt is recognised when the UI lays it out by column', async () => {
 
   // The CLI places each word at a column of its own, so the stripped text
   // has no spaces.
-  cli.print(
-    `${ESC}[2GPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`,
-  );
+  cli.print(`${ESC}[2GPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`);
   await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
   assert.equal(logins.state('claude', loginId).state, 'awaiting_code');
 });
@@ -414,9 +415,12 @@ test('cancelling ends the login, removes the container, and forgets the id', asy
 
   logins.cancel('openai', loginId);
   await until('the container to be removed', () => fake.removed.length === 1);
-  assert.throws(() => logins.state('openai', loginId), (err: unknown) => {
-    return err instanceof HttpError && err.statusCode === 404;
-  });
+  assert.throws(
+    () => logins.state('openai', loginId),
+    (err: unknown) => {
+      return err instanceof HttpError && err.statusCode === 404;
+    },
+  );
   assert.equal(store.get('openai'), undefined);
 });
 
@@ -590,14 +594,20 @@ test("Claude's URL is read after its label, and off the stream otherwise", () =>
     visitUrlIn('Visit: https://claude.ai/oauth/authorize?x=1\n'),
     'https://claude.ai/oauth/authorize?x=1',
   );
-  assert.equal(visitUrlIn('open https://console.anthropic.com/x in a browser'), 'https://console.anthropic.com/x');
+  assert.equal(
+    visitUrlIn('open https://console.anthropic.com/x in a browser'),
+    'https://console.anthropic.com/x',
+  );
   assert.equal(visitUrlIn('press enter'), null);
 });
 
 test('a value a read cut in half grows, and a redraw cannot shorten it', () => {
   const url = 'https://auth.openai.com/codex/device';
   assert.equal(grown(null, null), null);
-  assert.equal(grown(null, 'https://auth.openai.com/codex/dev'), 'https://auth.openai.com/codex/dev');
+  assert.equal(
+    grown(null, 'https://auth.openai.com/codex/dev'),
+    'https://auth.openai.com/codex/dev',
+  );
   // The rest of it arrived.
   assert.equal(grown('https://auth.openai.com/codex/dev', url), url);
   // The screen scrolled part of the line away, which says nothing new.

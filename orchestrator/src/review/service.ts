@@ -5,29 +5,29 @@ import type {
   ReviewFileResponse,
   ReviewRepo,
 } from '../../../shared/types.ts';
-import type { Db, BoxRow } from '../db.ts';
+import type { BoxRow, Db } from '../db.ts';
 import {
-  fileService,
+  type FileService,
   FileServiceError,
+  type FileStream,
+  fileService,
   isMissing,
   isRefusedPath,
-  type FileService,
-  type FileStream,
   type WriteCondition,
 } from '../files.ts';
 import { HttpError } from '../http-error.ts';
 import { log } from '../log.ts';
 import { emptyDiff, fileDiff } from './difflines.ts';
 import { fileLines, MAX_FILE_BYTES, MAX_REVIEW_BYTES } from './fs.ts';
-import { headCommit, type GitBox } from './git.ts';
+import { type GitBox, headCommit } from './git.ts';
 import {
+  type Base,
+  type FileStatuses,
   fileStatuses,
   NO_BASE,
   resolveBase,
   resolveBases,
   workspaceStatuses,
-  type Base,
-  type FileStatuses,
 } from './gitstatus.ts';
 import { discoverRepos, gitTarget, inRepo, type Repo, type RepoMap } from './repos.ts';
 import {
@@ -37,20 +37,20 @@ import {
   deleteAnnotation,
   detectLang,
   parseReview,
+  type Review,
   serializeReview,
   setAnnotation,
   todayStamp,
-  type Review,
 } from './store.ts';
 import {
+  type DirChild,
   dirEntries,
   holdsDeleted,
   listedDir,
   listedFile,
   MAX_DIR_ENTRIES,
-  reviewChildren,
   REVIEW_FILE,
-  type DirChild,
+  reviewChildren,
 } from './tree.ts';
 
 /**
@@ -139,9 +139,7 @@ export class ReviewService {
 
   /** The box row, or a 404 for an unknown or deleted box. */
   private row(id: string): BoxRow {
-    const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as
-      | BoxRow
-      | undefined;
+    const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as BoxRow | undefined;
     if (!row || row.status === 'deleted') throw new HttpError(404, 'Box not found');
     return row;
   }
@@ -508,10 +506,7 @@ export class ReviewService {
         }
         return toAnnotations(annotationsFor(review, relPath));
       }
-      throw new HttpError(
-        409,
-        'REVIEW.md is being written by something else; try again',
-      );
+      throw new HttpError(409, 'REVIEW.md is being written by something else; try again');
     });
   }
 
@@ -751,7 +746,10 @@ function goneFile(
  * cap, so the drift check skips it. A connection that fails throws, so it
  * marks nothing outdated.
  */
-async function sourceLines(files: FileService, relPath: string): Promise<string[] | null | undefined> {
+async function sourceLines(
+  files: FileService,
+  relPath: string,
+): Promise<string[] | null | undefined> {
   try {
     const read = await files.read(relPath, MAX_FILE_BYTES);
     if (read.binary || read.truncated) return undefined;
@@ -773,7 +771,9 @@ function failedCondition(err: unknown): boolean {
 }
 
 /** One file's annotations, as the API reports them: a list, in line order. */
-function toAnnotations(annotations: Map<number, { comment: string; outdated: boolean }>): ReviewAnnotation[] {
+function toAnnotations(
+  annotations: Map<number, { comment: string; outdated: boolean }>,
+): ReviewAnnotation[] {
   return [...annotations.entries()]
     .sort(([a], [b]) => a - b)
     .map(([line, ann]) => ({ line, comment: ann.comment, outdated: ann.outdated }));

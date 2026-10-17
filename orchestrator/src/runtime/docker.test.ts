@@ -45,7 +45,11 @@ beforeEach(() => {
     getContainer: (name: string) => ({
       inspect: async () => {
         if (name !== 'box-a1') throw notFound('container');
-        return { Id: 'abcdef0123456789', Image: 'sha256:0123456789abcdef', State: { Running: true } };
+        return {
+          Id: 'abcdef0123456789',
+          Image: 'sha256:0123456789abcdef',
+          State: { Running: true },
+        };
       },
     }),
   } as unknown as Docker);

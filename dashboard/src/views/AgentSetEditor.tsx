@@ -1,15 +1,7 @@
 import { FileText, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import type {
-  AgentBundlePreview,
-  AgentItem,
-  AgentRepo,
-  AgentSetDetail,
-} from '../../../shared/types.ts';
-import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
-import { useUp } from '@/hooks/use-up';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
@@ -26,6 +18,14 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { useUp } from '@/hooks/use-up';
+import type {
+  AgentBundlePreview,
+  AgentItem,
+  AgentRepo,
+  AgentSetDetail,
+} from '../../../shared/types.ts';
+import { api } from '../api.ts';
 
 /**
  * Editor for one agent set: its AGENTS.md and its skills.
@@ -123,9 +123,7 @@ export function AgentSetEditor() {
         Changes reach a box the next time it starts.
       </p>
 
-      {error ? (
-        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-      ) : null}
+      {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
 
       {/* The global set can be renamed too, because its name is only a label. */}
       <Card className="flex flex-col gap-3 p-4">
@@ -154,14 +152,14 @@ export function AgentSetEditor() {
           <h2 className="text-sm font-medium">AGENTS.md</h2>
         </div>
         <p className="text-xs text-muted-foreground">
-          Standing instructions. Installed as the agent&apos;s own memory, so it applies wherever
-          in the box the agent is working, not only in a checked-out project.
+          Standing instructions. Installed as the agent&apos;s own memory, so it applies wherever in
+          the box the agent is working, not only in a checked-out project.
         </p>
         <Textarea
           value={agentsMd}
           // field-sizing-content ignores rows, so min-h sets the empty size.
           className="min-h-40 font-mono text-xs"
-          placeholder={"# House rules\n\n- Run the tests before you say you are done.\n"}
+          placeholder={'# House rules\n\n- Run the tests before you say you are done.\n'}
           onChange={(e) => setAgentsMd(e.target.value)}
         />
         <div className="flex justify-end">
@@ -285,9 +283,7 @@ function ItemSection({
           key={item.name}
           className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
         >
-          <span className="min-w-0 flex-1 truncate font-mono text-xs">
-            {item.name}
-          </span>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs">{item.name}</span>
           {overridden.has(item.name) ? (
             <span className="shrink-0 text-xs text-muted-foreground">replaces the global one</span>
           ) : null}
@@ -478,9 +474,7 @@ function ItemDialog({
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent className="flex max-h-[85dvh] flex-col sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
-            {item ? `Edit skill ${item.name}` : 'New skill'}
-          </DialogTitle>
+          <DialogTitle>{item ? `Edit skill ${item.name}` : 'New skill'}</DialogTitle>
           <DialogDescription>Installed as skills/&lt;name&gt;/SKILL.md.</DialogDescription>
         </DialogHeader>
 

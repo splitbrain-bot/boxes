@@ -1,10 +1,10 @@
-import compress from '@fastify/compress';
-import Fastify from 'fastify';
-import type { FastifyReply } from 'fastify';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import compress from '@fastify/compress';
+import type { FastifyReply } from 'fastify';
+import Fastify from 'fastify';
 import type {
   ApiKeySummary,
   BootResponse,
@@ -21,8 +21,6 @@ import type {
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
 import { ApiKeyStore } from './api-keys.ts';
-import { BOOT_PAGE, BOOT_PAGE_CSP, BootState } from './boot.ts';
-import { builtinSkills } from './builtin-skills.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
 import {
   agentItemBody,
@@ -44,35 +42,37 @@ import {
   threadDoneBody,
   updateAgentSetBody,
 } from './bodies.ts';
+import { BOOT_PAGE, BOOT_PAGE_CSP, BootState } from './boot.ts';
+import { BoxManager } from './boxes.ts';
+import { builtinSkills } from './builtin-skills.ts';
 import type { Config } from './config.ts';
 import {
+  type CredentialId,
   CredentialStore,
   deliverableSecret,
   isCredentialId,
   undeliverableReason,
-  type CredentialId,
 } from './credentials.ts';
 import {
   countLiveBoxes,
   countPushSubscriptions,
+  type Db,
   deletePushSubscription,
   readHarnessCatalog,
   upsertPushSubscription,
-  type Db,
 } from './db.ts';
 import { EgressManager } from './egress.ts';
-import { HARNESSES } from './harness.ts';
 import { fileService, isRefusedPath } from './files.ts';
+import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
-import { LoginManager } from './login.ts';
-import { createRuntime } from './runtime/index.ts';
-import { runtime, setRuntime } from './runtime/runtime.ts';
 import { log } from './log.ts';
+import { LoginManager } from './login.ts';
 import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
-import { BoxManager } from './boxes.ts';
+import { createRuntime } from './runtime/index.ts';
+import { runtime, setRuntime } from './runtime/runtime.ts';
 import { deploymentId, patchSettings, readSettings } from './settings.ts';
 import { fetchRepo } from './skill-repos.ts';
 import { devTunnelsApi, TunnelReconciler } from './tunnels.ts';
@@ -317,10 +317,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * Hands attachment uploads to the route as a Buffer. The route sets the
    * size limit.
    */
-  app.addContentTypeParser(
-    'application/octet-stream',
-    { parseAs: 'buffer' },
-    (_req, body, done) => done(null, body),
+  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) =>
+    done(null, body),
   );
 
   /**
@@ -351,7 +349,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     if (boot.ready) return;
     const path = req.url.split('?')[0] ?? '/';
     if (BOOT_OPEN_PATHS.has(path)) return;
-    if (req.method === 'GET' && !path.startsWith('/api') && req.headers.accept?.includes('text/html')) {
+    if (
+      req.method === 'GET' &&
+      !path.startsWith('/api') &&
+      req.headers.accept?.includes('text/html')
+    ) {
       return reply
         .headers({
           'Content-Type': 'text/html; charset=utf-8',
@@ -464,17 +466,19 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * adapter of that harness has answered one, and the dialog then offers the
    * agent choice alone.
    */
-  app.get('/api/harnesses', async (): Promise<HarnessInfo[]> =>
-    harnessHealth().map((health) => {
-      const entry = HARNESSES[health.id];
-      return {
-        ...health,
-        defaultModeId: entry.defaultModeId,
-        forkModeId: entry.forkModeId,
-        defaultConfig: { ...entry.defaultConfig },
-        catalog: readHarnessCatalog(db, health.id),
-      };
-    }),
+  app.get(
+    '/api/harnesses',
+    async (): Promise<HarnessInfo[]> =>
+      harnessHealth().map((health) => {
+        const entry = HARNESSES[health.id];
+        return {
+          ...health,
+          defaultModeId: entry.defaultModeId,
+          forkModeId: entry.forkModeId,
+          defaultConfig: { ...entry.defaultConfig },
+          catalog: readHarnessCatalog(db, health.id),
+        };
+      }),
   );
 
   app.get('/api/boxes', async () => manager.list());
@@ -776,8 +780,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * The deployment's credentials. A secret goes in through PUT and never
    * comes back out: this lists only an account and a status for each.
    */
-  app.get('/api/credentials', async (): Promise<CredentialSummary[]> =>
-    credentials.list().map((row) => credentials.summarize(row)),
+  app.get(
+    '/api/credentials',
+    async (): Promise<CredentialSummary[]> =>
+      credentials.list().map((row) => credentials.summarize(row)),
   );
 
   app.put('/api/credentials/:id', async (req) => {
@@ -829,8 +835,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * The API keys a user added. A key goes in through PUT and never comes
    * back out: this lists only its hosts and its last four characters.
    */
-  app.get('/api/api-keys', async (): Promise<ApiKeySummary[]> =>
-    apiKeys.list().map((row) => apiKeys.summarize(row)),
+  app.get(
+    '/api/api-keys',
+    async (): Promise<ApiKeySummary[]> => apiKeys.list().map((row) => apiKeys.summarize(row)),
   );
 
   app.put('/api/api-keys/:name', async (req) => {
@@ -856,8 +863,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   app.get('/api/settings', async (): Promise<Settings> => readSettings(db));
 
   /** Writes the settings a body names and answers with all of them. */
-  app.patch('/api/settings', async (req): Promise<Settings> =>
-    patchSettings(db, parseBody(patchSettingsBody, req.body)),
+  app.patch(
+    '/api/settings',
+    async (req): Promise<Settings> => patchSettings(db, parseBody(patchSettingsBody, req.body)),
   );
 
   // --- Web Push --------------------------------------------------------------
@@ -866,9 +874,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * The deployment's VAPID public key, which a browser needs before it can
    * subscribe. It is public by design.
    */
-  app.get('/api/push/key', async (): Promise<PushKeyResponse> => ({
-    publicKey: notifier.publicKey,
-  }));
+  app.get(
+    '/api/push/key',
+    async (): Promise<PushKeyResponse> => ({
+      publicKey: notifier.publicKey,
+    }),
+  );
 
   /**
    * Checks a push endpoint before the orchestrator ever POSTs to it.

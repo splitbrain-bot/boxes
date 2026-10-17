@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ApiKeyStore } from './api-keys.ts';
 import { boxEnv } from './boxenv.ts';
-import { loadConfig, type Config } from './config.ts';
-import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
-import { openDb, type Db } from './db.ts';
+import { type Config, loadConfig } from './config.ts';
+import { type CredentialId, type CredentialMethod, CredentialStore } from './credentials.ts';
+import { type Db, openDb } from './db.ts';
 import { EgressManager } from './egress.ts';
 import { DockerRuntime } from './runtime/docker.ts';
 
@@ -187,5 +187,4 @@ describe('boxEnv', () => {
     // A variable of Boxes wins over a key of the same name.
     expect(env['GH_TOKEN']).toBe('ghp_placeholder');
   });
-
 });

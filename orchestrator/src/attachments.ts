@@ -1,6 +1,6 @@
 import { extname } from 'node:path';
 import type { StoredAttachment } from '../../shared/types.ts';
-import { FileServiceError, type FileService } from './files.ts';
+import { type FileService, FileServiceError } from './files.ts';
 
 /**
  * Files the user attaches to a prompt, stored in the box's own workspace,

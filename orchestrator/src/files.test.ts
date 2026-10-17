@@ -12,13 +12,13 @@ import { duplexPair, PassThrough, Readable } from 'node:stream';
 import { pack } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
 import { FILES_PROTOCOL_VERSION, VERSION_HEADER } from '../../shared/files.ts';
-import { inProcessFileService } from './files-in-process.ts';
 import {
-  fileService,
   FileServiceError,
-  setFileServiceSpawnerForTests,
   type FileServiceSpawner,
+  fileService,
+  setFileServiceSpawnerForTests,
 } from './files.ts';
+import { inProcessFileService } from './files-in-process.ts';
 import { HttpError } from './http-error.ts';
 
 let workspace: string;

@@ -48,7 +48,9 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect
         .poll(() => page.locator('[data-slot="tool-fallback-result"]').isVisible())
         .toBe(true);
-      await expect.poll(() => page.getByText('cidr.test.ts', { exact: false }).first().isVisible()).toBe(true);
+      await expect
+        .poll(() => page.getByText('cidr.test.ts', { exact: false }).first().isVisible())
+        .toBe(true);
       await expect
         .poll(() => page.getByText('ls -1 proxy/src', { exact: false }).first().isVisible())
         .toBe(true);

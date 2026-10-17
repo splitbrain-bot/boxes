@@ -149,10 +149,7 @@ export function withinLineLimit(content: string): boolean {
  * grammar for the language, too many lines, a line that is too long, or a
  * failure in the grammar.
  */
-export async function tokenizeLines(
-  content: string,
-  language: string,
-): Promise<Token[][] | null> {
+export async function tokenizeLines(content: string, language: string): Promise<Token[][] | null> {
   if (!canHighlight(language)) return null;
   if (!withinLineLimit(content)) return null;
   if (content.split('\n').some((line) => line.length > MAX_LINE)) return null;

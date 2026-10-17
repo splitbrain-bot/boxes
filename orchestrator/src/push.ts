@@ -6,7 +6,7 @@ import {
   randomBytes,
   sign as signWith,
 } from 'node:crypto';
-import { readAppKey, writeAppKey, type Db } from './db.ts';
+import { type Db, readAppKey, writeAppKey } from './db.ts';
 import { log } from './log.ts';
 
 /**
