@@ -55,6 +55,18 @@ export interface CredentialSummary {
   updatedAt: number;
 }
 
+/** One API key a user added, as the API reports it, without the secret. */
+export interface ApiKeySummary {
+  /** The environment variable that holds the key's placeholder in each box. */
+  name: string;
+  /** The hosts the egress proxy swaps the key in for. */
+  hosts: string[];
+  /** The last four characters of the key, or null for a key too short to show any. */
+  account: string | null;
+  /** When it was last stored, in epoch milliseconds. */
+  updatedAt: number;
+}
+
 /** What one harness needs before a thread on it can run, and whether it has it. */
 export interface HarnessHealth {
   /** Which harness this is. */
@@ -664,7 +676,11 @@ export interface EgressCredential {
    * Same grammar as the allowlist: exact names and one-label wildcards.
    */
   hosts: string[];
-  /** Header names that may carry it, lowercased. */
+  /**
+   * Header names that may carry it, lowercased. A header in this list that
+   * holds another value refuses the request. Empty means any header may carry
+   * it, and no header value is refused.
+   */
   headers: string[];
   /**
    * Authorization schemes, lowercased, whose values the host issues itself,

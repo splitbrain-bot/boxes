@@ -140,11 +140,12 @@ function schemeOf(value: string): string | null {
 /**
  * Decides what a request to an intercepted host may carry.
  *
- * Only the headers the host's credentials name are read. A header holding a
- * placeholder is rewritten to hold the real credential. A header under one of
- * the credentials' pass-through schemes is left alone, because the host issued
- * that value itself. A header holding any other value refuses the request, so
- * no foreign credential reaches the host.
+ * Only the headers the host's credentials name are read, or every header when
+ * a credential names none. A header holding a placeholder is rewritten to hold
+ * the real credential. A header under one of the credentials' pass-through
+ * schemes is left alone, because the host issued that value itself. A named
+ * header holding any other value refuses the request, so no foreign credential
+ * reaches the host. Any other header passes unchanged.
  *
  * A request with none of these headers passes through, so a login with a
  * session cookie from inside a box keeps working.
@@ -157,7 +158,13 @@ export function decideCredentials(
   const credentials = credentialsForHost(host, policy);
   if (credentials.length === 0) return { action: 'pass' };
 
-  const names = [...new Set(credentials.flatMap((c) => c.headers))];
+  // Pseudo-headers carry the request line, never a credential.
+  const sent = credentials.some((c) => c.headers.length === 0)
+    ? Object.keys(headers)
+        .map((h) => h.toLowerCase())
+        .filter((h) => !h.startsWith(':'))
+    : [];
+  const names = [...new Set([...credentials.flatMap((c) => c.headers), ...sent])];
   const replacements: Record<string, string> = {};
   const used: string[] = [];
 
@@ -167,7 +174,9 @@ export function decideCredentials(
 
     // Credentials that may travel in this header, in policy order. The first
     // whose placeholder the value carries is the one to swap.
-    const candidates = credentials.filter((c) => c.headers.includes(name));
+    const candidates = credentials.filter(
+      (c) => c.headers.length === 0 || c.headers.includes(name),
+    );
     let swapped: string | null = null;
     for (const credential of candidates) {
       swapped = swapCredentialValue(present, credential.placeholder, credential.secret);
@@ -177,13 +186,15 @@ export function decideCredentials(
       }
     }
     if (swapped === null) {
+      const named = candidates.filter((c) => c.headers.includes(name));
+      if (named.length === 0) continue;
       const scheme = schemeOf(present);
-      if (scheme !== null && candidates.some((c) => c.passthroughSchemes?.includes(scheme))) {
+      if (scheme !== null && named.some((c) => c.passthroughSchemes?.includes(scheme))) {
         continue;
       }
       return {
         action: 'deny',
-        reason: `foreign credential in ${name} for ${candidates[0]?.id ?? host}`,
+        reason: `foreign credential in ${name} for ${named[0]?.id ?? host}`,
       };
     }
     replacements[name] = swapped;
@@ -274,7 +285,6 @@ export function parsePolicy(input: unknown): EgressPolicy {
     const headers = stringArray(c['headers'], `credential ${id} headers`).map((h) =>
       h.toLowerCase(),
     );
-    if (headers.length === 0) return fail(`credential ${id} needs at least one header`);
     if (c['passthroughSchemes'] === undefined) return { id, hosts, headers, placeholder, secret };
     const passthroughSchemes = stringArray(
       c['passthroughSchemes'],

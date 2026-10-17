@@ -1,6 +1,7 @@
 import { KeyRound, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type {
+  ApiKeySummary,
   CredentialId,
   CredentialMethod,
   CredentialSummary,
@@ -128,6 +129,7 @@ export function Settings() {
   const { harnesses } = useBoxes();
 
   const [credentials, setCredentials] = useState<CredentialSummary[] | null>(null);
+  const [apiKeys, setApiKeys] = useState<ApiKeySummary[] | null>(null);
   const [settings, setSettings] = useState<SettingsShape | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -142,8 +144,13 @@ export function Settings() {
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const [stored, current] = await Promise.all([api.listCredentials(), api.getSettings()]);
+      const [stored, keys, current] = await Promise.all([
+        api.listCredentials(),
+        api.listApiKeys(),
+        api.getSettings(),
+      ]);
       setCredentials(stored);
+      setApiKeys(keys);
       setSettings(current);
       setError(null);
     } catch (err) {
@@ -232,6 +239,15 @@ export function Settings() {
           />
         ))
       )}
+
+      {apiKeys ? (
+        <ApiKeys
+          stored={apiKeys}
+          busy={busy}
+          onSave={(name, hosts, secret) => act(() => api.putApiKey(name, hosts, secret))}
+          onRemove={(name) => act(() => api.deleteApiKey(name))}
+        />
+      ) : null}
 
       {settings ? (
         <GitIdentity
@@ -426,6 +442,142 @@ function account(stored: CredentialSummary): string {
   return stored.method === 'oauth'
     ? `Signed in as ${stored.account}`
     : `Ends ${stored.account}`;
+}
+
+/**
+ * Card with the API keys a user added for other services, and the form that
+ * adds one or changes one.
+ */
+function ApiKeys({
+  stored,
+  busy,
+  onSave,
+  onRemove,
+}: {
+  stored: ApiKeySummary[];
+  busy: boolean;
+  onSave: (name: string, hosts: string[], secret: string) => Promise<boolean>;
+  onRemove: (name: string) => Promise<boolean>;
+}) {
+  const [name, setName] = useState('');
+  const [hosts, setHosts] = useState('');
+  const [secret, setSecret] = useState('');
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  // A stored key can keep its secret while its hosts change.
+  const existing = stored.some((key) => key.name === name.trim());
+  const ready = name.trim() !== '' && hosts.trim() !== '' && (existing || secret.trim() !== '');
+
+  const save = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (busy || !ready) return;
+    // Cleared even when the save fails, so the secret does not stay in the field.
+    const typed = secret.trim();
+    setSecret('');
+    const list = hosts.split(/[\s,]+/).filter((h) => h !== '');
+    if (await onSave(name.trim(), list, typed)) {
+      setName('');
+      setHosts('');
+    }
+  };
+
+  return (
+    <Card className="flex flex-col gap-3 p-4">
+      <h2 className="text-sm font-medium">Other API keys</h2>
+      <p className="text-xs text-muted-foreground">
+        Add API keys for other services, e.g., OpenRouter. The named environment variable holds a
+        placeholder in each box, and the egress proxy replaces it with the key in requests to the
+        given hosts. A change takes effect in a box at its next start.
+      </p>
+
+      {stored.map((key) => (
+        <div key={key.name} className="flex flex-col gap-1 text-xs">
+          <div className="flex items-center gap-2">
+            <KeyRound className="size-4 text-muted-foreground" />
+            <span className="truncate font-mono">{key.name}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="ml-auto"
+              disabled={busy}
+              onClick={() => {
+                setName(key.name);
+                setHosts(key.hosts.join(', '));
+              }}
+            >
+              Edit
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-danger"
+              disabled={busy}
+              onClick={() => setConfirmRemove(key.name)}
+            >
+              <Trash2 />
+              Remove
+            </Button>
+          </div>
+          <p className="text-muted-foreground">
+            {[key.hosts.join(', '), key.account ? `ends ${key.account}` : 'stored'].join(' · ')}
+          </p>
+        </div>
+      ))}
+
+      <form className="flex flex-col gap-2" onSubmit={(e) => void save(e)}>
+        <Label htmlFor="api-key-name">Environment variable</Label>
+        <Input
+          id="api-key-name"
+          className="font-mono"
+          placeholder="OPENROUTER_API_KEY"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <Label htmlFor="api-key-hosts">Hosts</Label>
+        <Input
+          id="api-key-hosts"
+          placeholder="openrouter.ai, *.example.com"
+          value={hosts}
+          onChange={(e) => setHosts(e.target.value)}
+        />
+        <Label htmlFor="api-key-secret">Key</Label>
+        <Input
+          id="api-key-secret"
+          type="password"
+          autoComplete="off"
+          className="font-mono"
+          placeholder={existing ? 'Leave empty to keep the stored key' : 'sk-…'}
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+        />
+        <div className="flex justify-end">
+          <Button type="submit" disabled={busy || !ready}>
+            {existing ? 'Save key' : 'Add key'}
+          </Button>
+        </div>
+      </form>
+
+      {confirmRemove ? (
+        <ConfirmDialog
+          title={`Remove the ${confirmRemove} key?`}
+          description={
+            'Nothing is intercepted for it afterwards. The variable stays in a running box ' +
+            'until its next start, but requests with it are no longer authenticated.'
+          }
+          confirmLabel="Remove"
+          danger
+          busy={busy}
+          onCancel={() => setConfirmRemove(null)}
+          onConfirm={() => {
+            const removed = confirmRemove;
+            setConfirmRemove(null);
+            void onRemove(removed);
+          }}
+        />
+      ) : null}
+    </Card>
+  );
 }
 
 /** Card that edits the name and email every box commits as. */

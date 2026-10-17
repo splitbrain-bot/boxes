@@ -56,6 +56,15 @@ const DEVTUNNELS = {
   secret: 'ghu_realrealreal',
 };
 
+/** A user's own API key, which names no header and so may travel in any. */
+const OPENROUTER = {
+  id: 'openrouter',
+  hosts: ['openrouter.ai'],
+  headers: [],
+  placeholder: 'sk-or-v1-PLACEHOLDER',
+  secret: 'sk-or-v1-realrealreal',
+};
+
 /** A policy holding all three credentials, with some fields replaced. */
 const policy = (over: Partial<EgressPolicy> = {}): EgressPolicy => ({
   allowedHosts: [],
@@ -198,6 +207,28 @@ describe('decideCredentials', () => {
       policy(),
     );
     expect(verdict.action).toBe('deny');
+  });
+
+  it('swaps a credential that names no header in whatever header carries it', () => {
+    const anyHeader = policy({ credentials: [OPENROUTER] });
+    expect(
+      decideCredentials(
+        'openrouter.ai',
+        { 'x-custom-key': OPENROUTER.placeholder, accept: '*/*' },
+        anyHeader,
+      ),
+    ).toEqual({
+      action: 'swap',
+      headers: { 'x-custom-key': OPENROUTER.secret },
+      credentialIds: ['openrouter'],
+    });
+  });
+
+  it('passes other values for a credential that names no header', () => {
+    const anyHeader = policy({ credentials: [OPENROUTER] });
+    expect(
+      decideCredentials('openrouter.ai', { authorization: 'Bearer sk-or-v1-other' }, anyHeader),
+    ).toEqual({ action: 'pass' });
   });
 
   it('refuses another credential host s placeholder, so hosts do not share', () => {
@@ -351,9 +382,11 @@ describe('parsePolicy', () => {
     expect(() => parsePolicy({ ...valid, credentials: [{ ...GITHUB, hosts: [] }] })).toThrow(
       /at least one host/,
     );
-    expect(() => parsePolicy({ ...valid, credentials: [{ ...GITHUB, headers: [] }] })).toThrow(
-      /at least one header/,
-    );
+  });
+
+  it('accepts a credential that names no header', () => {
+    const parsed = parsePolicy({ ...valid, credentials: [{ ...GITHUB, headers: [] }] });
+    expect(parsed.credentials[0]?.headers).toEqual([]);
   });
 
   it('rejects anything that is not a policy at all', () => {

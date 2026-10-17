@@ -20,7 +20,25 @@ export interface BoxEnvInputs {
   proxyUrl: string;
   /** True when the deployment has a CA, which the box trusts. */
   hasCa: boolean;
+  /** The placeholder of each API key a user added, by its variable name. */
+  apiKeys: Readonly<Record<string, string>>;
 }
+
+/**
+ * Variables the box image or the runtime sets, which an API key must not
+ * replace.
+ */
+const IMAGE_ENV_NAMES = [
+  'CODEX_PATH',
+  'HOME',
+  'HOSTNAME',
+  'LANG',
+  'NPM_CONFIG_PREFIX',
+  'PATH',
+  'SHELL',
+  'TMPDIR',
+  'USER',
+];
 
 /**
  * The full environment of a box, as a plain record. The runtime converts it
@@ -36,10 +54,11 @@ export interface BoxEnvInputs {
  *
  * GH_TOKEN is for git and gh. GITLAB_TOKEN and GITLAB_HOST are the same for
  * git and glab. DEVTUNNELS_TOKEN is the GitHub token the Dev Tunnels API
- * takes, for the share-app skill.
+ * takes, for the share-app skill. The API keys a user added come first, so a
+ * variable of Boxes wins over one with the same name.
  */
 export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
-  const env: Record<string, string> = {};
+  const env: Record<string, string> = { ...inputs.apiKeys };
   for (const harness of Object.values(HARNESSES)) {
     const id = harness.credentialId;
     Object.assign(env, harness.env(inputs.placeholderFor(id), inputs.methodFor(id)));
@@ -74,4 +93,25 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   }
 
   return Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
+}
+
+/**
+ * The variables an API key cannot be named by: those boxEnv sets for any
+ * stored credential, and those the box image or the runtime sets.
+ */
+export function reservedEnvNames(): ReadonlySet<string> {
+  const names = new Set(IMAGE_ENV_NAMES);
+  // The Claude variable follows the method, so both methods are asked.
+  for (const method of ['token', 'api_key'] as const) {
+    const env = boxEnv({
+      placeholderFor: () => 'set',
+      methodFor: () => method,
+      gitlabHost: 'set',
+      proxyUrl: 'set',
+      hasCa: true,
+      apiKeys: {},
+    });
+    for (const name of Object.keys(env)) names.add(name);
+  }
+  return names;
 }

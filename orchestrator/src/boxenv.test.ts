@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ApiKeyStore } from './api-keys.ts';
 import { boxEnv } from './boxenv.ts';
 import { loadConfig, type Config } from './config.ts';
 import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
@@ -60,7 +61,7 @@ async function deployment(
   for (const [id, secret] of Object.entries(secrets)) {
     credentials.put(id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
   }
-  const egress = new EgressManager(cfg, credentials, db);
+  const egress = new EgressManager(cfg, credentials, new ApiKeyStore(db, () => {}), db);
   await egress.prepare();
   return { cfg, db, egress };
 }
@@ -78,6 +79,7 @@ async function envFor(
     gitlabHost: cfg.GITLAB_HOST,
     proxyUrl: new DockerRuntime(cfg).proxyUrl(),
     hasCa: egress.caCertificate() !== '',
+    apiKeys: egress.apiKeyEnv(),
   });
 }
 
@@ -170,5 +172,20 @@ describe('boxEnv', () => {
     expect(env['HTTPS_PROXY']).toBe('http://proxy:3128');
     expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
   }, 30_000);
+
+  it('carries the API keys a user added, under their own names', () => {
+    const env = boxEnv({
+      placeholderFor: () => 'ghp_placeholder',
+      methodFor: () => 'token',
+      gitlabHost: 'gitlab.com',
+      proxyUrl: 'http://proxy:3128',
+      hasCa: true,
+      apiKeys: { OPENROUTER_API_KEY: 'sk-or-v1-placeholder', GH_TOKEN: 'sk-other' },
+    });
+
+    expect(env['OPENROUTER_API_KEY']).toBe('sk-or-v1-placeholder');
+    // A variable of Boxes wins over a key of the same name.
+    expect(env['GH_TOKEN']).toBe('ghp_placeholder');
+  });
 
 });

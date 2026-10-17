@@ -6,6 +6,7 @@ import { basename, dirname, join, normalize, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import type {
+  ApiKeySummary,
   BootResponse,
   CredentialSummary,
   HarnessHealth,
@@ -19,6 +20,7 @@ import type {
   StoredAttachment,
 } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
+import { ApiKeyStore } from './api-keys.ts';
 import { BOOT_PAGE, BOOT_PAGE_CSP, BootState } from './boot.ts';
 import { builtinSkills } from './builtin-skills.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
@@ -34,6 +36,7 @@ import {
   patchSettingsBody,
   pushSubscribeBody,
   pushUnsubscribeBody,
+  putApiKeyBody,
   putCredentialBody,
   reviewAnnotationBody,
   reviewBaseBody,
@@ -259,7 +262,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // from the store's rows, and every write to the store re-pushes it. The
   // hoisted function below lets the store be built first.
   const credentials = new CredentialStore(db, () => repushPolicy(), cfg.credentialSet);
-  const egress = new EgressManager(cfg, credentials, db);
+  const apiKeys = new ApiKeyStore(db, () => repushPolicy());
+  const egress = new EgressManager(cfg, credentials, apiKeys, db);
   const notifier = new Notifier(db, cfg);
 
   /**
@@ -818,6 +822,26 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   app.delete('/api/credentials/:id/login/:loginId', async (req, reply) => {
     const { loginId } = req.params as { loginId: string };
     logins.cancel(credentialId(req.params as { id: string }), loginId);
+    return reply.code(204).send();
+  });
+
+  /**
+   * The API keys a user added. A key goes in through PUT and never comes
+   * back out: this lists only its hosts and its last four characters.
+   */
+  app.get('/api/api-keys', async (): Promise<ApiKeySummary[]> =>
+    apiKeys.list().map((row) => apiKeys.summarize(row)),
+  );
+
+  app.put('/api/api-keys/:name', async (req) => {
+    const { name } = req.params as { name: string };
+    const { hosts, secret } = parseBody(putApiKeyBody, req.body);
+    return apiKeys.summarize(apiKeys.put(name, hosts, secret));
+  });
+
+  app.delete('/api/api-keys/:name', async (req, reply) => {
+    const { name } = req.params as { name: string };
+    apiKeys.remove(name);
     return reply.code(204).send();
   });
 

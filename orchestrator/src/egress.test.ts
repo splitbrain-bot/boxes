@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ApiKeyStore } from './api-keys.ts';
 import type { Config } from './config.ts';
 import { loadConfig } from './config.ts';
 import { CredentialStore, type CredentialId, type CredentialRow } from './credentials.ts';
@@ -113,7 +114,7 @@ describe('composePolicy', () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg, { github: GH_TOKEN });
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     expect(policy.credentials.map((c) => c.id)).toEqual(['github']);
     expect(policy.credentials[0]?.secret).toBe(GH_TOKEN);
@@ -129,18 +130,40 @@ describe('composePolicy', () => {
       JSON.stringify({ access_token: 'ghu_theaccesstoken', refresh_token: 'ghr_refresh' }),
     );
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     expect(policy.credentials).toHaveLength(1);
     expect(policy.credentials[0]?.secret).toBe('ghu_theaccesstoken');
     expect(policy.credentials[0]?.passthroughSchemes).toEqual(['tunnel']);
   }, 30_000);
 
+  it('carries an API key a user added, on its hosts and in any header', async () => {
+    const cfg = configFrom();
+    const { store, db } = storeWith(cfg);
+    const key = new ApiKeyStore(db, () => {}).put(
+      'OPENROUTER_API_KEY',
+      ['openrouter.ai'],
+      'sk-or-v1-0123456789abcdef',
+    );
+    const material = await resolveEgressMaterial(db);
+    const policy = composePolicy(cfg, material, rows(store), [key]);
+
+    expect(policy.credentials).toEqual([
+      {
+        id: 'api-key:OPENROUTER_API_KEY',
+        hosts: ['openrouter.ai'],
+        headers: [],
+        placeholder: key.placeholder,
+        secret: 'sk-or-v1-0123456789abcdef',
+      },
+    ]);
+  }, 30_000);
+
   it('intercepts nothing when the store is empty, and still carries the CA', async () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     expect(policy.credentials).toEqual([]);
     // A box keeps the CA it was created with for its whole life, and a
@@ -153,14 +176,14 @@ describe('composePolicy', () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
     const material = await resolveEgressMaterial(db);
-    expect(composePolicy(cfg, material, rows(store)).allowedHosts).toEqual([]);
+    expect(composePolicy(cfg, material, rows(store), []).allowedHosts).toEqual([]);
   }, 30_000);
 
   it('adds the hosts a configured credential needs but never travels to', async () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
     const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
     const material = await resolveEgressMaterial(db);
-    const { allowedHosts } = composePolicy(cfg, material, rows(store));
+    const { allowedHosts } = composePolicy(cfg, material, rows(store), []);
 
     expect(allowedHosts).toContain('registry.npmjs.org');
     expect(allowedHosts).toContain('platform.claude.com');
@@ -173,7 +196,7 @@ describe('composePolicy', () => {
     const cfg = configFrom({ GITLAB_HOST: 'gitlab.example.com' });
     const { store, db } = storeWith(cfg, { gitlab: GITLAB_TOKEN });
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     const gitlab = policy.credentials.find((c) => c.id === 'gitlab');
     expect(gitlab?.hosts).toEqual(['gitlab.example.com']);
@@ -189,7 +212,7 @@ describe('composePolicy', () => {
     // authenticates traffic to chatgpt.com, which the proxy does not intercept.
     store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
     // The row still has a placeholder, as a box holds one for every stored
@@ -201,7 +224,7 @@ describe('composePolicy', () => {
     const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
     const { store, db } = storeWith(cfg, { openai: OPENAI_KEY });
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     const openai = policy.credentials.find((c) => c.id === 'openai');
     expect(openai?.hosts).toEqual(['api.openai.com']);
@@ -266,7 +289,7 @@ describe('the control channel, from the orchestrator side', () => {
 
   it('pushes the policy with its bearer', async () => {
     const { cfg, material, store, seen } = await fakeProxy({ status: 200, body: okStatus });
-    const policy = composePolicy(cfg, material, rows(store));
+    const policy = composePolicy(cfg, material, rows(store), []);
 
     await expect(pushPolicy(cfg, material, policy)).resolves.toEqual(okStatus);
     expect(seen[0]?.method).toBe('POST');
@@ -281,7 +304,7 @@ describe('the control channel, from the orchestrator side', () => {
       body: { error: 'invalid policy: a bare * ...' },
     });
     await expect(
-      pushPolicy(cfg, material, composePolicy(cfg, material, rows(store))),
+      pushPolicy(cfg, material, composePolicy(cfg, material, rows(store), [])),
     ).rejects.toThrow(/proxy answered 400: invalid policy/);
   }, 30_000);
 });
@@ -294,7 +317,7 @@ describe('EgressManager', () => {
       openai: OPENAI_KEY,
       github: GH_TOKEN,
     });
-    const manager = new EgressManager(cfg, store, db);
+    const manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
     const claude = manager.placeholderFor('claude');
@@ -315,7 +338,7 @@ describe('EgressManager', () => {
   it('has the CA before any credential exists, and no placeholder', async () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
-    const manager = new EgressManager(cfg, store, db);
+    const manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
     // A box keeps the CA it was created with for its whole life. boxEnv drops
@@ -329,7 +352,7 @@ describe('EgressManager', () => {
   it('has nothing for a credential this deployment cannot translate', async () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
-    const manager = new EgressManager(cfg, store, db);
+    const manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
     expect(manager.placeholderFor('gemini')).toBe('');
@@ -368,7 +391,7 @@ describe('EgressManager', () => {
     // The wiring the app builds: a write to the store pushes the policy.
     let manager: EgressManager | undefined;
     const { store, db } = storeWith(cfg, {}, () => void manager?.sync());
-    manager = new EgressManager(cfg, store, db);
+    manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
     await manager.sync();
@@ -384,7 +407,7 @@ describe('EgressManager', () => {
   it('records why a push failed, for the health probe', async () => {
     const cfg = configFrom({ EGRESS_CONTROL_URL: 'http://127.0.0.1:1' });
     const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN });
-    const manager = new EgressManager(cfg, store, db);
+    const manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
     expect(manager.status()).toBeNull();

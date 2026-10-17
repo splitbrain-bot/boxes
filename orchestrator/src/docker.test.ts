@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Docker from 'dockerode';
 import { afterEach, describe, it } from 'vitest';
+import { ApiKeyStore } from './api-keys.ts';
 import { loadConfig, type Config } from './config.ts';
 import { CredentialStore, type CredentialId, type CredentialMethod } from './credentials.ts';
 import { openDb, type Db } from './db.ts';
@@ -43,7 +44,7 @@ async function deployment(
   for (const [id, secret] of Object.entries(secrets)) {
     credentials.put(id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
   }
-  const egress = new EgressManager(cfg, credentials, db);
+  const egress = new EgressManager(cfg, credentials, new ApiKeyStore(db, () => {}), db);
   await egress.prepare();
   return { cfg, db, egress };
 }

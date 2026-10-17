@@ -238,7 +238,7 @@ export function undeliverableReason(row: CredentialRow): string | null {
  * What a pasted secret is shown as: its last four characters. A secret of
  * four characters or fewer is shown as null, so it is never shown whole.
  */
-function accountOf(secret: string): string | null {
+export function accountOf(secret: string): string | null {
   return secret.length > ACCOUNT_TAIL ? secret.slice(-ACCOUNT_TAIL) : null;
 }
 

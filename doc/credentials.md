@@ -73,6 +73,28 @@ listens in a box. The placeholder is set as `DEVTUNNELS_TOKEN`.
 and enter the one-time code. The orchestrator stores the login under the GitHub account it belongs to and refreshes it
 periodically.
 
+### Other API keys
+
+You can add API keys for other services, for example OpenRouter. Each key has three fields:
+
+- **Environment variable**: the name of the variable that holds the placeholder in each box, for example
+  `OPENROUTER_API_KEY`. The orchestrator refuses a name that Boxes or the box image sets itself, e.g., `GH_TOKEN` or
+  `PATH`.
+- **Hosts**: the hosts the proxy sends the key to. A host is an exact name, e.g., `openrouter.ai`, or a name that starts
+  with `*.`. The name `*.example.com` includes `api.example.com`, but it does not include `example.com` or
+  `a.b.example.com`, as in the [allowlist](egress.md#allowlist).
+- **Key**: the secret. To change only the hosts, leave it empty.
+
+The placeholder has the same prefix and the same length as the key, so a client that checks the format of its key
+accepts the placeholder. The prefix is the start of the key up to and including the last `-` or `_`, but each part
+between two separators can have only up to eight lowercase letters or digits. For example, the prefix of
+`sk-or-v1-0a1b2c…` is `sk-or-v1-`, and the prefix of `sk-proj-AbC_dEf…` is `sk-proj-`, because `AbC` has uppercase
+letters. The orchestrator fills the rest of the placeholder with random characters, so the placeholder has no part of
+the secret. A new key with a different prefix or length gets a new placeholder, which takes effect in a box at its next
+start.
+
+The proxy replaces the placeholder in any header of a request to one of the hosts.
+
 ## Statuses and refresh
 
 The orchestrator keeps account logins valid: it checks them once a minute and refreshes a login against its service
@@ -103,6 +125,9 @@ because it must hand them to the proxy on every boot and there is nobody to ask 
 a secret: a summary carries the account, the status and the times only. The account defaults to the secret's last four
 characters, or to nothing when the secret is that short — the API never shows a whole secret. The structured logger
 (`orchestrator/src/log.ts`) redacts fields whose name or value looks credential-shaped before they reach stderr.
+
+The `api_keys` table holds one row for each of the other API keys, with the variable name, the hosts, the key and the
+placeholder. The API returns only the name, the hosts and the last four characters of the key.
 
 ### Refresh and delivery
 

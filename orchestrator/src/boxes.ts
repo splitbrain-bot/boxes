@@ -361,6 +361,7 @@ export class BoxManager {
         gitlabHost: this.cfg.GITLAB_HOST,
         proxyUrl: runtime().proxyUrl(),
         hasCa: this.egress.caCertificate() !== '',
+        apiKeys: this.egress.apiKeyEnv(),
       }),
     };
   }
