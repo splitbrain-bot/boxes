@@ -69,6 +69,9 @@ answers with a token for that one tunnel, and the CLI then sends this token unde
 such a token through unchanged, because the service issued it to the box. It is short-lived, it is valid for one tunnel
 only, and it cannot give access to the account.
 
+For the [other API keys](credentials.md#other-api-keys), the proxy examines every header of the request. It rewrites
+each header that has the placeholder of a key, and it sends all other headers unchanged.
+
 The proxy does not intercept any other host. It only sends that traffic through, and does not read it.
 
 Each credential is valid for a fixed set of hosts. When a credential is set, its hosts are added to the list of allowed
@@ -81,6 +84,7 @@ hosts automatically.
 | GitHub | `github.com`, `api.github.com`, `*.githubusercontent.com` |
 | GitLab | `gitlab.com`, or the host in `GITLAB_HOST` |
 | Dev Tunnels | `*.rel.tunnels.api.visualstudio.com` |
+| Other API keys | the hosts set for each key |
 
 ## The deployment certificate authority
 
@@ -185,7 +189,8 @@ means "allow all public".
 
 `policy.ts` implements the allowlist grammar and the credential decision as pure functions, with no I/O and no state.
 The intercepted hosts and their credential headers are fixed in `orchestrator/src/config.ts`: they are facts about the
-services, and no setting changes them — except the GitLab host, which `GITLAB_HOST` names.
+services, and no setting changes them. The exceptions are the GitLab host, which `GITLAB_HOST` names, and the hosts of
+the other API keys, which a user sets on the settings page.
 
 The OpenAI entry is the special case. Codex authenticates with an API key to `api.openai.com` or with a subscription
 login to `chatgpt.com`, and the two endpoints reject each other's credential. The proxy intercepts only
