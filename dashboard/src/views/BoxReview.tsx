@@ -391,12 +391,14 @@ export function BoxReview() {
 
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
-    if (lines.length === 0) return;
+    const first = lines[0];
+    const last = lines.at(-1);
+    if (first === undefined || last === undefined) return;
     const from = scrollTo?.line ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
     const next =
       direction === 1
-        ? (lines.find((line) => line > from) ?? lines[0]!)
-        : ([...lines].reverse().find((line) => line < from) ?? lines.at(-1)!);
+        ? (lines.find((line) => line > from) ?? first)
+        : ([...lines].reverse().find((line) => line < from) ?? last);
     // The nonce makes every press a new request, so the pane scrolls even when
     // the target line has not changed.
     setScrollTo((current) => ({ line: next, nonce: (current?.nonce ?? 0) + 1 }));

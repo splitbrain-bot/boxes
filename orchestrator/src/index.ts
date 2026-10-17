@@ -121,12 +121,12 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   const path = url.split('?')[0] ?? '';
   const match = WS_PATH.exec(path);
   const terminal = match ? null : TERMINAL_PATH.exec(path);
-  if (!match && !terminal) {
+  const boxId = match?.[1] ?? terminal?.[1];
+  if (!boxId) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     socket.destroy();
     return;
   }
-  const boxId = (match ?? terminal!)[1]!;
   const threadId = match?.[2] ?? null;
 
   // A token opens only the box the path names. A missing or deleted box has

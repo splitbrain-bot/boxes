@@ -169,6 +169,8 @@ export function CodePane({
   // Editing always wraps, because a textarea that scrolls sideways would move
   // apart from the rows behind it.
   const wrapped = wrap || editing;
+  // Lines removed at the top sit after no row, so their marker comes before the rows.
+  const firstDeletion = deletions.get(0);
 
   return (
     <div
@@ -194,8 +196,8 @@ export function CodePane({
           className={cn('relative min-w-full', editing && 'pb-[1.55em]')}
           style={{ '--review-gutter': gutterWidth(digits) } as React.CSSProperties}
         >
-          {deletions.has(0) && !editing ? (
-            <DeletionMarker hunkIndex={deletions.get(0)!} onShowHunk={onShowHunk} />
+          {firstDeletion !== undefined && !editing ? (
+            <DeletionMarker hunkIndex={firstDeletion} onShowHunk={onShowHunk} />
           ) : null}
 
           {lines.map((text, index) => (

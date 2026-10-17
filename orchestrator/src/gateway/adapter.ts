@@ -34,11 +34,11 @@ const raw = <T = unknown>(params: unknown): T => params as T;
  */
 const EXTENSION_UPDATE = /^async_task_/;
 
-/** How many times the adapter spawn is tried before the box errors. */
-const MAX_SPAWN_ATTEMPTS = 3;
-
 /** Wait before each retry, in milliseconds, by retry number. */
 const SPAWN_BACKOFF_MS = [1000, 3000];
+
+/** How many times the adapter spawn is tried before the box errors. */
+const MAX_SPAWN_ATTEMPTS = SPAWN_BACKOFF_MS.length + 1;
 
 /** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
 const RESOURCE_NOT_FOUND = -32002;
@@ -392,10 +392,9 @@ export class AdapterConnection {
     await this.host.ensureContainer();
 
     let lastError: unknown = null;
-    for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
+    for (const [attempt, wait] of [0, ...SPAWN_BACKOFF_MS].entries()) {
       if (this.stopping) return;
-      if (attempt > 0) {
-        const wait = SPAWN_BACKOFF_MS[attempt - 1]!;
+      if (wait > 0) {
         this.slog.warn('retrying adapter spawn', { attempt, waitMs: wait });
         await new Promise((r) => setTimeout(r, wait));
       }
@@ -653,7 +652,8 @@ export class AdapterConnection {
    * @returns False when the adapter no longer holds the thread.
    */
   private async loadThread(thread: ThreadRow): Promise<boolean> {
-    const acpSessionId = thread.acp_session_id!;
+    const acpSessionId = thread.acp_session_id;
+    if (!acpSessionId) return false;
     this.host.beginFill(acpSessionId);
     try {
       const res = await this.replay(acpSessionId);
@@ -706,7 +706,8 @@ export class AdapterConnection {
    * @param res The adapter's answer to the load.
    */
   async restoreSettings(thread: ThreadRow, res: LoadAnswer): Promise<void> {
-    const acpSessionId = thread.acp_session_id!;
+    const acpSessionId = thread.acp_session_id;
+    if (!acpSessionId) return;
     await this.applyMode(
       acpSessionId,
       res?.modes ?? null,

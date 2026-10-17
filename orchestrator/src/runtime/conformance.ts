@@ -356,7 +356,8 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
       });
 
       it('keeps a box from another box', async () => {
-        const address = (await sh('hostname -i', sibling)).trim().split(/\s+/)[0]!;
+        const address = (await sh('hostname -i', sibling)).trim().split(/\s+/)[0];
+        assert.ok(address, 'the sibling has no address');
         const target = { label: 'the other box', host: address, port: SIBLING_PORT };
         const listener = await rt.spawn(sibling, [
           'node',

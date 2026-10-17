@@ -49,10 +49,10 @@ export function parsePorcelain(out: string): FileStatuses {
   const result: FileStatuses = {};
   const records = out.split('\0');
   for (let i = 0; i < records.length; i++) {
-    const record = records[i]!;
+    const record = records[i] ?? '';
     if (record.length < 4) continue;
-    const x = record[0]!;
-    const y = record[1]!;
+    const x = record.charAt(0);
+    const y = record.charAt(1);
     // A rename or a copy is followed by a record holding the source path,
     // which is skipped.
     if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i++;
@@ -66,11 +66,11 @@ export function parsePorcelain(out: string): FileStatuses {
 export function parseNameStatus(out: string): FileStatuses {
   const result: FileStatuses = {};
   for (const line of out.split('\n')) {
-    const fields = line.split('\t');
-    if (fields.length < 2 || fields[0] === '') continue;
+    const [code, ...rest] = line.split('\t');
     // Renames and copies list the old path first, so the last field is the path.
-    const path = fields[fields.length - 1]!;
-    const status = classifyDiffStatus(fields[0]![0]!);
+    const path = rest.at(-1);
+    if (!code || path === undefined) continue;
+    const status = classifyDiffStatus(code.charAt(0));
     if (status) result[cleanPath(path)] = status;
   }
   return result;

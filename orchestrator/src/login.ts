@@ -352,10 +352,11 @@ export class LoginManager {
       return;
     }
     try {
-      flow.login = await runtime().startLogin(flow.credentialId);
+      const login = await runtime().startLogin(flow.credentialId);
+      flow.login = login;
       if (flow.settled) return;
-      if (flow.credentialId === 'openai') await this.codexLogin(flow);
-      else await this.claudeLogin(flow);
+      if (flow.credentialId === 'openai') await this.codexLogin(flow, login);
+      else await this.claudeLogin(flow, login);
     } catch (err) {
       this.fail(flow, (err as Error).message);
     } finally {
@@ -376,8 +377,8 @@ export class LoginManager {
    * person, writes `auth.json` and exits 0. On failure it exits 1 with the
    * reason on stderr.
    */
-  private async codexLogin(flow: Flow): Promise<void> {
-    const exec = await spawnLogin(flow.login!, {
+  private async codexLogin(flow: Flow, login: Login): Promise<void> {
+    const exec = await spawnLogin(login, {
       // The Codex CLI fails when CODEX_HOME does not exist.
       cmd: ['bash', '-lc', `mkdir -p "$CODEX_HOME" && exec codex login --device-auth`],
       env: { CODEX_HOME },
@@ -403,7 +404,7 @@ export class LoginManager {
       return;
     }
 
-    const read = await spawnLogin(flow.login!, {
+    const read = await spawnLogin(login, {
       cmd: ['cat', `${CODEX_HOME}/auth.json`],
     });
     const document = await readOutput(read.output, () => {});
@@ -516,8 +517,8 @@ export class LoginManager {
    * prints a one-year token once the code is entered. The scan reads a
    * rebuilt screen, as the UI redraws only the cells it changes.
    */
-  private async claudeLogin(flow: Flow): Promise<void> {
-    const exec = await spawnLogin(flow.login!, {
+  private async claudeLogin(flow: Flow, login: Login): Promise<void> {
+    const exec = await spawnLogin(login, {
       cmd: ['bash', '-lc', 'exec claude setup-token'],
       env: { CLAUDE_CONFIG_DIR },
       tty: true,

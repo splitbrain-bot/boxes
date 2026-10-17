@@ -408,8 +408,7 @@ export async function totalSize(roots: readonly string[]): Promise<number> {
 async function directorySize(root: string): Promise<number> {
   let total = 0;
   const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
+  for (let dir = stack.pop(); dir !== undefined; dir = stack.pop()) {
     let entries: Dirent[];
     try {
       entries = await readdir(dir, { withFileTypes: true });

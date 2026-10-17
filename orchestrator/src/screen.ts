@@ -28,7 +28,7 @@ export class Screen {
     this.pending = '';
     let i = 0;
     while (i < text.length) {
-      const ch = text[i]!;
+      const ch = text.charAt(i);
       if (ch === ESC) {
         const taken = this.escape(text, i);
         // The chunk ended mid-sequence: keep it for the next one rather than
@@ -101,9 +101,9 @@ export class Screen {
 
     // A control sequence: parameters, then one letter that says what it does.
     let i = at + 2;
-    while (i < text.length && /[0-9;?>]/.test(text[i]!)) i++;
+    while (i < text.length && /[0-9;?>]/.test(text.charAt(i))) i++;
     if (i >= text.length) return null;
-    const final = text[i]!;
+    const final = text.charAt(i);
     const params = text.slice(at + 2, i).replace(/^[?>]/, '');
     const n = (fallback: number): number => {
       const first = Number.parseInt(params.split(';')[0] ?? '', 10);

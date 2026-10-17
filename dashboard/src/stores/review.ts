@@ -170,8 +170,8 @@ function factsOf(dir: ReviewDirResponse): ReviewFacts {
  * reviewer closed stays closed when the tree is refetched.
  */
 function unwrap(dir: ReviewDirResponse): void {
-  if (dir.entries.length !== 1) return;
-  const only = dir.entries[0]!;
+  const only = dir.entries[0];
+  if (!only || dir.entries.length !== 1) return;
   if (!only.isDir || get().expanded.includes(only.path)) return;
   set({ expanded: [...get().expanded, only.path] });
   void loadDir(only.path);

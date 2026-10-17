@@ -232,7 +232,7 @@ export class KubernetesRuntime implements Runtime {
    */
   async ensure(box: BoxSpec): Promise<void> {
     const wanted = this.boxPolicy(box.boxId);
-    const name = wanted.metadata!.name!;
+    const name = names.box(box.boxId);
     const current = await this.readPolicy(name);
     if (!current) {
       await this.kube.networking.createNamespacedNetworkPolicy({
@@ -940,7 +940,7 @@ export function quantity(size: string): string {
   const match = /^(\d+)([kmgKMG]?)$/.exec(size);
   if (!match) throw new Error(`Invalid size: ${size}`);
   const unit = { k: 'Ki', m: 'Mi', g: 'Gi', '': '' }[
-    match[2]!.toLowerCase() as 'k' | 'm' | 'g' | ''
+    (match[2] ?? '').toLowerCase() as 'k' | 'm' | 'g' | ''
   ];
   return `${match[1]}${unit}`;
 }

@@ -347,8 +347,8 @@ export class ThreadStore {
    */
   private lastNamedMessage(): string | null {
     for (let i = this.model.messages.length - 1; i >= 0; i--) {
-      const message = this.model.messages[i]!;
-      if (message.named) return message.id;
+      const message = this.model.messages[i];
+      if (message?.named) return message.id;
     }
     return null;
   }
