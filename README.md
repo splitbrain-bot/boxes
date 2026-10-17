@@ -41,6 +41,7 @@ work on the same checkout.
 - [Quickstart](doc/quickstart.md) — Deploy with Docker Compose, put a reverse proxy in front, and do the first steps
   in the dashboard
 - [Docker Compose setup](doc/compose.md) — The services, the volume and the Docker socket
+- [Kubernetes setup](doc/kubernetes.md) — Run Boxes in a Kubernetes cluster in place of Docker Compose
 - [Environment variables](doc/environment.md) — Every variable the orchestrator reads, and its default
 - [Credentials](doc/credentials.md) — The credentials Boxes uses, how to enter them, and their path into a box
 - [Custom box images](doc/custom-images.md) — Build a box image from the base image, with the tools of a project
