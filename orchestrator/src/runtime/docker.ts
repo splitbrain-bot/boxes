@@ -222,9 +222,9 @@ export class DockerRuntime implements Runtime {
     };
   }
 
-  /** Starts the container, tolerating one that already runs. */
-  async start(boxId: string): Promise<void> {
-    await dk.startContainer(dk.names.container(boxId));
+  /** Starts the container that ensure() made, tolerating one that already runs. */
+  async start(box: BoxSpec): Promise<void> {
+    await dk.startContainer(dk.names.container(box.boxId));
   }
 
   /** Stops the container with a 10 second grace period, tolerating one already gone. */

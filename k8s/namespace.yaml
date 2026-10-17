@@ -1,0 +1,8 @@
+# The namespace of Boxes. The restricted Pod Security Standard applies to
+# every pod in it, the boxes included.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: boxes
+  labels:
+    pod-security.kubernetes.io/enforce: restricted

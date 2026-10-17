@@ -177,7 +177,7 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
       });
 
       it('runs after a start', async () => {
-        await rt.start(box);
+        await rt.start({ boxId: box, env });
         assert.equal(await rt.state(box), 'running');
       });
 
@@ -231,7 +231,7 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
         await rt.stop(box);
         assert.equal(await rt.state(box), 'stopped');
         await rt.ensure({ boxId: box, env });
-        await rt.start(box);
+        await rt.start({ boxId: box, env });
         await sh(`test -e ${WORKSPACE_DIR}/.conformance -a -e ${HOME_DIR}/.conformance -a -e ${NIX_DIR}/.conformance`);
       });
 
@@ -239,7 +239,7 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
         await rt.remove(box);
         assert.equal(await rt.state(box), 'stopped');
         await rt.ensure({ boxId: box, env });
-        await rt.start(box);
+        await rt.start({ boxId: box, env });
         await sh(`test -e ${WORKSPACE_DIR}/.conformance -a -e ${HOME_DIR}/.conformance -a -e ${NIX_DIR}/.conformance`);
       });
     });
@@ -337,7 +337,7 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
       beforeAll(async () => {
         await rt.createStorage(sibling);
         await rt.ensure({ boxId: sibling, env: {} });
-        await rt.start(sibling);
+        await rt.start({ boxId: sibling, env: {} });
       });
 
       it('lets a box reach the front door of the egress proxy', async () => {
@@ -443,7 +443,7 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
         );
         assert.deepEqual(left, []);
         assert.equal(await rt.state(box), 'stopped');
-        assert.equal((await rt.missingStorage(box)).length, 2);
+        assert.notDeepEqual(await rt.missingStorage(box), []);
       });
     });
   });

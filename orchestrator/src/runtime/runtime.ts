@@ -168,8 +168,12 @@ export interface Runtime {
    * container.
    */
   ensure(box: BoxSpec): Promise<void>;
-  /** Starts a box. Resolves when an exec in the box works. */
-  start(boxId: string): Promise<void>;
+  /**
+   * Starts a box, after {@link ensure}. Resolves when an exec in the box
+   * works. A runtime that makes the container at each start makes it from
+   * this spec.
+   */
+  start(box: BoxSpec): Promise<void>;
   /** Stops a box. Resolves when it is stopped. */
   stop(boxId: string): Promise<void>;
   /** Removes the container and the isolation of a box. The storage stays. */
