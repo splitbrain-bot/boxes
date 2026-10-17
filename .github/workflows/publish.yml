@@ -1,7 +1,8 @@
-# CI workflow: runs the test suites, builds the four Boxes images, runs the
-# runtime conformance suite on Docker and on kind and the security smoke test
-# against them, and publishes them to GHCR on every push to main. A pull request builds and
-# tests the images without pushing them.
+# CI workflow: checks the formatting and lints, runs the test suites, builds
+# the four Boxes images, runs the runtime conformance suite on Docker and on
+# kind and the security smoke test against them, and publishes them to GHCR on
+# every push to main. A pull request builds and tests the images without
+# pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
 #   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
@@ -35,6 +36,26 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  # Biome is one binary with its own lock file at the root, so the job
+  # installs nothing else.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Biome
+        run: npm ci
+
+      - name: Check formatting and lint
+        run: npx biome ci .
+
   test:
     name: test (${{ matrix.package }})
     runs-on: ubuntu-latest
@@ -103,7 +124,7 @@ jobs:
   # second build.
   images:
     name: images
-    needs: test
+    needs: [test, lint]
     runs-on: ubuntu-latest
     # A push to main writes the build cache and the images to GHCR. The token
     # of a pull request from a fork can only read.

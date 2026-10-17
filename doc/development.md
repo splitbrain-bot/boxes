@@ -25,6 +25,8 @@ Each top-level directory is a self-contained package with its own lock file.
   external, the runtime images install them); the dashboard is bundled as a browser app. Every package also
   type-checks with `tsc --noEmit` (`npm run check`).
 - **Tests:** Vitest everywhere, Playwright for browser tests.
+- **Formatting and lint:** Biome, set up once at the repository root (`biome.json`). CI fails on a formatting
+  difference or a lint error.
 - **Containers:** Docker with Compose v2 for deployment; the orchestrator talks to the daemon directly through the
   Docker socket.
 - **Protocol:** The dashboard and the orchestrator speak the [Agent Client Protocol (ACP)](acp.md) over WebSocket as
@@ -48,6 +50,8 @@ cd dashboard && npm ci
 ```
 
 `shared/` has no dependencies and is imported as source.
+
+The repository root has one more `package.json`, for Biome. `npm ci` there installs it.
 
 ## Building
 
@@ -103,6 +107,14 @@ cd orchestrator && npm run check
 cd proxy && npm run check
 cd files && npm run check
 cd dashboard && npm run check
+```
+
+Formatting and lint cover the whole repository. Run them from the root:
+
+```sh
+npm run check     # reports formatting differences and lint findings, like CI
+npm run format    # rewrites the files in the Biome style
+npm run lint      # lint only
 ```
 
 The orchestrator, proxy and file service suites are plain Vitest unit tests; Docker interactions are faked, no daemon is
