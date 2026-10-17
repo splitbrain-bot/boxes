@@ -123,6 +123,62 @@ test('a stored credential can be removed, and the warning comes back', async () 
   }
 });
 
+test('an API key is added, has its hosts changed, and is removed', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/settings');
+  try {
+    await expect
+      .poll(() => page.getByRole('heading', { name: 'Other API keys' }).isVisible())
+      .toBe(true);
+
+    await page.getByLabel('Environment variable').fill('OPENROUTER_API_KEY');
+    await page.getByLabel('Hosts').fill('openrouter.ai');
+    await page.getByLabel('Key', { exact: true }).fill('sk-or-v1-pastedkey4321');
+    await page.getByRole('button', { name: 'Add key' }).click();
+
+    await expect.poll(() => page.getByText(/openrouter\.ai · ends 4321/).isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Environment variable').inputValue()).toBe('');
+    expect(await page.content()).not.toContain('sk-or-v1-pastedkey4321');
+
+    // Edit fills the form, and an empty key keeps the stored one.
+    await page.getByRole('button', { name: 'Edit' }).click();
+    await page.getByLabel('Hosts').fill('openrouter.ai, *.openrouter.ai');
+    await page.getByRole('button', { name: 'Save key' }).click();
+    await expect
+      .poll(() => page.getByText(/openrouter\.ai, \*\.openrouter\.ai · ends 4321/).isVisible())
+      .toBe(true);
+    expect(await stub.apiKeys()).toEqual([
+      expect.objectContaining({
+        name: 'OPENROUTER_API_KEY',
+        hosts: ['openrouter.ai', '*.openrouter.ai'],
+        account: '4321',
+      }),
+    ]);
+    await shoot(page, 'settings-api-keys');
+
+    await page.getByRole('button', { name: 'Remove' }).last().click();
+    await page.getByRole('button', { name: 'Remove', exact: true }).last().click();
+    await expect.poll(() => stub.apiKeys()).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('an API key under a name Boxes sets itself is refused', async () => {
+  const { page, close } = await openPage(stub.url, '/settings');
+  try {
+    await page.getByLabel('Environment variable').fill('GH_TOKEN');
+    await page.getByLabel('Hosts').fill('example.com');
+    await page.getByLabel('Key', { exact: true }).fill('sk-whatever1234');
+    await page.getByRole('button', { name: 'Add key' }).click();
+
+    await expect.poll(() => page.getByText(/GH_TOKEN is set by Boxes itself/).isVisible()).toBe(true);
+    expect(await stub.apiKeys()).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the git identity round-trips through the deployment', async () => {
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {

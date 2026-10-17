@@ -562,6 +562,19 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes DROP COLUMN subnet;
   DROP TABLE counters;
   `,
+  // API keys for services Boxes has no credential for. Each reaches every box
+  // as a placeholder in the variable it is named by, and the proxy swaps it on
+  // its hosts. The hosts are a JSON array.
+  `
+  CREATE TABLE api_keys (
+    name        TEXT PRIMARY KEY,
+    hosts       TEXT NOT NULL,
+    secret      TEXT NOT NULL,
+    placeholder TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** An open database handle. */

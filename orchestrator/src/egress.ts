@@ -6,6 +6,7 @@ import type {
   EgressPolicy,
   EgressStatus,
 } from '../../shared/types.ts';
+import type { ApiKeyRow, ApiKeyStore } from './api-keys.ts';
 import type { Config } from './config.ts';
 import {
   deliverableSecret,
@@ -54,16 +55,19 @@ export async function resolveEgressMaterial(db: Db): Promise<EgressMaterial> {
 
 /**
  * Builds the policy the proxy runs, from the deployment's settings, the
- * stored material and the current rows of the credential store.
+ * stored material and the current rows of the credential store and the API
+ * key store.
  *
  * The policy always carries the CA, as boxes created before the first
  * credential already trust it. A host is only intercepted while its
- * credential has a deliverable secret.
+ * credential has a deliverable secret. An API key names no header, so the
+ * proxy swaps it in whatever header carries its placeholder.
  */
 export function composePolicy(
   cfg: Config,
   material: EgressMaterial,
   stored: readonly CredentialRow[],
+  apiKeys: readonly ApiKeyRow[],
 ): EgressPolicy {
   // A credential with no deliverable secret counts as absent.
   const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
@@ -78,6 +82,15 @@ export function composePolicy(
     placeholder: placeholders.get(spec.id) ?? '',
     secret: secrets.get(spec.id) ?? '',
   }));
+  for (const key of apiKeys) {
+    credentials.push({
+      id: `api-key:${key.name}`,
+      hosts: [...key.hosts],
+      headers: [],
+      placeholder: key.placeholder,
+      secret: key.secret,
+    });
+  }
 
   // The proxy allows a credential's own hosts. The other hosts its tools
   // need are added here, so an allowlist cannot break an OAuth refresh.
@@ -159,6 +172,8 @@ export class EgressManager {
      * compose.
      */
     private readonly credentials: CredentialStore,
+    /** Where the API keys come from, read on every compose like the credentials. */
+    private readonly apiKeys: ApiKeyStore,
     /** Where the CA and the control token are kept. */
     private readonly db: Db,
   ) {}
@@ -166,7 +181,12 @@ export class EgressManager {
   /** Loads the material and composes the policy, without talking to the proxy. */
   async prepare(): Promise<void> {
     this.material = await resolveEgressMaterial(this.db);
-    this.composed = composePolicy(this.cfg, this.material, this.credentials.list());
+    this.composed = composePolicy(
+      this.cfg,
+      this.material,
+      this.credentials.list(),
+      this.apiKeys.list(),
+    );
   }
 
   /** The CA certificate a box is given to trust. Public, never the key. */
@@ -194,6 +214,11 @@ export class EgressManager {
     return this.credentials.placeholderFor(id);
   }
 
+  /** The placeholder of each stored API key, by the variable a box holds it in. */
+  apiKeyEnv(): Record<string, string> {
+    return Object.fromEntries(this.apiKeys.list().map((key) => [key.name, key.placeholder]));
+  }
+
   /** How a stored credential was obtained, or null for one that is not stored. */
   methodFor(id: CredentialId): CredentialMethod | null {
     return this.credentials.get(id)?.method ?? null;
@@ -211,7 +236,12 @@ export class EgressManager {
   async sync(): Promise<void> {
     if (!this.material) await this.prepare();
     const material = this.prepared().material;
-    const composed = composePolicy(this.cfg, material, this.credentials.list());
+    const composed = composePolicy(
+      this.cfg,
+      material,
+      this.credentials.list(),
+      this.apiKeys.list(),
+    );
     this.composed = composed;
 
     try {

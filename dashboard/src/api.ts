@@ -4,6 +4,7 @@ import type {
   AgentRepoBody,
   AgentSetDetail,
   AgentSetSummary,
+  ApiKeySummary,
   CreateBoxBody,
   CreateThreadBody,
   CredentialId,
@@ -293,6 +294,18 @@ export const api = {
   /** Removes a stored credential. */
   deleteCredential: (id: CredentialId) =>
     request<void>(`/api/credentials/${id}`, { method: 'DELETE' }),
+
+  /** Lists every API key a user added. */
+  listApiKeys: () => request<ApiKeySummary[]>('/api/api-keys'),
+  /** Stores an API key, or only its hosts when no secret is given. */
+  putApiKey: (name: string, hosts: string[], secret?: string) =>
+    request<ApiKeySummary>(`/api/api-keys/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ hosts, ...(secret ? { secret } : {}) }),
+    }),
+  /** Removes an API key. */
+  deleteApiKey: (name: string) =>
+    request<void>(`/api/api-keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   // --- logging in to an account ---------------------------------------------
   // The orchestrator runs the harness's own CLI in a throwaway container.

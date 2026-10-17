@@ -152,6 +152,16 @@ export const putCredentialBody = z.object({
   secret: z.string().trim().min(1, 'must not be empty'),
 });
 
+/**
+ * PUT /api/api-keys/:name — the hosts of the key, and the key itself. Without
+ * a secret the stored key stays. Whether the name and the hosts are valid is
+ * the store's own check.
+ */
+export const putApiKeyBody = z.object({
+  hosts: z.array(z.string()),
+  secret: z.string().trim().min(1, 'must not be empty').optional(),
+});
+
 /** POST /api/credentials/:id/login/:loginId/code — the code the CLI asked for. */
 export const loginCodeBody = z.object({
   code: filled,

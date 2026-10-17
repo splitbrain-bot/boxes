@@ -302,6 +302,23 @@ describe('the interception engine', () => {
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
   }, 30_000);
 
+  it('swaps a credential that names no header in any header, and passes other values', async () => {
+    policy = githubPolicy({
+      credentials: [{ ...githubPolicy().credentials[0]!, headers: [] }],
+    });
+    await interceptor.apply();
+
+    const res = await throughEngine(interceptor.port()!, {
+      'x-api-key': PLACEHOLDER,
+      authorization: 'Bearer someOtherToken',
+    });
+
+    expect(res.status).toBe(200);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.headers['x-api-key']).toBe(SECRET);
+    expect(received[0]?.headers.authorization).toBe('Bearer someOtherToken');
+  }, 30_000);
+
   it('refuses an upgrade that would need a swap, since it cannot be rewritten', async () => {
     policy = githubPolicy();
     await interceptor.apply();

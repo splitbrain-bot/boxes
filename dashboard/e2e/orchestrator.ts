@@ -15,6 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type {
   AgentSetDetail,
+  ApiKeySummary,
   CredentialId,
   CredentialStatus,
   CredentialSummary,
@@ -356,6 +357,8 @@ export interface TestOrchestrator {
   agentSet(setId: string): Promise<AgentSetDetail>;
   /** The credentials the deployment holds, as the settings page sees them. */
   credentials(): Promise<CredentialSummary[]>;
+  /** The API keys a user added, as the settings page sees them. */
+  apiKeys(): Promise<ApiKeySummary[]>;
   /** The deployment's plain settings, as the API reports them. */
   settings(): Promise<Settings>;
   /** Stops the server and removes everything the harness installed or created. */
@@ -1037,6 +1040,7 @@ export async function startOrchestrator(
       return res.json() as AgentSetDetail;
     },
     credentials: async () => (await setup('GET', '/api/credentials')).json() as CredentialSummary[],
+    apiKeys: async () => (await setup('GET', '/api/api-keys')).json() as ApiKeySummary[],
     settings: async () => (await setup('GET', '/api/settings')).json() as Settings,
     logins,
     agentSets: async (global, named) => {

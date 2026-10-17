@@ -9,6 +9,7 @@ import { config } from '../config.ts';
 import { setLogLevel } from '../log.ts';
 import { openDb, readHarnessCatalog, type Db } from '../db.ts';
 import * as dk from '../docker.ts';
+import { ApiKeyStore } from '../api-keys.ts';
 import { CredentialStore } from '../credentials.ts';
 import { EgressManager } from '../egress.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
@@ -279,7 +280,12 @@ beforeEach(async () => {
   containerRunning = true;
   setRuntime(new DockerRuntime(cfg));
   // The environment of a box is built from the prepared policy.
-  const egress = new EgressManager(cfg, new CredentialStore(db, () => {}, cfg.credentialSet), db);
+  const egress = new EgressManager(
+    cfg,
+    new CredentialStore(db, () => {}, cfg.credentialSet),
+    new ApiKeyStore(db, () => {}),
+    db,
+  );
   await egress.prepare();
   manager = new BoxManager(
     db,
