@@ -1,0 +1,169 @@
+# The orchestrator: the API, the dashboard and the gateway. It runs the
+# boxes as pods in its own namespace, with the rights of the Role below.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: boxes-orchestrator
+---
+# The pods, claims and policies of the boxes and the logins, the exec into
+# them, and the read of the proxy Service. Nothing outside the namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: boxes-orchestrator
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  # The exec is a WebSocket, which opens with a GET.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: boxes-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: boxes-orchestrator
+    # The namespace of the kustomization.
+    namespace: boxes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: boxes-orchestrator
+---
+# The database, the generated keys and the skill repositories. The files of
+# the boxes are in their own claims.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: boxes-orchestrator-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boxes-orchestrator
+  labels:
+    app.kubernetes.io/name: boxes-orchestrator
+spec:
+  # One replica, and no second one during an update, because of the lock
+  # on the data directory.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: boxes-orchestrator
+  template:
+    metadata:
+      labels:
+        # The policy of the proxy allows the control port for this label.
+        app.kubernetes.io/name: boxes-orchestrator
+    spec:
+      serviceAccountName: boxes-orchestrator
+      enableServiceLinks: false
+      securityContext:
+        # The node user of the image. On Kubernetes, the orchestrator needs
+        # no root.
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: ghcr.io/splitbrain/boxes/orchestrator:latest
+          env:
+            - name: RUNTIME
+              value: kubernetes
+            # git of the skill repositories runs with no writable home.
+            - name: HOME
+              value: /tmp
+          # Optional settings, for example EGRESS_ALLOWED_HOSTS or
+          # BOX_MEM_LIMIT, from a ConfigMap.
+          envFrom:
+            - configMapRef:
+                name: boxes-settings
+                optional: true
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          # A ceiling, as in compose.yaml: the orchestrator holds an upload
+          # and a WebSocket frame in memory per request.
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: boxes-orchestrator-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: boxes-orchestrator
+spec:
+  selector:
+    app.kubernetes.io/name: boxes-orchestrator
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+# Only the ingress controller reaches the orchestrator. Change the namespace
+# below to the namespace of the ingress controller of the cluster. A port
+# forward does not go through this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: boxes-orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: boxes-orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: http

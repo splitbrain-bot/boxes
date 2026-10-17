@@ -1,6 +1,6 @@
 # CI workflow: runs the test suites, builds the four Boxes images, runs the
-# runtime conformance suite and the security smoke test against them, and
-# publishes them to GHCR on every push to main. A pull request builds and
+# runtime conformance suite on Docker and on kind and the security smoke test
+# against them, and publishes them to GHCR on every push to main. A pull request builds and
 # tests the images without pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
@@ -245,13 +245,7 @@ jobs:
           provenance: false
           sbom: false
 
-      # The conformance suite checks the Docker runtime against this daemon
-      # and the box image this job built. It needs the proxy of the stack,
-      # and it runs before the orchestrator starts, because the orphan sweep
-      # of the orchestrator removes the boxes of the suite. It runs as root,
-      # as the orchestrator does in its container, so that it can give the
-      # new box directories to the box user. sudo resets PATH, so the PATH of
-      # setup-node is passed on.
+      # The runtime conformance suites run from the orchestrator package.
       - uses: actions/setup-node@v7
         with:
           node-version: 26
@@ -262,19 +256,76 @@ jobs:
         working-directory: orchestrator
         run: npm ci
 
+      # The conformance suite checks the Kubernetes runtime against a kind
+      # cluster and the images this job built. kind enforces NetworkPolicy
+      # with its default network plugin. The images are on no registry, so
+      # they are loaded into the node, and nothing pulls them. It runs before
+      # the Docker suite, which runs as root and leaves files of root in
+      # node_modules.
+      - name: Create the kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          cluster_name: boxes
+
+      - name: Load the images into kind
+        run: kind load docker-image --name boxes "$BOX_IMAGE" "$PROXY_IMAGE"
+        env:
+          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
+          PROXY_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/egress-proxy:${{ steps.egress-proxy-meta.outputs.version }}
+
+      # The namespace and the proxy of the manifests, with the image this job
+      # built. The suite runs in the namespace of the current context.
+      - name: Start the egress proxy in kind
+        run: |
+          set -eu
+          kubectl apply -f k8s/namespace.yaml
+          kubectl config set-context --current --namespace=boxes
+          kubectl apply -f k8s/egress-proxy.yaml
+          kubectl patch deployment boxes-egress-proxy --type=json -p "$(jq -nc --arg image "$PROXY_IMAGE" '[
+            {op: "replace", path: "/spec/template/spec/containers/0/image", value: $image},
+            {op: "add", path: "/spec/template/spec/containers/0/imagePullPolicy", value: "IfNotPresent"}
+          ]')"
+          kubectl rollout status deployment/boxes-egress-proxy --timeout=180s
+        env:
+          PROXY_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/egress-proxy:${{ steps.egress-proxy-meta.outputs.version }}
+
+      - name: Run the runtime conformance suite on Kubernetes
+        working-directory: orchestrator
+        run: npm run test:conformance -- kubernetes
+        env:
+          BOXES_CONFORMANCE_CONTEXT: kind-boxes
+          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
+          BOX_IMAGE_PULL_POLICY: IfNotPresent
+
+      - name: Show the state of the kind cluster
+        if: failure()
+        run: |
+          kubectl get pods,services,networkpolicies,persistentvolumeclaims -o wide
+          kubectl describe pods
+          kubectl logs deployment/boxes-egress-proxy
+
+      # The conformance suite checks the Docker runtime against this daemon
+      # and the box image this job built. It needs the proxy of the stack,
+      # and it runs before the orchestrator starts, because the orphan sweep
+      # of the orchestrator removes the boxes of the suite. It runs as root,
+      # as the orchestrator does in its container, so that it can give the
+      # new box directories to the box user. sudo resets PATH, so the PATH of
+      # setup-node is passed on.
       - name: Start the egress proxy
         run: docker compose up -d --no-build egress-proxy
 
-      - name: Run the runtime conformance suite
+      - name: Run the runtime conformance suite on Docker
         working-directory: orchestrator
-        run: sudo --preserve-env env "PATH=$PATH" npm run test:conformance
+        run: sudo --preserve-env env "PATH=$PATH" npm run test:conformance -- docker
         env:
           BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
 
       # Checks the isolation of a box on a real Docker host, with the images
       # this job built. The box image under test is on no registry, so the
       # orchestrator must never pull it. BOXES_ENV points compose at the
-      # settings file for the later steps.
+      # settings file for the later steps. /healthz answers while the
+      # orchestrator boots, so the step waits for /readyz.
       - name: Start the stack
         run: |
           set -eu
@@ -284,10 +335,10 @@ jobs:
           echo "BOX_IMAGE_PULL_MINUTES=0" >> "$BOXES_ENV"
           docker compose up -d --no-build
           for _ in $(seq 1 60); do
-            if curl -fs -o /dev/null http://localhost:3000/healthz; then exit 0; fi
+            if curl -fs -o /dev/null http://localhost:3000/readyz; then exit 0; fi
             sleep 2
           done
-          echo 'The orchestrator did not answer on /healthz.'
+          echo 'The orchestrator did not get ready on /readyz.'
           exit 1
         env:
           BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}

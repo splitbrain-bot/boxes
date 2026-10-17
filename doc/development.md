@@ -139,10 +139,23 @@ the boxes of the suite. It must run as root:
 
 ```sh
 docker compose up -d egress-proxy
-cd orchestrator && sudo env "PATH=$PATH" BOX_IMAGE=... npm run test:conformance
+cd orchestrator && sudo env "PATH=$PATH" BOX_IMAGE=... npm run test:conformance -- docker
+```
+
+`kubernetes.conformance.ts` runs it against the cluster and the namespace of the kubeconfig context that
+`BOXES_CONFORMANCE_CONTEXT` names. Without this variable, the suite is skipped. The namespace needs the egress proxy from
+`k8s/egress-proxy.yaml`, a box image that the nodes can get, and no orchestrator:
+
+```sh
+kubectl --context kind-boxes apply -f k8s/namespace.yaml
+kubectl config set-context kind-boxes --namespace=boxes
+kubectl --context kind-boxes apply -f k8s/egress-proxy.yaml
+cd orchestrator && BOXES_CONFORMANCE_CONTEXT=kind-boxes BOX_IMAGE=... BOX_IMAGE_PULL_POLICY=IfNotPresent \
+  npm run test:conformance -- kubernetes
 ```
 
 ## CI
 
-`.github/workflows/publish.yml` runs the four test suites in parallel, builds the four images, runs the runtime
-conformance suite and the smoke test against the built images, and publishes to GHCR on pushes to `main`.
+`.github/workflows/publish.yml` runs the four test suites in parallel and builds the four images. It runs the runtime
+conformance suite against Docker and against a kind cluster, and the smoke test against the built images. It publishes
+to GHCR on pushes to `main`.

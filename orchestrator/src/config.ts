@@ -26,6 +26,12 @@ const flag = z
 
 /** Every setting the orchestrator reads from its environment, with its default. */
 const schema = z.object({
+  /**
+   * What runs the boxes: the Docker daemon of this host, or the Kubernetes
+   * cluster the orchestrator runs in. Settings that only one runtime reads
+   * say so.
+   */
+  RUNTIME: z.enum(['docker', 'kubernetes']).default('docker'),
   /** Where the orchestrator keeps its database and every box's files. */
   DATA_DIR: z.string().min(1).default('/data'),
   /**
@@ -37,6 +43,8 @@ const schema = z.object({
    * shipped compose that is `/var/lib/docker/volumes/boxes_boxes-data/_data`.
    * Set this where that cannot work: a nested or rootless daemon, or a
    * compose file that mounts a real host directory for /data.
+   *
+   * Docker only.
    */
   HOST_DATA_DIR: z.string().default(''),
   /** Port the HTTP server listens on. */
@@ -67,6 +75,8 @@ const schema = z.object({
    * 0 turns the refresh off, for an image built on the host that no registry
    * holds. The image is still pulled once when it is missing, because a box
    * cannot be created without it.
+   *
+   * Docker only. On Kubernetes, BOX_IMAGE_PULL_POLICY decides.
    */
   BOX_IMAGE_PULL_MINUTES: z.coerce.number().int().nonnegative().default(60),
   /**
@@ -80,9 +90,11 @@ const schema = z.object({
    *
    * Off is for a host that keeps old images on purpose: to roll back without
    * the registry, or because something outside Boxes runs them.
+   *
+   * Docker only. On Kubernetes, the kubelet removes unused images.
    */
   BOX_IMAGE_PRUNE: flag.default(true),
-  /** Address range each box's own /24 network is taken from. */
+  /** Address range each box's own /24 network is taken from. Docker only. */
   BOX_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
   /**
    * Memory one box container may use, such as `4g`.
@@ -98,8 +110,34 @@ const schema = z.object({
   /**
    * Processes one box container may run. When a box reaches the limit, a tool
    * call fails because it cannot fork.
+   *
+   * Docker only. On Kubernetes, the kubelet setting `podPidsLimit` limits the
+   * processes of each pod on a node.
    */
   BOX_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
+  /**
+   * Memory the scheduler reserves for one box pod, in the format of
+   * BOX_MEM_LIMIT. Kubernetes only.
+   *
+   * Less than the limit, because most boxes are idle most of the time. A box
+   * that uses more than this can be evicted when its node runs out of memory.
+   */
+  BOX_MEM_REQUEST: z.string().regex(/^\d+[kmgKMG]?$/).default('1g'),
+  /** CPUs the scheduler reserves for one box pod. Kubernetes only. */
+  BOX_CPU_REQUEST: z.coerce.number().positive().default(0.5),
+  /**
+   * Size of the volume claim of one box, which holds its workspace, its home
+   * and its Nix store, in the format of BOX_MEM_LIMIT. Kubernetes only.
+   */
+  BOX_STORAGE_SIZE: z.string().regex(/^\d+[kmgKMG]?$/).default('20g'),
+  /**
+   * When the kubelet pulls the box image for a box pod. Kubernetes only.
+   *
+   * `Always` resolves the tag at each start, so a box moves onto a new image
+   * at its next start. `IfNotPresent` is for an image that is loaded into
+   * the cluster and is in no registry.
+   */
+  BOX_IMAGE_PULL_POLICY: z.enum(['Always', 'IfNotPresent', 'Never']).default('Always'),
 
   /** How many minutes a box may go without activity before the reaper stops it. */
   IDLE_STOP_MINUTES: durationMinutes.default(30),
@@ -167,15 +205,21 @@ const schema = z.object({
     })
     .default('https://github.com/splitbrain/boxes'),
 
-  /** Container name of the egress proxy the orchestrator attaches. */
+  /** Container name of the egress proxy the orchestrator attaches. Docker only. */
   EGRESS_PROXY_CONTAINER: z.string().min(1).default('boxes-egress-proxy'),
-  /** Name the egress proxy answers to on every box network. */
+  /** Name the egress proxy answers to on every box network. Docker only. */
   EGRESS_PROXY_ALIAS: z.string().min(1).default('proxy'),
   /** Port boxes reach the egress proxy on. */
   EGRESS_PROXY_PORT: z.coerce.number().int().positive().default(3128),
   /**
-   * URL of the proxy's control channel on the compose network. Only the
-   * orchestrator connects to it.
+   * Name of the Service of the egress proxy, in the namespace of the
+   * orchestrator. Boxes reach the proxy at its cluster IP, and the isolation
+   * of a box allows the pods it selects. Kubernetes only.
+   */
+  EGRESS_PROXY_SERVICE: z.string().min(1).default('boxes-egress-proxy'),
+  /**
+   * URL of the proxy's control channel, on the compose network or at the
+   * proxy Service. Only the orchestrator connects to it.
    */
   EGRESS_CONTROL_URL: z.url({ protocol: /^http$/ }).default('http://boxes-egress-proxy:3129'),
 

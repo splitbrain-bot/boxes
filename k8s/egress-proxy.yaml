@@ -1,0 +1,96 @@
+# The egress proxy: the only way out of a box. The orchestrator reads the
+# Service by its name (EGRESS_PROXY_SERVICE), gives the boxes its cluster IP,
+# and lets each box reach the pods it selects on the proxy port.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boxes-egress-proxy
+  labels:
+    app.kubernetes.io/name: boxes-egress-proxy
+spec:
+  # One replica: the orchestrator pushes the policy and the credentials to
+  # the control channel of one proxy.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: boxes-egress-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: boxes-egress-proxy
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        # The node user of the image.
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: ghcr.io/splitbrain/boxes/egress-proxy:latest
+          ports:
+            - name: proxy
+              containerPort: 3128
+            - name: control
+              containerPort: 3129
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # The proxy holds the requests of every box in memory.
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: boxes-egress-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: boxes-egress-proxy
+  ports:
+    - name: proxy
+      port: 3128
+      targetPort: proxy
+    - name: control
+      port: 3129
+      targetPort: control
+---
+# The boxes reach the proxy port, and only the orchestrator reaches the
+# control port. The control channel accepts the first token it gets, so no
+# other pod may reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: boxes-egress-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: boxes-egress-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: boxes.box
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: proxy
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: boxes-orchestrator
+      ports:
+        - protocol: TCP
+          port: control

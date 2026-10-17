@@ -1,0 +1,30 @@
+# Boxes on Kubernetes: the orchestrator, the egress proxy and their
+# policies, in one namespace. The orchestrator makes the pods, claims and
+# policies of the boxes in the same namespace.
+#
+#   kubectl apply -k k8s/
+#
+# Requirements of the cluster:
+#
+#   - Kubernetes 1.30 or later. The file service needs the exec protocol
+#     v5.channel.k8s.io, which can close stdin.
+#   - A network plugin that enforces NetworkPolicy, for ingress and egress.
+#     Without it, the boxes are not isolated, and nothing reports an error.
+#   - A default storage class that supports fsGroup, or that makes its
+#     volumes writable for all users. Each box gets one claim.
+#   - The kubelet setting podPidsLimit on each node, for example 512, the
+#     limit of a Docker box. A pod spec has no limit of its own for this.
+#   - CoreDNS with the label k8s-app=kube-dns in kube-system. Only the login
+#     pods use DNS.
+#
+# To use another namespace, change it here and in the RoleBinding of
+# orchestrator.yaml.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: boxes
+resources:
+  - namespace.yaml
+  - egress-proxy.yaml
+  - orchestrator.yaml
+  - ingress.yaml

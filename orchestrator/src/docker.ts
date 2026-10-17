@@ -14,6 +14,7 @@ import {
   type RunOptions,
   type RunOutput,
 } from './runtime/runtime.ts';
+import { readAll, withTimeout } from './runtime/exec.ts';
 import { boxOwner } from './workspaces.ts';
 
 /**
@@ -524,25 +525,6 @@ export async function execInContainer(
     exited,
   ]);
   return { stdout: out, stderr: err, code };
-}
-
-/** Everything a stream will produce, as one string, up to a cap on its bytes. */
-async function readAll(stream: Readable, cap = Infinity): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of stream) {
-    // Drain past the cap, so the command never blocks on a full stream.
-    const buf = Buffer.from(chunk as Buffer);
-    if (size < cap) chunks.push(size + buf.length <= cap ? buf : buf.subarray(0, cap - size));
-    size += buf.length;
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-/** A command wrapped in the container's own `timeout`, when it is given a limit. */
-function withTimeout(cmd: readonly string[], timeoutMs?: number): string[] {
-  if (timeoutMs === undefined) return [...cmd];
-  return ['timeout', '--kill-after=5s', `${Math.ceil(timeoutMs / 1000)}s`, ...cmd];
 }
 
 /** One short exec with its stdout and its stderr demuxed apart. */

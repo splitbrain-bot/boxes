@@ -479,8 +479,9 @@ export class BoxManager {
    */
   private async createResources(id: string): Promise<void> {
     await runtime().createStorage(id);
-    await runtime().ensure(this.boxSpec(id));
-    await runtime().start(id);
+    const spec = this.boxSpec(id);
+    await runtime().ensure(spec);
+    await runtime().start(spec);
     await this.makeReady(this.mustGet(id));
   }
 
@@ -551,7 +552,7 @@ export class BoxManager {
       // Taken off before the start, so a crash between the two leaves the box
       // not ready.
       this.db.prepare('UPDATE boxes SET ready_at = NULL WHERE id = ?').run(id);
-      await runtime().start(id);
+      await runtime().start(this.boxSpec(id));
     }
     this.giveUpIfPreempted(id);
     await this.makeReady(this.mustGet(id));
