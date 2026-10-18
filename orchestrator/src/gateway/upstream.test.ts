@@ -1295,6 +1295,46 @@ test('forking a thread no browser has opened loads it first, for the fork to cop
   assert.deepEqual(loaded, ['acp-kept']);
 });
 
+test('two forks of a thread that is still loading share one load', async () => {
+  // The load of the source is held open, so the second fork comes while the
+  // first one still loads. A second load would replace the log of the first.
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let branches = 0;
+  loaded = [];
+  fakeDocker(
+    new FakeAdapter(async (msg) => {
+      if (msg.method === 'initialize') {
+        return { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { fork: {} } } };
+      }
+      if (msg.method === 'session/fork') {
+        branches += 1;
+        return { sessionId: `acp-branch-${branches}` };
+      }
+      if (msg.method === 'session/load' && msg.params?.sessionId === 'acp-kept') {
+        loaded.push('acp-kept');
+        await held;
+      }
+      return {};
+    }),
+  );
+  await manager.upstream('s1').ensureStarted();
+
+  const forks = Promise.all([
+    manager.createThread('s1', { from: 't2' }),
+    manager.createThread('s1', { from: 't2' }),
+  ]);
+  await vi.waitFor(() => assert.equal(loaded.length, 1));
+  release();
+  const [first, second] = await forks;
+
+  assert.deepEqual(loaded, ['acp-kept']);
+  assert.notEqual(first.id, second.id);
+  assert.equal(branches, 2);
+});
+
 test('a fork stops borrowing the moment it is prompted', async () => {
   fakeDocker(forkingAdapter({ 'acp-kept': 'what was said before the fork' }));
   const created = await manager.createThread('s1', { from: 't2' });

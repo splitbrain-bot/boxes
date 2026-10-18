@@ -305,6 +305,8 @@ export class AdapterConnection {
    * adapter holds nothing.
    */
   private readonly live = new Set<string>();
+  /** The loads in flight, by the adapter's id of the thread, so two callers share one load. */
+  private readonly loading = new Map<string, Promise<boolean>>();
   /**
    * The category of each config option the adapter has mentioned, by option id.
    *
@@ -731,8 +733,9 @@ export class AdapterConnection {
   /**
    * Loads a stored thread and reads its transcript into the thread's log.
    *
-   * Each caller checks first that this adapter does not hold the thread. The updates of the thread that arrive during
-   * the load go into the log and to no browser.
+   * Each caller checks first that this adapter does not hold the thread. A caller that comes while a load of the
+   * thread runs shares that load, because a second load would replace the log that the first one fills. The updates
+   * of the thread that arrive during the load go into the log and to no browser.
    *
    * A thread that was never prompted has no transcript and does not survive a
    * container stop. Any error other than a missing thread is rethrown, so a
@@ -741,9 +744,26 @@ export class AdapterConnection {
    * @param thread The thread row, with the adapter's id for its conversation.
    * @returns False when the adapter no longer holds the thread.
    */
-  private async loadThread(thread: ThreadRow): Promise<boolean> {
+  private loadThread(thread: ThreadRow): Promise<boolean> {
     const acpSessionId = thread.acp_session_id;
-    if (!acpSessionId) return false;
+    if (!acpSessionId) return Promise.resolve(false);
+    const inFlight = this.loading.get(acpSessionId);
+    if (inFlight) return inFlight;
+    const attempt = this.fillLog(thread, acpSessionId).finally(() =>
+      this.loading.delete(acpSessionId),
+    );
+    this.loading.set(acpSessionId, attempt);
+    return attempt;
+  }
+
+  /**
+   * Runs one load of a stored thread, as {@link AdapterConnection.loadThread} describes.
+   *
+   * @param thread The thread row.
+   * @param acpSessionId The adapter's id for its conversation.
+   * @returns False when the adapter no longer holds the thread.
+   */
+  private async fillLog(thread: ThreadRow, acpSessionId: string): Promise<boolean> {
     this.host.beginFill(acpSessionId);
     try {
       const res = await this.replay(acpSessionId);
