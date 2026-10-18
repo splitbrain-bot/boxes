@@ -20,7 +20,7 @@ import {
 } from './runtime.ts';
 
 /**
- * Runs boxes on the Docker daemon of this host.
+ * The runtime that runs the boxes on the Docker daemon of this host.
  *
  * A box is the container `box-<id>` on its own internal network `bn-<id>`,
  * with the egress proxy attached to that network. Its storage is three
@@ -28,9 +28,9 @@ import {
  */
 export class DockerRuntime implements Runtime {
   /**
-   * Host-side path of DATA_DIR, which is what a bind source has to name.
-   * Starts as this process's own path, the truth outside a container, where
-   * `npm run dev` and the tests run. prepare() replaces it.
+   * The host-side path of DATA_DIR, which a bind source must name. It starts
+   * as HOST_DATA_DIR, or else as DATA_DIR, which is correct outside a
+   * container. Inside a container without HOST_DATA_DIR, prepare() resolves it.
    */
   private hostDataDir: string;
 
@@ -40,23 +40,28 @@ export class DockerRuntime implements Runtime {
    */
   private allocating: Promise<unknown> = Promise.resolve();
 
+  /**
+   * Creates the runtime.
+   *
+   * @param cfg The configuration of the deployment.
+   */
   constructor(
-    /** The deployment's configuration. */
+    /** The configuration of the deployment. */
     private readonly cfg: Config,
   ) {
     this.hostDataDir = cfg.HOST_DATA_DIR || cfg.DATA_DIR;
   }
-
-  // --- boot -------------------------------------------------------------------
 
   /**
    * Resolves the host-side path of DATA_DIR.
    *
    * Inside a container, the orchestrator's path for its data volume is not
    * the path the daemon resolves a bind source against. A wrong path fails
-   * silently: the daemon creates an empty directory there and mounts it, and
-   * the agent's files end up where the orchestrator cannot see them. So a
-   * failure here is fatal, and the message names the setting that fixes it.
+   * silently. The daemon creates an empty directory there and mounts it, and
+   * the orchestrator cannot see the files of the agent. So a failure here is
+   * fatal, and the message names the setting that fixes it.
+   *
+   * @throws Error when the process is in a container and the path cannot be resolved.
    */
   async prepare(): Promise<void> {
     ws.ensureWorkspacesRoot(this.cfg.DATA_DIR);
@@ -79,9 +84,11 @@ export class DockerRuntime implements Runtime {
     log.info('resolved the host path of the data directory', { hostDataDir: source });
   }
 
-  // --- storage ----------------------------------------------------------------
-
-  /** Creates the workspace, the Nix store and the home directories, owned by the agent. */
+  /**
+   * Creates the workspace, the Nix store and the home directories, owned by the agent.
+   *
+   * @param boxId The id of the box.
+   */
   async createStorage(boxId: string): Promise<void> {
     ws.createWorkspace(this.cfg.DATA_DIR, boxId);
     ws.createNix(this.cfg.DATA_DIR, boxId);
@@ -92,8 +99,11 @@ export class DockerRuntime implements Runtime {
    * The workspace and the home directories that are gone.
    *
    * Docker creates a missing bind source, empty and owned by root. The box
-   * then looks healthy while every turn fails. A crash during a delete, a
-   * partly restored backup, or a wrong HOST_DATA_DIR all cause this.
+   * then looks healthy, but every turn fails. Possible causes are a crash
+   * during a delete, a partly restored backup or a wrong HOST_DATA_DIR.
+   *
+   * @param boxId The id of the box.
+   * @returns One description per missing directory, with its path.
    */
   async missingStorage(boxId: string): Promise<string[]> {
     const missing: string[] = [];
@@ -104,32 +114,36 @@ export class DockerRuntime implements Runtime {
     return missing;
   }
 
-  /** Removes the three directories of a box. */
+  /**
+   * Removes the three directories of a box.
+   *
+   * @param boxId The id of the box.
+   */
   async removeStorage(boxId: string): Promise<void> {
     ws.removeWorkspace(this.cfg.DATA_DIR, boxId);
     ws.removeHome(this.cfg.DATA_DIR, boxId);
     ws.removeNix(this.cfg.DATA_DIR, boxId);
   }
 
-  // --- lifecycle --------------------------------------------------------------
-
   /**
    * Brings the Nix store, the network, the proxy attachment and the container
    * of a box up to date, in this order.
    *
-   * A box container is built entirely from the spec and the box's
-   * directories, so replacing one costs nothing durable. `docker container
-   * prune` removes every stopped container, which includes every idle box,
-   * and `docker system prune` removes the network too.
+   * The container is made only from the spec and the box directories, so a
+   * new container loses no data. Each part can be missing, for example after
+   * `docker container prune` or `docker system prune`.
    *
-   * A container that runs is never changed, because that would take the
-   * adapter exec, and any turn in it, with it. A failed proxy attachment is
-   * logged, and {@link isolated} reports it.
+   * A running container is never changed, because a change would stop the
+   * adapter exec and any turn in it. A failed proxy attachment is logged, and
+   * {@link DockerRuntime.isolated} reports it.
+   *
+   * @param box The id and the environment of the box.
+   * @throws Error when the subnet pool has no free subnet.
    */
   async ensure(box: BoxSpec): Promise<void> {
     const slog = log.box(box.boxId);
-    // Before anything binds the Nix store, which the daemon would otherwise
-    // create empty and owned by root. An empty store is usable.
+    // Create the Nix store before a bind mount names it, or the daemon creates
+    // it owned by root. An empty store is usable.
     ws.createNix(this.cfg.DATA_DIR, box.boxId);
 
     const network = dk.names.network(box.boxId);
@@ -152,11 +166,13 @@ export class DockerRuntime implements Runtime {
   }
 
   /**
-   * Replaces a stopped container whose image is no longer what BOX_IMAGE
-   * resolves to.
+   * Replaces a stopped container when its image differs from the image that
+   * BOX_IMAGE resolves to.
    *
-   * The comparison is on image ids rather than the tag, because a tag such
-   * as `latest` moves without changing its name.
+   * The comparison uses image ids, because a tag such as `latest` can name a
+   * new image.
+   *
+   * @param box The id and the environment of the box.
    */
   private async rollOntoCurrentImage(box: BoxSpec): Promise<void> {
     const slog = log.box(box.boxId);
@@ -173,8 +189,8 @@ export class DockerRuntime implements Runtime {
       });
       return;
     }
-    // Nothing on the host to move to, or a container Docker no longer has:
-    // either way there is nothing to decide, and start() surfaces the second.
+    // Keep the container when the host has no BOX_IMAGE or the container is
+    // gone. start() reports a missing container.
     if (!wanted || !current || wanted === current) return;
 
     slog.info('recreating the container on the current box image', {
@@ -189,8 +205,12 @@ export class DockerRuntime implements Runtime {
   }
 
   /**
-   * Creates the network of a box on the first free subnet of the pool, and
-   * returns the subnet. Allocations run one at a time.
+   * Creates the network of a box on the first free subnet of the pool.
+   * Allocations run one at a time.
+   *
+   * @param boxId The id of the box.
+   * @returns The subnet of the new network.
+   * @throws Error when the pool has no free subnet.
    */
   private async createNetwork(boxId: string): Promise<string> {
     const run = this.allocating.then(async () => {
@@ -207,8 +227,11 @@ export class DockerRuntime implements Runtime {
   }
 
   /**
-   * Everything createContainer needs about a box. The bind sources are the
+   * Builds the input of createContainer for a box. The bind sources are the
    * host-side paths of its directories.
+   *
+   * @param box The id and the environment of the box.
+   * @returns The container spec.
    */
   private containerSpec(box: BoxSpec): dk.CreateContainerSpec {
     return {
@@ -222,17 +245,29 @@ export class DockerRuntime implements Runtime {
     };
   }
 
-  /** Starts the container that ensure() made, tolerating one that already runs. */
+  /**
+   * Starts the container that ensure() made, tolerating one that already runs.
+   *
+   * @param box The id and the environment of the box.
+   */
   async start(box: BoxSpec): Promise<void> {
     await dk.startContainer(dk.names.container(box.boxId));
   }
 
-  /** Stops the container with a 10 second grace period, tolerating one already gone. */
+  /**
+   * Stops the container with a 10 second grace period, tolerating one already gone.
+   *
+   * @param boxId The id of the box.
+   */
   async stop(boxId: string): Promise<void> {
     await dk.stopContainer(dk.names.container(boxId));
   }
 
-  /** Removes the container, then the network, which Docker refuses while a container uses it. */
+  /**
+   * Removes the container, then the network, which Docker refuses while a container uses it.
+   *
+   * @param boxId The id of the box.
+   */
   async remove(boxId: string): Promise<void> {
     const container = dk.names.container(boxId);
     await dk.stopContainer(container);
@@ -240,21 +275,34 @@ export class DockerRuntime implements Runtime {
     await dk.removeNetwork(dk.names.network(boxId), this.cfg);
   }
 
-  /** An exited container and a container that is gone are both stopped. */
+  /**
+   * Reads the state of the container. An exited container and a container that is gone are both stopped.
+   *
+   * @param boxId The id of the box.
+   * @returns The state of the box.
+   */
   async state(boxId: string): Promise<RuntimeState> {
     const state = await dk.containerState(dk.names.container(boxId));
     if (state === 'exited' || state === 'missing') return 'stopped';
     return state;
   }
 
-  /** True when the egress proxy is attached to the box network right now. */
+  /**
+   * Checks the attachment of the egress proxy to the box network.
+   *
+   * @param boxId The id of the box.
+   * @returns True when the proxy is attached now. False when the network cannot be read.
+   */
   async isolated(boxId: string): Promise<boolean> {
     return dk.isProxyAttached(dk.names.network(boxId), this.cfg);
   }
 
-  // --- the box image ----------------------------------------------------------
-
-  /** The id of the image the box container was created from. */
+  /**
+   * Reads the image that the box container was created from.
+   *
+   * @param boxId The id of the box.
+   * @returns The image id, or null when the container is gone.
+   */
   async imageOf(boxId: string): Promise<string | null> {
     return dk.containerImageId(dk.names.container(boxId));
   }
@@ -262,9 +310,11 @@ export class DockerRuntime implements Runtime {
   /**
    * Pulls the box image when it is not on this host.
    *
-   * Absent, there is nothing to create a box out of, so this is the one pull
-   * that is allowed to fail loudly. Present, it costs one inspect and says
-   * nothing.
+   * Without the image, the orchestrator cannot create a box, so a failed pull
+   * throws. When the image is present, the method only inspects it.
+   *
+   * @param onProgress Called with each progress event of the pull.
+   * @throws Error when the pull fails.
    */
   async ensureImage(onProgress?: (event: PullEvent) => void): Promise<void> {
     if (await dk.imageId(this.cfg.BOX_IMAGE)) return;
@@ -274,8 +324,10 @@ export class DockerRuntime implements Runtime {
   }
 
   /**
-   * Pulls the box image again, so a moving tag moves here. A box moves onto
-   * the new image at its next start.
+   * Pulls the box image again, so the host gets the image that a moving tag
+   * names now. ensure() recreates a stopped box container on the new image.
+   *
+   * @param onProgress Called with each progress event of the pull.
    */
   async refreshImage(onProgress?: (event: PullEvent) => void): Promise<void> {
     const before = await dk.imageId(this.cfg.BOX_IMAGE);
@@ -285,23 +337,19 @@ export class DockerRuntime implements Runtime {
       log.info('the box image moved; boxes adopt it as they are started', {
         image: this.cfg.BOX_IMAGE,
       });
-      // The copy it moved off is now untagged, on this host, and a gigabyte
-      // or two that nothing else reclaims.
+      // The old image is now untagged, and nothing else removes it.
       await this.pruneSupersededImages(before);
     }
   }
 
   /**
-   * Removes copies of the box image that a pull has superseded.
+   * Removes copies of the box image that a pull has superseded, when BOX_IMAGE_PRUNE is set.
    *
-   * Called after a refresh that moved the tag. `supersededId` is the image
-   * that pull replaced. The labelled images also include those an earlier
-   * process replaced and did not clean up.
+   * The labelled images also include those that an earlier process replaced
+   * and did not remove. The removal is not forced, so an image that a
+   * container still uses stays until a later refresh.
    *
-   * Nothing is forced. The daemon refuses to remove an image a container was
-   * created from, so a box that has not started since the tag moved keeps
-   * its old image. That image goes on a later sweep, after the box's next
-   * start has moved it onto the new one.
+   * @param supersededId The image that the last pull replaced, or null when the host had none.
    */
   private async pruneSupersededImages(supersededId: string | null): Promise<void> {
     if (!this.cfg.BOX_IMAGE_PRUNE) return;
@@ -325,12 +373,11 @@ export class DockerRuntime implements Runtime {
     }
   }
 
-  // --- inventory --------------------------------------------------------------
-
   /**
-   * The labelled containers and networks, the box directories on the data
-   * volume, and the login containers. Containers come before networks, and
-   * networks before directories.
+   * Lists the labelled containers and networks, the box directories on the
+   * data volume, and the login containers.
+   *
+   * @returns The objects. Containers come before networks, and networks before directories.
    */
   async inventory(): Promise<RuntimeObject[]> {
     const containers = await dk.listBoxContainers();
@@ -360,7 +407,11 @@ export class DockerRuntime implements Runtime {
     ];
   }
 
-  /** Removes one container, network, or set of box directories. */
+  /**
+   * Removes one container, network, or set of box directories.
+   *
+   * @param obj The object from {@link DockerRuntime.inventory}.
+   */
   async removeObject(obj: RuntimeObject): Promise<void> {
     switch (obj.kind) {
       case 'box':
@@ -376,9 +427,14 @@ export class DockerRuntime implements Runtime {
     }
   }
 
-  // --- processes --------------------------------------------------------------
-
-  /** One exec in the box container. The `timeout` command in the box enforces the timeout. */
+  /**
+   * Runs one exec in the box container. The `timeout` command in the box enforces the timeout.
+   *
+   * @param boxId The id of the box.
+   * @param cmd The argument vector of the command.
+   * @param opts The options of the command.
+   * @returns The output and the exit code.
+   */
   async run(boxId: string, cmd: readonly string[], opts: RunOptions = {}): Promise<RunOutput> {
     return dk.execInContainer(dk.names.container(boxId), cmd, {
       ...opts,
@@ -386,7 +442,14 @@ export class DockerRuntime implements Runtime {
     });
   }
 
-  /** One long-lived exec in the box container. */
+  /**
+   * Starts one long-lived exec in the box container.
+   *
+   * @param boxId The id of the box.
+   * @param cmd The argument vector of the process.
+   * @param opts The options of the process.
+   * @returns The stdio and the end of the process.
+   */
   async spawn(
     boxId: string,
     cmd: readonly string[],
@@ -401,6 +464,9 @@ export class DockerRuntime implements Runtime {
   /**
    * Creates and starts a login container from the box image. It is the only
    * container Boxes creates with a direct route to the internet.
+   *
+   * @param credentialId The id of the credential that the login is for.
+   * @returns The handle of the login container.
    */
   async startLogin(credentialId: string): Promise<Login> {
     const id = await dk.createLoginContainer({ image: this.cfg.BOX_IMAGE, credentialId });
@@ -420,14 +486,21 @@ export class DockerRuntime implements Runtime {
     };
   }
 
-  // --- facts ------------------------------------------------------------------
-
-  /** The URL of the egress proxy, as a box on its network reaches it. */
+  /**
+   * Gives the address of the egress proxy on a box network.
+   *
+   * @returns The URL with the network alias and the port of the proxy.
+   */
   proxyUrl(): string {
     return `http://${this.cfg.EGRESS_PROXY_ALIAS}:${this.cfg.EGRESS_PROXY_PORT}`;
   }
 
-  /** The container id, the network with its subnet, and the image id, as far as they can be read. */
+  /**
+   * Reads the container id, the network with its subnet, and the image id, as far as they can be read.
+   *
+   * @param boxId The id of the box.
+   * @returns The facts that could be read, each as label and value.
+   */
   async details(boxId: string): Promise<Array<[string, string]>> {
     const network = dk.names.network(boxId);
     const [container, subnet, image] = await Promise.all([
@@ -442,15 +515,22 @@ export class DockerRuntime implements Runtime {
     return facts;
   }
 
-  /** Pings the daemon. */
+  /**
+   * Pings the daemon.
+   *
+   * @throws Error when the daemon does not answer.
+   */
   async health(): Promise<void> {
     await dk.docker().ping();
   }
 
   /**
-   * The orchestrator and proxy images are the ones their containers were
-   * created from. The proxy container is the one EGRESS_PROXY_CONTAINER
-   * names. The box image is BOX_IMAGE itself, so it needs no container.
+   * Reads the images of the orchestrator, the proxy and a new box. The
+   * orchestrator and proxy images are the ones their containers were created
+   * from. The proxy container is the one EGRESS_PROXY_CONTAINER names. The box
+   * image is BOX_IMAGE.
+   *
+   * @returns The three images. An image that cannot be read is null.
    */
   async deploymentImages(): Promise<DeploymentImages> {
     const [orchestrator, proxy, box] = await Promise.all([
@@ -462,7 +542,12 @@ export class DockerRuntime implements Runtime {
   }
 }
 
-/** Runs one read for the details page, and returns null when it throws. */
+/**
+ * Runs one read for the details page, and returns null when it throws.
+ *
+ * @param read The read.
+ * @returns The value of the read, or null.
+ */
 async function quietly<T>(read: () => Promise<T | null>): Promise<T | null> {
   try {
     return await read();
@@ -473,11 +558,15 @@ async function quietly<T>(read: () => Promise<T | null>): Promise<T | null> {
 }
 
 /**
- * Runs one image read, and returns null when it throws.
+ * Runs one image read for the image footer, and returns null when it throws.
  *
- * A missing image is a normal answer, for example when the proxy is not up
- * or the daemon cannot be reached. The failure is logged at debug level, as
- * a deployment where the read cannot work would otherwise log a line a minute.
+ * The failure is logged at debug level, because the footer reads the images
+ * up to once a minute, and a deployment where the read always fails would
+ * otherwise log a line each minute.
+ *
+ * @param what The image that is read, for the log.
+ * @param read The read.
+ * @returns The image, or null when it is missing or the read fails.
  */
 async function safely(
   what: string,
@@ -491,7 +580,12 @@ async function safely(
   }
 }
 
-/** The image behind a container, by container name or id. */
+/**
+ * Reads the image behind a container.
+ *
+ * @param container The name or the id of the container, or null for none.
+ * @returns The image, or null when there is no container or no image.
+ */
 async function imageOfContainer(container: string | null): Promise<ImageInfo | null> {
   if (!container) return null;
   const id = await dk.containerImageId(container);

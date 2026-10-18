@@ -41,7 +41,12 @@ const AGENT = [
   '</task-notification>',
 ].join('\n');
 
-/** The one notification in a block, which every fixture here holds. */
+/**
+ * The one notification in a block, which every fixture here holds.
+ *
+ * @param text The block to parse.
+ * @returns The parsed notification, or null when the only segment is not a notification.
+ */
 function only(text: string): TaskNotification | null {
   const segments = parseTaskNotifications(text);
   assert.equal(segments?.length, 1);

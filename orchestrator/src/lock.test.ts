@@ -5,12 +5,18 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import { claimDataDir, LOCK_FILE, LOCK_STALE_MS } from './lock.ts';
 
+/** The temporary data directory of the current test. */
 let dir: string;
 
 /** The release functions of every claim a test took. */
 const claims: Array<() => void> = [];
 
-/** Claims the directory and remembers how to give it back. */
+/**
+ * Claims the directory and remembers how to give it back.
+ *
+ * @param at The time that the clock of the claim reports.
+ * @returns The claim.
+ */
 function claim(at: number): ReturnType<typeof claimDataDir> {
   const result = claimDataDir(dir, () => at);
   if (!result.held) claims.push(result.release);

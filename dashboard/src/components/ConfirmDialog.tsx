@@ -9,7 +9,18 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-/** A modal that asks before an action. Escape, the backdrop and the back button cancel. */
+/**
+ * A modal that asks before an action. Escape, the backdrop and the back button cancel.
+ *
+ * @param title The question.
+ * @param description The effect of the action, as one paragraph.
+ * @param children The things that the action affects, below the description.
+ * @param confirmLabel The text of the confirm button.
+ * @param danger Styles the confirm button as destructive.
+ * @param busy Disables both buttons while the action runs.
+ * @param onConfirm Called when the user confirms.
+ * @param onCancel Called when the user cancels or dismisses the dialog.
+ */
 export function ConfirmDialog({
   title,
   description,
@@ -22,10 +33,10 @@ export function ConfirmDialog({
 }: {
   /** The question. */
   title: string;
-  /** What the action does, as one paragraph. */
+  /** The effect of the action, as one paragraph. */
   description?: string;
   /**
-   * What the action affects, under the description. A slot, because a list
+   * The things that the action affects, below the description. A slot, because a list
    * inside the description paragraph would be invalid markup.
    */
   children?: ReactNode;

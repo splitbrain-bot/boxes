@@ -18,7 +18,7 @@ import { type BadgeKind, DOT, StatusBadge } from './StatusBadge';
 /**
  * A count with the thing it counts: "1 approval", "3 approvals".
  *
- * @param count How many there are.
+ * @param count The number of things.
  * @param noun The singular noun, which an "s" turns into the plural.
  * @returns The label.
  */
@@ -30,8 +30,7 @@ function counted(count: number, noun: string): string {
  * Builds the status badges for a box.
  *
  * The turn, task and approval badges cover every thread of the box, so one
- * busy thread makes the box read as busy. A badge that has a number to show
- * carries it.
+ * busy thread makes the box show as busy.
  *
  * @param s The box.
  * @returns The badges in display order.
@@ -41,8 +40,8 @@ export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string
   if (s.pendingCount > 0) {
     badges.push({ kind: 'waiting', label: counted(s.pendingCount, 'approval') });
   }
-  // Uses `speaking`, because a prompt held open for a background subagent is
-  // not the agent thinking to the reader.
+  // Uses `speaking`, because a prompt that stays open for a background subagent
+  // does not mean that the agent thinks.
   if (s.speaking) badges.push({ kind: 'turn', label: 'thinking' });
   if (s.backgroundBusy) badges.push({ kind: 'task', label: jobsLabel(s.backgroundCount) });
   if (s.tunnels.length > 0) {
@@ -61,20 +60,22 @@ export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string
  * Card for one box in the list, with a row per thread.
  *
  * A row opens its thread. The card itself opens nothing. The info corner
- * leads to the box's details and controls.
+ * leads to the details and controls of the box.
+ *
+ * @param box The box.
  */
 export function BoxCard({ box }: { box: BoxSummary }) {
   const navigate = useNavigate();
-  /** Whether a thread call or a stop is in flight, so a double tap cannot start two. */
+  /** True while a thread call or a stop is in flight, so a double tap cannot start two. */
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** Whether the new-thread dialog is up. */
+  /** True while the new-thread dialog is open. */
   const [starting, setStarting] = useState(false);
-  /** Whether the box-wide kill is waiting to be confirmed. */
+  /** True while the stop of all work in the box waits for confirmation. */
   const [stopping, setStopping] = useState(false);
   /**
-   * What the box runs, for the stop confirmation: the processes, 'reading'
-   * while the request runs, or 'unreadable' after it failed.
+   * The processes in the box for the stop confirmation, 'reading' while the
+   * request runs, or 'unreadable' after it failed.
    */
   const [boxWork, setBoxWork] = useState<BoxWork[] | 'reading' | 'unreadable'>('reading');
   // The harness labels come from the health probe that the list already polls.
@@ -84,10 +85,10 @@ export function BoxCard({ box }: { box: BoxSummary }) {
    * Runs one thread call and opens the thread it made.
    *
    * @param work The call that creates the thread.
-   * @param replace Replaces the current history entry instead of pushing. The
+   * @param replace True to replace the current history entry, false to push an entry. The
    *   dialog uses it, so the thread takes the entry the open dialog pushed.
    *   Otherwise back from the new thread would land on the list twice.
-   * @returns Whether the thread opened, so a caller knows whether to close its dialog.
+   * @returns True when the thread opened, so a caller knows if it must close its dialog.
    */
   async function open(work: () => Promise<ThreadSummary>, replace = false): Promise<boolean> {
     if (busy) return false;
@@ -109,9 +110,9 @@ export function BoxCard({ box }: { box: BoxSummary }) {
   }
 
   /**
-   * Opens the stop confirmation and reads what the box runs.
+   * Opens the stop confirmation and reads the processes in the box.
    *
-   * The box list carries no processes, so the box detail is fetched here.
+   * The box list does not contain the processes, so the function fetches the box detail.
    */
   async function askToStop(): Promise<void> {
     setBoxWork('reading');
@@ -125,10 +126,10 @@ export function BoxCard({ box }: { box: BoxSummary }) {
   }
 
   /**
-   * Stops the processes running in the box, except those Boxes started
-   * itself, then refreshes the box list.
+   * Stops the work that the orchestrator finds in the box, then refreshes the
+   * box list.
    *
-   * The box stays busy until a later reading no longer finds the processes.
+   * The card shows the box as busy until a later reading finds none of the processes.
    */
   async function stopEverything(): Promise<void> {
     setStopping(false);
@@ -146,7 +147,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
   }
 
   /**
-   * Whether the box is busy with work that no thread claims.
+   * True when the box is busy with work that no thread claims.
    *
    * An adapter knows only the tasks it announced. After a respawn, only the
    * orchestrator's reading of the process table sees what the old adapter
@@ -233,7 +234,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
             <Plus className="size-3.5" />
             New thread
           </button>
-          {/* Review needs no running box, because the orchestrator reads the workspace. */}
+          {/* Shown for a stopped box too. The orchestrator starts the box when the review reads it. */}
           <Link
             to={`/boxes/${box.id}/review`}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground no-underline hover:bg-accent hover:text-accent-foreground"

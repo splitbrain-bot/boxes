@@ -11,12 +11,18 @@ import {
 /**
  * The follow state of each scroller.
  *
- * Kept in a map, not in an attribute: the runtime reads every attribute
- * change in the viewport, except to style, as new content and scrolls.
+ * A DOM attribute cannot hold the state, because the runtime treats each
+ * attribute change in the viewport, except a change to style, as new content
+ * and scrolls.
  */
 const state = new WeakMap<Element, FollowState>();
 
-/** The nearest thing that scrolls, which for a thread is its viewport. */
+/**
+ * Finds the nearest element from `node` upwards that scrolls. For a thread, the element is its viewport.
+ *
+ * @param node The element to start from.
+ * @returns The scroller, or null when no element scrolls.
+ */
 function scrollerOf(node: Element | null): Element | null {
   for (let el = node; el; el = el.parentElement) {
     const { overflowY } = getComputedStyle(el);
@@ -26,10 +32,13 @@ function scrollerOf(node: Element | null): Element | null {
 }
 
 /**
- * Whether the scroller that contains `node` follows its own output right now.
+ * Checks if the scroller that contains `node` follows its own output now.
  *
- * False for a scroller that no {@link useFollowOutput} watches, such as the
- * playground's.
+ * False for a scroller that no {@link useFollowOutput} watches, e.g., the
+ * scroller of the playground.
+ *
+ * @param node An element inside the scroller.
+ * @returns True while the scroller follows its output.
  */
 export function isFollowingOutput(node: Element | null): boolean {
   const scroller = scrollerOf(node);
@@ -46,8 +55,11 @@ export function isFollowingOutput(node: Element | null): boolean {
  * grows. The check caches the element while it stays in the document, because
  * it runs on every chunk.
  *
- * If the runtime renames the attribute, the check finds nothing and the hook
- * jumps to the bottom at once instead of letting the anchor scroll smoothly.
+ * If the runtime renames the attribute, the check finds nothing, and the hook
+ * jumps to the bottom at once.
+ *
+ * @param el The thread viewport.
+ * @returns The check, which returns true while the reserve has height.
  */
 function reserveOf(el: Element): () => boolean {
   let reserve: HTMLElement | null = null;
@@ -65,8 +77,7 @@ function reserveOf(el: Element): () => boolean {
  * runs out, and records the follow state for {@link isFollowingOutput}.
  *
  * During a turn, the runtime's anchor holds the prompt at the top of the
- * viewport but does not follow the output. Without this hook, output past
- * the first screen would stay below the fold until the turn ends.
+ * viewport, but the anchor does not follow the output.
  *
  * @returns The ref to put on the scroller.
  */
@@ -79,7 +90,7 @@ export function useFollowOutput(): React.RefObject<HTMLDivElement | null> {
 
     state.set(el, followStart());
 
-    /** How much of the thread is below the fold. */
+    /** The height of the thread below the fold, in pixels. */
     const behind = (): number => el.scrollHeight - el.clientHeight - el.scrollTop;
     const reserving = reserveOf(el);
     const now = (): number => performance.now();
@@ -106,9 +117,9 @@ export function useFollowOutput(): React.RefObject<HTMLDivElement | null> {
 
     el.addEventListener('scroll', onScroll);
     /**
-     * The gestures that scroll by hand. Keys are left out, because the
-     * composer sits inside the viewport and every key typed into it arrives
-     * here too.
+     * The gestures of a reader who scrolls. The list has no keys, because the
+     * composer is inside the viewport and every key typed into it also arrives
+     * here.
      */
     const gestures = ['wheel', 'touchmove', 'pointerdown'] as const;
     for (const kind of gestures) el.addEventListener(kind, touched, { passive: true });

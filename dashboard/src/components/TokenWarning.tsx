@@ -6,9 +6,9 @@ import { useBoxes } from '../stores/boxes.ts';
 /**
  * Warning with one line per harness that cannot run a turn.
  *
- * Without a credential only the agent turn fails, at the first prompt, so the
- * warning says so up front. It renders nothing while every harness can run,
- * and before the first health probe answers.
+ * Without a credential, the thread fails at the first prompt. The warning
+ * shows the problem before that. It renders nothing while every harness can
+ * run, and before the first health probe answers.
  *
  * @param className Layout classes from the caller.
  */
@@ -33,7 +33,7 @@ export function TokenWarning({ className }: { className?: string }) {
 }
 
 /**
- * Explains why a harness cannot run, in the terms the settings page uses.
+ * Returns the reason a harness cannot run, in the terms the settings page uses.
  *
  * @param harness The harness.
  * @returns One sentence.

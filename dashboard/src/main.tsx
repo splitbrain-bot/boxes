@@ -1,3 +1,10 @@
+/**
+ * The entry point of the dashboard.
+ *
+ * Every view is a chunk of its own, loaded on first use, so opening a thread
+ * downloads only the thread view.
+ */
+
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
@@ -5,12 +12,7 @@ import { Loading } from './components/Loading.tsx';
 import { installWorker, refreshPush } from './stores/push.ts';
 import './globals.css';
 
-/**
- * The agent-set editor view.
- *
- * Every view is a chunk of its own, loaded on first use, so opening a thread
- * downloads only the thread view.
- */
+/** The agent-set editor view. Loaded on first use. */
 const AgentSetEditor = lazy(async () => ({
   default: (await import('./views/AgentSetEditor.tsx')).AgentSetEditor,
 }));
@@ -59,18 +61,18 @@ const Shell = lazy(async () => ({
 function App() {
   return (
     <BrowserRouter>
-      {/* Shown while a view's chunk loads. The review and the terminal have
-          their own, which say what they load. */}
+      {/* Shows while the chunk of a view loads. The review and the terminal
+          have their own fallbacks, which name what loads. */}
       <Suspense fallback={<Loading className="flex h-dvh items-center justify-center" />}>
         <Routes>
           {/* The thread, the review and the terminal fill the viewport. Every
               other route sits in the reading column. A box has no page of its
-              own: it is a card in the list. The URL names the thread, so two
+              own, because it is a card in the list. The URL names the thread, so two
               tabs can show two threads of one box. */}
           <Route path="/boxes/:id" element={<Navigate to="/" replace />} />
           <Route path="/boxes/:id/threads/:threadId" element={<BoxThread />} />
-          {/* The open file is in the search string, so a file has a link and
-              the back button works. */}
+          {/* The search string holds the open file, so each file has a link
+              and the back button works. */}
           <Route
             path="/boxes/:id/review"
             element={
@@ -85,8 +87,8 @@ function App() {
               </Suspense>
             }
           />
-          {/* Names no thread: every terminal on a box attaches to the same
-              shell. */}
+          {/* The path names no thread, because all terminals of a box attach
+              to the same shell. */}
           <Route
             path="/boxes/:id/terminal"
             element={
@@ -101,8 +103,8 @@ function App() {
               </Suspense>
             }
           />
-          {/* The installed components over a canned store, for reviewing a
-              registry upgrade. */}
+          {/* Shows the installed components with canned messages, to check a
+              component upgrade from the registry. */}
           <Route path="/playground" element={<Playground />} />
           <Route element={<Shell />}>
             <Route path="/" element={<BoxList />} />
@@ -119,6 +121,7 @@ function App() {
   );
 }
 
+/** The element that the dashboard renders into. */
 const root = document.getElementById('app');
 if (root) {
   createRoot(root).render(

@@ -8,11 +8,17 @@ import { loadConfig } from '../config.ts';
 import * as dk from '../docker.ts';
 import { DockerRuntime } from './docker.ts';
 
-/** The daemon this suite pretends to talk to: networks by name, with their subnets. */
+/** The networks of the fake daemon, as subnet by network name. */
 let networks: Map<string, string>;
+/** The temporary data directory of the current test. */
 let dir: string;
 
-/** An error shaped like the daemon's 404 for a missing object. */
+/**
+ * Makes an error shaped like the 404 of the daemon for a missing object.
+ *
+ * @param what The kind of the object, for the message.
+ * @returns The error.
+ */
 function notFound(what: string): Error {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
@@ -27,8 +33,8 @@ beforeEach(() => {
         Labels: { [dk.LABEL]: name.slice('bn-'.length) },
         IPAM: { Config: [{ Subnet: subnet }] },
       })),
-    // The listing comes back before the network exists, as it does when two
-    // creates run at once.
+    // The delay lets a second listing run before the network exists, as when
+    // two creates run at once.
     createNetwork: async (opts: { Name: string; IPAM: { Config: Array<{ Subnet: string }> } }) => {
       await new Promise((resolve) => setTimeout(resolve, 5));
       networks.set(opts.Name, opts.IPAM.Config[0]!.Subnet);
@@ -60,7 +66,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** A runtime over the fake daemon, with a small pool. */
+/**
+ * Makes a runtime over the fake daemon, with a pool of four subnets.
+ *
+ * @returns The runtime.
+ */
 function dockerRuntime(): DockerRuntime {
   return new DockerRuntime(loadConfig({ DATA_DIR: dir, BOX_SUBNET_POOL: '10.9.0.0/22' }));
 }

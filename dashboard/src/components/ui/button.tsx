@@ -4,6 +4,7 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/** The class names of a button for each variant and size. */
 const buttonVariants = cva(
   "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
@@ -36,6 +37,15 @@ const buttonVariants = cva(
   },
 );
 
+/**
+ * A button in the style of the dashboard.
+ *
+ * @param className Extra classes.
+ * @param variant The look of the button.
+ * @param size The size of the button.
+ * @param asChild True to render the child element with the button props in place of a button.
+ * @param props The other button props.
+ */
 function Button({
   className,
   variant = 'default',
@@ -44,6 +54,7 @@ function Button({
   ...props
 }: React.ComponentProps<'button'> &
   VariantProps<typeof buttonVariants> & {
+    /** True to render the child element with the button props in place of a button. */
     asChild?: boolean;
   }) {
   const Comp = asChild ? Slot.Root : 'button';

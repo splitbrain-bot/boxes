@@ -7,6 +7,10 @@
  *
  * The caller makes the first tick, because a view usually loads its data on
  * mount, and a tick here would race with that load.
+ *
+ * @param tick The function to run.
+ * @param everyMs The interval in milliseconds.
+ * @returns The teardown, which stops the timer and the listener.
  */
 export function pollWhileVisible(tick: () => void, everyMs: number): () => void {
   let timer: number | null = null;
@@ -40,9 +44,12 @@ export function pollWhileVisible(tick: () => void, everyMs: number): () => void 
  * Runs `tick` every time the tab becomes visible again, and returns the
  * teardown.
  *
- * For a view that only needs fresh data when the reader comes back to it. On
- * a phone, that is mostly a return from another app. The caller makes the
- * first tick, because a view loads its data on mount.
+ * Use it for a view that needs fresh data only when the reader comes back to
+ * it. On a phone, the reader comes back mostly from another app. The caller
+ * makes the first tick, because a view loads its data on mount.
+ *
+ * @param tick The function to run.
+ * @returns The teardown, which removes the listener.
  */
 export function refetchOnVisible(tick: () => void): () => void {
   const onVisibility = (): void => {

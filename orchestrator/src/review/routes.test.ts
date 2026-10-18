@@ -29,20 +29,24 @@ import { setFileServiceSpawnerForTests } from '../files.ts';
 import { inProcessFileService } from '../files-in-process.ts';
 import { type GitRunner, type GitTarget, setGitRunnerForTests } from './git.ts';
 
-/** Invocations addressed at anything but a box's own workspace. */
+/** The git targets outside the workspace of their box. */
 let misaddressed: GitTarget[] = [];
 
-/** How many times git has been run, for the paths that must not run it. */
+/** The number of git runs, for the paths that must not run git. */
 let invocations = 0;
 
 /**
- * A runner that starts git here, in the host directory that the container
- * path names.
+ * A runner that starts git on this machine, in the host directory for the
+ * container path of the target.
  *
- * The workspace is at `/workspace` inside a box, and the target names the
- * box, so the two together say which directory on this
- * machine an invocation means. One addressed anywhere else is recorded and
- * refused rather than run.
+ * The workspace is at `/workspace` in a box, and the target names the box. The
+ * runner records and refuses a target outside `/workspace`, or for a box
+ * without a workspace.
+ *
+ * @param target The box and the container path to run git in.
+ * @param argv The command line.
+ * @param env The variables added to the environment.
+ * @returns The result of git, or a failed result for a refused target.
  */
 const localGit: GitRunner = async (target, argv, env) => {
   invocations++;
@@ -70,16 +74,29 @@ const localGit: GitRunner = async (target, argv, env) => {
   }
 };
 
+/** The data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
+/** The orchestrator of the current test. */
 let orchestrator: Orchestrator;
 
-/** The workspace directory the routes will read, for box `id`. */
+/**
+ * Gives the host directory of the workspace of a box, which the routes read.
+ *
+ * @param id The box id.
+ * @returns The workspace directory.
+ */
 function workspace(id: string): string {
   return join(dir, 'workspaces', id);
 }
 
-/** A box row and its workspace directory, which is all the review routes need. */
+/**
+ * Inserts a box row and creates its workspace directory.
+ *
+ * @param id The box id.
+ * @returns The workspace directory.
+ */
 function insertBox(id: string): string {
   const now = Date.now();
   db.prepare(
@@ -91,19 +108,35 @@ function insertBox(id: string): string {
   return path;
 }
 
-/** Runs git in a directory with the ambient binary. */
+/**
+ * Runs the git binary of this machine in a directory.
+ *
+ * @param cwd The directory.
+ * @param args The arguments of git.
+ * @returns The standard output.
+ */
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, stdio: 'pipe', encoding: 'utf8' });
 }
 
-/** Initialises a repository on `main` and sets its commit identity. */
+/**
+ * Initialises a repository on `main` and sets its commit identity.
+ *
+ * @param root The directory of the repository.
+ */
 function initRepo(root: string): void {
   git(root, 'init', '-q', '-b', 'main');
   git(root, 'config', 'user.email', 'test@example.com');
   git(root, 'config', 'user.name', 'test');
 }
 
-/** Writes a file, creating the directories above it. */
+/**
+ * Writes a file, creating the directories above it.
+ *
+ * @param root The directory that the path is relative to.
+ * @param rel The relative path of the file.
+ * @param content The content of the file.
+ */
 function write(root: string, rel: string, content: string): void {
   const full = join(root, rel);
   mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
@@ -112,8 +145,7 @@ function write(root: string, rel: string, content: string): void {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-review-'));
-  // A fresh config per test rather than the process-wide one: every test gets
-  // its own DATA_DIR, and the cached config would keep the first test's.
+  // Each test loads its own config, because each test has its own DATA_DIR.
   const cfg = loadConfig({ ...process.env, DATA_DIR: dir });
   setConfigForTests(cfg);
   db = openDb(dir);
@@ -144,23 +176,29 @@ afterEach(async () => {
   vi.restoreAllMocks();
   setConfigForTests(null as never);
   rmSync(dir, { recursive: true, force: true });
-  // Every git invocation of the test went to its box's own workspace.
+  // Every git invocation of the test went to the workspace of its own box.
   assert.deepEqual(misaddressed, []);
 });
 
-/** GET, parsed. */
+/**
+ * Sends a GET request and parses the JSON response.
+ *
+ * @param url The URL of the request.
+ * @returns The status code and the parsed body.
+ */
 async function get<T>(url: string): Promise<{ status: number; body: T }> {
   const res = await orchestrator.app.inject({ url });
   return { status: res.statusCode, body: res.json() as T };
 }
 
-// --- the directory listing --------------------------------------------------
-
 /**
- * One directory of a review, at the workspace root unless a path is given.
+ * Requests one directory of a review.
  *
- * `fresh` is what the browser sends on arrival: it takes a new git snapshot of
- * the workspace. Tests that watch a change across two requests need it.
+ * @param id The box id.
+ * @param path The workspace-relative path of the directory, or '' for the workspace root.
+ * @param fresh True to send `fresh`, so the service takes a new git snapshot of the workspace. Tests that
+ *   watch a change across two requests need it.
+ * @returns The status code and the directory response.
  */
 async function openDir(
   id: string,
@@ -171,12 +209,23 @@ async function openDir(
   return get<ReviewDirResponse>(`/api/boxes/${id}/review/dir?${query}`);
 }
 
-/** The entries of a directory, as `d:name` or `f:name`, in the order they came. */
+/**
+ * Names the entries of a directory response.
+ *
+ * @param body The directory response.
+ * @returns Each entry as `d:name` for a folder or `f:name` for a file, in the order of the response.
+ */
 function named(body: ReviewDirResponse): string[] {
   return body.entries.map((entry) => `${entry.isDir ? 'd' : 'f'}:${entry.name}`);
 }
 
-/** One entry of a directory, by name. */
+/**
+ * Finds one entry of a directory response by name.
+ *
+ * @param body The directory response.
+ * @param name The name of the entry.
+ * @returns The entry, or undefined when there is none.
+ */
 function entry(body: ReviewDirResponse, name: string): ReviewDirEntry | undefined {
   return body.entries.find((e) => e.name === name);
 }
@@ -234,7 +283,6 @@ describe('the directory endpoint', () => {
     const { body } = await openDir('ccc');
     assert.equal(body.hasGit, false);
     assert.deepEqual(body.repos, []);
-    // Everything but the git features still works.
     assert.deepEqual(named(body), ['d:notes']);
     assert.equal(entry(body, 'notes')!.changed, undefined);
     assert.deepEqual(named((await openDir('ccc', 'notes')).body), ['f:todo.txt']);
@@ -342,8 +390,8 @@ describe('the directory endpoint', () => {
     write(repo, 'a.txt', 'x\n');
 
     await openDir('eee');
-    // There is no root to remember: /workspace is the root, and which
-    // repository a path belongs to is derived from the path.
+    // /workspace is the root, and the service gets the repository of a path
+    // from the path.
     const columns = (db.prepare('PRAGMA table_info(boxes)').all() as { name: string }[]).map(
       (c) => c.name,
     );
@@ -353,8 +401,8 @@ describe('the directory endpoint', () => {
 
   test('a repository that appears later is picked up by the next arrival', async () => {
     const ws = insertBox('ggg');
-    // What a curious user does: open the review on a fresh box, before the
-    // agent has fetched anything.
+    // A user opens the review on a new box, before the agent has fetched
+    // anything.
     const empty = await openDir('ggg');
     assert.equal(empty.body.hasGit, false);
     assert.deepEqual(empty.body.entries, []);
@@ -366,8 +414,7 @@ describe('the directory endpoint', () => {
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'init');
 
-    // Opening a folder reuses the held git snapshot. An arrival takes a new
-    // one.
+    // Opening a folder reuses the held git snapshot. A request with `fresh` takes a new one.
     assert.equal((await openDir('ggg', '', false)).body.hasGit, false);
     const { body } = await openDir('ggg');
     assert.equal(body.hasGit, true);
@@ -385,9 +432,8 @@ describe('the directory endpoint', () => {
     git(ws, 'commit', '-q', '-m', 'init');
     await openDir('cch');
 
-    // Git is a `docker exec` into the box container, so a status per
-    // folder tap would be an exec per tap. The whole workspace is asked once
-    // and a folder is a slice of the answer.
+    // Each git call is an exec into the box container. The service asks git
+    // once for the whole workspace, and each folder uses a part of the answer.
     const before = invocations;
     const { body } = await openDir('cch', 'src', false);
     assert.deepEqual(named(body), ['f:a.txt']);
@@ -433,9 +479,9 @@ describe('the directory endpoint', () => {
     });
 
     const { body } = await openDir('out');
-    // It is a real untracked file of this repository, since the workspace is
-    // one — but the listing leaves it out, because it is the review rather
-    // than a file of it.
+    // REVIEW.md is an untracked file of the repository, because the workspace
+    // is the repository. The listing leaves it out, because it is the review
+    // and not a file under review.
     assert.equal(body.hasReview, true);
     assert.deepEqual(named(body), ['f:code.ts']);
   });
@@ -524,10 +570,13 @@ describe('the directory endpoint', () => {
   });
 });
 
-// --- the file ---------------------------------------------------------------
-
 describe('the file endpoint', () => {
-  /** A box with a repository at the workspace root and one commit. */
+  /**
+   * Creates a box with a repository at the workspace root and one commit.
+   *
+   * @param id The box id.
+   * @returns The workspace directory.
+   */
   function repoBox(id: string): string {
     const ws = insertBox(id);
     initRepo(ws);
@@ -545,7 +594,7 @@ describe('the file endpoint', () => {
       '/api/boxes/aaa/review/file?path=code.ts',
     );
     assert.equal(status, 200);
-    // Plain text: the browser does the highlighting.
+    // The content is plain text, and the browser adds the highlighting.
     assert.equal(body.content, 'one\ntwo\nthree\nfour\nfive\nsix\n');
     assert.equal(body.lines, 6);
     assert.equal(body.language, 'typescript');
@@ -556,7 +605,7 @@ describe('the file endpoint', () => {
 
   test('diff markers come with the file, in one response', async () => {
     const ws = repoBox('bbb');
-    // two -> TWO, four and five removed, seven appended.
+    // Line two changes to TWO, lines four and five are removed, and seven is appended.
     write(ws, 'code.ts', 'one\nTWO\nthree\nsix\nseven\n');
 
     const { body } = await get<ReviewFileResponse>('/api/boxes/bbb/review/file?path=code.ts');
@@ -573,7 +622,7 @@ describe('the file endpoint', () => {
     const { status, body } = await get<ReviewFileResponse>(
       '/api/boxes/ccc/review/file?path=binary.dat',
     );
-    // The tree legitimately lists files the viewer cannot show.
+    // The tree lists files that the viewer cannot show.
     assert.equal(status, 200);
     assert.equal(body.binary, true);
     assert.equal(body.content, '');
@@ -653,10 +702,14 @@ describe('the file endpoint', () => {
   });
 });
 
-// --- a file's bytes ---------------------------------------------------------
-
 describe('the raw endpoint', () => {
-  /** GET one file's bytes. */
+  /**
+   * Sends a GET request for the bytes of one file.
+   *
+   * @param id The box id.
+   * @param path The workspace-relative path of the file.
+   * @returns The response.
+   */
   function raw(id: string, path: string) {
     return orchestrator.app.inject({
       url: `/api/boxes/${id}/review/raw?path=${encodeURIComponent(path)}`,
@@ -676,8 +729,8 @@ describe('the raw endpoint', () => {
     assert.equal(image.headers['x-content-type-options'], 'nosniff');
     assert.deepEqual(image.rawPayload, Buffer.from([0x89, 0x50, 0x00, 0x47]));
 
-    // Not something a browser shows, but a download that says what it is can
-    // be handed to an app that does.
+    // A browser does not show the file, but a download with a type can open in
+    // a matching app.
     const document = await raw('raw', 'report.docx');
     assert.equal(
       document.headers['content-type'],
@@ -727,10 +780,13 @@ describe('the raw endpoint', () => {
   });
 });
 
-// --- saving an edited file --------------------------------------------------
-
 describe('saving a file', () => {
-  /** A box with a repository, one committed file and one binary. */
+  /**
+   * Creates a box with a repository, one committed text file and one committed binary file.
+   *
+   * @param id The box id.
+   * @returns The workspace directory.
+   */
   function editable(id: string): string {
     const ws = insertBox(id);
     initRepo(ws);
@@ -741,7 +797,13 @@ describe('saving a file', () => {
     return ws;
   }
 
-  /** PUT a file's new content. */
+  /**
+   * Sends a PUT request with the new content of a file.
+   *
+   * @param id The box id.
+   * @param payload The body of the request.
+   * @returns The status code and the file response.
+   */
   async function save(
     id: string,
     payload: Record<string, unknown>,
@@ -754,7 +816,13 @@ describe('saving a file', () => {
     return { status: res.statusCode, body: res.json() as ReviewFileResponse };
   }
 
-  /** The hash the browser would be holding, from the file endpoint itself. */
+  /**
+   * Reads the hash of a file from the file endpoint, as the browser holds it.
+   *
+   * @param id The box id.
+   * @param path The workspace-relative path of the file.
+   * @returns The hash.
+   */
   async function hashOf(id: string, path: string): Promise<string> {
     const { body } = await get<ReviewFileResponse>(
       `/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`,
@@ -773,12 +841,11 @@ describe('saving a file', () => {
     });
     assert.equal(status, 200);
     assert.equal(readFileSync(join(ws, 'code.ts'), 'utf8'), 'one\nTWO\nthree\n');
-    // One round trip repaints the pane: the content, and the diff the edit
-    // just created.
+    // One response holds the content and the diff of the edit.
     assert.equal(body.content, 'one\nTWO\nthree\n');
     assert.equal(body.status, 'modified');
     assert.equal(body.diff.lines['2'], 'modified');
-    // And the hash to save against next time, which the edit moved.
+    // The response also holds the new hash for the next save.
     assert.notEqual(body.hash, hash);
     assert.equal(body.hash.length, 32);
   });
@@ -786,7 +853,7 @@ describe('saving a file', () => {
   test('a hash the file has moved past is refused, and nothing is written', async () => {
     const ws = editable('bbb');
     const hash = await hashOf('bbb', 'code.ts');
-    // The agent, working in the box while the reviewer types.
+    // The agent changes the file while the reviewer types.
     write(ws, 'code.ts', 'one\ntwo\nthree\nfour\n');
 
     const { status } = await save('bbb', { path: 'code.ts', content: 'mine\n', hash });
@@ -801,8 +868,8 @@ describe('saving a file', () => {
     const refused = await save('ccc', { path: 'code.ts', content: 'mine\n', hash: stale });
     assert.equal(refused.status, 412);
 
-    // Which is the reviewer overruling the refusal: they still hold their
-    // version, and the view offers to save it anyway.
+    // The reviewer overrules the refusal. The browser still holds the version of
+    // the reviewer and offers to save it.
     const fresh = await hashOf('ccc', 'code.ts');
     const { status } = await save('ccc', { path: 'code.ts', content: 'mine\n', hash: fresh });
     assert.equal(status, 200);
@@ -823,8 +890,7 @@ describe('saving a file', () => {
       content: 'zero\none\ntwo\nthree\n',
       hash,
     });
-    // Drift is what makes editing safe to do under the comments: the comment
-    // moved with its line rather than being left pointing at the wrong one.
+    // The drift check moves the comment with its line.
     assert.deepEqual(body.annotations, [{ line: 4, comment: 'this one', outdated: false }]);
   });
 
@@ -833,7 +899,7 @@ describe('saving a file', () => {
     rmSync(join(ws, 'code.ts'));
     write(ws, 'REVIEW.md', '# Code Review\n');
 
-    // Binary, deleted, and never offered in the first place.
+    // The files are binary, deleted, and not offered.
     assert.equal((await save('eee', { path: 'binary.dat', content: 'x', hash: '' })).status, 409);
     assert.equal((await save('eee', { path: 'code.ts', content: 'x', hash: '' })).status, 409);
     assert.equal((await save('eee', { path: 'REVIEW.md', content: 'x', hash: '' })).status, 404);
@@ -873,10 +939,13 @@ describe('saving a file', () => {
   });
 });
 
-// --- annotations ------------------------------------------------------------
-
 describe('annotations', () => {
-  /** A box with a repository and one file to comment on. */
+  /**
+   * Creates a box with a repository and one committed file to comment on.
+   *
+   * @param id The box id.
+   * @returns The workspace directory.
+   */
   function commentable(id: string): string {
     const ws = insertBox(id);
     initRepo(ws);
@@ -886,7 +955,13 @@ describe('annotations', () => {
     return ws;
   }
 
-  /** PUT one annotation. */
+  /**
+   * Sends a PUT request for one annotation.
+   *
+   * @param id The box id.
+   * @param payload The body of the request.
+   * @returns The status code and the annotations response.
+   */
   async function put(
     id: string,
     payload: Record<string, unknown>,
@@ -916,7 +991,7 @@ describe('annotations', () => {
     assert.match(written, /## `code\.ts`/);
     assert.match(written, /#### Line 3/);
     assert.match(written, /this needs a name/);
-    // With the context that lets the comment be followed when the code moves.
+    // REVIEW.md also holds the context, so the drift check can follow the comment when the code moves.
     assert.match(written, /```typescript context\n/);
   });
 
@@ -964,7 +1039,7 @@ describe('annotations', () => {
       url: '/api/boxes/ddd/review/annotations?path=code.ts&line=4',
     });
     const written = readFileSync(join(ws, 'REVIEW.md'), 'utf8');
-    // The document stays valid with nothing in it.
+    // REVIEW.md stays, without the section of the file.
     assert.ok(!written.includes('code.ts'));
     const listing = await openDir('ddd');
     assert.equal(listing.body.commentCount, 0);
@@ -979,16 +1054,15 @@ describe('annotations', () => {
     });
     assert.equal(res.statusCode, 200);
     assert.deepEqual((res.json() as ReviewAnnotationsResponse).annotations, []);
-    // Nothing was changed, so nothing is written: a review the reviewer never
-    // started must not appear because of a delete that applied to nothing.
+    // Nothing changed, so the service writes no file.
     assert.equal(existsSync(join(ws, 'REVIEW.md')), false);
     assert.equal((await openDir('lll')).body.hasReview, false);
   });
 
   test('a comment the agent wrote by hand is read, not overwritten', async () => {
     const ws = commentable('eee');
-    // REVIEW.md is shared: the agent can edit it, and the next mutation has to
-    // build on what it wrote rather than on a stale parse.
+    // The agent can edit REVIEW.md, and the next mutation must start from the
+    // version of the agent.
     writeFileSync(
       join(ws, 'REVIEW.md'),
       '# Code Review\n\n_Started: 2020-01-01_\n\n---\n\n## `code.ts`\n\n' +
@@ -999,7 +1073,7 @@ describe('annotations', () => {
       { line: 1, comment: 'written by the agent', outdated: false },
       { line: 6, comment: 'written by the API', outdated: false },
     ]);
-    // And the review's own start date is kept, not reset to today.
+    // The start date of the review stays, and does not change to today.
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /_Started: 2020-01-01_/);
   });
 
@@ -1030,8 +1104,7 @@ describe('annotations', () => {
     await put('hhh', { path: 'code.ts', line: 3, comment: 'about three' });
     rmSync(join(ws, 'code.ts'));
 
-    // Opening a folder runs no drift check. An arrival checks every annotated
-    // file.
+    // Opening a folder runs no drift check. A request with `fresh` checks every annotated file.
     await openDir('hhh', '', false);
     assert.ok(!readFileSync(join(ws, 'REVIEW.md'), 'utf8').includes('(outdated)'));
 
@@ -1046,8 +1119,8 @@ describe('annotations', () => {
     await put('drf', { path: 'other.ts', line: 1, comment: 'about a' });
     write(ws, 'code.ts', 'completely\ndifferent\ncontent\n');
 
-    // The second file is the one being written; the first is the one that
-    // moved under it, and nothing else looks at it any more.
+    // The request writes a comment on the second file. The first file changed,
+    // and no other request reads it.
     const { body } = await put('drf', { path: 'other.ts', line: 2, comment: 'about b' });
     assert.deepEqual(
       body.annotations.map((a) => a.outdated),
@@ -1059,8 +1132,8 @@ describe('annotations', () => {
   test('a comment on a file that became binary is kept as it stands', async () => {
     const ws = commentable('mmm');
     await put('mmm', { path: 'code.ts', line: 3, comment: 'about three' });
-    // There is nothing readable to compare the comment against, which is not
-    // the same as the code it was about being gone.
+    // A binary file has no lines to compare, so its comment does not become
+    // outdated.
     writeFileSync(join(ws, 'code.ts'), Buffer.from([0x41, 0x00, 0x42]));
 
     await openDir('mmm');
@@ -1068,8 +1141,8 @@ describe('annotations', () => {
 
     const { body } = await get<ReviewFileResponse>('/api/boxes/mmm/review/file?path=code.ts');
     assert.equal(body.binary, true);
-    // The listing counts the comment, so the file view shows it: it is where
-    // the reviewer reads and deletes it.
+    // The listing counts the comment, so the file view shows it too. The
+    // reviewer reads and deletes it there.
     assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: false }]);
   });
 
@@ -1119,8 +1192,8 @@ describe('annotations', () => {
       url: '/api/boxes/rip/review/annotations',
       payload: { path: 'gone.txt', line: 1, comment: 'x' },
     });
-    // The file is in the tree, so this is not a 404 — there is simply no line
-    // to attach a comment to.
+    // The file is in the tree, so the response is not a 404. The file has no
+    // line for a comment.
     assert.equal(res.statusCode, 409);
   });
 
@@ -1139,8 +1212,8 @@ describe('annotations', () => {
 
   test('concurrent comments all survive', async () => {
     commentable('kkk');
-    // Every write re-serializes the whole parsed file under the box's
-    // lock, so a burst cannot lose one.
+    // Every write serializes the whole parsed file again under the lock of the box,
+    // so a burst cannot lose a comment.
     await Promise.all(
       [1, 2, 3, 4, 5, 6].map((line) => put('kkk', { path: 'code.ts', line, comment: `c${line}` })),
     );
@@ -1151,8 +1224,6 @@ describe('annotations', () => {
     );
   });
 });
-
-// --- new review -------------------------------------------------------------
 
 describe('deleting the review', () => {
   test('REVIEW.md is removed, and the counts go with it', async () => {
@@ -1189,15 +1260,19 @@ describe('deleting the review', () => {
   });
 });
 
-// --- the base revision ------------------------------------------------------
-
 describe('the base revision', () => {
-  /** A repository with a main commit and a feature branch on top of it. */
+  /**
+   * Creates a repository with a main commit and a feature branch on top of it.
+   *
+   * @param ws The workspace directory.
+   * @param at The workspace-relative path of the repository, or '' for the workspace.
+   * @returns The directory of the repository.
+   */
   function branchRepo(ws: string, at = ''): string {
     const repo = at === '' ? ws : join(ws, at);
     mkdirSync(repo, { recursive: true });
     initRepo(repo);
-    // Repository-specific content, so two built the same way in the same
+    // Repository-specific content, so two repositories built the same way in the same
     // second do not end up with the same commit ids.
     write(repo, 'base.txt', `${at}\n`);
     git(repo, 'add', '.');
@@ -1209,12 +1284,23 @@ describe('the base revision', () => {
     return repo;
   }
 
-  /** A box whose workspace is itself such a repository. */
+  /**
+   * Creates a box whose workspace is itself a repository with a main commit and a feature branch.
+   *
+   * @param id The box id.
+   * @returns The workspace directory.
+   */
   function branched(id: string): string {
     return branchRepo(insertBox(id));
   }
 
-  /** PUT the base. */
+  /**
+   * Sends a PUT request that sets the base.
+   *
+   * @param id The box id.
+   * @param rev The revision expression, or null to clear the base.
+   * @returns The status code and the base response.
+   */
   async function setBase(
     id: string,
     rev: string | null,
@@ -1234,8 +1320,8 @@ describe('the base revision', () => {
     assert.equal(body.rev, 'main');
     assert.equal(body.repos[0]!.baseCommit, git(ws, 'merge-base', 'main', 'HEAD').trim());
 
-    // Only the expression is stored: what it resolves to is a different commit
-    // in every repository, so it is derived rather than kept.
+    // The database stores only the expression, because it resolves to a
+    // different commit in each repository.
     const row = db.prepare('SELECT review_base_rev FROM boxes WHERE id = ?').get('aaa') as {
       review_base_rev: string;
     };
@@ -1244,7 +1330,7 @@ describe('the base revision', () => {
 
   test('with a base set, the branch own changes are what is reported', async () => {
     const ws = branched('bbb');
-    // A commit on main after branching off must not become this branch's.
+    // A commit on main after the branch point must not show as a change of this branch.
     git(ws, 'checkout', '-q', 'main');
     write(ws, 'theirs.txt', 'not mine\n');
     git(ws, 'add', '.');
@@ -1302,7 +1388,7 @@ describe('the base revision', () => {
     const { body } = await setBase('two', 'main');
     assert.equal(body.repos.length, 2);
     assert.ok(body.repos.every((r) => r.baseCommit !== ''));
-    // Resolved separately, so they are different commits.
+    // Each repository resolves `main` to its own commit.
     assert.notEqual(body.repos[0]!.baseCommit, body.repos[1]!.baseCommit);
 
     assert.equal(entry((await openDir('two', 'repo-a')).body, 'mine.txt')!.status, 'added');
@@ -1320,8 +1406,6 @@ describe('the base revision', () => {
     git(other, 'commit', '-q', '-m', 'init');
     write(other, 'b.txt', 'changed\n');
 
-    // Resolved in one, unknown in the other. A 400 would refuse an ordinary
-    // shape, so the other is compared against its own HEAD.
     const { status, body } = await setBase('mix', 'release');
     assert.equal(status, 200);
     assert.deepEqual(
@@ -1334,8 +1418,8 @@ describe('the base revision', () => {
 
     const listing = await openDir('mix', 'repo-b');
     assert.equal(entry(listing.body, 'b.txt')!.status, 'modified');
-    // And every directory reports the same resolution, so the header can say
-    // where the revision landed.
+    // Every directory response reports the base of each repository, so the header can show
+    // where the revision resolved.
     assert.deepEqual(
       listing.body.repos.map((r) => r.baseCommit !== ''),
       [true, false],
@@ -1354,13 +1438,11 @@ describe('the base revision', () => {
   });
 });
 
-// --- freshness --------------------------------------------------------------
-
 describe('freshness is the fetch', () => {
   test('there is no fingerprint endpoint to poll', async () => {
     const ws = insertBox('aaa');
     write(ws, 'a.txt', 'x\n');
-    // Every fetch reads the filesystem on the spot, so no poll is needed.
+    // Each request reads the files again, so the browser does not need to poll.
     const res = await orchestrator.app.inject({ url: '/api/boxes/aaa/review/status' });
     assert.equal(res.statusCode, 404);
   });
@@ -1401,9 +1483,8 @@ describe('freshness is the fetch', () => {
     await openDir('bbb');
     await get<ReviewFileResponse>('/api/boxes/bbb/review/file?path=a.txt');
 
-    // A review asks git about the workspace, and git runs in the box's own
-    // container, so reading one is use of the box. The reaper stopping it under
-    // the reader would take the next request's answer with it.
+    // Git runs in the box container, so a review request counts as use of the
+    // box. The reaper must not stop the box while the reviewer reads.
     const row = db.prepare('SELECT last_active_at FROM boxes WHERE id = ?').get('bbb') as {
       last_active_at: number;
     };

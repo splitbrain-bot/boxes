@@ -1,3 +1,10 @@
+/**
+ * Agent sets for the agent in a box. A set holds an AGENTS.md and skills.
+ *
+ * The database stores the sets. A set can also take skills from git
+ * repositories, which the orchestrator pulls into checkouts under DATA_DIR.
+ */
+
 import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,42 +36,38 @@ import {
 } from './skill-repos.ts';
 
 /**
- * Agent sets: the AGENTS.md and skills a box's agent is configured with. The
- * database holds them, and the files a box gets are derived from it. A set
- * can also take skills from git repositories, which are pulled into
- * checkouts under DATA_DIR.
- */
-
-/**
- * A name that is safe as a single path component and is what the agent will
- * call the skill: its directory, and the word after the slash.
+ * The pattern of a skill name. A name is safe as one path component. The
+ * agent uses the name as the skill directory and as the word after the slash.
  */
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-/** Longest a set's display name may be. */
+/** The maximum length of the display name of a set. */
 const MAX_SET_NAME = 100;
 
-/** Longest an AGENTS.md or one skill's content may be. */
+/** The maximum length of an AGENTS.md or of the content of one skill. */
 const MAX_CONTENT = 100_000;
 
-/** Most skills a single set may hold, and most a repository may give. */
+/** The maximum number of skills in one set, and in one repository. */
 const MAX_ITEMS = 100;
 
-/** Most repositories a single set may take skills from. */
+/** The maximum number of repositories in one set. */
 const MAX_REPOS = 20;
 
-/** Longest a repository URL may be. */
+/** The maximum length of a repository URL. */
 const MAX_URL = 500;
 
-/** A branch, tag or full commit hash, which cannot be read as a git option. */
+/**
+ * The pattern of a branch, a tag or a full commit hash. The first character
+ * cannot be a dash, so git cannot read the ref as an option.
+ */
 const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
-/** How old the last pull of a repository may be before it is pulled again. */
+/** The maximum age of the last pull of a repository before the next pull. */
 const PULL_EVERY_MS = 24 * 60 * 60_000;
 
 /**
- * One skill of a merged set: written from its stored SKILL.md, or copied
- * from a repository's checkout.
+ * One skill of a merged set, with its stored SKILL.md or with its directory in
+ * the checkout of a repository.
  */
 type BundleSkill =
   | { name: string; repo: null; content: string }
@@ -74,19 +77,24 @@ type BundleSkill =
 interface Bundle {
   /** The merged AGENTS.md. */
   agentsMd: string;
-  /** Every skill, by name. */
+  /** Every skill, sorted by name. */
   skills: BundleSkill[];
-  /** Names the selected set took over from the global one. */
+  /** The names of the skills in the selected set that replace a skill of the global set. */
   overrides: string[];
 }
 
 /**
- * Sets, their items, and the merged bundle a box is given.
+ * The store of agent sets, with their skills and repositories.
  *
- * Every mutation returns the whole set, so a client needs one round trip per
- * screen rather than one per field.
+ * Each change returns the whole set, so a client needs one request per screen.
  */
 export class AgentStore {
+  /**
+   * @param db The database that stores the sets.
+   * @param dataDir The DATA_DIR that holds the repository checkouts.
+   * @param fetcher The function that fetches a repository into its checkout.
+   * @param builtins The function that returns the built-in skills of the orchestrator.
+   */
   constructor(
     /** Where the sets are stored. */
     private readonly db: Db,
@@ -95,16 +103,18 @@ export class AgentStore {
     /** Fetches a repository into its checkout. */
     private readonly fetcher: RepoFetcher = (dir, url, ref, keep) =>
       fetchRepo(dir, url, ref, null, keep),
-    /** The skills of the orchestrator that a box gets now. */
+    /** Returns the built-in skills of the orchestrator. */
     private readonly builtins: () => BuiltinSkill[] = () => [],
   ) {}
 
   /** The pulls running now, by repository id. */
   private readonly pulls = new Map<string, Promise<void>>();
 
-  // --- reading --------------------------------------------------------------
-
-  /** Every set, the global one first and the rest by name. */
+  /**
+   * Lists every set.
+   *
+   * @returns The summaries of the sets, the global set first and the rest by name.
+   */
   listSets(): AgentSetSummary[] {
     const rows = this.db
       .prepare('SELECT * FROM agent_sets ORDER BY (id = ?) DESC, name COLLATE NOCASE ASC')
@@ -112,7 +122,13 @@ export class AgentStore {
     return rows.map((row) => this.summarize(row));
   }
 
-  /** One set with everything in it, or a 404. */
+  /**
+   * Gives one set with its AGENTS.md, skills and repositories.
+   *
+   * @param id The id of the set.
+   * @returns The set.
+   * @throws {HttpError} A 404 when the set does not exist.
+   */
   getSet(id: string): AgentSetDetail {
     const row = this.mustGet(id);
     return {
@@ -131,7 +147,13 @@ export class AgentStore {
     };
   }
 
-  /** The stored row for a set, or a 404. */
+  /**
+   * Gives the stored row of a set.
+   *
+   * @param id The id of the set.
+   * @returns The row.
+   * @throws {HttpError} A 404 when the set does not exist.
+   */
   private mustGet(id: string): AgentSetRow {
     const row = this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(id) as
       | AgentSetRow
@@ -140,7 +162,12 @@ export class AgentStore {
     return row;
   }
 
-  /** A set's skills, by name. */
+  /**
+   * Gives the stored skills of a set.
+   *
+   * @param setId The id of the set.
+   * @returns The skills, sorted by name.
+   */
   private items(setId: string): AgentItem[] {
     const rows = this.db
       .prepare('SELECT * FROM agent_items WHERE set_id = ? ORDER BY name COLLATE NOCASE ASC')
@@ -152,21 +179,36 @@ export class AgentStore {
     }));
   }
 
-  /** A set's repositories, in the order they were added. */
+  /**
+   * Gives the repository rows of a set.
+   *
+   * @param setId The id of the set.
+   * @returns The rows, in the order of addition.
+   */
   private repoRows(setId: string): AgentRepoRow[] {
     return this.db
       .prepare('SELECT * FROM agent_repos WHERE set_id = ? ORDER BY created_at, rowid')
       .all(setId) as AgentRepoRow[];
   }
 
-  /** One repository's row, or undefined when it is gone. */
+  /**
+   * Gives the row of one repository.
+   *
+   * @param repoId The id of the repository.
+   * @returns The row, or undefined when the repository does not exist.
+   */
   private repoRow(repoId: string): AgentRepoRow | undefined {
     return this.db.prepare('SELECT * FROM agent_repos WHERE id = ?').get(repoId) as
       | AgentRepoRow
       | undefined;
   }
 
-  /** Counts and flags, without loading any content. */
+  /**
+   * Makes the summary of a set, with counts and flags but without the content.
+   *
+   * @param row The stored row of the set.
+   * @returns The summary.
+   */
   private summarize(row: AgentSetRow): AgentSetSummary {
     const counts = this.db
       .prepare('SELECT COUNT(*) AS skills FROM agent_items WHERE set_id = ?')
@@ -190,12 +232,22 @@ export class AgentStore {
     };
   }
 
-  /** Whether a set exists, without loading it. */
+  /**
+   * Checks if a set exists.
+   *
+   * @param id The id of the set.
+   * @returns True when the set exists.
+   */
   has(id: string): boolean {
     return this.db.prepare('SELECT 1 FROM agent_sets WHERE id = ?').get(id) !== undefined;
   }
 
-  /** A set's display name, or null when it is gone. */
+  /**
+   * Gives the display name of a set.
+   *
+   * @param id The id of the set, or null.
+   * @returns The name, or null when the id is null or the set does not exist.
+   */
   nameOf(id: string | null): string | null {
     if (!id) return null;
     const row = this.db.prepare('SELECT name FROM agent_sets WHERE id = ?').get(id) as
@@ -204,9 +256,13 @@ export class AgentStore {
     return row?.name ?? null;
   }
 
-  // --- writing --------------------------------------------------------------
-
-  /** Adds a set. Its id is server-generated: user input never names a path. */
+  /**
+   * Adds a set. The orchestrator makes the id, so user input never names a path.
+   *
+   * @param name The display name of the set.
+   * @returns The new set.
+   * @throws {HttpError} A 400 when the name is empty or too long.
+   */
   createSet(name: string): AgentSetDetail {
     const clean = validSetName(name);
     const now = Date.now();
@@ -220,7 +276,14 @@ export class AgentStore {
     return this.getSet(id);
   }
 
-  /** Renames a set, or replaces its AGENTS.md. An absent field is left alone. */
+  /**
+   * Renames a set, or replaces its AGENTS.md. A field that is absent stays the same.
+   *
+   * @param id The id of the set.
+   * @param body The new name, the new AGENTS.md, or both.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the set does not exist, or a 400 when a field is not valid.
+   */
   updateSet(id: string, body: { name?: unknown; agentsMd?: unknown }): AgentSetDetail {
     const row = this.mustGet(id);
     const name = body.name === undefined ? row.name : validSetName(body.name);
@@ -233,12 +296,14 @@ export class AgentStore {
   }
 
   /**
-   * Removes a set. The global set cannot be removed, because every box gets
-   * it.
+   * Removes a set and the checkouts of its repositories. The global set cannot
+   * be removed, because every box gets it.
    *
-   * The database clears the set from every box that named it. Those boxes
-   * get the global set alone at their next start. The checkouts of the set's
-   * repositories are removed with it.
+   * The database clears the set from each box that uses it. At its next
+   * start, such a box gets only the global set.
+   *
+   * @param id The id of the set.
+   * @throws {HttpError} A 404 when the set does not exist, or a 400 for the global set.
    */
   deleteSet(id: string): void {
     this.mustGet(id);
@@ -251,7 +316,15 @@ export class AgentStore {
       rmSync(repoDir(this.dataDir, repo.id), { recursive: true, force: true });
   }
 
-  /** Creates a skill, or replaces the one already under that name. */
+  /**
+   * Creates a skill, or replaces the skill with the same name.
+   *
+   * @param id The id of the set.
+   * @param body The name and the content of the skill.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the set does not exist, or a 400 when a field is not valid or the
+   *   set is full.
+   */
   putItem(id: string, body: AgentItemBody | undefined): AgentSetDetail {
     this.mustGet(id);
     const name = validItemName(body?.name);
@@ -284,7 +357,15 @@ export class AgentStore {
     return this.getSet(id);
   }
 
-  /** Removes one skill. Removing what is not there is a 404. */
+  /**
+   * Removes one skill.
+   *
+   * @param id The id of the set.
+   * @param name The name of the skill.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the set or the skill does not exist, or a 400 for a name that is
+   *   not valid.
+   */
   deleteItem(id: string, name: unknown): AgentSetDetail {
     this.mustGet(id);
     const info = this.db
@@ -295,11 +376,15 @@ export class AgentStore {
     return this.getSet(id);
   }
 
-  // --- repositories ---------------------------------------------------------
-
   /**
    * Adds a repository to a set and pulls it. A failed pull is recorded on the
    * repository, which stays in the set.
+   *
+   * @param setId The id of the set.
+   * @param body The URL and the ref of the repository.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the set does not exist, or a 400 when a field is not valid or the
+   *   set has the maximum number of repositories.
    */
   async addRepo(setId: string, body: AgentRepoBody | undefined): Promise<AgentSetDetail> {
     this.mustGet(setId);
@@ -327,7 +412,14 @@ export class AgentStore {
     return this.getSet(setId);
   }
 
-  /** Removes a repository from a set, with its checkout. */
+  /**
+   * Removes a repository from a set, with its checkout.
+   *
+   * @param setId The id of the set.
+   * @param repoId The id of the repository.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the set or the repository does not exist.
+   */
   deleteRepo(setId: string, repoId: string): AgentSetDetail {
     this.mustGet(setId);
     const info = this.db
@@ -339,7 +431,14 @@ export class AgentStore {
     return this.getSet(setId);
   }
 
-  /** Pulls one repository of a set now. */
+  /**
+   * Pulls one repository of a set now.
+   *
+   * @param setId The id of the set.
+   * @param repoId The id of the repository.
+   * @returns The set after the pull.
+   * @throws {HttpError} A 404 when the set does not exist or does not have the repository.
+   */
   async refreshRepo(setId: string, repoId: string): Promise<AgentSetDetail> {
     this.mustGet(setId);
     if (this.repoRow(repoId)?.set_id !== setId) throw new HttpError(404, 'No such repository');
@@ -348,8 +447,10 @@ export class AgentStore {
   }
 
   /**
-   * Pulls every repository whose last pull is a day old, one after the
-   * other, and removes the checkouts that no repository owns.
+   * Removes the checkouts that no repository owns. Then pulls, one after the
+   * other, each repository that has no pull or a pull older than {@link PULL_EVERY_MS}.
+   *
+   * @param now The current time in milliseconds since the epoch.
    */
   async pullDue(now = Date.now()): Promise<void> {
     const ids = this.db.prepare('SELECT id FROM agent_repos').all() as Array<{ id: string }>;
@@ -367,7 +468,12 @@ export class AgentStore {
     for (const { id } of due) await this.pullRepo(id);
   }
 
-  /** Pulls one repository, or joins the pull of it that runs already. */
+  /**
+   * Pulls one repository. When a pull of the repository runs already, the method gives that pull.
+   *
+   * @param repoId The id of the repository.
+   * @returns A promise that settles when the pull ends.
+   */
   pullRepo(repoId: string): Promise<void> {
     const running = this.pulls.get(repoId);
     if (running) return running;
@@ -379,6 +485,8 @@ export class AgentStore {
   /**
    * Fetches one repository and records its commit and skills. A failed fetch
    * is recorded, not thrown, and the last good checkout stays in use.
+   *
+   * @param repoId The id of the repository.
    */
   private async fetchAndRecord(repoId: string): Promise<void> {
     const row = this.repoRow(repoId);
@@ -412,11 +520,11 @@ export class AgentStore {
       .run(commit, JSON.stringify(skills), Date.now(), repoId);
   }
 
-  // --- merging --------------------------------------------------------------
-
   /**
-   * What a box that selected `setId` gets, as the editor shows it: the
-   * global set with that one laid over it.
+   * Gives the merged set for a box, in the form that the editor shows.
+   *
+   * @param setId The id of the set that the box selected, or null for only the global set.
+   * @returns The merged AGENTS.md, the skills with their sources, and the overridden skill names.
    */
   bundle(setId: string | null): AgentBundlePreview {
     const { agentsMd, skills, overrides } = this.merge(setId);
@@ -428,12 +536,14 @@ export class AgentStore {
   }
 
   /**
-   * The global set with the selected one laid over it.
+   * Merges the selected set over the global set.
    *
-   * The two kinds of content merge differently. An AGENTS.md is prose and
-   * accumulates: the global one comes first and the set's follows, separated
-   * by a blank line. A skill is addressed by name, and two skills cannot
-   * share one, so the set's wins.
+   * The merged AGENTS.md is the global AGENTS.md, then a blank line, then the
+   * AGENTS.md of the selected set. A skill of the selected set replaces a
+   * skill of the global set with the same name.
+   *
+   * @param setId The id of the selected set, or null for only the global set.
+   * @returns The merged set.
    */
   private merge(setId: string | null): Bundle {
     const global = this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(GLOBAL_AGENT_SET) as
@@ -463,8 +573,12 @@ export class AgentStore {
   }
 
   /**
-   * The skills of one set, by name. A skill of the set wins over a skill of
-   * its repositories, and a repository wins over the ones added after it.
+   * Collects the skills of one set. A stored skill of the set replaces a skill
+   * of its repositories. A repository has priority over the repositories added
+   * after it.
+   *
+   * @param setId The id of the set.
+   * @returns The skills by name.
    */
   private skillsOf(setId: string): Map<string, BundleSkill> {
     const byName = new Map<string, BundleSkill>();
@@ -481,16 +595,17 @@ export class AgentStore {
     return byName;
   }
 
-  // --- packing --------------------------------------------------------------
-
   /**
-   * A box's merged set as a tar stream, which the file service in the box
-   * installs into the home. The set is packed once for each harness, in that
-   * harness's layout, because a box may hold threads of both. Every path is
-   * relative to the home.
+   * Packs the merged set of a box as a tar stream. The file service in the box
+   * installs the tar into the home, so each path is relative to the home.
    *
-   * The skills of the orchestrator are added, except where the set has a
-   * skill of the same name.
+   * The tar holds the set once for each harness, in the layout of that
+   * harness, because a box can hold threads of each harness. The tar also
+   * holds the built-in skills of the orchestrator, except where the set has a
+   * skill with the same name.
+   *
+   * @param setId The id of the set that the box selected, or null for only the global set.
+   * @returns The tar stream.
    */
   pack(setId: string | null): Readable {
     const bundle = this.merge(setId);
@@ -517,12 +632,23 @@ export class AgentStore {
   }
 }
 
-/** The skills a repository's last good pull found. */
+/**
+ * Gives the skills that the last good pull of a repository found.
+ *
+ * @param row The row of the repository.
+ * @returns The skills.
+ */
 function repoSkills(row: AgentRepoRow): RepoSkill[] {
   return JSON.parse(row.skills) as RepoSkill[];
 }
 
-/** Adds one text file to the tar, with a final newline. */
+/**
+ * Adds one text file to the tar, with a final newline.
+ *
+ * @param tar The tar to add to.
+ * @param name The path of the file in the tar.
+ * @param content The text of the file.
+ */
 function addText(tar: Pack, name: string, content: string): void {
   const text = content.endsWith('\n') ? content : `${content}\n`;
   tar.entry({ name, mode: 0o644, size: Buffer.byteLength(text) }, text);
@@ -532,6 +658,10 @@ function addText(tar: Pack, name: string, content: string): void {
  * Adds a skill's directory from a checkout to the tar. Files keep their
  * mode, so a script stays executable. Links are left out, because they could
  * point anywhere on this host.
+ *
+ * @param tar The tar to add to.
+ * @param src The directory to add.
+ * @param name The path of the directory in the tar.
  */
 function addTree(tar: Pack, src: string, name: string): void {
   for (const entry of readdirSync(src, { withFileTypes: true })) {
@@ -546,9 +676,13 @@ function addTree(tar: Pack, src: string, name: string): void {
   }
 }
 
-// --- validation ---------------------------------------------------------------
-
-/** Checks a set's display name. */
+/**
+ * Checks the display name of a set.
+ *
+ * @param value The name from the request.
+ * @returns The trimmed name.
+ * @throws {HttpError} A 400 when the name is empty or too long.
+ */
 function validSetName(value: unknown): string {
   const name = typeof value === 'string' ? value.trim() : '';
   if (name === '') throw new HttpError(400, 'name is required');
@@ -559,8 +693,12 @@ function validSetName(value: unknown): string {
 }
 
 /**
- * Checks a skill name. The name becomes a path component and the word after
- * the slash, so a name that does not match is refused rather than changed.
+ * Checks a skill name after trim and lowercase. A name that does not match
+ * {@link NAME_PATTERN} is refused, because the name becomes a path component.
+ *
+ * @param value The name from the request.
+ * @returns The trimmed name in lowercase.
+ * @throws {HttpError} A 400 when the name does not match.
  */
 function validItemName(value: unknown): string {
   const name = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -575,8 +713,12 @@ function validItemName(value: unknown): string {
 }
 
 /**
- * Checks a repository URL. Only HTTPS is fetched, and credentials in the URL
- * are refused, because the URL is stored and shown.
+ * Checks a repository URL. Only HTTPS URLs are accepted. Credentials in the
+ * URL are refused, because the orchestrator stores and shows the URL.
+ *
+ * @param value The URL from the request.
+ * @returns The trimmed URL.
+ * @throws {HttpError} A 400 when the URL is not valid.
  */
 function validRepoUrl(value: unknown): string {
   const raw = typeof value === 'string' ? value.trim() : '';
@@ -596,7 +738,13 @@ function validRepoUrl(value: unknown): string {
   return raw;
 }
 
-/** Checks a branch, tag or commit. Absent or empty means the default branch. */
+/**
+ * Checks a branch, tag or commit hash.
+ *
+ * @param value The ref from the request.
+ * @returns The trimmed ref, or an empty string for the default branch.
+ * @throws {HttpError} A 400 when the ref is not valid.
+ */
 function validRef(value: unknown): string {
   if (value === undefined || value === null) return '';
   if (typeof value !== 'string') throw new HttpError(400, 'ref must be a string');
@@ -607,7 +755,14 @@ function validRef(value: unknown): string {
   return ref;
 }
 
-/** Checks a file's content, which may legitimately be empty. */
+/**
+ * Checks the content of a file. Empty content is valid.
+ *
+ * @param value The content from the request.
+ * @param field The name of the field, for the error message.
+ * @returns The content with LF line endings.
+ * @throws {HttpError} A 400 when the content is not a string or is too long.
+ */
 function validContent(value: unknown, field: string): string {
   if (typeof value !== 'string') throw new HttpError(400, `${field} must be a string`);
   if (value.length > MAX_CONTENT) {

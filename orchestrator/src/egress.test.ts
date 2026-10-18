@@ -29,8 +29,11 @@ const GH_TOKEN = 'ghp_therealgithubtoken';
 /** A real GitLab token as the store holds it. */
 const GITLAB_TOKEN = 'glpat-therealgitlabtoken';
 
+/** The temporary data directories that afterEach removes. */
 let dirs: string[] = [];
+/** The fake proxies that afterEach closes. */
 let servers: http.Server[] = [];
+/** The databases that afterEach closes. */
 let dbs: Db[] = [];
 
 afterEach(() => {
@@ -42,19 +45,35 @@ afterEach(() => {
   dirs = [];
 });
 
-/** Creates a temporary data directory that afterEach removes. */
+/**
+ * Creates a temporary data directory that afterEach removes.
+ *
+ * @returns The path of the directory.
+ */
 function dataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-egress-'));
   dirs.push(dir);
   return dir;
 }
 
-/** A config from an environment, with everything else defaulted. */
+/**
+ * Returns a config from an environment, with defaults for everything else.
+ *
+ * @param env The variables to set, on top of a new data directory.
+ * @returns The config.
+ */
 function configFrom(env: Record<string, string> = {}): Config {
   return loadConfig({ DATA_DIR: dataDir(), ...env });
 }
 
-/** A credential store over a database of its own, holding what was passed. */
+/**
+ * Returns a credential store over a database of its own, holding the given secrets.
+ *
+ * @param cfg The config with the data directory and the credential set.
+ * @param secrets The token of each credential to store.
+ * @param onChange The function that the store calls after each write.
+ * @returns The store and its database.
+ */
 function storeWith(
   cfg: Config,
   secrets: Partial<Record<CredentialId, string>> = {},
@@ -69,7 +88,12 @@ function storeWith(
   return { store, db };
 }
 
-/** The rows a store holds, which is what composePolicy is given. */
+/**
+ * Returns the rows of a store, as composePolicy takes them.
+ *
+ * @param store The credential store.
+ * @returns The rows.
+ */
 function rows(store: CredentialStore): CredentialRow[] {
   return store.list();
 }
@@ -188,7 +212,7 @@ describe('composePolicy', () => {
     expect(allowedHosts).toContain('registry.npmjs.org');
     expect(allowedHosts).toContain('platform.claude.com');
     expect(allowedHosts).toContain('codeload.github.com');
-    // The credential's own hosts are implied by the proxy, not listed here.
+    // The proxy allows the hosts of the credential itself, so the list leaves them out.
     expect(allowedHosts).not.toContain('api.github.com');
   }, 30_000);
 
@@ -215,8 +239,8 @@ describe('composePolicy', () => {
     const policy = composePolicy(cfg, material, rows(store), []);
 
     expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
-    // The row still has a placeholder, as a box holds one for every stored
-    // credential, deliverable or not.
+    // The row still has a placeholder, because a box gets one for every
+    // stored credential, deliverable or not.
     expect(store.get('openai')?.placeholder).toMatch(/^sk-/);
   }, 30_000);
 
@@ -245,7 +269,12 @@ describe('composePolicy', () => {
 });
 
 describe('the control channel, from the orchestrator side', () => {
-  /** A stand-in proxy that records what it was pushed. */
+  /**
+   * Starts a fake proxy that records each request, and makes a config and a store for it.
+   *
+   * @param answer The status and the JSON body of each answer.
+   * @returns The config, the material, the store and the recorded requests.
+   */
   async function fakeProxy(answer: { status: number; body: unknown }): Promise<{
     cfg: Config;
     material: EgressMaterial;
@@ -278,6 +307,7 @@ describe('the control channel, from the orchestrator side', () => {
     return { cfg, material, store, seen };
   }
 
+  /** The status of a proxy that applied the policy. */
   const okStatus = {
     applied: true,
     policyHash: 'abc',
@@ -329,8 +359,6 @@ describe('EgressManager', () => {
     expect(github).not.toBe(GH_TOKEN);
     expect(github.startsWith('ghp_')).toBe(true);
     expect(openai).not.toBe(OPENAI_KEY);
-    // Codex checks the shape of its key, so the placeholder carries the prefix
-    // a real one has.
     expect(openai.startsWith('sk-')).toBe(true);
     expect(manager.caCertificate()).toContain('BEGIN CERTIFICATE');
   }, 30_000);
@@ -386,7 +414,7 @@ describe('EgressManager', () => {
     });
 
     const cfg = configFrom({ EGRESS_CONTROL_URL: `http://127.0.0.1:${port}` });
-    // The wiring the app builds: a write to the store pushes the policy.
+    // As in the app, a write to the store pushes the policy.
     let manager: EgressManager | undefined;
     const { store, db } = storeWith(cfg, {}, () => void manager?.sync());
     manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);

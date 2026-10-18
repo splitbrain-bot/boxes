@@ -1,54 +1,70 @@
-import type { HarnessHealth, HarnessId, ThreadModeState } from '../../../shared/types.ts';
-
 /**
  * Display helpers for harnesses. The orchestrator sends the labels, defaults
  * and catalogues.
  */
 
+import type { HarnessHealth, HarnessId, ThreadModeState } from '../../../shared/types.ts';
+
 /**
- * Whether the settings page offers the Codex login.
+ * True when the settings page offers the Codex login.
  *
- * The orchestrator can run the login and store its result. That credential
- * cannot run a turn yet: its traffic goes to a host the proxy does not
- * intercept, so a box gets nothing. Until a box can receive an `auth.json` of
- * its own, the card offers the API key alone.
+ * The orchestrator can run the login and store its result. The credential
+ * cannot run a turn, because its traffic goes to `chatgpt.com`, which the proxy
+ * does not intercept. While the flag is false, the card offers only the API key.
  */
 export const CODEX_LOGIN_OFFERED = false;
 
 /**
- * Codex modes whose sandbox a box refuses.
+ * Codex modes whose sandbox cannot start in a box container.
  *
  * Both run every command under bubblewrap, which needs an unprivileged user
- * namespace. A box cannot create one, because `CapDrop: ALL` removes
- * `CAP_SYS_ADMIN`.
+ * namespace. The box container cannot create one. Docker's default seccomp
+ * profile allows a new user namespace only with `CAP_SYS_ADMIN`, and
+ * `CapDrop: ALL` leaves the container without capabilities.
  *
- * The picker still offers them, with a caveat worded as a doubt. The adapter
- * cannot know what container it runs in, and a later Codex or container
- * template may lift the limit.
+ * The picker still offers them, with a caveat worded as a doubt, because the
+ * adapter cannot know the container that it runs in.
  */
 const SANDBOXED_CODEX_MODES: ReadonlySet<string> = new Set(['read-only', 'agent']);
 
-/** The caveat shown beside those modes. */
+/** The caveat that the picker shows beside the sandboxed Codex modes. */
 export const MAY_BE_UNAVAILABLE = 'May be unavailable in this deployment.';
 
-/** Whether a mode carries that caveat. */
+/**
+ * Checks if a mode gets the {@link MAY_BE_UNAVAILABLE} caveat.
+ *
+ * @param harness The harness of the thread, or null when it is not known.
+ * @param modeId The id of the mode.
+ * @returns True for a sandboxed Codex mode.
+ */
 function modeIsDoubtful(harness: HarnessId | null, modeId: string): boolean {
   return harness === 'codex' && SANDBOXED_CODEX_MODES.has(modeId);
 }
 
-/** One of an adapter's modes, as both the catalogue and a live thread carry it. */
+/** One mode of an adapter, in the shape that the catalogue and a live thread both use. */
 type Mode = ThreadModeState['availableModes'][number];
 
 /**
- * What a mode is called in the picker: the adapter's name for it, or its id
- * when the adapter gives none, with a short caveat for a doubtful mode.
+ * Gives the label of a mode in the picker. The label is the name from the
+ * adapter, or the id when the adapter gives no name, with a short caveat for a
+ * doubtful mode.
+ *
+ * @param harness The harness of the thread, or null when it is not known.
+ * @param mode The mode.
+ * @returns The label.
  */
 export function modeLabel(harness: HarnessId | null, mode: Mode): string {
   const name = mode.name ?? mode.id;
   return modeIsDoubtful(harness, mode.id) ? `${name} (may be unavailable here)` : name;
 }
 
-/** What the picker says the mode does, with the caveat appended for a doubtful mode. */
+/**
+ * Gives the description of a mode in the picker, with the caveat appended for a doubtful mode.
+ *
+ * @param harness The harness of the thread, or null when it is not known.
+ * @param mode The mode.
+ * @returns The description, or null when there is none.
+ */
 export function modeDescription(harness: HarnessId | null, mode: Mode): string | null {
   const doubtful = modeIsDoubtful(harness, mode.id);
   if (!doubtful) return mode.description ?? null;
@@ -56,8 +72,11 @@ export function modeDescription(harness: HarnessId | null, mode: Mode): string |
 }
 
 /**
- * Why this harness cannot run a turn, in a few words that fit beside a
- * disabled agent in a dialog. Null when it can.
+ * Gives the reason why a harness cannot run a turn, in a few words that fit
+ * beside a disabled agent in a dialog.
+ *
+ * @param harness The harness as the health probe reports it.
+ * @returns The reason, or null when the harness can run.
  */
 export function unavailableReason(harness: HarnessHealth): string | null {
   if (harness.runnable) return null;
@@ -70,7 +89,13 @@ export function unavailableReason(harness: HarnessHealth): string | null {
   return 'cannot run';
 }
 
-/** What a thread's harness is called, or null while nothing has said. */
+/**
+ * Gives the label of the harness of a thread.
+ *
+ * @param harnesses The harnesses of the deployment.
+ * @param id The harness of the thread.
+ * @returns The label, or null while the harness is not known.
+ */
 export function harnessLabel(
   harnesses: readonly HarnessHealth[],
   id: HarnessId | null | undefined,

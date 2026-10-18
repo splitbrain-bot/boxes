@@ -21,13 +21,13 @@ import {
 } from './reaper.ts';
 import { runtime } from './runtime/runtime.ts';
 
-// --- the app and its database ----------------------------------------------
-
 /**
  * Claims DATA_DIR, or logs that another orchestrator holds it and exits.
  *
  * The boot calls this before it opens the database. The claim is released
  * when this process exits.
+ *
+ * @param dataDir The data directory to claim.
  */
 function lockDataDir(dataDir: string): void {
   const claim = claimDataDir(dataDir);
@@ -53,21 +53,18 @@ lockDataDir(cfg.DATA_DIR);
 /** The database under DATA_DIR. */
 const db = openDb(cfg.DATA_DIR);
 
-/** Whether the orchestrator has started, for the app and the gateway. */
+/** The boot state of the orchestrator, for the app and the gateway. */
 const boot = new BootState();
 
 /** The HTTP app and the services it built. */
 const { app, manager, agents, credentials, egress, logins, tunnels, setIsolationWarnings } =
   buildApp(cfg, db, { boot });
 
-// --- WebSocket gateway: token-authed on the upgrade itself ------------------
-
 /**
  * Largest ACP frame the gateway accepts from a client, in bytes.
  *
  * An ACP prompt can carry an inline base64 image, so the limit leaves room for
- * that. A larger frame closes the connection with code 1009, so no legitimate
- * frame should reach the limit.
+ * that. The ws library closes the connection with code 1009 on a larger frame.
  */
 const MAX_WS_FRAME_BYTES = 16 * 1024 * 1024;
 
@@ -76,8 +73,8 @@ const wss = new WebSocketServer({
   noServer: true,
   maxPayload: MAX_WS_FRAME_BYTES,
   // The client offers [ACP_SUBPROTOCOL, 'bearer.<token>']. The bearer entry
-  // is credentials, not a protocol, so the subprotocol is negotiated
-  // explicitly rather than relying on the client to list it first.
+  // carries the token and names no protocol, so the server selects
+  // ACP_SUBPROTOCOL by name.
   handleProtocols: (protocols) => (protocols.has(ACP_SUBPROTOCOL) ? ACP_SUBPROTOCOL : false),
 });
 
@@ -177,8 +174,6 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   });
 });
 
-// --- boot -------------------------------------------------------------------
-
 /** The background loops, so shutdown can stop them before anything else. */
 const loops: Array<{ stop: () => void }> = [];
 
@@ -193,8 +188,8 @@ async function main(): Promise<void> {
   log.info('orchestrator listening', { port: cfg.PORT });
 
   // The policy has to exist before the first box is created, because a
-  // box's environment is built from it. Pushing it can fail — the proxy
-  // may still be booting — and the reconciler retries every minute.
+  // box's environment is built from it. Pushing it can fail while the proxy
+  // is still booting, and the reconciler retries every minute.
   await egress.prepare();
   try {
     await egress.sync();
@@ -211,7 +206,7 @@ async function main(): Promise<void> {
   // Best effort, so a deployment with an unreachable registry still boots.
   // Creating a box pulls again and reports the error. The refresh lets a
   // restart pick up a moved tag. It is skipped when the periodic refresh is
-  // off, which means the image is built on this host.
+  // off, which is the setting for an image built on the host.
   try {
     if (cfg.BOX_IMAGE_PULL_MINUTES > 0) {
       await manager.refreshBoxImage(boot.trackPull(cfg.BOX_IMAGE));
@@ -274,11 +269,11 @@ async function drainTurns(): Promise<void> {
   log.info('every turn in flight finished');
 }
 
-// Once: a second signal while the server is closing must not re-enter this.
+// Once, because a second signal while the server closes must not run the handler again.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     log.info('shutting down', { signal });
-    // Stop new work first: the loops stop, and the server stops listening
+    // Stop new work first. The loops stop, and the server stops listening
     // while it finishes the requests it already has.
     for (const loop of loops) loop.stop();
     const closed = app

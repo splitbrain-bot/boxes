@@ -37,7 +37,7 @@ export interface ScrollTarget {
 
 /** A buffer being edited, and the way to change it. */
 interface CodeEdit {
-  /** The buffer's text. */
+  /** The text of the buffer. */
   text: string;
   /** Called with the new text on every change. */
   onChange: (text: string) => void;
@@ -46,42 +46,42 @@ interface CodeEdit {
 /** The props of {@link CodePane}. */
 export interface CodePaneProps {
   /**
-   * The pane's scroller. The view holds it, so it can measure the reader's
+   * The scroller of the pane. The view holds it, so it can measure the reader's
    * place before a mode switch and restore it after.
    */
   scrollRef: React.RefObject<HTMLDivElement | null>;
-  /** The open file's path. It keys the remembered scroll position. */
+  /** The path of the open file. It keys the remembered scroll position. */
   path: string;
-  /** The file's content as last loaded. */
+  /** The content of the file as last loaded. */
   content: string;
   /** One token list per line, or null to render the file plain. */
   tokens: Token[][] | null;
   /**
-   * The text the tokens were made from. A line the tokens no longer match
-   * renders plain until new tokens arrive.
+   * The text that the tokens were made from. A line that differs from its line
+   * in this text renders plain until new tokens arrive.
    */
   tokensFor: string;
   /** Changed lines, keyed by line number as the API sends them. */
   diffLines: Record<string, ReviewLineChange>;
   /** The hunk index of each deletion marker, by the line it sits after. 0 is the top. */
   deletions: Map<number, number>;
-  /** The hunk index each line sits in, by line number, for the gutter to open. */
+  /** The hunk index of each line, by line number, for the gutter to open. */
   hunkByLine: Map<number, number>;
   /** The comments, by line number. */
   annotations: Map<number, ReviewAnnotation>;
   /** The line whose composer is open, or null. */
   composing: number | null;
-  /** Wrap long lines instead of scrolling them. */
+  /** True to wrap long lines, false to scroll them sideways. */
   wrap: boolean;
   /** A line to scroll to once, when prev/next asks for it. */
   scrollTo: ScrollTarget | null;
   /** The buffer being edited, or null when the file is being read. */
   edit: CodeEdit | null;
-  /** Called with the line number when the user taps a line's code. */
+  /** Called with the line number when the user taps the code of a line. */
   onSelectLine: (line: number) => void;
   /** Called with the hunk index when the user taps a gutter or a deletion marker. */
   onShowHunk: (hunkIndex: number) => void;
-  /** Renders the card and composer that sit under a line. */
+  /** Renders the card and the composer below a line. */
   renderUnderLine?: (line: number) => React.ReactNode;
 }
 
@@ -97,8 +97,10 @@ export interface CodePaneProps {
  * A file past the line limit renders as one block of plain text, because a
  * phone cannot lay out tens of thousands of rows.
  *
- * File content and comments are agent-influenced and hostile by assumption, so
- * both render as text nodes only.
+ * The agent can change the file content and the comments, so both render as
+ * text nodes only.
+ *
+ * @param props The props of the pane.
  */
 export function CodePane({
   scrollRef,
@@ -121,18 +123,18 @@ export function CodePane({
   /** The path this pane has already positioned, so a poll does not re-do it. */
   const positioned = useRef<string | null>(null);
   const editing = edit !== null;
-  /** What the pane is showing: the buffer while editing, the file otherwise. */
+  /** The shown text, which is the buffer while editing and the file otherwise. */
   const source = edit ? edit.text : content;
-  /** Whether this file is too long to be read a line at a time. */
+  /** True when this file is too long to be read a line at a time. */
   const tooLong = !withinLineLimit(source);
 
   /**
    * Puts each file back where it was left, and every file this review has not
    * opened at the top.
    *
-   * It runs before paint, so the reader never sees the previous file's offset.
+   * It runs before paint, so the reader never sees the offset of the previous file.
    * It positions each path once, so a poll that refetches the open file keeps
-   * the reader's place.
+   * the place of the reader.
    */
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -141,7 +143,7 @@ export function CodePane({
     element.scrollTop = recallScroll(path);
   }, [scrollRef, path, content]);
 
-  /** Brings the line prev/next asked for into the middle of the pane. */
+  /** Brings the line that prev/next asked for into the middle of the pane. */
   useEffect(() => {
     if (!scrollTo) return;
     scrollRef.current
@@ -159,7 +161,7 @@ export function CodePane({
   }, [scrollRef, path]);
 
   const lines = useMemo(() => (tooLong ? [] : splitLines(source)), [source, tooLong]);
-  /** The lines the tokens describe, which is the file itself until it is typed in. */
+  /** The lines that the tokens describe. They are the lines of the file until the user types. */
   const tokenLines = useMemo(
     () => (tokensFor === source ? lines : splitLines(tokensFor)),
     [tokensFor, source, lines],
@@ -231,7 +233,21 @@ export function CodePane({
  * One line: its row, the deletion marker after it, and whatever sits under it.
  *
  * Memoized, because typing re-renders the whole file on every keystroke.
- * Unchanged lines then cost a comparison instead of a render.
+ * An unchanged line then costs a comparison and no render.
+ *
+ * @param line The line number, counted from 1.
+ * @param text The text of the line.
+ * @param tokens The colours of the line, or null while it renders plain.
+ * @param change The kind of change on the line, or undefined when the line did not change.
+ * @param annotation The comment on the line, if any.
+ * @param composing True while the composer is open on the line.
+ * @param hunkIndex The hunk of the line, or undefined when the line is in no hunk.
+ * @param deletionHunk The hunk of the lines deleted after this line, or undefined for none.
+ * @param wrap True to wrap the line, false to scroll it sideways.
+ * @param editing True while the pane is in edit mode.
+ * @param under The content below the line, such as its comment card.
+ * @param onSelectLine Called with the line number when the user taps the code.
+ * @param onShowHunk Called with the hunk index when the user taps the gutter or the deletion marker.
  */
 const Row = memo(function Row({
   line,
@@ -250,25 +266,25 @@ const Row = memo(function Row({
 }: {
   /** The line number, counted from 1. */
   line: number;
-  /** The line's text. */
+  /** The text of the line. */
   text: string;
-  /** This line's colours, or null while it is rendered plain. */
+  /** The colours of the line, or null while it renders plain. */
   tokens: Token[] | null;
-  /** How the line changed, or undefined when it did not. */
+  /** The kind of change on the line, or undefined when the line did not change. */
   change: ReviewLineChange | undefined;
-  /** The comment on this line, if any. */
+  /** The comment on the line, if any. */
   annotation: ReviewAnnotation | undefined;
-  /** The composer is open on this line. */
+  /** True while the composer is open on the line. */
   composing: boolean;
-  /** The hunk this line sits in, or undefined when it sits in none. */
+  /** The hunk of the line, or undefined when the line is in no hunk. */
   hunkIndex: number | undefined;
-  /** The hunk of the lines deleted after this one, or undefined for none. */
+  /** The hunk of the lines deleted after this line, or undefined for none. */
   deletionHunk: number | undefined;
-  /** Wrap the line instead of scrolling it. */
+  /** True to wrap the line, false to scroll it sideways. */
   wrap: boolean;
-  /** The pane is in edit mode. */
+  /** True while the pane is in edit mode. */
   editing: boolean;
-  /** What renders under the line, such as its comment card. */
+  /** The content below the line, such as its comment card. */
   under: React.ReactNode;
   /** Called with the line number when the user taps the code. */
   onSelectLine: (line: number) => void;
@@ -356,6 +372,9 @@ const Row = memo(function Row({
  * and the caret. The font, size, line height, padding and wrapping match the
  * rows, or the caret would drift away from the letters. It takes no focus on
  * mount, so the keyboard stays down until the reviewer taps a line.
+ *
+ * @param text The text of the buffer.
+ * @param onChange Called with the new text on every change.
  */
 function Editor({ text, onChange }: CodeEdit) {
   return (
@@ -374,10 +393,18 @@ function Editor({ text, onChange }: CodeEdit) {
 }
 
 /**
- * One line's number and markers, and the way into its hunk.
+ * The number and the markers of one line, and the way into its hunk.
  *
- * It is a button only where there is a hunk to open. A file git does not track
+ * It is a button only where there is a hunk to open. A file that git does not track
  * has every line marked added, but no hunks.
+ *
+ * @param line The line number, counted from 1.
+ * @param change The kind of change on the line, or undefined when the line did not change.
+ * @param annotated True when the line has a comment.
+ * @param outdated True when the comment on the line is outdated.
+ * @param active True when the line is being commented on or has a comment.
+ * @param hunkIndex The hunk of the line, or undefined when the line is in no hunk.
+ * @param onShowHunk Called with the hunk index when the user taps the gutter.
  */
 function Gutter({
   line,
@@ -390,15 +417,15 @@ function Gutter({
 }: {
   /** The line number, counted from 1. */
   line: number;
-  /** How the line changed, or undefined when it did not. */
+  /** The kind of change on the line, or undefined when the line did not change. */
   change: ReviewLineChange | undefined;
-  /** The line carries a comment. */
+  /** True when the line has a comment. */
   annotated: boolean;
-  /** The line's comment is outdated. */
+  /** True when the comment on the line is outdated. */
   outdated: boolean;
-  /** The line is being commented on, or already carries a comment. */
+  /** True when the line is being commented on or has a comment. */
   active: boolean;
-  /** The hunk this line sits in, or undefined when it sits in none. */
+  /** The hunk of the line, or undefined when the line is in no hunk. */
   hunkIndex: number | undefined;
   /** Called with the hunk index when the user taps the gutter. */
   onShowHunk: (hunkIndex: number) => void;
@@ -451,12 +478,12 @@ function Gutter({
 }
 
 /**
- * Tells whether a click ended a text selection instead of being a tap on the line.
+ * Checks if a click ended a text selection and was not a tap on the line.
  *
  * A drag leaves a selection behind, and a double click selects a word. Opening
  * the composer then would take the focus off the selection.
  *
- * @param event The click on the line's code.
+ * @param event The click on the code of the line.
  * @returns True when the click selected text.
  */
 function selecting(event: React.MouseEvent): boolean {
@@ -465,12 +492,16 @@ function selecting(event: React.MouseEvent): boolean {
   return selection !== null && !selection.isCollapsed;
 }
 
-/** One line's coloured spans. */
+/**
+ * The coloured spans of one line.
+ *
+ * @param tokens The tokens of the line.
+ */
 function Tokens({ tokens }: { tokens: Token[] }) {
   return (
     <>
       {tokens.map((token, i) => (
-        // The span carries both theme colours, and globals.css picks one.
+        // The span carries both theme colours, and the stylesheet picks one.
         // biome-ignore lint/suspicious/noArrayIndexKey: tokens have no id, and a line is replaced whole
         <span key={i} style={token.style as React.CSSProperties}>
           {token.content}
@@ -480,7 +511,12 @@ function Tokens({ tokens }: { tokens: Token[] }) {
   );
 }
 
-/** A marker for lines removed between two lines. Tapping it opens the hunk that holds them. */
+/**
+ * A marker for lines removed between two lines. Tapping it opens the hunk that holds them.
+ *
+ * @param hunkIndex The hunk that holds the removed lines.
+ * @param onShowHunk Called with the hunk index when the user taps the marker.
+ */
 function DeletionMarker({
   hunkIndex,
   onShowHunk,
@@ -515,7 +551,7 @@ function DeletionMarker({
 }
 
 /**
- * Splits content into the lines the pane renders.
+ * Splits content into the lines that the pane renders.
  *
  * @param content The file text.
  * @returns One string per line, without the empty line after a final newline.

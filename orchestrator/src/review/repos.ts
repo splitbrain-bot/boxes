@@ -4,22 +4,21 @@ import { type GitBox, type GitTarget, isTopLevel } from './git.ts';
 /** One repository found in a workspace. */
 export interface Repo {
   /**
-   * Where it sits relative to the workspace, slash-separated. Empty when the
-   * workspace is itself the repository.
+   * The path relative to the workspace, with slashes. Empty when the workspace
+   * is itself the repository.
    */
   path: string;
-  /** What to call it: its last path segment, or the workspace's own name. */
+  /** The display name. It is the last path segment, or the name of the workspace directory. */
   name: string;
-  /** Where its git runs: the box's container, and its root inside it. */
+  /** The box and the repository root in it, where git runs. */
   git: GitTarget;
 }
 
 /**
- * Directory names the discovery walk does not enter.
+ * The directory names that the discovery walk does not enter.
  *
- * A dependency tree can hold dozens of repositories that no reviewer wants
- * listed. A repository cloned into such a directory, for example `vendor/`, is
- * not found.
+ * A dependency tree can hold many repositories that a reviewer does not want
+ * listed. The walk does not find a repository cloned into such a directory, for example `vendor/`.
  */
 const PRUNED_DIRS = new Set([
   '.boxes',
@@ -33,55 +32,67 @@ const PRUNED_DIRS = new Set([
 ]);
 
 /**
- * How deep under the workspace a repository is looked for.
+ * The maximum depth under the workspace at which the discovery looks for a repository.
+ * The workspace has depth 0.
  *
- * Clones sit near the top, as in `/workspace/projects/foo`. Much deeper
- * directories belong to dependency trees.
+ * Clones are usually near the top, as in `/workspace/projects/foo`. Much deeper
+ * directories are usually part of dependency trees.
  */
 export const MAX_REPO_DEPTH = 6;
 
 /**
- * How many directories one discovery walk may read before it stops looking.
+ * The maximum number of directories that one discovery walk reads before it stops.
  *
  * After `npm install`, a workspace can hold tens of thousands of directories.
- * {@link PRUNED_DIRS} drops most of them, and this cap bounds the rest.
+ * The walk skips most of them through {@link PRUNED_DIRS}, and this cap limits the rest.
  */
 export const MAX_SCANNED_DIRS = 4000;
 
-/** How many repositories a workspace may contribute before the rest are left out. */
+/**
+ * The maximum number of repositories that the discovery returns for one workspace. The walk stops when it
+ * finds this number of candidates.
+ */
 const MAX_REPOS = 32;
 
 /**
  * The repositories of one workspace, with the lookup that assigns a path to
  * one of them.
  *
- * A workspace can hold several repositories: side by side, deeper down, or one
- * inside another. Each path belongs to its closest enclosing repository, and a
- * path that no repository encloses is shown without git. The map is immutable.
+ * A workspace can hold several repositories, also one inside another. The
+ * review shows a path that no repository encloses without a git status or a diff. The map is
+ * immutable.
  */
 export class RepoMap {
   /** The repositories, sorted by path. The API reports them in this order. */
   readonly repos: readonly Repo[];
 
+  /**
+   * Creates the map and sorts the repositories by path.
+   *
+   * @param workspace The workspace that every path in this map is relative to.
+   * @param repos The repositories of the workspace.
+   */
   constructor(
-    /** The workspace every path in this map is relative to. */
+    /** The workspace that every path in this map is relative to. */
     readonly workspace: string,
     repos: Repo[],
   ) {
     this.repos = [...repos].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
-  /** Whether the workspace holds any repository at all. */
+  /** True when the workspace holds a repository. */
   get hasGit(): boolean {
     return this.repos.length > 0;
   }
 
   /**
-   * The closest repository enclosing a workspace-relative path, or null when
-   * no repository claims it.
+   * Finds the closest repository that encloses a workspace-relative path.
    *
    * The longest enclosing path wins, so a nested repository claims its own
    * files.
+   *
+   * @param path The workspace-relative path.
+   * @returns The repository, or null when no repository encloses the path.
    */
   repoFor(path: string): Repo | null {
     let best: Repo | null = null;
@@ -92,28 +103,46 @@ export class RepoMap {
     return best;
   }
 
-  /** The repository rooted exactly at this workspace-relative path, or null. */
+  /**
+   * Finds the repository whose root is exactly at a workspace-relative path.
+   *
+   * @param path The workspace-relative path.
+   * @returns The repository, or null when no repository has its root there.
+   */
   at(path: string): Repo | null {
     return this.repos.find((repo) => repo.path === path) ?? null;
   }
 }
 
-/** Whether a repository at `prefix` encloses a workspace-relative path. */
+/**
+ * Checks if a repository at `prefix` encloses a workspace-relative path.
+ *
+ * @param prefix The workspace-relative path of the repository.
+ * @param path The workspace-relative path.
+ * @returns True when the path is the repository root or inside it.
+ */
 function encloses(prefix: string, path: string): boolean {
   if (prefix === '') return true;
   return path === prefix || path.startsWith(`${prefix}/`);
 }
 
-/** A path inside a repository, as the workspace names it. */
+/**
+ * Converts a repository-relative path into a workspace-relative path.
+ *
+ * @param repo The repository.
+ * @param path The path relative to the repository.
+ * @returns The path relative to the workspace.
+ */
 export function inWorkspace(repo: Repo, path: string): string {
   return repo.path === '' ? path : `${repo.path}/${path}`;
 }
 
 /**
- * Where one repository's git runs, from its workspace-relative path.
+ * Makes the git target of one repository from its workspace-relative path.
  *
- * The box holds the workspace at `box.workspaceDir`, so the repository
- * root inside the box is the two joined.
+ * @param box The box and the workspace in it.
+ * @param repoPath The workspace-relative path of the repository.
+ * @returns The git target for the repository root.
  */
 export function gitTarget(box: GitBox, repoPath: string): GitTarget {
   return {
@@ -123,10 +152,14 @@ export function gitTarget(box: GitBox, repoPath: string): GitTarget {
 }
 
 /**
- * A workspace-relative path as its own repository names it.
+ * Converts a workspace-relative path into a path relative to its repository.
  *
- * The repository must enclose the path, as {@link RepoMap.repoFor} ensures.
- * This function does not check it.
+ * The repository must enclose the path, as {@link RepoMap.repoFor} ensures. The
+ * function does not check it.
+ *
+ * @param repo The repository that encloses the path.
+ * @param path The workspace-relative path.
+ * @returns The path relative to the repository.
  */
 export function inRepo(repo: Repo, path: string): string {
   return repo.path === '' ? path : path.slice(repo.path.length + 1);
@@ -140,6 +173,10 @@ export function inRepo(repo: Repo, path: string): string {
  * {@link MAX_SCANNED_DIRS} or {@link MAX_REPOS}. Every directory holding a
  * `.git` file or directory is a candidate. Git in the box then confirms that
  * each candidate is the top of a work tree.
+ *
+ * @param files The file service in the box.
+ * @param box The box and the workspace in it.
+ * @returns The confirmed repositories.
  */
 export async function discoverRepos(files: FileService, box: GitBox): Promise<RepoMap> {
   const paths = await files.findRepos({
@@ -162,7 +199,12 @@ export async function discoverRepos(files: FileService, box: GitBox): Promise<Re
   );
 }
 
-/** What to call a repository that is the workspace itself. */
+/**
+ * Gives the name of a repository that is the workspace itself.
+ *
+ * @param workspace The path of the workspace directory.
+ * @returns The last segment of the path, or 'workspace' when the path has none.
+ */
 function workspaceName(workspace: string): string {
   return (
     workspace

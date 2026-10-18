@@ -14,10 +14,16 @@ const STATUS: Record<ReviewFileStatus, { className: string; mark: string; label:
 };
 
 /**
- * The tree of the workspace's files, with git status and comment counts on them.
+ * The tree of the files in the workspace, with git status and comment counts on them.
  *
- * One tree covers the whole workspace, and it marks the folder each repository
- * is rooted at.
+ * One tree covers the whole workspace, and it marks the root folder of each
+ * repository.
+ *
+ * @param dirs Each loaded directory by its path. The workspace root is ''.
+ * @param expanded The open folders, by path.
+ * @param activePath The file that the pane shows, so the tree can mark it.
+ * @param onOpen Called with the path when the user opens a file.
+ * @param onToggle Called with the path when the user opens or closes a folder.
  */
 export function ReviewTree({
   dirs,
@@ -26,14 +32,14 @@ export function ReviewTree({
   onOpen,
   onToggle,
 }: {
-  /** Each loaded directory by its path; the workspace root is ''. */
+  /** Each loaded directory by its path. The workspace root is ''. */
   dirs: Record<string, ReviewDirResponse>;
   /**
-   * The folders standing open, by path. The store holds them, so a refetch of
+   * The open folders, by path. The store holds them, so a refetch of
    * the tree keeps the shape the reviewer left.
    */
   expanded: string[];
-  /** The file the pane is showing, so the tree can mark it. */
+  /** The file that the pane shows, so the tree can mark it. */
   activePath: string | null;
   /** Called with the path when the user opens a file. */
   onOpen: (path: string) => void;
@@ -66,7 +72,17 @@ export function ReviewTree({
   );
 }
 
-/** One directory, and every folder of it that stands open. */
+/**
+ * One directory, and each of its open folders.
+ *
+ * @param dir The directory to list.
+ * @param depth The depth of the directory, 0 for the workspace root.
+ * @param dirs Each loaded directory by its path.
+ * @param expanded The open folders, by path.
+ * @param activePath The file that the pane shows.
+ * @param onOpen Called with the path when the user opens a file.
+ * @param onToggle Called with the path when the user opens or closes a folder.
+ */
 function Level({
   dir,
   depth,
@@ -78,13 +94,13 @@ function Level({
 }: {
   /** The directory to list. */
   dir: ReviewDirResponse;
-  /** How deep the directory sits, 0 for the workspace root. */
+  /** The depth of the directory, 0 for the workspace root. */
   depth: number;
   /** Each loaded directory by its path. */
   dirs: Record<string, ReviewDirResponse>;
-  /** The folders standing open, by path. */
+  /** The open folders, by path. */
   expanded: string[];
-  /** The file the pane is showing. */
+  /** The file that the pane shows. */
   activePath: string | null;
   /** Called with the path when the user opens a file. */
   onOpen: (path: string) => void;

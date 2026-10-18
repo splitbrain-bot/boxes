@@ -3,31 +3,28 @@ import { HARNESSES } from './harness.ts';
 import { HOME_DIR } from './runtime/runtime.ts';
 
 /**
- * Where the box setup writes the system authorities together with the
- * deployment CA, and where the CA env vars point.
+ * The path of the CA bundle. The box setup writes the system authorities and
+ * the deployment CA to it, and the CA variables point to it.
  */
 const CA_PATH = `${HOME_DIR}/.boxes/ca-bundle.crt`;
 
-/** What the environment of a box is built from. */
+/** The inputs for the environment of a box. */
 export interface BoxEnvInputs {
-  /** The placeholder the egress proxy swaps for a stored credential. */
+  /** Returns the placeholder that the egress proxy replaces with a stored credential. */
   placeholderFor: (credentialId: string) => string;
-  /** The method a stored credential is used with, or null when none is stored. */
+  /** Returns the method of a stored credential, or null when none is stored. */
   methodFor: (credentialId: CredentialId) => CredentialMethod | null;
-  /** The GitLab host the GitLab credential is for. */
+  /** The GitLab host of the GitLab credential. */
   gitlabHost: string;
-  /** The URL of the egress proxy, as a box reaches it. */
+  /** The URL of the egress proxy, as seen from a box. */
   proxyUrl: string;
-  /** True when the deployment has a CA, which the box trusts. */
+  /** True when the deployment has a CA. */
   hasCa: boolean;
   /** The placeholder of each API key a user added, by its variable name. */
   apiKeys: Readonly<Record<string, string>>;
 }
 
-/**
- * Variables the box image or the runtime sets, which an API key must not
- * replace.
- */
+/** The variables that the box image or the runtime sets, which an API key must not replace. */
 const IMAGE_ENV_NAMES = [
   'CODEX_PATH',
   'HOME',
@@ -41,21 +38,23 @@ const IMAGE_ENV_NAMES = [
 ];
 
 /**
- * The full environment of a box, as a plain record. The runtime converts it
- * to its own format. Variables with an empty value are left out.
+ * Builds the full environment of a box as a plain record. The runtime converts
+ * it to its own format. Variables with an empty value are left out.
  *
- * It carries the credential placeholders, never a real credential.
+ * Each credential variable holds a placeholder and never the real credential.
+ * The egress proxy replaces the placeholder with the real secret. Each harness
+ * adds its variables, also a harness that no thread in the box uses. A
+ * credential that is not stored has no placeholder, so its variable is left
+ * out. The environment is fixed when the container is created, so a credential
+ * entered later reaches the box when its container is created again.
  *
- * Every harness adds its variables, even one no thread in the box uses. Each
- * credential value is a placeholder that the egress proxy swaps for the real
- * secret. A credential that is not stored has none, and its variable is
- * dropped: the environment is fixed at container creation, so a credential
- * entered later reaches the box at its next restart.
+ * GH_TOKEN is for git and gh. GITLAB_TOKEN and GITLAB_HOST are for git and
+ * glab. DEVTUNNELS_TOKEN is the GitHub token for the Dev Tunnels API, for the
+ * share-app skill. The API keys of the user go in first, so a variable of
+ * Boxes has priority over a key with the same name.
  *
- * GH_TOKEN is for git and gh. GITLAB_TOKEN and GITLAB_HOST are the same for
- * git and glab. DEVTUNNELS_TOKEN is the GitHub token the Dev Tunnels API
- * takes, for the share-app skill. The API keys a user added come first, so a
- * variable of Boxes wins over one with the same name.
+ * @param inputs The placeholders, the methods and the settings of the deployment.
+ * @returns The variables by name.
  */
 export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   const env: Record<string, string> = { ...inputs.apiKeys };
@@ -69,8 +68,8 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   env.DEVTUNNELS_TOKEN = inputs.placeholderFor('devtunnels');
 
   env.TERM = 'dumb';
-  // Every proxy-aware client honours these; anything else has no route
-  // out, which is the intended failure mode.
+  // Each client with proxy support uses these variables. Other clients have no
+  // route out, and that failure is intended.
   env.HTTP_PROXY = inputs.proxyUrl;
   env.HTTPS_PROXY = inputs.proxyUrl;
   env.http_proxy = inputs.proxyUrl;
@@ -79,16 +78,14 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   env.no_proxy = 'localhost,127.0.0.1';
 
   if (inputs.hasCa) {
-    // The box setup appends the CA to the system authorities in CA_PATH;
-    // these are the variables that point node, gh, git, git-lfs, curl and
-    // Codex at it. A tool honouring none of them fails TLS against the
-    // intercepted hosts and nothing else.
+    // The box setup writes the system authorities and the CA to CA_PATH. The
+    // variables below point node, gh, git, git-lfs, curl and Codex to it. A tool
+    // that reads none of them fails TLS only for the intercepted hosts.
     env.NODE_EXTRA_CA_CERTS = CA_PATH;
     env.SSL_CERT_FILE = CA_PATH;
     env.GIT_SSL_CAINFO = CA_PATH;
     env.CURL_CA_BUNDLE = CA_PATH;
-    // Codex reads this one first and falls back to SSL_CERT_FILE. It is
-    // unconfirmed whether the published Codex binary reads either.
+    // Codex reads this variable first, then SSL_CERT_FILE.
     env.CODEX_CA_CERTIFICATE = CA_PATH;
   }
 
@@ -96,12 +93,15 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
 }
 
 /**
- * The variables an API key cannot be named by: those boxEnv sets for any
- * stored credential, and those the box image or the runtime sets.
+ * The names that an API key cannot use. These are the variables that boxEnv
+ * sets when each credential is stored, and the variables that the box image or
+ * the runtime sets.
+ *
+ * @returns The reserved names.
  */
 export function reservedEnvNames(): ReadonlySet<string> {
   const names = new Set(IMAGE_ENV_NAMES);
-  // The Claude variable follows the method, so both methods are asked.
+  // The Claude variable depends on the method, so the loop tries both methods.
   for (const method of ['token', 'api_key'] as const) {
     const env = boxEnv({
       placeholderFor: () => 'set',

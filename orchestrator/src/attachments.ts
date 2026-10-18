@@ -1,31 +1,29 @@
+/**
+ * Attachments of prompts, stored in the workspace of the box, and the content
+ * types for sending workspace files.
+ */
+
 import { extname } from 'node:path';
 import type { StoredAttachment } from '../../shared/types.ts';
 import { type FileService, FileServiceError } from './files.ts';
 
-/**
- * Files the user attaches to a prompt, stored in the box's own workspace,
- * and the types workspace files are served back as.
- */
-
-/** Directory attachments live in, relative to the workspace root. */
+/** The directory of the attachments, relative to the workspace root. */
 export const ATTACHMENTS_DIR = '.boxes/attachments';
 
 /**
- * What goes in `.boxes/.gitignore`.
+ * The content of `.boxes/.gitignore`.
  *
- * The workspace is often a git repository, where attachments would show up
- * as untracked files and could end up in a commit. A `*` ignores the whole
- * directory, this file included, so the repository's own .gitignore stays
- * untouched.
+ * The workspace is often a git repository. There, attachments would show as
+ * untracked files and could get into a commit. A `*` ignores the whole
+ * directory and this file, so the .gitignore of the repository stays the same.
  */
 const GITIGNORE = '*\n';
 
 /**
- * Content types a workspace file may be served back as itself: the images,
- * PDFs, audio and video a browser shows rather than saves.
+ * The content types of the workspace files that the browser shows inline. The
+ * list holds images, PDFs, audio and video.
  *
- * HTML is left out on purpose, because a page served as HTML runs as this
- * origin.
+ * HTML is not in the list, because a page served as HTML runs as this origin.
  */
 const SERVABLE_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -49,11 +47,11 @@ const SERVABLE_TYPES: Record<string, string> = {
 };
 
 /**
- * Content types a workspace file is downloaded as.
+ * The content types of the workspace files that the browser downloads.
  *
- * Formats a browser does not show but an app on the device may: a download
- * that says what it is can be handed to that app, where one of unknown type
- * cannot. Everything on neither list is a download of unknown type.
+ * The formats are for apps on the device. A download with a known type can go
+ * to the matching app, and a download of unknown type cannot. A file in
+ * neither list is a download of unknown type.
  */
 const DOWNLOAD_TYPES: Record<string, string> = {
   '.doc': 'application/msword',
@@ -74,12 +72,11 @@ const DOWNLOAD_TYPES: Record<string, string> = {
 };
 
 /**
- * The content security policy a workspace file is served under, unless a
- * viewer or player shows it.
+ * The content security policy of a workspace file, except for a file that a
+ * viewer or a player shows.
  *
- * `sandbox` leaves a document no script, no origin and no network. That makes
- * it safe to serve an SVG the agent wrote as itself. Shown through an
- * `<img>`, an SVG runs nothing and fetches nothing.
+ * With `sandbox`, a document has no script, no origin and no network access,
+ * so an SVG that the agent wrote is safe to show as a document.
  */
 const SANDBOXED_CSP = "default-src 'none'; sandbox";
 
@@ -87,29 +84,39 @@ const SANDBOXED_CSP = "default-src 'none'; sandbox";
  * The policy for a PDF, audio or video file, which the browser shows with its
  * own viewer or player.
  *
- * A browser may refuse to hand a sandboxed PDF to its viewer and offer a
- * download instead. A media element cannot load a file from a sandboxed
- * document, because that document has no origin. `media-src 'self'` lets the
- * player load the file, and `default-src 'none'` refuses everything else.
+ * A browser can refuse to give a sandboxed PDF to its viewer and offer a
+ * download. A media element cannot load a file from a sandboxed document,
+ * because a sandboxed document has no origin. `media-src 'self'` lets the
+ * player load the file, and `default-src 'none'` refuses all other requests.
  */
 const VIEWER_CSP = "default-src 'none'; media-src 'self'";
 
-/** Whether a content type is shown by the browser's own viewer or player. */
+/**
+ * Checks if the browser shows a content type with its own viewer or player.
+ *
+ * @param type The content type.
+ * @returns True for a PDF, audio or video type.
+ */
 function viewed(type: string): boolean {
   return type === 'application/pdf' || type.startsWith('audio/') || type.startsWith('video/');
 }
 
-/** How one workspace file is served: as itself, or as a download. */
+/** The way to send one workspace file, inline or as a download. */
 export interface ServedType {
-  /** The Content-Type header the file is sent with. */
+  /** The Content-Type header of the response. */
   contentType: string;
-  /** Whether the file is shown inline. False means it is sent as a download. */
+  /** True when the browser shows the file inline, false for a download. */
   inline: boolean;
-  /** The content security policy it is served under. */
+  /** The content security policy of the response. */
   csp: string;
 }
 
-/** What to serve a workspace file as, from its name alone. */
+/**
+ * Gives the way to send a workspace file, from its name only.
+ *
+ * @param name The name of the file.
+ * @returns The content type, the disposition and the policy.
+ */
 export function servedTypeFor(name: string): ServedType {
   const ext = extname(name).toLowerCase();
   const type = SERVABLE_TYPES[ext];
@@ -123,22 +130,24 @@ export function servedTypeFor(name: string): ServedType {
   };
 }
 
-/** Longest a stored name may be, extension included. */
+/** The maximum length of a stored name, with the extension. */
 const MAX_NAME = 100;
 
 /**
- * A client's filename, reduced to a name that is safe as a path component and
- * as a line of a prompt.
+ * Reduces a filename from a client to a name that is safe as a path component
+ * and as a line of a prompt.
  *
- * Every run of characters other than letters, digits, dot, dash and
- * underscore becomes one underscore. That removes separators, so the name
- * cannot leave the attachments directory. It also removes newlines and
- * brackets, which could forge a line of the prompt or break the format the
- * dashboard parses back out.
+ * Each run of characters other than letters, digits, dot, dash and underscore
+ * becomes one underscore. So the name has no separators and cannot leave the
+ * attachments directory. The name also has no newlines and no brackets, which
+ * could forge a line of the prompt or break the format that the dashboard parses.
  *
- * Unicode letters are kept, so `Größe.png` stays as it is. Leading dots are
- * dropped, so an upload cannot land on `.gitignore` and turn the ignore rule
- * off.
+ * Unicode letters stay, so `Größe.png` does not change. Leading dots are
+ * removed, so a stored name is not hidden, and `.` and `..` become
+ * `attachment`. Leading underscores are removed for a cleaner name.
+ *
+ * @param name The filename from the client.
+ * @returns The safe name, at most {@link MAX_NAME} characters long.
  */
 export function safeAttachmentName(name: string): string {
   const base = name.split(/[/\\]/).pop() ?? '';
@@ -148,20 +157,23 @@ export function safeAttachmentName(name: string): string {
     .replace(/^[._]+/, '');
   if (!cleaned) return 'attachment';
   if (cleaned.length <= MAX_NAME) return cleaned;
-  // Truncate the stem rather than the name, so the extension — which is what
-  // tells the agent and the browser what the file is — always survives.
+  // The cut is in the stem, because the extension tells the agent and the browser
+  // the type of the file.
   const ext = extname(cleaned).slice(0, 16);
   return cleaned.slice(0, MAX_NAME - ext.length) + ext;
 }
 
 /**
- * Writes one attachment into the workspace of a box and returns where it
- * landed.
+ * Writes one attachment into the workspace of a box.
  *
- * The name is reduced to a single path component, so it cannot leave the
- * directory. The file service creates each directory of the chain on its
- * own, and refuses a link at any level. It writes the file under the first
- * free name: `name`, `name-2`, `name-3`, and so on.
+ * The file service creates each directory of the path and refuses a link at
+ * each level. It writes the file under the first free name, for example
+ * `shot.png`, then `shot-2.png`, then `shot-3.png`.
+ *
+ * @param files The file service of the box.
+ * @param name The filename from the client.
+ * @param bytes The content of the file.
+ * @returns The stored name, the path relative to the workspace, and the size in bytes.
  */
 export async function storeAttachment(
   files: FileService,
@@ -171,7 +183,7 @@ export async function storeAttachment(
   await files.mkdir('.boxes');
   await files.mkdir(ATTACHMENTS_DIR);
 
-  // Only when there is none, so a file already there is left as it is.
+  // The write needs an absent file, so an existing file stays the same.
   try {
     await files.write('.boxes/.gitignore', GITIGNORE, { absent: true });
   } catch (err) {

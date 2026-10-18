@@ -2,18 +2,13 @@ import { UPDATE_KIND } from '../../../shared/acp.ts';
 import type { ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 
 /**
- * How much of one thread's log is kept, counted as the JSON length of each
- * logged update.
+ * The size limit of one thread's log, counted as the summed JSON length of the logged updates.
  *
- * Past this the oldest messages go. A thread opens at its bottom, so only
- * old scrollback is lost.
+ * Past this the log drops the oldest messages. A thread opens at its bottom, so only old scrollback is lost.
  */
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
-/**
- * What the adapter advertises about a thread, besides the messages: the modes
- * it offers and the options it lets a client set.
- */
+/** The modes and options that the adapter advertises for a thread. */
 export interface AdapterOptions {
   /** The modes the thread offers and the current one, or null for none. */
   modes: ThreadModeState | null;
@@ -21,7 +16,7 @@ export interface AdapterOptions {
   configOptions: ThreadConfigOption[];
 }
 
-/** What a browser asking to open a thread is sent, and told about it. */
+/** The content that a browser gets when it opens a thread. */
 export interface Opening {
   /** True when `updates` starts at the message the browser named. */
   resumed: boolean;
@@ -41,13 +36,7 @@ interface Entry {
   size: number;
 }
 
-/**
- * Log of everything a browser watching one thread would have been sent, in
- * order.
- *
- * A browser opens a thread by being sent this log: whole for a fresh tab, or
- * from the last message it holds when it reconnects.
- */
+/** The log of every update that a browser watching one thread gets, in order. */
 export class ThreadLog {
   /** The logged notifications, oldest first. */
   private entries: Entry[] = [];
@@ -56,11 +45,11 @@ export class ThreadLog {
   /** True once the log has dropped a message to stay under its cap. */
   private truncated = false;
   /**
-   * True while the adapter is reading the transcript into this log. What
-   * arrives meanwhile is logged and sent to nobody.
+   * True while the adapter's transcript replay fills this log. Updates that arrive meanwhile go into the log and to
+   * no browser.
    *
-   * A replay and a live turn look the same on the wire, so the gateway fills
-   * only a thread that is not talking.
+   * A replay and a live turn look the same on the wire. The gateway fills a log only for a thread that the adapter
+   * did not hold when the load started.
    */
   filling = false;
   /**
@@ -69,9 +58,14 @@ export class ThreadLog {
    */
   options: AdapterOptions = { modes: null, configOptions: [] };
 
+  /** @param cap The size limit, as the summed JSON length of the entries. */
   constructor(private readonly cap = MAX_LOG_BYTES) {}
 
-  /** Adds one notification, and drops the oldest messages once over the cap. */
+  /**
+   * Adds one notification, and drops the oldest messages once over the cap.
+   *
+   * @param params The params of the `session/update` notification.
+   */
   append(params: unknown): void {
     this.noteOptions(params);
     const size = JSON.stringify(params).length;
@@ -86,6 +80,9 @@ export class ThreadLog {
    *
    * The adapter writes a fork a transcript only when it is first prompted, so
    * the copy lets a new fork open on the conversation it carries.
+   *
+   * @param source The log of the thread that was forked.
+   * @param acpThreadId The adapter's id for this thread.
    */
   copyFrom(source: ThreadLog, acpThreadId: string): void {
     this.entries = source.entries.map(({ params, size }) => ({
@@ -97,13 +94,14 @@ export class ThreadLog {
   }
 
   /**
-   * What to send a browser opening this thread.
+   * The content to send to a browser that opens this thread.
    *
    * When the log holds `anchor`, the browser gets that message and everything
    * after it. The anchor message is sent again because a socket can drop
    * partway through it. Otherwise the browser gets the whole thread.
    *
    * @param anchor The last message the browser holds, if any.
+   * @returns The updates to send, the answer to the load, and two flags that describe the updates.
    */
   opening(anchor?: string): Opening {
     const at = anchor ? this.entries.findIndex((e) => messageOf(e.params) === anchor) : -1;
@@ -116,9 +114,8 @@ export class ThreadLog {
   }
 
   /**
-   * Drops the oldest message: its chunks and everything up to the next
-   * message's first chunk, such as the tool calls it made. A cut anywhere
-   * else would leave a partial message or a tool result without its call.
+   * Drops the oldest message with its chunks and every entry up to the first chunk of the next message, e.g. the
+   * tool calls it made. A cut anywhere else would leave a partial message or a tool result without its call.
    */
   private evictOldest(): void {
     this.truncated = true;
@@ -133,7 +130,7 @@ export class ThreadLog {
   }
 
   /**
-   * Sets the current mode in {@link options}, for a mode set by request. The
+   * Sets the current mode in {@link ThreadLog.options}, for a mode set by request. The
    * adapter need not send a `current_mode_update` for it.
    *
    * @param modeId The mode that is now current.
@@ -147,7 +144,7 @@ export class ThreadLog {
   }
 
   /**
-   * Sets one option's value in {@link options}, for a value set by request.
+   * Sets one option's value in {@link ThreadLog.options}, for a value set by request.
    * The adapter need not send a `config_option_update` for it.
    *
    * @param configId The option's id.
@@ -165,8 +162,10 @@ export class ThreadLog {
   }
 
   /**
-   * Updates {@link options} from a `current_mode_update` or a
+   * Updates {@link ThreadLog.options} from a `current_mode_update` or a
    * `config_option_update`.
+   *
+   * @param params The params of the `session/update` notification.
    */
   private noteOptions(params: unknown): void {
     const update = (params as { update?: Record<string, unknown> } | null)?.update;
@@ -184,7 +183,12 @@ export class ThreadLog {
   }
 }
 
-/** The message a session/update belongs to, or undefined when it names none. */
+/**
+ * The message a session/update belongs to.
+ *
+ * @param params The params of the notification.
+ * @returns The message id, or undefined when the update names none.
+ */
 export function messageOf(params: unknown): string | undefined {
   const messageId = (params as { update?: { messageId?: unknown } } | undefined)?.update?.messageId;
   return typeof messageId === 'string' && messageId ? messageId : undefined;

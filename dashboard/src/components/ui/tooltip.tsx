@@ -5,6 +5,12 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * The provider that shares the tooltip settings of a tree.
+ *
+ * @param delayDuration The delay before a tooltip opens, in milliseconds.
+ * @param props The other props of the Radix tooltip provider.
+ */
 function TooltipProvider({
   delayDuration = 0,
   ...props
@@ -18,14 +24,32 @@ function TooltipProvider({
   );
 }
 
+/**
+ * A short text that shows while the pointer is on its trigger or the trigger has focus.
+ *
+ * @param props The props of the Radix tooltip root.
+ */
 function Tooltip({ ...props }: React.ComponentProps<typeof TooltipPrimitive.Root>) {
   return <TooltipPrimitive.Root data-slot="tooltip" {...props} />;
 }
 
+/**
+ * The element that a tooltip belongs to.
+ *
+ * @param props The props of the Radix tooltip trigger.
+ */
 function TooltipTrigger({ ...props }: React.ComponentProps<typeof TooltipPrimitive.Trigger>) {
   return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />;
 }
 
+/**
+ * The bubble of a tooltip with its arrow, rendered in a portal.
+ *
+ * @param className Extra classes.
+ * @param sideOffset The distance from the trigger, in pixels.
+ * @param children The text of the tooltip.
+ * @param props The other props of the Radix tooltip content.
+ */
 function TooltipContent({
   className,
   sideOffset = 0,

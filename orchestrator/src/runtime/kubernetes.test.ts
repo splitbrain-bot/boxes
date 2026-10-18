@@ -32,7 +32,7 @@ interface ExecCall {
   stderr: Writable | null;
   /** Where the input comes from, or null without one. */
   stdin: Readable | null;
-  /** Whether the exec has a terminal. */
+  /** True when the exec has a terminal. */
   tty: boolean;
 }
 
@@ -44,24 +44,42 @@ let policies: Map<string, V1NetworkPolicy>;
 let claims: Map<string, V1PersistentVolumeClaim>;
 /** The execs the fake cluster saw, in order. */
 let execs: ExecCall[];
-/** What each pod read does to the pod before it is returned, for a pod that changes. */
+/** Changes a pod at each read, before the read returns it. */
 let onRead: (pod: V1Pod) => void;
-/** How an exec answers: output, and the status it ends with. */
+/** How an exec answers, with its output and the status it ends with. */
 let answer: (call: ExecCall) => { stdout?: string; stderr?: string; status: V1Status };
 
-/** An error shaped like an answer of the API. */
+/**
+ * Makes an error shaped like an error answer of the API.
+ *
+ * @param code The HTTP status code.
+ * @returns The error.
+ */
 function apiError(code: number): Error {
   return Object.assign(new Error(`HTTP ${code}`), { code, body: { message: `status ${code}` } });
 }
 
-/** A read from a map that answers 404 for a missing object. */
+/**
+ * Reads an object from a map of the fake cluster.
+ *
+ * @param map The objects by name.
+ * @param name The name of the object.
+ * @returns A copy of the object.
+ * @throws Error shaped like a 404 of the API when the object is missing.
+ */
 function read<T>(map: Map<string, T>, name: string): T {
   const value = map.get(name);
   if (!value) throw apiError(404);
   return structuredClone(value);
 }
 
-/** The objects of a map whose label selector, `key` or `key=value`, matches. */
+/**
+ * Lists the objects of a map that match a label selector.
+ *
+ * @param map The objects by name.
+ * @param selector One label selector, as `key` or `key=value`.
+ * @returns The matching objects, as a list answer of the API.
+ */
 function select<T extends { metadata?: { labels?: Record<string, string> } }>(
   map: Map<string, T>,
   selector: string,
@@ -75,7 +93,11 @@ function select<T extends { metadata?: { labels?: Record<string, string> } }>(
   };
 }
 
-/** A fake cluster with the proxy Service and nothing else. */
+/**
+ * Makes the clients of a fake cluster that has the proxy Service and nothing else.
+ *
+ * @returns The clients.
+ */
 function fakeClients(): KubeClients {
   const core = {
     readNamespacedService: async ({ name }: { name: string }) => {
@@ -171,7 +193,12 @@ function fakeClients(): KubeClients {
   };
 }
 
-/** A prepared runtime over the fake cluster, with short waits. */
+/**
+ * Makes a prepared runtime over the fake cluster, with short waits.
+ *
+ * @param env Configuration values on top of the defaults of the test.
+ * @returns The runtime.
+ */
 async function kubernetesRuntime(env: Record<string, string> = {}): Promise<KubernetesRuntime> {
   const rt = new KubernetesRuntime(
     loadConfig({ RUNTIME: 'kubernetes', BOX_IMAGE: 'box:test', ...env }),

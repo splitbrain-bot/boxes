@@ -15,6 +15,7 @@ import type { FileMessagePartComponent } from "@assistant-ui/react";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/attachments";
 
+/** The class names of a file card for each variant and size. */
 const fileVariants = cva(
   "aui-file-root inline-flex items-center gap-3 rounded-lg transition-colors",
   {
@@ -37,6 +38,12 @@ const fileVariants = cva(
   },
 );
 
+/**
+ * Picks the icon for a MIME type.
+ *
+ * @param mimeType The MIME type of the file.
+ * @returns The icon component, or the generic file icon for an unknown type.
+ */
 function getMimeTypeIcon(mimeType: string): FC<{ className?: string }> {
   const type = mimeType.toLowerCase();
   if (type.startsWith("image/")) {
@@ -60,8 +67,17 @@ function getMimeTypeIcon(mimeType: string): FC<{ className?: string }> {
   return FileIcon;
 }
 
+/** The form of the file data: a data URI, a URL, raw base64 or an id. */
 export type FileDataKind = "data-uri" | "url" | "base64" | "id";
 
+/**
+ * Finds the form of the file data. A data URI wins over the given source type
+ * `url`. Without a source type, data that is not a data URI or an http URL counts as base64.
+ *
+ * @param data The file data.
+ * @param sourceType The source type from the message part, if any.
+ * @returns The form of the data.
+ */
 function getFileDataKind(
   data: string,
   sourceType?: "url" | "id",
@@ -73,6 +89,12 @@ function getFileDataKind(
   return "base64";
 }
 
+/**
+ * Computes the decoded size of base64 data. A data URI prefix up to the first comma is ignored.
+ *
+ * @param base64 The base64 data or data URI.
+ * @returns The size in bytes.
+ */
 function getBase64Size(base64: string): number {
   const commaIndex = base64.indexOf(",");
   const base64Data = commaIndex >= 0 ? base64.slice(commaIndex + 1) : base64;
@@ -80,12 +102,18 @@ function getBase64Size(base64: string): number {
   return Math.floor((base64Data.length * 3) / 4) - padding;
 }
 
-/** Boxes edit: the app's shared byte formatter, under the name the registry exports. */
+/** Boxes edit: the byte formatter of the dashboard, under the name that the upstream registry exports. */
 const formatFileSize = formatBytes;
 
+/** The props of {@link FileRoot}: any div prop and the variant props. */
 export type FileRootProps = React.ComponentProps<"div"> &
   VariantProps<typeof fileVariants>;
 
+/**
+ * The frame of a file card.
+ *
+ * @param props The variant, the size, the classes, the content and the other div props.
+ */
 function FileRoot({
   className,
   variant,
@@ -106,10 +134,17 @@ function FileRoot({
   );
 }
 
+/** The props of {@link FileIconDisplay}: any span prop and the MIME type. */
 type FileIconDisplayProps = React.ComponentProps<"span"> & {
+  /** The MIME type that picks the icon. */
   mimeType?: string;
 };
 
+/**
+ * The icon of a file card. Children replace the icon for the MIME type.
+ *
+ * @param props The MIME type, the classes, the content and the other span props.
+ */
 function FileIconDisplay({
   mimeType,
   className,
@@ -129,6 +164,13 @@ function FileIconDisplay({
   );
 }
 
+/**
+ * The name of a file, truncated to one line. A missing name shows as "Unnamed file".
+ *
+ * @param className Extra classes.
+ * @param children The name.
+ * @param props The other span props.
+ */
 function FileName({
   className,
   children,
@@ -145,10 +187,17 @@ function FileName({
   );
 }
 
+/** The props of {@link FileSize}: any span prop and the size. */
 type FileSizeProps = React.ComponentProps<"span"> & {
+  /** The size in bytes. */
   bytes: number;
 };
 
+/**
+ * The size of a file in a readable unit.
+ *
+ * @param props The size, the classes and the other span props.
+ */
 function FileSize({ bytes, className, ...props }: FileSizeProps) {
   return (
     <span
@@ -161,13 +210,24 @@ function FileSize({ bytes, className, ...props }: FileSizeProps) {
   );
 }
 
+/** The props of {@link FileDownload}: any anchor prop but href, and the file data. */
 type FileDownloadProps = Omit<React.ComponentProps<"a">, "href"> & {
+  /** The file data, as a data URI, a URL, base64 or an id. */
   data: string;
+  /** The MIME type, for the data URI of base64 data. */
   mimeType: string;
+  /** The name for the downloaded file. */
   filename?: string;
+  /** The source type from the message part, if any. */
   sourceType?: "url" | "id";
 };
 
+/**
+ * The download link of a file card. It renders nothing for an id, or for a URL
+ * that is not http, https or blob.
+ *
+ * @param props The file data, the MIME type, the file name, the source type and the other anchor props.
+ */
 function FileDownload({
   data,
   mimeType,
@@ -200,6 +260,15 @@ function FileDownload({
   );
 }
 
+/**
+ * A file part of a message, as a card with icon, name, size and download link.
+ * The size shows only for inline data.
+ *
+ * @param filename The name of the file.
+ * @param data The file data.
+ * @param mimeType The MIME type of the file.
+ * @param sourceType The source type of the data, if any.
+ */
 const FileImpl: FileMessagePartComponent = ({
   filename,
   data,
@@ -229,11 +298,17 @@ const FileImpl: FileMessagePartComponent = ({
   );
 };
 
+/** The file part component, with its parts attached for custom layouts. */
 const File = memo(FileImpl) as unknown as FileMessagePartComponent & {
+  /** The root part. */
   Root: typeof FileRoot;
+  /** The icon part. */
   Icon: typeof FileIconDisplay;
+  /** The name part. */
   Name: typeof FileName;
+  /** The size part. */
   Size: typeof FileSize;
+  /** The download link part. */
   Download: typeof FileDownload;
 };
 

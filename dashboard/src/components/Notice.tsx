@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 
-/** What a notice is about, which picks its colour. */
+/** The kind of a notice, which picks its colour. */
 export type NoticeTone = 'danger' | 'warn';
 
 /** The colour classes of each tone. */
@@ -11,8 +11,12 @@ const TONE: Record<NoticeTone, string> = {
 };
 
 /**
- * An alert for a failed request or a state worth a warning. The component sets
+ * An alert for a failed request or a state that needs a warning. The component sets
  * the colour and the alert role. The caller sets the layout.
+ *
+ * @param tone The tone, danger by default.
+ * @param className Layout classes from the caller.
+ * @param children The message.
  */
 export function Notice({
   tone = 'danger',

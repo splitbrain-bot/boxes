@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { test } from 'vitest';
 import { loadConfig } from './config.ts';
 
-/** Runs a case against a throwaway data dir, so no case names a real one. */
+/**
+ * Runs a case with a temporary data directory, so no case uses a real one.
+ *
+ * @param fn The case, which gets the path of the directory.
+ * @returns The result of the case.
+ */
 function withDataDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-config-'));
   try {
@@ -145,8 +150,7 @@ test('an allowlist entry that would allow everything is refused at boot', () => 
 
 test('no secret comes from the environment any more', () => {
   withDataDir((dir) => {
-    // Credentials live in the database. PROFILE_DEFAULT_* variables come from
-    // older releases and must stay ignored.
+    // Credentials are in the database. The config ignores each PROFILE_DEFAULT_* variable.
     const cfg = loadConfig({
       DATA_DIR: dir,
       PROFILE_DEFAULT_GH_TOKEN: 'ghp_x',
@@ -224,15 +228,15 @@ test('the OpenAI credential travels to the API-key endpoint alone', () => {
   // narrow allowlist, and neither is intercepted.
   assert.deepEqual(openai?.alsoAllow, ['auth.openai.com', 'chatgpt.com']);
   assert.ok(!openai?.hosts.includes('chatgpt.com'));
-  // Codex checks the shape of the key before it sends it anywhere, so the
-  // placeholder has to look like one.
+  // The placeholder starts like an OpenAI key, so a client that checks the format
+  // of the key accepts it.
   assert.equal(openai?.placeholderPrefix, 'sk-');
 });
 
 test('the box uid defaults off 1000 and is settable', () => {
   withDataDir((dir) => {
-    // 1000 is the base image's uid and, on a host, usually a person's. The
-    // default gives the agent a uid of its own, like any other service.
+    // 1000 is the uid of the base image, and on a host it is usually the uid of a
+    // person. The default gives the agent its own uid, like each other service.
     const base = loadConfig({ DATA_DIR: dir });
     assert.equal(base.BOX_UID, 1020);
     assert.equal(base.BOX_GID, 1020);

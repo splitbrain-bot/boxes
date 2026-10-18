@@ -2,13 +2,11 @@ import type { BackgroundProcess, BoxWork } from '../../../shared/types.ts';
 import type { Harness } from '../harness.ts';
 import type { ContainerProcess } from '../processes.ts';
 
-// --- what the adapters say -------------------------------------------------
-
 /**
  * One `session/update` of the async-task extension, as either adapter sends it.
  *
- * Every field is `unknown`, because no schema covers this extension. Only
- * the update names and `asyncTaskId` are required.
+ * Every field is `unknown`, because no schema covers this extension. {@link TaskBoard.note} needs only the update
+ * name and `asyncTaskId`.
  */
 export interface AsyncTaskUpdate {
   /** `async_task_spawned`, `async_task_state_update` or `async_task_progress`. */
@@ -17,11 +15,14 @@ export interface AsyncTaskUpdate {
   asyncTaskId?: unknown;
   /** The command for a shell task, a description for any other kind. */
   name?: unknown;
-  /** `shell`, `workflow`, `monitor` or `task` under Claude; always `shell` under Codex. */
+  /**
+   * The kind of the task. Claude sends `shell`, `workflow`, `monitor`, `task` or the raw type of the CLI. Codex sends
+   * `shell`.
+   */
   taskType?: unknown;
   /** A description of the task, and the only name a progress update carries. */
   description?: unknown;
-  /** Whether the adapter can stop the task. */
+  /** True when the adapter can stop the task. */
   canStop?: unknown;
   /** On a state update: `running`, `paused`, `completed`, `failed` or `stopped`. */
   state?: unknown;
@@ -36,10 +37,9 @@ const UNNAMED_TASK = 'a background task';
 /**
  * The tasks one adapter process has announced, by the conversation they are on.
  *
- * These are what a thread's bar shows and what its stop button names. Neither
- * adapter re-announces the tasks of a process that has died, so a respawned
- * adapter starts with an empty board. What the old process left running is
- * found by {@link readBox}.
+ * A thread's bar shows these tasks, and its stop button names them. The adapters do not announce the tasks of a
+ * dead process again, so a respawned adapter starts with an empty board. {@link readBox} finds the work that the old
+ * process left running.
  */
 export class TaskBoard {
   /** The tasks of each thread by task id, in the order they arrived. */
@@ -54,7 +54,9 @@ export class TaskBoard {
    * A spawn adds an entry, a final state removes it, and a progress update may
    * rename one. Anything else leaves the board as it is.
    *
-   * @returns Whether the thread's bar has changed.
+   * @param acpThreadId The adapter's id for the conversation of the update.
+   * @param update The `update` field of the `session/update` notification.
+   * @returns True when the thread's bar has changed.
    */
   note(acpThreadId: string, update: unknown): boolean {
     if (!update || typeof update !== 'object') return false;
@@ -93,7 +95,12 @@ export class TaskBoard {
     }
   }
 
-  /** The tasks one conversation has running. */
+  /**
+   * The tasks one conversation has running.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   * @returns The tasks, in the order they arrived.
+   */
   for(acpThreadId: string): BackgroundProcess[] {
     return [...(this.byThread.get(acpThreadId)?.values() ?? [])];
   }
@@ -103,12 +110,12 @@ export class TaskBoard {
     return [...this.byThread].filter(([, tasks]) => tasks.size > 0).map(([thread]) => thread);
   }
 
-  /** Whether any conversation of this adapter has a task running. */
+  /** True when any conversation of this adapter has a task running. */
   get any(): boolean {
     return this.threads.length > 0;
   }
 
-  /** How many tasks this adapter has running, across its conversations. */
+  /** Number of tasks this adapter has running, across its conversations. */
   get count(): number {
     let total = 0;
     for (const tasks of this.byThread.values()) total += tasks.size;
@@ -119,7 +126,9 @@ export class TaskBoard {
    * Forgets one task. A stop also calls this, because an adapter that answers
    * `stopped: false` sends no final state update.
    *
-   * @returns Whether the task was on the board.
+   * @param acpThreadId The adapter's id for the conversation.
+   * @param taskId The adapter's id for the task.
+   * @returns True when the task was on the board.
    */
   drop(acpThreadId: string, taskId: string): boolean {
     const tasks = this.byThread.get(acpThreadId);
@@ -131,7 +140,7 @@ export class TaskBoard {
   /**
    * Forgets every task, for a process that has gone.
    *
-   * @returns The conversations that had a task, so their browsers can be told.
+   * @returns The conversations that had a task.
    */
   clear(): string[] {
     const had = this.threads;
@@ -139,7 +148,12 @@ export class TaskBoard {
     return had;
   }
 
-  /** The tasks of one thread, created on first use. */
+  /**
+   * The tasks of one thread, created on first use.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns The tasks of the thread by task id.
+   */
   private tasksOf(acpThreadId: string): Map<string, BackgroundProcess> {
     let tasks = this.byThread.get(acpThreadId);
     if (!tasks) {
@@ -151,7 +165,10 @@ export class TaskBoard {
 }
 
 /**
- * The name to show for a task: `name` when set, else `description`, else null.
+ * The name to show for a task. `name` comes first, then `description`.
+ *
+ * @param update The async-task update.
+ * @returns The trimmed name, or null when the update has neither.
  */
 function describe(update: AsyncTaskUpdate): string | null {
   for (const value of [update.name, update.description]) {
@@ -160,21 +177,18 @@ function describe(update: AsyncTaskUpdate): string | null {
   return null;
 }
 
-// --- what the box says -----------------------------------------------------
-
 /**
- * One reading of a box: whether anything is running in it that Boxes did not
- * put there, and what.
+ * One reading of the work that runs in a box, which is every process that does not belong to the box setup or to an
+ * adapter.
  *
- * The reading covers the whole box. The process table cannot say which
- * conversation owns a process: `codex app-server` runs every Codex
- * conversation of a box in one process.
+ * The reading covers the whole box. The process table does not show which conversation owns a process, because
+ * `codex app-server` runs every Codex conversation of a box in one process.
  */
 export interface BoxReading {
-  /** Whether anything is running that Boxes did not put there to hold the box open. */
+  /** True when the reading found work. */
   busy: boolean;
   /**
-   * The work found, for the log and for a reader deciding whether to stop it.
+   * The work found, for the log and for a reader who decides to stop it or not.
    *
    * A stop does not signal these pids, because it reads the table again just
    * before. They tell two identical command lines apart.
@@ -204,17 +218,14 @@ const ENTRYPOINT_HOLD = 'sleep infinity';
 const INIT_PID = 1;
 
 /**
- * Whether one process belongs to the box itself rather than to work done in it.
+ * Checks if one process is resident, which means it belongs to the box setup or to an adapter and is not work.
  *
- * Resident processes are the box's init and the `sleep infinity` directly
- * under it, every adapter, every adapter's direct children (the agent
- * processes), anything matching a harness's `residentProcesses`, the file
- * service, and the `ps` that took the reading. Everything else is work,
- * including a build orphaned by an adapter that died and the sandbox wrappers
- * around a Codex command.
+ * Work includes a build orphaned by an adapter that died, and the sandbox wrappers around a Codex command.
  *
- * `harnesses` must list every harness. With one missing, a box running that
- * harness reads as empty.
+ * @param process The process to check.
+ * @param adapters The pids of the adapter processes.
+ * @param harnesses Every harness. With one missing, the adapter and the agent of that harness read as work.
+ * @returns True when the process is resident.
  */
 function isResident(
   process: ContainerProcess,
@@ -224,6 +235,7 @@ function isResident(
   if (process.pid === INIT_PID) return true;
   if (process.ppid === INIT_PID && process.command.trim() === ENTRYPOINT_HOLD) return true;
   if (adapters.has(process.pid)) return true;
+  // The direct children of an adapter are the agent processes.
   if (adapters.has(process.ppid)) return true;
   if (READING_ITSELF.test(process.command.trim())) return true;
   if (FILE_SERVICE.test(process.command.trim())) return true;
@@ -240,6 +252,10 @@ function isResident(
  * inside the `claude-agent-acp` package. A process is not an adapter when it
  * matches a harness's `residentProcesses`, or when a process above it carries
  * a token. Reading an agent as an adapter would hide the shells under it.
+ *
+ * @param processes The processes of the box.
+ * @param harnesses Every harness.
+ * @returns The pids of the adapters.
  */
 function adapterPids(
   processes: readonly ContainerProcess[],
@@ -250,7 +266,7 @@ function adapterPids(
     harnesses.some((h) => p.command.includes(h.processToken));
   const named = (p: ContainerProcess): boolean =>
     harnesses.some((h) => h.residentProcesses.some((pattern) => pattern.test(p.command)));
-  /** Whether anything above a process carries an adapter's token. */
+  /** Checks if an ancestor of a process carries an adapter's token. */
   const under = (start: ContainerProcess): boolean => {
     const seen = new Set<number>([start.pid]);
     let at = byPid.get(start.ppid);
@@ -265,11 +281,14 @@ function adapterPids(
 }
 
 /**
- * What is running in a box that Boxes did not put there.
+ * Finds the work that runs in a box.
  *
- * The reaper relies on this rather than on task events: a respawned adapter
- * knows nothing of the work its predecessor left running. A running box with
- * no adapter, which runs only the entrypoint, reads as empty.
+ * The reaper uses this reading next to the task events, because a respawned adapter does not know the work that
+ * its predecessor left running. A running box with no adapter, which runs only the entrypoint, reads as empty.
+ *
+ * @param processes The processes of the box.
+ * @param harnesses Every harness.
+ * @returns The reading.
  */
 export function readBox(
   processes: readonly ContainerProcess[],
@@ -293,6 +312,10 @@ export function readBox(
  * reading taken inside the box just now, so the pids fit a `kill` there.
  * Children come before parents, because a parent killed first hands its
  * children to init before they are signalled.
+ *
+ * @param processes The processes of the box, read inside the box just now.
+ * @param harnesses Every harness.
+ * @returns The pids of the work, deepest first.
  */
 export function workPids(
   processes: readonly ContainerProcess[],
@@ -300,7 +323,7 @@ export function workPids(
 ): number[] {
   const adapters = adapterPids(processes, harnesses);
   const byPid = new Map(processes.map((p) => [p.pid, p]));
-  /** How far under the root a process sits; anything that loops is shallow. */
+  /** The number of steps from a process up to the root. A loop in the parent chain ends the count. */
   const depth = (start: ContainerProcess): number => {
     const seen = new Set<number>();
     let at: ContainerProcess | undefined = start;
@@ -326,9 +349,9 @@ export interface ProbeOptions {
    * container or it is not running, which reads as nothing running.
    */
   list: () => Promise<ContainerProcess[] | null>;
-  /** Every harness, because a box may run either adapter, or both. */
+  /** Every harness, because one box can hold the adapters of both. */
   harnesses: readonly Harness[];
-  /** How long one reading stays current, in milliseconds. */
+  /** Time that one reading stays current, in milliseconds. */
   ttlMs: number;
   /** The clock. A test can replace it. */
   now?: () => number;
@@ -347,33 +370,33 @@ export interface ProbeOptions {
 }
 
 /**
- * The reading of one container, taken again at most once per `ttlMs`.
+ * The cached reading of one container.
  *
- * Readers get the last reading at once and never wait. A stale reading starts
- * a refresh in the background.
+ * Readers get the last reading at once and never wait. A reading older than `ttlMs` starts a refresh in the
+ * background.
  */
 export class BackgroundProbe {
   /** The last reading. */
   private reading: BoxReading = NOTHING;
-  /** When the last reading was taken or failed. */
+  /** The time of the last reading, or of the last failed reading. */
   private readAt = -Infinity;
   /** The reading being taken, if any. */
   private inFlight: Promise<void> | null = null;
-  /** Whether the box has been read at all, so an empty reading is an answer. */
+  /** True after the first reading, so an empty reading is an answer. */
   private read = false;
   /**
-   * Counts the times {@link clear} has set the answer. A reading that started
+   * Counts the times {@link BackgroundProbe.clear} has set the answer. A reading that started
    * under an older count is dropped.
    */
   private generation = 0;
-  /** Whether the last reading failed, so the trouble is reported once. */
+  /** True while readings fail, so the class reports the trouble once. */
   private failing = false;
 
   /** Lists the processes of the box, or null when it is not running. */
   private readonly list: ProbeOptions['list'];
   /** Every harness, to tell resident processes from work. */
   private readonly harnesses: readonly Harness[];
-  /** How long one reading stays current, in milliseconds. */
+  /** Time that one reading stays current, in milliseconds. */
   private readonly ttlMs: number;
   /** The clock. */
   private readonly now: () => number;
@@ -382,6 +405,7 @@ export class BackgroundProbe {
   /** Runs when the box changes between busy and idle. */
   private readonly onChange: (reading: BoxReading) => void;
 
+  /** @param options The process source, the harnesses, the reading lifetime and the callbacks. */
   constructor(options: ProbeOptions) {
     this.list = options.list;
     this.harnesses = options.harnesses;
@@ -392,7 +416,7 @@ export class BackgroundProbe {
   }
 
   /**
-   * Whether anything is running in the box, or null before the first reading.
+   * True when work runs in the box, or null before the first reading.
    * Starts a refresh when the reading is stale.
    *
    * Null does not mean nothing is running. A caller that stops boxes must
@@ -404,7 +428,7 @@ export class BackgroundProbe {
   }
 
   /**
-   * What the last reading found running. Empty before the first reading.
+   * The work that the last reading found. Empty before the first reading.
    * Starts a refresh when the reading is stale.
    */
   get work(): readonly BoxWork[] {
@@ -432,7 +456,11 @@ export class BackgroundProbe {
     if (this.now() - this.readAt >= this.ttlMs) void this.refresh();
   }
 
-  /** Reads the box, at most one reading at a time. */
+  /**
+   * Reads the box, at most one reading at a time.
+   *
+   * @returns A promise that resolves when the reading is done or has failed.
+   */
   refresh(): Promise<void> {
     if (this.inFlight) return this.inFlight;
     const generation = this.generation;
@@ -465,8 +493,6 @@ export class BackgroundProbe {
   }
 }
 
-// --- the call that started it ----------------------------------------------
-
 /** The fields of a tool call update that {@link startsBackgroundWork} reads. */
 export interface ToolCallUpdate {
   /** The tool name, where the adapter sets one. */
@@ -481,13 +507,16 @@ export interface ToolCallUpdate {
 }
 
 /**
- * Whether a tool call leaves something running after the turn that made it.
+ * Checks if a tool call leaves something running after the turn that made it.
  *
- * Three checks, in order. The `_meta.jetbrains.air.asyncTasks.backgrounded`
- * marker, which both adapters set and the only one Codex sends. Claude's
- * `rawInput.run_in_background` flag, which arrives with the call. And the tool
- * name, checked against `alwaysBackground`, the harness's list of tools that
- * always run in the background.
+ * Both adapters set the `_meta.jetbrains.air.asyncTasks.backgrounded` marker on the `tool_call_update` of a shell
+ * command that went to the background, because the gateway advertises the `asyncTasks` capability. Under Claude
+ * this is a Bash call. The marker is the only sign that Codex sends. Claude also sends the
+ * `rawInput.run_in_background` flag and a tool name.
+ *
+ * @param update The tool call update.
+ * @param alwaysBackground The tool names of the harness that always run in the background.
+ * @returns True when the call starts background work.
  */
 export function startsBackgroundWork(
   update: ToolCallUpdate,

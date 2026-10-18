@@ -27,18 +27,32 @@ import {
 } from '../../shared/files.ts';
 import { serveFiles } from './server.ts';
 
+/** The temporary directory of one test, with the workspace, the home and the Nix directory. */
 let dir: string;
+/** The workspace of one test, in {@link dir}. */
 let workspace: string;
+/** The client session to the file service of one test. */
 let session: ClientHttp2Session;
 
 /** A reply, with its body as bytes. */
 interface Reply {
+  /** The HTTP status. */
   status: number;
+  /** The response headers. */
   headers: Record<string, string | string[] | undefined>;
+  /** The body. */
   body: Buffer;
 }
 
-/** Sends one request over the test session and collects the reply. */
+/**
+ * Sends one request over the test session and collects the reply.
+ *
+ * @param method The HTTP method.
+ * @param path The request path, with the query.
+ * @param body The request body, or undefined for none.
+ * @param headers More request headers.
+ * @returns The reply.
+ */
 function request(
   method: string,
   path: string,
@@ -61,17 +75,34 @@ function request(
   });
 }
 
-/** The JSON body of a reply. */
+/**
+ * Parses the body of a reply as JSON.
+ *
+ * @param reply The reply.
+ * @returns The parsed body.
+ */
 function json(reply: Reply): unknown {
   return JSON.parse(reply.body.toString('utf8'));
 }
 
-/** A request path with a `path` query and any further query values. */
+/**
+ * Builds a request path with a `path` query and more query values.
+ *
+ * @param route The route of the operation.
+ * @param path The value of the `path` query.
+ * @param extra More query values.
+ * @returns The request path.
+ */
 function at(route: string, path: string, extra: Record<string, string> = {}): string {
   return `${route}?${new URLSearchParams({ path, ...extra }).toString()}`;
 }
 
-/** Writes a file under the workspace, creating the directories above it. */
+/**
+ * Writes a file under the workspace, and creates the missing parent directories.
+ *
+ * @param rel The path, relative to the workspace.
+ * @param content The content of the file.
+ */
 function put(rel: string, content: string | Buffer): void {
   const full = join(workspace, rel);
   mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
@@ -260,7 +291,12 @@ describe('raw', () => {
 });
 
 describe('write', () => {
-  /** The hash the service reports for a file now. */
+  /**
+   * Reads the hash that the service reports for a file.
+   *
+   * @param rel The path, relative to the workspace.
+   * @returns The hash.
+   */
   async function hashOf(rel: string): Promise<string> {
     return String((await request('GET', at(FILE_ROUTES.read, rel, { cap: '0' }))).headers.etag);
   }
@@ -387,7 +423,13 @@ describe('setup files', () => {
   });
 });
 
-/** A tar with one file, relative to the home. */
+/**
+ * Packs one file into a tar.
+ *
+ * @param name The path of the file, relative to the home.
+ * @param content The content of the file.
+ * @returns The bytes of the tar.
+ */
 function tarOf(name: string, content: string): Promise<Buffer> {
   const p = pack();
   p.entry({ name, size: content.length }, content);

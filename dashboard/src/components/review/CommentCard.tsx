@@ -6,6 +6,11 @@ import type { ReviewAnnotation } from '../../../../shared/types.ts';
  * One comment, as a card under the line it is about.
  *
  * The agent can write into REVIEW.md, so the comment renders as a text node only.
+ *
+ * @param annotation The comment to show.
+ * @param busy True while a write is in flight, so a double tap cannot act twice.
+ * @param onEdit Called when the user asks to edit the comment.
+ * @param onDelete Called when the user asks to delete the comment.
  */
 export function CommentCard({
   annotation,

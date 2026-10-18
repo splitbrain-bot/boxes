@@ -32,6 +32,7 @@ export class PendingStore {
   /** The answerable entries, by row id. */
   private readonly entries = new Map<number, PendingEntry>();
 
+  /** @param db The orchestrator's database. */
   constructor(private readonly db: Db) {}
 
   /** Drops rows left behind by a previous orchestrator process. */
@@ -45,7 +46,14 @@ export class PendingStore {
   /**
    * Queues a request and returns its entry.
    *
+   * @param boxId The box of the request.
+   * @param acpSessionId The adapter's id for the thread that asks, or null when the request names none.
+   * @param method The ACP method of the request.
+   * @param params The params of the request.
+   * @param handlers Resolve and reject of the upstream request.
+   * @param holdMs The hold time in milliseconds.
    * @param onTimeout Runs after holdMs unless the entry is settled first.
+   * @returns The entry.
    */
   add(
     boxId: string,
@@ -88,6 +96,7 @@ export class PendingStore {
   /**
    * Removes the entry and its DB row. Safe to call twice.
    *
+   * @param id The row id of the request.
    * @returns The entry, or undefined when it was already settled.
    */
   settle(id: number): PendingEntry | undefined {
@@ -103,17 +112,33 @@ export class PendingStore {
     return entry;
   }
 
-  /** The answerable entries of one box, across every thread. */
+  /**
+   * The answerable entries of one box, across every thread.
+   *
+   * @param boxId The box.
+   * @returns The entries.
+   */
   listForBox(boxId: string): PendingEntry[] {
     return [...this.entries.values()].filter((e) => e.row.box_id === boxId);
   }
 
-  /** The answerable entries of one thread. */
+  /**
+   * The answerable entries of one thread.
+   *
+   * @param boxId The box of the thread.
+   * @param acpSessionId The adapter's id for the thread.
+   * @returns The entries.
+   */
   listForThread(boxId: string, acpSessionId: string): PendingEntry[] {
     return this.listForBox(boxId).filter((e) => e.row.acp_session_id === acpSessionId);
   }
 
-  /** How many requests of one box are waiting. */
+  /**
+   * The number of waiting requests of one box.
+   *
+   * @param boxId The box.
+   * @returns The number of rows.
+   */
   countForBox(boxId: string): number {
     const row = this.db
       .prepare('SELECT COUNT(*) AS n FROM pending_requests WHERE box_id = ?')
@@ -121,7 +146,12 @@ export class PendingStore {
     return row?.n ?? 0;
   }
 
-  /** Waiting request counts of one box, keyed by the adapter's thread id. */
+  /**
+   * Waiting request counts of one box, keyed by the adapter's thread id.
+   *
+   * @param boxId The box.
+   * @returns The counts.
+   */
   countsByThread(boxId: string): Map<string, number> {
     const rows = this.db
       .prepare(
@@ -133,7 +163,11 @@ export class PendingStore {
     return new Map(rows.map((r) => [r.acp_session_id, r.n]));
   }
 
-  /** Waiting request counts, keyed by box id. */
+  /**
+   * Waiting request counts, keyed by box id.
+   *
+   * @returns The counts.
+   */
   countsByBox(): Map<string, number> {
     const rows = this.db
       .prepare('SELECT box_id, COUNT(*) AS n FROM pending_requests GROUP BY box_id')
@@ -141,7 +175,12 @@ export class PendingStore {
     return new Map(rows.map((r) => [r.box_id, r.n]));
   }
 
-  /** Rejects every queued request of a box, for a box that stops or is deleted. */
+  /**
+   * Rejects every queued request of a box, for a box that stops or is deleted.
+   *
+   * @param boxId The box.
+   * @param reason The message of the rejection.
+   */
   failBox(boxId: string, reason: string): void {
     for (const entry of this.listForBox(boxId)) {
       this.settle(entry.row.id);
@@ -149,7 +188,13 @@ export class PendingStore {
     }
   }
 
-  /** Rejects every queued request of one thread, for an adapter that has exited. */
+  /**
+   * Rejects every queued request of one thread, for an adapter that has exited.
+   *
+   * @param boxId The box of the thread.
+   * @param acpSessionId The adapter's id for the thread.
+   * @param reason The message of the rejection.
+   */
   failThread(boxId: string, acpSessionId: string, reason: string): void {
     for (const entry of this.listForThread(boxId, acpSessionId)) {
       this.settle(entry.row.id);

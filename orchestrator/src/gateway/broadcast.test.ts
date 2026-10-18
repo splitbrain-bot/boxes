@@ -14,7 +14,14 @@ const T1 = 'acp-1';
 /** A second thread of the same box, watched by nobody unless said. */
 const T2 = 'acp-2';
 
-/** A browser that records what it was sent, watching one thread. */
+/**
+ * A browser that records what it was sent, watching one thread.
+ *
+ * @param id The handle id.
+ * @param acpThreadId The thread it watches, or null while its thread resolves.
+ * @param lastActiveAt The time it last sent something.
+ * @returns The handle, with the records of what it was sent.
+ */
 function fakeDownstream(
   id: number,
   acpThreadId: string | null = T1,
@@ -25,6 +32,7 @@ function fakeDownstream(
   states: TurnStateParams[];
   replays: ReplayParams[];
 } {
+  /** Every session/update this browser was sent, in order. */
   const sent: unknown[] = [];
   /** Every thread state this browser was told, in order. */
   const states: TurnStateParams[] = [];
@@ -57,12 +65,27 @@ function fakeDownstream(
   };
 }
 
-/** A session/update notification, as the adapter sends it. */
+/**
+ * A session/update notification, as the adapter sends it.
+ *
+ * @param sessionUpdate The update kind.
+ * @param text The text of the content.
+ * @param thread The thread of the update.
+ * @returns The params of the notification.
+ */
 function update(sessionUpdate: string, text: string, thread = T1): unknown {
   return { sessionId: thread, update: { sessionUpdate, content: { type: 'text', text } } };
 }
 
-/** A session/update with a message id, which a resume can start from. */
+/**
+ * A session/update with a message id, which a resume can start from.
+ *
+ * @param sessionUpdate The update kind.
+ * @param text The text of the content.
+ * @param messageId The id of the message.
+ * @param thread The thread of the update.
+ * @returns The params of the notification.
+ */
 function named(sessionUpdate: string, text: string, messageId: string, thread = T1): unknown {
   return {
     sessionId: thread,
@@ -70,19 +93,38 @@ function named(sessionUpdate: string, text: string, messageId: string, thread = 
   };
 }
 
-/** A session/update about a tool call, which the adapter names by call id. */
+/**
+ * A session/update about a tool call, which the adapter names by call id.
+ *
+ * @param sessionUpdate The update kind.
+ * @param title The title of the call.
+ * @param toolCallId The id of the call.
+ * @param thread The thread of the update.
+ * @returns The params of the notification.
+ */
 function call(sessionUpdate: string, title: string, toolCallId: string, thread = T1): unknown {
   return { sessionId: thread, update: { sessionUpdate, toolCallId, title } };
 }
 
-/** The text of each chunk of one kind a browser received. */
+/**
+ * The text of each chunk of one kind a browser received.
+ *
+ * @param d The browser.
+ * @param kind The update kind.
+ * @returns The texts, in order.
+ */
 function chunks(d: { sent: unknown[] }, kind: string): string[] {
   return d.sent
     .filter((p) => (p as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === kind)
     .map((p) => (p as { update: { content: { text: string } } }).update.content.text);
 }
 
-/** The text of each user_message_chunk a browser received. */
+/**
+ * The text of each user_message_chunk a browser received.
+ *
+ * @param d The browser.
+ * @returns The texts, in order.
+ */
 function userChunks(d: { sent: unknown[] }): string[] {
   return chunks(d, 'user_message_chunk');
 }
@@ -215,7 +257,7 @@ test('a multi-block prompt is echoed block by block', () => {
   assert.deepEqual(userChunks(a), ['first', 'second']);
 });
 
-/** What the adapter answered for a thread, as a test hands it to the log. */
+/** The modes and options the adapter answered for a thread, as a test hands them to the log. */
 const OPTIONS = {
   modes: { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
   configOptions: [],
@@ -391,14 +433,14 @@ test('a reconnect mid-turn is sent the rest of the turn, and nothing is asked of
   b.beginPrompt(PROMPT);
   b.update(named('agent_message_chunk', 'the answer so far', 'm1'));
 
-  // The phone's socket drops. The turn goes on without it: a tool call, and a
-  // new message the gateway has never seen a chunk of before.
+  // The phone's socket drops. The turn goes on without it, with a tool call and a new message that the gateway has
+  // not seen a chunk of.
   b.remove(phone);
   b.update(call('tool_call', 'npm test', 'c1'));
   b.update(named('agent_message_chunk', 'and the conclusion', 'm2'));
 
-  // Back, holding the thread as far as m1. Every chunk the turn produced
-  // while it was away is in the log, whatever its id.
+  // The phone comes back and holds the thread up to m1. Every chunk of the turn from the time it was away is in the
+  // log, whatever its id.
   const back = fakeDownstream(2);
   b.add(back);
   b.open(back, T1, 'm1');
@@ -429,7 +471,7 @@ test('a fork opens on the conversation it came from, under its own thread id', (
     update('agent_message_chunk', 'old answer', T2),
   ]);
 
-  // From here the two are two threads: what the source says next is its own.
+  // From here the threads are separate. A new update on the source does not reach the fork.
   b.update(update('agent_message_chunk', 'live', T1));
   assert.deepEqual(working.sent.at(-1), update('agent_message_chunk', 'live', T1));
   assert.equal(exploring.sent.length, 2);

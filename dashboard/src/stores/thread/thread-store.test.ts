@@ -13,7 +13,7 @@ import { convertMessage } from './convert.ts';
 import { ThreadStore, type ThreadStoreDeps } from './thread-store.ts';
 import { type Message, resetIds } from './translate.ts';
 
-/** A stand-in AcpClient that records what the store asks of it. */
+/** A fake AcpClient that records the calls of the store. */
 class FakeClient {
   /** The ACP thread id the store reads. */
   sessionId: string | null = 'acp-1';
@@ -21,7 +21,7 @@ class FakeClient {
   readonly requests: Array<{ method: string; params: unknown }> = [];
   /** Every notification the store sent, in order. */
   readonly notifications: Array<{ method: string; params: unknown }> = [];
-  /** Resolvers for requests the test wants to hold open. */
+  /** The resolvers of the requests that the test holds open. */
   private readonly held: Array<(v: unknown) => void> = [];
   /** True to hold every request open until `settle`. */
   hold = false;
@@ -33,7 +33,7 @@ class FakeClient {
   /** @param handlers The store's callbacks, which the tests call directly. */
   constructor(readonly handlers: AcpClientHandlers) {}
 
-  /** Runs a handshake: a load, then ready. */
+  /** Runs a handshake, which is a load and then ready. */
   start(): void {
     this.load();
     this.handlers.onState('ready');
@@ -41,9 +41,9 @@ class FakeClient {
   }
 
   /**
-   * A session/load, as the handshake and a reconnect run one. The store names
-   * its resume point, and `resumes` decides whether the replay picks up
-   * there.
+   * Simulates a session/load, as the handshake and a reconnect run it. The
+   * store names its resume point, and `resumes` decides whether the replay
+   * continues there.
    */
   load(): void {
     const from = this.handlers.resumePoint();
@@ -57,9 +57,9 @@ class FakeClient {
     this.handlers.onReady(this.modes, this.configOptions);
   }
 
-  /** Whether the next load is answered as a resume rather than a full replay. */
+  /** True when the next load is answered as a resume rather than a full replay. */
   resumes = false;
-  /** Whether the gateway says it no longer holds the start of the thread. */
+  /** True when the gateway says it does not hold the start of the thread. */
   truncates = false;
   /** The resume point each load asked for, in order. */
   readonly resumePoints: Array<string | null> = [];
@@ -69,7 +69,13 @@ class FakeClient {
   /** The config options the handshake reports. */
   configOptions: ThreadConfigOption[] = [];
 
-  /** Records a request and answers it, holds it, or fails it. */
+  /**
+   * Records a request and answers it, holds it, or fails it.
+   *
+   * @param method The JSON-RPC method.
+   * @param params The params of the request.
+   * @returns The answer, which is an empty object.
+   */
   request(method: string, params: unknown): Promise<unknown> {
     this.requests.push({ method, params });
     if (this.fail) return Promise.reject(new Error(this.fail));
@@ -82,7 +88,12 @@ class FakeClient {
     this.held.shift()?.({});
   }
 
-  /** Records a notification. */
+  /**
+   * Records a notification.
+   *
+   * @param method The JSON-RPC method.
+   * @param params The params of the notification.
+   */
   notify(method: string, params: unknown): void {
     this.notifications.push({ method, params });
   }
@@ -93,7 +104,13 @@ class FakeClient {
   }
 }
 
-/** A store wired to a fake client, already started. */
+/**
+ * Creates a store with a fake client, and starts it.
+ *
+ * @param configure Changes the fake client before the store starts it.
+ * @param deps The dependencies that differ from the defaults.
+ * @returns The store and its fake client.
+ */
 function makeStore(
   configure?: (c: FakeClient) => void,
   deps?: Partial<ThreadStoreDeps>,
@@ -115,10 +132,13 @@ function makeStore(
 }
 
 /**
- * Puts a permission request to the store, as the gateway would.
+ * Sends a permission request to the store, as the gateway does.
  *
- * `withdrawn` is the signal the gateway aborts when another browser answers
- * first. By default nothing aborts it.
+ * @param client The fake client of the store.
+ * @param params The permission request.
+ * @param withdrawn The signal the gateway aborts when another browser answers
+ *   first. By default nothing aborts it.
+ * @returns The answer of the store.
  */
 function ask(
   client: FakeClient,
@@ -128,14 +148,22 @@ function ask(
   return client.handlers.onPermission(params, withdrawn);
 }
 
-/** Pushes one session/update at the store, as the gateway would. */
+/**
+ * Sends one session/update to the store, as the gateway does.
+ *
+ * @param client The fake client of the store.
+ * @param update The update.
+ */
 function push(client: FakeClient, update: ThreadUpdate): void {
   client.handlers.onUpdate({ sessionId: 'acp-1', update });
 }
 
 /**
- * The converted parts of one message. ThreadMessageLike allows a bare string
- * for content; convertMessage never produces one, so the tests read parts.
+ * Gives the converted parts of one message. ThreadMessageLike allows a bare
+ * string for content. convertMessage never produces one, so the tests read parts.
+ *
+ * @param message The message.
+ * @returns The converted parts.
  */
 function partsOf(message: Message): ConvertedPart[] {
   const content = convertMessage(message).content;
@@ -143,13 +171,17 @@ function partsOf(message: Message): ConvertedPart[] {
   return content as ConvertedPart[];
 }
 
-/** One converted part, in the shape the assertions read it. */
+/** One converted part, in the shape that the assertions read. */
 type ConvertedPart = {
+  /** The kind of the part. */
   type: string;
+  /** The text of a text or reasoning part. */
   text?: string;
+  /** The tool name of a tool-call part. */
   toolName?: string;
   /** Absent while a call is unfinished, which includes awaiting permission. */
   result?: unknown;
+  /** The approval of a tool-call part that asked for permission. */
   approval?: {
     id: string;
     options?: Array<{ id: string; kind: string; label?: string }>;
@@ -199,7 +231,12 @@ const BUILD = {
   startedAt: Date.parse('2026-08-01T10:00:00Z'),
 };
 
-/** What the gateway says about a thread, defaulting to a quiet one. */
+/**
+ * Builds the turn state of a thread from the gateway. By default, the thread is quiet.
+ *
+ * @param patch The fields that differ from a quiet thread.
+ * @returns The turn state.
+ */
 function threadState(patch: Partial<TurnStateParams> = {}): TurnStateParams {
   return { sessionId: 'acp-1', active: false, speaking: false, background: [], ...patch };
 }
@@ -223,7 +260,7 @@ test("a prompt of this browser's own does not claim the agent is talking", async
 
   client.settle();
   await sent;
-  // Still talking, because the gateway has not said otherwise.
+  // The agent still speaks, because the gateway has not reported otherwise.
   assert.equal(store.getSnapshot().isRunning, true);
   client.handlers.onTurnState(threadState());
   assert.equal(store.getSnapshot().isRunning, false);
@@ -233,7 +270,7 @@ test("the gateway's turn state runs the thread a browser did not prompt", () => 
   const { store, client } = makeStore();
   assert.equal(store.getSnapshot().isRunning, false);
 
-  // What a browser hears after its replay when it opens a thread mid-turn.
+  // A browser gets the state after its replay when it opens a thread during a turn.
   client.handlers.onTurnState(threadState({ speaking: true }));
   assert.equal(store.getSnapshot().isRunning, true);
 
@@ -287,7 +324,7 @@ test('an open permission request is reported as one', async () => {
       { optionId: 'no', name: 'Deny', kind: 'reject_once' },
     ],
   } as RequestPermissionRequest);
-  // One way to say yes, doubled by scope, and one to say no: a gate.
+  // One allow option per scope and one reject option make a gate.
   assert.equal(store.getSnapshot().awaiting, 'permission');
 });
 
@@ -302,7 +339,7 @@ test('several ways to say yes is a question, not a gate', async () => {
   void ask(client, {
     sessionId: 'acp-1',
     toolCall: { toolCallId: 't1' },
-    // What leaving plan mode asks: three different things to do next.
+    // Leaving plan mode offers three different next steps.
     options: [
       { optionId: 'auto', name: 'Yes, and use auto mode', kind: 'allow_always' },
       { optionId: 'acceptEdits', name: 'Yes, and auto-accept edits', kind: 'allow_always' },
@@ -365,7 +402,7 @@ test('a reconnect replay rebuilds the thread instead of doubling it', () => {
   for (const u of script) push(client, u);
   assert.equal(store.getSnapshot().messages.length, 2);
 
-  // A fresh connection with nothing to resume from: the whole history follows.
+  // A new connection has no resume point, so the whole history follows.
   client.handlers.onReplay(false, false);
   // The published conversation stays on screen.
   assert.equal(store.getSnapshot().messages.length, 2);
@@ -509,8 +546,8 @@ test('a permission request attaches to its tool call and its answer unblocks the
 
 test('a call awaiting permission reports no result, so the question can render', async () => {
   const { store, client } = makeStore();
-  // The shape a real edit arrives in: the adapter sends the diff it proposes
-  // before it is allowed to write it.
+  // A real edit arrives in the same shape. The adapter sends the diff that it
+  // proposes before it gets permission to write it.
   push(client, {
     sessionUpdate: 'tool_call',
     toolCallId: 'td',
@@ -529,8 +566,8 @@ test('a call awaiting permission reports no result, so the question can render',
     options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
   });
 
-  // A result of any kind reads to the runtime as a finished call, and a
-  // finished call is never the one being asked about.
+  // The runtime treats a result of any kind as a finished call, and a
+  // finished call never shows the question.
   const asked = partsOf(store.getSnapshot().messages[0]!)[0]!;
   assert.equal(asked.type, 'tool-call');
   assert.equal(asked.result, undefined);
@@ -541,7 +578,7 @@ test('a call awaiting permission reports no result, so the question can render',
   store.respondToApproval(asked.approval.id, 'yes');
   await answered;
 
-  // Once answered the diff is a result again, so the call renders as done.
+  // After the answer, the diff is a result again, so the call shows as done.
   const done = partsOf(store.getSnapshot().messages[0]!)[0]!;
   assert.equal(done.type, 'tool-call');
   assert.match(String(done.result), /\+hello/);
@@ -773,7 +810,14 @@ test("an update that replaces a call's content replaces its images with it", () 
   assert.deepEqual(parts.map((p) => p.image).filter(Boolean), ['data:image/png;base64,BBBB']);
 });
 
-/** One named message of a transcript, as the adapter replays it. */
+/**
+ * Builds one named message of a transcript, as the adapter replays it.
+ *
+ * @param role The speaker.
+ * @param messageId The adapter's id for the message.
+ * @param text The text of the message.
+ * @returns The update.
+ */
 function said(role: 'user' | 'agent', messageId: string, text: string): ThreadUpdate {
   return {
     sessionUpdate: `${role}_message_chunk`,
@@ -782,7 +826,7 @@ function said(role: 'user' | 'agent', messageId: string, text: string): ThreadUp
   } as ThreadUpdate;
 }
 
-/** The whole conversation these resume tests replay. */
+/** The whole conversation that the resume tests replay. */
 const TRANSCRIPT: ThreadUpdate[] = [
   said('user', 'msg_1', 'the first question'),
   said('agent', 'msg_2', 'the first answer'),
@@ -790,7 +834,12 @@ const TRANSCRIPT: ThreadUpdate[] = [
   said('agent', 'msg_4', 'this came back'),
 ];
 
-/** Every message as its id, role and text, which is what a reader sees. */
+/**
+ * Gives every message as its id, role and text, which is what a reader sees.
+ *
+ * @param store The store.
+ * @returns One tuple of id, role and text per message.
+ */
 function shapeOf(store: ThreadStore): Array<[string, string, string]> {
   return store.getSnapshot().messages.map((m) => [
     m.id,
@@ -810,7 +859,7 @@ test('a reconnect resumes from the last message the adapter named', () => {
   // The resume point is the last message the browser holds.
   assert.deepEqual(client.resumePoints, [null, 'msg_2']);
 
-  // The tail as the gateway sends it: the message named, then what followed.
+  // The gateway sends the tail, which is the named message and the messages after it.
   for (const u of TRANSCRIPT.slice(1)) push(client, u);
   client.finish();
 
@@ -833,8 +882,8 @@ test('a resumed thread reads the same as one replayed whole', () => {
   const whole = makeStore();
   for (const u of TRANSCRIPT) push(whole.client, u);
 
-  // The model is the updates applied in order, and a resume is a cut across
-  // that order rather than a different way of reading it.
+  // The model is the result of the updates in order. A resume cuts that order
+  // and does not read it in a different way.
   assert.deepEqual(shapeOf(resumed.store), shapeOf(whole.store));
 });
 
@@ -842,8 +891,8 @@ test('a resume the gateway cannot honour rebuilds the thread from the top', () =
   const { store, client } = makeStore();
   for (const u of TRANSCRIPT.slice(0, 2)) push(client, u);
 
-  // The gateway looked for the point and did not find it — the transcript was
-  // compacted under this browser — so it sends the whole thread instead.
+  // The gateway did not find the point, because the transcript was compacted
+  // after this browser read it. The gateway sends the whole thread instead.
   client.resumes = false;
   client.load();
   for (const u of TRANSCRIPT) push(client, u);
@@ -864,9 +913,8 @@ test('a reconnect mid-turn takes in what was said while the socket was down', ()
 
   client.resumes = true;
   client.load();
-  // The transcript holds the whole of the message the socket dropped in the
-  // middle of, and the browser takes that message again rather than keeping
-  // the half it has.
+  // The transcript holds the whole message that the socket dropped in the
+  // middle. The browser takes that message again and does not keep its half.
   push(client, said('agent', 'msg_2', 'half an answer, and the rest'));
   push(client, said('agent', 'msg_3', 'then this'));
   client.finish();
@@ -932,8 +980,8 @@ test('a cut thread says so, and a resume keeps what the store holds', () => {
   push(client, said('agent', 'm1', 'the newest answer'));
   assert.equal(store.getSnapshot().truncated, true);
 
-  // A reconnect picks up at the store's last message, so the store is still
-  // cut, whatever the gateway says about its own log.
+  // A reconnect continues at the last message of the store, so the store still
+  // lacks the old messages, whatever the gateway reports about its own log.
   client.resumes = true;
   client.truncates = false;
   client.load();
@@ -961,7 +1009,7 @@ test('the full history replaces a cut thread once it has arrived', async () => {
     },
   });
 
-  // The gateway's notice, then the replay from the start.
+  // The gateway sends its notice, then the replay from the start.
   client.handlers.onReplay(false, false);
   push(client, said('agent', 'm1', 'the oldest answer'));
   push(client, said('agent', 'm2', 'the newest answer'));

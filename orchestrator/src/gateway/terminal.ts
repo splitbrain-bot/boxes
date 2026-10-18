@@ -7,9 +7,9 @@ import { log } from '../log.ts';
 import { runtime } from '../runtime/runtime.ts';
 
 /**
- * How many bytes one browser's socket may have waiting on it.
+ * Largest number of bytes that can wait on the socket of one browser.
  *
- * Past this the pty is paused, which blocks the program writing into it.
+ * Past this the endpoint pauses the pty, which blocks the program that writes into it.
  */
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 
@@ -20,32 +20,32 @@ const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
 /**
- * How often the server pings the browser, in milliseconds.
+ * Interval between two pings from the server to the browser, in milliseconds.
  *
  * An open terminal keeps its box running, so a dead socket must be found
  * sooner than TCP would find it.
  */
 const PING_MS = 30_000;
 
-/** How many pings the browser may leave unanswered before it is dropped. */
+/** Number of pings that the browser can leave unanswered before the server drops it. */
 const MISSED_PINGS = 2;
 
 /**
- * How long to wait for the browser's size before the pty opens at the
+ * Time to wait for the browser's size before the pty opens at the
  * default size, in milliseconds. The dashboard sends its size first.
  */
 const SIZE_WAIT_MS = 2_000;
 
 /**
- * How long to wait after the pty's exec ended before the terminal attaches
+ * Time to wait after the pty's exec ended before the terminal attaches
  * to its tmux session again, in milliseconds.
  */
 const REATTACH_DELAY_MS = 1_000;
 
-/** How long to wait before the second try of a reattach that failed, in milliseconds. */
+/** Time to wait before the second try of a reattach that failed, in milliseconds. */
 const REATTACH_RETRY_MS = 5_000;
 
-/** Where the pty of a terminal runs. */
+/** The box and the working directory in which the pty of a terminal runs. */
 type Target = Awaited<ReturnType<BoxManager['execTarget']>>;
 
 /**
@@ -59,7 +59,12 @@ interface TerminalExec {
   output: Readable;
   /** The input of the pty, which the browser types into. */
   input: Writable;
-  /** Tells the pty how large the window onto it is. */
+  /**
+   * Tells the pty the size of the window onto it.
+   *
+   * @param cols The number of columns.
+   * @param rows The number of rows.
+   */
   resize(cols: number, rows: number): Promise<void>;
   /** Resolves when the stream ends, with the exit code if known. */
   exited: Promise<number | null>;
@@ -79,6 +84,9 @@ const SHARED_TMUX_SESSION = 'boxes';
  *
  * The own session lets close() end the client by name, as the runtime cannot
  * signal a running exec. Without tmux, the shell is a plain login shell.
+ *
+ * @param client The name of the connection's own tmux session.
+ * @returns The shell script.
  */
 function terminalShell(client: string): string {
   return [
@@ -95,6 +103,9 @@ export const NO_TERMINAL_SESSION = 3;
  * The shell that attaches one terminal connection to its own tmux session
  * again. The session is gone when the user ended the shell, or when the box
  * has no tmux.
+ *
+ * @param client The name of the connection's own tmux session.
+ * @returns The shell script.
  */
 function reattachShell(client: string): string {
   return [
@@ -104,7 +115,7 @@ function reattachShell(client: string): string {
 }
 
 /**
- * Opens a pty in a box, running the shell a reader types into.
+ * Opens a pty in a box, running the shell that a user types into.
  *
  * The pty runs inside the box's isolation, so it reaches no further than the
  * agent does. The command is an argument vector, and the only part this
@@ -113,6 +124,12 @@ function reattachShell(client: string): string {
  * With `reattach`, the pty attaches to that client session of an earlier
  * exec. The exec then ends with {@link NO_TERMINAL_SESSION} when the session
  * is gone.
+ *
+ * @param target The box and the working directory.
+ * @param cols The number of columns to open at.
+ * @param rows The number of rows to open at.
+ * @param reattach The name of the client session to attach to again.
+ * @returns The opened pty.
  */
 async function openTerminal(
   target: Target,
@@ -141,8 +158,8 @@ async function openTerminal(
     resize: (nextCols, nextRows) => pty.resize(nextCols, nextRows),
     exited: pty.exited,
     close: async () => {
-      // The stream is dropped either way: a box that stopped under the
-      // terminal answers nothing, and has no client left to end.
+      // The stream is dropped even when kill-session fails, because a box that stopped under the terminal has no
+      // client left to end.
       try {
         await runtime().run(target.boxId, ['tmux', 'kill-session', '-t', client]);
       } catch (err) {
@@ -153,7 +170,12 @@ async function openTerminal(
   };
 }
 
-/** Resolves after `ms` milliseconds. */
+/**
+ * Resolves after `ms` milliseconds.
+ *
+ * @param ms The wait in milliseconds.
+ * @returns A promise that resolves after the wait.
+ */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms).unref?.();
@@ -173,15 +195,19 @@ const CLOSE = {
  *
  * Binary frames carry the pty's bytes in both directions. Text frames carry
  * control messages from the browser, such as the window size. Every browser
- * that opens a terminal on a box gets the same shell.
+ * that opens a terminal on a box sees the same tmux windows.
  *
- * The box is started first, which can take seconds, so input that arrives
- * meanwhile is queued. The socket closing ends the shell, and the shell
- * ending closes the socket.
+ * The manager starts the box first, which can take seconds, so input that
+ * arrives meanwhile is queued. The socket closing ends the shell, and the
+ * shell ending closes the socket.
  *
  * When the pty's exec ends while the socket stays open, the terminal
  * attaches to its tmux session again, and input is queued in the meantime.
  * A reattach never starts a stopped box.
+ *
+ * @param ws The browser's socket.
+ * @param boxId The box.
+ * @param manager The source of the box and its exec target.
  */
 export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager): void {
   const slog = log.box(boxId);
@@ -224,7 +250,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     if (ws.readyState === ws.OPEN) ws.close(code, reason);
   };
 
-  // --- the browser's side -----------------------------------------------
+  // The browser's side
 
   ws.on('message', (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
@@ -274,7 +300,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   pings.unref?.();
   ws.on('close', () => clearInterval(pings));
 
-  // --- the box's side ---------------------------------------------------
+  // The box's side
 
   /** Connects an opened pty to the browser, and acts on the end of its exec. */
   const wire = (opened: TerminalExec, target: Target): void => {

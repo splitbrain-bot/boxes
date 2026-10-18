@@ -1,6 +1,5 @@
 /**
- * Address vetting for the egress proxy: which resolved addresses an agent may
- * connect to.
+ * Address checks of the egress proxy, which decide the addresses that an agent may connect to.
  */
 
 /** IPv4 ranges an agent must never reach through the proxy. */
@@ -8,17 +7,22 @@ const V4_BLOCKED: ReadonlyArray<readonly [string, number]> = [
   ['10.0.0.0', 8],
   ['172.16.0.0', 12],
   ['192.168.0.0', 16],
-  ['169.254.0.0', 16], // link-local, incl. cloud metadata at 169.254.169.254
+  ['169.254.0.0', 16], // link-local, including cloud metadata at 169.254.169.254
   ['127.0.0.0', 8],
   ['100.64.0.0', 10], // carrier-grade NAT
   ['0.0.0.0', 8],
   ['192.0.0.0', 24], // IETF protocol assignments
   ['198.18.0.0', 15], // benchmarking
   ['224.0.0.0', 4], // multicast
-  ['240.0.0.0', 4], // reserved, incl. 255.255.255.255
+  ['240.0.0.0', 4], // reserved, including 255.255.255.255
 ];
 
-/** Parses a dotted quad into a 32-bit unsigned integer, or null if malformed. */
+/**
+ * Parses a dotted quad into a 32-bit unsigned integer.
+ *
+ * @param addr The IPv4 address in dotted quad form.
+ * @returns The address as an unsigned integer, or null when the text is malformed.
+ */
 function v4ToInt(addr: string): number | null {
   const parts = addr.split('.');
   if (parts.length !== 4) return null;
@@ -32,7 +36,14 @@ function v4ToInt(addr: string): number | null {
   return value;
 }
 
-/** Whether an IPv4 value falls inside base/prefix. */
+/**
+ * Checks if an IPv4 address is inside a range.
+ *
+ * @param value The address as an unsigned integer.
+ * @param base The first address of the range, in dotted quad form.
+ * @param prefix The prefix length of the range, in bits.
+ * @returns True when the address is inside base/prefix.
+ */
 function inV4Range(value: number, base: string, prefix: number): boolean {
   const baseInt = v4ToInt(base);
   if (baseInt === null) return false;
@@ -40,16 +51,21 @@ function inV4Range(value: number, base: string, prefix: number): boolean {
   return (value & mask) >>> 0 === (baseInt & mask) >>> 0;
 }
 
-/** Expands an IPv6 literal to its 8 groups, or null if malformed. */
+/**
+ * Expands an IPv6 literal to its 8 groups of 16 bits.
+ *
+ * @param addr The IPv6 literal, optionally in brackets and with a zone ID.
+ * @returns The 8 groups, or null when the literal is malformed.
+ */
 function parseV6(addr: string): number[] | null {
   let text = addr.trim().toLowerCase();
   if (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1);
-  // Strip a zone id (fe80::1%eth0).
+  // Strip a zone ID (fe80::1%eth0).
   const zone = text.indexOf('%');
   if (zone !== -1) text = text.slice(0, zone);
   if (text === '') return null;
 
-  // A trailing dotted quad (v4-mapped/compatible forms) becomes two groups.
+  // A trailing dotted quad (v4-mapped and v4-compatible forms) becomes two groups.
   let tail: number[] = [];
   const lastColon = text.lastIndexOf(':');
   const trailing = text.slice(lastColon + 1);
@@ -92,18 +108,25 @@ function parseV6(addr: string): number[] | null {
   return [...head, ...zeros, ...mid, ...tail];
 }
 
-/** Parses one IPv6 group, or null if it is not one to four hex digits. */
+/**
+ * Parses one IPv6 group.
+ *
+ * @param text The group as text.
+ * @returns The value of the group, or null when the text is not one to four hex digits.
+ */
 function hexGroup(text: string): number | null {
   if (!/^[0-9a-f]{1,4}$/.test(text)) return null;
   return Number.parseInt(text, 16);
 }
 
 /**
- * The IPv4 address an IPv6 address reaches, or null when it embeds none.
+ * Finds the IPv4 address that an IPv6 address embeds.
  *
- * Covers v4-mapped (::ffff:a.b.c.d), v4-translated (::ffff:0:a.b.c.d),
- * v4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4 (2002::/16), so
- * that none of these forms gets past the IPv4 ranges.
+ * The function knows the v4-mapped (::ffff:a.b.c.d), v4-translated (::ffff:0:a.b.c.d),
+ * v4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4 (2002::/16) forms.
+ *
+ * @param groups The 8 groups of the IPv6 address.
+ * @returns The embedded IPv4 address as an unsigned integer, or null when the address embeds none.
  */
 function embeddedV4(groups: readonly number[]): number | null {
   const at = (i: number): number => groups[i] ?? 0;
@@ -120,7 +143,12 @@ function embeddedV4(groups: readonly number[]): number | null {
   return null;
 }
 
-/** Whether an agent must not reach an address. Unparseable input counts as blocked. */
+/**
+ * Checks if an address is in a range that an agent must not reach.
+ *
+ * @param address The IPv4 or IPv6 address.
+ * @returns True when the address is blocked. Input that does not parse counts as blocked.
+ */
 export function isBlockedAddress(address: string): boolean {
   const text = address.trim();
   if (text === '') return true;
@@ -151,8 +179,13 @@ export function isBlockedAddress(address: string): boolean {
   return false;
 }
 
-/** True when every resolved address is safe to connect to. */
+/**
+ * Checks if every address of a DNS answer is safe to connect to.
+ *
+ * @param addresses The resolved addresses.
+ * @returns True when the list has addresses and none of them is blocked.
+ */
 export function allAddressesAllowed(addresses: readonly string[]): boolean {
-  if (addresses.length === 0) return false; // nothing resolved: fail closed
+  if (addresses.length === 0) return false; // An empty answer fails closed.
   return addresses.every((a) => !isBlockedAddress(a));
 }

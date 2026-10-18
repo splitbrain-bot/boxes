@@ -1,16 +1,16 @@
-import { randomBytes } from 'node:crypto';
-import type { Settings, ThreadDialogDefaults } from '../../shared/types.ts';
-import type { Db } from './db.ts';
-
 /**
  * The deployment's settings that are not secrets, stored as key/value rows in
  * the `settings` table. A new setting needs a key, not a migration.
  */
 
-/** The git author name a box commits as when none is set. */
+import { randomBytes } from 'node:crypto';
+import type { Settings, ThreadDialogDefaults } from '../../shared/types.ts';
+import type { Db } from './db.ts';
+
+/** The git author name for commits in a box when none is set. */
 export const DEFAULT_GIT_NAME = 'boxes-bot';
 
-/** The git author email a box commits as when none is set. */
+/** The git author email for commits in a box when none is set. */
 export const DEFAULT_GIT_EMAIL = 'boxes-bot@users.noreply.github.com';
 
 /** Settings key of the git author name. */
@@ -22,12 +22,22 @@ const GIT_EMAIL = 'git.email';
 /** Settings key of the deployment's id. */
 const DEPLOYMENT_ID = 'deployment.id';
 
-/** Returns the settings key that holds one harness's last dialog choice. */
+/**
+ * Returns the settings key that holds one harness's last dialog choice.
+ *
+ * @param harnessId The harness id.
+ * @returns The key.
+ */
 function dialogKey(harnessId: string): string {
   return `dialog.${harnessId}`;
 }
 
-/** Returns every setting, with the default filled in for each unset one. */
+/**
+ * Returns every setting, with the default filled in for each unset one.
+ *
+ * @param db The database.
+ * @returns The settings.
+ */
 export function readSettings(db: Db): Settings {
   const stored = readAll(db);
   const dialogs: Record<string, ThreadDialogDefaults> = {};
@@ -52,6 +62,10 @@ export function readSettings(db: Db): Settings {
  *
  * Dialogs are merged per harness, so two browsers that configure different
  * agents do not overwrite each other. Each harness entry is replaced whole.
+ *
+ * @param db The database.
+ * @param patch The settings to write.
+ * @returns All settings after the write.
  */
 export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
   const writes: Array<[string, string | null]> = [];
@@ -81,8 +95,11 @@ export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
 
 /**
  * Returns the deployment's id, a short random hex string, and generates and
- * stores it on first use. Labels on shared resources carry it, so that two
- * deployments on one account tell their resources apart.
+ * stores it on first use. The labels of dev tunnels carry it, so that two
+ * deployments on one account tell their tunnels apart.
+ *
+ * @param db The database.
+ * @returns The id.
  */
 export function deploymentId(db: Db): string {
   const stored = readAll(db)[DEPLOYMENT_ID];
@@ -96,7 +113,12 @@ export function deploymentId(db: Db): string {
   return readAll(db)[DEPLOYMENT_ID] ?? id;
 }
 
-/** Returns every stored row as a map of key to value. */
+/**
+ * Returns every stored row as a map of key to value.
+ *
+ * @param db The database.
+ * @returns The values by key.
+ */
 function readAll(db: Db): Record<string, string> {
   const rows = db.prepare('SELECT key, value FROM settings').all() as Array<{
     key: string;
@@ -108,6 +130,9 @@ function readAll(db: Db): Record<string, string> {
 /**
  * Parses one stored dialog choice, or returns null when the value is not a
  * JSON object. A bad row is skipped, so it cannot fail the whole read.
+ *
+ * @param value The stored value.
+ * @returns The dialog choice, or null.
  */
 function parseDialog(value: string): ThreadDialogDefaults | null {
   try {

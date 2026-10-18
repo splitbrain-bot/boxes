@@ -59,7 +59,7 @@ const WS_TOKEN = 'e2e-ws-token-0123456789abcdef';
 /** The Claude token the deployment holds, as the settings page would have stored it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-a-token-for-the-tests-1234';
 
-/** The OpenAI key the deployment holds when a test gives it one. */
+/** The OpenAI key that the deployment holds. */
 const OPENAI_KEY = 'sk-proj-a-key-for-the-tests-abcd';
 
 /**
@@ -155,7 +155,7 @@ const CATALOG: Record<
   },
 };
 
-/** Marks a request this harness made, so the recorded calls leave it out. */
+/** Marks a setup request from the tests, so the recorded calls leave it out. */
 const SETUP_HEADER = 'x-boxes-e2e-setup';
 
 /** The box a test gets unless it asks for another. */
@@ -167,23 +167,23 @@ export const DEFAULT_BOX = {
 
 /** One conversation of a fixture box. */
 export interface ThreadSpec {
-  /** Named rather than generated, so a test can link straight at it. */
+  /** A fixed id, so a test can link to it. */
   id?: string;
-  /** Which agent runs it. Claude unless a test says otherwise. */
+  /** The agent that runs it. Claude unless a test says otherwise. */
   harness?: HarnessId;
   /** The thread's title, or null for an untitled one. */
   title?: string | null;
-  /** Whether the thread is marked as done. */
+  /** True when the thread is marked as done. */
   done?: boolean;
-  /** Whether a prompt is open on this thread, as the database records it. */
+  /** True when a prompt is open on this thread, as the database records it. */
   turnActive?: boolean;
-  /** Whether the agent is talking on this thread. */
+  /** True while the agent is talking on this thread. */
   speaking?: boolean;
-  /** Whether this thread has left something running in the box. */
+  /** True while work that this thread started runs in the box. */
   backgroundBusy?: boolean;
   /** Permission requests waiting on this thread. */
   pendingCount?: number;
-  /** When the thread was last active, in epoch milliseconds. */
+  /** The time of the last activity on the thread, in epoch milliseconds. */
   lastActiveAt?: number;
 }
 
@@ -195,33 +195,33 @@ export interface BoxSpec {
   name?: string;
   /** The stored status. Defaults to running. */
   status?: BoxRow['status'];
-  /** Whether the fake daemon has its container running. */
+  /** True when the container of the box runs in the fake daemon. */
   containerRunning?: boolean;
   /** The box's threads. Defaults to one thread with no options set. */
   threads?: ThreadSpec[];
   /**
-   * Whether the box is busy with work that no thread claims, as after an
-   * adapter restart over a running build. Without it, the box is busy exactly
+   * True when the box is busy with work that no thread claims, as after an
+   * adapter restart during a running build. Without it, the box is busy exactly
    * when one of its threads is.
    */
   backgroundBusy?: boolean;
   /**
-   * What a reading of the box finds running in it, as the detail reports it.
+   * The work that a reading of the box finds running in it, as the detail reports it.
    * The badge reads `backgroundBusy` instead. The two differ when a task an
    * adapter announced is not a process of its own.
    */
   boxWork?: BoxWork[];
   /** The dev tunnel ports the box hosts, as the tunnel reconciler reports them. */
   tunnels?: BoxTunnel[];
-  /** How many browsers the gateway has on this box. */
+  /** The number of browsers the gateway has on this box. */
   attachedCount?: number;
-  /** Whether the adapter advertises forking, which the list offers. */
+  /** True when the adapter advertises forking. The list then offers a fork. */
   canFork?: boolean;
   /** The disk usage the box was last measured at. */
   diskBytes?: number;
 }
 
-/** What the deployment answers about itself, which a test may change. */
+/** The facts the deployment reports about itself, which a test may change. */
 export interface DeploymentState {
   /**
    * The Claude credential this deployment holds, by the status the settings
@@ -231,7 +231,7 @@ export interface DeploymentState {
    * and the dashboard shows a warning.
    */
   claudeCredential: CredentialStatus | null;
-  /** The OpenAI key, on the same terms. None unless a test gives it one. */
+  /** The OpenAI key, by the same status. Null when nobody has entered one. */
   openaiCredential: CredentialStatus | null;
   /**
    * The harnesses that have a catalogue for the dialogs to read. For a harness
@@ -242,8 +242,8 @@ export interface DeploymentState {
    * The cookie an authenticating reverse proxy in front of the deployment
    * checks, or null for no proxy.
    *
-   * A request without the cookie is redirected to a login page. Not every
-   * request the page makes carries credentials.
+   * The stand-in proxy redirects a request without the cookie to a login page. A browser sends some requests
+   * without the cookie, for example the manifest request when the link does not ask for credentials.
    */
   requireCookie: string | null;
 }
@@ -264,13 +264,34 @@ interface HookRequest {
 
 /** The part of a Fastify reply that the hooks below use. */
 interface HookReply {
-  /** Sets the status code. */
+  /**
+   * Sets the status code.
+   *
+   * @param status The HTTP status code.
+   * @returns The same reply.
+   */
   code(status: number): HookReply;
-  /** Sets one response header. */
+  /**
+   * Sets one response header.
+   *
+   * @param name The header name.
+   * @param value The header value.
+   * @returns The same reply.
+   */
   header(name: string, value: string): HookReply;
-  /** Sets the content type. */
+  /**
+   * Sets the content type.
+   *
+   * @param value The media type, with its parameters.
+   * @returns The same reply.
+   */
   type(value: string): HookReply;
-  /** Sends the reply. */
+  /**
+   * Sends the reply.
+   *
+   * @param payload The response body, or nothing for an empty body.
+   * @returns The same reply.
+   */
   send(payload?: unknown): HookReply;
 }
 
@@ -286,7 +307,7 @@ export interface ReviewCall {
 
 /** An agent set a test wants to find, beside the global one. */
 export interface AgentSetSpec {
-  /** Named rather than generated, so a test can link straight at it. */
+  /** A fixed id, so a test can link to it. */
   id: string;
   /** The set's display name. */
   name: string;
@@ -304,7 +325,7 @@ export interface TestOrchestrator {
   url: string;
   /** The ACP gateway attached to the same server, on the same origin. */
   gateway: StubGateway;
-  /** What the deployment reports about itself. Setting a field changes it. */
+  /** The facts the deployment reports about itself. Setting a field changes them. */
   state: DeploymentState;
   /** Files uploaded to the attachments endpoint, in order. */
   attachmentUploads: Array<{ boxId: string; name: string; bytes: Buffer }>;
@@ -312,76 +333,145 @@ export interface TestOrchestrator {
   threadCalls: Array<{ boxId: string; body: unknown }>;
   /** Every box the browser asked for, as the body it sent. */
   boxCalls: unknown[];
-  /**
-   * Every login the browser started, in order, over a runtime that runs no
-   * container: what the CLI is scripted to print goes in through `print`,
-   * and what the browser pasted back comes out in `input`.
-   */
+  /** Every login the browser started, in order. */
   logins: TestLogin[];
   /**
    * Every stop of background work the browser asked for, in order.
    *
-   * `processId` is absent where the reader asked for all of a thread's work
-   * rather than one command of it.
+   * `processId` is absent when the user asked to stop all work of a thread and not one command of it.
    */
   backgroundStops: Array<{ boxId: string; threadId: string; processId?: string }>;
   /** Every box-wide stop the browser asked for, by box, in order. */
   boxStops: string[];
   /** Every review mutation the browser made, in order. */
   reviewCalls: ReviewCall[];
-  /** Adds a box, its directories, its threads and its container. */
+  /**
+   * Adds a box, its directories, its threads and its container.
+   *
+   * @param spec The box. Missing fields take the defaults of {@link BoxSpec}.
+   */
   createBox(spec?: BoxSpec): void;
-  /** Forgets every box, for a test that wants the deployment back. */
+  /** Removes every box, for a test that wants an empty deployment. */
   resetBoxes(): void;
-  /** Rebuilds a box's workspace from a fixture. */
+  /**
+   * Rebuilds a box's workspace from a fixture.
+   *
+   * @param boxId The box id.
+   * @param spec The workspace. Defaults to {@link reviewWorkspace}.
+   */
   review(boxId: string, spec?: WorkspaceSpec): void;
-  /** Writes one file of a workspace, as the agent working in it would. */
+  /**
+   * Writes one file of a workspace, as the agent working in it would.
+   *
+   * @param boxId The box id.
+   * @param path The path of the file, relative to the workspace.
+   * @param content The content of the file.
+   */
   write(boxId: string, path: string, content: string): void;
-  /** Reads one file of a workspace back. */
+  /**
+   * Reads one file of a workspace back.
+   *
+   * @param boxId The box id.
+   * @param path The path of the file, relative to the workspace.
+   * @returns The content of the file.
+   */
   read(boxId: string, path: string): string;
-  /** Whether the box's workspace has a REVIEW.md. */
+  /**
+   * Checks if the box's workspace has a REVIEW.md.
+   *
+   * @param boxId The box id.
+   * @returns True when the file exists.
+   */
   hasReview(boxId: string): boolean;
-  /** Writes one comment through the real API, as a previous visit would have. */
+  /**
+   * Writes one comment through the real API, as a previous visit would have.
+   *
+   * @param boxId The box id.
+   * @param path The path of the file, relative to the workspace.
+   * @param line The line number of the comment.
+   * @param text The text of the comment.
+   */
   comment(boxId: string, path: string, line: number, text: string): Promise<void>;
-  /** The comments on one file, as the API reports them. */
+  /**
+   * Reads the comments on one file through the real API.
+   *
+   * @param boxId The box id.
+   * @param path The path of the file, relative to the workspace.
+   * @returns The comments, as the API reports them.
+   */
   comments(boxId: string, path: string): Promise<ReviewAnnotation[]>;
-  /** What a terminal in a box answers a typed line with. */
+  /** The answer of a terminal in a box to a typed line. A test can replace it. */
   terminalAnswer: (line: string) => string;
-  /** How many terminals the orchestrator counts as open on one box. */
+  /**
+   * Counts the terminals that the orchestrator has open on one box.
+   *
+   * @param boxId The box id.
+   * @returns The number of open terminals.
+   */
   terminalsOpen(boxId: string): number;
-  /** Replaces the named agent sets, and fills in the global one. */
+  /**
+   * Replaces the named agent sets, and fills in the global one.
+   *
+   * @param global The content of the global set.
+   * @param named The named sets.
+   */
   agentSets(global: Omit<AgentSetSpec, 'id' | 'name'>, named: AgentSetSpec[]): Promise<void>;
-  /** One agent set as the API reports it, for what a test wrote through the UI. */
+  /**
+   * Reads one agent set through the real API, so a test can check what it wrote through the UI.
+   *
+   * @param setId The id of the set.
+   * @returns The set, as the API reports it.
+   */
   agentSet(setId: string): Promise<AgentSetDetail>;
-  /** The credentials the deployment holds, as the settings page sees them. */
+  /**
+   * Reads the credentials that the deployment holds.
+   *
+   * @returns The credentials, as the settings page sees them.
+   */
   credentials(): Promise<CredentialSummary[]>;
-  /** The API keys a user added, as the settings page sees them. */
+  /**
+   * Reads the API keys that a user added.
+   *
+   * @returns The API keys, as the settings page sees them.
+   */
   apiKeys(): Promise<ApiKeySummary[]>;
-  /** The deployment's plain settings, as the API reports them. */
+  /**
+   * Reads the plain settings of the deployment.
+   *
+   * @returns The settings, as the API reports them.
+   */
   settings(): Promise<Settings>;
-  /** Stops the server and removes everything the harness installed or created. */
+  /** Stops the server and removes everything that the test setup installed or created. */
   close(): Promise<void>;
 }
 
 /**
  * One login the browser started, over the stand-in runtime.
  *
- * The real runtime runs the harness's CLI in a throwaway container; this one
- * gives the test the CLI's streams instead, so a test says what the CLI
- * printed and reads what was typed into it.
+ * The real runtime runs the CLI of the harness in a temporary container. The
+ * stand-in gives the CLI streams to the test, so the test writes the CLI output
+ * and reads the typed input.
  */
 export interface TestLogin {
   /** The credential the login is for. */
   id: CredentialId;
-  /** What the flow asked to run, which says which CLI it is driving. */
+  /** The command the flow asked to run, which shows the CLI it drives. */
   spec: LoginExecSpec;
   /** Everything pasted back into the CLI, as the login manager wrote it. */
   input: string;
-  /** Whether the flow's container was removed: a cancel, or a finished flow. */
+  /** True when the container of the flow was removed, after a cancel or a finished flow. */
   cancelled: boolean;
-  /** Writes what the CLI printed. */
+  /**
+   * Writes output of the CLI.
+   *
+   * @param text The output.
+   */
   print(text: string): void;
-  /** Ends the CLI with a status, or with none where it was killed. */
+  /**
+   * Ends the CLI.
+   *
+   * @param code The exit status, or null when the CLI was killed.
+   */
   exit(code: number | null): void;
 }
 
@@ -396,36 +486,48 @@ export interface TestLogin {
 class TestUpstream {
   /** Browsers the gateway has on this box, as the list reports it. */
   attachedCount = 0;
-  /** Whether the adapters advertise forking, which the list offers. */
+  /** True when the adapters advertise forking. The list then offers a fork. */
   canFork = true;
-  /** Whether anything is running in the box, or null before it was read. */
+  /** True while work runs in the box, or null before the first reading. */
   backgroundActive: boolean | null = false;
-  /** How many pieces of work are running in it, which the badge counts. */
+  /** The number of pieces of work running in it, which the badge counts. */
   backgroundCount = 0;
-  /** What a reading of the box found running in it, which the detail carries. */
+  /** The work that a reading of the box found running in it, which the detail carries. */
   boxWork: BoxWork[] = [];
   /** The adapter's ids for the threads the agent is talking on. */
   speakingThreads: string[] = [];
   /** The adapter's ids for the threads with work still running. */
   workingThreads: string[] = [];
 
+  /**
+   * Creates the stand-in for one box.
+   *
+   * @param boxId The box id.
+   * @param db The database that holds the thread rows.
+   * @param gateway The stub gateway that mints the conversations.
+   */
   constructor(
     private readonly boxId: string,
     private readonly db: Db,
     private readonly gateway: StubGateway,
   ) {}
 
-  /** Nothing is held, so the housekeeping sweep may forget this. */
+  /** Always true, so the housekeeping sweep can remove this upstream. */
   get holdsNothing(): boolean {
     return true;
   }
 
-  /** Every harness whose adapter advertised forking: both, or neither. */
+  /** Every harness whose adapter advertised forking. The set holds both harnesses or none. */
   get forkableHarnesses(): Set<HarnessId> {
     return new Set<HarnessId>(this.canFork ? ['claude', 'codex'] : []);
   }
 
-  /** Mints an empty conversation on the agent asked for. */
+  /**
+   * Mints an empty conversation on the agent asked for.
+   *
+   * @param options The agent, mode and settings of the thread. Claude when absent.
+   * @returns The new thread row.
+   */
   async newThread(options?: ThreadOptions): Promise<ThreadRow> {
     return this.mint(this.gateway.newThread(), null, {
       harness: options?.harness ?? 'claude',
@@ -434,7 +536,13 @@ class TestUpstream {
     });
   }
 
-  /** Mints a conversation carrying another's history. */
+  /**
+   * Mints a conversation carrying another's history.
+   *
+   * @param sourceThreadId The id of the thread to fork.
+   * @returns The new thread row.
+   * @throws Error When the source thread does not exist or has no conversation.
+   */
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
     const source = getThread(this.db, sourceThreadId);
     if (!source?.acp_session_id) throw new Error('Thread not found');
@@ -445,19 +553,28 @@ class TestUpstream {
     });
   }
 
-  /** Nothing to spawn: the stand-in is up from the moment it exists. */
+  /** Does nothing, because the stand-in is ready when it is created. */
   async ensureStarted(): Promise<void> {
     return undefined;
   }
 
-  /** Gives a thread that has a row and no conversation one, and reports its id. */
+  /**
+   * Mints a conversation for a thread row that has none.
+   *
+   * @param row The thread row.
+   * @returns The adapter's id for the conversation.
+   */
   adoptThread(row: ThreadRow): string {
     const acpSessionId = this.gateway.newThread();
     setThreadAcpId(this.db, row.id, acpSessionId);
     return acpSessionId;
   }
 
-  /** Mints this box's first conversation and reports the adapter's id. */
+  /**
+   * Mints this box's first conversation.
+   *
+   * @returns The adapter's id for the conversation.
+   */
   mintFirstThread(): string {
     return (
       this.mint(this.gateway.newThread(), null, { harness: 'claude', modeId: null, config: {} })
@@ -465,12 +582,20 @@ class TestUpstream {
     );
   }
 
-  /** Reports one process signalled, which is what the browser is told. */
+  /**
+   * Stops nothing.
+   *
+   * @returns 1 as the count of signalled processes.
+   */
   async stopBackgroundWork(): Promise<number> {
     return 1;
   }
 
-  /** Reports one process signalled, and clears what the box has running. */
+  /**
+   * Clears the work in the box.
+   *
+   * @returns 1 as the count of signalled processes.
+   */
   async stopBoxWork(): Promise<number> {
     this.backgroundActive = false;
     this.boxWork = [];
@@ -483,7 +608,14 @@ class TestUpstream {
   /** Does nothing, like {@link stop}. */
   close(): void {}
 
-  /** Stores a minted conversation. */
+  /**
+   * Stores a minted conversation as a new thread row.
+   *
+   * @param acpSessionId The adapter's id for the conversation.
+   * @param inheritsFrom The id of the thread it was forked from, or null.
+   * @param on The agent, mode and settings of the thread.
+   * @returns The new thread row.
+   */
   private mint(
     acpSessionId: string,
     inheritsFrom: string | null,
@@ -505,6 +637,9 @@ class TestUpstream {
  *
  * The manager reads what a browser sees off the entry in this map, so a
  * stand-in has to be put there.
+ *
+ * @param manager The box manager of the orchestrator.
+ * @returns The map, by box id.
  */
 function upstreamsOf(manager: BoxManager): Map<string, unknown> {
   return (manager as unknown as { upstreams: Map<string, unknown> }).upstreams;
@@ -516,12 +651,23 @@ function upstreamsOf(manager: BoxManager): Map<string, unknown> {
  * On {@link DEFAULT_BOX} it is short, so a test can write out a route to it.
  * On any other box it carries the box id, because thread ids are unique
  * across the deployment.
+ *
+ * @param boxId The box id.
+ * @param ordinal The position of the thread in its box, from 1.
+ * @returns The thread id.
  */
 function threadName(boxId: string, ordinal: number): string {
   return boxId === DEFAULT_BOX.id ? `th${ordinal}` : `${boxId}-th${ordinal}`;
 }
 
-/** Inserts one thread row and returns it. */
+/**
+ * Inserts one thread row.
+ *
+ * @param db The database.
+ * @param boxId The box id.
+ * @param thread The fields of the thread. Missing fields take the defaults of an idle Claude thread.
+ * @returns The inserted row.
+ */
 function insertThread(
   db: Db,
   boxId: string,
@@ -566,19 +712,39 @@ function insertThread(
   return row;
 }
 
-/** The stored box behind an id, or nothing where the deployment has none. */
+/**
+ * Reads the stored box with an id.
+ *
+ * @param db The database.
+ * @param boxId The box id.
+ * @returns The row, or undefined when the deployment has no such box.
+ */
 function boxRow(db: Db, boxId: string): BoxRow | undefined {
   return db.prepare('SELECT * FROM boxes WHERE id = ?').get(boxId) as BoxRow | undefined;
 }
 
-/** Writes a file of a workspace, creating the directories above it. */
+/**
+ * Writes a file of a workspace, creating the directories above it.
+ *
+ * @param root The workspace directory.
+ * @param path The path of the file, relative to the workspace.
+ * @param content The content of the file.
+ */
 function writeFile(root: string, path: string, content: string): void {
   const full = join(root, path);
   mkdirSync(dirname(full), { recursive: true });
   writeFileSync(full, content);
 }
 
-/** Adds one box with its row, directories, threads, container and stand-in adapter. */
+/**
+ * Adds one box with its row, directories, threads, container and stand-in adapter.
+ *
+ * @param app The orchestrator.
+ * @param db The database of the orchestrator.
+ * @param docker The fake daemon.
+ * @param upstreamFor Gives the stand-in adapter of a box.
+ * @param spec The box.
+ */
 function createBox(
   app: Orchestrator,
   db: Db,
@@ -589,7 +755,7 @@ function createBox(
   const cfg: Config = app.cfg;
   const id = spec.id ?? DEFAULT_BOX.id;
   const now = Date.now();
-  // A running box is set up already, so bringing it up runs no setup.
+  // A set ready_at marks the setup as done, so a start of the box runs no setup.
   db.prepare(
     `INSERT INTO boxes (id, name, profile, review_base_rev, status, agent_set_id, ws_token,
        created_at, last_active_at, ready_at)
@@ -643,7 +809,13 @@ function createBox(
   }
 }
 
-/** The review mutation a request is, as the tests name them. */
+/**
+ * Names the review mutation of a request for the tests.
+ *
+ * @param method The HTTP method.
+ * @param endpoint The part of the path after `review/`, or the empty string for the review itself.
+ * @returns The name, or null for a request that is not a review mutation.
+ */
 function reviewCallOf(method: string, endpoint: string): string | null {
   if (endpoint === 'annotations' && method === 'PUT') return 'PUT';
   if (endpoint === 'annotations' && method === 'DELETE') return 'DELETE';
@@ -654,10 +826,13 @@ function reviewCallOf(method: string, endpoint: string): string | null {
 }
 
 /**
- * Wires the real terminal endpoint onto the harness's server.
+ * Attaches the real terminal endpoint to the test server.
  *
  * It runs the orchestrator's own handshake check and terminal session, over
  * the fake daemon's pty.
+ *
+ * @param app The orchestrator.
+ * @param db The database, which holds the token of each box.
  */
 function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
   const wss = new WebSocketServer({
@@ -685,6 +860,10 @@ function attachTerminalEndpoint(app: Orchestrator, db: Db): void {
  * browser asked for.
  *
  * Every request the proxy lets through still reaches the real handler.
+ *
+ * @param app The orchestrator.
+ * @param state The deployment state, which holds the cookie that the proxy checks.
+ * @param calls The lists that get the recorded requests.
  */
 function installHooks(
   app: Orchestrator,
@@ -702,7 +881,7 @@ function installHooks(
   app.app.addHook('onRequest', async (req: HookRequest, reply: HookReply) => {
     if (!state.requireCookie) return;
     if ((req.headers.cookie ?? '').includes(`${state.requireCookie}=`)) return;
-    // As oauth2-proxy, Authelia and Caddy forward_auth do: redirect to a login
+    // Like oauth2-proxy, Authelia and Caddy forward_auth, redirect to a login
     // page that answers 200.
     if ((req.url.split('?')[0] ?? '') === '/login') {
       return reply.type('text/html; charset=utf-8').send('<!doctype html><title>Sign in</title>');
@@ -766,15 +945,21 @@ function installHooks(
 }
 
 /**
- * Stands in for the containers a login runs in, and returns the logins started.
+ * Stands in for the containers a login runs in.
  *
  * Each start adds one entry. The test prints the CLI's output through it and
  * ends it with a status. A `cat` of the file Codex wrote answers with
  * {@link LOGIN_DOCUMENT}, so a finished Codex login stores an account.
+ *
+ * @returns The list of the logins started, which grows with each start.
  */
 function installLoginRuntime(): TestLogin[] {
   const logins: TestLogin[] = [];
-  /** A finished stream, for the stderr the stand-in CLIs never write. */
+  /**
+   * Creates a finished stream, for the stderr the stand-in CLIs never write.
+   *
+   * @returns The stream.
+   */
   const silent = (): PassThrough => new PassThrough().end() as PassThrough;
   runtime().startLogin = async (id) => {
     const output = new PassThrough();
@@ -799,7 +984,7 @@ function installLoginRuntime(): TestLogin[] {
         const stdin = new PassThrough();
         const pipes = { stdin, stderr: silent(), resize: async () => undefined };
         if (cmd[0] === 'cat') {
-          // What the Codex CLI left behind, read back once it has exited.
+          // The file that the Codex CLI left behind, read back after the CLI exited.
           const document = new PassThrough();
           document.end(LOGIN_DOCUMENT);
           return { ...pipes, stdout: document, exited: Promise.resolve(0), kill: () => undefined };
@@ -822,7 +1007,12 @@ function installLoginRuntime(): TestLogin[] {
   return logins;
 }
 
-/** What a review delete names, taken off the query it travels in. */
+/**
+ * Reads the subject of a review delete from its query.
+ *
+ * @param query The parsed query string.
+ * @returns The path and line of the comment, or null when the query has no path.
+ */
 function deleteSubject(query: unknown): unknown {
   const { path, line } = query as { path?: string; line?: string };
   if (path === undefined) return null;
@@ -832,9 +1022,13 @@ function deleteSubject(query: unknown): unknown {
 /**
  * Starts the real orchestrator on an ephemeral port, with the boxes given.
  *
- * Only the Docker daemon, git inside a container and the agent are stand-ins.
- * `gatewayScript` sets what the stub gateway answers prompts with, which
- * modes it advertises and what it asks permission for.
+ * The stand-ins are the Docker daemon, git and the file service of a box
+ * container, the login runtime and the ACP gateway with its agent.
+ *
+ * @param boxes The boxes to create.
+ * @param gatewayScript Sets what the stub gateway answers prompts with, which modes it advertises and what it asks
+ *   permission for.
+ * @returns The handles that a test drives the orchestrator with.
  */
 export async function startOrchestrator(
   boxes: BoxSpec[] = [{}],
@@ -859,7 +1053,12 @@ export async function startOrchestrator(
   installLocalGit((boxId) => ws.workspacePath(dataDir, boxId));
   installLocalFiles((boxId) => ws.workspacePath(dataDir, boxId));
 
-  /** The stand-in adapter for a box, made on first use and put in the manager's map. */
+  /**
+   * Gives the stand-in adapter for a box, made on first use and put in the manager's map.
+   *
+   * @param boxId The box id.
+   * @returns The stand-in adapter.
+   */
   const upstreamFor = (boxId: string): TestUpstream => {
     const held = upstreamsOf(app.manager).get(boxId);
     if (held) return held as TestUpstream;
@@ -868,7 +1067,14 @@ export async function startOrchestrator(
     return made;
   };
 
-  /** Puts a credential in the store at a status, or takes it out. */
+  /**
+   * Puts a credential in the store at a status, or takes it out.
+   *
+   * @param id The credential id.
+   * @param method The kind of the secret.
+   * @param secret The secret to store.
+   * @param status The status of the stored credential, or null to remove it.
+   */
   const holdCredential = (
     id: 'claude' | 'openai',
     method: 'token' | 'api_key',
@@ -948,15 +1154,15 @@ export async function startOrchestrator(
     },
   );
 
-  // The orchestrator's entry point wires the upgrade in a deployment.
+  // In a deployment, the entry point of the orchestrator attaches this endpoint.
   attachTerminalEndpoint(app, db);
 
   installHooks(app, state, calls);
   const logins = installLoginRuntime();
 
-  // As at boot: creating a box fails until the egress policy exists.
+  // As at boot, box creation fails until the egress policy exists.
   await app.egress.prepare();
-  // A working deployment: a credential for each agent, and Claude's catalogue.
+  // A working deployment has a credential for each agent and the Claude catalogue.
   state.claudeCredential = 'ok';
   state.openaiCredential = 'ok';
   state.catalogued = ['claude'];
@@ -964,7 +1170,14 @@ export async function startOrchestrator(
   await app.app.listen({ host: '127.0.0.1', port: 0 });
   const { port } = app.app.server.address() as AddressInfo;
 
-  /** Sends a request as the harness, which the recorded calls leave out. */
+  /**
+   * Sends a setup request, which the recorded calls leave out.
+   *
+   * @param method The HTTP method.
+   * @param path The path of the API endpoint.
+   * @param payload The request body, if any.
+   * @returns The response.
+   */
   const setup = (
     method: 'GET' | 'PUT' | 'PATCH',
     path: string,

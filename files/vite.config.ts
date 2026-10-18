@@ -1,9 +1,8 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * Build and test configuration of the file service. It builds as one Node
- * bundle in Vite's SSR mode, with its npm dependencies inside, so the box
- * image needs only the bundle.
+ * Build and test configuration of the file service. The build puts the service and its npm dependencies into one Node
+ * bundle, so the box image needs only the bundle.
  */
 export default defineConfig({
   ssr: { noExternal: true },

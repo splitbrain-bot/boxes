@@ -1,3 +1,5 @@
+/** Functions that fold ACP session/update notifications into the message model of the thread. */
+
 import { UPDATE_KIND, type UpdateKind } from '../../../../shared/acp.ts';
 import {
   parseTaskNotifications,
@@ -22,8 +24,6 @@ import {
   type ToolKind,
 } from './acp-types.ts';
 
-/** Folds ACP session/update notifications into the thread's message model. */
-
 /** The member of the update union that carries one kind. */
 type UpdateOf<K extends UpdateKind> = Extract<ThreadUpdate, { sessionUpdate: K }>;
 
@@ -46,8 +46,8 @@ interface ReasoningPart {
 /**
  * An image, as a src the browser can load.
  *
- * `imageSrc` settles the src on arrival. A block without a src becomes text
- * instead.
+ * `imageSrc` sets the src when the block arrives. A block without a src
+ * becomes text instead.
  */
 interface ImagePart {
   /** The part's kind. */
@@ -59,7 +59,7 @@ interface ImagePart {
 /**
  * A file the user attached, shown as a chip under the message.
  *
- * Built from the envelope text the composer put in the prompt. Text survives
+ * Built from the envelope text that the composer put in the prompt. Text survives
  * a transcript unchanged, so live and replayed threads show the same chip.
  */
 export interface AttachmentPart {
@@ -74,9 +74,9 @@ export interface AttachmentPart {
 }
 
 /**
- * A background task's report, shown as a row of its own.
+ * The report of a background task, shown as a row of its own.
  *
- * Built from the XML block the harness wakes the agent with, so live and
+ * Built from the XML block that the harness wakes the agent with, so live and
  * replayed threads show the same row.
  */
 export interface TaskPart extends TaskNotification {
@@ -108,7 +108,7 @@ export interface ToolPart {
   name?: string;
   /** The category of the tool. */
   kind?: ToolKind;
-  /** How far along the call is. */
+  /** The progress of the call. */
   status: ToolCallStatus;
   /** The arguments the tool received. */
   rawInput?: unknown;
@@ -125,9 +125,9 @@ export type Part = TextPart | ReasoningPart | ImagePart | AttachmentPart | TaskP
 
 /** One message in the thread. */
 export interface Message {
-  /** The adapter's message id, or one this model made up. */
+  /** The message id from the adapter, or an id that this model generated. */
   id: string;
-  /** Who speaks. */
+  /** The role of the speaker. */
   role: 'user' | 'assistant';
   /** The message content, in order. */
   parts: Part[];
@@ -140,8 +140,9 @@ export interface Message {
   named?: boolean;
 }
 
-/** Everything the thread view reads. */
+/** The model that the thread view reads. */
 export interface ThreadModel {
+  /** The messages of the thread, in order. */
   messages: Message[];
   /** The adapter's advertised modes, or null when it advertises none. */
   modes: ThreadModeState | null;
@@ -167,7 +168,11 @@ export interface ThreadModel {
   tools: Map<string, { part: ToolPart; message: Message }>;
 }
 
-/** A model with nothing in it. */
+/**
+ * Builds a model with nothing in it.
+ *
+ * @returns The empty model.
+ */
 export function emptyModel(): ThreadModel {
   return {
     messages: [],
@@ -180,7 +185,7 @@ export function emptyModel(): ThreadModel {
   };
 }
 
-/** Source of message ids for chunks that arrive without one. */
+/** The counter for the ids of messages whose chunks arrive without an id. */
 let nextId = 1;
 
 /** Resets the id counter, so each test gets predictable ids. */
@@ -188,18 +193,29 @@ export function resetIds(): void {
   nextId = 1;
 }
 
-/** A new empty message in the given role, named when `id` is given. */
+/**
+ * Creates an empty message in the given role, named when `id` is given.
+ *
+ * @param role The role of the speaker.
+ * @param id The adapter's id for the message, if any.
+ * @returns The new message.
+ */
 function newMessage(role: Message['role'], id?: string | null): Message {
   if (id) return { id, role, parts: [], named: true };
   return { id: `m${nextId++}`, role, parts: [] };
 }
 
 /**
- * The message a chunk belongs to.
+ * Finds or creates the message a chunk belongs to.
  *
- * ACP marks message boundaries with messageId: chunks sharing one are the
- * same message, and a change starts a new one. Without a messageId, a role
+ * ACP marks message boundaries with messageId. Chunks with the same messageId
+ * are one message, and a change starts a new one. Without a messageId, a role
  * change starts a new message.
+ *
+ * @param model The thread model.
+ * @param role The role of the chunk.
+ * @param messageId The adapter's id for the message of the chunk, if any.
+ * @returns The message, which is the last one in the model.
  */
 function messageFor(
   model: ThreadModel,
@@ -219,7 +235,13 @@ function messageFor(
   return created;
 }
 
-/** Appends text to the trailing part of that kind, or starts a new one. */
+/**
+ * Appends text to the last part when that part has the given kind, or starts a new part.
+ *
+ * @param message The message.
+ * @param kind The kind of the part.
+ * @param text The text to append.
+ */
 function appendText(message: Message, kind: 'text' | 'reasoning', text: string): void {
   if (!text) return;
   const last = message.parts.at(-1);
@@ -231,12 +253,16 @@ function appendText(message: Message, kind: 'text' | 'reasoning', text: string):
 }
 
 /**
- * Appends one content block to a message, as a part of the kind it is.
+ * Appends one content block to a message.
  *
  * An image becomes its own part between the text parts around it.
  * Everything else is read as text and appended, so a run of chunks
  * collapses into one part. All three chunk kinds use this path, thoughts
  * included.
+ *
+ * @param message The message.
+ * @param kind The kind of the part for text.
+ * @param content The content block.
  */
 function appendBlock(message: Message, kind: 'text' | 'reasoning', content: ContentBlock): void {
   if (content?.type === 'image') {
@@ -284,11 +310,13 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
 }
 
 /**
- * Drops the message an id names and everything after it, so a replay that
- * starts there builds them again.
+ * Drops the message that an id names and every message after it, so a replay
+ * that starts there builds them again.
  *
- * Returns what went, which is empty when no message answers to the id — and
- * then the model is left exactly as it was.
+ * @param model The thread model.
+ * @param messageId The id of the first message to drop.
+ * @returns The dropped messages. The result is empty when no message has the
+ *   id, and then the model stays unchanged.
  */
 export function truncateFrom(model: ThreadModel, messageId: string): Message[] {
   const from = model.messages.findIndex((m) => m.id === messageId);
@@ -303,23 +331,39 @@ export function truncateFrom(model: ThreadModel, messageId: string): Message[] {
   return dropped;
 }
 
-/** Finds a tool part anywhere in the thread. */
+/**
+ * Finds a tool part anywhere in the thread.
+ *
+ * @param model The thread model.
+ * @param toolCallId The adapter's id for the call.
+ * @returns The tool part, or undefined when the thread has no such call.
+ */
 export function findTool(model: ThreadModel, toolCallId: string): ToolPart | undefined {
   return model.tools.get(toolCallId)?.part;
 }
 
-/** The message a tool call sits in, or null when the thread has no such call. */
+/**
+ * Finds the message a tool call sits in.
+ *
+ * @param model The thread model.
+ * @param toolCallId The adapter's id for the call.
+ * @returns The message, or null when the thread has no such call.
+ */
 export function messageOfTool(model: ThreadModel, toolCallId: string): Message | null {
   return model.tools.get(toolCallId)?.message ?? null;
 }
 
 /**
- * Applies one update to the model, in place, and returns the message it
- * changed so a caller can refresh just that one.
+ * Applies one update to the model, in place.
  *
  * Replay and live streaming both come through here. An unknown kind is
  * noted by name and otherwise ignored, so a newer adapter does not break an
  * older dashboard.
+ *
+ * @param model The thread model.
+ * @param update The update.
+ * @returns The changed message, so a caller can refresh only that message, or
+ *   null when the update changed no message.
  */
 export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message | null {
   switch (update.sessionUpdate) {
@@ -343,15 +387,15 @@ export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message |
     }
     case UPDATE_KIND.toolCall: {
       const u = update as UpdateOf<typeof UPDATE_KIND.toolCall>;
-      // A re-announced call is an update, not a second card: an adapter may
-      // resend one, and replay always does.
+      // A call announced again is an update and not a second card, because an
+      // adapter can send a call again, and a replay always does.
       return openTool(model, u, u.title);
     }
     case UPDATE_KIND.toolCallUpdate: {
       const u = update as UpdateOf<typeof UPDATE_KIND.toolCallUpdate>;
-      // Out of order: an update can arrive before the call it belongs to, and
-      // dropping it would lose the tool's result. What it lacks is a title, so
-      // the id stands in until the announcement arrives with one.
+      // An update can arrive before the call that it belongs to, and dropping
+      // it would lose the result of the tool. The update can lack a title, so
+      // the id stands in until the announcement brings one.
       return openTool(model, u, u.title ?? u.toolCallId);
     }
     case UPDATE_KIND.plan: {
@@ -366,8 +410,8 @@ export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message |
     }
     case UPDATE_KIND.configOption: {
       const u = update as UpdateOf<typeof UPDATE_KIND.configOption>;
-      // The adapter sends the whole set every time, so this replaces rather
-      // than merges.
+      // The adapter sends the whole set every time, so the model replaces the
+      // set and does not merge it.
       model.configOptions = u.configOptions ?? [];
       return null;
     }
@@ -383,11 +427,16 @@ export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message |
 }
 
 /**
- * Folds a tool_call or a tool_call_update into the thread: merged into the
- * call it is about, or started as a fresh card when there is none yet.
+ * Folds a tool_call or a tool_call_update into the thread. The update merges
+ * into its call, or starts a new card when the call does not exist yet.
  *
  * An adapter may send either of the two first, so both take this path. The
  * caller passes the title for a new card.
+ *
+ * @param model The thread model.
+ * @param u The tool call or the update.
+ * @param title The title for a new card.
+ * @returns The message that holds the call.
  */
 function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message | null {
   const indexed = model.tools.get(u.toolCallId);
@@ -415,8 +464,11 @@ function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message
 /**
  * Merges a tool_call or tool_call_update into an existing part.
  *
- * Null and absent both mean "leave it alone", which is what the schema says
- * an omitted field means.
+ * Null and absent both mean that the field stays unchanged, as the schema
+ * defines for an omitted field.
+ *
+ * @param part The existing part.
+ * @param u The tool call or the update.
  */
 function mergeTool(part: ToolPart, u: ToolCallUpdate): void {
   if (u.title != null) part.title = u.title;
@@ -424,18 +476,21 @@ function mergeTool(part: ToolPart, u: ToolCallUpdate): void {
   if (u.kind != null) part.kind = u.kind;
   if (u.status != null) part.status = u.status;
   if (u.rawInput !== undefined) part.rawInput = u.rawInput;
-  // content and locations replace rather than merge, which is what the
-  // schema says: an update carries the whole collection.
+  // content and locations replace the old values and do not merge, because
+  // in the schema an update carries the whole collection.
   if (u.content != null) part.content = u.content;
   if (u.locations != null) part.locations = u.locations;
 }
 
 /**
- * Renders a tool call's content as the plain text the fallback shows.
+ * Renders the content of a tool call as the plain text that the fallback shows.
  *
- * An image is named rather than rendered here; the picture itself is shown
- * beside the card. Naming it keeps an image result from reading as a tool
- * that produced nothing.
+ * The text names an image and does not render it. The picture shows beside
+ * the card. The name keeps an image result from looking like a tool that
+ * produced nothing.
+ *
+ * @param part The tool part.
+ * @returns The text, one line per content entry.
  */
 export function toolOutputText(part: ToolPart): string {
   return part.content
@@ -450,7 +505,12 @@ export function toolOutputText(part: ToolPart): string {
     .join('\n');
 }
 
-/** A diff as a block in unified style: the removed lines, then the added ones. */
+/**
+ * Renders a diff as a block in unified style, with the removed lines first and then the added lines.
+ *
+ * @param diff The diff content.
+ * @returns The diff text.
+ */
 function diffText(diff: Extract<ToolCallContent, { type: 'diff' }>): string {
   const removed = (diff.oldText ?? '')
     .split('\n')

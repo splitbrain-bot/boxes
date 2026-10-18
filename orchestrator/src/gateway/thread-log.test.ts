@@ -5,7 +5,14 @@ import { ThreadLog } from './thread-log.ts';
 /** The thread these tests log. */
 const T1 = 'acp-1';
 
-/** A chunk of a named message. */
+/**
+ * A chunk of a named message.
+ *
+ * @param messageId The id of the message.
+ * @param text The text of the chunk.
+ * @param thread The thread of the update.
+ * @returns The `session/update` params.
+ */
 function chunk(messageId: string, text: string, thread = T1): unknown {
   return {
     sessionId: thread,
@@ -13,12 +20,23 @@ function chunk(messageId: string, text: string, thread = T1): unknown {
   };
 }
 
-/** An update about a tool call, which names no message. */
+/**
+ * An update about a tool call, which names no message.
+ *
+ * @param toolCallId The id of the call.
+ * @param thread The thread of the update.
+ * @returns The `session/update` params.
+ */
 function call(toolCallId: string, thread = T1): unknown {
   return { sessionId: thread, update: { sessionUpdate: 'tool_call', toolCallId, title: 'ls' } };
 }
 
-/** The size the log counts for one entry: the JSON length of its params. */
+/**
+ * The size that the log counts for one entry, which is the JSON length of its params.
+ *
+ * @param params The params of the entry.
+ * @returns The size.
+ */
 function sizeOf(params: unknown): number {
   return JSON.stringify(params).length;
 }

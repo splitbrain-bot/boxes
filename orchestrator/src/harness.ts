@@ -14,13 +14,13 @@ export interface AgentLayout {
   skills: string;
 }
 
-/** Every harness-specific value the orchestrator needs. Values only, no behaviour. */
+/** The values of one harness that the orchestrator needs. */
 export interface Harness {
   /** The harness id. */
   id: HarnessId;
   /** What the dashboard calls it. */
   label: string;
-  /** argv for the adapter, spawned as a docker exec in the box. */
+  /** argv for the adapter, which the runtime starts as an exec in the box. */
   cmd: readonly string[];
   /** The token the adapter's own process is recognised by in the box's process table. */
   processToken: string;
@@ -32,7 +32,7 @@ export interface Harness {
   residentProcesses: readonly RegExp[];
   /** Mode a fresh thread is put in, when the adapter offers it. */
   defaultModeId: string;
-  /** Mode a fork starts in instead. */
+  /** Mode a fork starts in. */
   forkModeId: string;
   /** Config option values a fresh thread starts with, by option id. */
   defaultConfig: Readonly<Record<string, string>>;
@@ -41,10 +41,12 @@ export interface Harness {
   /** Which credential must be present before a thread can run. */
   credentialId: CredentialId;
   /**
-   * Container environment this harness needs. `placeholder` is what the box
-   * holds in place of the credential: the real secret never enters a box, and
-   * the egress proxy swaps the placeholder for it on the way out. `method`
-   * is how the stored credential was obtained, or null when none is stored.
+   * Returns the container environment that this harness needs. The real secret never
+   * enters a box, and the egress proxy swaps the placeholder for it on the way out.
+   *
+   * @param placeholder The value that stands for the credential in the box.
+   * @param method How the stored credential was obtained, or null when none is stored.
+   * @returns The variables by name.
    */
   env: (placeholder: string, method: CredentialMethod | null) => Record<string, string>;
   /** Where an agent set is installed, home-relative. */
@@ -63,24 +65,24 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     label: 'Claude Code',
     cmd: ['claude-agent-acp'],
     processToken: 'claude-agent-acp',
-    // The adapter spawns the Claude Code CLI as its agent, and nothing else
-    // of its own outlives a turn. The pattern matches the `claude` argv0, not
-    // a path that contains the word.
+    // The adapter spawns the Claude Code CLI as its agent. The pattern matches a
+    // path that ends in `claude`, and not a path such as `claude-agent-acp` that
+    // only contains the word.
     residentProcesses: [/(^|\/)claude(\s|$)/],
     defaultModeId: 'auto',
     forkModeId: 'plan',
     defaultConfig: { model: 'opus' },
     /**
-     * `summarized` makes the reasoning readable: the default `omitted` streams
-     * thinking blocks without text. `enabled` with a budget rather than
-     * `adaptive`, because older models reject `adaptive`.
+     * `summarized` makes the reasoning readable, because the default `omitted`
+     * streams thinking blocks without text. The type is `enabled` with a
+     * budget, because older models reject `adaptive`.
      */
     threadMeta: {
       claudeCode: {
         options: {
-          // Named so the adapter offers Fable, which is billed against usage
-          // credits and is not in the plan's list. It does not select it: a
-          // fresh thread still starts on defaultConfig's model.
+          // Named so that the adapter offers Fable. The orchestrator sets the
+          // model from defaultConfig after session/new, so a fresh thread runs on
+          // that model.
           model: 'fable',
           thinking: { type: 'enabled', budgetTokens: 10_000, display: 'summarized' },
         },
@@ -108,29 +110,31 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     label: 'Codex',
     cmd: ['codex-acp'],
     processToken: 'codex-acp',
-    // The adapter spawns Codex as `codex app-server` for the life of the exec.
-    // Not yet checked in a real box: other long-lived helpers under it belong
-    // here too.
+    // The adapter spawns `$CODEX_PATH app-server` for the life of the exec. The box
+    // image points CODEX_PATH to the npm launcher of Codex, and the command lines of
+    // the launcher and of the native binary that it starts both hold `codex app-server`.
     residentProcesses: [/codex app-server/],
     /**
-     * `agent-full-access` rather than the adapter's `agent` default. The other
-     * modes run each command under bubblewrap, which needs a user namespace.
-     * A box cannot create one on any host, because `CapDrop: ['ALL']` removes
-     * `CAP_SYS_ADMIN`. The container is the boundary instead.
+     * `agent-full-access` replaces the `agent` default of the adapter. The
+     * other modes run each command in the sandbox of Codex, which uses bubblewrap
+     * and needs a user namespace. A process in a box cannot create one, because
+     * every runtime drops all capabilities, `CAP_SYS_ADMIN` included, and the
+     * default seccomp profile refuses a user namespace without it. The
+     * container is the boundary instead.
      */
     defaultModeId: 'agent-full-access',
     /**
-     * Like a Claude fork in `plan`, every write asks first. `read-only` is
-     * Codex's `on-request` approval with a human reviewer, not a sandbox. In
-     * a box Codex runs it without the bubblewrap sandbox.
+     * The adapter mode with the `on-request` approval of Codex and a human
+     * reviewer. It sets the `workspace-write` sandbox without network, and
+     * Codex asks before it edits files outside the workspace or uses the internet.
      */
     forkModeId: 'read-only',
-    /** Empty: a fresh Codex thread stays on the adapter's own default model. */
+    /** Empty, so a fresh Codex thread stays on the default model of the adapter. */
     defaultConfig: {},
     threadMeta: undefined,
     credentialId: 'openai',
     /**
-     * The adapter reads `CODEX_API_KEY`: with `DEFAULT_AUTH_REQUEST` naming the
+     * The adapter reads `CODEX_API_KEY`. With `DEFAULT_AUTH_REQUEST` naming the
      * `api-key` method, `codex-acp` logs in from the environment when a
      * `session/*` call finds no account. Codex then saves the key to
      * `$CODEX_HOME/auth.json` on the home. The placeholder never changes, so
@@ -165,8 +169,12 @@ export const HARNESS_IDS: readonly HarnessId[] = Object.keys(HARNESSES) as Harne
 export const DEFAULT_HARNESS: HarnessId = 'claude';
 
 /**
- * The harness a stored id names. Throws for an unknown id rather than fall
- * back, so a thread never runs on the wrong agent.
+ * Returns the harness a stored id names. It throws for an unknown id, so a thread
+ * never runs on the wrong agent.
+ *
+ * @param id The harness id.
+ * @returns The harness.
+ * @throws Error when no harness has the id.
  */
 export function harness(id: string): Harness {
   // Own properties only, so `constructor` or `toString` names no harness.

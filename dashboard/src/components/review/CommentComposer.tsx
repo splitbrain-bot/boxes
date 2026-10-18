@@ -12,7 +12,16 @@ const SAVE_KEY = /mac|iphone|ipad|ipod/i.test(
   ? '⌘↵'
   : 'Ctrl+↵';
 
-/** The form both arrangements render. */
+/**
+ * The form that both composer layouts render.
+ *
+ * @param line The line being commented on.
+ * @param initial The existing comment when editing, or '' when writing a new one.
+ * @param busy Disables the buttons while a write is in flight.
+ * @param autoFocus Focuses the textarea on mount and whenever the line changes.
+ * @param onSave Called with the trimmed comment when the user saves.
+ * @param onCancel Called when the user cancels.
+ */
 function Form({
   line,
   initial,
@@ -85,7 +94,11 @@ function Form({
   );
 }
 
-/** The composer inline under the line, for wide screens. */
+/**
+ * The composer inline below the line, for wide screens.
+ *
+ * @param props The line, the existing comment, the busy flag and the callbacks.
+ */
 export function InlineComposer(props: {
   /** The line being commented on. */
   line: number;
@@ -111,6 +124,12 @@ export function InlineComposer(props: {
  *
  * The view picks this or {@link InlineComposer} with a media query, because the
  * sheet renders into a portal that a CSS breakpoint on a wrapper cannot hide.
+ *
+ * @param line The line being commented on, or null when the sheet is closed.
+ * @param initial The existing comment when editing, or '' when writing a new one.
+ * @param busy Disables the buttons while a write is in flight.
+ * @param onSave Called with the trimmed comment when the user saves.
+ * @param onCancel Called when the user cancels or dismisses the sheet.
  */
 export function ComposerSheet({
   line,

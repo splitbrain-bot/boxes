@@ -1,9 +1,10 @@
+/** Browser tests for the agent set pages and the global and named set model. */
+
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
-/** Browser tests for the agent set pages and the global and named set model. */
-
+/** The orchestrator that the tests in this file share. */
 let stub: TestOrchestrator;
 
 beforeAll(async () => {
@@ -71,7 +72,7 @@ test('the global set cannot be deleted, and a named one can', async () => {
   const { page, close } = await openPage(stub.url, '/agents');
   try {
     await expect.poll(() => page.getByText('Go projects').isVisible()).toBe(true);
-    // One delete button, next to the only set that has one.
+    // Only the named set has a delete button.
     expect(await page.getByRole('button', { name: 'Delete' }).count()).toBe(1);
   } finally {
     await close();
@@ -82,9 +83,9 @@ test('the editor shows the merge, and which of its items replaces a global one',
   const { page, close } = await openPage(stub.url, '/agents/as1');
   try {
     await expect.poll(() => page.getByText('Merged result').isVisible()).toBe(true);
-    // `review` is defined in both sets; the named one wins, and says so.
+    // Both sets define the review skill. The named set wins and says so.
     await expect.poll(() => page.getByText('replaces the global one').isVisible()).toBe(true);
-    // `ship` comes from the global set, which this one adds nothing to.
+    // The ship skill comes only from the global set.
     await expect.poll(() => page.getByText('review, ship').isVisible()).toBe(true);
   } finally {
     await close();
@@ -126,8 +127,8 @@ test('a SKILL.md with no front matter is called out before it is saved', async (
     await expect.poll(() => page.getByText('Skills').first().isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Add' }).first().click();
     await page.getByLabel('SKILL.md').fill('Just some prose.');
-    // The failure is silent inside the box, so the editor is the only place
-    // it can be caught.
+    // The agent ignores such a file without an error, so the editor is the
+    // only place to catch the problem.
     await expect.poll(() => page.getByText('is not loaded at all').isVisible()).toBe(true);
   } finally {
     await close();
@@ -140,7 +141,7 @@ test('a box is created against a named set, and the global one is not offered', 
     await expect.poll(() => page.getByLabel('Agent set').isVisible()).toBe(true);
     await page.getByLabel('Name').fill('a new box');
     await page.getByLabel('Agent set').click();
-    // The global set applies either way, so it is no choice.
+    // The global set always applies, so it is not an option.
     expect(await page.getByRole('option').allInnerTexts()).toEqual([
       'Global set only',
       'Go projects',

@@ -11,7 +11,12 @@ import { log } from '../log.ts';
 import { threadOf } from './broadcast.ts';
 import type { DownstreamHandle, UpstreamBox } from './upstream.ts';
 
-/** Pass-through parser, leaving params and their _meta untouched. */
+/**
+ * Pass-through parser, leaving params and their _meta untouched.
+ *
+ * @param params The params of the message.
+ * @returns The same params.
+ */
 const raw = <T = unknown>(params: unknown): T => params as T;
 
 /** Methods forwarded to the adapter verbatim, _meta intact. */
@@ -34,11 +39,10 @@ const FORWARDED_REQUESTS = [
 const FORWARDED_NOTIFICATIONS = [ACP_METHOD.sessionCancel] as const;
 
 /**
- * How many bytes one browser's socket may have waiting on it.
+ * Largest number of bytes that can wait on the socket of one browser.
  *
- * Past this the socket is closed, so a browser that stopped reading cannot
- * grow the buffer without end. The browser reconnects and resumes from the
- * last message it holds.
+ * Past this the gateway closes the socket, so a browser that stopped reading cannot grow the buffer without end. The
+ * browser reconnects and resumes from the last message it holds.
  */
 const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 
@@ -55,7 +59,7 @@ let nextHandleId = 1;
  * @param protocolHeader The `Sec-WebSocket-Protocol` header of the upgrade.
  * @param boxToken The token of the box, or null when no such box exists.
  * @param subprotocol The protocol the endpoint speaks.
- * @returns Whether the upgrade may proceed, and the reason when it may not.
+ * @returns `ok` true when the upgrade can go on, or `ok` false with the reason.
  */
 export function checkUpgrade(
   protocolHeader: string | undefined,
@@ -79,7 +83,13 @@ export function checkUpgrade(
   return { ok: true };
 }
 
-/** Constant-time compare that does not leak length via early return. */
+/**
+ * Constant-time compare that does not leak length via early return.
+ *
+ * @param a The first string.
+ * @param b The second string.
+ * @returns True when both strings are equal.
+ */
 function timingSafeEqualStr(a: string, b: string): boolean {
   let diff = a.length ^ b.length;
   const len = Math.max(a.length, b.length);
@@ -89,7 +99,13 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** An ACP Stream over a WebSocket: one JSON-RPC message per text frame. */
+/**
+ * An ACP Stream over a WebSocket, with one JSON-RPC message per text frame.
+ *
+ * @param ws The browser's socket.
+ * @param boxId The box, for the log.
+ * @returns The stream for the SDK.
+ */
 export function wsStream(ws: WebSocket, boxId: string): Stream {
   const slog = log.box(boxId);
 
@@ -140,7 +156,7 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
     write(msg) {
       if (ws.readyState !== ws.OPEN) return;
       // Resolves when the send completes, so the writer waits for the socket.
-      // A failed send resolves too; the read side notices the closed socket.
+      // A failed send also resolves. The read side then sees the closed socket.
       return new Promise<void>((resolve) => {
         ws.send(JSON.stringify(msg), () => resolve());
         if (ws.bufferedAmount <= MAX_BUFFERED_BYTES) return;
@@ -164,11 +180,14 @@ export function wsStream(ws: WebSocket, boxId: string): Stream {
  * threads.
  *
  * Toward the browser the orchestrator speaks ACP as an agent and forwards
- * most requests to the adapter. Disconnecting only drops the handle from the
- * broadcast set.
+ * most requests to the adapter. Disconnecting drops the handle from the
+ * broadcast set, and the upstream keeps running.
  *
+ * @param ws The browser's socket.
+ * @param boxId The box that the URL named.
  * @param threadId The thread the URL named, or null to pin the box's most
  *   recently active thread.
+ * @param manager The source of the box's upstream.
  */
 export function attachDownstream(
   ws: WebSocket,
@@ -252,8 +271,8 @@ export function attachDownstream(
           'this connection is pinned to another thread',
         );
       }
-      // The handle decides who gets a replay, and which adapter gets a
-      // request that names no thread.
+      // The handle tells the upstream which browser gets a replay, and which adapter gets a request that names
+      // no thread.
       const result = await up.forwardRequest(method, params, handle);
       // Queued permission requests go out after the replay, because a client
       // discards what it showed before the replay landed.

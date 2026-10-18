@@ -1,9 +1,9 @@
 /**
- * Structured JSON logging to stderr. The fields of every line are redacted,
- * the message text is not.
+ * Structured JSON logger that writes to stderr. It redacts the fields of every
+ * line. It does not redact the message text.
  */
 
-/** Field names whose value is replaced whatever it contains. */
+/** Field names whose values are always replaced. */
 const SECRET_KEY = /(token|key|secret|password|authorization|cookie)/i;
 
 /** Values that look like credentials regardless of the key they sit under. */
@@ -12,6 +12,10 @@ const SECRET_VALUE = /\b(sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,})\b/
 /**
  * Returns a copy of a value with credentials replaced by a marker. Recurses
  * into arrays and objects up to a fixed depth.
+ *
+ * @param value The value to copy.
+ * @param depth The depth of the value in the original, 0 at the top.
+ * @returns The redacted copy.
  */
 function redact(value: unknown, depth = 0): unknown {
   if (depth > 8) return '[deep]';
@@ -37,20 +41,33 @@ const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40
  */
 let threshold = LEVELS.info;
 
-/** Sets the lowest severity that is written. The boot calls it with LOG_LEVEL. */
+/**
+ * Sets the lowest severity that is written. The entry point calls it with LOG_LEVEL.
+ *
+ * @param level The lowest severity to write.
+ */
 export function setLogLevel(level: Level): void {
   threshold = LEVELS[level];
 }
 
 /**
- * Whether a line at this level would be written. Lets a caller skip building
- * an expensive log line that nothing will read.
+ * Checks if a line at a level is written. A caller uses it to skip
+ * an expensive log line that nothing reads.
+ *
+ * @param level The severity of the line.
+ * @returns True when the line is written.
  */
 export function wants(level: Level): boolean {
   return LEVELS[level] >= threshold;
 }
 
-/** Writes one redacted JSON line, unless the level is below the threshold. */
+/**
+ * Writes one redacted JSON line, unless the level is below the threshold.
+ *
+ * @param level The severity of the line.
+ * @param msg The message.
+ * @param fields The fields of the line.
+ */
 function emit(level: Level, msg: string, fields?: Record<string, unknown>): void {
   if (LEVELS[level] < threshold) return;
   const line = {
@@ -63,7 +80,12 @@ function emit(level: Level, msg: string, fields?: Record<string, unknown>): void
   process.stderr.write(`${JSON.stringify(line)}\n`);
 }
 
-/** Builds the four level methods, each adding tag to the fields of every line. */
+/**
+ * Builds the four level methods.
+ *
+ * @param tag The fields that each method adds to every line.
+ * @returns The method of each level.
+ */
 function levels(
   tag?: Record<string, unknown>,
 ): Record<Level, (msg: string, fields?: Record<string, unknown>) => void> {
@@ -81,12 +103,20 @@ export type Logger = ReturnType<typeof levels>;
 export const log = {
   ...levels(),
   wants,
-  /** Child logger that stamps every line with a box id. */
+  /**
+   * Returns a child logger that stamps every line with a box id.
+   *
+   * @param id The box id.
+   * @returns The child logger.
+   */
   box: (id: string): Logger => levels({ box: id }),
   /**
-   * Child logger that stamps every line with the given fields. One box runs
+   * Returns a child logger that stamps every line with the given fields. One box runs
    * an adapter per harness, so a box id alone cannot say which process a line
    * came from.
+   *
+   * @param fields The fields to add to every line.
+   * @returns The child logger.
    */
   tagged: (fields: Record<string, unknown>): Logger => levels(fields),
 };

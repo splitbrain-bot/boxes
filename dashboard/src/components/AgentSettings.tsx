@@ -1,17 +1,16 @@
+/**
+ * Controls for the mode and the config options of an agent. The thread header and the thread options block use
+ * them.
+ */
 import { modeDescription, modeLabel } from '@/lib/harness';
 import { cn } from '@/lib/utils';
 import type { HarnessId, ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
-
-/**
- * Controls for an agent's mode and config options, shared by the thread header
- * and the new-thread block.
- */
 
 /** The classes every select here shares. */
 const SELECT = 'min-w-0 rounded-md border bg-muted px-2 py-1 text-xs';
 
 /**
- * Whether an option is a select with more than one value.
+ * Checks if an option is a select with more than one value.
  *
  * @param option The config option.
  * @returns True when the option offers a choice.
@@ -32,16 +31,20 @@ export function optionName(option: ThreadConfigOption): string {
 
 /**
  * One setting with its name, description and control. The block is a label,
- * so the whole block is the hit area.
+ * so a click anywhere on it reaches the control.
+ *
+ * @param name The name of the setting.
+ * @param description The description from the adapter, if any.
+ * @param children The control.
  */
 export function Setting({
   name,
   description,
   children,
 }: {
-  /** The setting's name. */
+  /** The name of the setting. */
   name: string;
-  /** What the adapter says it does, when it says anything. */
+  /** The description from the adapter, if any. */
   description?: string | null | undefined;
   /** The control. */
   children: React.ReactNode;
@@ -57,8 +60,14 @@ export function Setting({
 }
 
 /**
- * One config option as a native select. A native select opens the platform's
- * own picker, which fits a phone.
+ * One config option as a native select. A native select opens the picker of the
+ * platform, which fits a phone.
+ *
+ * @param option The config option.
+ * @param label The name to show. The default is the name from the adapter.
+ * @param value The chosen value, for a caller that holds it. The default is the `currentValue` of the option.
+ * @param className Extra classes for the select.
+ * @param onSet Called with the value that the user picked.
  */
 export function ConfigSelect({
   option,
@@ -69,16 +78,16 @@ export function ConfigSelect({
 }: {
   /** The config option. */
   option: ThreadConfigOption;
-  /** What to call it. The adapter's own name, unless the caller has a better one. */
+  /** The name to show. The default is the name from the adapter. */
   label?: string;
   /**
-   * The chosen value, for a caller that holds it, such as the new-thread
-   * block. The option's own `currentValue` when absent.
+   * The chosen value, for a caller that holds it, such as the thread options
+   * block. The default is the `currentValue` of the option.
    */
   value?: string;
   /** Extra classes for the select. */
   className?: string;
-  /** Called with the value the user picked. */
+  /** Called with the value that the user picked. */
   onSet: (value: string) => void;
 }) {
   const name = label ?? optionName(option);
@@ -104,8 +113,13 @@ export function ConfigSelect({
 /**
  * The mode picker as a native select.
  *
- * It shows the adapter's mode names, plus a caveat for a mode that may be
- * unavailable in this deployment.
+ * It shows the mode names from the adapter, with a caveat on each mode that
+ * may be unavailable in this deployment.
+ *
+ * @param modes The available modes and the current one.
+ * @param harness The harness that the modes belong to.
+ * @param className Extra classes for the select.
+ * @param onSet Called with the mode id that the user picked.
  */
 export function ModeSelect({
   modes,
@@ -115,11 +129,11 @@ export function ModeSelect({
 }: {
   /** The available modes and the current one. */
   modes: ThreadModeState;
-  /** The harness the modes belong to. The caveat depends on it. */
+  /** The harness that the modes belong to. The caveat depends on it. */
   harness: HarnessId | null;
   /** Extra classes for the select. */
   className?: string;
-  /** Called with the mode id the user picked. */
+  /** Called with the mode id that the user picked. */
   onSet: (modeId: string) => void;
 }) {
   return (
@@ -139,10 +153,10 @@ export function ModeSelect({
 }
 
 /**
- * Returns the description of the current mode, for under the picker's name.
+ * Returns the description of the current mode, to show below the name of the picker.
  *
  * @param modes The mode state, if any.
- * @param harness The harness the modes belong to.
+ * @param harness The harness that the modes belong to.
  * @returns The description, or null when there is none.
  */
 export function currentModeDescription(

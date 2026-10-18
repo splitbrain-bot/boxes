@@ -16,8 +16,11 @@ import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import { FileError, readFile, writeFile } from './ops.ts';
 
+/** The root directory of one test, which stands for the workspace. */
 let root: string;
+/** A directory outside {@link root}. */
 let outside: string;
+/** A file in {@link outside} that no operation may change or reveal. */
 let secret: string;
 
 beforeEach(() => {
@@ -31,7 +34,12 @@ afterEach(() => {
   for (const d of [root, outside]) rmSync(d, { recursive: true, force: true });
 });
 
-/** A body stream of some text. */
+/**
+ * Makes a request body.
+ *
+ * @param text The text of the body.
+ * @returns A stream of the text.
+ */
 function body(text: string): Readable {
   return Readable.from([Buffer.from(text)]);
 }
@@ -67,9 +75,8 @@ describe('readFile', () => {
 describe('writeFile', () => {
   test('a link planted at the temp name is not written through', async () => {
     const path = join(root, 'REVIEW.md');
-    // The agent owns the directory and the temp name is predictable. The
-    // counter in the name is private, so every name the write could pick is
-    // planted.
+    // The agent owns the directory and can predict the temp name. The test cannot read the counter in the name, so
+    // it plants a link for each of the first 64 counter values.
     for (let n = 0; n < 64; n++) symlinkSync(secret, `${path}.${process.pid}.${n}.tmp`);
 
     await writeFile(root, 'REVIEW.md', body('# Code Review\n'), { absent: true });
@@ -91,7 +98,7 @@ describe('writeFile', () => {
     mkdirSync(dir);
     writeFileSync(join(dir, 'REVIEW.md'), 'the previous version\n');
     const hash = readFile(root, 'sub/REVIEW.md', 100).hash;
-    // Read-only directory, so the temp write fails.
+    // The directory is read-only, so the temp write fails.
     chmodSync(dir, 0o555);
     try {
       await assert.rejects(writeFile(root, 'sub/REVIEW.md', body('fails\n'), { hash }), FileError);

@@ -8,10 +8,12 @@ import { loadConfig } from './config.ts';
 import { type Db, openDb } from './db.ts';
 import { startReaper } from './reaper.ts';
 
-/** How long a box must be quiet before the reaper stops it. */
+/** How long a box must be quiet before the reaper stops it, in minutes. */
 const IDLE_MINUTES = 30;
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
 
 beforeEach(() => {
@@ -25,7 +27,12 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** A running box row, quiet for `idleMinutes`. */
+/**
+ * Inserts a running box row.
+ *
+ * @param id The box id.
+ * @param idleMinutes How long the box has been quiet, in minutes.
+ */
 function insertBox(id: string, idleMinutes: number): void {
   const now = Date.now();
   db.prepare(
@@ -34,7 +41,13 @@ function insertBox(id: string, idleMinutes: number): void {
   ).run(id, now - idleMinutes * 60_000, now - idleMinutes * 60_000);
 }
 
-/** One of a box's threads, with or without a turn running on it. */
+/**
+ * Inserts a thread of a box, with or without a turn running on it.
+ *
+ * @param id The thread id.
+ * @param boxId The box id.
+ * @param turnActive True for a thread with a turn running.
+ */
 function insertThread(id: string, boxId: string, turnActive = false): void {
   db.prepare(
     `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
@@ -44,8 +57,10 @@ function insertThread(id: string, boxId: string, turnActive = false): void {
 }
 
 /**
- * Runs one tick of the reaper over a manager that answers as told, and
- * returns the ids of the boxes it stopped.
+ * Runs one tick of the reaper over a manager that answers as told.
+ *
+ * @param over The answers of the fake manager.
+ * @returns The ids of the boxes that the reaper stopped.
  */
 async function tick(
   over: {
@@ -53,17 +68,17 @@ async function tick(
     pending?: number;
     /** Browsers attached to each box. */
     attachedCount?: number;
-    /** Null is a box whose work has not been read yet. */
+    /** The background state of each box. Null means it has not been read yet. */
     backgroundActive?: boolean | null;
-    /** Run as each box is stopped, for what a slow stop lets happen. */
+    /** Runs as each box is stopped, to simulate events during a slow stop. */
     onStop?: (id: string) => void;
-    /** The count asked for again just before a box is stopped. */
+    /** The pending count, read again just before a box is stopped. */
     pendingNow?: (id: string) => number;
-    /** Terminals open on the box, which is somebody working in it directly. */
+    /** Terminals open on the box, which means somebody works in it directly. */
     terminals?: number;
-    /** The terminal count asked for again just before a box is stopped. */
+    /** The terminal count, read again just before a box is stopped. */
     terminalsNow?: (id: string) => number;
-    /** Boxes with an operation of their own in flight, which never wait. */
+    /** Boxes with an operation in progress, which the reaper skips without waiting. */
     busy?: Set<string>;
   } = {},
 ): Promise<string[]> {
@@ -124,9 +139,9 @@ test('a browser still attached holds the box', async () => {
 });
 
 test('a terminal open on the box holds it, however quiet the shell has gone', async () => {
-  // The case the activity clock cannot see: a build that prints nothing for
-  // an hour, with somebody watching it. Stopping the box would take the
-  // shell, its scrollback and the build with it.
+  // The activity clock cannot see a build that prints nothing for an hour
+  // while somebody watches it. Stopping the box would end the shell, its
+  // scrollback and the build.
   insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ terminals: 1 }), []);
 });
@@ -137,9 +152,8 @@ test('work left running in the background holds the box', async () => {
 });
 
 test('a box whose work has not been read yet is held for this tick', async () => {
-  // The state after every restart: the probe has not answered, and a box
-  // with a build in it and nobody watching looks exactly like an idle one.
-  // The reading lands well before the next sweep.
+  // After every restart, the probe has not answered yet. A box with an
+  // unwatched build in it then looks like an idle one.
   insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ backgroundActive: null }), []);
 });
@@ -162,8 +176,8 @@ test('a turn that starts while another box is being stopped holds its own box', 
 });
 
 test('a permission request that arrives mid-sweep holds its box', async () => {
-  // The same window as the turn above: the question is asked while the first
-  // box is being stopped, and only a fresh count can see it.
+  // The request arrives while the first box is being stopped, so only a fresh
+  // count can see it.
   insertBox('s1', IDLE_MINUTES + 1);
   insertBox('s2', IDLE_MINUTES + 1);
   let asked = false;
@@ -239,8 +253,8 @@ test("a box that is not running is not the reaper's to stop", async () => {
 
 test('a box something else is already working on is left for the next tick', async () => {
   // Starting a box, replacing its container or deleting it all hold the
-  // box's own queue. The reaper never waits on that: the box is
-  // skipped and looked at again a minute later.
+  // queue of the box. The reaper never waits on the queue. It skips the box
+  // and checks it again a minute later.
   insertBox('s1', IDLE_MINUTES + 1);
   assert.deepEqual(await tick({ busy: new Set(['s1']) }), []);
 });

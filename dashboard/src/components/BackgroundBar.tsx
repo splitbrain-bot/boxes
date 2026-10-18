@@ -7,7 +7,7 @@ import { formatDuration } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
 import type { BackgroundProcess } from '../../../shared/types.ts';
 
-/** How often the ages are re-read, in milliseconds. */
+/** The interval between two reads of the clock for the ages, in milliseconds. */
 const TICK_MS = 15_000;
 
 /**
@@ -25,7 +25,7 @@ const KINDS: Record<string, string> = {
  *
  * @param kind The task kind from the adapter.
  * @returns The prefix, the kind as the adapter spelled it for an unknown kind,
- *   or null for a shell command.
+ *   or null for a shell task or an empty kind.
  */
 function kindLabel(kind: string): string | null {
   if (kind === '' || kind === 'shell') return null;
@@ -35,7 +35,7 @@ function kindLabel(kind: string): string | null {
 /**
  * Returns the current time, re-read every {@link TICK_MS} while active.
  *
- * @param active Whether an age is being shown.
+ * @param active True while an age is shown.
  * @returns The time in epoch milliseconds.
  */
 function useNow(active: boolean): number {
@@ -51,23 +51,23 @@ function useNow(active: boolean): number {
 
 /**
  * Bar above the composer that lists the background work of this thread while
- * it runs.
+ * it runs. It renders nothing when no work runs.
  *
- * Without it, a thread with a quiet agent and a running monitor or build
- * looks finished. It renders nothing when no work runs.
+ * @param processes The background tasks of this thread, from the last thread state that the gateway sent.
+ * @param onStop Stops one task, or every task of this thread when given no id. Absent hides the stop buttons.
  */
 export function BackgroundBar({
   processes,
   onStop,
 }: {
-  /** What this conversation is running, as the gateway last read it. */
+  /** The background tasks of this thread, from the last thread state that the gateway sent. */
   processes: readonly BackgroundProcess[];
   /**
-   * Kills one process and its children, or everything this thread runs when
-   * given no id. Absent hides the stop buttons.
+   * Stops one task, or every task of this thread when given no id. Absent hides
+   * the stop buttons.
    *
-   * A kill, because `session/cancel` ends the turn but leaves a running
-   * command alive.
+   * The stop is a separate request, because `session/cancel` ends the turn and
+   * does not reach a background task.
    */
   onStop?: (processId?: string) => void;
 }) {

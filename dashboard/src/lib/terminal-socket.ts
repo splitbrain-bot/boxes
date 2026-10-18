@@ -1,9 +1,9 @@
 import { TERMINAL_SUBPROTOCOL, type TerminalResize } from '../../../shared/terminal.ts';
 
-/** Where a connection is in its life, as the view draws it. */
+/** The state of a connection, as the view shows it. */
 export type TerminalStatus = 'connecting' | 'ready' | 'closed';
 
-/** What the view gives the socket to call back into. */
+/** The callbacks that the view gives the socket. */
 export interface TerminalSocketHandlers {
   /**
    * Receives the pty's output as raw bytes. A multi-byte character can be
@@ -18,12 +18,12 @@ export interface TerminalSocketHandlers {
  * One connection to one box's shell.
  *
  * Binary frames carry the pty's bytes in both directions. Text frames carry
- * the window size this end sends.
+ * the window size from the browser.
  */
 export class TerminalSocket {
   /** The WebSocket to the orchestrator. */
   private readonly ws: WebSocket;
-  /** False once this end asked to close, so the close is not reported to the view. */
+  /** False after the browser asked to close, so the view gets no report of that close. */
   private wanted = true;
 
   /**
@@ -52,13 +52,22 @@ export class TerminalSocket {
     handlers.onStatus('connecting');
   }
 
-  /** Sends what was typed, as the UTF-8 the pty expects. */
+  /**
+   * Sends typed text as UTF-8, which the pty expects.
+   *
+   * @param data The typed text.
+   */
   send(data: string): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(new TextEncoder().encode(data));
   }
 
-  /** Tells the pty the size of the window, in columns and rows. */
+  /**
+   * Tells the pty the size of the window.
+   *
+   * @param cols The number of columns.
+   * @param rows The number of rows.
+   */
   resize(cols: number, rows: number): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
     const message: TerminalResize = { type: 'resize', cols, rows };

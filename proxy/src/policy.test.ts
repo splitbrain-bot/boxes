@@ -22,9 +22,9 @@ const CLAUDE = {
 };
 
 /**
- * The OpenAI credential Codex sends. Its placeholder starts with `sk-`, like
- * the Claude one, so it shows that the whole value at the right host decides
- * a swap, not a prefix.
+ * The OpenAI credential that Codex sends. Its placeholder starts with sk-, as
+ * the Claude placeholder does, so the tests show that a swap needs the full
+ * placeholder at the host of its credential.
  */
 const OPENAI = {
   id: 'openai',
@@ -44,8 +44,8 @@ const GITHUB = {
 };
 
 /**
- * The Dev Tunnels credential. Its hosts also see tokens the service issued
- * for one tunnel, which travel under the `tunnel` scheme.
+ * The Dev Tunnels credential. Its hosts also get tokens that the service issued
+ * for one tunnel, under the tunnel scheme.
  */
 const DEVTUNNELS = {
   id: 'devtunnels',
@@ -65,7 +65,12 @@ const OPENROUTER = {
   secret: 'sk-or-v1-realrealreal',
 };
 
-/** A policy holding all three credentials, with some fields replaced. */
+/**
+ * Makes a policy that holds the Claude, OpenAI and GitHub credentials.
+ *
+ * @param over The fields to replace.
+ * @returns The policy.
+ */
 const policy = (over: Partial<EgressPolicy> = {}): EgressPolicy => ({
   allowedHosts: [],
   ca: { key: 'KEY', cert: 'CERT' },
@@ -179,8 +184,6 @@ describe('decideCredentials', () => {
   });
 
   it('passes an unauthenticated request to a credential host', () => {
-    // `curl https://api.github.com` must keep working: no credential is not a
-    // foreign credential.
     expect(decideCredentials('api.github.com', { accept: '*/*' }, policy())).toEqual({
       action: 'pass',
     });
@@ -266,7 +269,7 @@ describe('decideCredentials', () => {
         policy(),
       ).action,
     ).toBe('deny');
-    // The subscription endpoint is not intercepted, so anything passes there.
+    // chatgpt.com, the subscription endpoint, has no credential, so any value passes there.
     expect(isInjectionHost('chatgpt.com', policy())).toBe(false);
     expect(
       decideCredentials('chatgpt.com', { authorization: 'Bearer whatever' }, policy()),
@@ -290,7 +293,7 @@ describe('decideCredentials', () => {
   it('passes a value under a pass-through scheme unchanged, and swaps the placeholder', () => {
     const tunnels = policy({ credentials: [DEVTUNNELS] });
     const host = 'euw-data.rel.tunnels.api.visualstudio.com';
-    // A token the service minted for one tunnel, which the box got from it.
+    // A token that the service issued for one tunnel.
     expect(decideCredentials(host, { authorization: 'tunnel eyJhbGciOi.x.y' }, tunnels)).toEqual({
       action: 'pass',
     });
@@ -346,6 +349,7 @@ describe('policyHash', () => {
 });
 
 describe('parsePolicy', () => {
+  /** A valid policy with one credential. */
   const valid = {
     allowedHosts: ['github.com', '*.github.com'],
     ca: { key: 'K', cert: 'C' },

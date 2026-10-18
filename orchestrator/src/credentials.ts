@@ -1,3 +1,5 @@
+/** The credential store, and the refresh that keeps its secrets valid. */
+
 import { randomBytes } from 'node:crypto';
 import type {
   CredentialId,
@@ -7,9 +9,7 @@ import type {
 } from '../../shared/types.ts';
 import type { Db } from './db.ts';
 
-/** The credential store, and the refresh that keeps its secrets valid. */
-
-/** The three credential types, re-exported from the shared API shapes. */
+/** The three credential types, exported again from the shared API types. */
 export type { CredentialId, CredentialMethod, CredentialStatus };
 
 /** Every credential id, in the order the settings page lists them. */
@@ -21,48 +21,61 @@ export const CREDENTIAL_IDS: readonly CredentialId[] = [
   'devtunnels',
 ];
 
-/** Every way a secret can be obtained. */
+/** Every method to get a secret. */
 export const CREDENTIAL_METHODS: readonly CredentialMethod[] = ['token', 'api_key', 'oauth'];
 
-/** Whether a string names a credential this deployment knows. */
+/**
+ * Checks if a string is the id of a credential that this deployment knows.
+ *
+ * @param id The string to check.
+ * @returns True for a credential id.
+ */
 export function isCredentialId(id: string): id is CredentialId {
   return (CREDENTIAL_IDS as readonly string[]).includes(id);
 }
 
-/** Whether a string names a way a secret can have been obtained. */
+/**
+ * Checks if a string is a credential method.
+ *
+ * @param method The string to check.
+ * @returns True for a credential method.
+ */
 export function isCredentialMethod(method: string): method is CredentialMethod {
   return (CREDENTIAL_METHODS as readonly string[]).includes(method);
 }
 
 /** One row of the credentials table. */
 export interface CredentialRow {
-  /** Which credential this is. */
+  /** The id of the credential. */
   id: CredentialId;
-  /** How the secret was obtained. */
+  /** The method that got the secret. */
   method: CredentialMethod;
   /**
-   * The material, stored unencrypted: a token or an API key for a pasted
-   * secret, and a JSON document for an `oauth` one, so a refresh has the
-   * refresh token beside the access token. For Codex it is the whole document
-   * the CLI wrote; for Dev Tunnels it holds `access_token` and
-   * `refresh_token`.
+   * The secret, stored unencrypted, because the orchestrator gives it to the
+   * proxy at each boot. A pasted secret is a token or an API key. An `oauth`
+   * secret is a JSON document, so a refresh has the refresh token next to the
+   * access token. For Codex, it is the whole document that the CLI wrote. For
+   * Dev Tunnels, it holds `access_token` and `refresh_token`.
    */
   secret: string;
-  /** What the settings page shows: an account name, or a pasted secret's last four. */
+  /**
+   * The text for the settings page. It is an account name, or the last four
+   * characters of a pasted secret.
+   */
   account: string | null;
-  /** Epoch milliseconds, or null for a secret that does not expire. */
+  /** The expiry in epoch milliseconds, or null for a secret that does not expire. */
   expires_at: number | null;
-  /** Epoch milliseconds, or null until something has refreshed it. */
+  /** The last refresh in epoch milliseconds, or null until the first refresh. */
   refreshed_at: number | null;
-  /** Whether the credential worked the last time it was used or refreshed. */
+  /** The result of the last use or refresh of the credential. */
   status: CredentialStatus;
-  /** Why it failed, for the settings page, or null. */
+  /** The reason of the last failure, for the settings page, or null. */
   last_error: string | null;
   /**
-   * What a box holds in place of the secret. Shaped like a real token of the
-   * service, worth nothing on its own. Generated when the credential is first
-   * stored and kept for as long as the row exists, so a box created with it
-   * keeps working through every refresh.
+   * The value that a box holds in place of the secret. It has the format of a
+   * real token of the service, but it is worth nothing alone. The store makes
+   * it at the first store and keeps it while the row exists, so a box created
+   * with it continues to work after each refresh.
    */
   placeholder: string;
   /** Epoch milliseconds of the first store. */
@@ -71,48 +84,68 @@ export interface CredentialRow {
   updated_at: number;
 }
 
-/** How much of a pasted secret is shown, from the end. */
+/** The number of characters at the end of a pasted secret that the settings page shows. */
 const ACCOUNT_TAIL = 4;
 
-/** Random bytes in a generated placeholder, before its prefix. */
+/** The number of random bytes in a generated placeholder, after its prefix. */
 const PLACEHOLDER_BYTES = 24;
 
-/** Owns the credentials table. */
+/** The store of the credentials table. */
 export class CredentialStore {
+  /**
+   * @param db The database that holds the credentials table.
+   * @param onChange The function that the store calls after each write.
+   * @param specs The credentials that this deployment translates.
+   */
   constructor(
     /** The database that holds the credentials table. */
     private readonly db: Db,
     /**
-     * Called after every write, so the egress policy is pushed at once rather
-     * than at the reconciler's next tick.
+     * The function that the store calls after each write, so the egress policy
+     * changes at once and not at the next tick of the reconciler.
      */
     private readonly onChange: () => void,
     /**
-     * The credentials this deployment translates, for the prefix a new
-     * placeholder carries.
+     * The credentials that this deployment translates, for the prefix of a new
+     * placeholder.
      */
     private readonly specs: readonly { id: string; placeholderPrefix: string }[],
   ) {}
 
-  /** One credential, or undefined when the deployment holds none for it. */
+  /**
+   * Gives one stored credential.
+   *
+   * @param id The id of the credential.
+   * @returns The row, or undefined when no secret is stored for the id.
+   */
   get(id: CredentialId): CredentialRow | undefined {
     return this.db.prepare('SELECT * FROM credentials WHERE id = ?').get(id) as
       | CredentialRow
       | undefined;
   }
 
-  /** Every stored credential, in the order the settings page lists them. */
+  /**
+   * Lists every stored credential.
+   *
+   * @returns The rows, in the order of the settings page.
+   */
   list(): CredentialRow[] {
     const rows = this.db.prepare('SELECT * FROM credentials').all() as CredentialRow[];
     return rows.sort((a, b) => CREDENTIAL_IDS.indexOf(a.id) - CREDENTIAL_IDS.indexOf(b.id));
   }
 
   /**
-   * Stores a credential, replacing whatever was there.
+   * Stores a credential and replaces the old one. The placeholder stays.
    *
-   * Unless `extra` names an account, the account is the secret's last four
-   * characters. Unless `extra` says otherwise, the status goes back to `ok`
-   * and the last error is cleared.
+   * When `extra` names no account, the account is the last four characters of
+   * the secret. When `extra` names no status and no error, the status goes
+   * back to `ok`, and the last error is cleared.
+   *
+   * @param id The id of the credential.
+   * @param method The method that got the secret.
+   * @param secret The secret.
+   * @param extra The other columns to write.
+   * @returns The stored row.
    */
   put(
     id: CredentialId,
@@ -153,31 +186,47 @@ export class CredentialStore {
   }
 
   /**
-   * What a box holds in place of this credential, or the empty string when
-   * none is stored. The empty string drops the variable from the box's
-   * environment, so a box created now gets the credential at its next
-   * restart.
+   * Gives the placeholder of a credential.
+   *
+   * With the empty string, the variable is not in the environment of the box,
+   * so a box created now gets the credential when its container is created
+   * again.
+   *
+   * @param id The id of the credential.
+   * @returns The placeholder, or the empty string when no secret is stored.
    */
   placeholderFor(id: string): string {
     return isCredentialId(id) ? (this.get(id)?.placeholder ?? '') : '';
   }
 
-  /** A new placeholder that starts with the prefix a real token of the service has. */
+  /**
+   * Makes a new placeholder with the prefix of a real token of the service.
+   *
+   * @param id The id of the credential.
+   * @returns The placeholder.
+   */
   private generatePlaceholder(id: CredentialId): string {
     const prefix = this.specs.find((spec) => spec.id === id)?.placeholderPrefix ?? '';
     return `${prefix}${randomBytes(PLACEHOLDER_BYTES).toString('base64url')}`;
   }
 
-  /** Forgets a credential. The hosts it travelled to stop being intercepted. */
+  /**
+   * Removes a credential. The proxy then stops the interception of its hosts.
+   *
+   * @param id The id of the credential.
+   */
   remove(id: CredentialId): void {
     this.db.prepare('DELETE FROM credentials WHERE id = ?').run(id);
     this.onChange();
   }
 
   /**
-   * Records what happened the last time the credential was used or refreshed.
-   * The secret and the account stay, as a failing token is still the one the
-   * proxy sends.
+   * Records the result of the last use or refresh of the credential. The
+   * secret and the account stay, because the proxy still sends a failing token.
+   *
+   * @param id The id of the credential.
+   * @param status The new status.
+   * @param error The reason of the failure, or null.
    */
   markStatus(id: CredentialId, status: CredentialStatus, error: string | null): void {
     this.db
@@ -186,7 +235,12 @@ export class CredentialStore {
     this.onChange();
   }
 
-  /** A row as the API reports it: everything but the secret. */
+  /**
+   * Makes the form of a credential that the API reports, without the secret and the placeholder.
+   *
+   * @param row The stored row.
+   * @returns The summary.
+   */
   summarize(row: CredentialRow): CredentialSummary {
     return {
       id: row.id,
@@ -202,15 +256,17 @@ export class CredentialStore {
 }
 
 /**
- * The secret the egress proxy can swap into a header for a box, or null when
- * the row has none.
+ * Gives the secret that the egress proxy can put into a header for a box.
  *
  * A Codex `oauth` row is a document that Codex reads from
- * `$CODEX_HOME/auth.json`, not a header value. Its traffic goes to
- * `chatgpt.com`, which the proxy does not intercept. Such a row is stored,
- * refreshed and reported, but never reaches a box. A Dev Tunnels `oauth` row
- * delivers the access token inside its document. Every other row delivers its
- * secret as stored.
+ * `$CODEX_HOME/auth.json`, and not a header value. Its traffic goes to
+ * `chatgpt.com`, which the proxy does not intercept. The store keeps,
+ * refreshes and reports such a row, but the row never reaches a box. A Dev
+ * Tunnels `oauth` row gives the access token in its document. A row with
+ * another method gives its secret as stored.
+ *
+ * @param row The stored row.
+ * @returns The secret, or null when the row has none for a header.
  */
 export function deliverableSecret(row: CredentialRow): string | null {
   if (row.method !== 'oauth') return row.secret;
@@ -220,9 +276,12 @@ export function deliverableSecret(row: CredentialRow): string | null {
 }
 
 /**
- * Why a stored credential cannot reach a box, or null when it can. The text
- * is shown beside the harness, so a working login that cannot run does not
- * look broken.
+ * Gives the reason why a stored credential cannot reach a box. The dashboard
+ * shows the text next to the harness, so a working login that cannot run does
+ * not look broken.
+ *
+ * @param row The stored row.
+ * @returns The reason, or null when the credential can reach a box.
  */
 export function undeliverableReason(row: CredentialRow): string | null {
   if (deliverableSecret(row) !== null) return null;
@@ -233,31 +292,35 @@ export function undeliverableReason(row: CredentialRow): string | null {
 }
 
 /**
- * What a pasted secret is shown as: its last four characters. A secret of
- * four characters or fewer is shown as null, so it is never shown whole.
+ * Gives the display text of a pasted secret, which is its last four characters.
+ *
+ * @param secret The secret.
+ * @returns The last four characters, or null for a secret of four characters
+ *   or fewer, so it is never shown whole.
  */
 export function accountOf(secret: string): string | null {
   return secret.length > ACCOUNT_TAIL ? secret.slice(-ACCOUNT_TAIL) : null;
 }
 
-// --- what a Codex auth.json says --------------------------------------------
-
-/** The parts of a Codex `auth.json` the settings page and the refresh use. */
+/** The parts of a Codex `auth.json` that the settings page and the refresh use. */
 export interface AuthDocument {
-  /** The account the id token names, where it names one. */
+  /** The account that the id token names, or null. */
   account: string | null;
-  /** When the access token expires, in epoch milliseconds, or null. */
+  /** The expiry of the access token, in epoch milliseconds, or null. */
   expiresAt: number | null;
-  /** The CLI's own `last_refresh`, in epoch milliseconds, or null. */
+  /** The `last_refresh` value of the CLI, in epoch milliseconds, or null. */
   lastRefresh: number | null;
 }
 
 /**
- * Reads a Codex `auth.json` far enough to describe it, or null when it has no
- * access token.
+ * Reads the description of a Codex `auth.json`.
  *
- * The token signatures are not verified; the service that receives the tokens
- * does that. A payload that does not decode only loses the expiry or email.
+ * The function does not verify the token signatures, because the service that
+ * receives the tokens does that. A payload that does not decode only loses the
+ * expiry or the email.
+ *
+ * @param document The content of the `auth.json`.
+ * @returns The description, or null when the document has no access token.
  */
 export function parseAuthDocument(document: string): AuthDocument | null {
   let parsed: unknown;
@@ -281,7 +344,12 @@ export function parseAuthDocument(document: string): AuthDocument | null {
   };
 }
 
-/** A JWT's payload, decoded and not verified, or null when there is none. */
+/**
+ * Decodes the payload of a JWT, without verification.
+ *
+ * @param token The JWT.
+ * @returns The claims, or null when the token has no payload that decodes.
+ */
 export function jwtClaims(token: string): Record<string, unknown> | null {
   const payload = token.split('.')[1];
   if (!payload) return null;
@@ -297,8 +365,11 @@ export function jwtClaims(token: string): Record<string, unknown> | null {
 }
 
 /**
- * The email in a set of id-token claims: the plain `email` claim, or else the
- * first `email` inside a nested claim object, where OpenAI puts the profile.
+ * Finds the email in the claims of an id token. It is the plain `email` claim,
+ * or else the first `email` in a nested claim object, where OpenAI puts the profile.
+ *
+ * @param claims The claims, or null.
+ * @returns The email, or null when the claims have none.
  */
 function emailIn(claims: Record<string, unknown> | null): string | null {
   if (!claims) return null;
@@ -312,39 +383,37 @@ function emailIn(claims: Record<string, unknown> | null): string | null {
   return null;
 }
 
-// --- keeping an account credential alive ------------------------------------
-
 /**
- * Codex's own OAuth client id. It is taken from the Codex CLI and is not a
- * stable API, so a Codex release may change it.
+ * The OAuth client id of Codex. It comes from the Codex CLI and is not a
+ * stable API, so a Codex release can change it.
  */
 export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
-/** Codex's OAuth token endpoint. It is not a stable API either. */
+/** The OAuth token endpoint of Codex. It is not a stable API, so a Codex release can change it. */
 export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 
 /**
- * The GitHub App the Dev Tunnels service accepts user tokens from. It is
- * taken from the devtunnel CLI and is not a stable API, so a CLI release may
+ * The GitHub App that the Dev Tunnels service accepts user tokens from. It
+ * comes from the devtunnel CLI and is not a stable API, so a CLI release can
  * change it.
  */
 export const DEVTUNNELS_CLIENT_ID = 'Iv1.e7b89e013f801f03';
 
-/** GitHub's OAuth token endpoint, for the device login and the refresh. */
+/** The OAuth token endpoint of GitHub, for the device login and the refresh. */
 export const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
 
-/** How close to expiry an access token is refreshed, in milliseconds. */
+/** The time before expiry at which an access token is refreshed, in milliseconds. */
 const REFRESH_WINDOW_MS = 60 * 60_000;
 
-/** How old a login may get before it is refreshed anyway, as Codex does. */
+/** The maximum age of a login before a refresh without a near expiry, as Codex does it. */
 const REFRESH_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
 
-/** How long the token endpoint gets to answer, in milliseconds. */
+/** The timeout for the answer of the token endpoint, in milliseconds. */
 const REFRESH_TIMEOUT_MS = 15_000;
 
 /**
- * What an OAuth endpoint answers with. Every field is optional. GitHub
- * reports a failure with a 200 and the `error` fields.
+ * The answer of an OAuth endpoint. Each field is optional. GitHub reports a
+ * failure with a 200 and the `error` fields.
  */
 export interface TokenAnswer {
   /** The new access token. */
@@ -353,26 +422,33 @@ export interface TokenAnswer {
   refresh_token?: string;
   /** The new id token. */
   id_token?: string;
-  /** Seconds, as OAuth writes it. Only used when the token carries no `exp`. */
+  /** The lifetime of the access token in seconds. The Codex refresh uses it only without `exp`. */
   expires_in?: number;
-  /** The device code a device login polls with. */
+  /** The device code for the polls of a device login. */
   device_code?: string;
-  /** The code a person enters at `verification_uri`. */
+  /** The code that a person enters at `verification_uri`. */
   user_code?: string;
-  /** Where a person enters `user_code`. */
+  /** The URL where a person enters `user_code`. */
   verification_uri?: string;
-  /** Seconds a device login waits between two polls. */
+  /** The seconds between two polls of a device login. */
   interval?: number;
-  /** An OAuth error code, such as `authorization_pending`. */
+  /** An OAuth error code, for example `authorization_pending`. */
   error?: string;
-  /** The error in a sentence. */
+  /** The error as a sentence. */
   error_description?: string;
 }
 
-/** One POST to a token endpoint. A type, so tests can pass a fake. */
+/** Sends one POST to a token endpoint. Tests can pass a fake. */
 export type TokenPost = (url: string, body: Record<string, string>) => Promise<TokenAnswer>;
 
-/** The real POST, as the Codex CLI makes it. */
+/**
+ * Sends the real POST, with a JSON body, as the Codex CLI does.
+ *
+ * @param url The token endpoint.
+ * @param body The fields of the request.
+ * @returns The parsed answer.
+ * @throws {Error} When the endpoint answers with an error status or the request times out.
+ */
 export const postToken: TokenPost = async (url, body) => {
   const res = await fetch(url, {
     method: 'POST',
@@ -390,14 +466,17 @@ export const postToken: TokenPost = async (url, body) => {
 /**
  * Refreshes or checks every stored credential once.
  *
- * A Codex or Dev Tunnels `oauth` row is refreshed the way its CLI would
- * refresh it. The orchestrator holds the only copy, so nothing else rotates
- * the token. Any
- * other row with a past expiry, such as a Claude `setup-token` token, is
- * marked `expired`, as it cannot be renewed.
+ * A Codex or Dev Tunnels `oauth` row gets the refresh that its CLI would do.
+ * The orchestrator holds the only copy, so nothing else rotates the token. A
+ * row that is not `oauth` and has a past expiry, for example a Claude
+ * `setup-token` token, is marked `expired`, because it cannot be renewed.
  *
  * A failed refresh marks the row `failing` with the reason and keeps it. The
  * next call retries.
+ *
+ * @param store The credential store.
+ * @param post The function that sends a POST to a token endpoint.
+ * @param now The current time in epoch milliseconds.
  */
 export async function refreshCredentials(
   store: CredentialStore,
@@ -417,12 +496,17 @@ export async function refreshCredentials(
 }
 
 /**
- * Whether an `oauth` row is due a refresh: its access token is close to
- * expiry, or its last refresh is REFRESH_MAX_AGE_MS old.
+ * Checks if an `oauth` row needs a refresh, because its access token is close
+ * to expiry, or its last refresh is REFRESH_MAX_AGE_MS old.
+ *
+ * @param row The stored row.
+ * @param doc The description of its document, or null when it does not parse.
+ * @param now The current time in epoch milliseconds.
+ * @returns True when the row needs a refresh.
  */
 export function refreshDue(row: CredentialRow, doc: AuthDocument | null, now: number): boolean {
-  // An unreadable document is refreshed, and the answer is written back in a
-  // shape this can read.
+  // An unreadable document gets a refresh, and the answer is written back in a
+  // form that this function can read.
   if (doc === null) return true;
   if (doc.expiresAt !== null && doc.expiresAt - now <= REFRESH_WINDOW_MS) return true;
   const last = doc.lastRefresh ?? row.updated_at;
@@ -430,10 +514,15 @@ export function refreshDue(row: CredentialRow, doc: AuthDocument | null, now: nu
 }
 
 /**
- * Refreshes one Codex subscription, writing the answer back into the document.
+ * Refreshes one Codex subscription and writes the answer back into the document.
  *
  * The whole document is rewritten, because the refresh token rotates with the
  * access token, and refreshDue reads `last_refresh` next time.
+ *
+ * @param store The credential store.
+ * @param row The stored row.
+ * @param post The function that sends a POST to a token endpoint.
+ * @param now The current time in epoch milliseconds.
  */
 async function refreshCodex(
   store: CredentialStore,
@@ -498,11 +587,18 @@ async function refreshCodex(
 }
 
 /**
- * Refreshes one Dev Tunnels login against GitHub, which rotates the refresh
- * token with the access token.
+ * Refreshes one Dev Tunnels login at GitHub, which rotates the refresh token
+ * with the access token.
  *
- * It refreshes once the access token has less than an hour left, or has
- * expired. GitHub needs no client secret for this app.
+ * The refresh happens when the access token has less than an hour left, has
+ * expired, or has no known expiry. A row without a known expiry gets a refresh
+ * at each call, which is each minute in the refresh loop. GitHub needs no
+ * client secret, because the login used the device flow.
+ *
+ * @param store The credential store.
+ * @param row The stored row.
+ * @param post The function that sends a POST to a token endpoint.
+ * @param now The current time in epoch milliseconds.
  */
 async function refreshDevTunnels(
   store: CredentialStore,
@@ -561,7 +657,12 @@ async function refreshDevTunnels(
   );
 }
 
-/** The stored document as an object, or null when it is not one. */
+/**
+ * Parses a stored document as an object.
+ *
+ * @param document The stored secret.
+ * @returns The object, or null when the document is not a JSON object.
+ */
 function authObject(document: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(document);

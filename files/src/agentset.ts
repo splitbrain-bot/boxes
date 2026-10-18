@@ -1,3 +1,5 @@
+/** Installation of an agent set and of the skills of the box image into the home. */
+
 import {
   cpSync,
   existsSync,
@@ -13,15 +15,10 @@ import type { Readable } from 'node:stream';
 import { validRelativePath } from '../../shared/files.ts';
 import { unpackTar } from './unpack.ts';
 
-/**
- * The install of an agent set into the home: the instructions file and the
- * skills of each harness layout, and the skills of the box image.
- */
-
-/** Where the install records what it put into the home, relative to the home. */
+/** The file that records the units of the last install, relative to the home. */
 export const MANAGED_FILE = '.boxes/managed';
 
-/** Where the set is unpacked before it replaces the last install, relative to the home. */
+/** The directory for the unpacked set before it replaces the last install, relative to the home. */
 const STAGE_DIR = '.boxes/agent-set.new';
 
 /** The skill directories of the harness layouts, relative to the home. */
@@ -31,13 +28,13 @@ const SKILL_DIRS = ['.claude/skills', '.agents/skills'];
 const INSTRUCTIONS_FILES = ['.claude/CLAUDE.md', '.codex/AGENTS.md'];
 
 /**
- * The unit of an installed path: the path itself for an instructions file,
- * and the skill directory for a file in a skill. A unit is what the install
- * records and what the next install removes as a whole. Null for a path
- * outside the layouts.
+ * Returns the unit of an installed path. The unit of an instructions file is the file itself. The unit of a file in a
+ * skill is the skill directory. The install records units, and the next install removes each unit as a whole.
  *
- * The layouts are fixed here, so a request or the managed file cannot name
- * `.ssh` or `.claude` as a whole.
+ * The layouts are fixed, so a tar entry or a line of the managed file cannot name `.ssh` or `.claude` as a whole.
+ *
+ * @param path The path, relative to the home.
+ * @returns The unit, or null for a path outside the layouts.
  */
 export function unitOf(path: string): string | null {
   if (!validRelativePath(path)) return null;
@@ -52,12 +49,12 @@ export function unitOf(path: string): string | null {
 /**
  * Installs an agent set from a tar stream, and then the skills of the image.
  *
- * The tar is unpacked into a stage directory first, so a refused entry
- * changes nothing.
+ * The function unpacks the tar into a stage directory first, so a refused entry changes nothing in the home.
  *
  * @param home The home directory.
  * @param imageSkills The directory with the skills of the image, or undefined for none.
  * @param tar The set, as a tar stream of files relative to the home.
+ * @throws {FileError} A 400 when an entry is outside the layouts or is not a plain file.
  */
 export async function installAgentSet(
   home: string,
@@ -77,7 +74,7 @@ export async function installAgentSet(
   }
 
   removeManaged(home);
-  // Recorded before the move, so an interrupted install is undone by the next one.
+  // The record comes before the move, so the next install removes the units of an interrupted install.
   writeFileSync(
     join(home, MANAGED_FILE),
     [...units]
@@ -96,7 +93,11 @@ export async function installAgentSet(
   if (imageSkills) installImageSkills(home, imageSkills, units);
 }
 
-/** Removes every unit the last install recorded, and the record. */
+/**
+ * Removes every unit that the last install recorded, and the record.
+ *
+ * @param home The home directory.
+ */
 function removeManaged(home: string): void {
   const managed = join(home, MANAGED_FILE);
   if (!existsSync(managed)) return;
@@ -108,9 +109,14 @@ function removeManaged(home: string): void {
 }
 
 /**
- * Copies each skill of the image into both skill layouts. A skill of the set
- * wins, and the set has a skill in every layout, so the check of one layout
- * is enough.
+ * Copies each skill of the image into every skill layout. A skill of the set with the same name has priority.
+ *
+ * The function looks for a skill of the set only in `.claude/skills`. This check is sufficient because
+ * `AgentStore.pack` in the orchestrator writes each skill of the set into every harness layout.
+ *
+ * @param home The home directory.
+ * @param imageSkills The directory with the skills of the image.
+ * @param units The units of the set.
  */
 function installImageSkills(home: string, imageSkills: string, units: Set<string>): void {
   if (!existsSync(imageSkills)) return;

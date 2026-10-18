@@ -21,7 +21,11 @@ import {
 
 export type { ReasoningRootProps } from "./reasoning";
 
-/** `ReasoningRoot` with the thread viewport scroll locked during disclosure animations. */
+/**
+ * `ReasoningRoot` with the thread viewport scroll locked during disclosure animations.
+ *
+ * @param props The props of the reasoning root, with its ref and its animation start handler.
+ */
 function ReasoningRoot({
   ref,
   onAnimationStart,
@@ -57,8 +61,16 @@ function ReasoningRoot({
   );
 }
 
+/** One reasoning part, rendered as markdown. */
 const ReasoningImpl: ReasoningMessagePartComponent = () => <MarkdownText />;
 
+/**
+ * A collapsible block around consecutive reasoning parts. The trigger shows activity while one of the parts streams.
+ *
+ * @param children The reasoning parts.
+ * @param startIndex The index of the first part of the group in the message.
+ * @param endIndex The index of the last part of the group in the message.
+ */
 const ReasoningGroupImpl: ReasoningGroupComponent = ({
   children,
   startIndex,
@@ -82,13 +94,19 @@ const ReasoningGroupImpl: ReasoningGroupComponent = ({
   );
 };
 
+/** The reasoning part component, with the parts of the block attached for custom layouts. */
 const Reasoning = memo(
   ReasoningImpl,
 ) as unknown as ReasoningMessagePartComponent & {
+  /** The root part. */
   Root: typeof ReasoningRoot;
+  /** The row that opens and closes the block. */
   Trigger: typeof ReasoningTrigger;
+  /** The collapsible panel. */
   Content: typeof ReasoningContent;
+  /** The reasoning text part. */
   Text: typeof ReasoningText;
+  /** The edge fade part. */
   Fade: typeof ReasoningFade;
 };
 
@@ -100,10 +118,12 @@ Reasoning.Text = ReasoningText;
 Reasoning.Fade = ReasoningFade;
 
 /**
- * @deprecated This wrapper targets the legacy `components.ReasoningGroup`
- * prop on `<MessagePrimitive.Parts>`. Use `<MessagePrimitive.GroupedParts>`
- * with a `groupBy` returning `"group-reasoning"` and compose `ReasoningRoot`
- * / `ReasoningTrigger` / `ReasoningContent` / `ReasoningText` directly.
+ * The memoized reasoning group.
+ *
+ * @deprecated The wrapper is for the legacy `components.ReasoningGroup` prop of
+ * `MessagePrimitive.Parts`. Use `MessagePrimitive.GroupedParts` with a `groupBy`
+ * that returns `"group-reasoning"`, and compose `ReasoningRoot`, `ReasoningTrigger`,
+ * `ReasoningContent` and `ReasoningText` directly.
  */
 const ReasoningGroup = memo(ReasoningGroupImpl);
 ReasoningGroup.displayName = "ReasoningGroup";

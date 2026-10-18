@@ -1,19 +1,20 @@
+/**
+ * Browser tests for the review pages, over a workspace with real git
+ * repositories in it.
+ *
+ * The tests use both viewports, because the phone and desktop layouts differ so
+ * much that a test on one does not cover the other.
+ */
+
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reviewWorkspace } from './workspace.ts';
 
-/**
- * Browser tests for the review pages, over a workspace with real git
- * repositories in it.
- *
- * The tests use both viewports, because the phone and desktop layouts differ
- * too much for one to vouch for the other.
- */
-
 /** The box every test here drives. */
 const BOX = DEFAULT_BOX.id;
 
+/** The orchestrator that the tests in this file share. */
 let stub: TestOrchestrator;
 
 beforeAll(async () => {
@@ -34,12 +35,10 @@ afterAll(async () => {
   await stub.close();
 });
 
-// --- browsing ---------------------------------------------------------------
-
 test('the tree is the whole screen on a phone, and a file replaces it', async () => {
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
-    // The workspace's top level: two repositories and a directory in neither.
+    // The workspace's top level has two repositories and one directory outside them.
     await expect
       .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
       .toBe(true);
@@ -72,8 +71,8 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
       .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
       .toBe(true);
 
-    // From the list, back leads to the boxes: a review opened by a link names
-    // no thread to go back to.
+    // From the list, back leads to the boxes, because a review opened by a link
+    // names no thread to go back to.
     await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
 
     expect(errors).toEqual([]);
@@ -100,8 +99,8 @@ test('the tree is a column beside the pane on a desktop', async () => {
     await expect.poll(() => page.getByRole('button', { name: /boot\.ts/ }).isVisible()).toBe(true);
     // The header names the repository the open file belongs to.
     await expect.poll(() => page.getByText(/· app/).isVisible()).toBe(true);
-    // The list and the file are one view here, so there is no step between
-    // the review and what opened it: back leaves, with a file open or without.
+    // The list and the file are one view here, so no step lies between the
+    // review and the view that opened it. Back leaves, with or without an open file.
     expect(await page.getByLabel('Back to the file list').count()).toBe(0);
     await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
     await shoot(page, 'review-file-desktop');
@@ -135,7 +134,7 @@ test('the code is highlighted, and a line is addressable', async () => {
     await expect.poll(() => page.locator('[data-line="1"]').isVisible()).toBe(true);
     // Every line is its own element, which is what makes tapping one possible.
     expect(await page.locator('[data-line]').count()).toBe(3);
-    // Tokens arrive after the grammar has loaded, so this is polled.
+    // Tokens arrive after the grammar has loaded, so the test polls for them.
     await expect
       .poll(() => page.locator('[data-line="1"] code span').count(), { timeout: 15_000 })
       .toBeGreaterThan(1);
@@ -283,7 +282,7 @@ test('a text file opens in a tab of its own from the toolbar', async () => {
     const link = page.getByRole('link', { name: 'Open in a new tab' });
     expect(await link.getAttribute('target')).toBe('_blank');
     expect(await link.getAttribute('href')).toContain('/review/raw?path=notes%2Ftodo.txt');
-    // A .txt is on no list of types a browser shows, so the server sends a download.
+    // The server sends inline only the types that a browser shows, and .txt is not one of them.
     const res = await page.request.get(new URL((await link.getAttribute('href'))!, stub.url).href);
     expect(res.headers()['content-disposition']).toMatch(/^attachment;/);
     expect(await res.text()).toBe('plain text, no grammar\n');
@@ -294,9 +293,8 @@ test('a text file opens in a tab of its own from the toolbar', async () => {
 });
 
 test('a file past the line limit is one plain block with nothing to tap', async () => {
-  // Long enough that a row per line is tens of thousands of elements, which is
-  // what freezes a phone — and one line of it changed, so the toolbar has
-  // something to count.
+  // Long enough that a row per line gives tens of thousands of elements, which
+  // freezes a phone. One line changed, so the toolbar has something to count.
   const body = Array.from({ length: 9000 }, (_, i) => `const line${i} = ${i};`).join('\n');
   const workspace = reviewWorkspace();
   workspace.files['app/long.ts'] = `const first = false;\n${body}\n`;
@@ -323,7 +321,7 @@ test('a file past the line limit is one plain block with nothing to tap', async 
     expect(await page.getByLabel('Edit this file').count()).toBe(0);
 
     // The change is still counted, because it is still a fact about the file.
-    // There is just no row to step to.
+    // There is no row to step to.
     await expect.poll(() => page.getByLabel('1 change').isVisible()).toBe(true);
     expect(await page.getByRole('button', { name: 'Next change' }).isDisabled()).toBe(true);
     expect(errors).toEqual([]);
@@ -352,8 +350,6 @@ test('prev/next steps through the changes', async () => {
   }
 });
 
-// --- commenting -------------------------------------------------------------
-
 test('commenting a line on a phone writes it through the API', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
@@ -365,8 +361,7 @@ test('commenting a line on a phone writes it through the API', async () => {
     await expect.poll(() => page.locator('[data-line="2"] code').isVisible()).toBe(true);
     await page.locator('[data-line="2"] code').click();
 
-    // On touch the composer is a bottom sheet, so the keyboard has somewhere
-    // to be that is not on top of it.
+    // On touch the composer is a bottom sheet, so the keyboard does not cover it.
     await expect.poll(() => page.getByText('Comment on line 2').isVisible()).toBe(true);
     await shoot(page, 'review-composer-phone', 'viewport');
 
@@ -438,7 +433,7 @@ test('a comment can be edited and deleted', async () => {
     await page.getByRole('button', { name: 'Edit the comment on line 2' }).click();
     const field = page.getByRole('textbox', { name: 'Comment on line 2' });
     await expect.poll(() => field.isVisible()).toBe(true);
-    // Editing starts from what is there, rather than from an empty box.
+    // Editing starts from the stored text, rather than from an empty field.
     expect(await field.inputValue()).toBe('first thoughts');
     await field.fill('second thoughts');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
@@ -552,8 +547,6 @@ test('a new review clears every comment, behind a confirmation', async () => {
   }
 });
 
-// --- editing ----------------------------------------------------------------
-
 test('a line can be fixed in place, and the save reaches the workspace', async () => {
   const { page, errors, close } = await openPage(
     stub.url,
@@ -615,7 +608,11 @@ test('the line being read stays put across a switch into editing', async () => {
     await pane.evaluate((el) => {
       el.scrollTop = 2000;
     });
-    /** The line at the top of the pane, which is what must not move. */
+    /**
+     * Reads the line at the top of the pane. It must not move.
+     *
+     * @returns The line number, or null when no row is in view.
+     */
     const topLine = (): Promise<number | null> =>
       pane.evaluate((el) => {
         for (const row of el.querySelectorAll<HTMLElement>('[data-line]')) {
@@ -739,8 +736,8 @@ test('the rows and the editor over them wrap in the same places', async () => {
     });
     expect(heights.content).toBe(heights.box);
 
-    // Far enough down for any drift to show: text typed into the last visual
-    // row of a wrapped line lands in that line.
+    // Far enough down for any drift to show. Text typed into the last visual
+    // row of a wrapped line must land in that line.
     await page.locator('[data-slot="review-code-pane"]').evaluate((pane) => {
       const target = pane.querySelector('[data-line="22"]') as HTMLElement;
       pane.scrollTop = target.offsetTop - 120;
@@ -775,8 +772,6 @@ test('a file the pane cannot show whole cannot be edited', async () => {
     await close();
   }
 });
-
-// --- the base revision ------------------------------------------------------
 
 test('the base picker sets a revision and says which one is active', async () => {
   const { page, errors, close } = await openPage(
@@ -859,8 +854,6 @@ test('a revision that is not one anywhere is reported, not swallowed', async () 
   }
 });
 
-// --- degraded shapes --------------------------------------------------------
-
 test('a workspace with no repository still browses and comments', async () => {
   stub.review(BOX, { files: { 'notes.txt': 'just some notes\nnothing tracked\n' }, repos: [] });
 
@@ -898,8 +891,6 @@ test('an empty workspace says so rather than showing nothing', async () => {
     await close();
   }
 });
-
-// --- reading position -------------------------------------------------------
 
 test('each file remembers how far it was read, and a new one starts at the top', async () => {
   // Long enough to scroll, which the small fixture files are not.
@@ -956,7 +947,11 @@ test('the review header gives way to reading the file, and returns', async () =>
     const pane = page.locator('[data-slot="review-code-pane"]');
     const shelf = page.locator('[data-slot="shelf"]');
     const away = (): Promise<boolean> => shelf.evaluate((el) => el.hasAttribute('data-away'));
-    /** Whether the header is where a thumb reaches for it. */
+    /**
+     * Checks if the header is at the top left of the page, where a thumb reaches for it.
+     *
+     * @returns True when the header is there.
+     */
     const inReach = (): Promise<boolean> =>
       page.evaluate(() => !!document.elementFromPoint(20, 10)?.closest('header'));
 
@@ -965,6 +960,9 @@ test('the review header gives way to reading the file, and returns', async () =>
      *
      * It sets the position instead of using the wheel. A wheel notch starts an
      * animation whose frames depend on how busy the machine is.
+     *
+     * @param dy The pixels to scroll per frame. A negative value scrolls up.
+     * @param steps The number of frames.
      */
     const read = (dy: number, steps: number): Promise<void> =>
       pane.evaluate(
@@ -1057,8 +1055,6 @@ test('the review header stays where it is on a wide screen', async () => {
     await close();
   }
 });
-
-// --- the entry points -------------------------------------------------------
 
 test('the review is reachable from the box card and the thread header', async () => {
   const list = await openPage(stub.url, '/', 'dark', 'desktop');

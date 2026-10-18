@@ -1,8 +1,14 @@
-import type { Readable } from 'node:stream';
-
 /** Helpers for the commands that each runtime runs in a box. */
 
-/** Everything a stream will produce, as one string, up to a cap on its bytes. */
+import type { Readable } from 'node:stream';
+
+/**
+ * Reads a stream to its end.
+ *
+ * @param stream The stream to read.
+ * @param cap The maximum number of bytes to keep. The rest is read and dropped.
+ * @returns The kept bytes, decoded as UTF-8.
+ */
 export async function readAll(stream: Readable, cap = Infinity): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -15,7 +21,14 @@ export async function readAll(stream: Readable, cap = Infinity): Promise<string>
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** A command wrapped in the box's own `timeout`, when it is given a limit. */
+/**
+ * Wraps a command in the `timeout` command of the box image. The limit is rounded up to whole
+ * seconds, and a command that survives SIGTERM gets SIGKILL five seconds later.
+ *
+ * @param cmd The argument vector of the command.
+ * @param timeoutMs The time limit in milliseconds. Without it, the command is returned unchanged.
+ * @returns A new argument vector.
+ */
 export function withTimeout(cmd: readonly string[], timeoutMs?: number): string[] {
   if (timeoutMs === undefined) return [...cmd];
   return ['timeout', '--kill-after=5s', `${Math.ceil(timeoutMs / 1000)}s`, ...cmd];

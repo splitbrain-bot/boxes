@@ -8,7 +8,12 @@ import {
   unavailableReason,
 } from './harness.ts';
 
-/** A harness as the health probe reports one. */
+/**
+ * Builds a harness as the health probe reports one.
+ *
+ * @param over The fields that differ from a Claude harness without a credential.
+ * @returns The harness.
+ */
 function health(over: Partial<HarnessHealth> = {}): HarnessHealth {
   return {
     id: 'claude',

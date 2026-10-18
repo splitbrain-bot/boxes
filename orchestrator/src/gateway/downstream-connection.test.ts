@@ -28,7 +28,7 @@ const UPDATE: AnyNotification = {
   params: { sessionId: T1 },
 };
 
-/** How many bytes that update leaves in a socket that takes none of it. */
+/** The number of bytes that the update leaves in a socket that takes none of it. */
 const UPDATE_BYTES = Buffer.byteLength(JSON.stringify(UPDATE));
 
 /** A JSON-RPC message, in either direction. */
@@ -56,7 +56,7 @@ interface Rpc {
 class FakeSocket extends EventEmitter {
   /** The readyState of a socket that can take frames. */
   readonly OPEN = 1;
-  /** Which state the socket is in, settable to take it out of OPEN. */
+  /** The socket state. A test sets it to take the socket out of OPEN. */
   readyState = 1;
   /** Bytes written to the socket and not taken. */
   bufferedAmount = 0;
@@ -65,19 +65,33 @@ class FakeSocket extends EventEmitter {
   /** The code and reason of each close asked for, in order. */
   readonly closes: Array<{ code: number; reason: string }> = [];
 
-  /** Takes one text frame and leaves its bytes buffered. */
+  /**
+   * Takes one text frame and leaves its bytes buffered.
+   *
+   * @param data The frame.
+   * @param cb Runs once the frame is taken.
+   */
   send(data: string, cb?: () => void): void {
     this.sent.push(data);
     this.bufferedAmount += Buffer.byteLength(data);
     cb?.();
   }
 
-  /** Records a close rather than performing one. */
+  /**
+   * Records a close rather than performing one.
+   *
+   * @param code The close code.
+   * @param reason The close reason.
+   */
   close(code?: number, reason?: string): void {
     this.closes.push({ code: code ?? 1000, reason: reason ?? '' });
   }
 
-  /** Delivers one text frame to the gateway, the way a browser sends it. */
+  /**
+   * Delivers one text frame to the gateway, the way a browser sends it.
+   *
+   * @param msg The message to send.
+   */
   receive(msg: Rpc): void {
     this.emit('message', Buffer.from(JSON.stringify(msg), 'utf8'), false);
   }
@@ -106,23 +120,37 @@ class FakeUpstream {
   readonly notified: string[] = [];
   /** The handles the queued questions were flushed to, in order. */
   readonly flushed: DownstreamHandle[] = [];
-  /** What the upstream was asked for, in order: a method name, or `flush`. */
+  /** Each call to the upstream in order, as a method name or `flush`. */
   readonly calls: string[] = [];
 
-  /** `pinned` settles on the thread this connection is pinned to. */
+  /** @param pinned Settles on the thread this connection is pinned to. */
   constructor(private readonly pinned: Promise<string>) {}
 
-  /** Counts a connection as attached. */
+  /**
+   * Counts a connection as attached.
+   *
+   * @param handle The browser connection.
+   */
   attach(handle: DownstreamHandle): void {
     this.attached.push(handle);
   }
 
-  /** Drops a connection that has gone. */
+  /**
+   * Drops a connection that has gone.
+   *
+   * @param handle The browser connection.
+   */
   detach(handle: DownstreamHandle): void {
     this.detached.push(handle);
   }
 
-  /** Answers with the thread the test pinned the connection to. */
+  /**
+   * Answers with the thread the test pinned the connection to.
+   *
+   * @param _handle The browser connection.
+   * @param _threadId The thread the URL named.
+   * @returns The promise the test holds.
+   */
   pin(_handle: DownstreamHandle, _threadId: string | null): Promise<string> {
     return this.pinned;
   }
@@ -130,26 +158,47 @@ class FakeUpstream {
   /** Does nothing, as for an adapter that is already up. */
   async ensureStarted(): Promise<void> {}
 
-  /** Records a forwarded request and answers it with nothing. */
+  /**
+   * Records a forwarded request and answers it with nothing.
+   *
+   * @param method The ACP method.
+   * @param params The params of the request.
+   * @param from The browser that asked.
+   * @returns An empty result.
+   */
   async forwardRequest(method: string, params: unknown, from?: DownstreamHandle): Promise<unknown> {
     this.forwarded.push({ method, params, from });
     this.calls.push(method);
     return {};
   }
 
-  /** Records a forwarded notification. */
+  /**
+   * Records a forwarded notification.
+   *
+   * @param method The ACP method.
+   * @param _params The params of the notification.
+   */
   async forwardNotification(method: string, _params: unknown): Promise<void> {
     this.notified.push(method);
   }
 
-  /** Records the browser the queued questions were sent to. */
+  /**
+   * Records the browser the queued questions were sent to.
+   *
+   * @param handle The browser connection.
+   */
   flushPendingTo(handle: DownstreamHandle): void {
     this.flushed.push(handle);
     this.calls.push('flush');
   }
 }
 
-/** A browser wired to a stand-in upstream, with the pin the test controls. */
+/**
+ * A browser wired to a stand-in upstream, with the pin the test controls.
+ *
+ * @param pinned Settles on the thread the connection is pinned to.
+ * @returns The socket and the upstream.
+ */
 function connect(pinned: Promise<string> = Promise.resolve(T1)): {
   ws: FakeSocket;
   up: FakeUpstream;
@@ -161,7 +210,13 @@ function connect(pinned: Promise<string> = Promise.resolve(T1)): {
   return { ws, up };
 }
 
-/** The answer to one request, once the gateway has sent it. */
+/**
+ * The answer to one request, once the gateway has sent it.
+ *
+ * @param ws The socket.
+ * @param id The id of the request.
+ * @returns The answer.
+ */
 async function answer(ws: FakeSocket, id: number): Promise<Rpc> {
   await expect.poll(() => ws.replies.some((m) => m.id === id)).toBe(true);
   return ws.replies.find((m) => m.id === id) as Rpc;
@@ -172,7 +227,12 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-/** Writes one JSON-RPC message to the socket, the way the gateway writes a box's updates. */
+/**
+ * Writes one JSON-RPC message to the socket, the way the gateway writes a box's updates.
+ *
+ * @param ws The socket.
+ * @param msg The message.
+ */
 async function write(ws: FakeSocket, msg: AnyNotification): Promise<void> {
   const writer = wsStream(ws as unknown as WebSocket, 's1').writable.getWriter();
   await writer.write(msg);
@@ -236,6 +296,7 @@ test('a request that arrives before the pin waits for it, and is still checked',
   });
   const { ws, up } = connect(pinned);
 
+  // A client that knows a thread id and prompts before saying hello.
   ws.receive({
     jsonrpc: '2.0',
     id: 1,
@@ -249,7 +310,6 @@ test('a request that arrives before the pin waits for it, and is still checked',
     params: { sessionId: T2, prompt: [{ type: 'text', text: 'someone else thread' }] },
   });
 
-  // A client that knows a thread id and prompts before saying hello.
   await settle();
   assert.deepEqual(
     up.forwarded.map((call) => call.method),

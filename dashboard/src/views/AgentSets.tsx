@@ -20,7 +20,7 @@ import { api } from '../api.ts';
  * two are merged.
  */
 export function AgentSets() {
-  /** Leaves for the box list. */
+  /** Goes back to the box list. */
   const up = useUp('/');
   const [sets, setSets] = useState<AgentSetSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +29,7 @@ export function AgentSets() {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<AgentSetSummary | null>(null);
 
+  /** Reads the list of sets. */
   const load = useCallback(async (): Promise<void> => {
     try {
       setSets(await api.listAgentSets());
@@ -42,6 +43,7 @@ export function AgentSets() {
     void load();
   }, [load]);
 
+  /** Creates a set with the typed name and reloads the list. */
   const create = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (busy || !name.trim()) return;
@@ -59,6 +61,7 @@ export function AgentSets() {
     }
   };
 
+  /** Deletes a set and reloads the list. */
   const remove = async (set: AgentSetSummary): Promise<void> => {
     setBusy(true);
     setError(null);
@@ -179,7 +182,12 @@ export function AgentSets() {
   );
 }
 
-/** The one-line summary under a set's name. */
+/**
+ * Builds the one-line summary under a set's name.
+ *
+ * @param set The set.
+ * @returns The summary.
+ */
 function describe(set: AgentSetSummary): string {
   const parts: string[] = [];
   if (set.hasAgentsMd) parts.push('AGENTS.md');

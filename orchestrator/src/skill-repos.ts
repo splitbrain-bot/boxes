@@ -1,8 +1,3 @@
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { basename, join, posix } from 'node:path';
-import { promisify } from 'node:util';
-
 /**
  * Git repositories that agent sets take skills from: fetching one into a
  * checkout under DATA_DIR, and finding the skills in that checkout.
@@ -11,12 +6,18 @@ import { promisify } from 'node:util';
  * a program, because no configuration of the repository reaches git.
  */
 
+import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { basename, join, posix } from 'node:path';
+import { promisify } from 'node:util';
+
+/** Runs a program without a shell, and resolves with its output. */
 const run = promisify(execFile);
 
 /** Where the checkouts are kept, under DATA_DIR. */
 const REPOS_SUBDIR = 'skill-repos';
 
-/** How long one git invocation may take before it is killed. */
+/** How long one git invocation may take before it is killed, in milliseconds. */
 const GIT_TIMEOUT_MS = 5 * 60_000;
 
 /** How deep the skill search descends below the checkout's root. */
@@ -34,8 +35,13 @@ export interface RepoSkill {
 }
 
 /**
- * Fetches a repository into its checkout and returns the commit. The
- * credential is chosen already.
+ * Fetches a repository into its checkout. The caller has chosen the credential already.
+ *
+ * @param dir The repository's directory.
+ * @param url The HTTPS URL to fetch.
+ * @param ref The branch, tag or full commit hash, or '' for the default branch.
+ * @param keep Asked after the checkout. When it returns false, the directory is deleted.
+ * @returns The commit hash that was checked out.
  */
 export type RepoFetcher = (
   dir: string,
@@ -44,17 +50,34 @@ export type RepoFetcher = (
   keep: () => boolean,
 ) => Promise<string>;
 
-/** The directory of one repository, as this process sees it. */
+/**
+ * Returns the directory of one repository, as this process sees it.
+ *
+ * @param dataDir The data directory.
+ * @param repoId The repository id.
+ * @returns The path.
+ */
 export function repoDir(dataDir: string, repoId: string): string {
   return join(dataDir, REPOS_SUBDIR, repoId);
 }
 
-/** The current checkout of one repository. Absent before the first good pull. */
+/**
+ * Returns the current checkout of one repository. It is absent before the first good pull.
+ *
+ * @param dataDir The data directory.
+ * @param repoId The repository id.
+ * @returns The path.
+ */
 export function repoTree(dataDir: string, repoId: string): string {
   return join(repoDir(dataDir, repoId), 'tree');
 }
 
-/** The ids of every repository that has a directory. */
+/**
+ * Returns the ids of every repository that has a directory.
+ *
+ * @param dataDir The data directory.
+ * @returns The repository ids.
+ */
 export function repoDirIds(dataDir: string): string[] {
   const root = join(dataDir, REPOS_SUBDIR);
   if (!existsSync(root)) return [];
@@ -73,9 +96,10 @@ export function repoDirIds(dataDir: string): string[] {
  * @param url The HTTPS URL to fetch.
  * @param ref The branch, tag or full commit hash, or '' for the default branch.
  * @param token A GitHub token sent to github.com only, or null.
- * @param keep Asked after the fetch. When it returns false, the repository
+ * @param keep Asked after the checkout. When it returns false, the repository
  *   was removed meanwhile and its directory is deleted instead.
  * @returns The commit hash that was checked out.
+ * @throws Error when git fails, with the last line that git wrote to stderr.
  */
 export async function fetchRepo(
   dir: string,
@@ -119,11 +143,15 @@ export async function fetchRepo(
 }
 
 /**
- * The environment of one git invocation.
+ * Returns the environment of one git invocation.
  *
- * Git must never wait at a prompt, and neither the system's nor a user's git
- * configuration applies. The token goes in as configuration through the
+ * Git must never wait at a prompt. The git configuration of the system and of
+ * the user does not apply. The token goes in as configuration through the
  * environment, so it is not on a command line, and is scoped to github.com.
+ *
+ * @param url The URL to fetch.
+ * @param token A GitHub token, or null.
+ * @returns The environment.
  */
 function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
@@ -142,7 +170,12 @@ function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
   return env;
 }
 
-/** The last line git wrote to stderr, which names the cause, or the error's own message. */
+/**
+ * Returns the reason that a git invocation failed.
+ *
+ * @param err The error of the invocation.
+ * @returns The last line git wrote to stderr, which names the cause, or the message of the error.
+ */
 function gitError(err: unknown): string {
   const e = err as { stderr?: string; killed?: boolean; message?: string };
   if (e.killed) return 'git took too long and was stopped';
@@ -164,6 +197,7 @@ function gitError(err: unknown): string {
  * @param rootName The name for a SKILL.md at the checkout's root.
  * @param valid Accepts the names that may be installed. Others are skipped.
  * @param max The most skills to return.
+ * @returns The skills found, in the order of the search.
  */
 export function findSkills(
   tree: string,
@@ -196,7 +230,12 @@ export function findSkills(
   return [...found.values()];
 }
 
-/** The last path segment of a repository URL without `.git`, the name of a skill at its root. */
+/**
+ * Returns the name of a skill at the root of a repository.
+ *
+ * @param url The repository URL.
+ * @returns The last path segment of the URL, without `.git`.
+ */
 export function repoName(url: string): string {
   const last =
     new URL(url).pathname

@@ -124,8 +124,8 @@ const MESSAGES: ThreadMessageLike[] = [
 
 /**
  * Page that renders the installed thread components over canned messages,
- * without an ACP connection. It shows every part kind, so a component upgrade
- * can be checked on one page.
+ * without an ACP connection. It shows every part kind, so a reviewer can check
+ * a component upgrade on one page.
  */
 export function Playground() {
   useDocumentTitle('Playground · Boxes');

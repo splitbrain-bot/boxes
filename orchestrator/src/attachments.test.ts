@@ -16,8 +16,11 @@ import { ATTACHMENTS_DIR, safeAttachmentName, storeAttachment } from './attachme
 import { type FileService, fileService, setFileServiceSpawnerForTests } from './files.ts';
 import { inProcessFileService } from './files-in-process.ts';
 
+/** The temporary workspace of each test. */
 let workspace: string;
+/** A temporary directory outside the workspace, as the target of planted links. */
 let outside: string;
+/** The file service of the test box, which runs in this process. */
 let files: FileService;
 
 beforeEach(() => {
@@ -85,8 +88,8 @@ test('storing writes the file and reports a workspace-relative path', async () =
 
 test('the attachments directory carries a gitignore that hides it whole', async () => {
   await storeAttachment(files, 'shot.png', Buffer.from('x'));
-  // The user owns the repository's .gitignore. The pattern "*" also hides
-  // this file from git status.
+  // The .gitignore of the repository belongs to the user. The pattern "*" also
+  // hides this file from git status.
   assert.equal(readFileSync(join(workspace, '.boxes', '.gitignore'), 'utf8'), '*\n');
 });
 
@@ -101,7 +104,7 @@ test('a second file of the same name is suffixed, not overwritten', async () => 
 });
 
 test('a link planted where the attachments directory goes is refused', async () => {
-  // The agent writes the workspace. Following its link would create
+  // The agent can write to the workspace. To follow its link would create
   // directories and write the file outside the workspace.
   symlinkSync(outside, join(workspace, '.boxes'));
 

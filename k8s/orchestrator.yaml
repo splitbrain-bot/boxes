@@ -1,5 +1,6 @@
-# The orchestrator: the API, the dashboard and the gateway. It runs the
-# boxes as pods in its own namespace, with the rights of the Role below.
+# The orchestrator, which serves the API, the dashboard and the gateway. It
+# runs the boxes as pods in its own namespace, with the rights of the Role
+# below.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -93,7 +94,8 @@ spec:
           env:
             - name: RUNTIME
               value: kubernetes
-            # git of the skill repositories runs with no writable home.
+            # The root filesystem is read-only, so HOME points git of the skill
+            # repositories at the writable /tmp.
             - name: HOME
               value: /tmp
           # Optional settings, for example EGRESS_ALLOWED_HOSTS or
@@ -120,8 +122,8 @@ spec:
               mountPath: /data
             - name: tmp
               mountPath: /tmp
-          # A ceiling, as in compose.yaml: the orchestrator holds an upload
-          # and a WebSocket frame in memory per request.
+          # The memory limit is a ceiling. The orchestrator holds a whole upload
+          # and a whole WebSocket frame in memory per request.
           resources:
             requests:
               memory: 256Mi

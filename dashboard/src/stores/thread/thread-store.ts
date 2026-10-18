@@ -23,21 +23,21 @@ import {
 } from './translate.ts';
 
 /**
- * What the thread waits on the user for.
+ * The type of answer that the thread waits for from the user.
  *
  * `permission` asks whether a tool call may proceed. `question` asks which of
- * several courses to take, such as how to leave plan mode. ACP carries both
- * as a permission request, and the tab names which one waits.
+ * several courses to take, e.g., how to leave plan mode. ACP carries both as
+ * a permission request, and the tab shows which type waits.
  */
 export type Awaiting = 'permission' | 'question';
 
-/** What the view renders. Every field is replaced, never mutated. */
+/** The state that the view renders. Every field is replaced, never mutated. */
 export interface ThreadSnapshot {
   /** The messages of the thread, in order. */
   messages: readonly Message[];
   /**
-   * True while the agent is producing output: text, thinking, or a tool call
-   * of its own. The gateway decides this.
+   * True while the agent produces text, thinking or a tool call of its own.
+   * The gateway decides the value.
    *
    * An open prompt does not count. The adapter holds a prompt open until the
    * subagents of a turn settle, and a thread woken by a task report works
@@ -45,11 +45,11 @@ export interface ThreadSnapshot {
    */
   isRunning: boolean;
   /**
-   * What this thread has left running in its box, such as a command or a
-   * monitor. Usually empty.
+   * The processes that this thread left running in its box, e.g., a command or
+   * a monitor. Usually empty.
    */
   background: readonly BackgroundProcess[];
-  /** What the thread is waiting for an answer to, or null. */
+  /** The type of question that waits for an answer, or null. */
   awaiting: Awaiting | null;
   /** The state of the connection to the gateway. */
   connection: ConnectionState;
@@ -70,20 +70,20 @@ export interface ThreadSnapshot {
    */
   loading: boolean;
   /**
-   * True when the thread lacks its oldest messages, because the gateway no
-   * longer holds them. {@link ThreadStore.loadFullHistory} fetches them.
+   * True when the thread lacks its oldest messages, because the gateway does
+   * not hold them. {@link ThreadStore.loadFullHistory} fetches them.
    */
   truncated: boolean;
   /** True while the full history is loading. */
   loadingHistory: boolean;
   /**
-   * How many replays of the whole thread have rebuilt the messages. A
+   * The number of replays of the whole thread that rebuilt the messages. A
    * rebuild can bring messages back under other ids.
    */
   rebuilds: number;
 }
 
-/** What a thread shows before anything has been read into it. */
+/** The snapshot of a thread before the store has read anything into it. */
 export const INITIAL_SNAPSHOT: ThreadSnapshot = {
   messages: [],
   isRunning: false,
@@ -106,27 +106,27 @@ interface OpenApproval {
   /** The tool call the request is about. */
   toolCallId: string;
   /**
-   * What the request offered, so the card can be drawn again on the tool call
-   * a refetch rebuilt.
+   * The options of the request, so the view can show the card again on a tool
+   * call that a refetch rebuilt.
    */
   options: PermissionOption[];
   /** Sends the answer back to the gateway. */
   resolve: (response: RequestPermissionResponse) => void;
 }
 
-/** How the store reaches the outside world; swapped wholesale in tests. */
+/** The dependencies of the store. A test replaces all of them. */
 export interface ThreadStoreDeps {
   /** Builds the client. A test supplies a fake. */
   createClient: (handlers: ConstructorParameters<typeof AcpClient>[2]) => AcpClient;
   /** The box this thread belongs to. */
   boxId: string;
-  /** The thread within it. */
+  /** The id of the thread in the box. */
   threadId: string;
 }
 
 /**
- * The live state of one thread: the ACP connection, the message model built
- * from it, and the actions the view can take.
+ * The live state of one thread, with the ACP connection, the message model
+ * built from it, and the actions of the view.
  *
  * React reads it through useSyncExternalStore. It has no React dependency, so
  * tests run without a renderer.
@@ -136,7 +136,7 @@ export class ThreadStore {
   private model: ThreadModel = emptyModel();
   /** The published state. */
   private snapshot: ThreadSnapshot;
-  /** The snapshot's copy of each message, refreshed only when it changes. */
+  /** The snapshot copy of each message. The store copies a message again only when it changes. */
   private views = new Map<Message, Message>();
   /** The subscribers to wake on every publish. */
   private readonly listeners = new Set<() => void>();
@@ -145,14 +145,14 @@ export class ThreadStore {
   /** The connection, or null before `start` and after `dispose`. */
   private client: AcpClient | null = null;
   /**
-   * Whether the gateway says the agent is talking.
+   * True while the agent speaks, as the gateway reports it.
    *
    * A new store has sent nothing, yet a turn may already run, because the
    * orchestrator is the ACP client of record. The gateway sends this after
    * the replay and on every change.
    */
   private speakingUpstream = false;
-  /** What the gateway says the thread has left running. */
+  /** The processes that the thread left running, as the gateway reports them. */
   private backgroundUpstream: readonly BackgroundProcess[] = [];
   /** The number for the next approval id. */
   private nextApprovalId = 1;
@@ -174,7 +174,7 @@ export class ThreadStore {
    */
   private resumeAnchor: string | null = null;
   /**
-   * Whether the model lacks the oldest messages of the thread. Published with
+   * True when the model lacks the oldest messages of the thread. Published with
    * the replay that set it.
    */
   private truncated = false;
@@ -186,18 +186,29 @@ export class ThreadStore {
     this.snapshot = INITIAL_SNAPSHOT;
   }
 
-  // --- React glue ----------------------------------------------------------
-
-  /** Adds a subscriber and returns the function that removes it. */
+  /**
+   * Adds a subscriber.
+   *
+   * @param listener The callback to run on every publish.
+   * @returns The function that removes the subscriber.
+   */
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
 
-  /** The published state. */
+  /**
+   * Reads the published state.
+   *
+   * @returns The current snapshot.
+   */
   getSnapshot = (): ThreadSnapshot => this.snapshot;
 
-  /** Publishes a new snapshot and wakes every subscriber. */
+  /**
+   * Publishes a new snapshot and wakes every subscriber.
+   *
+   * @param patch The snapshot fields to change. The store computes the derived fields itself.
+   */
   private emit(patch: Partial<ThreadSnapshot> = {}): void {
     this.snapshot = {
       ...this.snapshot,
@@ -210,7 +221,7 @@ export class ThreadStore {
   }
 
   /**
-   * Whether the agent is talking, as the gateway reports it.
+   * True while the agent speaks, as the gateway reports it.
    *
    * A turn blocked on a permission request counts as not running. The
    * runtime shows an open approval only while the thread is not running, so
@@ -221,10 +232,9 @@ export class ThreadStore {
   }
 
   /**
-   * What the oldest open request asks for, or null when none is open.
+   * The type of the oldest open request, or null when none is open.
    *
-   * The oldest request holds the turn up, and the view takes the reader to
-   * it.
+   * The oldest request blocks the turn, and the view brings the reader to it.
    */
   private get awaiting(): Awaiting | null {
     for (const approval of this.approvals.keys()) {
@@ -234,11 +244,14 @@ export class ThreadStore {
   }
 
   /**
-   * The snapshot's copy of every message the model holds, with `touched`
-   * copied again.
+   * Gives the snapshot copies of all messages in the model, with a new copy
+   * of `touched`.
    *
    * The model is mutated in place while a message streams. A new copy of the
    * changed message gives the view a new identity to re-render on.
+   *
+   * @param touched The message that changed, or null.
+   * @returns The snapshot copies, in order.
    */
   private messageViews(touched: Message | null): readonly Message[] {
     if (touched) this.views.set(touched, { ...touched, parts: [...touched.parts] });
@@ -251,7 +264,11 @@ export class ThreadStore {
     });
   }
 
-  /** Publishes the messages, unless a replay is still being read. */
+  /**
+   * Publishes the messages, unless a replay is still being read.
+   *
+   * @param touched The message that changed, or null.
+   */
   private refreshMessages(touched: Message | null): void {
     if (this.replaying) {
       // flushReplay copies every message at the end of a replay.
@@ -259,8 +276,6 @@ export class ThreadStore {
     }
     this.emit({ messages: this.messageViews(touched) });
   }
-
-  // --- lifecycle -----------------------------------------------------------
 
   /** Connects and starts the handshake. */
   start(): void {
@@ -271,7 +286,7 @@ export class ThreadStore {
         this.model.modes = modes;
         this.model.configOptions = configOptions;
         this.emit({ modes, configOptions, error: null });
-        // The replay is in the model by now, and this publishes it.
+        // The replay is in the model now, and flushReplay publishes it.
         this.flushReplay();
       },
       // Skips a repeated state, because a publish re-renders the whole thread
@@ -294,7 +309,7 @@ export class ThreadStore {
           this.resume();
           return;
         }
-        // Only a replay of the whole thread says whether the store is cut.
+        // Only a replay of the whole thread tells whether the store lacks old messages.
         this.truncated = truncated;
         this.reset();
       },
@@ -310,15 +325,15 @@ export class ThreadStore {
   }
 
   /**
-   * Throws away the model because a replay of the whole thread is about to
-   * rebuild it. Keeping it would double every message.
+   * Discards the model, because a replay of the whole thread will rebuild it.
+   * Keeping the model would double every message.
    *
    * The published messages stay until the replay has been read, so a
    * reconnect does not blank the conversation.
    *
-   * `keepApprovals` is for a replay on a connection that is still up, where
-   * cancelling an open question would reach the agent and refuse the tool
-   * call. {@link refetch} uses it.
+   * @param opts Holds `keepApprovals`, for a replay on a connection that is
+   *   still up, where cancelling an open question would reach the agent and
+   *   refuse the tool call. {@link ThreadStore.refetch} uses it.
    */
   private reset(opts: { keepApprovals?: boolean } = {}): void {
     const { modes, configOptions } = this.model;
@@ -334,16 +349,18 @@ export class ThreadStore {
     if (!opts.keepApprovals) this.failOpenApprovals();
     this.replaying = true;
     // Publishes the derived fields only. The messages, the plan and the
-    // commands stay until the replay lands.
+    // commands stay until the replay arrives.
     this.emit();
   }
 
   /**
-   * The id of the last message the adapter named, where a replay can resume.
-   * Null when there is none, and then the whole thread has to come.
+   * Finds the last message that the adapter named, where a replay can resume.
    *
    * A message this model numbered itself, such as one that opens with a tool
    * call, has an id the replay never repeats.
+   *
+   * @returns The id of the message, or null when there is none, and then the
+   *   whole thread must come again.
    */
   private lastNamedMessage(): string | null {
     for (let i = this.model.messages.length - 1; i >= 0; i--) {
@@ -357,9 +374,9 @@ export class ThreadStore {
    * Cuts the thread back to the resume point, because the replay about to
    * arrive starts there.
    *
-   * The message the point names goes, with everything after it. The replay
-   * builds them again. The messages before it stay, because the gateway does
-   * not send them again.
+   * The store removes the message that the point names, and every message
+   * after it. The replay builds them again. The messages before the point
+   * stay, because the gateway does not send them again.
    *
    * When no message matches the point, the store resets and rebuilds the
    * thread from the replay.
@@ -383,7 +400,7 @@ export class ThreadStore {
   }
 
   /**
-   * Publishes what a replay built, in one snapshot.
+   * Publishes the result of a replay in one snapshot.
    *
    * The store calls it once session/load has answered, after the last of the
    * history. A replay that never finishes publishes nothing, and the view
@@ -433,9 +450,11 @@ export class ThreadStore {
     }
   }
 
-  // --- incoming ------------------------------------------------------------
-
-  /** Applies one session/update and publishes what changed. */
+  /**
+   * Applies one session/update and publishes what changed.
+   *
+   * @param params The notification params.
+   */
   private onUpdate(params: ThreadNotification): void {
     const touched = applyUpdate(this.model, params.update);
     // flushReplay publishes what a replay built.
@@ -460,9 +479,11 @@ export class ThreadStore {
    * Attaches an incoming permission request to the tool call it is about, so
    * the options render inside that call rather than as a separate prompt.
    *
-   * The promise resolves when the user picks, which unblocks the agent's
-   * turn. A request the gateway withdraws, for example because another
-   * browser answered it, resolves as cancelled.
+   * @param params The permission request.
+   * @param signal Aborts when the gateway withdraws the request, for example
+   *   because another browser answered it. The request then resolves as cancelled.
+   * @returns The answer, which resolves when the user picks and unblocks the
+   *   agent's turn.
    */
   private onPermission(
     params: RequestPermissionRequest,
@@ -474,8 +495,8 @@ export class ThreadStore {
     if (!toolCallId) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
     const id = `approval-${this.nextApprovalId++}`;
 
-    // The call may not have been announced yet; make a placeholder so the
-    // question has somewhere to live.
+    // The adapter may not have announced the call yet, so the store makes a
+    // placeholder for the question.
     let part = findTool(this.model, toolCallId);
     if (!part) {
       const touched = applyUpdate(this.model, {
@@ -499,18 +520,23 @@ export class ThreadStore {
     });
   }
 
-  /** The message holding a tool call, for a targeted snapshot refresh. */
+  /**
+   * Finds the message holding a tool call, for a targeted snapshot refresh.
+   *
+   * @param toolCallId The adapter's id for the call.
+   * @returns The message, or null when the thread has no such call.
+   */
   private messageOfTool(toolCallId: string): Message | null {
     return messageOfTool(this.model, toolCallId);
   }
-
-  // --- actions -------------------------------------------------------------
 
   /**
    * Shows an error that happened on the way to a send.
    *
    * The composer's own failures, such as a refused upload, never reach the
    * socket, and the send button does not await them.
+   *
+   * @param message The error message.
    */
   reportError(message: string): void {
     this.emit({ error: message });
@@ -521,6 +547,9 @@ export class ThreadStore {
    *
    * The prompt is a list of content blocks, because an attachment adds a
    * block beside the prose.
+   *
+   * @param blocks The content blocks of the prompt.
+   * @throws {Error} When the store has no connection or no ACP thread, or when the prompt request fails.
    */
   async send(blocks: readonly ContentBlock[]): Promise<void> {
     const client = this.client;
@@ -544,7 +573,7 @@ export class ThreadStore {
     }
   }
 
-  /** Cancels the running turn. The prompt request resolves on its own after. */
+  /** Cancels the running turn. The prompt request then resolves by itself. */
   cancel(): void {
     const client = this.client;
     const sessionId = client?.sessionId;
@@ -557,12 +586,16 @@ export class ThreadStore {
     this.emit();
   }
 
-  /** Switches the adapter into another of its advertised modes. */
+  /**
+   * Switches the adapter into another of its advertised modes.
+   *
+   * @param modeId The id of the mode.
+   */
   async setMode(modeId: string): Promise<void> {
     const client = this.client;
     const sessionId = client?.sessionId;
     if (!client || !sessionId) return;
-    // Optimistic: current_mode_update confirms it, and a failure puts it back.
+    // Changes the mode optimistically. A current_mode_update confirms it, and a failure restores it.
     const before = this.model.modes;
     if (before) {
       this.model.modes = { ...before, currentModeId: modeId };
@@ -579,12 +612,15 @@ export class ThreadStore {
   /**
    * Sets one of the adapter's configuration options, such as the model it
    * answers with.
+   *
+   * @param configId The id of the option.
+   * @param value The new value.
    */
   async setConfigOption(configId: string, value: string): Promise<void> {
     const client = this.client;
     const sessionId = client?.sessionId;
     if (!client || !sessionId) return;
-    // Optimistic: config_option_update confirms it, and a failure puts it back.
+    // Changes the value optimistically. A config_option_update confirms it, and a failure restores it.
     const before = this.model.configOptions;
     this.model.configOptions = before.map((option) =>
       option.id === configId ? { ...option, currentValue: value } : option,
@@ -599,9 +635,11 @@ export class ThreadStore {
   }
 
   /**
-   * Answers a permission request. `optionId` picks one of the offered
-   * options. Without it the request is cancelled, which the adapter expects
-   * when the user declines to choose.
+   * Answers a permission request.
+   *
+   * @param approvalId The id of the approval.
+   * @param optionId One of the offered options. Without it the request is
+   *   cancelled, which the adapter expects when the user declines to choose.
    */
   respondToApproval(approvalId: string, optionId: string | undefined): void {
     const open = this.approvals.get(approvalId);
@@ -623,7 +661,12 @@ export class ThreadStore {
     );
   }
 
-  /** The options offered for an approval that is still open. */
+  /**
+   * Gives the options offered for an approval that is still open.
+   *
+   * @param approvalId The id of the approval.
+   * @returns The options, or an empty list when the approval is not open.
+   */
   optionsFor(approvalId: string): PermissionOption[] {
     const open = this.approvals.get(approvalId);
     if (!open) return [];
@@ -654,10 +697,10 @@ export class ThreadStore {
   }
 
   /**
-   * Asks for the full history of the thread, which the gateway has the
-   * adapter replay again. It replaces the model once it has arrived.
+   * Asks for the full history of the thread. The gateway makes the adapter
+   * replay the thread again, and the replay replaces the model.
    *
-   * The gateway refuses while the thread works. The gateway's replay notice
+   * The gateway refuses while the thread works. The replay notice of the gateway
    * resets the store, so a refusal leaves the thread as it was. The reason
    * shows as an error.
    */
@@ -678,13 +721,16 @@ export class ThreadStore {
 }
 
 /**
- * Whether an open request is a question rather than a permission gate.
+ * Checks if an open request is a question rather than a permission gate.
  *
  * ACP carries both as a permission request, and the options tell them
  * apart. A gate offers at most one allow option of each kind, such as allow
  * once and allow always. A question offers two or more allow options of the
  * same kind, because each is a different course of action. Leaving plan
  * mode is an example.
+ *
+ * @param options The options of the request.
+ * @returns True for a question.
  */
 function isQuestion(options: readonly PermissionOption[]): boolean {
   const seen = new Set<string>();

@@ -16,14 +16,17 @@ import { AgentStore } from './agents.ts';
 import { type Db, openDb } from './db.ts';
 import { HttpError } from './http-error.ts';
 
+/** The temporary DATA_DIR of each test. */
 let dir: string;
+/** The database of each test. */
 let db: Db;
+/** The store under test, with a fake fetcher. */
 let store: AgentStore;
 
-/** The fake fetcher's checkouts, by URL. A string is the error the fetch fails with. */
+/** The files of each fake remote, by URL. A string is the error message of a failed fetch. */
 let remotes: Record<string, Record<string, string> | string>;
 
-/** Every fetch the store asked for, as URL and ref. */
+/** Each fetch that the store started, as `url@ref`. */
 let fetches: string[];
 
 beforeEach(() => {
@@ -41,7 +44,12 @@ beforeEach(() => {
   });
 });
 
-/** Writes files under `root`, creating the directories on the way. */
+/**
+ * Writes files under `root`, and creates the missing directories.
+ *
+ * @param root The directory to write into.
+ * @param contents The content of each file, by its path relative to `root`.
+ */
 function files(root: string, contents: Record<string, string>): void {
   for (const [rel, content] of Object.entries(contents)) {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
@@ -54,7 +62,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** The files of a packed set, by their home-relative path. */
+/**
+ * Packs a set and reads the tar back.
+ *
+ * @param setId The id of the selected set, or null for only the global set.
+ * @returns The content and the mode of each file, by its path relative to the home.
+ */
 async function packed(
   setId: string | null,
 ): Promise<Map<string, { content: string; mode: number }>> {
@@ -79,20 +92,28 @@ async function packed(
   return files;
 }
 
-/** The home-relative paths of a packed set, sorted. */
+/**
+ * Packs a set and lists its paths.
+ *
+ * @param setId The id of the selected set, or null for only the global set.
+ * @returns The paths relative to the home, sorted.
+ */
 async function paths(setId: string | null): Promise<string[]> {
   return [...(await packed(setId)).keys()].sort();
 }
 
-/** Inserts a box row, which is all the set's box count reads. */
+/**
+ * Inserts a running box row with the columns that the box count of a set reads.
+ *
+ * @param id The id of the box.
+ * @param agentSetId The id of the set that the box selected, or null.
+ */
 function insertBox(id: string, agentSetId: string | null): void {
   db.prepare(
     `INSERT INTO boxes (id, name, profile, status, agent_set_id, created_at, last_active_at)
      VALUES (?, 'test', 'DEFAULT', 'running', ?, 0, 0)`,
   ).run(id, agentSetId);
 }
-
-// --- the global set ----------------------------------------------------------
 
 test('the global set exists from the first boot and cannot be deleted', () => {
   const sets = store.listSets();
@@ -115,15 +136,13 @@ test('the global set is listed first, and the rest by name', () => {
   );
 });
 
-// --- merging -----------------------------------------------------------------
-
 test('an AGENTS.md accumulates: the global one first, then the set own', () => {
   store.updateSet('global', { agentsMd: 'House rules.' });
   const set = store.createSet('go');
   store.updateSet(set.id, { agentsMd: 'Go rules.' });
 
   assert.equal(store.bundle(set.id).agentsMd, 'House rules.\n\nGo rules.');
-  // The global set alone is what a box naming none gets.
+  // A box without a set gets only the global set.
   assert.equal(store.bundle(null).agentsMd, 'House rules.');
 });
 
@@ -145,7 +164,7 @@ test('skills are a union, and the set wins a name clash', async () => {
     bundle.skills.map((i) => i.name),
     ['bench', 'review', 'ship'],
   );
-  // An override is silent in the merged result, so it is reported separately.
+  // `overrides` names the global skill that the set replaces.
   assert.deepEqual(bundle.overrides, ['review']);
   assert.equal(
     (await packed(set.id)).get('.claude/skills/review/SKILL.md')?.content,
@@ -158,8 +177,6 @@ test('naming the global set as the extra one changes nothing', () => {
   assert.deepEqual(store.bundle('global'), store.bundle(null));
 });
 
-// --- packing -----------------------------------------------------------------
-
 test('a merged set is packed in every harness layout', async () => {
   store.updateSet('global', { agentsMd: 'House rules.' });
   store.putItem('global', { name: 'review', content: '---\nname: review\n---\n' });
@@ -168,8 +185,6 @@ test('a merged set is packed in every harness layout', async () => {
 
   const files = await packed(set.id);
 
-  // Both layouts, always: a box holds threads of either harness, and which it
-  // will hold is not known when this is packed.
   assert.deepEqual([...files.keys()].sort(), [
     '.agents/skills/bench/SKILL.md',
     '.agents/skills/review/SKILL.md',
@@ -178,18 +193,18 @@ test('a merged set is packed in every harness layout', async () => {
     '.claude/skills/review/SKILL.md',
     '.codex/AGENTS.md',
   ]);
-  // What the dashboard calls AGENTS.md lands as each agent's user-level memory.
+  // The AGENTS.md of the set becomes the user instructions file of each harness.
   assert.equal(files.get('.claude/CLAUDE.md')?.content, 'House rules.\n');
   assert.equal(files.get('.codex/AGENTS.md')?.content, 'House rules.\n');
-  // A skill is a directory with a SKILL.md in it under both layouts.
+  // In both layouts, a skill is a directory with a SKILL.md.
   assert.equal(files.get('.claude/skills/review/SKILL.md')?.content, '---\nname: review\n---\n');
   assert.equal(files.get('.agents/skills/review/SKILL.md')?.content, '---\nname: review\n---\n');
   assert.equal(files.get('.claude/skills/bench/SKILL.md')?.content, 'Run the benchmarks.\n');
 });
 
 test('every packed path is home-relative and inside a layout', async () => {
-  // The file service installs these relative to the home and refuses a path
-  // outside these four prefixes.
+  // The file service installs each path relative to the home.
+  // It refuses a path outside the four prefixes below.
   store.updateSet('global', { agentsMd: 'House rules.' });
   store.putItem('global', { name: 'review', content: 'x' });
 
@@ -218,15 +233,13 @@ test('the skills of the orchestrator are packed, and a skill of the set wins', a
   assert.equal(files.get('.claude/skills/diagrams/SKILL.md')?.content, 'own diagrams\n');
   assert.equal(files.get('.agents/skills/share-app/SKILL.md')?.content, 'orchestrator share-app\n');
 
-  // A skill whose condition no longer holds is not packed, so the next install removes it.
+  // The next tar holds only the skills of the set, so the next install removes the built-in skills.
   builtins = [];
   assert.deepEqual(await paths(null), [
     '.agents/skills/diagrams/SKILL.md',
     '.claude/skills/diagrams/SKILL.md',
   ]);
 });
-
-// --- repositories ------------------------------------------------------------
 
 test('a repository is pulled when it is added, and its skills are listed', async () => {
   remotes['https://example.com/skills'] = {
@@ -416,8 +429,6 @@ test('an unknown repository is a 404, also in another set', async () => {
   }
 });
 
-// --- validation --------------------------------------------------------------
-
 test('a skill name that is not a safe path component is refused', () => {
   for (const name of ['../escape', 'a/b', '-lead', 'sk ill', '.hidden', '', 'a'.repeat(65)]) {
     assert.throws(
@@ -429,7 +440,6 @@ test('a skill name that is not a safe path component is refused', () => {
 });
 
 test('a name is lowercased rather than refused for its case alone', () => {
-  // Only the lowercase form is stored.
   const set = store.putItem('global', { name: 'Review', content: 'x' });
   assert.equal(set.items[0]!.name, 'review');
 });
@@ -457,8 +467,6 @@ test('an unknown set is a 404 on every route into it', () => {
     assert.throws(call, (err: unknown) => err instanceof HttpError && err.statusCode === 404);
   }
 });
-
-// --- boxes ----------------------------------------------------------------
 
 test('a set counts the live boxes that selected it', () => {
   const set = store.createSet('go');

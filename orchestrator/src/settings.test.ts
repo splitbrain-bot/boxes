@@ -12,7 +12,9 @@ import {
   readSettings,
 } from './settings.ts';
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
 
 beforeEach(() => {
@@ -63,7 +65,7 @@ test('a dialog is stored per harness and merged rather than replaced', () => {
     codex: { modeId: 'agent-full-access' },
   });
 
-  // One dialog's answer is replaced whole: it is one screen's state.
+  // The patch replaces the whole entry of one harness, because the entry is the state of one dialog.
   patchSettings(db, { dialogs: { claude: { modeId: 'auto' } } });
   assert.deepEqual(readSettings(db).dialogs.claude, { modeId: 'auto' });
 });

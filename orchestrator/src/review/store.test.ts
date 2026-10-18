@@ -17,29 +17,37 @@ import {
 } from './store.ts';
 
 /**
- * REVIEW.md files written by the desktop tool. Output here must match them
- * byte for byte, so a review started in one tool continues in the other.
+ * The directory with REVIEW.md files that the desktop tool wrote. The output of
+ * the serializer must match them byte for byte, so a review started in one tool
+ * can continue in the other.
  */
 const FIXTURES = join(import.meta.dirname, 'fixtures');
 
-/** Splits source text the way an annotation's context is taken from it. */
+/**
+ * Splits source text into lines. A final newline adds no empty last line.
+ *
+ * @param text The source text.
+ * @returns The lines.
+ */
 function lines(text: string): string[] {
   const out = text.split('\n');
   if (out.at(-1) === '') out.pop();
   return out;
 }
 
-/** An empty review with a pinned start date, so a serialization is stable. */
+/**
+ * Makes an empty review with a fixed start date, so a serialization is stable.
+ *
+ * @param started The start date.
+ * @returns The empty review.
+ */
 function emptyReview(started: string): Review {
   return { data: new Map(), started };
 }
 
-// --- byte-for-byte against files the Go tool wrote ---------------------------
-
 /**
- * The inputs each fixture was built from, mirroring the generator that wrote
- * them. Building the same review here and serializing it must produce the
- * fixture's bytes exactly.
+ * The inputs of each fixture, as the generator that wrote the fixtures used them. The same review, built
+ * here and serialized, must give the bytes of the fixture.
  */
 const FIXTURE_INPUTS: Record<
   string,
@@ -106,8 +114,8 @@ describe('the format, against files the desktop tool wrote', () => {
     .map((f) => f.slice(0, -3));
 
   test('every fixture has inputs to build it from', () => {
-    // A fixture added without its inputs would otherwise be silently
-    // half-tested: parsed and re-serialized, but never built from scratch.
+    // Without inputs, the tests only parse a fixture and serialize it again, and
+    // never build it from the inputs.
     assert.deepEqual(names.toSorted(), Object.keys(FIXTURE_INPUTS).toSorted());
   });
 
@@ -129,15 +137,12 @@ describe('the format, against files the desktop tool wrote', () => {
     });
 
     test(`${name}: a second round trip is still identical`, () => {
-      // The first pass could normalise something; the second proves it does
-      // not.
+      // The first pass can normalize the text. The second pass must not change it.
       const once = serializeReview(parseReview(want));
       assert.equal(serializeReview(parseReview(once)), once);
     });
   }
 });
-
-// --- parsing ----------------------------------------------------------------
 
 describe('parseReview', () => {
   test('captures the context block with its first line number', () => {
@@ -187,7 +192,6 @@ describe('parseReview', () => {
   });
 
   test('an empty document is an empty review', () => {
-    // What a box with no REVIEW.md yet reads as.
     const review = parseReview('');
     assert.equal(review.data.size, 0);
     assert.equal(review.started, '');
@@ -215,8 +219,8 @@ describe('parseReview', () => {
   });
 
   test('an unmarked context block is still recognised', () => {
-    // Review files written before the marker existed carry none; there the
-    // numbered source lines are what identify the block.
+    // Older review files have no marker. In them, the numbered source lines
+    // identify the block.
     const review = parseReview(
       '# Code Review\n\n_Started: 2020-01-01_\n\n---\n\n## `a.go`\n\n' +
         '#### Line 5 (outdated)\n\nan older comment\n\n```go\n4: was here\n5: and here\n```\n',
@@ -241,8 +245,6 @@ describe('parseReview', () => {
     assert.equal(review.data.get('a.go')?.get(1)?.comment, 'before\n\n---\n\nafter');
   });
 });
-
-// --- round trips ------------------------------------------------------------
 
 describe('a comment survives a write and a read', () => {
   const cases: Record<string, string> = {
@@ -343,8 +345,6 @@ describe('a comment survives a write and a read', () => {
   });
 });
 
-// --- mutation ---------------------------------------------------------------
-
 describe('mutation', () => {
   test('setting a comment twice replaces it', () => {
     const review = emptyReview('2026-08-31');
@@ -408,15 +408,21 @@ describe('mutation', () => {
     assert.deepEqual(contextAround(five, 3), { context: five, from: 1 });
     assert.deepEqual(contextAround(five, 1), { context: ['l1', 'l2', 'l3', 'l4'], from: 1 });
     assert.deepEqual(contextAround(five, 5), { context: ['l2', 'l3', 'l4', 'l5'], from: 2 });
-    // Out of range records nothing rather than guessing.
+    // A line out of range gives no context.
     assert.deepEqual(contextAround(five, 0), { context: [], from: 0 });
     assert.deepEqual(contextAround(five, 6), { context: [], from: 0 });
   });
 });
 
-// --- drift ------------------------------------------------------------------
-
-/** One annotation with stored context, as a drift check meets it. */
+/**
+ * Makes a map with one annotation with stored context, for a drift check.
+ *
+ * @param line The line of the annotation.
+ * @param context The stored context lines.
+ * @param contextFrom The line number of the first context line.
+ * @param outdated True when the annotation is marked outdated.
+ * @returns The annotations by line number.
+ */
 function annotated(
   line: number,
   context: string[],
@@ -452,7 +458,7 @@ describe('checkDrift', () => {
     const anns = annotated(3, ['line2', 'line3', 'line4'], 2);
     assert.equal(checkDrift(anns, null), true);
     assert.equal(anns.get(3)?.outdated, true);
-    // And says so only once: a second check has nothing left to change.
+    // A second check reports no change.
     assert.equal(checkDrift(anns, null), false);
   });
 
@@ -478,8 +484,7 @@ describe('checkDrift', () => {
   });
 
   test('repeated code relocates to the nearest copy, not the first', () => {
-    // The same three lines open a block at 1, 6 and 11. Code that repeats
-    // itself would otherwise pull every annotation to the first copy.
+    // The same three lines open a block at lines 1, 6 and 11.
     const source = [
       '}',
       '',
@@ -518,7 +523,7 @@ describe('checkDrift', () => {
     const block = ['func x() {', '\treturn', '}'];
     const review = emptyReview('2026-08-31');
     setAnnotation(review, 'test.go', 5, 'the second one', [...block, ...block]);
-    // Push everything down by one.
+    // One line at the top moves everything down by one.
     const anns = review.data.get('test.go')!;
     assert.equal(checkDrift(anns, ['// header', ...block, ...block]), true);
     assert.ok(anns.has(6));
@@ -533,8 +538,8 @@ describe('checkDrift', () => {
     assert.equal(checkDrift(review.data.get('test.go')!, after), true);
     assert.equal(review.data.get('test.go')?.get(4)?.outdated, true);
 
-    // The stored context must stay the code the comment was about, not the
-    // code that took its place — else the next read clears the mark.
+    // The stored context must stay the code that the comment was about. With the
+    // new code as context, the next drift check would clear the mark.
     const reloaded = parseReview(serializeReview(review));
     assert.equal(reloaded.data.get('test.go')?.get(4)?.outdated, true);
     assert.equal(checkDrift(reloaded.data.get('test.go')!, after), false);
@@ -553,8 +558,8 @@ describe('checkDrift', () => {
     const anns = annotated(1, ['b', 'c'], 5);
     checkDrift(anns, ['b', 'c', 'd']);
     assert.ok(!anns.has(-3));
-    // So the annotation stays where it was, with the context it was written
-    // against, rather than being moved somewhere impossible or dropped.
+    // The annotation stays on its line, with the context it was written
+    // against.
     assert.equal(anns.size, 1);
     assert.equal(anns.get(1)?.contextFrom, 5);
   });
@@ -584,9 +589,9 @@ describe('checkDrift', () => {
   });
 
   test('a move blocked by one that stays put keeps every annotation', () => {
-    // 'third' still finds its context where it left it, so it holds line 3.
-    // That refuses 'second' the line it wants, which leaves it holding line 2
-    // and refuses 'first' in turn. Nothing moves, and all three survive.
+    // 'third' still finds its context at line 3, so it stays there. Line 3 is
+    // the target of 'second', so 'second' stays on line 2, which is the target
+    // of 'first'. No annotation moves, and all three stay.
     const anns = new Map<number, Annotation>([
       [1, { comment: 'first', context: ['aa'], contextFrom: 1, outdated: false }],
       [2, { comment: 'second', context: ['bb'], contextFrom: 2, outdated: false }],
@@ -603,8 +608,6 @@ describe('checkDrift', () => {
     );
   });
 });
-
-// --- odds and ends ----------------------------------------------------------
 
 describe('detectLang', () => {
   test('names the languages the fence info string uses', () => {

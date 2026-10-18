@@ -1,7 +1,12 @@
 import { type AttachmentAdapter, generateId, type PendingAttachment } from '@assistant-ui/react';
 import { api } from '../../api.ts';
 
-/** Which of assistant-ui's three tiles a file is shown as. */
+/**
+ * Picks the assistant-ui tile type that shows a file.
+ *
+ * @param type The MIME type of the file.
+ * @returns The tile type.
+ */
 function kindOf(type: string): PendingAttachment['type'] {
   if (type.startsWith('image/')) return 'image';
   if (type.startsWith('text/') || type === 'application/pdf' || type === 'application/json') {
@@ -17,15 +22,17 @@ function kindOf(type: string): PendingAttachment['type'] {
  * only its path, so the agent opens it with its own tools. The upload runs
  * on send, so a file the user removes again never reaches the workspace.
  *
- * `onError` reports a failed upload, because the send button does not await
- * the upload.
+ * @param boxId The id of the box.
+ * @param onError Receives the message of a failed upload. The send button does
+ *   not await the upload, so the adapter reports the failure itself.
+ * @returns The attachment adapter.
  */
 export function createAttachmentAdapter(
   boxId: string,
   onError: (message: string) => void,
 ): AttachmentAdapter {
   return {
-    // Every type: the agent decides what it can read.
+    // Accepts every type, because the agent decides what it can read.
     accept: '*',
 
     async add({ file }) {
@@ -63,7 +70,7 @@ export function createAttachmentAdapter(
       }
     },
 
-    // Nothing to undo: a removed attachment was never uploaded.
+    // Has nothing to undo, because the upload runs only on send.
     async remove() {},
   };
 }

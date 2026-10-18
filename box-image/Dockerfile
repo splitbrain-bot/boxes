@@ -1,6 +1,6 @@
 # Boxes box images: one long-lived container per box. PID 1 only holds the
-# container open. The gateway runs the ACP adapter as a docker exec, so
-# browser churn never restarts it.
+# container open. The gateway starts the ACP adapter with an exec, so a
+# browser that disconnects does not restart the adapter.
 #
 # Two images from this file, selected with --target:
 #
@@ -13,8 +13,8 @@
 # Each image has three stages: *-image installs everything, *-test checks it,
 # and the target ships the image once the test has passed.
 #
-# A new box's home gets the files of /usr/local/share/boxes/home, seeded once
-# and never refreshed. /home/agent in the image is an empty mount point. A
+# boxes-setup seeds a new home once from /usr/local/share/boxes/home and does
+# not refresh it. /home/agent in the image is an empty mount point. Thus a
 # tool that must follow the image is installed outside the home.
 #
 # The build context is the repository root, because the file service is
@@ -56,8 +56,7 @@ FROM ubuntu:26.04 AS base-image
 # orchestrator can find and remove an untagged copy after a pull replaced it.
 LABEL boxes.image=box
 
-# curl needs a trust store to add the repositories below. tini is PID 1;
-# see the ENTRYPOINT.
+# curl needs a trust store to add the repositories below. tini is PID 1.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -77,8 +76,8 @@ RUN install -d -m 0755 /etc/apt/keyrings \
  && apt-get update && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-# Boxes reads the box's process table with ps to find what a thread left
-# running, and to stop it by pid.
+# The orchestrator reads the process table of the box with ps to find what a
+# thread left running, and to stop it by pid.
 #
 # The dashboard's terminal attaches to tmux, so a shell and its scrollback
 # outlive a closed tab.
@@ -179,8 +178,8 @@ COPY box-image/codex-config.toml /etc/codex/config.toml
 RUN mkdir -p /usr/local/share/boxes/skills
 
 # The file service. The orchestrator starts it in the box and reaches all the
-# files of the box through it. The bundle has no npm dependencies. node runs
-# the link as the bundle itself, so the .mjs name makes it an ES module.
+# files of the box through it. The bundle has no npm dependencies. node
+# resolves the link to the bundle, so the .mjs name makes it an ES module.
 COPY --from=files-build /build/files/dist/main.mjs /usr/local/lib/boxes-files/main.mjs
 RUN chmod 0755 /usr/local/lib/boxes-files/main.mjs \
  && ln -s /usr/local/lib/boxes-files/main.mjs /usr/local/bin/boxes-files
@@ -223,7 +222,7 @@ RUN mkdir -p /usr/local/lib/boxes/setup.d
 
 # The root filesystem is read-only at runtime, so every mount point must
 # exist in the image. /workspace, /home/agent and /nix are writable binds, and
-# /tmp is a tmpfs. The home stays empty: the mount hides it in a box.
+# /tmp is a tmpfs. The home stays empty, because the mount hides it in a box.
 RUN mkdir -p /workspace /nix /home/agent \
  && chown agent:agent /workspace /nix /home/agent
 
@@ -258,8 +257,8 @@ ARG CODEX_VERSION
 ARG NODE_MAJOR
 
 # Checks the user, the writable directories, the npm prefix and the tool
-# locations. Each failure here would be silent otherwise: an ARG out of scope
-# leaves USER empty, which means root.
+# locations. Each of these failures is silent otherwise. For example, an ARG
+# out of scope leaves USER empty, which means root.
 #
 # codex --version runs the platform binary, so it fails if --omit=optional
 # left none. The match against CODEX_VERSION catches a followed range.
@@ -299,8 +298,8 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
       case ":$PATH:" in *":$d:"*) ;; *) echo "a login shell lost $d" >&2; exit 1 ;; esac; \
     done' "$PATH"
 
-# Node has the requested major and comes from NodeSource. Ubuntu's nodejs has
-# the same major, so the vendor check catches apt preferring it.
+# Node has the requested major and comes from NodeSource. The vendor check
+# catches apt preferring Ubuntu's nodejs.
 RUN test "$(node -p 'process.versions.node.split(".")[0]')" = "${NODE_MAJOR}" \
  && test "$(command -v node)" = "/usr/bin/node" \
  && dpkg-query -W -f='${Version}' nodejs | grep -q nodesource \
@@ -450,8 +449,8 @@ COPY box-image/nix.conf /etc/nix/nix.conf
 #
 # /usr/local/bin/chromium is a stable path to the image's Chromium, for a
 # project whose own Playwright wants another revision. /usr/local/bin/playwright
-# is the Playwright CLI nested under @playwright/cli, so a box can download
-# Firefox and WebKit without npx.
+# is the Playwright CLI nested under @playwright/cli, so the agent can
+# download Firefox and WebKit without npx.
 ARG PLAYWRIGHT_CLI_VERSION=^0.1.19
 ENV BOXES_IMAGE_BROWSERS=/opt/playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=${BOXES_IMAGE_BROWSERS}
@@ -467,17 +466,13 @@ RUN npm install -g --prefix /usr/local @playwright/cli@${PLAYWRIGHT_CLI_VERSION}
  && apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# The system libraries of Firefox and WebKit, without the browsers. A box can
-# download a browser as the agent, but cannot install libraries without root.
-# Library names do not depend on the Playwright revision, so this serves the
-# Playwright of any project.
+# The system libraries of Firefox and WebKit, without the browsers. The agent
+# can download a browser, but it cannot install libraries, because it is not
+# root.
 #
 # install-deps is a command of the playwright-core that @playwright/cli nests,
 # so the path names it directly. The dry run fails if any package is still
 # missing, which an apt error in the install output would hide.
-#
-# Playwright's map has no arm64 entry, so on arm64 both commands succeed and
-# install nothing. The launch check below catches that.
 RUN pw=/usr/local/lib/node_modules/@playwright/cli/node_modules/.bin/playwright \
  && "$pw" install-deps firefox webkit \
  && "$pw" install-deps --dry-run firefox webkit \
@@ -493,7 +488,7 @@ COPY box-image/playwright-cli.config.json /usr/local/share/boxes/playwright-cli.
 
 # The skill of the browser CLI, with this image's browser notes appended,
 # beside the other image skills. The CLI installs its skill only into a home,
-# so a scratch home is used and removed.
+# so the step uses a scratch home and removes it.
 COPY box-image/playwright-skill-notes.md /tmp/playwright-skill-notes.md
 RUN HOME=/tmp/skill-home NO_UPDATE_NOTIFIER=1 playwright-cli install --skills --global \
  && mv /tmp/skill-home/.claude/skills/playwright-cli /usr/local/share/boxes/skills/playwright-cli \
@@ -529,8 +524,8 @@ ARG NIX_VERSION
 # Checks the user, that no install wrote into the home, nix, the setup with
 # the steps of the full image, and the skills. The setup runs as it does in a
 # box, without a proxy CA, and the skill of the browser CLI must hold this
-# image's notes. It also creates the TMPDIR that the Go and Rust builds below
-# need.
+# image's notes. The setup also creates the TMPDIR that the Go and Rust
+# builds below need.
 #
 # A login shell keeps every directory of the image's PATH.
 RUN test "$(id -u)" = "${AGENT_UID}" \
@@ -583,8 +578,8 @@ RUN set -eu; \
     grep -qE 'button "Continue" \[ref=e[0-9]+\]' .playwright-cli/*.yml; \
     playwright-cli close
 
-# Firefox and WebKit launch, downloaded as the agent into the home the way a
-# box gets them. install-deps reports installed packages, not a browser that
+# Firefox and WebKit launch, downloaded as the agent into the home, as in a
+# box. install-deps reports installed packages, not a browser that
 # starts. Playwright maps this Ubuntu release to an older release's Firefox
 # build, so Firefox is the likeliest to fail.
 #

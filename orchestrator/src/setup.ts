@@ -1,18 +1,18 @@
+/**
+ * The setup of a box after it started. The start and this setup make a box
+ * ready.
+ */
+
 import { Readable } from 'node:stream';
 import { pack } from 'tar-stream';
 import { fileService, NOT_IN_IMAGE, OutdatedImageError } from './files.ts';
 import type { Logger } from './log.ts';
 import { runtime } from './runtime/runtime.ts';
 
-/**
- * The setup of a box after it started. The start and this setup make a box
- * ready.
- */
-
 /** The command in the box image that sets up the home for the tools of the image. */
 export const SETUP_COMMAND = 'boxes-setup';
 
-/** How long the setup in the box may run. */
+/** How long the setup in the box may run, in milliseconds. */
 const SETUP_TIMEOUT_MS = 60_000;
 
 /** How many bytes of the setup output are kept, for the warnings and the error message. */
@@ -40,12 +40,16 @@ export interface SetupInputs {
 
 /**
  * Sets up a started box: the files of the orchestrator, then `boxes-setup`,
- * then the agent set. Throws with the output of the setup when a step
- * failed, and an {@link OutdatedImageError} when the image has no setup
- * command.
+ * then the agent set.
  *
  * Each warning of the setup goes to the log, because the exec output does
  * not reach the container log.
+ *
+ * @param boxId The id of the box.
+ * @param inputs The CA, the git identity and the agent set.
+ * @param slog The logger of the box.
+ * @throws OutdatedImageError when the image has no setup command or no current file service.
+ * @throws Error when a step fails, with the output of `boxes-setup` when that step fails.
  */
 export async function setUpBox(boxId: string, inputs: SetupInputs, slog: Logger): Promise<void> {
   const files = fileService(boxId);
@@ -71,7 +75,12 @@ export async function setUpBox(boxId: string, inputs: SetupInputs, slog: Logger)
   await files.installAgentSet(inputs.agentSet);
 }
 
-/** The files of the orchestrator as a tar stream: the CA, when there is one, and the git configuration. */
+/**
+ * Returns the files of the orchestrator as a tar stream: the CA, when there is one, and the git configuration.
+ *
+ * @param inputs The CA and the git identity.
+ * @returns The tar stream, with paths relative to the home.
+ */
 export function setupFiles(inputs: Pick<SetupInputs, 'caCertificate' | 'identity'>): Readable {
   const tar = pack();
   if (inputs.caCertificate !== '') {
@@ -87,9 +96,12 @@ export function setupFiles(inputs: Pick<SetupInputs, 'caCertificate' | 'identity
 }
 
 /**
- * The git configuration of a box: the identity, `main` as the default
- * branch, and every directory as safe, so git does not refuse a checkout
- * whose owner differs from the agent, for example after a restore.
+ * Returns the git configuration of a box: the identity, `main` as the default
+ * branch, no advice on a detached HEAD, and every directory as safe, so git does
+ * not refuse a checkout whose owner differs from the agent, for example after a restore.
+ *
+ * @param identity The git name and email.
+ * @returns The content of the configuration file.
  */
 function gitConfig(identity: SetupInputs['identity']): string {
   return [
@@ -106,7 +118,12 @@ function gitConfig(identity: SetupInputs['identity']): string {
   ].join('\n');
 }
 
-/** A git configuration value in quotes, with the characters escaped that git reads as syntax. */
+/**
+ * Returns a git configuration value in quotes, with the characters escaped that git reads as syntax.
+ *
+ * @param value The value.
+ * @returns The quoted value.
+ */
 function quoted(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 }

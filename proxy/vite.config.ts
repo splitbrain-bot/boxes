@@ -1,9 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * Build and test configuration of the proxy. The proxy builds as a Node bundle
- * in Vite's SSR mode, which keeps npm dependencies external, so the runtime
- * image installs them and the bundle loads them at boot.
+ * Build and test configuration of the proxy.
+ *
+ * Vite builds the proxy as a Node bundle in SSR mode. SSR mode keeps the npm
+ * dependencies external, so the runtime image must install them.
  */
 export default defineConfig({
   build: {

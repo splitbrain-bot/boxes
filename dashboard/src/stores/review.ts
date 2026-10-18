@@ -1,3 +1,5 @@
+/** Store for the review view, with the tree folder by folder and the open file. */
+
 import { create } from 'zustand';
 import type {
   ReviewAnnotation,
@@ -10,30 +12,28 @@ import { ApiError, api } from '../api.ts';
 import { type Token, tokenizeLines } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
-/** Store for the review view: the tree, folder by folder, and the open file. */
-
 /** The file the pane is showing, with its tokens once they arrive. */
 export interface OpenFile extends ReviewFileResponse {
   /**
-   * One token list per line, or null when the file renders plain. That
-   * happens before the tokens arrive, without a grammar for the language, or
-   * when the file or a line is too long to tokenize.
+   * One token list per line, or null when the file renders plain. The file
+   * renders plain before the tokens arrive, without a grammar for the
+   * language, or when the file or a line is too long to tokenize.
    */
   tokens: Token[][] | null;
 }
 
-/** What the review view renders. */
+/** The state that the review view renders. */
 export interface ReviewState {
   /** The box the store holds, or null before the first `open`. */
   boxId: string | null;
   /**
-   * What the review is, apart from its files. Every directory answer carries
-   * it, so it holds what the last answer said.
+   * The facts of the review that do not belong to one file. Every directory
+   * answer has them, so the field holds the facts of the last answer.
    */
   facts: ReviewFacts | null;
-  /** Each loaded directory by its path; the workspace root is ''. */
+  /** Each loaded directory by its path. The path of the workspace root is ''. */
   dirs: Record<string, ReviewDirResponse>;
-  /** The folders standing open, by path. */
+  /** The paths of the open folders. */
   expanded: string[];
   /** The open file, or null. */
   file: OpenFile | null;
@@ -41,17 +41,17 @@ export interface ReviewState {
   loadingTree: boolean;
   /** True while a file fetch is in flight. */
   loadingFile: boolean;
-  /** What went wrong last, or null. Shown in place of the pane. */
+  /** The last error message, or null. The view shows it in place of the pane. */
   error: string | null;
-  /** A line whose composer is open, or null. */
+  /** The line whose composer is open, or null. */
   composing: number | null;
   /** True while an annotation write is in flight. */
   saving: boolean;
   /**
    * True while the pane holds unsaved edits.
    *
-   * The view holds the buffer. The store reads this flag so that a refetch
-   * does not throw half-typed work away.
+   * The view holds the buffer. The store reads the flag, so that a refetch
+   * does not discard unsaved work.
    */
   dirty: boolean;
 }
@@ -75,29 +75,47 @@ const EMPTY: ReviewState = {
 export const useReview = create<ReviewState>(() => EMPTY);
 
 /**
- * How far down each file was scrolled, by path.
+ * The scroll offset of each file, by path.
  *
- * Kept outside the state, so a scroll does not re-render the view. Cleared
- * when the store points at another box.
+ * The map is outside the state, so a scroll does not render the view again.
+ * {@link open} clears it when the store changes to another box.
  */
 const scrollOffsets = new Map<string, number>();
 
-/** Records how far down a file is scrolled. */
+/**
+ * Records the scroll offset of a file.
+ *
+ * @param path The path of the file.
+ * @param offset The scroll offset in pixels.
+ */
 export function rememberScroll(path: string, offset: number): void {
   scrollOffsets.set(path, offset);
 }
 
-/** How far down a file was left, or 0 for one this review has not opened. */
+/**
+ * Reads the last scroll offset of a file.
+ *
+ * @param path The path of the file.
+ * @returns The offset in pixels, or 0 for a file that this review has not opened.
+ */
 export function recallScroll(path: string): number {
   return scrollOffsets.get(path) ?? 0;
 }
 
-/** Merges `next` into the state. */
+/**
+ * Merges `next` into the state.
+ *
+ * @param next The fields to change.
+ */
 function set(next: Partial<ReviewState>): void {
   useReview.setState(next);
 }
 
-/** The state right now, for the async functions below. */
+/**
+ * Reads the current state.
+ *
+ * @returns The current state.
+ */
 function get(): ReviewState {
   return useReview.getState();
 }
@@ -107,6 +125,8 @@ function get(): ReviewState {
  *
  * The store is a singleton, so re-entering the same box keeps what is loaded
  * and paints at once.
+ *
+ * @param boxId The id of the box.
  */
 export function open(boxId: string): void {
   if (get().boxId === boxId) return;
@@ -115,13 +135,16 @@ export function open(boxId: string): void {
 }
 
 /**
- * Fetches one directory: its children, their statuses and their comment
- * counts, and the review-wide facts around them.
+ * Fetches one directory with its children, their statuses and comment counts,
+ * and the facts of the whole review.
  *
- * `fresh` says the browser has arrived rather than opened a folder. It makes
- * the orchestrator ask git again and check every comment for drift. An answer
- * for a box the store has since left is dropped, so it cannot paint another
- * box's files.
+ * The function drops an answer for a box that the store has left, so the
+ * answer cannot show the files of another box.
+ *
+ * @param path The path of the directory, or '' for the workspace root.
+ * @param fresh True when the browser arrives at the review, and false when it
+ *   opens a folder. When true, the orchestrator reads the git state again and
+ *   checks every comment for drift.
  */
 export async function loadDir(path: string, fresh = false): Promise<void> {
   const { boxId } = get();
@@ -157,7 +180,12 @@ export async function loadTree(): Promise<void> {
   await Promise.all(open.map((path) => loadDir(path)));
 }
 
-/** The review-wide part of a directory answer. */
+/**
+ * Takes the facts of the whole review from a directory answer.
+ *
+ * @param dir The directory answer.
+ * @returns The facts of the review.
+ */
 function factsOf(dir: ReviewDirResponse): ReviewFacts {
   const { repos, hasGit, base, hasReview, started, commentCount } = dir;
   return { repos, hasGit, base, hasReview, started, commentCount };
@@ -168,6 +196,8 @@ function factsOf(dir: ReviewDirResponse): ReviewFacts {
  *
  * `loadDir` calls it only on a directory's first answer, so a folder the
  * reviewer closed stays closed when the tree is refetched.
+ *
+ * @param dir The directory answer.
  */
 function unwrap(dir: ReviewDirResponse): void {
   const only = dir.entries[0];
@@ -182,6 +212,8 @@ function unwrap(dir: ReviewDirResponse): void {
  *
  * A loaded folder keeps its content when it is closed and opened again. The
  * next arrival refreshes it.
+ *
+ * @param path The path of the folder.
  */
 export function toggleDir(path: string): void {
   const { expanded, dirs } = get();
@@ -199,17 +231,25 @@ export function toggleDir(path: string): void {
  */
 let requestedPath: string | null = null;
 
-/** Whether a fetch's answer is still the one the store is waiting for. */
+/**
+ * Checks if the store still waits for the answer of a fetch.
+ *
+ * @param boxId The box of the fetch.
+ * @param path The file path of the fetch.
+ * @returns True when the store still holds the box and the path is the last one requested.
+ */
 function stillWanted(boxId: string, path: string): boolean {
   return get().boxId === boxId && requestedPath === path;
 }
 
 /**
- * Opens one file: content, diff markers and comments in one request, then the
- * tokens once the grammar has loaded.
+ * Opens one file. One request gets the content, the diff markers and the
+ * comments. The tokens follow when the grammar has loaded.
  *
- * An answer is dropped when a later call has asked for another file, so two
- * answers that land out of order cannot leave the pane on the first file.
+ * The function drops an answer when a later call asked for another file, so
+ * two answers that arrive out of order cannot leave the pane on the first file.
+ *
+ * @param path The path of the file.
  */
 export async function loadFile(path: string): Promise<void> {
   const { boxId } = get();
@@ -228,9 +268,11 @@ export async function loadFile(path: string): Promise<void> {
 }
 
 /**
- * Puts a file in the pane at once, and adds its tokens once they arrive.
+ * Shows a file in the pane immediately, and adds its tokens when they arrive.
  *
- * The tokens are dropped when another file has opened in the meantime.
+ * The function drops the tokens when another file opened in the meantime.
+ *
+ * @param file The file answer.
  */
 async function show(file: ReviewFileResponse): Promise<void> {
   set({ file: { ...file, tokens: null } });
@@ -241,36 +283,45 @@ async function show(file: ReviewFileResponse): Promise<void> {
   }
 }
 
-/** Closes the open file, back to the tree on a phone. */
+/** Closes the open file. On a phone, the view then shows the tree. */
 export function closeFile(): void {
   requestedPath = null;
   set({ file: null, composing: null, dirty: false });
 }
 
-/** Records whether the pane is holding unsaved edits. */
+/**
+ * Records whether the pane is holding unsaved edits.
+ *
+ * @param dirty True while the pane holds unsaved edits.
+ */
 export function setDirty(dirty: boolean): void {
   if (get().dirty !== dirty) set({ dirty });
 }
 
-/** Opens or closes the composer on one line. */
+/**
+ * Opens or closes the composer on one line.
+ *
+ * @param line The line of the composer, or null to close it.
+ */
 export function compose(line: number | null): void {
   set({ composing: line });
 }
 
-// --- editing ----------------------------------------------------------------
-
-/** What came of a save. A conflict is the one failure the reviewer can resolve. */
+/** The result of a save. A conflict is the only failure that the reviewer can resolve. */
 export type SaveResult = { ok: true } | { ok: false; conflict: boolean };
 
 /**
  * Writes the edited file back to the workspace.
  *
- * `hash` is the version the pane opened. The server refuses the save when the
- * file on disk has changed since. Passing null saves against the current
- * version on disk, which overrules that refusal.
- *
- * The server answers with the whole file view, so the pane repaints from it.
+ * The server returns the whole file view, and the pane shows that view.
  * The tree reloads as well, because an edit changes the file's status.
+ *
+ * @param path The path of the file.
+ * @param content The new content.
+ * @param hash The version the pane opened. The server refuses the save when the
+ *   file on disk has changed since. Null saves against the current version on
+ *   disk, so the save overwrites the changes on disk.
+ * @returns The result of the save.
  */
 export async function saveFile(
   path: string,
@@ -296,13 +347,15 @@ export async function saveFile(
   }
 }
 
-// --- annotations ------------------------------------------------------------
-
 /**
  * Writes a comment, showing it before the server has confirmed it.
  *
  * The server's answer then replaces the annotation list. A failure restores
  * the previous list.
+ *
+ * @param path The path of the file.
+ * @param line The line of the comment.
+ * @param comment The text of the comment.
  */
 export async function saveComment(path: string, line: number, comment: string): Promise<void> {
   const { boxId, file } = get();
@@ -328,7 +381,12 @@ export async function saveComment(path: string, line: number, comment: string): 
   }
 }
 
-/** Deletes a comment, removing it before the server has confirmed it. */
+/**
+ * Deletes a comment, removing it before the server has confirmed it.
+ *
+ * @param path The path of the file.
+ * @param line The line of the comment.
+ */
 export async function deleteComment(path: string, line: number): Promise<void> {
   const { boxId, file } = get();
   if (!boxId) return;
@@ -370,6 +428,10 @@ export async function newReview(): Promise<void> {
 /**
  * Records a file's annotations and patches the comment counts in the tree
  * without a refetch.
+ *
+ * @param path The path of the file.
+ * @param annotations The annotations of the file.
+ * @param delta The change in the comment count of the file.
  */
 function applyAnnotations(path: string, annotations: ReviewAnnotation[], delta: number): void {
   const { file, facts } = get();
@@ -383,12 +445,18 @@ function applyAnnotations(path: string, annotations: ReviewAnnotation[], delta: 
 }
 
 /**
- * Moves a file's comment count in the directory that lists it, and marks the
- * folders above it as commented.
+ * Changes the comment count of a file in the directory that lists it, and
+ * marks the folders above it as commented.
  *
- * A folder's mark says its subtree holds a comment. A new comment sets it at
- * once. Only the server clears it, on the next arrival, because only the whole
- * review tells whether a subtree still holds a comment.
+ * The mark of a folder means that its subtree holds a comment. A new comment
+ * sets the mark immediately. Only the server clears the mark on the next
+ * arrival, because it needs the whole review to know whether a subtree still
+ * holds a comment.
+ *
+ * @param dirs The loaded directories by path.
+ * @param path The path of the file.
+ * @param delta The change in the comment count of the file.
+ * @returns The patched directories.
  */
 function patchCounts(
   dirs: Record<string, ReviewDirResponse>,
@@ -397,7 +465,7 @@ function patchCounts(
 ): Record<string, ReviewDirResponse> {
   const next = { ...dirs };
 
-  /** Replaces one entry of one loaded directory, where both are there. */
+  /** Replaces one entry of one directory, when the directory is loaded and lists the entry. */
   const patch = (
     dirPath: string,
     entryPath: string,
@@ -427,12 +495,16 @@ function patchCounts(
   return next;
 }
 
-/** How much a file's comment count moved. */
+/**
+ * Computes the change in the comment count of a file.
+ *
+ * @param before The annotations before the change.
+ * @param after The annotations after the change.
+ * @returns The difference in the number of annotations.
+ */
 function countDelta(before: ReviewAnnotation[], after: ReviewAnnotation[]): number {
   return after.length - before.length;
 }
-
-// --- the base revision ------------------------------------------------------
 
 /**
  * Sets the revision the review is compared against. Null clears it, so each
@@ -440,6 +512,8 @@ function countDelta(before: ReviewAnnotation[], after: ReviewAnnotation[]): numb
  *
  * The tree and the open file reload, because the base changes their statuses
  * and diff markers.
+ *
+ * @param rev The revision, or null to clear it.
  */
 export async function setBase(rev: string | null): Promise<void> {
   const { boxId, file } = get();
@@ -455,10 +529,8 @@ export async function setBase(rev: string | null): Promise<void> {
   }
 }
 
-// --- freshness --------------------------------------------------------------
-
 /**
- * Refetches what is on screen: the tree, and the open file if there is one.
+ * Refetches the tree, and the open file if there is one.
  *
  * Skips while a write is in flight, a composer is open, or the pane holds
  * unsaved edits. A refetch then would overwrite the optimistic annotation
@@ -472,11 +544,13 @@ export async function refresh(): Promise<void> {
 }
 
 /**
- * Refetches whenever the tab becomes visible again, and returns the teardown.
+ * Refetches whenever the tab becomes visible again.
  *
- * Nothing fires while the tab stays visible. An agent may change files in
- * that time, and the drift check on the next arrival moves or outdates the
- * comments it affects.
+ * The function does not refetch while the tab stays visible. An agent can
+ * change files in that time. The drift check on the next arrival then moves the
+ * affected comments or marks them as outdated.
+ *
+ * @returns The teardown, which removes the listener.
  */
 export function refreshOnReturn(): () => void {
   return refetchOnVisible(() => void refresh());

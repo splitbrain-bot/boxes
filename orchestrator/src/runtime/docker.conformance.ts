@@ -1,3 +1,13 @@
+/**
+ * The conformance suite against the Docker daemon of this host.
+ *
+ * It needs the box image that BOX_IMAGE names and a running egress proxy
+ * container, as EGRESS_PROXY_CONTAINER names it. No orchestrator may run on
+ * the same daemon, because its orphan sweep removes the boxes of the suite.
+ * It must run as root, so that it can give the new box directories to
+ * BOX_UID.
+ */
+
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,16 +16,6 @@ import * as dk from '../docker.ts';
 import { setBoxOwner } from '../workspaces.ts';
 import { runtimeConformance } from './conformance.ts';
 import { DockerRuntime } from './docker.ts';
-
-/**
- * The conformance suite against the Docker daemon of this host.
- *
- * It needs the box image that BOX_IMAGE names and a running egress proxy
- * container, as EGRESS_PROXY_CONTAINER names it. No orchestrator may run on
- * the same daemon, because its orphan sweep removes the boxes of the suite.
- * It must run as root, so that the new box directories can be given to
- * BOX_UID.
- */
 
 /** The port of the control channel of the egress proxy. */
 const CONTROL_PORT = 3129;

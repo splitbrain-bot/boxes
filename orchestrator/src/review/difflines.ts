@@ -2,13 +2,13 @@ import { fileLines } from './fs.ts';
 import { type GitTarget, git, gitOut } from './git.ts';
 import { type Base, baseRev } from './gitstatus.ts';
 
-/** What happened to a line of the new file. */
+/** The type of change of a line in the new file. */
 export type LineChange = 'added' | 'modified';
 
-/** Unchanged lines git includes around a change, shown in the hunk view. */
+/** The number of unchanged lines around a change in each hunk. */
 const DIFF_CONTEXT = 3;
 
-/** Matches a hunk header: `@@ -old[,count] +new[,count] @@`. */
+/** Matches a hunk header of the form `@@ -old[,count] +new[,count] @@`. */
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /**
@@ -16,33 +16,37 @@ const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * points at holds the removed lines.
  */
 interface DiffDeletion {
-  /** The deletion sits after this line; 0 means the top of the file. */
+  /** The deletion is after this line. 0 means the top of the file. */
   afterLine: number;
-  /** Index into `hunks`, so tapping the marker can show the removed lines. */
+  /** The index into `hunks` of the hunk that holds the removed lines. */
   hunkIndex: number;
 }
 
 /** One diff hunk with the range of new-file lines it covers. */
 interface DiffHunk {
-  /** First new-file line in the hunk. */
+  /** The first new-file line in the hunk. */
   startLine: number;
-  /** Last new-file line in the hunk. */
+  /** The last new-file line in the hunk. */
   endLine: number;
   /** The hunk's raw diff lines, as git wrote them. */
   diff: string;
 }
 
-/** Everything a file view needs to mark up its gutter. */
+/** The diff markers of one file, for the gutter of the file view. */
 export interface FileDiff {
-  /** Changed new-file lines, by line number. */
+  /** The changed new-file lines, by line number. */
   lines: Record<number, LineChange>;
-  /** The diff's hunks, in file order. */
+  /** The hunks of the diff, in file order. */
   hunks: DiffHunk[];
-  /** Where lines were removed and nothing replaced them. */
+  /** The places where lines were removed and no lines replaced them. */
   deletions: DiffDeletion[];
 }
 
-/** A file with no diff at all. */
+/**
+ * Returns the diff of a file without changes.
+ *
+ * @returns A diff with no lines, hunks or deletions.
+ */
 export function emptyDiff(): FileDiff {
   return { lines: {}, hunks: [], deletions: [] };
 }
@@ -50,6 +54,9 @@ export function emptyDiff(): FileDiff {
 /**
  * Splits diff output into lines without terminators. A final newline adds no
  * empty last line.
+ *
+ * @param out The output of git diff.
+ * @returns The lines.
  */
 function diffLines(out: string): string[] {
   if (out === '') return [];
@@ -60,23 +67,26 @@ function diffLines(out: string): string[] {
 
 /**
  * Turns unified diff output for one file into line markers, hunks and
- * deletion markers. The function is pure.
+ * deletion markers.
  *
- * It tells added lines from modified ones by the diff body, because one hunk
+ * The function tells added lines from modified lines by the diff body, because one hunk
  * can hold both. A run of removed lines that no added lines replace becomes a
- * deletion marker after the last line that survived.
+ * deletion marker after the last line that stayed.
+ *
+ * @param out The unified diff output of git for one file.
+ * @returns The diff markers.
  */
 export function parseDiff(out: string): FileDiff {
   const info = emptyDiff();
 
-  /** The hunk being read, and its raw text. */
+  /** The hunk being read. */
   let current: DiffHunk | null = null;
   let body: string[] = [];
-  /** Next line number in the new file. */
+  /** The next line number in the new file. */
   let newLine = 0;
-  /** Removed lines seen since the last unchanged line. */
+  /** The number of removed lines since the last unchanged line. */
   let removed = 0;
-  /** Whether the run of added lines replaces removed ones. */
+  /** True when the run of added lines replaces removed lines. */
   let replacing = false;
 
   const keep = (line: string): void => {
@@ -163,7 +173,12 @@ export function parseDiff(out: string): FileDiff {
   return info;
 }
 
-/** Marks every line of a file as added, for a file git does not track yet. */
+/**
+ * Marks every line of a file as added, for a file that git does not track.
+ *
+ * @param content The content of the file.
+ * @returns The value 'added' for each line number.
+ */
 export function allLinesAdded(content: string): Record<number, LineChange> {
   const lines: Record<number, LineChange> = {};
   for (let i = 1; i <= fileLines(content).length; i++) lines[i] = 'added';
@@ -172,11 +187,17 @@ export function allLinesAdded(content: string): Record<number, LineChange> {
 
 /**
  * Computes the diff markers for one file, against the base commit or, without
- * one, against HEAD. For a file git does not track, every line of `content` is
+ * one, against HEAD. For a file that git does not track, every line of `content` is
  * marked as added.
  *
  * The diff and the untracked check run in parallel, because only the diff
  * result shows which of the two answers is needed.
+ *
+ * @param target The repository to run git in.
+ * @param base The base to compare against.
+ * @param path The path of the file, relative to the repository.
+ * @param content The current content of the file.
+ * @returns The diff markers.
  */
 export async function fileDiff(
   target: GitTarget,

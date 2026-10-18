@@ -6,7 +6,12 @@ import { cn } from '@/lib/utils';
 
 /**
  * The select root. Opening it pushes a history entry at the same URL, so the
- * back button closes the list instead of leaving the screen under it.
+ * back button closes the list and the screen below it stays.
+ *
+ * @param open The open state, for a controlled select.
+ * @param defaultOpen The open state at mount, for an uncontrolled select.
+ * @param onOpenChange Called with the new open state.
+ * @param props The other props of the Radix select root.
  */
 function Select({
   open,
@@ -25,20 +30,39 @@ function Select({
   );
 }
 
+/**
+ * A group of select items.
+ *
+ * @param props The props of the Radix select group.
+ */
 function SelectGroup({ ...props }: React.ComponentProps<typeof SelectPrimitive.Group>) {
   return <SelectPrimitive.Group data-slot="select-group" {...props} />;
 }
 
+/**
+ * The chosen value, as the trigger shows it.
+ *
+ * @param props The props of the Radix select value.
+ */
 function SelectValue({ ...props }: React.ComponentProps<typeof SelectPrimitive.Value>) {
   return <SelectPrimitive.Value data-slot="select-value" {...props} />;
 }
 
+/**
+ * The control that opens a select, with a chevron after its content.
+ *
+ * @param className Extra classes.
+ * @param size The height of the trigger.
+ * @param children The content of the trigger, usually a select value.
+ * @param props The other props of the Radix select trigger.
+ */
 function SelectTrigger({
   className,
   size = 'default',
   children,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Trigger> & {
+  /** The height of the trigger. */
   size?: 'sm' | 'default';
 }) {
   return (
@@ -59,6 +83,15 @@ function SelectTrigger({
   );
 }
 
+/**
+ * The list of a select, rendered in a portal with scroll buttons.
+ *
+ * @param className Extra classes.
+ * @param children The items.
+ * @param position The positioning mode of Radix.
+ * @param align The alignment against the trigger in the popper mode.
+ * @param props The other props of the Radix select content.
+ */
 function SelectContent({
   className,
   children,
@@ -96,6 +129,12 @@ function SelectContent({
   );
 }
 
+/**
+ * A label for a group of select items.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix select label.
+ */
 function SelectLabel({ className, ...props }: React.ComponentProps<typeof SelectPrimitive.Label>) {
   return (
     <SelectPrimitive.Label
@@ -106,6 +145,13 @@ function SelectLabel({ className, ...props }: React.ComponentProps<typeof Select
   );
 }
 
+/**
+ * One item of a select, with a check mark while it is chosen.
+ *
+ * @param className Extra classes.
+ * @param children The text of the item.
+ * @param props The other props of the Radix select item.
+ */
 function SelectItem({
   className,
   children,
@@ -133,6 +179,12 @@ function SelectItem({
   );
 }
 
+/**
+ * A line between select items.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix select separator.
+ */
 function SelectSeparator({
   className,
   ...props
@@ -146,6 +198,12 @@ function SelectSeparator({
   );
 }
 
+/**
+ * The button that scrolls a long select list up.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix scroll button.
+ */
 function SelectScrollUpButton({
   className,
   ...props
@@ -161,6 +219,12 @@ function SelectScrollUpButton({
   );
 }
 
+/**
+ * The button that scrolls a long select list down.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix scroll button.
+ */
 function SelectScrollDownButton({
   className,
   ...props

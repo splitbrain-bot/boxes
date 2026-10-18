@@ -1,3 +1,5 @@
+/** Web Push notifications for the events where a thread needs a person. */
+
 import type { Config } from './config.ts';
 import {
   type Db,
@@ -9,17 +11,15 @@ import {
 import { log } from './log.ts';
 import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';
 
-/** Web Push notifications for the events where a thread needs a person. */
-
 /** Longest a thread title may be in a notification, in characters. */
 const MAX_TITLE = 80;
 
-/** What happened, which picks the wording. */
+/** The kind of event. It selects the wording. */
 export type NotifyKind = 'approval' | 'idle';
 
-/** One thing worth interrupting somebody for. */
+/** One event that needs a person. */
 export interface NotifyEvent {
-  /** What happened. */
+  /** The kind of event. */
   kind: NotifyKind;
   /** The box the thread is in. */
   boxId: string;
@@ -27,11 +27,11 @@ export interface NotifyEvent {
   boxName: string;
   /** The dashboard's own thread id, so the notification can link at it. */
   threadId: string | null;
-  /** What that conversation is called, or null for an untitled one. */
+  /** The title of the thread, or null for an untitled one. */
   threadName: string | null;
   /**
-   * Whether this thread still has background work running, when the event
-   * knows. Work in other threads of the box does not count.
+   * True when this thread still has background work running. Undefined when
+   * the event does not know. Work in other threads of the box does not count.
    */
   background?: boolean;
 }
@@ -43,8 +43,8 @@ interface PushPayload {
   /** The notification text. */
   body: string;
   /**
-   * Replaces an earlier notification with the same tag rather than stacking
-   * on it, so a thread that asks twice does not leave two to dismiss.
+   * The notification tag. A notification replaces an earlier one with the
+   * same tag, so a thread that asks twice leaves one notification to dismiss.
    */
   tag: string;
   /** Where a tap goes, relative to the dashboard's own origin. */
@@ -52,8 +52,11 @@ interface PushPayload {
 }
 
 /**
- * Title and body for one event. Exported for tests, as the encrypted payload
+ * Returns the title and body for one event. Exported for tests, as the encrypted payload
  * cannot be read on the wire.
+ *
+ * @param event The event.
+ * @returns The title and the body of the notification.
  */
 export function wording(event: NotifyEvent): { title: string; body: string } {
   const where = event.threadName
@@ -65,7 +68,7 @@ export function wording(event: NotifyEvent): { title: string; body: string } {
       body: `${where} is waiting for a permission decision.`,
     };
   }
-  // Says that something runs, not what: a lock screen is no place for a command.
+  // The text does not name the command, because a lock screen can show it to anyone.
   const still = event.background ? ' Something is still running.' : '';
   return {
     title: 'Boxes: waiting for you',
@@ -74,14 +77,22 @@ export function wording(event: NotifyEvent): { title: string; body: string } {
 }
 
 /**
- * A thread title cut to MAX_TITLE characters. The whole payload must fit one
+ * Returns a thread title cut to MAX_TITLE characters. The whole payload must fit one
  * encrypted record.
+ *
+ * @param name The thread title.
+ * @returns The title, with an ellipsis at the end when it was cut.
  */
 function shortTitle(name: string): string {
   return name.length <= MAX_TITLE ? name : `${name.slice(0, MAX_TITLE - 1)}…`;
 }
 
-/** Where a notification about this event points. */
+/**
+ * Returns the dashboard path that a notification about an event opens.
+ *
+ * @param event The event.
+ * @returns The path of the thread, or the root path for an event without a thread.
+ */
 function target(event: NotifyEvent): string {
   return event.threadId ? `/boxes/${event.boxId}/threads/${event.threadId}` : '/';
 }
@@ -91,6 +102,10 @@ export class Notifier {
   /** The VAPID keypair, or null before first use. */
   private keys: VapidKeys | null = null;
 
+  /**
+   * @param db The database that holds the push subscriptions and the keypair.
+   * @param cfg The configuration of the deployment.
+   */
   constructor(
     /** Where the push subscriptions and the keypair are stored. */
     private readonly db: Db,
@@ -102,23 +117,31 @@ export class Notifier {
    * The deployment's VAPID public key, which a browser needs to subscribe.
    * The first read generates the keypair, so a deployment without subscribers
    * writes none.
+   *
+   * @returns The public key, base64url.
    */
   get publicKey(): string {
     return this.vapid().publicKey;
   }
 
-  /** The keypair, loaded or generated on first use. */
+  /**
+   * Returns the keypair, loaded or generated on first use.
+   *
+   * @returns The keypair.
+   */
   private vapid(): VapidKeys {
     if (!this.keys) this.keys = loadVapidKeys(this.db);
     return this.keys;
   }
 
   /**
-   * Sends one event. It never throws: every failure is logged.
+   * Sends one event. It never throws, and it logs every failure.
    *
    * The gateway does not await it, so a turn waiting on a person does not also
    * wait on a push service. An unhandled rejection would crash the process.
    * The promise lets a test wait.
+   *
+   * @param event The event.
    */
   async notify(event: NotifyEvent): Promise<void> {
     try {
@@ -135,6 +158,8 @@ export class Notifier {
   /**
    * Pushes to every subscribed browser. It deletes subscriptions the push
    * service reports as gone, and those made under another VAPID key.
+   *
+   * @param event The event.
    */
   private async push(event: NotifyEvent): Promise<void> {
     const stored = listPushSubscriptions(this.db);
@@ -142,8 +167,8 @@ export class Notifier {
     if (stored.length === 0) return;
 
     const keys = this.vapid();
-    // One made under another key is refused with a status the gone check
-    // below misses, so without this it would be retried forever.
+    // The push service refuses a subscription made under another key with a
+    // status that the gone check misses. Without the drop, it is retried forever.
     const dropped = dropOtherKeySubscriptions(this.db, keys.publicKey);
     if (dropped > 0) {
       log.info('dropped push subscriptions made under an earlier key', { count: dropped });
@@ -191,9 +216,11 @@ export class Notifier {
 }
 
 /**
- * The push service an endpoint belongs to, for the log. The path is a
- * capability — anyone holding it can push to that browser — so it never
- * reaches a log line.
+ * Returns the origin of the push service of an endpoint, for the log. The
+ * path identifies one subscription of one browser, so the log leaves it out.
+ *
+ * @param endpoint The endpoint URL.
+ * @returns The origin, or `unparseable` for an endpoint that is no URL.
  */
 function originOf(endpoint: string): string {
   try {

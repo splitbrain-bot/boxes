@@ -1,35 +1,35 @@
 /**
- * The REVIEW.md format: parsing, serialization, mutation and drift.
+ * The REVIEW.md format and the operations on a parsed review.
  *
- * The format matches the desktop review tool's byte for byte, so either tool
- * can continue a review the other started. This module does no I/O.
+ * The format is the format of the desktop review tool, so each tool can continue a review that the other
+ * started. This module does no I/O.
  */
 
 /**
- * Source lines kept above and below an annotated line, so the code can be
- * recognised again after it moved.
+ * The number of source lines kept above and below an annotated line, so the drift check can
+ * find the code again after it moved.
  */
 const CONTEXT_RADIUS = 3;
 
 /**
- * The word in a context block's fence info string that tells the block apart
+ * The word in the fence info string of a context block that tells the block apart
  * from a code sample in the comment above it.
  */
 const CONTEXT_MARKER = 'context';
 
 /** One review comment with the source context it was written against. */
 export interface Annotation {
-  /** The reviewer's comment, trimmed. */
+  /** The comment of the reviewer, trimmed. */
   comment: string;
-  /** Stored context lines, without their line-number prefix. */
+  /** The stored context lines, without their line-number prefix. */
   context: string[];
-  /** First line number of the context block; 0 when none is stored. */
+  /** The first line number of the context block, or 0 when none is stored. */
   contextFrom: number;
-  /** True when the stored context no longer matches the source. */
+  /** True when the stored context does not match the source. */
   outdated: boolean;
 }
 
-/** Annotations by file path, then by line number. */
+/** The annotations by file path, then by line number. */
 type ReviewData = Map<string, Map<number, Annotation>>;
 
 /** A whole parsed REVIEW.md. */
@@ -40,28 +40,29 @@ export interface Review {
   started: string;
 }
 
-/** A file section heading, which holds the path in backticks. */
+/** Matches a file section heading, which holds the path in backticks. */
 const FILE_HEADER = /^## `(.+)`$/;
-/** An annotation heading with its line number and an optional marker. */
+/** Matches an annotation heading with its line number and an optional marker. */
 const LINE_HEADER = /^#### Line (\d+)(.*)$/;
-/** One numbered source line of a context block. */
+/** Matches one numbered source line of a context block. */
 const CONTEXT_LINE = /^(\d+):(?: (.*))?$/;
-/** The line that records the date the review was started. */
+/** Matches the line that records the date the review was started. */
 const STARTED = /^_Started: (.+)_$/;
-/** The run of backticks or tildes that opens a code fence. */
+/** Matches the run of backticks or tildes that opens a code fence. */
 const FENCE = /^(`{3,}|~{3,})/;
 
 /**
- * The most spaces a code fence may be indented. A line indented further is
- * content, not a fence.
+ * The maximum indent of a code fence, in spaces. A line with more indent is
+ * content.
  */
 const MAX_FENCE_INDENT = 3;
-
-// --- parsing ----------------------------------------------------------------
 
 /**
  * Splits a document into lines without terminators, tolerating CRLF. A final
  * newline adds no empty last line.
+ *
+ * @param text The document.
+ * @returns The lines.
  */
 function toLines(text: string): string[] {
   if (text === '') return [];
@@ -74,8 +75,11 @@ function toLines(text: string): string[] {
  * Reads a REVIEW.md into its annotations and the date the review was started.
  *
  * Headings count as structure only outside fenced code blocks, so a heading in
- * a comment's code sample stays part of the comment. A horizontal rule
+ * a code sample of a comment stays part of the comment. A horizontal rule
  * separates sections only when a file heading follows it.
+ *
+ * @param text The content of REVIEW.md.
+ * @returns The parsed review.
  */
 export function parseReview(text: string): Review {
   const lines = toLines(text);
@@ -152,9 +156,13 @@ export function parseReview(text: string): Review {
 }
 
 /**
- * Separates an annotation's comment from the context block closing it. With
- * `marked` set, only a block whose fence carries the context marker counts as
- * one; otherwise a closing block of numbered source lines does.
+ * Separates the comment of an annotation from the context block at its end.
+ * With `marked` set, only a block whose fence has the context marker is a
+ * context block. Without it, a last block of numbered source lines is one.
+ *
+ * @param body The lines of the annotation after its heading.
+ * @param marked True when the document marks its context blocks.
+ * @returns The comment, the context lines, and the first line number of the context, or 0 without context.
  */
 function splitBody(
   body: string[],
@@ -182,12 +190,22 @@ function splitBody(
   };
 }
 
-/** Whether the document marks its context blocks. */
+/**
+ * Checks if the document marks its context blocks.
+ *
+ * @param lines The lines of the document.
+ * @returns True when a fence line has the context marker.
+ */
 function usesContextMarker(lines: string[]): boolean {
   return lines.some((line) => fenceMarker(line) !== '' && isContextFence(line));
 }
 
-/** Whether a fence line opens a context block. */
+/**
+ * Checks if a fence line opens a context block.
+ *
+ * @param line The fence line.
+ * @returns True when the info string holds {@link CONTEXT_MARKER}.
+ */
 function isContextFence(line: string): boolean {
   const { trimmed } = trimIndent(line);
   const info = trimmed.replace(/^[`~]+/, '');
@@ -195,16 +213,21 @@ function isContextFence(line: string): boolean {
 }
 
 /**
- * Assembles the comment body, without the blank lines that set it apart from
+ * Joins the comment lines and removes the blank lines that set the comment apart from
  * the headings around it.
+ *
+ * @param lines The comment lines.
+ * @returns The comment, trimmed.
  */
 function joinComment(lines: string[]): string {
   return lines.join('\n').trim();
 }
 
 /**
- * Parses the numbered source lines of a context block, or returns null when
- * the lines are not one.
+ * Parses the numbered source lines of a context block.
+ *
+ * @param lines The lines between the fences.
+ * @returns The context lines and the first line number, or null when a line is not a numbered source line.
  */
 function parseContext(lines: string[]): { context: string[]; from: number } | null {
   if (lines.length === 0) return null;
@@ -219,7 +242,12 @@ function parseContext(lines: string[]): { context: string[]; from: number } | nu
   return { context, from };
 }
 
-/** The lines opening and closing the last complete fenced block in `lines`. */
+/**
+ * Finds the last complete fenced block.
+ *
+ * @param lines The lines to search.
+ * @returns The indexes of the opening and the closing fence line, or null when there is no complete block.
+ */
 function lastFencedBlock(lines: string[]): { open: number; close: number } | null {
   let fence = '';
   let start = 0;
@@ -242,8 +270,10 @@ function lastFencedBlock(lines: string[]): { open: number; close: number } | nul
 }
 
 /**
- * Whether the next line with content starts a file section, which is what
- * makes a horizontal rule a separator rather than text.
+ * Checks if the next line that is not blank is a file heading.
+ *
+ * @param lines The lines after the current line.
+ * @returns True when the first line that is not blank is a file heading.
  */
 function opensFileSection(lines: string[]): boolean {
   for (const line of lines) {
@@ -254,8 +284,10 @@ function opensFileSection(lines: string[]): boolean {
 }
 
 /**
- * The run of backticks or tildes opening a code fence on this line, or '' when
- * the line opens none.
+ * Gives the run of backticks or tildes that opens a code fence on a line.
+ *
+ * @param line The line.
+ * @returns The run, or '' when the line opens no fence.
  */
 function fenceMarker(line: string): string {
   const { trimmed, indent } = trimIndent(line);
@@ -263,7 +295,13 @@ function fenceMarker(line: string): string {
   return FENCE.exec(trimmed)?.[0] ?? '';
 }
 
-/** Whether the line closes a fence opened with `marker`. */
+/**
+ * Checks if a line closes a fence that `marker` opened.
+ *
+ * @param line The line.
+ * @param marker The run of backticks or tildes that opened the fence.
+ * @returns True when the line closes the fence.
+ */
 function closesFence(line: string, marker: string): boolean {
   const { trimmed, indent } = trimIndent(line);
   if (indent > MAX_FENCE_INDENT) return false;
@@ -273,36 +311,47 @@ function closesFence(line: string, marker: string): boolean {
   return body.split('').every((char) => char === marker[0]);
 }
 
-/** Strips leading spaces and reports how many there were. */
+/**
+ * Strips the leading spaces of a line.
+ *
+ * @param line The line.
+ * @returns The line without leading spaces, and the number of spaces removed.
+ */
 function trimIndent(line: string): { trimmed: string; indent: number } {
   const trimmed = line.replace(/^ +/, '');
   return { trimmed, indent: line.length - trimmed.length };
 }
 
 /**
- * Whether a line would be read back as one of the document's own headings
- * rather than as text.
+ * Checks if the parser reads a line as a heading of the document.
+ *
+ * @param line The line.
+ * @returns True when the line is a file heading or an annotation heading.
  */
 function looksStructural(line: string): boolean {
   return FILE_HEADER.test(line) || LINE_HEADER.test(line);
 }
 
 /**
- * Removes the backslash that `escapeComment` puts in front of a comment line
- * which would otherwise read as a heading.
+ * Removes the backslash that {@link escapeComment} puts in front of a comment line
+ * that looks like a heading.
+ *
+ * @param line The line from the document.
+ * @returns The line as the reviewer wrote it.
  */
 function unescapeStructure(line: string): string {
   if (line.startsWith('\\') && looksStructural(line.slice(1))) return line.slice(1);
   return line;
 }
 
-// --- serialization ----------------------------------------------------------
-
 /**
  * Converts a review to its markdown form.
  *
- * Context blocks hold the context stored with each annotation: the code as it
- * was when the annotation last matched the source.
+ * Each context block holds the stored context of its annotation, which is the
+ * code at the last time the annotation matched the source.
+ *
+ * @param review The review.
+ * @returns The content of REVIEW.md.
  */
 export function serializeReview(review: Review): string {
   const out: string[] = ['# Code Review\n\n', `_Started: ${review.started}_\n`];
@@ -331,11 +380,14 @@ export function serializeReview(review: Review): string {
 }
 
 /**
- * The annotated file paths, in the order the document lists them.
+ * Sorts the annotated files in the order that the document lists them.
  *
- * Paths are sorted by their UTF-8 bytes, as the desktop tool sorts them. The
+ * The function sorts the paths by their UTF-8 bytes, as the desktop tool sorts them. The
  * default sort compares UTF-16 code units, which gives a different order for
  * characters outside the BMP.
+ *
+ * @param data The annotations of the review.
+ * @returns The files that hold annotations, with their annotations.
  */
 function sortedEntries(data: ReviewData): [string, Map<number, Annotation>][] {
   return [...data.entries()]
@@ -344,12 +396,14 @@ function sortedEntries(data: ReviewData): [string, Map<number, Annotation>][] {
 }
 
 /**
- * Writes a comment as the reviewer wrote it, and reports the code fence it
- * left open, if any.
+ * Prepares the text of a comment for the document.
  *
- * A line that would read back as one of the document's own headings gets a
- * backslash in front, which markdown renders as the intended text. Lines inside
- * the comment's own code fences stay unchanged.
+ * A line that looks like a heading of the document gets a backslash in front,
+ * and markdown renders the line as text. Lines inside the code fences of the
+ * comment stay unchanged.
+ *
+ * @param comment The comment.
+ * @returns The text with a newline after each line, and the fence that the comment left open, or ''.
  */
 function escapeComment(comment: string): { text: string; openFence: string } {
   const out: string[] = [];
@@ -368,10 +422,12 @@ function escapeComment(comment: string): { text: string; openFence: string } {
 }
 
 /**
- * The info string of a context block's fence: the file's language, so the
- * block is highlighted wherever the review is rendered, followed by the marker
- * that tells it from a code sample in a comment. Renderers take the language
- * from the first word and ignore the rest.
+ * Gives the info string of the fence of a context block. It holds the language of the
+ * file for highlighting, and then the marker that tells the block apart from a
+ * code sample in a comment. Renderers take the language from the first word.
+ *
+ * @param path The path of the annotated file.
+ * @returns The info string.
  */
 function contextFenceInfo(path: string): string {
   const lang = detectLang(path);
@@ -379,20 +435,25 @@ function contextFenceInfo(path: string): string {
 }
 
 /**
- * Renders stored context lines with their line numbers, the form they take
- * inside the fenced context block.
+ * Writes stored context lines with their line numbers, as the fenced context block holds them.
+ *
+ * @param lines The context lines.
+ * @param from The line number of the first line.
+ * @returns The numbered lines, each with a newline.
  */
 function formatContext(lines: string[], from: number): string {
   return lines.map((line, i) => `${from + i}: ${line}\n`).join('');
 }
 
 /**
- * A language identifier for a context block's fence, by file name or
- * extension, or '' when none is known.
+ * Gives a language identifier for a file, by file name or extension.
  *
  * The language only affects syntax colouring when the markdown is rendered.
- * Both tools find the `context` marker after it, so a review still reads back
- * in the other tool when the two pick different languages.
+ * Both tools find the `context` marker after it, so the other tool can read a review
+ * when the two pick different languages.
+ *
+ * @param path The path of the file.
+ * @returns The language identifier, or '' when none is known.
  */
 export function detectLang(path: string): string {
   const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
@@ -462,19 +523,23 @@ export function detectLang(path: string): string {
 }
 
 /**
- * Formats a date, today by default, as REVIEW.md records a start date:
- * YYYY-MM-DD in local time.
+ * Formats a date as REVIEW.md records a start date.
+ *
+ * @param now The date. Today when absent.
+ * @returns The date as YYYY-MM-DD in local time.
  */
 export function todayStamp(now: Date = new Date()): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-// --- mutation ---------------------------------------------------------------
-
 /**
- * The lines surrounding `lineNum` together with the line number the block
- * starts at. Line numbers are 1-based; an out-of-range line records nothing.
+ * Gives the lines around a line.
+ *
+ * @param lines The lines of the file.
+ * @param lineNum The line number, starting at 1.
+ * @param radius The number of lines above and below.
+ * @returns The lines and the line number of the first line. A line out of range gives no lines and 0.
  */
 export function contextAround(
   lines: string[],
@@ -488,10 +553,15 @@ export function contextAround(
 }
 
 /**
- * Adds or replaces the comment on one line of one file, recording the
- * surrounding source with it so the annotation can be followed when the code
- * later moves. `sourceLines` is null for a file that cannot be read, which
- * leaves the annotation without context rather than refusing it.
+ * Adds or replaces the comment on one line of one file. The annotation stores
+ * the source lines around the line, so the drift check can follow the code
+ * when it moves.
+ *
+ * @param review The review to change.
+ * @param file The workspace-relative path of the file.
+ * @param line The line number, starting at 1.
+ * @param comment The comment.
+ * @param sourceLines The current lines of the file, or null for an annotation without context.
  */
 export function setAnnotation(
   review: Review,
@@ -519,7 +589,13 @@ export function setAnnotation(
   lines.set(line, ann);
 }
 
-/** Removes the comment on one line, and the file entry once it holds none. */
+/**
+ * Removes the comment on one line, and the file entry when it holds no more comments.
+ *
+ * @param review The review to change.
+ * @param file The workspace-relative path of the file.
+ * @param line The line number.
+ */
 export function deleteAnnotation(review: Review, file: string, line: number): void {
   const lines = review.data.get(file);
   if (!lines) return;
@@ -527,12 +603,23 @@ export function deleteAnnotation(review: Review, file: string, line: number): vo
   if (lines.size === 0) review.data.delete(file);
 }
 
-/** Annotations for one file, by line number. Empty when the file has none. */
+/**
+ * Gives the annotations of one file.
+ *
+ * @param review The review.
+ * @param file The workspace-relative path of the file.
+ * @returns The annotations by line number. The map is empty when the file has none.
+ */
 export function annotationsFor(review: Review, file: string): Map<number, Annotation> {
   return review.data.get(file) ?? new Map();
 }
 
-/** How many annotations each annotated file has. */
+/**
+ * Counts the annotations of each annotated file.
+ *
+ * @param review The review.
+ * @returns The number of annotations, by file path.
+ */
 export function annotationCounts(review: Review): Map<string, number> {
   return new Map(
     [...review.data.entries()]
@@ -541,16 +628,17 @@ export function annotationCounts(review: Review): Map<string, number> {
   );
 }
 
-// --- drift ------------------------------------------------------------------
-
 /**
- * Brings one file's annotations back in line with its source, and reports
- * whether that changed anything.
+ * Updates the annotations of one file for its current source.
  *
- * An annotation whose context has moved is relocated. One whose context is
- * gone is marked outdated. One without stored context adopts the current
- * source as its reference. `sourceLines` is null for a file that no longer
- * exists, which makes every annotation on it outdated.
+ * An annotation whose context has moved goes to the new line. An annotation
+ * whose context is gone is marked outdated. An annotation without stored
+ * context takes the context of the current source.
+ *
+ * @param annotations The annotations of the file, by line number. The function changes them in place.
+ * @param sourceLines The current lines of the file, or null for a file that is gone or cannot be read. Null
+ *   marks every annotation outdated.
+ * @returns True when an annotation changed.
  */
 export function checkDrift(
   annotations: Map<number, Annotation>,
@@ -574,7 +662,7 @@ export function checkDrift(
 
   for (const [lineNum, ann] of annotations) {
     if (ann.context.length === 0) {
-      // No stored context to compare against: adopt the current source.
+      // Without stored context, the annotation takes the context of the current source.
       const { context, from } = contextAround(sourceLines, lineNum, CONTEXT_RADIUS);
       if (context.length > 0) {
         ann.context = context;
@@ -616,7 +704,7 @@ export function checkDrift(
 interface Relocation {
   /** The line the annotation is on. */
   oldLine: number;
-  /** The line its context now points to. */
+  /** The line that its context points to after the move. */
   newLine: number;
   /** The annotation that moves. */
   ann: Annotation;
@@ -628,8 +716,11 @@ interface Relocation {
  * A move goes ahead only when no staying annotation holds its target line and
  * no earlier move claims it. A refused move leaves its annotation in place,
  * which can block another move, so the loop refuses one move at a time until
- * the rest hold. No annotation is lost and no two share a line. The map is
- * rebuilt in line order.
+ * the rest hold. No annotation is lost and no two share a line. The function
+ * rebuilds the map in line order.
+ *
+ * @param annotations The annotations of the file, by line number.
+ * @param relocations The annotations whose context moved.
  */
 function relocate(annotations: Map<number, Annotation>, relocations: Relocation[]): void {
   const moves = new Map(relocations.map((r) => [r.oldLine, r]));
@@ -653,19 +744,30 @@ function relocate(annotations: Map<number, Annotation>, relocations: Relocation[
   for (const [line, ann] of [...moved].sort((a, b) => a[0] - b[0])) annotations.set(line, ann);
 }
 
-/** Whether the context lines match the file at a given 1-based position. */
+/**
+ * Checks if the context lines match the file at a line number.
+ *
+ * @param fileLines The lines of the file.
+ * @param context The context lines.
+ * @param fromLine The line number of the first context line, starting at 1.
+ * @returns True when all context lines match.
+ */
 function contextMatchesAt(fileLines: string[], context: string[], fromLine: number): boolean {
   if (fromLine < 1 || fromLine - 1 + context.length > fileLines.length) return false;
   return context.every((line, i) => fileLines[fromLine - 1 + i] === line);
 }
 
 /**
- * Searches the file for a block of lines matching `context` and returns its
- * 1-based line number, or 0 when there is none.
+ * Searches the file for a block of lines that matches `context`.
  *
- * The search runs outwards from `near`, so the match closest to where the
- * context was written wins. Code that repeats, such as closing braces or
- * boilerplate, then keeps its annotations on the right copy.
+ * The search starts at `near` and goes outwards, so the closest match wins.
+ * Thus an annotation on code that repeats, for example closing braces, stays
+ * on the nearest copy.
+ *
+ * @param fileLines The lines of the file.
+ * @param context The context lines.
+ * @param near The line number to start at.
+ * @returns The line number of the match, starting at 1, or 0 when there is none.
  */
 function findContext(fileLines: string[], context: string[], near: number): number {
   const limit = fileLines.length - context.length + 1;

@@ -1,23 +1,29 @@
+/**
+ * The schemas of the JSON bodies of the REST routes, and the check that
+ * applies them.
+ *
+ * A schema checks only the shape of one body. The code that owns a limit or a
+ * lookup checks it, for example the maximum length of a name or the existence
+ * of a box. Unknown fields are removed and not refused, so an older
+ * orchestrator can serve a newer client.
+ */
+
 import { z } from 'zod';
 import type { HarnessId } from '../../shared/types.ts';
 import { HttpError } from './http-error.ts';
 
 /**
- * The shapes of the REST routes' JSON bodies, and the check that applies them.
+ * Reads a request body, or refuses it with a 400 that names the field and the
+ * problem.
  *
- * Each schema checks the shape of one route's body. Limits and lookups, such
- * as how long a name may be or whether a box exists, stay with the code that
- * owns them. Unknown fields are dropped rather than refused, so an older
- * orchestrator still serves a newer client.
- */
-
-/**
- * Reads a request body, or refuses it with a 400 naming the field and what is
- * wrong with it.
+ * A request without a body is read as an empty object. So a route with only
+ * optional fields accepts it, and a route with a required field answers that
+ * the field is missing.
  *
- * A request carrying no body at all is read as an empty object. A route whose
- * fields are all optional therefore takes one, and a route with a required
- * field answers that the field is missing.
+ * @param schema The schema of the body.
+ * @param body The parsed JSON body, or undefined for a request without a body.
+ * @returns The body in the shape of the schema, without unknown fields.
+ * @throws {HttpError} A 400 when the body does not match the schema.
  */
 export function parseBody<S extends z.ZodTypeAny>(schema: S, body: unknown): z.infer<S> {
   const parsed = schema.safeParse(body ?? {});
@@ -28,21 +34,17 @@ export function parseBody<S extends z.ZodTypeAny>(schema: S, body: unknown): z.i
   throw new HttpError(400, field ? `${field}: ${issue.message}` : issue.message);
 }
 
-/** A string that has to carry something, for a field an empty value cannot name. */
+/** A string that must not be empty. */
 const filled = z.string().min(1, 'must not be empty');
 
-/**
- * What a new thread runs: the harness, and its mode and settings when the
- * dialog chose them. Whether the harness is one this deployment has is the
- * box manager's check, which is where the registry is.
- */
+/** The harness of a new thread, with the mode and the settings that the dialog chose. */
 const threadOptions = z.object({
   harness: z.custom<HarnessId>((id) => typeof id === 'string', 'must be a string'),
   modeId: z.string().optional(),
   config: z.record(z.string(), z.string()).optional(),
 });
 
-/** POST /api/boxes — the box to create, and what its first thread runs. */
+/** The body of POST /api/boxes, with the box to create and the options of its first thread. */
 export const createBoxBody = z.object({
   name: z.string(),
   profile: z.string().optional(),
@@ -50,28 +52,29 @@ export const createBoxBody = z.object({
   thread: threadOptions.optional(),
 });
 
-/** POST /api/boxes/:id/threads — the conversation to add. */
+/** The body of POST /api/boxes/:id/threads, with the thread to add. */
 export const createThreadBody = z.object({
   from: z.string().optional(),
   options: threadOptions.optional(),
 });
 
-/** POST /api/boxes/:id/threads/:threadId/done — the mark to set or clear. */
+/** The body of POST /api/boxes/:id/threads/:threadId/done, with the mark to set or clear. */
 export const threadDoneBody = z.object({
   done: z.boolean(),
 });
 
 /**
- * POST /api/boxes/:id/threads/:threadId/background/stop — the adapter's id
- * of the task to stop. Without one, every task of that thread stops.
+ * The body of POST /api/boxes/:id/threads/:threadId/background/stop, with the
+ * id of the task to stop in the adapter. Without it, every task of the thread stops.
  */
 export const backgroundStopBody = z.object({
   processId: z.string().optional(),
 });
 
 /**
- * PUT /api/boxes/:id/review/file — the whole file, and the hash it was read
- * at. An absent hash matches nothing, so the save is refused as a stale one.
+ * The body of PUT /api/boxes/:id/review/file, with the whole file and its hash
+ * at the time of the read. An absent hash matches nothing, so the service
+ * refuses the save as stale.
  */
 export const reviewFileBody = z.object({
   path: filled,
@@ -80,10 +83,9 @@ export const reviewFileBody = z.object({
 });
 
 /**
- * PUT /api/boxes/:id/review/annotations — the comment on one line.
+ * The body of PUT /api/boxes/:id/review/annotations, with the comment on one line.
  *
- * `line` is coerced, so a client that sends its line number as a string is
- * still understood. Which numbers are lines is the review service's rule.
+ * `line` is coerced, so a line number in a string also works.
  */
 export const reviewAnnotationBody = z.object({
   path: filled,
@@ -92,40 +94,42 @@ export const reviewAnnotationBody = z.object({
 });
 
 /**
- * PUT /api/boxes/:id/review/base — the revision to compare against. Null
- * and absent both clear the base back to each repository's working tree.
+ * The body of PUT /api/boxes/:id/review/base, with the revision to compare
+ * against. A null or absent value clears the base back to the HEAD of each repository.
  */
 export const reviewBaseBody = z.object({
   rev: z.string().nullable().optional(),
 });
 
-/** POST /api/agent-sets — the set to create. */
+/** The body of POST /api/agent-sets, with the set to create. */
 export const createAgentSetBody = z.object({
   name: z.string(),
 });
 
-/** PATCH /api/agent-sets/:setId — the fields to change. An absent one is left alone. */
+/**
+ * The body of PATCH /api/agent-sets/:setId, with the fields to change. An
+ * absent field stays the same.
+ */
 export const updateAgentSetBody = z.object({
   name: z.string().optional(),
   agentsMd: z.string().optional(),
 });
 
-/** POST /api/agent-sets/:setId/repos — the repository to take skills from. */
+/** The body of POST /api/agent-sets/:setId/repos, with the repository to take skills from. */
 export const agentRepoBody = z.object({
   url: z.string(),
   ref: z.string().optional(),
 });
 
-/** PUT /api/agent-sets/:setId/items — the skill to write. */
+/** The body of PUT /api/agent-sets/:setId/items, with the skill to write. */
 export const agentItemBody = z.object({
   name: z.string(),
   content: z.string(),
 });
 
 /**
- * POST /api/push/subscribe — a browser's push subscription, shaped like its
- * own PushSubscription.toJSON(). Whether the endpoint may be posted to and
- * whether the keys are the right size is the route's own check.
+ * The body of POST /api/push/subscribe, with the push subscription of a browser
+ * in the form of PushSubscription.toJSON().
  */
 export const pushSubscribeBody = z.object({
   endpoint: z.string(),
@@ -136,17 +140,15 @@ export const pushSubscribeBody = z.object({
   label: z.string().optional(),
 });
 
-/** DELETE /api/push/subscribe — the subscription to forget. */
+/** The body of DELETE /api/push/subscribe, with the subscription to remove. */
 export const pushUnsubscribeBody = z.object({
   endpoint: z.string(),
 });
 
 /**
- * PUT /api/credentials/:id — the secret to store and how it was obtained.
+ * The body of PUT /api/credentials/:id, with the secret to store and the method that got it.
  *
- * The method defaults to a pasted token, which is what a settings page that
- * names none is sending. Whether the id is a credential this deployment
- * knows is the route's own check.
+ * The method defaults to a pasted token, for a client that names no method.
  */
 export const putCredentialBody = z.object({
   method: z.enum(['token', 'api_key', 'oauth']).default('token'),
@@ -154,32 +156,34 @@ export const putCredentialBody = z.object({
 });
 
 /**
- * PUT /api/api-keys/:name — the hosts of the key, and the key itself. Without
- * a secret the stored key stays. Whether the name and the hosts are valid is
- * the store's own check.
+ * The body of PUT /api/api-keys/:name, with the hosts of the key and the key.
+ * Without a secret, the stored key stays.
  */
 export const putApiKeyBody = z.object({
   hosts: z.array(z.string()),
   secret: z.string().trim().min(1, 'must not be empty').optional(),
 });
 
-/** POST /api/credentials/:id/login/:loginId/code — the code the CLI asked for. */
+/**
+ * The body of POST /api/credentials/:id/login/:loginId/code, with the code that
+ * the CLI asked for.
+ */
 export const loginCodeBody = z.object({
   code: filled,
 });
 
-/** One dialog's remembered choices, as the thread dialog last left them. */
+/** The last choices in one thread dialog. */
 const threadDialogDefaults = z.object({
   modeId: z.string().optional(),
   config: z.record(z.string(), z.string()).optional(),
 });
 
 /**
- * PATCH /api/settings — the settings to write.
+ * The body of PATCH /api/settings, with the settings to write.
  *
- * Every field is optional: the git identity and a dialog's last choice are
- * written by different screens, and neither should carry the other's values
- * to be able to save.
+ * Each field is optional, because different screens write the git identity
+ * and the choices of a dialog. A screen does not need the values of the other
+ * screen to save.
  */
 export const patchSettingsBody = z.object({
   gitName: z.string().optional(),

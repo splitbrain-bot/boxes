@@ -17,9 +17,13 @@ import {
 } from './credentials.ts';
 import { type Db, openDb } from './db.ts';
 
+/** The temporary data directory of each test. */
 let dir: string;
+/** The database of each test. */
 let db: Db;
+/** The number of calls of the change callback. */
 let changes: number;
+/** The store under test. */
 let store: CredentialStore;
 
 beforeEach(() => {
@@ -71,7 +75,7 @@ test('a replacement keeps the credential created_at and clears the old error', (
   const second = store.put('github', 'token', 'ghp_newtoken');
   assert.equal(second.created_at, first.created_at);
   assert.ok(second.updated_at >= first.updated_at);
-  // Pasting a new token is the answer to whatever the old one's error said.
+  // A new token is the answer to the error of the old token.
   assert.equal(second.status, 'ok');
   assert.equal(second.last_error, null);
   assert.equal(store.list().length, 1);
@@ -84,7 +88,7 @@ test('a status is recorded without touching the secret', () => {
   const row = store.get('claude');
   assert.equal(row?.status, 'expired');
   assert.equal(row?.last_error, 'the token is a year old');
-  // Still the token the proxy has to send, and still the one the page names.
+  // The proxy still sends this token, and the page still names it.
   assert.equal(row?.secret, 'sk-ant-oat01-abcdefgh1234');
   assert.equal(row?.account, '1234');
 });
@@ -95,8 +99,8 @@ test('a new credential gets a placeholder shaped like its token, kept across rep
   assert.notEqual(first.placeholder, first.secret);
   assert.equal(store.placeholderFor('claude'), first.placeholder);
 
-  // A box holds the placeholder in its environment, and Codex copies its own
-  // into auth.json, so neither a refresh nor a new paste may change it.
+  // A box holds the placeholder in its environment, and a Codex login stores its
+  // placeholder in auth.json. So a refresh or a new paste must not change it.
   const second = store.put('claude', 'token', 'sk-ant-oat01-replaced5678');
   assert.equal(second.placeholder, first.placeholder);
   assert.equal(store.get('claude')?.placeholder, first.placeholder);
@@ -154,15 +158,24 @@ test('the list is in the order the settings page shows them', () => {
   );
 });
 
-// --- keeping an account credential alive -------------------------------------
-
-/** A JWT whose payload holds claims. The header and signature are placeholders. */
+/**
+ * Builds a JWT with the claims as payload. The header and the signature are fakes.
+ *
+ * @param claims The claims.
+ * @returns The token.
+ */
 function jwt(claims: Record<string, unknown>): string {
   const body = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
   return `header.${body}.signature`;
 }
 
-/** What the Codex CLI leaves in `$CODEX_HOME/auth.json`. */
+/**
+ * Builds a document like the one that the Codex CLI writes to `$CODEX_HOME/auth.json`.
+ *
+ * @param expSeconds The expiry of the access token, in epoch seconds.
+ * @param lastRefresh The `last_refresh` value, as an ISO date.
+ * @returns The document as JSON.
+ */
 function authJson(expSeconds: number, lastRefresh: string): string {
   return JSON.stringify({
     OPENAI_API_KEY: null,
@@ -176,7 +189,12 @@ function authJson(expSeconds: number, lastRefresh: string): string {
   });
 }
 
-/** A recording POST that answers with whatever it was given. */
+/**
+ * Makes a fake POST that records each call and answers with `answer`.
+ *
+ * @param answer The answer of each call, or the error that each call throws.
+ * @returns The recorded calls and the fake POST.
+ */
 function posts(answer: TokenAnswer | Error): {
   calls: Array<{ url: string; body: Record<string, string> }>;
   post: (url: string, body: Record<string, string>) => Promise<TokenAnswer>;
@@ -195,10 +213,10 @@ function posts(answer: TokenAnswer | Error): {
 /** The clock every refresh case runs at, in epoch milliseconds. */
 const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
 
-/** Ten minutes after NOW, in epoch seconds as a JWT exp claim holds it. */
+/** Ten minutes after NOW, in epoch seconds, as in a JWT exp claim. */
 const IN_TEN_MINUTES = Math.floor((NOW + 10 * 60_000) / 1000);
 
-/** Five hours after NOW, in epoch seconds as a JWT exp claim holds it. */
+/** Five hours after NOW, in epoch seconds, as in a JWT exp claim. */
 const IN_FIVE_HOURS = Math.floor((NOW + 5 * 60 * 60_000) / 1000);
 
 test('a Codex access token about to expire is refreshed, whole document and all', async () => {
@@ -227,8 +245,8 @@ test('a Codex access token about to expire is refreshed, whole document and all'
     last_refresh: string;
     OPENAI_API_KEY: string | null;
   };
-  // The whole document is kept: the rotated refresh token is what the next
-  // refresh needs, and last_refresh is what the eight-day rule reads.
+  // The store keeps the whole document. The next refresh needs the rotated
+  // refresh token, and the eight-day rule reads last_refresh.
   assert.equal(stored.tokens.access_token, fresh);
   assert.equal(stored.tokens.refresh_token, 'rotated');
   assert.equal(stored.tokens.account_id, 'acct_123');
@@ -263,7 +281,7 @@ test('a refresh that fails says why and keeps the credential', async () => {
   const row = store.get('openai');
   assert.equal(row?.status, 'failing');
   assert.match(row?.last_error ?? '', /invalid_grant/);
-  // Still the document the next attempt refreshes from.
+  // The next attempt refreshes from the same document.
   assert.equal(row?.secret, document);
 });
 
@@ -274,7 +292,7 @@ test('a Claude token cannot be refreshed, so at expiry it is marked expired', as
 
   await refreshCredentials(store, post, NOW);
 
-  // Nothing to POST for either: one has no refresh token, the other no expiry.
+  // No POST for either, because neither is an `oauth` row.
   assert.deepEqual(calls, []);
   assert.equal(store.get('claude')?.status, 'expired');
   assert.match(store.get('claude')?.last_error ?? '', /log in again/);
@@ -297,7 +315,7 @@ test('a stored login with no refresh token says so once rather than every minute
 
 test('an account credential is stored and refreshed, and is not delivered to a box', () => {
   const oauth = store.put('openai', 'oauth', authJson(IN_FIVE_HOURS, '2026-09-12T11:00:00Z'));
-  // The proxy swaps a header value. This row is a document for traffic that
+  // The proxy replaces a header value. This row is a document for traffic that
   // the proxy does not intercept.
   assert.equal(deliverableSecret(oauth), null);
   assert.match(undeliverableReason(oauth) ?? '', /cannot hand a subscription login to a box/);
@@ -307,7 +325,13 @@ test('an account credential is stored and refreshed, and is not delivered to a b
   assert.equal(undeliverableReason(pasted), null);
 });
 
-/** A Dev Tunnels login document, as the device login stores it. */
+/**
+ * Builds a Dev Tunnels login document, as the device login stores it.
+ *
+ * @param access The access token.
+ * @param refresh The refresh token.
+ * @returns The document as JSON.
+ */
 function devTunnelsJson(access: string, refresh = 'ghr_the-refresh-token'): string {
   return JSON.stringify({ access_token: access, refresh_token: refresh });
 }

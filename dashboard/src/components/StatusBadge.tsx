@@ -1,7 +1,7 @@
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
-/** What a badge reports, which picks its colour. */
+/** The state that a badge reports, which picks its colour. */
 export type BadgeKind = 'running' | 'turn' | 'task' | 'shared' | 'waiting' | 'error' | 'idle';
 
 /**

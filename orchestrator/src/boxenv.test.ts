@@ -28,7 +28,9 @@ const GITLAB_TOKEN = 'glpat-therealgitlabtoken';
 /** A real Dev Tunnels token as the store holds it. */
 const DEVTUNNELS_TOKEN = 'ghu_therealdevtunnelstoken';
 
+/** The temporary data directories of the current test. */
 let dirs: string[] = [];
+/** The open databases of the current test. */
 let dbs: Db[] = [];
 
 afterEach(() => {
@@ -38,7 +40,11 @@ afterEach(() => {
   dirs = [];
 });
 
-/** Creates a temporary data directory that afterEach removes. */
+/**
+ * Creates a temporary data directory that afterEach removes.
+ *
+ * @returns The path of the directory.
+ */
 function dataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-boxenv-'));
   dirs.push(dir);
@@ -46,8 +52,13 @@ function dataDir(): string {
 }
 
 /**
- * A deployment: a config, a credential store holding whatever was passed, and
- * a prepared egress manager over both.
+ * Creates a deployment with a config, a credential store with the given
+ * secrets, and a prepared egress manager.
+ *
+ * @param secrets The secret of each stored credential.
+ * @param over The config variables that replace the defaults.
+ * @param methods The method of each stored credential. The default is a token.
+ * @returns The config, the database and the egress manager.
  */
 async function deployment(
   secrets: Partial<Record<CredentialId, string>> = {},
@@ -66,7 +77,14 @@ async function deployment(
   return { cfg, db, egress };
 }
 
-/** The env of one box, as a map, for a given deployment. */
+/**
+ * Builds the environment of one box for a deployment with the given secrets.
+ *
+ * @param secrets The secret of each stored credential.
+ * @param over The config variables that replace the defaults.
+ * @param methods The method of each stored credential. The default is a token.
+ * @returns The variables by name.
+ */
 async function envFor(
   secrets: Partial<Record<CredentialId, string>> = {},
   over: Record<string, string> = {},
@@ -109,19 +127,18 @@ describe('boxEnv', () => {
   it('carries no credential variable where nothing is configured', async () => {
     const env = await envFor();
 
-    // A box holds a placeholder for a stored credential only. One entered
-    // later reaches the box at its next restart.
+    // The environment holds a placeholder only for a stored credential.
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.GH_TOKEN).toBeUndefined();
     expect(env.CODEX_API_KEY).toBeUndefined();
-    // What each harness needs beside its credential still comes from the registry.
+    // The other variables of each harness still come from the registry.
     expect(env.CLAUDE_CONFIG_DIR).toBe('/home/agent/.claude');
     expect(env.CODEX_HOME).toBe('/home/agent/.codex');
   }, 30_000);
 
   it('carries the GitLab host always, and the token once one is stored', async () => {
-    // glab reads the host, and the entrypoint points the credential helper at it.
+    // glab reads the host, and the box setup points the git credential helper at it.
     const env = await envFor();
     expect(env.GITLAB_TOKEN).toBeUndefined();
     expect(env.GITLAB_HOST).toBe('gitlab.com');
@@ -139,18 +156,17 @@ describe('boxEnv', () => {
   }, 30_000);
 
   it('carries what Codex needs to log itself in from the environment', async () => {
-    // The Codex app-server reads no key from its environment; `codex-acp` is
-    // what reads CODEX_API_KEY, and it only does so when DEFAULT_AUTH_REQUEST
-    // tells it to log in with the api-key method on the first `session/*` call.
-    // The value has to reach the box as the JSON the adapter parses.
+    // `codex-acp` reads CODEX_API_KEY when it logs in with the api-key method.
+    // DEFAULT_AUTH_REQUEST selects that method for a `session/*` call that needs a
+    // login. The value must be the JSON that the adapter parses.
     const env = await envFor({ openai: OPENAI_KEY });
 
     expect(env.CODEX_API_KEY).toMatch(/^sk-/);
     expect(env.CODEX_API_KEY).not.toBe(OPENAI_KEY);
     expect(env.DEFAULT_AUTH_REQUEST).toBe('{"methodId":"api-key"}');
     expect(JSON.parse(env.DEFAULT_AUTH_REQUEST!)).toEqual({ methodId: 'api-key' });
-    // A fresh Codex thread starts where the registry says, and the browser
-    // method is hidden because nothing in a box can open one.
+    // A new Codex thread starts in the mode from the registry. The browser login
+    // is hidden, because nothing in a box can open a browser.
     expect(env.INITIAL_AGENT_MODE).toBe('agent-full-access');
     expect(env.NO_BROWSER).toBe('1');
   }, 30_000);
@@ -184,7 +200,7 @@ describe('boxEnv', () => {
     });
 
     expect(env.OPENROUTER_API_KEY).toBe('sk-or-v1-placeholder');
-    // A variable of Boxes wins over a key of the same name.
+    // A variable of Boxes has priority over a key with the same name.
     expect(env.GH_TOKEN).toBe('ghp_placeholder');
   });
 });

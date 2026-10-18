@@ -51,8 +51,8 @@ function textOf(message: AppendMessage): string {
 /**
  * Converts one composer submission into the content blocks of an ACP prompt.
  *
- * The note on the attachments comes first, then the typed text. The
- * attachments are already uploaded, so the note holds their paths.
+ * The attachment envelope comes first, then the typed text. The attachments
+ * are already uploaded, so the envelope holds their paths.
  *
  * @param message The submission.
  * @returns The prompt blocks.
@@ -79,7 +79,7 @@ function blocksOf(message: AppendMessage): ContentBlock[] {
   ];
 }
 
-/** Why this view could not read its box, in the words it shows. */
+/** The notice text for a box that the view could not read. */
 interface LoadError {
   /** The first line of the notice. */
   message: string;
@@ -88,7 +88,7 @@ interface LoadError {
 }
 
 /**
- * Builds the notice for a box that would not load.
+ * Builds the notice for a box that did not load.
  *
  * Only a 404 means the box is gone. An authenticating proxy in front of the
  * deployment answers 401 or 403 once its cookie expires. Any other failure
@@ -132,20 +132,21 @@ export function BoxThread() {
    * composer and is never sent on its own.
    */
   const [prefill, setPrefill] = useState<string | null>(null);
-  /** The thread a fork just made, shown as a link. */
+  /** The thread that a fork made, shown as a link. */
   const [forked, setForked] = useState<ThreadSummary | null>(null);
   const [forkError, setForkError] = useState<string | null>(null);
   const [forking, setForking] = useState(false);
 
   /**
-   * This box, polled for the WebSocket token, the name and the threads.
-   * Polling picks up a title the agent gives a thread after its first turn.
+   * The box, polled for the WebSocket token, the name and the threads. The
+   * poll picks up a title that the agent gives a thread after its first turn.
    */
   const { box, error: readError, reload } = useBox(id);
 
   /**
-   * Why there is nothing to show, or null. Set only while the box has never
-   * been read, so a failed later poll keeps the conversation on screen.
+   * The reason why there is nothing to show, or null. It is set only while the
+   * box has never been read, so a failed later poll keeps the conversation on
+   * screen.
    */
   const loadError: LoadError | null = box || !readError ? null : describeLoadError(readError);
 
@@ -161,12 +162,12 @@ export function BoxThread() {
     if (staged !== null) setPrefill(staged);
   }, [id]);
 
-  /** Leaves for the box list. */
+  /** Goes back to the box list. */
   const up = useUp('/');
 
   const { store, state } = useThread(id, threadId, box?.wsToken ?? null);
 
-  // Named even in a box with one thread, so two tabs on one box differ.
+  // The thread has a name even in a box with one thread, so two tabs on one box differ.
   const threads = box?.threads ?? [];
   const thread = threads.find((t) => t.id === threadId);
   const threadLabel = thread ? threadName(thread) : null;
@@ -174,10 +175,10 @@ export function BoxThread() {
   const { harnesses } = useBoxes();
 
   /**
-   * What this tab is doing, for its title.
+   * The state of the tab, for its title.
    *
    * A waiting question outranks a running turn. Below those, background work
-   * without a turn reads as waiting.
+   * without a turn shows as waiting.
    */
   const tabState: TabState =
     state.awaiting ??
@@ -212,7 +213,7 @@ export function BoxThread() {
   /**
    * Marks this thread done, or removes the mark.
    *
-   * The header shows the mark from the polled box, so this reloads the box.
+   * The header shows the mark from the polled box, so the function reloads the box.
    *
    * @param next True to mark the thread done.
    */
@@ -228,7 +229,7 @@ export function BoxThread() {
   );
 
   /**
-   * Stops the background work of a thread: one process, or all of them.
+   * Stops one background process of a thread, or all of them.
    *
    * The bar keeps its rows until the gateway reports the processes gone.
    * A failed request shows as a thread error.
@@ -257,8 +258,8 @@ export function BoxThread() {
   );
 
   /**
-   * The composer's attachment adapter, which uploads into this box's
-   * workspace. It is rebuilt with the store, so a failed upload reports to the
+   * The attachment adapter of the composer, which uploads into the workspace
+   * of the box. It is rebuilt with the store, so a failed upload reports to the
    * current store.
    */
   const attachmentAdapter = useMemo(
@@ -266,11 +267,11 @@ export function BoxThread() {
     [id, store],
   );
 
-  // Bound to the box, because attachments are served from its workspace.
+  // Bound to the box, because the attachment URLs name the box.
   const convert = useCallback((message: Message) => convertMessage(message, id), [id]);
 
   // The runtime keeps every message it was given as a branch. A rebuild can
-  // bring messages back under other ids, so each one gets a fresh store.
+  // bring messages back under other ids, so each rebuild gets a new repository.
   const repository = useMemo(() => new INTERNAL.MessageRepository(), [state.rebuilds]);
 
   const runtime = useExternalStoreRuntime<Message>({
@@ -285,13 +286,13 @@ export function BoxThread() {
     onRefetchThread: async () => store?.refetch(),
     adapters: { attachments: attachmentAdapter },
     onRespondToToolApproval: ({ approvalId, approved, optionId }) => {
-      // No option id means a refusal to choose. The store sends ACP's cancelled outcome.
+      // No option id means a refusal to choose. The store sends the cancelled outcome of ACP.
       store?.respondToApproval(approvalId, approved || optionId ? optionId : undefined);
     },
   });
 
-  // The runtime is rebuilt on every message, so the ref keeps this to one run
-  // that does not overwrite typed text.
+  // The runtime changes on every message, so the ref limits the effect to one
+  // run, and the effect does not overwrite typed text.
   const staged = useRef(false);
   useEffect(() => {
     if (!prefill || staged.current) return;
@@ -367,7 +368,7 @@ export function BoxThread() {
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
                   <p className="text-sm">{loadError.message}</p>
                   <p className="text-sm text-muted-foreground">{loadError.detail}</p>
-                  {/* The same step out as the header's back button. */}
+                  {/* Goes back in the same way as the back button of the header. */}
                   <a href={up.href} onClick={up.onClick} className="text-sm font-medium underline">
                     Back to boxes
                   </a>

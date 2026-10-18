@@ -1,3 +1,4 @@
+/** Composer completion for the slash commands that the adapter advertises. */
 import {
   ComposerPrimitive,
   type Unstable_DirectiveFormatter,
@@ -7,17 +8,20 @@ import {
 import { createContext, type FC, type ReactNode, useContext, useMemo } from 'react';
 import type { AvailableCommand } from '../stores/thread/acp-types.ts';
 
-/** Composer completion for the slash commands the adapter advertises. */
-
-/** The commands the composer completes, published by the thread route. */
+/** The commands that the composer completes, published by the thread route. */
 const CommandsContext = createContext<AvailableCommand[]>([]);
 
-/** Puts the adapter's command list where the composer can read it. */
+/**
+ * Gives the command list of the adapter to the composer.
+ *
+ * @param commands The commands from the session/update stream of the thread.
+ * @param children The tree that holds the composer.
+ */
 export function SlashCommandsProvider({
   commands,
   children,
 }: {
-  /** The commands from the thread's session/update stream. */
+  /** The commands from the session/update stream of the thread. */
   commands: AvailableCommand[];
   /** The tree that holds the composer. */
   children: ReactNode;

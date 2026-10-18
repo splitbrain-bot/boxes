@@ -13,7 +13,12 @@ const ESC = String.fromCharCode(27);
  */
 const FIXTURE = join(import.meta.dirname, 'testdata', 'claude-setup-token.bin');
 
-/** Removes escape sequences with regular expressions, to compare with what the screen renders. */
+/**
+ * Removes escape sequences with regular expressions, to compare with what the screen renders.
+ *
+ * @param text The terminal output.
+ * @returns The text without the escape sequences.
+ */
 function stripAnsi(text: string): string {
   return text
     .replace(new RegExp(`${ESC}\\][^\\u0007]*\\u0007`, 'g'), '')

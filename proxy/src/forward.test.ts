@@ -1,19 +1,28 @@
+/** Tests for host parsing and for vetting the port, host and address of a target. */
+
 import dns from 'node:dns';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EgressPolicy } from '../../shared/types.ts';
 import { parseHostPort, vetTarget } from './forward.ts';
 import { EMPTY_POLICY } from './policy.ts';
 
-/** Tests for host parsing and for vetting a target's port, host and address. */
-
-/** Answers DNS with a fixed set of addresses, without touching the network. */
+/**
+ * Makes the DNS lookup answer with fixed addresses, so the test uses no network.
+ *
+ * @param addresses The addresses that the lookup returns.
+ */
 function resolvesTo(...addresses: string[]): void {
   vi.spyOn(dns.promises, 'lookup').mockResolvedValue(
     addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 })) as never,
   );
 }
 
-/** A policy that allows only the given hosts. */
+/**
+ * Makes a policy that allows only the given hosts.
+ *
+ * @param hosts The allowlist patterns.
+ * @returns A policy with no CA and no credentials.
+ */
 const allowing = (...hosts: string[]): EgressPolicy => ({
   allowedHosts: hosts,
   ca: null,

@@ -1,11 +1,16 @@
-import type { TaskUsage } from '../../../shared/task-notifications.ts';
-
 /** Display helpers for a background task's report. */
+
+import type { TaskUsage } from '../../../shared/task-notifications.ts';
 
 /** The name of the converted part, which selects its renderer. */
 export const TASK_NOTIFICATION_PART = 'task-notification';
 
-/** A token count as text, in tokens, thousands or millions. */
+/**
+ * Formats a token count as text, in tokens, thousands or millions.
+ *
+ * @param tokens The token count.
+ * @returns The formatted count, e.g., "48.2k tokens".
+ */
 function formatTokens(tokens: number): string {
   if (tokens < 1000) return `${tokens} tokens`;
   if (tokens < 1000 * 1000) return `${(tokens / 1000).toFixed(1)}k tokens`;
@@ -13,10 +18,13 @@ function formatTokens(tokens: number): string {
 }
 
 /**
- * A duration as text: seconds below a minute, then minutes and seconds, then
+ * Formats a duration as text: seconds below a minute, then minutes and seconds, then
  * hours and minutes.
  *
  * Used for finished reports and for work still running.
+ *
+ * @param ms The duration in milliseconds.
+ * @returns The formatted duration, e.g., "3m 4s".
  */
 export function formatDuration(ms: number): string {
   const seconds = Math.round(ms / 1000);
@@ -28,7 +36,12 @@ export function formatDuration(ms: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-/** What a task cost, as one line. Leaves out every figure the usage lacks. */
+/**
+ * Formats the usage of a task as one line. Leaves out each figure that the usage does not have.
+ *
+ * @param usage The usage of the task.
+ * @returns The line.
+ */
 export function formatUsage(usage: TaskUsage): string {
   return [
     usage.tokens === undefined ? '' : formatTokens(usage.tokens),

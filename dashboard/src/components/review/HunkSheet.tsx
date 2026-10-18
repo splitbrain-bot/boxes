@@ -13,6 +13,9 @@ import type { ReviewDiffHunk } from '../../../../shared/types.ts';
  * lines show.
  *
  * The diff text comes from the workspace and renders as text nodes only.
+ *
+ * @param hunk The hunk to show, or null when the sheet is closed.
+ * @param onClose Called when the sheet closes.
  */
 export function HunkSheet({
   hunk,
@@ -44,7 +47,7 @@ export function HunkSheet({
                   // biome-ignore lint/suspicious/noArrayIndexKey: diff lines have no id, and a hunk is replaced whole
                   key={i}
                   className={cn(
-                    // Indents the rest of a wrapped line past the +/− column.
+                    // Indents the rest of a wrapped line past the column of the + and - signs.
                     '-indent-3 pr-1 pl-4 break-words whitespace-pre-wrap',
                     line.startsWith('+') && 'bg-ok/12 text-ok',
                     line.startsWith('-') && 'bg-danger/12 text-danger',

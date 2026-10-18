@@ -23,7 +23,12 @@ import type { LoginExecSpec } from './login.ts';
 import { runtime } from './runtime/runtime.ts';
 import * as ws from './workspaces.ts';
 
-/** One frame of a demuxable Docker stream. */
+/**
+ * Makes one stdout frame of a multiplexed Docker stream.
+ *
+ * @param text The payload of the frame.
+ * @returns The frame with its header.
+ */
 function frame(text: string): Buffer {
   const payload = Buffer.from(text, 'utf8');
   const header = Buffer.alloc(8);
@@ -32,22 +37,19 @@ function frame(text: string): Buffer {
   return Buffer.concat([header, payload]);
 }
 
-/**
- * What the box's own `ps` prints, for the stop that reads it.
- * Reset for every test, like everything else the fake Docker answers with.
- */
+/** The output of `ps` in the fake box, for the stop route that reads it. Each test resets it. */
 let insideBox = '';
 
-/** Every `kill` the routes ran inside a box, as its arguments. */
+/** The arguments of each `kill` that the routes ran in a box. */
 let killedInBox: string[][] = [];
 
-/** Installs a fake Docker client that answers everything the routes touch. */
+/** Installs a fake Docker client that answers each call of the routes. */
 function fakeDocker(): void {
   const modem = new Docker({ socketPath: '/var/run/docker.sock' }).modem;
 
   dk.setDockerForTests({
     modem,
-    // Bringing a box up re-attaches the egress proxy to its network.
+    // A box start connects the egress proxy to the network of the box again.
     getNetwork: () => ({
       inspect: async () => ({ Containers: {} }),
       connect: async () => undefined,
@@ -60,15 +62,15 @@ function fakeDocker(): void {
         // Every short command runs under `timeout`.
         const cmd = opts.Cmd[0] === 'timeout' ? opts.Cmd.slice(3) : opts.Cmd;
         const command = cmd[0];
-        // The box-wide stop's two calls: a reading taken inside the container,
-        // and the signal it aims at what the reading found.
+        // The stop route for the whole box runs `ps` in the container, then `kill`
+        // on the processes that `ps` found.
         if (command === 'kill') killedInBox.push(cmd.slice(1));
         const answers = command === 'ps' ? insideBox : null;
         return {
           start: async () => {
             const stream = new PassThrough();
             queueMicrotask(() => {
-              // The repo probe is a plain `test -d`, which produces nothing.
+              // The repository probe is `test -d`, which has no output.
               if (answers === null) return stream.end();
               stream.write(frame(answers));
               stream.end();
@@ -76,8 +78,7 @@ function fakeDocker(): void {
             return stream;
           },
           inspect: async () => ({
-            // A `ps` or a `kill` the stop ran and the setup succeeded; anything
-            // else this fake does not answer for failed.
+            // `ps`, `kill` and `boxes-setup` succeed. Each other command fails.
             ExitCode: answers === null && command !== 'kill' && command !== 'boxes-setup' ? 1 : 0,
           }),
         };
@@ -86,11 +87,18 @@ function fakeDocker(): void {
   } as unknown as Docker);
 }
 
+/** The temporary directory of each test. */
 let dir: string;
+/** The database of each test. */
 let db: Db;
+/** The app and the objects behind it, built for each test. */
 let orchestrator: Orchestrator;
 
-/** Inserts a running box row with one thread. */
+/**
+ * Inserts a running box row with one thread.
+ *
+ * @param id The id of the box. The thread gets the id `<id>-t1`.
+ */
 function insertBox(id: string): void {
   const now = Date.now();
   db.prepare(
@@ -100,7 +108,13 @@ function insertBox(id: string): void {
   insertThread(id, `${id}-t1`, 1);
 }
 
-/** Inserts one thread of a box. */
+/**
+ * Inserts one thread of a box.
+ *
+ * @param boxId The id of the box.
+ * @param threadId The id of the thread.
+ * @param ordinal The position of the thread in the box.
+ */
 function insertThread(boxId: string, threadId: string, ordinal: number): void {
   const now = Date.now();
   db.prepare(
@@ -114,14 +128,14 @@ beforeEach(async () => {
   insideBox = '';
   killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
-  // Before config(), which reads DATA_DIR once and keeps it for the process.
+  // config() reads DATA_DIR once and keeps it for the process, so this line comes first.
   process.env.DATA_DIR = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
   // The setup of a box writes the CA of the egress proxy into the home.
   await orchestrator.egress.prepare();
-  // Every test box runs in the container c1, and the tests that reach its
-  // files use the box abc123.
+  // The file service serves the directories of the box abc123 for each box, so the
+  // tests that reach files use the box abc123.
   const data = orchestrator.cfg.DATA_DIR;
   setFileServiceSpawnerForTests(
     inProcessFileService(() => ({
@@ -133,8 +147,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  // Workspaces and homes are written under the config's DATA_DIR, which
-  // outlives this test's own directory.
+  // Workspaces and homes are under the DATA_DIR of the config, which can differ
+  // from the directory of this test.
   rmSync(ws.workspacesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   rmSync(ws.homesRoot(orchestrator.cfg.DATA_DIR), { recursive: true, force: true });
   await orchestrator.app.close();
@@ -145,16 +159,19 @@ afterEach(async () => {
 });
 
 /**
- * Inserts a box with its directories on disk, as an attachment or a start
- * needs, and returns the workspace path. The file service is reached through
- * a started container, so the fake Docker is installed too.
+ * Inserts a box with its directories on disk, for an attachment or a start,
+ * and returns the workspace path. The orchestrator reaches the file service
+ * through a started container, so the function also installs the fake Docker.
+ *
+ * @param id The id of the box.
+ * @returns The path of the workspace on the host.
  */
 function insertWorkspaceBox(id: string): string {
   insertBox(id);
   fakeDocker();
-  // config() is memoised for the process, so the app's DATA_DIR is whatever
-  // the first test in this file set — not necessarily this test's `dir`.
-  // Everything that reaches the disk has to go through the app's own copy.
+  // config() is memoised for the process, so the DATA_DIR of the app comes from
+  // the first test of the file. It can differ from `dir` of this test, so each
+  // disk access uses the DATA_DIR of the app.
   const workspace = ws.createWorkspace(orchestrator.cfg.DATA_DIR, id);
   ws.createHome(orchestrator.cfg.DATA_DIR, id);
   ws.createNix(orchestrator.cfg.DATA_DIR, id);
@@ -178,8 +195,11 @@ test('an attachment is stored in the workspace and its path reported back', asyn
 });
 
 /**
- * Lists boxes until the box reports a size, or returns null after 100 tries.
+ * Lists boxes until the box reports a size, or gives up after 100 tries.
  * The list never waits for a disk walk, so a test that wants a size asks again.
+ *
+ * @param id The id of the box.
+ * @returns The size in bytes, or null after the last try.
  */
 async function measuredSize(id: string): Promise<number | null> {
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -195,15 +215,13 @@ async function measuredSize(id: string): Promise<number | null> {
 test('a running box is measured off the request path and reported on the list', async () => {
   const workspace = insertWorkspaceBox('abc123');
   writeFileSync(join(workspace, 'checkout.bin'), Buffer.alloc(4096));
-  // The home counts too, and on a box that has been working it is the larger
-  // half: the thread history, the tool caches, whatever the agent installed.
+  // The size includes the home.
   writeFileSync(
     join(ws.homePath(orchestrator.cfg.DATA_DIR, 'abc123'), 'cache.bin'),
     Buffer.alloc(2048),
   );
 
-  // The first list answers with no size rather than waiting for the walk it
-  // starts. A card shows nothing; a zero would be a claim.
+  // The first list does not wait for the walk that it starts, and answers without a size.
   const first = await orchestrator.app.inject({ url: '/api/boxes' });
   assert.equal((first.json() as Array<{ diskBytes: number | null }>)[0]!.diskBytes, null);
 
@@ -273,8 +291,8 @@ test('an attachment over the size limit is refused, and says so', async () => {
     payload: Buffer.alloc(config().MAX_ATTACHMENT_MB * 1024 * 1024 + 1),
   });
 
-  // Fastify's own refusal, passed through with its status rather than
-  // flattened into a 500 — the size is the one thing the user can act on.
+  // The error handler keeps the status of the refusal from Fastify and does not
+  // change it to a 500, because the user can act on the size.
   assert.equal(res.statusCode, 413);
 });
 
@@ -311,8 +329,8 @@ test('an SVG is served as one, inert, so a diagram can be looked at', async () =
 
   assert.equal(res.headers['content-type'], 'image/svg+xml');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
-  // This makes the inline disposition safe: an SVG opened as a document has
-  // no script, no origin and no network.
+  // The policy makes the inline disposition safe. An SVG opened as a document has
+  // no script, no origin and no network access.
   assert.equal(res.headers['content-security-policy'], "default-src 'none'; sandbox");
 });
 
@@ -331,8 +349,8 @@ test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
 
   assert.equal(res.headers['content-type'], 'application/pdf');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
-  // No `sandbox`: a browser may refuse to hand a sandboxed document to its
-  // PDF viewer and offer a download instead.
+  // The policy has no `sandbox`, because a browser can refuse to give a sandboxed
+  // document to its PDF viewer and offer a download.
   assert.equal(res.headers['content-security-policy'], "default-src 'none'; media-src 'self'");
 });
 
@@ -351,14 +369,14 @@ test('a video is served as one, unsandboxed, so the player can load it', async (
 
   assert.equal(res.headers['content-type'], 'video/mp4');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
-  // A sandboxed document has no origin, and the player the browser builds
-  // around the file could not load it from one.
+  // A sandboxed document has no origin, so the player that the browser makes for
+  // the file could not load it.
   assert.equal(res.headers['content-security-policy'], "default-src 'none'; media-src 'self'");
 });
 
 test('a format nothing renders is served as a download of unknown type', async () => {
   insertWorkspaceBox('abc123');
-  // Served as itself, HTML would run as this origin, and no policy makes it
+  // HTML served with its own type runs as this origin, and no policy makes it
   // safe to show.
   for (const name of ['page.html', 'notes.txt', 'data.bin']) {
     await orchestrator.app.inject({
@@ -405,9 +423,8 @@ test('a link planted in the attachments directory serves nothing', async () => {
     headers: { 'content-type': 'application/octet-stream' },
     payload: Buffer.from('x'),
   });
-  // What an agent with a foothold in its own workspace would try: the
-  // orchestrator's own uid can read the database, and every box's gateway
-  // token is in it.
+  // An agent can plant a link in its workspace. The file service must not follow it
+  // out of the workspace.
   const secret = join(dir, 'secret.txt');
   writeFileSync(secret, 'a gateway token');
   symlinkSync(secret, join(workspace, '.boxes/attachments/escape.png'));
@@ -433,8 +450,10 @@ test('an attachment that was never stored is a 404', async () => {
 });
 
 /**
- * Writes a minimal bundle where the static handler looks for one, laid out
- * like the dashboard build in the runtime image.
+ * Writes a minimal bundle at the path where the static handler looks, with
+ * the layout of the dashboard build in the runtime image.
+ *
+ * @returns The path of the bundle directory.
  */
 function writeBundle(): string {
   // The handler resolves the bundle relative to its own module, which is
@@ -457,7 +476,7 @@ function writeBundle(): string {
 test('the dashboard bundle is served, with a single-page fallback', async () => {
   const bundle = writeBundle();
   try {
-    // Real files come back as themselves, with the right content type.
+    // A real file comes back with its content type.
     const js = await orchestrator.app.inject({ url: '/assets/index-abc.js' });
     assert.equal(js.statusCode, 200);
     assert.match(js.headers['content-type'] as string, /text\/javascript/);
@@ -465,7 +484,7 @@ test('the dashboard bundle is served, with a single-page fallback', async () => 
     const css = await orchestrator.app.inject({ url: '/assets/index-abc.css' });
     assert.match(css.headers['content-type'] as string, /text\/css/);
 
-    // A client-side route is not a file, and must survive a reload.
+    // A client-side route is not a file, and must work after a reload.
     for (const url of ['/', '/new', '/boxes/abc123', '/boxes/abc123/info']) {
       const res = await orchestrator.app.inject({ url });
       assert.equal(res.statusCode, 200, url);
@@ -473,14 +492,14 @@ test('the dashboard bundle is served, with a single-page fallback', async () => 
       assert.match(res.body, /id="app"/, url);
     }
 
-    // The API and the gateway do not get the fallback: a mistyped endpoint
-    // must be a 404, not a page.
+    // The API and the gateway do not get the fallback, so a wrong endpoint is a
+    // 404 and not a page.
     for (const url of ['/api/nope', '/ws/nope']) {
       const res = await orchestrator.app.inject({ url });
       assert.equal(res.statusCode, 404, url);
     }
 
-    // Nothing outside the bundle is reachable through a traversal.
+    // A traversal cannot reach a file outside the bundle.
     for (const url of ['/../package.json', '/assets/../../package.json']) {
       const res = await orchestrator.app.inject({ url });
       assert.match(res.headers['content-type'] as string, /text\/html/, url);
@@ -494,14 +513,14 @@ test('the service worker and the manifest are served from the bundle root', asyn
   const bundle = writeBundle();
   try {
     // A service worker controls only the scope it is served from, so it must
-    // be /sw.js. The single-page fallback here would break push silently.
+    // be /sw.js. If the fallback answered here, push would break without an error.
     const sw = await orchestrator.app.inject({ url: '/sw.js' });
     assert.equal(sw.statusCode, 200);
     assert.match(sw.headers['content-type'] as string, /text\/javascript/);
     assert.match(sw.body, /addEventListener\("push"/);
 
-    // Without the manifest an iPhone cannot install the page, and without
-    // installing it, it has no Push API at all.
+    // An iPhone needs the manifest to install the page, and only an installed
+    // page has the Push API.
     const manifest = await orchestrator.app.inject({ url: '/manifest.webmanifest' });
     assert.equal(manifest.statusCode, 200);
     assert.match(manifest.headers['content-type'] as string, /application\/manifest\+json/);
@@ -523,16 +542,16 @@ test('a POST that matches no route is a 404 rather than the page', async () => {
 test('the hashed assets are cached for good and the page never is', async () => {
   const bundle = writeBundle();
   try {
-    // The name carries the content hash, so this copy can never be the wrong
-    // one: a changed file is a changed name.
+    // The name has the content hash, so a changed file has a changed name, and
+    // a cached copy is always correct.
     const asset = await orchestrator.app.inject({ url: '/assets/index-abc.js' });
     assert.match(asset.headers['cache-control'] as string, /immutable/);
 
-    // index.html is the file that says which assets are current, so a held
-    // copy would go on naming the ones it was built with.
+    // index.html names the current assets, so a cached copy would continue to
+    // name the old assets.
     const page = await orchestrator.app.inject({ url: '/boxes/abc123' });
     assert.equal(page.headers['cache-control'], 'no-cache');
-    // The same holds for every other file that keeps its name across builds.
+    // The same rule applies to each other file that keeps its name across builds.
     const worker = await orchestrator.app.inject({ url: '/sw.js' });
     assert.equal(worker.headers['cache-control'], 'no-cache');
   } finally {
@@ -549,16 +568,15 @@ test('the page is served under a policy that pins every fetch to this origin', a
     });
     const csp = res.headers['content-security-policy'] as string;
 
-    // A remote image in markdown the agent wrote is the channel this closes.
+    // The policy blocks a remote image in the markdown of the agent.
     assert.match(csp, /img-src 'self' data: blob:/);
     assert.match(csp, /default-src 'none'/);
-    // The gateway socket is spelled out, on this host and no other.
+    // The policy names the gateway socket on this host only.
     assert.match(csp, /connect-src 'self' ws:\/\/boxes\.example:8443 wss:\/\/boxes\.example:8443/);
-    // The one inline script the page has is allowed by its hash, and nothing
-    // else inline is.
+    // The policy allows the one inline script of the page by its hash.
     assert.match(csp, /script-src 'self' 'sha256-[A-Za-z0-9+/=]+'/);
 
-    // A Host header that is not a plain host never reaches the header.
+    // A Host header that is not a plain host does not get into the policy.
     const odd = await orchestrator.app.inject({
       url: '/',
       headers: { host: 'evil; script-src *' },
@@ -586,11 +604,8 @@ test('a bundle worth compressing is compressed', async () => {
   }
 });
 
-// --- Liveness, readiness and the request log ---------------------------------
-
 test('a deployment that cannot serve boxes is live but not ready', async () => {
-  // Nothing has pushed an egress policy here, so a box created now would
-  // get no egress at all.
+  // This test pushes no egress policy, so a box created now would get no egress.
   const ready = await orchestrator.app.inject({ url: '/readyz' });
   assert.equal(ready.statusCode, 503);
   const body = ready.json() as { ready: boolean; checks: Record<string, boolean> };
@@ -599,8 +614,8 @@ test('a deployment that cannot serve boxes is live but not ready', async () => {
   assert.equal(body.checks.database, true);
   assert.equal(body.checks.egress, false);
 
-  // Liveness says this process serves. A probe must not restart an
-  // orchestrator that is only unconfigured.
+  // The liveness probe passes, because a probe must not restart an orchestrator
+  // that only lacks configuration.
   const live = await orchestrator.app.inject({ url: '/healthz' });
   assert.equal(live.statusCode, 200);
 });
@@ -625,31 +640,38 @@ test('every response is logged with what was asked and what came back', async ()
 
   const ok = logged.find((line) => line.status === 200);
   assert.equal(ok?.method, 'GET');
-  // The query string is left off: it carries what the reader typed.
+  // The log leaves out the query string, because it holds what the user typed.
   assert.equal(ok?.path, '/api/boxes');
   assert.equal(typeof ok?.ms, 'number');
 
-  // A refusal is the caller's problem, not the deployment's, so it is logged
-  // as a warning.
+  // A refusal is a problem of the caller and not of the deployment, so the log
+  // level is a warning.
   const refused = logged.find((line) => line.status === 404);
   assert.equal(refused?.level, 'warn');
 });
 
-// --- Web Push registration --------------------------------------------------
-
-/** A subscription shaped the way the browser's own toJSON() produces one. */
+/**
+ * Makes a subscription in the form that toJSON() of the browser makes.
+ *
+ * @param endpoint The push endpoint.
+ * @returns The subscription.
+ */
 function subscription(endpoint = 'https://push.example.net/x/abc'): Record<string, unknown> {
   return {
     endpoint,
     keys: {
-      // 65 and 16 bytes: what a real P-256 point and auth secret decode to.
+      // A real P-256 point decodes to 65 bytes, and an auth secret to 16 bytes.
       p256dh: Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 7)]).toString('base64url'),
       auth: Buffer.alloc(16, 9).toString('base64url'),
     },
   };
 }
 
-/** Every stored subscription, as rows. */
+/**
+ * Reads every stored subscription.
+ *
+ * @returns The rows of the push_subscriptions table.
+ */
 function subscriptions(): Array<Record<string, unknown>> {
   return db.prepare('SELECT * FROM push_subscriptions').all() as Array<Record<string, unknown>>;
 }
@@ -660,7 +682,7 @@ test('the VAPID public key is served and stays the same across reads', async () 
 
   assert.equal(first.statusCode, 200);
   const key = (first.json() as { publicKey: string }).publicKey;
-  // Uncompressed P-256, which is the only form a browser accepts here.
+  // A browser accepts only an uncompressed P-256 key here.
   assert.equal(Buffer.from(key, 'base64url').length, 65);
   // A key that changed between reads would invalidate every subscription
   // made against the previous one.
@@ -675,8 +697,8 @@ test('a browser registers once however many times it subscribes', async () => {
   });
   assert.equal(first.statusCode, 204);
 
-  // Re-subscribing hands back the same endpoint with fresh keys, which has to
-  // update the row rather than add one.
+  // A new subscribe sends the same endpoint with new keys. The route must update
+  // the row and not add a row.
   const rotated = subscription();
   (rotated.keys as Record<string, string>).auth = Buffer.alloc(16, 1).toString('base64url');
   await orchestrator.app.inject({
@@ -703,7 +725,7 @@ test('the health probe counts subscribed browsers', async () => {
 test('an endpoint the orchestrator must not be aimed at is refused', async () => {
   const refused = [
     'http://push.example.net/x', // not https
-    'https://127.0.0.1/x', // an address literal in the owner's own space
+    'https://127.0.0.1/x', // an IP address
     'https://localhost/x',
     'https://[::1]/x',
   ];
@@ -745,8 +767,6 @@ test('a browser can unsubscribe itself', async () => {
   assert.equal(subscriptions().length, 0);
 });
 
-// --- agent configuration over its real routes ---------------------------------
-
 test('a set is created, filled and read back over the API', async () => {
   const created = await orchestrator.app.inject({
     method: 'POST',
@@ -763,7 +783,7 @@ test('a set is created, filled and read back over the API', async () => {
     payload: { name: 'bench', content: 'Run the benchmarks.' },
   });
   assert.equal(put.statusCode, 200);
-  // Every mutation answers with the whole set, so the editor needs one call.
+  // Each change answers with the whole set, so the editor needs one request.
   assert.deepEqual(
     (put.json() as { items: Array<{ name: string }> }).items.map((i) => i.name),
     ['bench'],
@@ -836,14 +856,14 @@ test('creating a box against an unknown set is refused before anything is built'
   });
   assert.equal(res.statusCode, 400);
   assert.match((res.json() as { error: string }).error, /Unknown agent set/);
-  // Nothing was inserted: the check runs before the row does.
+  // The check runs before the insert, so the table has no row.
   const rows = db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number };
   assert.equal(rows.n, 0);
 });
 
 test('starting a container to reach into installs the current configuration first', async () => {
-  // Opening a thread and opening a terminal both start a stopped box without
-  // /start. The file service installs what is configured at that moment.
+  // A thread or a terminal starts a stopped box without /start. The file service
+  // installs the configuration of that time.
   insertWorkspaceBox('abc123');
   fakeDocker();
   await orchestrator.app.inject({
@@ -854,8 +874,8 @@ test('starting a container to reach into installs the current configuration firs
 
   await orchestrator.manager.execTarget('abc123');
 
-  // config() caches process-wide, so the data directory in force is the
-  // orchestrator's own rather than this test's fresh one.
+  // config() is cached for the process, so the test uses the DATA_DIR of the
+  // orchestrator and not `dir` of this test.
   assert.equal(
     readFileSync(
       join(
@@ -881,8 +901,8 @@ test('stopping background work names a thread, and 404s for one that is not ther
   });
   assert.equal(missing.statusCode, 404);
 
-  // A task is named by the adapter's id for its conversation, and this
-  // thread has none. The route answers without reaching Docker.
+  // This thread has no session id in the adapter, so it has no task. The route
+  // answers without a call to Docker.
   const now = Date.now();
   db.prepare(
     `INSERT INTO threads (id, box_id, acp_session_id, title, ordinal,
@@ -890,8 +910,6 @@ test('stopping background work names a thread, and 404s for one that is not ther
      VALUES ('t1', 'abc123', NULL, NULL, 1, ?, ?)`,
   ).run(now, now);
 
-  // `processId` is the adapter's async task id. This thread has announced no
-  // task, so nothing stops.
   const unminted = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes/abc123/threads/t1/background/stop',
@@ -902,8 +920,8 @@ test('stopping background work names a thread, and 404s for one that is not ther
 });
 
 test('stopping everything in a box signals the work and nothing of Boxes own', async () => {
-  // The box-wide stop, for work no conversation can name: after an adapter
-  // restart the bars are empty and the box is still compiling something.
+  // The stop for the whole box is for work that no thread can name. After an
+  // adapter restart, the task bars are empty, but a build can still run in the box.
   insertBox('abc123');
   fakeDocker();
   insideBox = [
@@ -926,8 +944,8 @@ test('stopping everything in a box signals the work and nothing of Boxes own', a
   });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.json(), { stopped: 2 });
-  // The two shells, and neither adapter, neither agent, nothing of the
-  // entrypoint's and not the `ps` that took the reading.
+  // Only the two shells get the signal. The adapters, the agents, the entrypoint
+  // processes and the `ps` do not.
   assert.deepEqual(killedInBox, [['-TERM', '14', '22']]);
 });
 
@@ -953,7 +971,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   });
   assert.equal(missing.statusCode, 404);
 
-  // A body without a boolean would otherwise unmark the thread.
+  // The body must hold a boolean, so an empty body cannot remove the mark.
   const empty = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes/abc123/threads/abc123-t1/done',
@@ -969,7 +987,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   assert.equal(marked.statusCode, 200);
   assert.equal((marked.json() as { done: boolean }).done, true);
 
-  // Read back over the list route, which is where the dashboard sees it.
+  // The dashboard reads the mark from the list route.
   const threads = await orchestrator.app.inject({
     method: 'GET',
     url: '/api/boxes/abc123/threads',
@@ -979,7 +997,7 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
     [['abc123-t1', true]],
   );
 
-  // The mark comes off the same way.
+  // The same route removes the mark.
   const unmarked = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes/abc123/threads/abc123-t1/done',
@@ -987,8 +1005,8 @@ test('marking a thread done is remembered, reversible, and 404s for a thread tha
   });
   assert.equal((unmarked.json() as { done: boolean }).done, false);
 
-  // Nothing else moved: marking a conversation done is bookkeeping about it,
-  // not something that happened in it.
+  // The activity time stays the same, because the mark is not activity in the
+  // thread.
   const after = db.prepare("SELECT last_active_at FROM threads WHERE id = 'abc123-t1'").get() as {
     last_active_at: number;
   };
@@ -1002,18 +1020,13 @@ test('a listed box carries its own WebSocket token', async () => {
   const res = await orchestrator.app.inject({ url: '/api/boxes' });
   const listed = res.json() as Array<{ id: string; wsToken: string }>;
 
-  // Each summary hands out the token of the box it is about, so a reader
-  // of one box never learns what opens the one beside it.
+  // Each summary has only the token of its own box, so a reader of one box cannot
+  // get the token of another box.
   assert.deepEqual(listed.map((s) => [s.id, s.wsToken]).sort(), [
     ['abc123', 'token-abc123'],
     ['def456', 'token-def456'],
   ]);
 });
-
-// --- request bodies over the real routes --------------------------------------
-//
-// Every route that takes a JSON body checks it before it acts. A wrong body
-// gets a 400 that names the field.
 
 test('a body missing a required field is refused, and the answer names it', async () => {
   const res = await orchestrator.app.inject({
@@ -1050,7 +1063,7 @@ test('a body that leaves out an optional field is taken as it is', async () => {
     payload: { name: 'Everywhere', agentsMd: 'House rules.' },
   });
 
-  // An empty body names no field, so every field keeps what it had.
+  // An empty body names no field, so each field keeps its value.
   const res = await orchestrator.app.inject({
     method: 'PATCH',
     url: '/api/agent-sets/global',
@@ -1061,8 +1074,6 @@ test('a body that leaves out an optional field is taken as it is', async () => {
   assert.equal(set.name, 'Everywhere');
   assert.equal(set.agentsMd, 'House rules.');
 });
-
-// --- credentials and settings over their real routes --------------------------
 
 test('a pasted credential is stored, shown by its last four, and never read back', async () => {
   const put = await orchestrator.app.inject({
@@ -1083,8 +1094,7 @@ test('a pasted credential is stored, shown by its last four, and never read back
   });
 
   const list = await orchestrator.app.inject({ url: '/api/credentials' });
-  // Write-only: the secret exists in the database and in the proxy, and in no
-  // answer this API gives.
+  // The secret is in the database and in the proxy, but in no answer of the API.
   assert.ok(!list.payload.includes('sk-ant-oat01-abcdefgh1234'));
   assert.deepEqual(
     (list.json() as Array<{ id: string }>).map((c) => c.id),
@@ -1125,9 +1135,11 @@ test('a credential nobody can use is refused rather than stored', async () => {
 });
 
 /**
- * Installs a scripted login runtime and returns what it ran and removed. The
- * container and the exec are faked, so the tests exercise only the routes the
- * settings page calls.
+ * Installs a fake login runtime and returns the commands that it ran and the
+ * containers that it removed. The container and the exec are fakes, so the
+ * tests check only the routes that the settings page calls.
+ *
+ * @returns The record of each command that the fake ran, and the list of removed containers.
  */
 function fakeLogins(): {
   execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }>;
@@ -1162,7 +1174,12 @@ function fakeLogins(): {
   return { execs, removed };
 }
 
-/** Waits for something a flow does on its own, or gives up loudly. */
+/**
+ * Waits until `ready` returns true, or fails the test after a timeout.
+ *
+ * @param what The awaited event, for the failure message.
+ * @param ready The check to repeat.
+ */
 async function untilTrue(what: string, ready: () => boolean | Promise<boolean>): Promise<void> {
   for (let i = 0; i < 500; i += 1) {
     if (await ready()) return;
@@ -1211,8 +1228,7 @@ test('a login is started, polled, and cancelled over its own routes', async () =
   assert.equal(cancelled.statusCode, 204);
   await untilTrue('the container to go', () => fake.removed.length === 1);
 
-  // The id stops resolving with it, which is what a page polling an abandoned
-  // login sees.
+  // After the cancel, the id is unknown, so a page that polls the login gets a 404.
   const gone = await orchestrator.app.inject({
     url: `/api/credentials/openai/login/${loginId}`,
   });
@@ -1252,8 +1268,8 @@ test("a code is posted back into Claude's flow, and refused where none is wanted
   });
   assert.equal(posted.statusCode, 204);
   await untilTrue('the code to be entered', () => cli.input.endsWith('\r'));
-  // A carriage return: the Enter key's own byte, which is what the raw
-  // terminal the UI reads needs to see.
+  // The code ends with a carriage return, which is the byte of the Enter key. The
+  // CLI reads a raw terminal and needs this byte.
   assert.equal(cli.input, 'from-the-page\r');
 
   const missing = await orchestrator.app.inject({
@@ -1298,8 +1314,8 @@ test('an account credential is reported, and says why it cannot run a box yet', 
   const codex = health.harnesses.find((h) => h.id === 'codex');
   assert.equal(codex?.credential?.account, 'someone@example.com');
   assert.equal(codex?.credential?.status, 'ok');
-  // The proxy swaps a header value, and this document authenticates traffic
-  // the proxy does not intercept.
+  // The proxy replaces a header value, but this document authenticates traffic
+  // that the proxy does not intercept.
   assert.equal(codex?.runnable, false);
   assert.match(codex?.credential?.lastError ?? '', /cannot hand a subscription login to a box/);
 });
@@ -1342,8 +1358,8 @@ test('the health probe says which harness can run, and on what', async () => {
     harnesses: Array<{ id: string; runnable: boolean; credential: unknown }>;
     credentials: unknown[];
   };
-  // Both harnesses, because a box can be handed a placeholder for either
-  // credential. Neither runs yet: nothing is stored.
+  // The list has both harnesses, because a box can get a placeholder for each
+  // credential. No harness can run yet, because no credential is stored.
   assert.deepEqual(
     empty.harnesses.map((h) => [h.id, h.runnable]),
     [
@@ -1367,10 +1383,9 @@ test('the health probe says which harness can run, and on what', async () => {
   };
   assert.equal(after.harnesses[0]!.runnable, true);
   assert.equal(after.harnesses[0]!.credential?.account, '1234');
-  // One credential is one harness: Codex is still waiting for its own.
+  // Each harness needs its own credential, so Codex cannot run yet.
   assert.equal(after.harnesses[1]!.runnable, false);
-  // Every stored credential is reported, GitHub included, because the
-  // settings page reads them from here.
+  // The probe reports each stored credential.
   assert.deepEqual(
     after.credentials.map((c) => c.id),
     ['claude'],
@@ -1384,7 +1399,7 @@ test('an OpenAI key entered on the settings page is what makes Codex runnable', 
     payload: { method: 'api_key', secret: 'sk-proj-abcdefgh5678' },
   });
   assert.equal(put.statusCode, 200);
-  // Write-only: the page is told which key this is and never the key.
+  // The answer names the key by its last four characters and never holds the key.
   assert.deepEqual(put.json(), {
     id: 'openai',
     method: 'api_key',
@@ -1430,8 +1445,6 @@ test('a credential that is failing is still offered, and says it is not runnable
   assert.equal(health.harnesses[0]!.credential.lastError, 'a year is up');
 });
 
-// --- harnesses, and the thread bodies that name one ---------------------------
-
 test('the harness list carries the registry, the catalogue and the health', async () => {
   const res = await orchestrator.app.inject({ url: '/api/harnesses' });
   assert.equal(res.statusCode, 200);
@@ -1443,8 +1456,8 @@ test('the harness list carries the registry, the catalogue and the health', asyn
     defaultConfig: Record<string, string>;
     catalog: unknown;
   }>;
-  // Both, on the same rule the health probe uses: a harness this deployment
-  // can carry a credential to is offered whether or not one is stored.
+  // The list has both harnesses, by the same rule as the health probe. It offers
+  // each harness that can get a credential in this deployment, stored or not.
   assert.deepEqual(
     fresh.map((h) => h.id),
     ['claude', 'codex'],
@@ -1452,19 +1465,18 @@ test('the harness list carries the registry, the catalogue and the health', asyn
   assert.equal(fresh[0]!.defaultModeId, 'auto');
   assert.equal(fresh[0]!.forkModeId, 'plan');
   assert.deepEqual(fresh[0]!.defaultConfig, { model: 'opus' });
-  // Codex's own defaults, which the dialog prefills from: the container is the
-  // boundary, so a fresh thread is in full access, and the model is left to
-  // the adapter.
+  // The defaults of Codex fill the dialog. The container is the security boundary,
+  // so a new thread has full access. The adapter selects the model.
   assert.equal(fresh[1]!.defaultModeId, 'agent-full-access');
   assert.equal(fresh[1]!.forkModeId, 'read-only');
   assert.deepEqual(fresh[1]!.defaultConfig, {});
   assert.equal(fresh[1]!.catalog, null);
-  // Nothing has run an adapter here, so there is nothing cached and no box is
-  // started to find out: the dialog shows the agent choice alone.
+  // No adapter ran here, so no catalogue is cached, and the route starts no box to
+  // get one. The dialog then shows only the agent choice.
   assert.equal(fresh[0]!.catalog, null);
   assert.equal(fresh[0]!.runnable, false);
 
-  // What an adapter last advertised, cached by the gateway and read back here.
+  // The gateway caches the last catalogue of an adapter, and the route reads it.
   upsertHarnessCatalog(
     db,
     'claude',
@@ -1495,8 +1507,7 @@ test('a thread reports the agent it runs and what it is configured with', async 
   assert.deepEqual(res.json(), [
     {
       id: 'harn01-t1',
-      // Claude, which is what a row written before harnesses existed is and
-      // what a request naming none asks for.
+      // Claude is the default for a row and for a request without a harness.
       harness: 'claude',
       acpSessionId: null,
       title: null,
@@ -1507,7 +1518,7 @@ test('a thread reports the agent it runs and what it is configured with', async 
       pendingCount: 0,
       modeId: 'plan',
       config: { model: 'opus' },
-      // No adapter has been reached, so nothing is claimed about forking.
+      // No adapter answered yet, so canFork is false.
       canFork: false,
       done: false,
       createdAt: (res.json() as Array<{ createdAt: number }>)[0]!.createdAt,
@@ -1525,15 +1536,14 @@ test('a thread for an agent nobody has is refused before anything is started', a
   });
   assert.equal(res.statusCode, 400);
   assert.match((res.json() as { error: string }).error, /Unknown harness/);
-  // Nothing was created on the way to the refusal: the box still has the one
-  // thread it was seeded with.
+  // The refusal created nothing, so the box has only its first thread.
   const threads = (
     await orchestrator.app.inject({ url: '/api/boxes/harn02/threads' })
   ).json() as unknown[];
   assert.equal(threads.length, 1);
 
-  // Same answer when a box is asked for on an agent nobody has, and before
-  // anything is allocated for it — no image pull, no network, no container.
+  // A new box with an unknown harness gets the same answer, before any image pull,
+  // network or container.
   const created = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes',

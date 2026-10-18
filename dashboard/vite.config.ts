@@ -27,9 +27,9 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    // Stated, because the orchestrator and the service worker name this
-    // directory and cache it for good. Every name in it carries a content
-    // hash.
+    // Set explicitly, because the orchestrator and the service worker use this
+    // directory name and cache its files permanently. Every file name in it
+    // has a content hash.
     assetsDir: 'assets',
   },
   test: {
@@ -54,7 +54,7 @@ export default defineConfig({
           // Vitest's default poll timeout of one second fails on a busy CI
           // machine. The test timeout stops a hung run.
           expect: { poll: { timeout: 15_000, interval: 50 } },
-          // Parallel files would compete for Chromium for no gain.
+          // Test files that run in parallel would compete for Chromium.
           fileParallelism: false,
         },
       },

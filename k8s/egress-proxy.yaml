@@ -1,4 +1,4 @@
-# The egress proxy: the only way out of a box. The orchestrator reads the
+# The egress proxy, which is the only way out of a box. The orchestrator reads the
 # Service by its name (EGRESS_PROXY_SERVICE), gives the boxes its cluster IP,
 # and lets each box reach the pods it selects on the proxy port.
 apiVersion: apps/v1
@@ -8,8 +8,8 @@ metadata:
   labels:
     app.kubernetes.io/name: boxes-egress-proxy
 spec:
-  # One replica: the orchestrator pushes the policy and the credentials to
-  # the control channel of one proxy.
+  # One replica, because the orchestrator pushes the policy and the
+  # credentials to the control channel of one proxy.
   replicas: 1
   strategy:
     type: Recreate
@@ -43,7 +43,8 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          # The proxy holds the requests of every box in memory.
+          # The proxy buffers each request to a credential host in memory, to
+          # swap the credential in.
           resources:
             requests:
               memory: 256Mi

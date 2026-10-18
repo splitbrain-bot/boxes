@@ -8,14 +8,22 @@ import { type Db, openDb, upsertPushSubscription } from './db.ts';
 import { Notifier, type NotifyEvent, wording } from './notify.ts';
 import { loadVapidKeys } from './push.ts';
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
+/** The config of the current test. */
 let cfg: Config;
+/** The calls that the fake fetch recorded in the current test. */
 let calls: Array<{ url: string; headers: Record<string, string> }>;
 /** The real fetch, restored after each test. */
 const realFetch = globalThis.fetch;
 
-/** Installs a fetch that records every call and answers as told. */
+/**
+ * Installs a fetch that records every call and answers as told.
+ *
+ * @param answer Returns the status to answer a URL with, or the error to throw.
+ */
 function fakeFetch(answer: (url: string) => { status: number } | Error): void {
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
@@ -28,7 +36,9 @@ function fakeFetch(answer: (url: string) => { status: number } | Error): void {
 
 /**
  * Stores one subscription row, with keys of the sizes the crypto needs.
- * `vapidKey` defaults to the deployment's current key.
+ *
+ * @param endpoint The endpoint URL.
+ * @param vapidKey The VAPID public key of the subscription. It defaults to the current key of the deployment.
  */
 function subscribe(endpoint: string, vapidKey = loadVapidKeys(db).publicKey): void {
   upsertPushSubscription(

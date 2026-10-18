@@ -16,10 +16,15 @@ import type { BoxDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/boxes.ts';
 
-/** How often the detail view re-reads the box, while its tab is visible. */
+/** The poll interval in milliseconds for the box, while the tab is visible. */
 const POLL_MS = 5000;
 
-/** One field of the details grid. */
+/**
+ * One field of the details grid.
+ *
+ * @param label The name of the field.
+ * @param value The value of the field.
+ */
 function Meta({ label, value }: { label: string; value: string }) {
   return (
     <>
@@ -45,6 +50,7 @@ export function BoxInfo() {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  /** Reads the box. */
   const load = useCallback(async (): Promise<void> => {
     try {
       setBox(await api.getBox(id));
@@ -75,8 +81,8 @@ export function BoxInfo() {
   };
 
   /**
-   * Deletes the box and leaves for the list. It bypasses `act`, because a
-   * reload of the deleted box would answer 404.
+   * Deletes the box and goes back to the list. The function does not use
+   * `act`, because a reload of the deleted box would get a 404.
    */
   const remove = async (): Promise<void> => {
     setBusy(true);
@@ -136,7 +142,7 @@ export function BoxInfo() {
             {box.runtimeDetails.map(([label, value]) => (
               <Meta key={label} label={label} value={value} />
             ))}
-            {/* Every box gets the global set, so no named set reads as "global only". */}
+            {/* Every box gets the global set, so a box without a named set shows "global only". */}
             <Meta label="Agent set" value={box.agentSetName ?? 'global only'} />
             <Meta label="Last active" value={new Date(box.lastActiveAt).toLocaleString()} />
             {/* Null before the first measurement. */}

@@ -3,8 +3,8 @@ import { Button } from '@/components/ui/button';
 import { disablePush, enablePush, type PushBlocker, usePush } from '../stores/push.ts';
 
 /**
- * Why this browser cannot be notified, in terms of what the user would have to
- * change. The disabled toggle shows it as its tooltip, because the list header
+ * The reason this browser cannot get notifications, as the change the user must
+ * make. The disabled toggle shows it as its tooltip, because the list header
  * has no room for a sentence.
  */
 const BLOCKED: Record<PushBlocker, string> = {

@@ -1,25 +1,27 @@
+/** Pure functions over the egress policy. */
+
 import { createHash } from 'node:crypto';
 import net from 'node:net';
 import type { EgressCredential, EgressPolicy } from '../../shared/types.ts';
 
-/** Pure functions over the egress policy, with no I/O and no state. */
-
-/** The policy of a proxy nobody has pushed to yet. Frozen, because it is shared. */
+/** The policy of a proxy before the first push. It is frozen, because all callers share the same object. */
 export const EMPTY_POLICY: EgressPolicy = Object.freeze({
   allowedHosts: Object.freeze([] as string[]),
   ca: null,
   credentials: Object.freeze([] as EgressCredential[]),
 }) as EgressPolicy;
 
-// --- host matching ----------------------------------------------------------
-
 /**
- * Whether a hostname matches one allowlist pattern.
+ * Checks if a hostname matches one allowlist pattern.
  *
- * A pattern is an exact name or `*.example.com`, where the star stands for
- * exactly one label. So `*.example.com` matches `api.example.com`, but not
- * `example.com` or `a.b.example.com`. Matching ignores case, and an IP literal
- * matches only an identical literal.
+ * A pattern is an exact name or *.example.com, where the star stands for
+ * exactly one label. So *.example.com matches api.example.com, but not
+ * example.com or a.b.example.com. Matching ignores case and a trailing dot. An
+ * IP literal matches only an identical literal.
+ *
+ * @param host The hostname or IP literal.
+ * @param pattern The allowlist pattern.
+ * @returns True when the host matches the pattern.
  */
 export function hostMatches(host: string, pattern: string): boolean {
   const h = host.trim().toLowerCase().replace(/\.$/, '');
@@ -36,47 +38,75 @@ export function hostMatches(host: string, pattern: string): boolean {
   return label !== '' && !label.includes('.');
 }
 
-/** Whether a hostname matches any of the patterns. */
+/**
+ * Checks if a hostname matches one of the patterns.
+ *
+ * @param host The hostname or IP literal.
+ * @param patterns The allowlist patterns.
+ * @returns True when the host matches at least one pattern.
+ */
 function hostMatchesAny(host: string, patterns: readonly string[]): boolean {
   return patterns.some((p) => hostMatches(host, p));
 }
 
 /**
- * Whether a host may be reached at all. An empty allowlist allows every host,
- * and the address vetting still applies.
+ * Checks if the policy allows a host. An empty allowlist allows every host.
+ *
+ * @param host The hostname or IP literal.
+ * @param policy The policy to check against.
+ * @returns True when the allowlist or the hosts of a credential match the host.
  */
 export function hostAllowed(host: string, policy: EgressPolicy): boolean {
   if (policy.allowedHosts.length === 0) return true;
   if (hostMatchesAny(host, policy.allowedHosts)) return true;
-  // A configured credential's hosts are implied members, so a narrow allowlist
-  // cannot cut off the traffic the proxy authenticates.
+  // The hosts of a credential are always allowed, so a narrow allowlist cannot
+  // cut off the traffic that the proxy authenticates.
   return policy.credentials.some((c) => hostMatchesAny(host, c.hosts));
 }
 
-/** The credentials configured for a host, in policy order. */
+/**
+ * Finds the credentials configured for a host.
+ *
+ * @param host The hostname or IP literal.
+ * @param policy The policy to search.
+ * @returns The credentials for the host, in policy order.
+ */
 export function credentialsForHost(host: string, policy: EgressPolicy): EgressCredential[] {
   return policy.credentials.filter((c) => hostMatchesAny(host, c.hosts));
 }
 
-/** Whether a host's TLS is intercepted: the policy has a CA and a credential for it. */
+/**
+ * Checks if the proxy intercepts the TLS of a host.
+ *
+ * @param host The hostname or IP literal.
+ * @param policy The policy to check against.
+ * @returns True when the policy has a CA and a credential for the host.
+ */
 export function isInjectionHost(host: string, policy: EgressPolicy): boolean {
   return policy.ca !== null && credentialsForHost(host, policy).length > 0;
 }
 
-/** Every host pattern the policy intercepts, for logging. */
+/**
+ * Lists every host pattern that the policy intercepts, for logging.
+ *
+ * @param policy The policy to read.
+ * @returns The host patterns of all credentials, without duplicates.
+ */
 export function injectionPatterns(policy: EgressPolicy): string[] {
   return [...new Set(policy.credentials.flatMap((c) => c.hosts))];
 }
 
-// --- credential translation -------------------------------------------------
-
 /**
- * Rewrites one header value so it carries `secret` instead of `placeholder`,
- * or returns null when the value does not carry the placeholder.
+ * Rewrites one header value so it holds the secret in place of the placeholder.
  *
- * The placeholder may appear as it is (`Bearer <p>`, `token <p>`, or the bare
- * value), or inside the decoded `user:password` of HTTP Basic, which is what
- * git's credential helper sends.
+ * The placeholder can appear as it is (Bearer <p>, token <p>, or the bare
+ * value), or inside the decoded user:password of HTTP Basic. The credential
+ * helper of git sends HTTP Basic.
+ *
+ * @param value The header value.
+ * @param placeholder The placeholder to replace.
+ * @param secret The real credential.
+ * @returns The rewritten value, or null when the value does not hold the placeholder.
  */
 export function swapCredentialValue(
   value: string,
@@ -101,16 +131,20 @@ export function swapCredentialValue(
 
 /** What the proxy does with one intercepted request. */
 export type CredentialVerdict =
-  /** Forward it unchanged: it carries no credential for this host. */
+  /** Forward the request unchanged, because no header of it holds a placeholder. */
   | { action: 'pass' }
-  /** Forward it with these header values replaced. */
+  /** Forward the request with the values in headers. credentialIds names the credentials that were swapped in. */
   | { action: 'swap'; headers: Record<string, string>; credentialIds: string[] }
-  /** Refuse it here rather than let a foreign credential reach the host. */
+  /** Refuse the request, so a foreign credential does not reach the host. reason says why. */
   | { action: 'deny'; reason: string };
 
 /**
- * The first non-blank value of a header, or null. Names are compared in lower
- * case, so a client's capitalisation cannot hide a header.
+ * Finds the value of a header. For an array value, only the first entry counts.
+ * Names are compared in lower case, so the capitalisation of a client cannot hide a header.
+ *
+ * @param headers The request headers.
+ * @param name The header name.
+ * @returns The value, or null when the header is missing or blank.
  */
 function headerValue(
   headers: Readonly<Record<string, string | string[] | undefined>>,
@@ -127,8 +161,10 @@ function headerValue(
 }
 
 /**
- * The authorization scheme a header value starts with, lowercased, or null
- * when the value is not a scheme followed by a credential.
+ * Finds the authorization scheme that a header value starts with.
+ *
+ * @param value The header value.
+ * @returns The scheme in lower case, or null when the value is not a scheme followed by a credential.
  */
 function schemeOf(value: string): string | null {
   return /^\s*([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+\S/.exec(value)?.[1]?.toLowerCase() ?? null;
@@ -137,15 +173,20 @@ function schemeOf(value: string): string | null {
 /**
  * Decides what a request to an intercepted host may carry.
  *
- * Only the headers the host's credentials name are read, or every header when
- * a credential names none. A header holding a placeholder is rewritten to hold
- * the real credential. A header under one of the credentials' pass-through
- * schemes is left alone, because the host issued that value itself. A named
- * header holding any other value refuses the request, so no foreign credential
- * reaches the host. Any other header passes unchanged.
+ * The function reads each header that a credential of the host names. When a
+ * credential names no header, the function reads every header. A header with a
+ * placeholder gets the real credential. A named header under a pass-through
+ * scheme of its credential stays unchanged, because the host issued that value.
+ * A named header with any other value refuses the request, so no foreign
+ * credential reaches the host. All other headers stay unchanged.
  *
- * A request with none of these headers passes through, so a login with a
- * session cookie from inside a box keeps working.
+ * A request without these headers passes, so an agent can still log in with a
+ * session cookie.
+ *
+ * @param host The hostname of the request.
+ * @param headers The request headers.
+ * @param policy The policy that holds the credentials.
+ * @returns The verdict for the request.
  */
 export function decideCredentials(
   host: string,
@@ -170,7 +211,7 @@ export function decideCredentials(
     if (present === null) continue;
 
     // Credentials that may travel in this header, in policy order. The first
-    // whose placeholder the value carries is the one to swap.
+    // credential with its placeholder in the value is swapped in.
     const candidates = credentials.filter(
       (c) => c.headers.length === 0 || c.headers.includes(name),
     );
@@ -201,12 +242,13 @@ export function decideCredentials(
   return { action: 'swap', headers: replacements, credentialIds: [...new Set(used)] };
 }
 
-// --- identity ---------------------------------------------------------------
-
 /**
- * A stable fingerprint of a policy, reported in the proxy's status. Secrets
- * are hashed, never echoed, because the status travels over the control
- * channel.
+ * Makes a stable fingerprint of a policy for the status of the proxy. The
+ * fingerprint uses only hashes of the secrets, because the status travels over
+ * the control channel.
+ *
+ * @param policy The policy to fingerprint.
+ * @returns 32 hex digits, which ignore the order of the lists and the case of the hosts.
  */
 export function policyHash(policy: EgressPolicy): string {
   const canonical = JSON.stringify({
@@ -226,7 +268,13 @@ export function policyHash(policy: EgressPolicy): string {
   return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }
 
-/** Parses and validates a pushed policy, throwing on anything malformed. */
+/**
+ * Parses and validates a pushed policy.
+ *
+ * @param input The decoded JSON body of the push.
+ * @returns The validated policy, with trimmed entries and header names in lower case.
+ * @throws Error When the input is not a valid policy.
+ */
 export function parsePolicy(input: unknown): EgressPolicy {
   const fail = (why: string): never => {
     throw new Error(`invalid policy: ${why}`);

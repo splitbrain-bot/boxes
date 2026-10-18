@@ -1,3 +1,5 @@
+/** The orchestrator side of the egress proxy: its policy and key material. */
+
 import { randomBytes } from 'node:crypto';
 import { generateCACertificate } from 'mockttp';
 import type {
@@ -18,8 +20,6 @@ import {
 import { type Db, readAppKey, writeAppKey } from './db.ts';
 import { log } from './log.ts';
 
-/** The orchestrator side of the egress proxy: its policy and key material. */
-
 /** The app key under which the CA and the control token are stored. */
 const APP_KEY = 'egress';
 
@@ -31,15 +31,18 @@ const CONTROL_TIMEOUT_MS = 5_000;
  * Running boxes trust the CA, so it must survive a restart.
  */
 export interface EgressMaterial {
-  /** The deployment CA. Its certificate is public; its key is not. */
+  /** The deployment CA. The certificate is public, and the key is secret. */
   ca: { key: string; cert: string };
-  /** Bearer the orchestrator authenticates its pushes with. */
+  /** The bearer token that authenticates the calls of the orchestrator on the control channel. */
   controlToken: string;
 }
 
 /**
  * Loads the deployment's egress material, generating and storing it on first
  * use. Deleting the row rotates it.
+ *
+ * @param db The database that holds the material.
+ * @returns The material.
  */
 export async function resolveEgressMaterial(db: Db): Promise<EgressMaterial> {
   const stored = readAppKey<EgressMaterial>(db, APP_KEY);
@@ -59,9 +62,15 @@ export async function resolveEgressMaterial(db: Db): Promise<EgressMaterial> {
  * key store.
  *
  * The policy always carries the CA, as boxes created before the first
- * credential already trust it. A host is only intercepted while its
+ * credential already trust it. The proxy intercepts a host only while its
  * credential has a deliverable secret. An API key names no header, so the
  * proxy swaps it in whatever header carries its placeholder.
+ *
+ * @param cfg The configuration of the deployment.
+ * @param material The CA and the control token.
+ * @param stored The rows of the credential store.
+ * @param apiKeys The rows of the API key store.
+ * @returns The policy for the proxy.
  */
 export function composePolicy(
   cfg: Config,
@@ -107,7 +116,15 @@ export function composePolicy(
   };
 }
 
-/** Pushes a policy to the proxy and returns what it reports back. */
+/**
+ * Pushes a policy to the proxy.
+ *
+ * @param cfg The configuration of the deployment, with the URL of the control channel.
+ * @param material The material with the control token.
+ * @param policy The policy to push.
+ * @returns The status that the proxy reports back.
+ * @throws Error When the call fails or the proxy answers with an error status.
+ */
 export async function pushPolicy(
   cfg: Config,
   material: EgressMaterial,
@@ -116,7 +133,17 @@ export async function pushPolicy(
   return controlCall(cfg, material, 'POST', '/policy', policy);
 }
 
-/** One authenticated call on the control channel, returning the proxy's status. */
+/**
+ * Makes one authenticated call on the control channel.
+ *
+ * @param cfg The configuration of the deployment, with the URL of the control channel.
+ * @param material The material with the control token.
+ * @param method The HTTP method.
+ * @param path The path on the control channel.
+ * @param body The JSON body, or undefined for a call without a body.
+ * @returns The status that the proxy reports back.
+ * @throws Error When the call fails, times out after CONTROL_TIMEOUT_MS, or the proxy answers with an error status.
+ */
 async function controlCall(
   cfg: Config,
   material: EgressMaterial,
@@ -150,7 +177,7 @@ async function controlCall(
 }
 
 /**
- * Owns the composed policy and keeps the proxy holding it.
+ * The owner of the composed egress policy, which it pushes to the proxy.
  *
  * Real credentials leave this process only over the control channel, into
  * the proxy's memory. A proxy restart loses the policy, and the push is
@@ -161,18 +188,21 @@ export class EgressManager {
   private material: EgressMaterial | null = null;
   /** The last composed policy, or null before prepare(). */
   private composed: EgressPolicy | null = null;
-  /** What the last push reported, or null before the first. */
+  /** The health that the last push reported, or null before the first push. */
   private health: EgressHealth | null = null;
 
+  /**
+   * @param cfg The configuration of the deployment.
+   * @param credentials The source of the secrets.
+   * @param apiKeys The source of the API keys.
+   * @param db The database that holds the CA and the control token.
+   */
   constructor(
     /** The deployment's configuration. */
     private readonly cfg: Config,
-    /**
-     * Where the secrets come from. The manager only reads it, on every
-     * compose.
-     */
+    /** The source of the secrets, read on every compose. */
     private readonly credentials: CredentialStore,
-    /** Where the API keys come from, read on every compose like the credentials. */
+    /** The source of the API keys, read on every compose. */
     private readonly apiKeys: ApiKeyStore,
     /** Where the CA and the control token are kept. */
     private readonly db: Db,
@@ -189,14 +219,22 @@ export class EgressManager {
     );
   }
 
-  /** The CA certificate a box is given to trust. Public, never the key. */
+  /**
+   * Returns the CA certificate that a box trusts.
+   *
+   * @returns The certificate, without the key.
+   * @throws Error Before prepare().
+   */
   caCertificate(): string {
     return this.prepared().material.ca.cert;
   }
 
   /**
-   * The prepared state. Throws before prepare(), so no box is built without
-   * the placeholders and the CA.
+   * Returns the prepared state. It throws before prepare(), so no box is built
+   * without the CA.
+   *
+   * @returns The material and the last composed policy.
+   * @throws Error Before prepare().
    */
   private prepared(): { material: EgressMaterial; composed: EgressPolicy } {
     if (!this.material || !this.composed) {
@@ -206,32 +244,49 @@ export class EgressManager {
   }
 
   /**
-   * What a box holds in place of a credential, or the empty string for one
-   * that is not stored. The empty string drops the variable from the box's
-   * environment.
+   * Returns the placeholder that stands for a credential in a box. The empty
+   * string drops the variable from the environment of the box.
+   *
+   * @param id The id of the credential.
+   * @returns The placeholder, or the empty string for a credential that is not stored.
    */
   placeholderFor(id: string): string {
     return this.credentials.placeholderFor(id);
   }
 
-  /** The placeholder of each stored API key, by the variable a box holds it in. */
+  /**
+   * Returns the placeholder of each stored API key.
+   *
+   * @returns The placeholders, by the name of the variable in a box.
+   */
   apiKeyEnv(): Record<string, string> {
     return Object.fromEntries(this.apiKeys.list().map((key) => [key.name, key.placeholder]));
   }
 
-  /** How a stored credential was obtained, or null for one that is not stored. */
+  /**
+   * Returns how a stored credential was obtained.
+   *
+   * @param id The id of the credential.
+   * @returns The method, or null for a credential that is not stored.
+   */
   methodFor(id: CredentialId): CredentialMethod | null {
     return this.credentials.get(id)?.method ?? null;
   }
 
-  /** The last thing the proxy reported, for /healthz. */
+  /**
+   * Returns the last health that the proxy reported, for /healthz.
+   *
+   * @returns The health, or null before the first push.
+   */
   status(): EgressHealth | null {
     return this.health;
   }
 
   /**
    * Recomposes the policy from the store, pushes it, and records what the
-   * proxy reported. Every store write and every reconciler tick calls it.
+   * proxy reported. The boot, every store write and every reconciler tick call it.
+   *
+   * @throws Error When the push fails. The health then records the error.
    */
   async sync(): Promise<void> {
     if (!this.material) await this.prepare();

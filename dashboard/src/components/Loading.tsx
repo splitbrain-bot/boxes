@@ -4,6 +4,9 @@ import { cn } from '@/lib/utils';
 /**
  * Status text a view shows while it waits for its first answer. The status
  * role lets a screen reader announce it. The caller sets the layout.
+ *
+ * @param className Layout classes from the caller.
+ * @param children The text, when a view has a more exact one than the default.
  */
 export function Loading({
   className,

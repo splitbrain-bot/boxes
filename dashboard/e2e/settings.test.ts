@@ -1,15 +1,16 @@
+/**
+ * Browser tests for the settings page.
+ *
+ * A secret is write-only. The page gets back its last four characters and a
+ * status, never the value.
+ */
+
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { CODEX_LOGIN_OFFERED } from '../src/lib/harness.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
-/**
- * Browser tests for the settings page.
- *
- * A secret is write-only: the page gets back its last four characters and a
- * status, never the value.
- */
-
+/** The orchestrator of the running test. */
 let stub: TestOrchestrator;
 
 beforeEach(async () => {
@@ -224,15 +225,7 @@ test('the box list links to the settings page', async () => {
   }
 });
 
-// --- logins -----------------------------------------------------------------
-// The orchestrator runs the harness's CLI, scripted here, and the page follows
-// the flow by polling.
-
-/**
- * Runs a test only while the settings page offers the Codex login.
- *
- * The Codex CLI prints a URL and a one-time code, and finishes by itself.
- */
+/** Runs a test only while the settings page offers the Codex login. */
 const codexLogin = test.skipIf(!CODEX_LOGIN_OFFERED);
 
 codexLogin('a Codex login shows the URL and the code, and the account with it', async () => {
@@ -355,7 +348,7 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
       await shoot(page, `settings-login-${scheme}`);
 
-      // Only one login runs at a time, so starting another ends the first.
+      // The page follows one login at a time, so starting another cancels the first.
       await page.getByRole('button', { name: 'Log in to Claude' }).click();
       await expect.poll(() => stub.logins.length).toBe(2);
       stub.logins[1]!.print('Visit: https://claude.ai/oauth/code\nPaste code here if prompted > ');

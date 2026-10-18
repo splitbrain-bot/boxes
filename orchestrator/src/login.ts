@@ -1,3 +1,13 @@
+/**
+ * Account logins. The CLI of a harness runs the login of that harness in a
+ * throwaway container. The Dev Tunnels login is the device flow of GitHub,
+ * which the orchestrator runs itself.
+ *
+ * The CLIs do not document the lines they print. So the parsers look for
+ * shapes, such as a URL on the service's host, a one-time code or a token
+ * prefix, and the raw output goes to the log.
+ */
+
 import { randomUUID } from 'node:crypto';
 import { finished, PassThrough, type Readable, type Writable } from 'node:stream';
 import type { CredentialId, LoginState } from '../../shared/types.ts';
@@ -13,16 +23,6 @@ import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import { type Login, runtime } from './runtime/runtime.ts';
 import { Screen } from './screen.ts';
-
-/**
- * Account logins. A harness login is run by the harness's own CLI in a
- * throwaway container. The Dev Tunnels login is GitHub's device flow, which
- * the orchestrator runs itself.
- *
- * The CLIs do not document the lines they print. So the parsers look for
- * shapes, such as a URL on the service's host, a one-time code or a token
- * prefix, and the raw output goes to the log.
- */
 
 /** How long a person gets to finish a login before it fails, in milliseconds. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
@@ -45,10 +45,10 @@ const CLAUDE_CONFIG_DIR = '/home/agent/.claude';
 const CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device';
 
 /**
- * What a Claude one-year token looks like, which is how it is recognised.
+ * The pattern of a Claude one-year token, which the login recognises it by.
  *
  * Only the `sk-ant-` prefix is matched, not the kind after it, so a new token
- * kind cannot make the login hang. The minimum length keeps it off other text.
+ * kind cannot make the login hang. The minimum length keeps it from matching other text.
  */
 const CLAUDE_TOKEN = /sk-ant-[A-Za-z0-9_-]{20,}/;
 
@@ -69,8 +69,7 @@ const RETRY_PROMPT = /press enter to retry/i;
  * it, in milliseconds.
  *
  * The UI reads a chunk of stdin as one keypress, and two writes back to back
- * arrive as one chunk. The value is measured: with it, a real code is always
- * entered.
+ * arrive as one chunk.
  */
 const ENTER_DELAY_MS = 150;
 
@@ -89,7 +88,7 @@ const CLAUDE_TOKEN_DAYS = 365;
 /** GitHub's endpoint that starts a device login. */
 const GITHUB_DEVICE_CODE_URL = 'https://github.com/login/device/code';
 
-/** What the Dev Tunnels app asks of a GitHub account: its public profile. */
+/** The scope the Dev Tunnels app asks of a GitHub account, which is its public profile. */
 const DEVTUNNELS_SCOPE = 'read:user';
 
 /** Seconds GitHub adds to the poll interval each time it answers `slow_down`. */
@@ -107,12 +106,15 @@ const ERROR_TAIL = 600;
 /** The credentials that have a login flow at all. */
 export const LOGIN_CREDENTIALS: readonly CredentialId[] = ['claude', 'openai', 'devtunnels'];
 
-/** Whether a credential is obtained by logging in rather than by pasting. */
+/**
+ * Checks if a credential is obtained by logging in rather than by pasting.
+ *
+ * @param id The id of the credential.
+ * @returns True when the credential has a login flow.
+ */
 export function hasLoginFlow(id: CredentialId): boolean {
   return LOGIN_CREDENTIALS.includes(id);
 }
-
-// --- the container and exec layer -------------------------------------------
 
 /**
  * The terminal size of an interactive login. A login URL is longer than the
@@ -126,18 +128,19 @@ export interface LoginExecSpec {
   cmd: readonly string[];
   /** Variables set for the command. */
   env?: Record<string, string>;
-  /** A terminal and a writable stdin: what an interactive CLI needs. */
+  /** True for a terminal and a writable stdin, which an interactive CLI needs. */
   tty?: boolean;
 }
 
 /**
  * A running login command: what it prints, what it can be told, and its end.
- * Which stream a CLI prints its URL on is not an API, so the flows read both.
+ * A CLI does not promise the stream that it prints its URL on, so the flows
+ * read both.
  */
 export interface LoginExec {
   /** stdout and stderr merged, in the order they were written. */
   output: Readable;
-  /** Writable only on a TTY exec; null otherwise. */
+  /** The stdin of a TTY exec, or null for other execs. */
   stdin: Writable | null;
   /** Resolves when the command ends, with the exit code if known. */
   exited: Promise<number | null>;
@@ -151,6 +154,10 @@ export interface LoginExec {
  * `tty` is for `claude setup-token`, an interactive UI that refuses to run
  * without a terminal and reads the code from stdin. Under a TTY the output is
  * one raw stream, with the CLI's redraws and escape sequences.
+ *
+ * @param login The login container.
+ * @param spec The command and its options.
+ * @returns The running command.
  */
 async function spawnLogin(login: Login, spec: LoginExecSpec): Promise<LoginExec> {
   const proc = await login.spawn(spec.cmd, {
@@ -174,17 +181,20 @@ async function spawnLogin(login: Login, spec: LoginExecSpec): Promise<LoginExec>
   };
 }
 
-// --- GitHub, for the device login ------------------------------------------
-
 /** What the Dev Tunnels login needs from GitHub. An interface, so tests can fake it. */
 export interface GitHubClient {
   /** One POST to an OAuth endpoint. */
   post: TokenPost;
-  /** The login name of the account a token belongs to, or null when GitHub does not say. */
+  /**
+   * Returns the login name of the account that a token belongs to.
+   *
+   * @param token The access token.
+   * @returns The login name, or null when GitHub does not say.
+   */
   login(token: string): Promise<string | null>;
 }
 
-/** The real thing: GitHub's own endpoints. */
+/** The client that calls the real GitHub endpoints. */
 export const gitHubClient: GitHubClient = {
   post: postToken,
   async login(token) {
@@ -202,8 +212,6 @@ export const gitHubClient: GitHubClient = {
   },
 };
 
-// --- the flows --------------------------------------------------------------
-
 /** One login in progress, or the last one that finished. */
 interface Flow {
   /** The login id the page polls with. */
@@ -216,11 +224,11 @@ interface Flow {
   login: Login | null;
   /** The running CLI, or null. */
   exec: LoginExec | null;
-  /** Set once the state is `done` or `failed`; nothing moves it afterwards. */
+  /** True once the state is `done` or `failed`. Nothing changes the state afterwards. */
   settled: boolean;
   /** Why the last code was refused, until another one is sent. */
   refusal: string | null;
-  /** Whether the retry the CLI is waiting on has been pressed already. */
+  /** True when Enter for the retry that the CLI waits on was pressed already. */
   retrying: boolean;
   /** The LOGIN_TIMEOUT_MS timer, or null once released. */
   timer: ReturnType<typeof setTimeout> | null;
@@ -234,6 +242,11 @@ export class LoginManager {
   /** The current flow of each credential. */
   private readonly flows = new Map<CredentialId, Flow>();
 
+  /**
+   * @param credentials The store that a finished login writes its credential to.
+   * @param timeoutMs How long a login may take, in milliseconds.
+   * @param github The client that the Dev Tunnels login uses to call GitHub.
+   */
   constructor(
     /** Where a finished login stores its credential. */
     private readonly credentials: CredentialStore,
@@ -244,8 +257,13 @@ export class LoginManager {
   ) {}
 
   /**
-   * Starts a login and returns the id the page polls. It returns before the
-   * container starts, and the page shows the `starting` state meanwhile.
+   * Starts a login. It returns before the container starts, and the page
+   * shows the `starting` state meanwhile. A new login cancels the current login
+   * of the same credential.
+   *
+   * @param credentialId The credential to log in for.
+   * @returns The login id that the page polls with.
+   * @throws HttpError with status 400 when the credential has no login flow.
    */
   start(credentialId: CredentialId): string {
     if (!hasLoginFlow(credentialId)) {
@@ -278,7 +296,14 @@ export class LoginManager {
     return flow.id;
   }
 
-  /** Where a login has got to, or a 404 for one that is no longer current. */
+  /**
+   * Returns the state of a login.
+   *
+   * @param credentialId The credential of the login.
+   * @param loginId The login id.
+   * @returns The state.
+   * @throws HttpError with status 404 when the login is not the current one.
+   */
   state(credentialId: CredentialId, loginId: string): LoginState {
     return this.flow(credentialId, loginId).state;
   }
@@ -287,12 +312,17 @@ export class LoginManager {
    * Types the code the person pasted into the CLI's prompt.
    *
    * It also accepts a code before the prompt is drawn, as the CLI reads the
-   * stream when it gets there. A flow without stdin, such as Codex's, answers
-   * 409.
+   * stream when it gets there.
    *
    * The code is entered with a carriage return, as a raw-mode UI does not turn
    * a newline into Enter. The return is written ENTER_DELAY_MS later, as a
    * separate keypress.
+   *
+   * @param credentialId The credential of the login.
+   * @param loginId The login id.
+   * @param code The code that the person pasted.
+   * @throws HttpError with status 404 when the login is not the current one, 400 for an empty code, and 409 when
+   *   the login does not wait for a code or has no stdin, such as the Codex flow.
    */
   submitCode(credentialId: CredentialId, loginId: string, code: string): void {
     const flow = this.flow(credentialId, loginId);
@@ -317,7 +347,13 @@ export class LoginManager {
     enter.unref?.();
   }
 
-  /** Gives up on a login and takes its container with it. */
+  /**
+   * Gives up on a login and removes its container.
+   *
+   * @param credentialId The credential of the login.
+   * @param loginId The login id.
+   * @throws HttpError with status 404 when the login is not the current one.
+   */
   cancel(credentialId: CredentialId, loginId: string): void {
     const flow = this.flow(credentialId, loginId);
     this.abort(flow, 'the login was cancelled');
@@ -330,7 +366,14 @@ export class LoginManager {
     }
   }
 
-  /** The named flow, or a 404 saying it is not the current one. */
+  /**
+   * Returns the named flow.
+   *
+   * @param credentialId The credential of the login.
+   * @param loginId The login id.
+   * @returns The flow.
+   * @throws HttpError with status 404 when the flow is not the current one.
+   */
   private flow(credentialId: CredentialId, loginId: string): Flow {
     const flow = this.flows.get(credentialId);
     if (!flow || flow.id !== loginId) {
@@ -339,7 +382,11 @@ export class LoginManager {
     return flow;
   }
 
-  /** Runs one flow to its end, and cleans up whatever it was holding. */
+  /**
+   * Runs one flow to its end, and cleans up whatever it was holding.
+   *
+   * @param flow The flow.
+   */
   private async run(flow: Flow): Promise<void> {
     if (flow.credentialId === 'devtunnels') {
       try {
@@ -371,11 +418,14 @@ export class LoginManager {
   }
 
   /**
-   * Codex: the device-code flow.
+   * Runs the Codex device-code flow.
    *
    * The CLI reads no stdin. It prints a URL and a one-time code, waits for the
    * person, writes `auth.json` and exits 0. On failure it exits 1 with the
    * reason on stderr.
+   *
+   * @param flow The flow.
+   * @param login The login container.
    */
   private async codexLogin(flow: Flow, login: Login): Promise<void> {
     const exec = await spawnLogin(login, {
@@ -418,6 +468,9 @@ export class LoginManager {
   /**
    * Stores the whole document the Codex CLI wrote, as the refresh needs the
    * refresh token beside the access token.
+   *
+   * @param flow The flow.
+   * @param document The content of `auth.json`.
    */
   private storeCodexDocument(flow: Flow, document: string): void {
     const parsed = parseAuthDocument(document);
@@ -438,10 +491,13 @@ export class LoginManager {
   }
 
   /**
-   * Dev Tunnels: GitHub's device flow for the Dev Tunnels app.
+   * Runs the GitHub device flow for the Dev Tunnels app.
    *
    * GitHub hands out a one-time code, which the page shows with its URL, and
    * the orchestrator polls until the person has entered it.
+   *
+   * @param flow The flow.
+   * @throws Error when GitHub does not start the device login.
    */
   private async devTunnelsLogin(flow: Flow): Promise<void> {
     const started = await this.github.post(GITHUB_DEVICE_CODE_URL, {
@@ -486,6 +542,10 @@ export class LoginManager {
   /**
    * Stores a Dev Tunnels login as a document with both tokens, named by the
    * GitHub account it belongs to.
+   *
+   * @param flow The flow.
+   * @param accessToken The access token.
+   * @param answer The token answer of GitHub, with the refresh token and the lifetime.
    */
   private async storeDevTunnelsLogin(
     flow: Flow,
@@ -500,7 +560,7 @@ export class LoginManager {
       'oauth',
       JSON.stringify({ access_token: accessToken, refresh_token: answer.refresh_token ?? '' }),
       {
-        // Without a name the store would show the document's last characters.
+        // Without an account name, the store shows the last four characters of the document.
         account: account ?? 'a GitHub account',
         expires_at: answer.expires_in ? now + answer.expires_in * 1000 : null,
         refreshed_at: now,
@@ -511,11 +571,14 @@ export class LoginManager {
   }
 
   /**
-   * Claude: an interactive terminal UI with a code pasted back.
+   * Runs the Claude login, an interactive terminal UI with a code pasted back.
    *
    * `claude setup-token` needs a TTY. It prints a URL, blocks on a prompt, and
    * prints a one-year token once the code is entered. The scan reads a
    * rebuilt screen, as the UI redraws only the cells it changes.
+   *
+   * @param flow The flow.
+   * @param login The login container.
    */
   private async claudeLogin(flow: Flow, login: Login): Promise<void> {
     const exec = await spawnLogin(login, {
@@ -527,10 +590,10 @@ export class LoginManager {
 
     let url: string | null = null;
     let token: string | null = null;
-    /** Set once a token has been seen, while the rest of it is given time to arrive. */
+    /** The timer that stores the token. It starts once a token is seen, so the rest can arrive. */
     let storing: ReturnType<typeof setTimeout> | null = null;
     /**
-     * Whether the CLI has asked for a code yet. It stays true, as a refusal
+     * True once the CLI has asked for a code. It stays true, as a refusal
      * draws over the prompt while the CLI still wants a code.
      */
     let prompted = false;
@@ -590,6 +653,9 @@ export class LoginManager {
    * Stores the token the CLI printed, expiring CLAUDE_TOKEN_DAYS from now.
    * `setup-token` reports no account name, so the store uses the token's
    * last four characters.
+   *
+   * @param flow The flow.
+   * @param token The token.
    */
   private storeClaudeToken(flow: Flow, token: string): void {
     this.credentials.put('claude', 'token', token, {
@@ -599,7 +665,12 @@ export class LoginManager {
     log.info('stored a Claude subscription token');
   }
 
-  /** Records a new state, unless the flow has ended. `done` and `failed` end it. */
+  /**
+   * Records a new state, unless the flow has ended. `done` and `failed` end it.
+   *
+   * @param flow The flow.
+   * @param state The new state.
+   */
   private settle(flow: Flow, state: LoginState): void {
     if (flow.settled) return;
     flow.state = state;
@@ -609,7 +680,12 @@ export class LoginManager {
     }
   }
 
-  /** Ends a flow as failed, with a sentence the settings page can show. */
+  /**
+   * Ends a flow as failed.
+   *
+   * @param flow The flow.
+   * @param error The sentence that the settings page shows.
+   */
   private fail(flow: Flow, error: string): void {
     if (flow.settled) return;
     log.warn('a login failed', { credential: flow.credentialId, error });
@@ -617,9 +693,12 @@ export class LoginManager {
   }
 
   /**
-   * Fails a flow, removes its container now, and forgets it. For a cancel,
-   * a shutdown, and a flow a newer login replaced. `run` then finds no
+   * Fails a flow, removes its container now, and forgets it. Used for a
+   * cancel, a shutdown, and a flow that a newer login replaced. `run` then finds no
    * container left to remove.
+   *
+   * @param flow The flow.
+   * @param reason The sentence that the settings page shows.
    */
   private abort(flow: Flow, reason: string): void {
     this.fail(flow, reason);
@@ -629,7 +708,11 @@ export class LoginManager {
     if (this.flows.get(flow.credentialId) === flow) this.flows.delete(flow.credentialId);
   }
 
-  /** Drops the timer and the exec a settled flow no longer needs. */
+  /**
+   * Drops the timer and the exec a settled flow no longer needs.
+   *
+   * @param flow The flow.
+   */
   private release(flow: Flow): void {
     if (flow.timer) {
       clearTimeout(flow.timer);
@@ -639,7 +722,11 @@ export class LoginManager {
   }
 }
 
-/** Resolves after some milliseconds, without holding the process open. */
+/**
+ * Waits without holding the process open.
+ *
+ * @param ms The time to wait, in milliseconds.
+ */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -647,12 +734,14 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-// --- reading what a CLI printed ---------------------------------------------
-
 /**
  * Reads a redrawing CLI's terminal, and returns what is on its screen at the
  * end. onText gets the screen after every chunk, as the URL and the prompt
  * may be drawn over later.
+ *
+ * @param output The terminal stream.
+ * @param onText The function that gets the screen after every chunk.
+ * @returns The text on the screen at the end.
  */
 async function readScreen(output: Readable, onText: (text: string) => void): Promise<string> {
   const screen = new Screen();
@@ -671,6 +760,10 @@ async function readScreen(output: Readable, onText: (text: string) => void): Pro
  * Reads a stream to its end, stripped of terminal escapes, and returns the
  * text. onText gets the whole text so far after every chunk, as a match may
  * be split across reads.
+ *
+ * @param output The stream.
+ * @param onText The function that gets the text so far after every chunk.
+ * @returns The text, up to OUTPUT_LIMIT characters from the end.
  */
 async function readOutput(output: Readable, onText: (text: string) => void): Promise<string> {
   let text = '';
@@ -686,12 +779,22 @@ async function readOutput(output: Readable, onText: (text: string) => void): Pro
   return text;
 }
 
-/** Keeps the tail of a long stream, so a chatty CLI cannot grow without end. */
+/**
+ * Keeps the tail of a long stream, so the output of a CLI that prints much cannot grow without end.
+ *
+ * @param text The text so far.
+ * @returns The last OUTPUT_LIMIT characters.
+ */
 function clamp(text: string): string {
   return text.length <= OUTPUT_LIMIT ? text : text.slice(-OUTPUT_LIMIT);
 }
 
-/** The last of some output, for a log line or an error message. */
+/**
+ * Returns the end of some output, for a log line or an error message.
+ *
+ * @param text The output.
+ * @returns The last ERROR_TAIL characters of the trimmed output, with an ellipsis in front when it was cut.
+ */
 export function tail(text: string): string {
   const trimmed = text.trim();
   return trimmed.length <= ERROR_TAIL ? trimmed : `…${trimmed.slice(-ERROR_TAIL)}`;
@@ -700,13 +803,13 @@ export function tail(text: string): string {
 /** The byte every terminal control sequence starts with. */
 const ESC = String.fromCharCode(0x1b);
 
-/** The single-byte form of the same thing, which a CLI may still emit. */
+/** The single-byte form of ESC [, which a CLI may still emit. */
 const CSI = String.fromCharCode(0x9b);
 
-/** Operating-system commands: a title change, a hyperlink. */
+/** Matches operating-system commands, for example a title change or a hyperlink. */
 const OSC_PATTERN = new RegExp(`${ESC}\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)`, 'g');
 
-/** Control sequences: colour, cursor moves, erases, and the shorter escapes. */
+/** Matches control sequences, for example colour, cursor moves and erases, and the shorter escapes. */
 const CSI_PATTERN = new RegExp(
   `[${ESC}${CSI}][[\\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-PR-TZcf-ntqry=><~]`,
   'g',
@@ -715,14 +818,17 @@ const CSI_PATTERN = new RegExp(
 /**
  * Returns the text with its CSI and OSC terminal sequences removed, and with
  * carriage returns turned into newlines.
+ *
+ * @param text The terminal output.
+ * @returns The plain text.
  */
 export function stripAnsi(text: string): string {
   return (
     text
       .replace(OSC_PATTERN, '')
       .replace(CSI_PATTERN, '')
-      // A terminal UI rewrites a line by returning to its start; read as
-      // text, that is a new line.
+      // A terminal UI rewrites a line by returning to its start. As text, the
+      // return starts a new line.
       .replace(/\r\n?/g, '\n')
   );
 }
@@ -734,6 +840,10 @@ export function stripAnsi(text: string): string {
  * A read may end in the middle of a URL or a code, so a longer later reading
  * replaces it. A redraw may cut a value short later, so a reading that does
  * not start with the earlier one is ignored.
+ *
+ * @param seen The earlier reading, or null.
+ * @param read The later reading, or null.
+ * @returns The reading to keep.
  */
 export function grown(seen: string | null, read: string | null): string | null {
   if (read === null) return seen;
@@ -741,7 +851,12 @@ export function grown(seen: string | null, read: string | null): string | null {
   return seen;
 }
 
-/** The Codex device URL in some output, or null. */
+/**
+ * Returns the Codex device URL in some output.
+ *
+ * @param text The output.
+ * @returns The URL, or null.
+ */
 export function deviceUrlIn(text: string): string | null {
   const match = new RegExp(`${CODEX_DEVICE_URL}[^\\s"'<>]*`).exec(text);
   if (match) return match[0];
@@ -786,12 +901,16 @@ const NOT_A_CODE = new Set([
 ]);
 
 /**
- * The one-time code in some output, or null until one appears.
+ * Returns the one-time code in some output, or null until one appears.
  *
  * It matches the shape: runs of four or more upper-case letters and digits,
  * joined by hyphens. Only text from the URL on is searched, with the URL cut
  * out. Words in NOT_A_CODE are skipped, and a match must have a hyphen, a
  * digit, or at least eight characters.
+ *
+ * @param text The output.
+ * @param url The device URL in the output.
+ * @returns The code, or null.
  */
 export function deviceCodeIn(text: string, url: string): string | null {
   const from = text.indexOf(url);
@@ -807,9 +926,12 @@ export function deviceCodeIn(text: string, url: string): string | null {
 }
 
 /**
- * The URL `claude setup-token` wants visited, or null.
+ * Returns the URL that `claude setup-token` asks the person to visit, or null.
  *
- * The URL after `Visit:` first, and the first https URL otherwise.
+ * It prefers the URL after `Visit:`, and takes the first https URL otherwise.
+ *
+ * @param text The screen text.
+ * @returns The URL, or null.
  */
 export function visitUrlIn(text: string): string | null {
   const labelled = /Visit:\s*(https?:\/\/[^\s"'<>]+)/i.exec(text);

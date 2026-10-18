@@ -1,12 +1,13 @@
+/** Store for the box list and the deployment health facts. */
+
 import { useSyncExternalStore } from 'react';
 import type { BoxSummary, DeploymentImages, HarnessHealth } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { pollWhileVisible } from '../lib/poll.ts';
 
-/** Store for the box list and the deployment health facts. */
-
-/** What the views render. */
+/** The state that the views render. */
 export interface BoxesState {
+  /** Every box, as the last successful poll returned them. */
   boxes: BoxSummary[];
   /**
    * Every harness the deployment can run, and whether each has a credential
@@ -22,7 +23,7 @@ export interface BoxesState {
   images: DeploymentImages;
   /** The message from the last failed poll, or null. */
   error: string | null;
-  /** True until the first poll has finished, however it went. */
+  /** True until the first poll has finished, with or without success. */
   loading: boolean;
 }
 
@@ -37,19 +38,32 @@ let state: BoxesState = {
 /** The callbacks to run on every state change. */
 const listeners = new Set<() => void>();
 
-/** Merges `next` into the state and notifies every subscriber. */
+/**
+ * Merges `next` into the state and notifies every subscriber.
+ *
+ * @param next The fields to change.
+ */
 function set(next: Partial<BoxesState>): void {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
 
-/** Adds a subscriber and returns the function that removes it. */
+/**
+ * Adds a subscriber.
+ *
+ * @param listener The callback to run on every state change.
+ * @returns The function that removes the subscriber.
+ */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
-/** Reads the polled box list, re-rendering on every change. */
+/**
+ * Reads the polled box list, re-rendering on every change.
+ *
+ * @returns The current state.
+ */
 export function useBoxes(): BoxesState {
   return useSyncExternalStore(
     subscribe,
@@ -64,6 +78,9 @@ export function useBoxes(): BoxesState {
  * A request that never reached the server rejects with a TypeError. Its
  * browser message does not say what failed or what happens next. An error
  * message from the server passes through unchanged.
+ *
+ * @param error The error of the request.
+ * @returns The message for the user.
  */
 function reachable(error: Error): string {
   return error instanceof TypeError ? 'Could not reach Boxes. Still trying.' : error.message;
@@ -107,10 +124,12 @@ export async function refreshHealth(): Promise<void> {
 const POLL_MS = 5000;
 
 /**
- * Refreshes now, polls while the tab is visible, and returns the teardown.
+ * Refreshes now and polls while the tab is visible.
  *
  * The list screen starts it, so a browser that shows one thread does not
  * fetch every box every few seconds.
+ *
+ * @returns The teardown, which stops the polling.
  */
 export function startPolling(): () => void {
   void refresh();

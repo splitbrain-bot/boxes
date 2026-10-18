@@ -2,42 +2,45 @@ import { useCallback, useEffect, useState } from 'react';
 import { type Token, tokenizeLines } from '@/lib/highlight';
 import type { OpenFile } from '../stores/review.ts';
 
-/** How long typing has to pause, in milliseconds, before the buffer is coloured again. */
+/** The typing pause in milliseconds after which the hook colours the buffer again. */
 const RECOLOUR_AFTER = 150;
 
 /** The edit state of one file, and the actions on it. */
 export interface CodeEditing {
-  /** The buffer, or null while the file is being read rather than edited. */
+  /** The buffer, or null while the reader views the file and does not edit it. */
   text: string | null;
-  /** Tokens for what is on screen, whichever mode that is. */
+  /** Tokens for the text on screen, in both modes. */
   tokens: Token[][] | null;
-  /** The text those tokens were made from, which typing outruns. */
+  /** The text that the tokens were made from. While the reader types, this text lags behind the buffer. */
   tokensFor: string;
-  /** Whether the buffer says something the file on disk does not. */
+  /**
+   * True when the buffer differs from the file as it was last read.
+   *
+   * A save that returns the typed text clears the flag. Typing the original text again also clears it.
+   */
   dirty: boolean;
   /** Starts editing, from the file as it was last read. */
   start: () => void;
   /** Stops editing, discarding whatever is in the buffer. */
   stop: () => void;
-  /** Replaces the buffer with what was typed. */
+  /** Replaces the buffer with the typed text. */
   change: (text: string) => void;
-  /** Puts the file back as it was last read, without leaving edit mode. */
+  /** Resets the buffer to the file as it was last read, and stays in edit mode. */
   revert: () => void;
 }
 
 /**
- * Holds one file's buffer while it is edited, and the colours for it.
+ * Holds the buffer of one file while the reader edits it, and the colours for the buffer.
  *
- * The buffer is null while the file is read. The hook keeps it out of the
- * review store, which holds only what the box has. The view tells the store
- * about unsaved work, so a refetch does not throw it away.
+ * The hook keeps the buffer out of the review store, which holds only the files of the workspace. The view tells the
+ * store about unsaved work, so a refetch does not discard it.
  *
- * Dirty compares the buffer with the file. A save that returns the typed text
- * clears it, and so does typing the text back to what it was.
+ * @param file The open file, or null when no file is open.
+ * @returns The edit state of the file and the actions on it.
  */
 export function useCodeEdit(file: OpenFile | null): CodeEditing {
   const [text, setText] = useState<string | null>(null);
-  /** The last colours computed, and what they were computed from. */
+  /** The last computed colours, and the text they were computed from. */
   const [painted, setPainted] = useState<{ text: string; tokens: Token[][] | null }>({
     text: '',
     tokens: null,
@@ -72,7 +75,7 @@ export function useCodeEdit(file: OpenFile | null): CodeEditing {
   }, [text, painted.text, language]);
 
   const start = useCallback(() => {
-    // The buffer starts as the file, so the file's colours fit it.
+    // The buffer starts as the file content, so the colours of the file fit it.
     setPainted({ text: content, tokens: file?.tokens ?? null });
     setText(content);
   }, [content, file?.tokens]);

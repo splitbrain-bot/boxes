@@ -46,15 +46,19 @@ import { Broadcast, threadOf } from './broadcast.ts';
 import type { PendingStore } from './pending.ts';
 import type { AdapterOptions } from './thread-log.ts';
 
-/** How much of one tapped ACP message a debug line carries. */
+/** Largest number of characters of one tapped ACP message that a debug line carries. */
 const MAX_TAPPED_CHARS = 64_000;
 
 /**
  * A JSON.stringify replacer that replaces the base64 payload of image and
  * audio blocks with its length.
  *
- * A `function` rather than an arrow, because it reads the holder through
- * `this`: a terminal's output is also named `data` and must stay.
+ * A `function` and not an arrow, because it reads the holder through `this`. The terminal output in a tool call's
+ * `_meta` also has the key `data`, and the replacer keeps it.
+ *
+ * @param key The key of the value.
+ * @param value The value to write.
+ * @returns The value, or a note with the payload length for an image or audio payload.
  */
 function withoutMediaPayloads(this: unknown, key: string, value: unknown): unknown {
   if (key !== 'data' || typeof value !== 'string') return value;
@@ -65,39 +69,51 @@ function withoutMediaPayloads(this: unknown, key: string, value: unknown): unkno
 
 /** A browser attached to this box, as seen from the upstream side. */
 export interface DownstreamHandle {
+  /** The handle id, unique within the process. */
   readonly id: number;
   /**
    * The ACP thread this connection is for, fixed once the pin resolves. Null
    * until then, and nothing is routed to it meanwhile.
    */
   acpThreadId: string | null;
-  /** When this browser last sent something. The most recent one gets permission requests. */
+  /** The time this browser last sent something. The most recent one gets permission requests. */
   lastActiveAt: number;
-  /** Sends a notification to this browser. */
+  /**
+   * Sends a notification to this browser.
+   *
+   * @param method The method of the notification.
+   * @param params The params of the notification.
+   */
   notify(method: string, params: unknown): void;
   /**
    * Sends a request to this browser and awaits its answer.
    *
+   * @param method The method of the request.
+   * @param params The params of the request.
    * @param signal Withdraws the question, for example after another browser
    *   answered it. The promise still settles on this browser's own answer.
+   * @returns The browser's answer.
    */
   request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
   /** Closes this browser's socket, which makes it reconnect from scratch. */
   close(): void;
 }
 
-/** Every harness, for the reading of a box, which may run either adapter or both. */
+/** Every harness. The box reading needs all of them, because the adapters of both harnesses can run in one box. */
 const ALL_HARNESSES = HARNESS_IDS.map((id) => harness(id));
 
-/** How long work gets between TERM and KILL, in milliseconds. */
+/** Time between the TERM and the KILL for the work in a box, in milliseconds. */
 const TERM_GRACE_MS = 2_000;
 
 export { NOTHING_TO_FORK, THREAD_NOT_FOUND };
 
 /**
  * The message id a browser's `session/load` asks to resume from, read from
- * its `_meta`. Undefined when it asks for the whole thread, or sends
- * anything but a non-empty string.
+ * its `_meta`.
+ *
+ * @param params The params of the `session/load`.
+ * @returns The message id, or undefined when the load asks for the whole thread or sends anything but a non-empty
+ *   string.
  */
 function resumePointOf(params: unknown): string | undefined {
   const meta = (params as { _meta?: Record<string, unknown> } | null)?._meta;
@@ -105,33 +121,43 @@ function resumePointOf(params: unknown): string | undefined {
   return typeof asked === 'string' && asked ? asked : undefined;
 }
 
-/** Whether a browser's `session/load` asks for the full history, read from its `_meta`. */
+/**
+ * Checks if a browser's `session/load` asks for the full history in its `_meta`.
+ *
+ * @param params The params of the `session/load`.
+ * @returns True when the load asks for the full history.
+ */
 function wantsFullHistory(params: unknown): boolean {
   const meta = (params as { _meta?: Record<string, unknown> } | null)?._meta;
   return (meta?.[BOXES_META] as LoadMeta | undefined)?.full === true;
 }
 
-/** Why the full history cannot be loaded while the thread works. */
+/** The error for a load of the full history while the thread works. */
 export const THREAD_WORKING =
   'The agent is working on this thread. Load the full history once it is idle.';
 
-/** Why a prompt or a second request is refused while the full history loads. */
+/** The error for a prompt or a second request while the full history loads. */
 export const HISTORY_LOADING =
   'The full history of this thread is loading. Try again once it is shown.';
 
-/** Why an unprompted fork has no full history to load. */
+/** The error for a load of the full history of a fork that was never prompted. */
 const NO_OWN_HISTORY = 'This fork has no history of its own until it is prompted.';
 
 /**
  * The start of the text block in which the dashboard names a prompt's
- * attachments for the model. A thread is not named after it.
+ * attachments for the model. {@link nameFromPrompt} skips a block that starts with it.
  */
 const ATTACHMENTS_OPEN = '<attachments>';
 
 /** The longest a thread's name may be, in characters. */
 const MAX_PROMPT_NAME_LENGTH = 120;
 
-/** A name cut to {@link MAX_PROMPT_NAME_LENGTH}, with an ellipsis for the cut part. */
+/**
+ * Cuts a name to {@link MAX_PROMPT_NAME_LENGTH}, with an ellipsis for the cut part.
+ *
+ * @param name The name to cut.
+ * @returns The name, cut when it is too long.
+ */
 function capName(name: string): string {
   if (name.length <= MAX_PROMPT_NAME_LENGTH) return name;
   return `${name.slice(0, MAX_PROMPT_NAME_LENGTH - 1)}…`;
@@ -139,7 +165,10 @@ function capName(name: string): string {
 
 /**
  * A thread name from the first non-empty line of a prompt's text, skipping
- * the attachments block. Null when the prompt has no such line.
+ * the attachments block.
+ *
+ * @param params The params of the `session/prompt`.
+ * @returns The name, or null when the prompt has no such line.
  */
 function nameFromPrompt(params: unknown): string | null {
   const blocks = (params as { prompt?: unknown } | null)?.prompt;
@@ -155,24 +184,21 @@ function nameFromPrompt(params: unknown): string | null {
 }
 
 /**
- * The gateway state of one box: its adapter connections, the browsers
- * attached to it, and the reading of what runs in its container.
+ * The gateway state of one box.
  *
- * It owns one {@link AdapterConnection} per harness its threads run, and
- * routes every message to the connection that holds the conversation it
- * names. The orchestrator owns the connections, so a turn runs to the end
- * whoever is watching. Each browser connection is pinned to one thread.
+ * The orchestrator owns the adapter connections, so a turn runs to the end with or without a browser that watches
+ * it. Each browser connection is pinned to one thread.
  */
 export class UpstreamBox implements AdapterHost {
   /** One adapter process per harness a thread of this box runs. */
   private readonly connections = new Map<HarnessId, AdapterConnection>();
   /** The container start, shared by every connection that wants one. */
   private containerStarting: Promise<void> | null = null;
-  /** Who each adapter update goes to. */
+  /** The router that sends each adapter update to the browsers of its thread. */
   private readonly downstreams: Broadcast;
-  /** Whether this box still has work running in it. */
+  /** The reading of the work that runs in the box. */
   private readonly background: BackgroundProbe;
-  /** Whether the agent is talking on each thread. */
+  /** Tracks if the agent talks on each thread. */
   private readonly activity: Activity;
   /** The logger tagged with this box. */
   private readonly slog: Logger;
@@ -181,9 +207,8 @@ export class UpstreamBox implements AdapterHost {
   /** The poll that refreshes the box reading while a browser is attached. */
   private polling: ReturnType<typeof setInterval> | null = null;
   /**
-   * When each thread last had an approval announced, by the adapter's thread
-   * id, or the empty string for a question that names no thread. A thread
-   * announces one approval per hold window.
+   * The time of the last approval announcement of each thread, by the adapter's thread id, or the empty string for a
+   * question that names no thread. Each thread gets at most one approval announcement per hold window.
    */
   private readonly announcedApprovals = new Map<string, number>();
   /** KILL escalations armed and not yet fired, so a stop can cancel them. */
@@ -211,14 +236,14 @@ export class UpstreamBox implements AdapterHost {
       list: () => this.containerProcesses(),
       harnesses: ALL_HARNESSES,
       ttlMs: cfg.BACKGROUND_POLL_SECONDS * 1_000,
-      // A failing probe keeps its last answer, which may keep the box awake.
+      // A failing probe keeps its last answer, which can hold off the reaper.
       onTrouble: (error) =>
         error
           ? this.slog.warn('cannot read what is running in the box', {
               error: error.message,
             })
           : this.slog.info('reading what is running in the box again'),
-      // Logged with the commands, the only trace of work no task names.
+      // The log line carries the commands, because it is the only trace of work that no task names.
       onChange: (reading) =>
         reading.busy
           ? this.slog.info('the box has work running in it', { work: reading.work })
@@ -235,11 +260,12 @@ export class UpstreamBox implements AdapterHost {
     });
   }
 
-  // --- the connections ------------------------------------------------------
-
   /**
-   * The connection for one harness, created on first use. Creating it starts
-   * nothing; `ensureStarted` spawns the adapter.
+   * The connection for one harness, created on first use. Creating it does not start the adapter.
+   * `ensureStarted` spawns it.
+   *
+   * @param id The harness.
+   * @returns The connection.
    */
   private connection(id: HarnessId): AdapterConnection {
     let conn = this.connections.get(id);
@@ -254,6 +280,8 @@ export class UpstreamBox implements AdapterHost {
    * Starts the adapter of one harness. Without a harness, starts the one of
    * the box's most recently active thread, or the default harness before the
    * box has a thread.
+   *
+   * @param harnessId The harness whose adapter to start.
    */
   async ensureStarted(harnessId?: HarnessId): Promise<void> {
     await this.connection(harnessId ?? this.defaultHarness()).ensureStarted();
@@ -265,8 +293,10 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Whether threads of one harness can be forked, as that adapter's
-   * `initialize` advertised. False for an adapter that has not been reached.
+   * Checks if threads of one harness can be forked, as that adapter's `initialize` advertised.
+   *
+   * @param harnessId The harness.
+   * @returns True when the adapter advertised the fork capability. False for an adapter that has not been reached.
    */
   canFork(harnessId: HarnessId): boolean {
     return this.connections.get(harnessId)?.canFork ?? false;
@@ -280,16 +310,23 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * The initialize response to hand a browser: the one cached by the adapter
-   * holding the thread that browser is pinned to. The two adapters advertise
-   * different modes and session capabilities.
+   * The initialize response that the adapter holding a thread has cached. The two adapters advertise different
+   * modes and session capabilities.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns The cached response, or null when no adapter holds the thread or the handshake is not done.
    */
   initializeFor(acpThreadId: string): unknown {
     const conn = this.connectionHolding(acpThreadId);
     return conn?.cachedInitialize ?? null;
   }
 
-  /** The connection whose adapter is holding one conversation, if any is. */
+  /**
+   * The connection whose adapter is holding one conversation.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   * @returns The connection, or null when no adapter holds the conversation.
+   */
   private connectionHolding(acpThreadId: string): AdapterConnection | null {
     for (const conn of this.connections.values()) {
       if (conn.holds(acpThreadId)) return conn;
@@ -301,6 +338,9 @@ export class UpstreamBox implements AdapterHost {
    * One of this box's threads by the adapter's own id for it, whichever
    * harness it belongs to. Both adapters mint UUIDs, so at most one harness
    * has a match.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns The thread row, or undefined when no thread of the box has the id.
    */
   private rowOfAcp(acpThreadId: string): ThreadRow | undefined {
     for (const id of HARNESS_IDS) {
@@ -311,10 +351,14 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * The connection a forwarded message belongs on, found by the thread it
-   * names or else the browser's own thread: the connection holding that
-   * thread, else the one for its stored harness. Without a thread, or with
-   * an unknown one, the box's default.
+   * The connection that gets a forwarded message.
+   *
+   * The thread comes from the message, or else from the browser. The connection that holds the thread comes first,
+   * then the connection for the stored harness of the thread. Without a known thread, the default harness gets it.
+   *
+   * @param params The params of the message.
+   * @param from The browser that sent the message.
+   * @returns The connection.
    */
   private connectionFor(params: unknown, from?: DownstreamHandle): AdapterConnection {
     const acpThreadId = threadOf(params) ?? from?.acpThreadId ?? null;
@@ -327,11 +371,8 @@ export class UpstreamBox implements AdapterHost {
     return this.connection(this.defaultHarness());
   }
 
-  // --- what the connections ask of the box -------------------------------
-
   /**
-   * Brings the box up, ready. Concurrent callers share one start, and a later
-   * call starts it again.
+   * Starts the box and makes it ready. Concurrent callers share one start, and a later call starts it again.
    */
   ensureContainer(): Promise<void> {
     if (!this.containerStarting) {
@@ -350,33 +391,63 @@ export class UpstreamBox implements AdapterHost {
   /**
    * Opens a log for a conversation an adapter has just minted.
    *
-   * The logs belong to the box, so they outlive adapter restarts.
+   * The UpstreamBox keeps the logs, so they outlive adapter restarts.
+   *
+   * @param acpThreadId The adapter's id for the new conversation.
+   * @param options The modes and options the adapter answered with.
+   * @param from The conversation it was forked from, whose log is copied.
    */
   openLog(acpThreadId: string, options: AdapterOptions, from?: string): void {
     this.downstreams.openLog(acpThreadId, options, from);
   }
 
-  /** Starts reading a transcript into a conversation's log. */
+  /**
+   * Starts reading a transcript into a conversation's log.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   */
   beginFill(acpThreadId: string): void {
     this.downstreams.beginFill(acpThreadId);
   }
 
-  /** Ends the transcript read, so the thread's updates go to browsers again. */
+  /**
+   * Ends the transcript read, so the thread's updates go to browsers again.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   * @param options The modes and options the adapter answered the load with.
+   */
   endFill(acpThreadId: string, options: AdapterOptions): void {
     this.downstreams.endFill(acpThreadId, options);
   }
 
-  /** Forgets a conversation's log, for one the adapter does not hold. */
+  /**
+   * Forgets a conversation's log, for one the adapter does not hold.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   */
   dropLog(acpThreadId: string): void {
     this.downstreams.dropLog(acpThreadId);
   }
 
-  /** Sets the current mode in a conversation's log. */
+  /**
+   * Sets the current mode in a conversation's log.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   * @param modeId The mode that is now current.
+   * @returns The mode that was current before, or null when the log has none.
+   */
   logMode(acpThreadId: string, modeId: string): string | null {
     return this.downstreams.logMode(acpThreadId, modeId);
   }
 
-  /** Sets one option's value in a conversation's log. */
+  /**
+   * Sets one option's value in a conversation's log.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   * @param configId The option's id.
+   * @param value The value it is now set to.
+   * @param answered The options the adapter answered the change with, if any.
+   */
   logConfig(
     acpThreadId: string,
     configId: string,
@@ -386,12 +457,16 @@ export class UpstreamBox implements AdapterHost {
     this.downstreams.logConfig(acpThreadId, configId, value, answered);
   }
 
-  /** Restarts the box reading's poll when a connection is up. */
+  /** Starts the poll of the box reading when a connection comes up and a browser is attached. */
   onUp(): void {
     this.pollWhileWatched();
   }
 
-  /** Passes a connection's status on as the box's status. */
+  /**
+   * Passes a connection's status on as the box's status.
+   *
+   * @param status The status of the connection.
+   */
   onStatus(status: 'running' | 'error'): void {
     this.onStatusChange(status);
   }
@@ -402,6 +477,8 @@ export class UpstreamBox implements AdapterHost {
    *
    * The browsers are told after every thread is cleared, so no state sent
    * halfway through claims a turn on a cleared thread.
+   *
+   * @param acpThreadIds The adapter's ids for the lost conversations.
    */
   onThreadsLost(acpThreadIds: readonly string[]): void {
     for (const acpThreadId of acpThreadIds) {
@@ -413,20 +490,16 @@ export class UpstreamBox implements AdapterHost {
     this.downstreams.refreshThreadStates();
   }
 
-  // --- the box ---------------------------------------------------------------
-
-  /** How many browsers are attached to this box. */
+  /** Number of browsers attached to this box. */
   get attachedCount(): number {
     return this.downstreams.size;
   }
 
   /**
-   * Whether this box has work running in the background, which holds off the
-   * idle reaper.
+   * True when the box has work running in the background, which holds off the idle reaper.
    *
-   * True when an adapter has announced a task, because some tasks, such as a
-   * monitor inside the CLI, are not processes of their own. Otherwise the
-   * box reading answers, which also finds work a dead adapter left behind.
+   * An announced task of an adapter counts first, because some tasks, such as a monitor inside the CLI, are not
+   * processes of their own. Otherwise the box reading answers, which also finds work a dead adapter left behind.
    * Null when no task is announced and the box has not been read yet.
    */
   get backgroundActive(): boolean | null {
@@ -435,11 +508,11 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * How many pieces of background work the box has running.
+   * Number of pieces of background work that run in the box.
    *
    * Counts the adapters' announced tasks where there are any, so the number
-   * matches what the threads report. Otherwise the box reading, which also
-   * counts what a dead adapter left behind. Zero before the first reading.
+   * matches what the threads report. Otherwise it counts the work in the box reading, which includes work that a
+   * dead adapter left behind. Zero before the first reading.
    */
   get backgroundCount(): number {
     const announced = [...this.connections.values()].reduce(
@@ -450,20 +523,18 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * What the last reading found running in the box, for a reader deciding
-   * whether to stop it.
+   * The work that the last reading found in the box, for a reader who decides whether to stop it.
    *
-   * Only the reading, without the adapters' tasks, so this can be empty while
-   * {@link backgroundActive} is true.
+   * The adapters' tasks are not part of it, so the list can be empty while {@link UpstreamBox.backgroundActive} is
+   * true.
    */
   get boxWork(): readonly BoxWork[] {
     return this.background.work;
   }
 
   /**
-   * Whether this upstream holds nothing at all: no browser attached, no
-   * permission request waiting, no adapter connection, no start in flight and
-   * no KILL escalation armed. The manager may then drop it.
+   * True when this upstream holds no browser, permission request, adapter process, container start or KILL
+   * escalation. The manager can then drop it.
    */
   get holdsNothing(): boolean {
     return (
@@ -475,14 +546,14 @@ export class UpstreamBox implements AdapterHost {
     );
   }
 
-  /** Test seam: takes a reading now rather than when one goes stale. */
+  /** Takes a reading now, for tests. */
   refreshBackgroundForTests(): Promise<void> {
     return this.background.refresh();
   }
 
   /**
-   * Polls the box reading while a browser is attached. The last browser to
-   * detach stops it.
+   * Polls the box reading while a browser is attached. {@link UpstreamBox.detach} stops the poll when the last
+   * browser leaves.
    *
    * Without a browser, the reaper's own checks refresh the reading.
    */
@@ -508,7 +579,9 @@ export class UpstreamBox implements AdapterHost {
    * Stops one task of a conversation, or every task it has, through the
    * adapter that holds the conversation. Sends the thread's state afterwards.
    *
-   * @returns How many tasks the adapter said it stopped. Zero when no adapter
+   * @param acpThreadId The adapter's id for the conversation.
+   * @param taskId The task to stop. Without it, every task of the conversation stops.
+   * @returns The number of tasks the adapter said it stopped. Zero when no adapter
    *   holds the conversation or the tasks were already over.
    */
   async stopBackgroundWork(acpThreadId: string, taskId?: string): Promise<number> {
@@ -527,14 +600,14 @@ export class UpstreamBox implements AdapterHost {
    * first, and whatever is left after {@link TERM_GRACE_MS} gets KILL. The
    * call does not wait for the KILL.
    *
-   * @returns How many processes got TERM. Zero when nothing was running.
+   * @returns The number of processes that got TERM. Zero when nothing was running.
    */
   async stopBoxWork(): Promise<number> {
     if ((await runtime().state(this.boxId)) !== 'running') return 0;
 
     const doomed = workPids(await boxProcesses(this.boxId), ALL_HARNESSES);
     if (doomed.length === 0) {
-      // The card shows an outdated reading, so a fresh one corrects it.
+      // The card can show an outdated reading, so a fresh one corrects it.
       void this.background.refresh();
       return 0;
     }
@@ -573,7 +646,11 @@ export class UpstreamBox implements AdapterHost {
     this.escalations.add(timer);
   }
 
-  /** The processes in this box, for the probe. Null when the box is not running. */
+  /**
+   * The processes in this box, for the probe.
+   *
+   * @returns The processes, or null when the box is not running.
+   */
   private async containerProcesses(): Promise<ContainerProcess[] | null> {
     if ((await runtime().state(this.boxId)) !== 'running') return null;
     return boxProcesses(this.boxId);
@@ -590,8 +667,11 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * What one conversation has running, whichever adapter announced it. Only
-   * the adapter that holds a conversation runs its tasks.
+   * The tasks of one conversation, whichever adapter announced them. Only the adapter that holds a conversation runs
+   * its tasks.
+   *
+   * @param acpThreadId The adapter's id for the conversation.
+   * @returns The tasks, or an empty list.
    */
   private tasksFor(acpThreadId: string): BackgroundProcess[] {
     for (const conn of this.connections.values()) {
@@ -602,8 +682,10 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Everything a browser is told about a thread: whether a prompt is in
-   * flight, whether the agent is talking, and what it has left running.
+   * The state that the browsers of a thread get.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns The state.
    */
   threadState(acpThreadId: string): TurnStateParams {
     return {
@@ -614,11 +696,11 @@ export class UpstreamBox implements AdapterHost {
     };
   }
 
-  // --- browsers --------------------------------------------------------------
-
   /**
    * Adds a browser to the broadcast set. It counts as attached for the reaper
    * at once, but receives nothing until `pin` has set its thread.
+   *
+   * @param handle The browser connection.
    */
   attach(handle: DownstreamHandle): void {
     this.downstreams.add(handle);
@@ -630,6 +712,7 @@ export class UpstreamBox implements AdapterHost {
    * Pins a connection to one of the box's conversations, bringing it up on
    * its harness's adapter first.
    *
+   * @param handle The browser connection.
    * @param threadId One of the box's threads, or null for the most recently
    *   active one.
    * @returns The adapter's id for the thread.
@@ -647,6 +730,8 @@ export class UpstreamBox implements AdapterHost {
    *
    * @param threadId One of the box's threads, or null for the most recently
    *   active one.
+   * @returns The adapter's id for the thread.
+   * @throws Error with {@link THREAD_NOT_FOUND} when the thread is not one of the box's threads.
    */
   private async resolveThread(threadId: string | null): Promise<string> {
     let row = threadId ? getThread(this.db, threadId) : this.latest;
@@ -666,7 +751,11 @@ export class UpstreamBox implements AdapterHost {
     return attempt;
   }
 
-  /** Removes a browser from the broadcast set, leaving the upstream running. */
+  /**
+   * Removes a browser from the broadcast set, leaving the upstream running.
+   *
+   * @param handle The browser connection.
+   */
   detach(handle: DownstreamHandle): void {
     this.downstreams.remove(handle);
     if (this.downstreams.size === 0) this.stopPolling();
@@ -676,6 +765,8 @@ export class UpstreamBox implements AdapterHost {
   /**
    * Closes the sockets of the browsers watching one thread, so each
    * reconnects and pins the thread's current id.
+   *
+   * @param acpThreadId The adapter's id for the thread.
    */
   dropWatchers(acpThreadId: string): void {
     for (const handle of this.downstreams.byRecency(acpThreadId)) {
@@ -687,7 +778,12 @@ export class UpstreamBox implements AdapterHost {
     }
   }
 
-  /** This box's stored row. Throws once the box is gone. */
+  /**
+   * This box's stored row.
+   *
+   * @returns The row.
+   * @throws Error when the box is gone.
+   */
   private row(): BoxRow {
     const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(this.boxId) as
       | BoxRow
@@ -707,8 +803,6 @@ export class UpstreamBox implements AdapterHost {
     this.activity.clear();
     this.downstreams.refreshThreadStates();
   }
-
-  // --- threads --------------------------------------------------------------
 
   /**
    * The box's most recently active thread, which a connection naming no
@@ -730,6 +824,10 @@ export class UpstreamBox implements AdapterHost {
    * The row is written before the adapter is asked, so a harness without a
    * credential still gets a thread. Such a thread has no conversation until
    * the next pin brings it up.
+   *
+   * @param options The harness, mode and settings of the thread. The defaults of the default harness apply without
+   *   them.
+   * @returns The new thread row, with the adapter's id when the adapter minted a conversation.
    */
   async newThread(options?: ThreadOptions): Promise<ThreadRow> {
     const wanted = harness(options?.harness ?? DEFAULT_HARNESS);
@@ -765,6 +863,10 @@ export class UpstreamBox implements AdapterHost {
    * The fork keeps the source's harness and settings. It starts in the
    * harness's fork mode, such as `plan` for Claude, because it shares the
    * source's workspace.
+   *
+   * @param sourceThreadId The thread to fork.
+   * @returns The new thread row.
+   * @throws Error with {@link THREAD_NOT_FOUND} or {@link NOTHING_TO_FORK} when the source cannot be forked.
    */
   async forkThread(sourceThreadId: string): Promise<ThreadRow> {
     const source = getThread(this.db, sourceThreadId);
@@ -793,18 +895,18 @@ export class UpstreamBox implements AdapterHost {
     return thread;
   }
 
-  // --- what arrives from the adapters ----------------------------------------
-
   /**
    * Taps an adapter update and delivers it to the browsers it is meant for.
    *
-   * @param replaying Whether the update is part of a replay on that adapter.
+   * @param harnessId The harness whose adapter sent the update.
+   * @param params The params of the `session/update` notification.
+   * @param replaying True when the update is part of a replay on that adapter.
    */
   onUpdate(harnessId: HarnessId, params: unknown, replaying: boolean): void {
     this.touch();
-    // A replay is not the agent talking.
     const thread = threadOf(params);
     const update = (params as { update?: unknown })?.update;
+    // A replay is not the agent talking.
     if (!replaying && thread) this.activity.observe(thread, update, harnessId);
     this.recordThreadInfo(harnessId, params, replaying);
     this.tap('up', ACP_METHOD.sessionUpdate, params);
@@ -817,12 +919,16 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Keeps a thread's row in step with what the adapter says about it: the
-   * title, the mode, the settings, and when it was last heard from.
+   * Keeps a thread's row in step with the adapter's updates for the title, the mode and the settings. Also records
+   * when the adapter last sent an update for the thread.
    *
    * The adapter changes the mode and settings on its own too, for example
    * when a plan is accepted. A replayed update does not count as the thread
    * being heard from, so opening a thread does not move it up the list.
+   *
+   * @param harnessId The harness whose adapter sent the update.
+   * @param params The params of the `session/update` notification.
+   * @param replaying True when the update is part of a replay.
    */
   private recordThreadInfo(harnessId: HarnessId, params: unknown, replaying: boolean): void {
     const acpSessionId = (params as { sessionId?: string })?.sessionId;
@@ -869,6 +975,9 @@ export class UpstreamBox implements AdapterHost {
    * Puts a permission request to the most recently active browser watching
    * the thread that asked, or queues it when none is. The adapter blocks
    * until the answer arrives.
+   *
+   * @param params The params of the `session/request_permission` request.
+   * @returns The answer for the adapter.
    */
   onPermission(params: unknown): Promise<unknown> {
     this.touch();
@@ -888,7 +997,12 @@ export class UpstreamBox implements AdapterHost {
     return this.queuePermission(params);
   }
 
-  /** Holds a permission request for a browser to answer, and sends a notification. */
+  /**
+   * Holds a permission request for a browser to answer, and sends a notification.
+   *
+   * @param params The params of the `session/request_permission` request.
+   * @returns The answer for the adapter, from a browser or from the fallback.
+   */
   private queuePermission(params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const entry = this.pending.add(
@@ -907,8 +1021,11 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Whether a thread may announce that it waits for an approval, at most once
-   * per PERMISSION_HOLD_MINUTES. Records the announcement when it may.
+   * Checks if a thread can announce that it waits for an approval, at most once per PERMISSION_HOLD_MINUTES.
+   * Records the announcement when it can.
+   *
+   * @param acpThreadId The adapter's id for the thread, or null for a question that names no thread.
+   * @returns True when the announcement can go out.
    */
   private mayAnnounceApproval(acpThreadId: string | null): boolean {
     const key = acpThreadId ?? '';
@@ -923,6 +1040,10 @@ export class UpstreamBox implements AdapterHost {
    * Applies PERMISSION_FALLBACK once PERMISSION_HOLD_MINUTES has passed. The
    * deny fallback answers with a reject option from the request's own list,
    * never an invented one, and cancels the request when none is offered.
+   *
+   * @param pendingId The id of the queued request.
+   * @param params The params of the `session/request_permission` request.
+   * @param resolve Answers the adapter.
    */
   private applyPermissionFallback(
     pendingId: number,
@@ -951,8 +1072,11 @@ export class UpstreamBox implements AdapterHost {
   }
 
   /**
-   * Tells the notifier that a thread wants somebody, naming the thread as
-   * well as the box. Not awaited, so a turn does not wait on a push service.
+   * Tells the notifier that a thread needs a person, with the names of the thread and the box. Not awaited, so a
+   * turn does not wait on a push service.
+   *
+   * @param kind The kind of the notification.
+   * @param acpThreadId The adapter's id for the thread, or null for a question that names no thread.
    */
   private announce(kind: NotifyKind, acpThreadId: string | null): void {
     const thread = acpThreadId ? this.rowOfAcp(acpThreadId) : undefined;
@@ -970,7 +1094,7 @@ export class UpstreamBox implements AdapterHost {
       threadId: thread?.id ?? null,
       // The same name the dashboard shows.
       threadName: thread ? thread.title?.trim() || `Thread ${thread.ordinal}` : null,
-      // Whether this thread still has background tasks running.
+      // True when the thread still has background tasks running.
       background: acpThreadId ? this.tasksFor(acpThreadId).length > 0 : false,
     });
   }
@@ -981,6 +1105,8 @@ export class UpstreamBox implements AdapterHost {
    *
    * Called after the browser has taken the thread's replay, because a client
    * drops what it showed before the replay.
+   *
+   * @param handle The browser connection.
    */
   flushPendingTo(handle: DownstreamHandle): void {
     const thread = handle.acpThreadId;
@@ -1009,15 +1135,16 @@ export class UpstreamBox implements AdapterHost {
     }
   }
 
-  // --- what arrives from the browsers ----------------------------------------
-
   /**
    * Forwards a browser request to the adapter holding the conversation it is
    * about, and tracks prompt turns. A `session/load` is answered from the
    * thread's log instead.
    *
+   * @param method The ACP method.
+   * @param params The params of the request.
    * @param from The browser that asked. It gets the log for a load, and its
    *   thread picks the adapter for a request that names no thread.
+   * @returns The answer for the browser.
    */
   async forwardRequest(method: string, params: unknown, from?: DownstreamHandle): Promise<unknown> {
     const conn = this.connectionFor(params, from);
@@ -1063,10 +1190,8 @@ export class UpstreamBox implements AdapterHost {
         : null;
     try {
       const result = await conn.request(method, params);
-      // Recorded here too, because the adapter need not send a
-      // current_mode_update for a requested change. The log's mode, because
-      // a current_mode_update for a mode the adapter fell back to has
-      // replaced the requested one there.
+      // Recorded here too, because the adapter need not send a current_mode_update for a requested change. The row
+      // takes the log's mode, because a current_mode_update for a fallback mode has replaced the requested one there.
       if (thread !== undefined && typeof modeId === 'string') {
         const row = conn.rowOf(thread);
         if (row) setThreadMode(this.db, row.id, this.downstreams.modeOf(thread) ?? modeId);
@@ -1084,8 +1209,8 @@ export class UpstreamBox implements AdapterHost {
       if (isPrompt) {
         this.setTurnActive(thread, false);
         this.downstreams.endPrompt(params);
-        // The idle announcement comes from Activity, not from here: a prompt
-        // can stay open until the turn's background subagents settle.
+        // The settle callback of the Activity sends the idle announcement, because a prompt can stay open until the
+        // turn's background subagents settle.
       }
     }
   }
@@ -1094,11 +1219,13 @@ export class UpstreamBox implements AdapterHost {
    * Sends one browser the full history of its thread, replayed by the adapter
    * again. The replay goes to that browser only.
    *
-   * A replay and a live turn look the same on the wire, so this runs only
-   * while the thread is idle: no prompt in flight, the agent quiet, and no
-   * background task that could wake it. Prompts are refused until the replay
-   * is over.
+   * A replay and a live turn look the same on the wire, so the replay runs only while the thread is idle. Idle means
+   * no prompt in flight, a quiet agent, and no background task that could wake the agent.
+   * {@link UpstreamBox.forwardRequest} refuses prompts until the replay is over.
    *
+   * @param conn The connection whose adapter holds the thread.
+   * @param handle The browser that gets the replay.
+   * @param acpThreadId The adapter's id for the thread.
    * @returns The answer to the browser's `session/load`.
    */
   private async relayHistory(
@@ -1137,6 +1264,11 @@ export class UpstreamBox implements AdapterHost {
    * Records a setting a browser changed, in the thread's log and row, from the
    * adapter's answer where there is one and from the request where there is
    * not. The row skips the option in the `mode` category.
+   *
+   * @param conn The connection whose adapter holds the thread.
+   * @param acpThreadId The adapter's id for the thread.
+   * @param params The params of the `session/set_config_option` request.
+   * @param result The adapter's answer.
    */
   private recordConfigChange(
     conn: AdapterConnection,
@@ -1158,12 +1290,22 @@ export class UpstreamBox implements AdapterHost {
     }
   }
 
-  /** Records whether a prompt turn is running on one thread, and marks the box active. */
+  /**
+   * Records if a prompt turn is running on one thread, and marks the box active.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @param active True while the turn runs.
+   */
   private setTurnActive(acpThreadId: string, active: boolean): void {
     setThreadTurnActive(this.db, this.boxId, acpThreadId, active);
   }
 
-  /** Forwards a browser notification to the adapter its thread is on. */
+  /**
+   * Forwards a browser notification to the adapter its thread is on.
+   *
+   * @param method The ACP method.
+   * @param params The params of the notification.
+   */
   async forwardNotification(method: string, params: unknown): Promise<void> {
     const conn = this.connectionFor(params);
     await conn.ensureStarted();
@@ -1177,7 +1319,13 @@ export class UpstreamBox implements AdapterHost {
     await conn.notify(method, params);
   }
 
-  /** Writes one message to the log at debug level, where `docker logs` sees it. */
+  /**
+   * Writes one message to the log at debug level, where `docker logs` sees it.
+   *
+   * @param direction Up for a message from an adapter, down for a message from a browser.
+   * @param method The ACP method.
+   * @param params The params of the message.
+   */
   tap(direction: 'up' | 'down', method: string, params: unknown): void {
     if (!log.wants('debug')) return;
     this.slog.debug('acp', {
@@ -1186,8 +1334,6 @@ export class UpstreamBox implements AdapterHost {
       payload: JSON.stringify(params, withoutMediaPayloads).slice(0, MAX_TAPPED_CHARS),
     });
   }
-
-  // --- shutdown --------------------------------------------------------------
 
   /** Stops every connection deliberately, which suppresses the respawns. */
   stop(): void {

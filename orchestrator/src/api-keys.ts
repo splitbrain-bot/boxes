@@ -1,3 +1,11 @@
+/**
+ * API keys that a user adds for services without a credential in Boxes.
+ *
+ * In each box, the environment variable with the name of a key holds a
+ * placeholder. The egress proxy replaces the placeholder with the key in each
+ * header of a request to a host of the key.
+ */
+
 import { randomInt } from 'node:crypto';
 import type { ApiKeySummary } from '../../shared/types.ts';
 import { reservedEnvNames } from './boxenv.ts';
@@ -5,26 +13,19 @@ import { accountOf } from './credentials.ts';
 import type { Db } from './db.ts';
 import { HttpError } from './http-error.ts';
 
-/**
- * The API keys a user adds for services Boxes has no credential for.
- *
- * The environment variable a key is named by holds a placeholder for the key
- * in every box. The egress proxy swaps the placeholder for the key in any
- * header of a request to one of the key's hosts.
- */
-
 /** One row of the api_keys table, with its hosts parsed. */
 export interface ApiKeyRow {
   /** The environment variable that holds the placeholder in each box. */
   name: string;
-  /** Hosts intercepted so the key can be swapped in, as allowlist patterns. */
+  /** The hosts where the egress proxy puts in the key, as allowlist patterns. */
   hosts: string[];
-  /** The key, stored unencrypted for the same reason as a credential. */
+  /** The key, stored unencrypted, because the orchestrator gives it to the egress proxy. */
   secret: string;
   /**
-   * What the environment of a box holds in place of the key: the key's
-   * prefix and random characters, as long as the key. Kept while the key
-   * keeps its shape, so a box created with it keeps working.
+   * The value in the environment of a box in place of the key. It is the
+   * prefix of the key, followed by random characters. The random part has the
+   * length of the rest of the key, but at least {@link MIN_RANDOM} characters.
+   * It stays while the key keeps its shape, so a box created with it keeps working.
    */
   placeholder: string;
   /** Epoch milliseconds of the first store. */
@@ -33,39 +34,48 @@ export interface ApiKeyRow {
   updated_at: number;
 }
 
-/** A shell-safe environment variable name. */
+/** The pattern of a shell-safe environment variable name. */
 const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** An exact hostname, or one with a leading one-label wildcard. */
+/** The pattern of an exact hostname, or of a hostname with a wildcard for the first label. */
 const HOST_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
 /**
- * The prefix of a key that a placeholder copies: leading segments of up to
- * eight lowercase letters or digits, each followed by a dash or an
- * underscore, like `sk-or-v1-`. The limit keeps the random part of a key out
- * of its placeholder.
+ * The pattern of the prefix of a key that a placeholder copies. The prefix is a
+ * series of segments of up to eight lowercase letters or digits, each followed
+ * by a dash or an underscore, like `sk-or-v1-`. The limit keeps the random part
+ * of a key out of its placeholder.
  */
 const PREFIX_PATTERN = /^(?:[a-z0-9]{1,8}[-_])*/;
 
-/** The fewest random characters a placeholder has, however short the key. */
+/** The minimum number of random characters in a placeholder. */
 const MIN_RANDOM = 16;
 
-/** The characters the random part of a placeholder is made of. */
+/** The characters of the random part of a placeholder. */
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 /** The raw row as SQLite returns it, with the hosts still JSON. */
 type StoredRow = Omit<ApiKeyRow, 'hosts'> & { hosts: string };
 
-/** Owns the api_keys table. */
+/** The store of the api_keys table. */
 export class ApiKeyStore {
+  /**
+   * @param db The database that holds the api_keys table.
+   * @param onChange The function that the store calls after each write.
+   */
   constructor(
     /** The database that holds the api_keys table. */
     private readonly db: Db,
-    /** Called after every write, so the egress policy is pushed at once. */
+    /** The function that the store calls after each write. */
     private readonly onChange: () => void,
   ) {}
 
-  /** One key, or undefined when none has this name. */
+  /**
+   * Gives one key.
+   *
+   * @param name The environment variable name of the key.
+   * @returns The key, or undefined when no key has this name.
+   */
   get(name: string): ApiKeyRow | undefined {
     const row = this.db.prepare('SELECT * FROM api_keys WHERE name = ?').get(name) as
       | StoredRow
@@ -73,7 +83,11 @@ export class ApiKeyStore {
     return row ? parse(row) : undefined;
   }
 
-  /** Every key, by name. */
+  /**
+   * Lists every key.
+   *
+   * @returns The keys, sorted by name.
+   */
   list(): ApiKeyRow[] {
     const rows = this.db.prepare('SELECT * FROM api_keys ORDER BY name').all() as StoredRow[];
     return rows.map(parse);
@@ -85,6 +99,12 @@ export class ApiKeyStore {
    * Without a secret, the stored key stays and only its hosts change. A new
    * key gets a new placeholder when its prefix or its length differs from
    * the old one, so the placeholder keeps the shape of the key.
+   *
+   * @param name The environment variable name of the key.
+   * @param hosts The hosts of the key, as exact hostnames or `*.` wildcards.
+   * @param secret The key, or undefined to keep the stored key.
+   * @returns The stored row.
+   * @throws {HttpError} A 400 when the name, a host or the secret is not valid.
    */
   put(name: string, hosts: readonly string[], secret: string | undefined): ApiKeyRow {
     if (!NAME_PATTERN.test(name)) {
@@ -128,14 +148,24 @@ export class ApiKeyStore {
     return row;
   }
 
-  /** Forgets a key. Throws a 404 when none has this name. */
+  /**
+   * Removes a key.
+   *
+   * @param name The environment variable name of the key.
+   * @throws {HttpError} A 404 when no key has this name.
+   */
   remove(name: string): void {
     const info = this.db.prepare('DELETE FROM api_keys WHERE name = ?').run(name);
     if (info.changes === 0) throw new HttpError(404, `No API key named ${name}`);
     this.onChange();
   }
 
-  /** A row as the API reports it: everything but the secret and the placeholder. */
+  /**
+   * Makes the form of a key that the API reports. It holds only the last characters of the secret.
+   *
+   * @param row The stored key.
+   * @returns The summary.
+   */
   summarize(row: ApiKeyRow): ApiKeySummary {
     return {
       name: row.name,
@@ -146,25 +176,44 @@ export class ApiKeyStore {
   }
 }
 
-/** A stored row with its hosts parsed. */
+/**
+ * Parses the hosts of a stored row.
+ *
+ * @param row The raw row.
+ * @returns The row with its hosts as an array.
+ */
 function parse(row: StoredRow): ApiKeyRow {
   return { ...row, hosts: JSON.parse(row.hosts) as string[] };
 }
 
-/** The prefix a placeholder for this key starts with. */
+/**
+ * Gives the prefix of a key that its placeholder copies.
+ *
+ * @param secret The key.
+ * @returns The prefix, or an empty string.
+ */
 function prefixOf(secret: string): string {
   return PREFIX_PATTERN.exec(secret)?.[0] ?? '';
 }
 
-/** Whether two keys have the same prefix and the same length. */
+/**
+ * Checks if two keys have the same prefix and the same length.
+ *
+ * @param a The first key.
+ * @param b The second key.
+ * @returns True when the shapes are the same.
+ */
 function sameShape(a: string, b: string): boolean {
   return a.length === b.length && prefixOf(a) === prefixOf(b);
 }
 
 /**
- * A new placeholder for a key: its prefix, then random characters up to the
- * length of the key, or more for a key with too few characters after its
- * prefix.
+ * Makes a new placeholder for a key. The placeholder is the prefix of the key,
+ * followed by random characters up to the length of the key, but at least
+ * {@link MIN_RANDOM} random characters.
+ *
+ * @param secret The key.
+ * @returns The placeholder.
  */
 export function placeholderFor(secret: string): string {
   const prefix = prefixOf(secret);

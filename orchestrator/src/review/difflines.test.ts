@@ -10,7 +10,12 @@ import { NO_BASE } from './gitstatus.ts';
 
 /**
  * A runner that starts git on this machine, in the directory the target names,
- * so the parser is checked against output git really writes.
+ * so the tests check the parser against the real output of git.
+ *
+ * @param target The target whose directory git runs in.
+ * @param argv The command line.
+ * @param env The variables added to the environment.
+ * @returns The result of git.
  */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
@@ -32,7 +37,12 @@ const localGit: GitRunner = async (target, argv, env) => {
   }
 };
 
-/** A directory addressed the way the service addresses a repository. */
+/**
+ * Makes a git target for a local directory.
+ *
+ * @param dir The local directory.
+ * @returns The git target.
+ */
 function at(dir: string): GitTarget {
   return { boxId: 'box-1', dir };
 }
@@ -241,8 +251,6 @@ test('an untracked file is entirely added', () => {
   assert.deepEqual(allLinesAdded(''), {});
 });
 
-// --- against git's own output ------------------------------------------------
-
 describe('over output git actually produces', () => {
   let dir: string;
 
@@ -267,7 +275,7 @@ describe('over output git actually produces', () => {
   });
 
   test('a modification, a deletion and an append are all marked', async () => {
-    // two -> TWO, four and five removed, seven appended.
+    // Line two changes to TWO, lines four and five are removed, and seven is appended.
     writeFileSync(join(dir, 'code.go'), 'one\nTWO\nthree\nsix\nseven\n');
     const info = await fileDiff(at(dir), NO_BASE, 'code.go', '');
 
@@ -275,7 +283,7 @@ describe('over output git actually produces', () => {
     assert.equal(info.lines[5], 'added');
     assert.equal(info.deletions.length, 1);
     assert.equal(info.deletions[0]!.afterLine, 3);
-    // The marker has to point at a hunk that exists, since tapping it shows it.
+    // The marker must point at a hunk that exists, because a tap on it shows the hunk.
     const index = info.deletions[0]!.hunkIndex;
     assert.ok(index >= 0 && index < info.hunks.length);
   });
@@ -295,7 +303,6 @@ describe('over output git actually produces', () => {
     const bare = mkdtempSync(join(tmpdir(), 'boxes-nogit-'));
     try {
       writeFileSync(join(bare, 'a.txt'), 'a\n');
-      // A workspace need not be a repository.
       assert.deepEqual(await fileDiff(at(bare), NO_BASE, 'a.txt', 'a\n'), {
         lines: {},
         hunks: [],

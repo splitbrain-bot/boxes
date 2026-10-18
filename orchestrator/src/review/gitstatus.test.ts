@@ -22,7 +22,12 @@ import { discoverRepos } from './repos.ts';
 
 /**
  * A runner that starts git on this machine, in the directory the target names,
- * over repositories the tests build themselves.
+ * over repositories that the tests build.
+ *
+ * @param target The target whose directory git runs in.
+ * @param argv The command line.
+ * @param env The variables added to the environment.
+ * @returns The result of git.
  */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
@@ -44,13 +49,23 @@ const localGit: GitRunner = async (target, argv, env) => {
   }
 };
 
-/** A directory addressed the way the service addresses a repository. */
+/**
+ * Makes a git target for a local directory.
+ *
+ * @param dir The local directory.
+ * @returns The git target.
+ */
 function at(dir: string): GitTarget {
   return { boxId: 'box-1', dir };
 }
 
 describe('parsePorcelain', () => {
-  /** The output `git status -z` produces: one NUL-terminated record per file. */
+  /**
+   * Builds `git status -z` output, with a NUL byte at the end of each record.
+   *
+   * @param entries The records.
+   * @returns The output.
+   */
   function records(entries: string[]): string {
     return entries.map((entry) => `${entry}\0`).join('');
   }
@@ -72,7 +87,7 @@ describe('parsePorcelain', () => {
       'new.txt': 'untracked',
       'modified.txt': 'modified',
       'staged.txt': 'staged',
-      // Staged and then changed again: the more urgent of the two is shown.
+      // A change in the work tree after the staged change shows as modified.
       'staged-then-modified.txt': 'modified',
       'added.txt': 'added',
       'deleted-staged.txt': 'deleted',
@@ -135,10 +150,14 @@ test('baseRev is HEAD until a base is chosen', () => {
   assert.equal(baseRev({ rev: 'main', commit: 'abc123' }), 'abc123');
 });
 
-// --- against a real repository -----------------------------------------------
-
 describe('over a real repository', () => {
   let dir: string;
+  /**
+   * Runs git in the test repository.
+   *
+   * @param args The arguments of git.
+   * @returns The standard output.
+   */
   const run = (...args: string[]): string =>
     execFileSync('git', args, { cwd: dir, stdio: 'pipe', encoding: 'utf8' });
 
@@ -188,8 +207,7 @@ describe('over a real repository', () => {
   test('a directory that is no repository has no statuses at all', async () => {
     const bare = mkdtempSync(join(tmpdir(), 'boxes-nogit-'));
     try {
-      // Null rather than empty, which is a different answer from a repository
-      // with nothing changed.
+      // Null, because an empty result means a repository without changes.
       assert.equal(await fileStatuses(at(bare), NO_BASE), null);
     } finally {
       rmSync(bare, { recursive: true, force: true });
@@ -202,7 +220,7 @@ describe('over a real repository', () => {
     run('add', '.');
     run('commit', '-q', '-m', 'feature work');
 
-    // A commit on main after branching off must not become this branch's.
+    // A commit on main after the branch point must not show as a change of this branch.
     run('checkout', '-q', 'main');
     writeFileSync(join(dir, 'theirs.txt'), 'not mine\n');
     run('add', '.');
@@ -249,8 +267,6 @@ describe('over a real repository', () => {
   });
 });
 
-// --- across a whole workspace ------------------------------------------------
-
 describe('over a workspace of several repositories', () => {
   let dir: string;
 
@@ -268,12 +284,22 @@ describe('over a workspace of several repositories', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The box these repositories would be reviewed in. */
+  /**
+   * Makes the git box for the test workspace.
+   *
+   * @returns The box id and the workspace directory.
+   */
   function box(): { boxId: string; workspaceDir: string } {
     return { boxId: 'box-1', workspaceDir: dir };
   }
 
-  /** Runs git in a workspace-relative directory. */
+  /**
+   * Runs git in a workspace-relative directory.
+   *
+   * @param rel The workspace-relative directory, or '' for the workspace.
+   * @param args The arguments of git.
+   * @returns The standard output.
+   */
   const git = (rel: string, ...args: string[]): string =>
     execFileSync('git', args, {
       cwd: rel === '' ? dir : join(dir, rel),
@@ -281,7 +307,11 @@ describe('over a workspace of several repositories', () => {
       encoding: 'utf8',
     });
 
-  /** A repository with one committed file in it. */
+  /**
+   * Creates a repository with one committed file in it.
+   *
+   * @param rel The workspace-relative directory of the repository, or '' for the workspace.
+   */
   function repo(rel: string): void {
     mkdirSync(rel === '' ? dir : join(dir, rel), { recursive: true });
     git(rel, 'init', '-q', '-b', 'main');
@@ -294,7 +324,12 @@ describe('over a workspace of several repositories', () => {
     git(rel, 'commit', '-q', '-m', 'init');
   }
 
-  /** Writes a workspace-relative file, creating the directories above it. */
+  /**
+   * Writes a workspace-relative file, creating the directories above it.
+   *
+   * @param rel The workspace-relative path of the file.
+   * @param content The content of the file.
+   */
   function file(rel: string, content = 'x\n'): void {
     const full = join(dir, rel);
     mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
@@ -302,8 +337,10 @@ describe('over a workspace of several repositories', () => {
   }
 
   /**
-   * The merged statuses of the workspace, against `rev` in each repository or,
-   * without one, against HEAD.
+   * Reads the merged statuses of the workspace.
+   *
+   * @param rev The revision to compare against in each repository, or '' to compare against HEAD.
+   * @returns The statuses by workspace-relative path.
    */
   async function statuses(rev = ''): Promise<Record<string, string>> {
     const map = await discoverRepos(fileService(dir), box());
@@ -328,8 +365,7 @@ describe('over a workspace of several repositories', () => {
     file('outer/inner/new.txt');
 
     const merged = await statuses();
-    // The inner repository's own answer, at its workspace-relative path — and
-    // not the outer repository's `inner/` for the whole work tree.
+    // The outer repository reports the inner work tree as `inner/`, and the merge drops it.
     assert.equal(merged['outer/inner/new.txt'], 'untracked');
     assert.equal(merged['outer/inner'], undefined);
     assert.equal(merged['outer/inner/tracked.txt'], undefined);
@@ -353,7 +389,7 @@ describe('over a workspace of several repositories', () => {
     const map = await discoverRepos(fileService(dir), box());
     const bases = await resolveBases(box(), map, 'main');
     assert.equal(bases.size, 2);
-    // Different commits: `main` means main-in-each, not one shared id.
+    // Each repository has its own merge base with `main`.
     assert.notEqual(bases.get('repo-a')!.commit, bases.get('repo-b')!.commit);
 
     const merged = await workspaceStatuses(box(), map, bases);
@@ -369,8 +405,6 @@ describe('over a workspace of several repositories', () => {
 
     const map = await discoverRepos(fileService(dir), box());
     const bases = await resolveBases(box(), map, 'release');
-    // Resolved in one, absent from the other — a soft failure rather than a
-    // failed request, because that shape is ordinary.
     assert.deepEqual([...bases.keys()], ['repo-a']);
 
     const merged = await workspaceStatuses(box(), map, bases);

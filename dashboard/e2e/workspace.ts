@@ -10,14 +10,14 @@ export interface WorkspaceSpec {
   /** The working tree, by workspace-relative path. */
   files: Record<string, string>;
   /**
-   * What the repositories hold at HEAD, by the same paths. Defaults to
-   * `files`, which is a checkout nobody has touched yet; a path that differs
-   * is a modified file and one that is missing is an untracked one.
+   * The content of the repositories at HEAD, by the same paths. Defaults to `files`,
+   * which gives a clean checkout. A path with different content is a modified file.
+   * A path that is missing here is an untracked file.
    */
   committed?: Record<string, string>;
-  /** Committed paths the working tree no longer has: the deleted files. */
+  /** Committed paths that are deleted from the working tree. */
   deleted?: string[];
-  /** Which directories are git repositories, by workspace-relative path. */
+  /** The directories that are git repositories, by workspace-relative path. */
   repos?: string[];
   /** Extra branches to create, by the repository that gets them. */
   branches?: Record<string, string[]>;
@@ -29,6 +29,9 @@ export interface WorkspaceSpec {
  *
  * `app` holds a modified file, `lib` an untracked one, and `notes` belongs to
  * no repository.
+ *
+ * @param over The fields that replace the defaults.
+ * @returns The spec of the workspace.
  */
 export function reviewWorkspace(over: Partial<WorkspaceSpec> = {}): WorkspaceSpec {
   const files: Record<string, string> = {
@@ -46,7 +49,7 @@ export function reviewWorkspace(over: Partial<WorkspaceSpec> = {}): WorkspaceSpe
     committed: {
       'app/src/app.ts': files['app/src/app.ts']!,
       // One line replaced by two, and a block removed at the end. Only a pure
-      // removal draws a deletion marker; a removal followed by an addition is a change.
+      // removal shows a deletion marker. A removal followed by an addition is a change.
       'app/src/boot.ts':
         'export function boot(): void {\n  console.log("boot");\n}\n' +
         '// the old entry point, kept while the router is wired\nconst legacyBoot = boot;\n',
@@ -60,12 +63,24 @@ export function reviewWorkspace(over: Partial<WorkspaceSpec> = {}): WorkspaceSpe
   };
 }
 
-/** Runs git in a directory with the ambient binary. */
+/**
+ * Runs git in a directory with the git binary on the PATH.
+ *
+ * @param cwd The directory to run git in.
+ * @param args The arguments for git.
+ * @throws Error When git exits with a status other than zero.
+ */
 function git(cwd: string, ...args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe', encoding: 'utf8' });
 }
 
-/** Writes a file, creating the directories above it. */
+/**
+ * Writes a file, creating the directories above it.
+ *
+ * @param root The root directory of the workspace.
+ * @param path The path of the file, relative to the root.
+ * @param content The content of the file.
+ */
 function write(root: string, path: string, content: string): void {
   const full = join(root, path);
   mkdirSync(dirname(full), { recursive: true });
@@ -75,9 +90,11 @@ function write(root: string, path: string, content: string): void {
 /**
  * Builds a workspace from a spec, replacing whatever was there.
  *
- * The history is made by committing `committed` and then moving the working
- * tree to `files`, so every status the review reports is one real git worked
- * out rather than one the fixture declared.
+ * It commits `committed` and then changes the working tree to `files`. Thus
+ * git calculates every status that the review shows.
+ *
+ * @param root The directory of the workspace. The function deletes it first.
+ * @param spec The files, history and repositories of the workspace.
  */
 export function buildWorkspace(root: string, spec: WorkspaceSpec): void {
   rmSync(root, { recursive: true, force: true });
@@ -118,6 +135,8 @@ export function buildWorkspace(root: string, spec: WorkspaceSpec): void {
  * The target names the box, and the path under `/workspace` names the
  * directory in its workspace. A call addressed anywhere else fails without
  * running.
+ *
+ * @param workspaceOf Gives the workspace directory on this machine for a box id.
  */
 export function installLocalGit(workspaceOf: (boxId: string) => string): void {
   const runner: GitRunner = async (target, argv, env) => {
@@ -156,6 +175,8 @@ export function removeLocalGit(): void {
 /**
  * Runs the file service of a box in this process, on its workspace on this
  * machine, instead of inside its container.
+ *
+ * @param workspaceOf Gives the workspace directory on this machine for a box id.
  */
 export function installLocalFiles(workspaceOf: (boxId: string) => string): void {
   setFileServiceSpawnerForTests(

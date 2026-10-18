@@ -14,8 +14,8 @@ test('every harness fills in every field, in the right shape', () => {
   for (const h of all) {
     assert.ok(h.label.length > 0, `${h.id}: label`);
     assert.ok(h.cmd.length > 0, `${h.id}: cmd`);
-    // If these differed, the process table would be searched for a command
-    // that nothing in the box runs.
+    // The adapter is found in the process table by this token, and the
+    // adapter runs as cmd[0].
     assert.equal(h.processToken, h.cmd[0], `${h.id}: processToken`);
     assert.ok(Array.isArray(h.residentProcesses), `${h.id}: residentProcesses`);
     for (const re of h.residentProcesses)
@@ -55,7 +55,7 @@ test('env() puts the placeholder in one of its values', () => {
     const env = h.env('placeholder-value', 'token');
     const values = Object.values(env);
     assert.ok(values.includes('placeholder-value'), `${h.id}: placeholder unused`);
-    // Exactly one variable carries the credential; the rest are fixed.
+    // Exactly one variable carries the credential. The rest are fixed.
     assert.equal(
       values.filter((v) => v === 'placeholder-value').length,
       1,

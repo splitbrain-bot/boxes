@@ -2,6 +2,12 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * A multi-line text input in the style of the dashboard. It grows with its content.
+ *
+ * @param className Extra classes.
+ * @param props The other textarea props.
+ */
 function Textarea({ className, ...props }: React.ComponentProps<'textarea'>) {
   return (
     <textarea

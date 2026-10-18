@@ -1,8 +1,3 @@
-import { describe, it } from 'vitest';
-import { loadConfig } from '../config.ts';
-import { runtimeConformance } from './conformance.ts';
-import { connect, KubernetesRuntime, names } from './kubernetes.ts';
-
 /**
  * The conformance suite against the Kubernetes cluster of the kubeconfig
  * context that BOXES_CONFORMANCE_CONTEXT names, in the namespace of that
@@ -15,10 +10,15 @@ import { connect, KubernetesRuntime, names } from './kubernetes.ts';
  * because its orphan sweep removes the boxes of the suite.
  */
 
+import { describe, it } from 'vitest';
+import { loadConfig } from '../config.ts';
+import { runtimeConformance } from './conformance.ts';
+import { connect, KubernetesRuntime, names } from './kubernetes.ts';
+
 /** The port of the control channel of the egress proxy. */
 const CONTROL_PORT = 3129;
 
-/** The kubeconfig context the suite runs against. */
+/** The kubeconfig context the suite runs against, or undefined to skip the suite. */
 const context = process.env.BOXES_CONFORMANCE_CONTEXT;
 
 if (context) {
@@ -34,8 +34,8 @@ if (context) {
     const labelSelector = Object.entries(service.spec?.selector ?? {})
       .map(([key, value]) => `${key}=${value}`)
       .join(',');
-    // A proxy pod stands in for the orchestrator: it is on the pod network,
-    // and it listens on the control port.
+    // A proxy pod stands in for the orchestrator, because it is on the pod
+    // network and listens on the control port.
     const proxyPods = await kube.core.listNamespacedPod({
       namespace: kube.namespace,
       labelSelector,

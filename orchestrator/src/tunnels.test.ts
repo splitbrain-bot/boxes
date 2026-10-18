@@ -23,7 +23,9 @@ const DEPLOYMENT = 'd1d2d3d4';
 /** A start time for the fake clock, in epoch milliseconds. */
 const T0 = Date.UTC(2026, 9, 3, 12, 0, 0);
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
 
 beforeEach(() => {
@@ -36,7 +38,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** A Dev Tunnels account held in memory, which records every call. */
+/**
+ * Returns a fake API over a Dev Tunnels account in memory, which records every call.
+ *
+ * @param tunnels The tunnels of the account.
+ * @returns The API, and the ids that it read, labelled and removed.
+ */
 function fakeApi(tunnels: RemoteTunnel[]): {
   api: TunnelApi;
   reads: string[];
@@ -68,7 +75,13 @@ function fakeApi(tunnels: RemoteTunnel[]): {
   };
 }
 
-/** A tunnel on port 3000 in `euw`, with the labels given. */
+/**
+ * Returns a tunnel on port 3000 in `euw`.
+ *
+ * @param id The tunnel id.
+ * @param labels The labels of the tunnel.
+ * @returns The tunnel.
+ */
 function tunnel(id: string, labels: string[] = []): RemoteTunnel {
   return {
     id,
@@ -78,17 +91,33 @@ function tunnel(id: string, labels: string[] = []): RemoteTunnel {
   };
 }
 
-/** The command line the skill starts. */
+/**
+ * Returns a `devtunnel host` command line in the `<id>.<region>` form that the share-app skill uses.
+ *
+ * @param id The tunnel id.
+ * @returns The command line.
+ */
 function hostCommand(id: string): string {
   return `devtunnel host ${id}.euw --access-token -`;
 }
 
-/** How many tunnels the table remembers. */
+/**
+ * Returns how many tunnels the table remembers.
+ *
+ * @returns The number of rows.
+ */
 function tunnelCount(): number {
   return (db.prepare('SELECT COUNT(*) AS n FROM tunnels').get() as { n: number }).n;
 }
 
-/** A reconciler over the fake API, with box readings and a clock the case controls. */
+/**
+ * Returns a reconciler over the fake API, with box readings and a clock the case controls.
+ *
+ * @param api The API.
+ * @param readings Returns the readings of the boxes.
+ * @param now The clock, in epoch milliseconds.
+ * @returns The reconciler.
+ */
 function reconcilerFor(
   api: TunnelApi,
   readings: () => BoxReading[],
@@ -123,7 +152,7 @@ test('a newly served tunnel is read and labelled once, then remembered', async (
   await reconciler.tick();
   await reconciler.tick();
 
-  // The API is called for the new tunnel only, not on every tick.
+  // The reconciler calls the API for the new tunnel only.
   assert.deepEqual(fake.reads, ['abc123']);
   // Labels this deployment did not set stay on the tunnel.
   assert.deepEqual(fake.labelled, [
@@ -156,7 +185,6 @@ test('of the URLs the service lists for a port, the one on the standard port is 
 });
 
 test('a URL remembered with its own port number is shown on the standard port', () => {
-  // A remembered URL on its own port number.
   db.prepare(
     `INSERT INTO tunnels (id, cluster, box_id, ports, unserved_since, created_at)
      VALUES ('abc123', 'euw', 'box1', ?, NULL, 1)`,

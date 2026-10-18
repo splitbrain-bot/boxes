@@ -3,6 +3,10 @@
 import { AuiIf, useAuiState, ThreadPrimitive } from "@assistant-ui/react";
 import { useCallback, useEffect, useRef, useState, type FC } from "react";
 
+/**
+ * The suggested follow-up prompts in one row that scrolls sideways. An edge
+ * fades out while content is hidden past it. A click sends the prompt.
+ */
 const FollowupSuggestionsRow: FC = () => {
   const suggestions = useAuiState((s) => s.thread.suggestions);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -13,9 +17,9 @@ const FollowupSuggestionsRow: FC = () => {
     const el = scrollRef.current;
     if (!el) return;
     const maxScroll = el.scrollWidth - el.clientWidth;
-    // scrollLeft runs 0..-max in RTL; normalize to hidden width per physical edge.
+    // In RTL, scrollLeft runs from 0 to -max. The code converts it to the hidden width at each physical edge.
     const fromStart = Math.abs(el.scrollLeft);
-    // getComputedStyle forces a style recalc per scroll event; direction is stable, read it once.
+    // A getComputedStyle call forces a style recalculation, so the code reads the direction once.
     const rtl = (rtlRef.current ??= getComputedStyle(el).direction === "rtl");
     const [left, right] = rtl
       ? [maxScroll - fromStart, fromStart]
@@ -44,7 +48,8 @@ const FollowupSuggestionsRow: FC = () => {
     <div
       ref={scrollRef}
       onScroll={updateFades}
-      // overflow-x clips both axes; py-1/-my-1 gives focus rings vertical room without changing outer height.
+      // A scrolling overflow-x also clips vertically. The py-1 and -my-1 pair gives the focus rings room and
+      // keeps the outer height.
       className="aui-thread-followup-suggestions -my-1 w-full overflow-x-auto py-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       style={{ maskImage, WebkitMaskImage: maskImage }}
     >
@@ -70,6 +75,7 @@ const FollowupSuggestionsRow: FC = () => {
   );
 };
 
+/** The follow-up suggestions, shown after a finished turn when the thread has any. */
 export const ThreadFollowupSuggestions: FC = () => (
   <AuiIf
     condition={(s) =>

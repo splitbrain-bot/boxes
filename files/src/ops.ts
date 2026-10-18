@@ -40,6 +40,12 @@ export class FileError extends Error {
   /** The HTTP status of the reply. */
   readonly status: number;
 
+  /**
+   * Creates the error.
+   *
+   * @param status The HTTP status of the reply.
+   * @param message The message of the error.
+   */
   constructor(status: number, message: string) {
     super(message);
     this.status = status;
@@ -47,10 +53,14 @@ export class FileError extends Error {
 }
 
 /**
- * Resolves a client-supplied path under the root, or throws the refusal.
+ * Resolves a path from a client under the root, or throws the refusal.
  *
- * A malformed path is a 400, a missing one a 404, and a path that leaves the
- * root or ends in a link a 403.
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @param mustExist False for a path that a write can create.
+ * @returns The resolved path.
+ * @throws {FileError} A 400 for a malformed path, a 404 for a missing path, and a 403 for a path that leaves the root
+ *   or ends in a link.
  */
 function resolved(root: string, relPath: string, mustExist = true): string {
   const r = resolveInRoot(root, relPath, mustExist);
@@ -61,8 +71,13 @@ function resolved(root: string, relPath: string, mustExist = true): string {
 }
 
 /**
- * The status that reports a failed filesystem call, from its error code.
- * An error without a known code is rethrown as it is.
+ * Converts the error of a failed filesystem call into a FileError with the status for its error code. A FileError
+ * stays as it is.
+ *
+ * @param err The error of the call.
+ * @param relPath The path of the call, for the message.
+ * @returns The FileError.
+ * @throws The error itself when its code has no status.
  */
 function asFileError(err: unknown, relPath: string): FileError {
   if (err instanceof FileError) return err;
@@ -76,10 +91,13 @@ function asFileError(err: unknown, relPath: string): FileError {
 }
 
 /**
- * The plain files and directories in one directory, up to
- * {@link MAX_DIR_ENTRIES}.
+ * Lists the plain files and directories in one directory, up to {@link MAX_DIR_ENTRIES}.
  *
  * Symlinks are left out, because their target can change after the listing.
+ *
+ * @param root The root directory.
+ * @param relDir The directory, relative to the root.
+ * @returns The entries, and a flag for a truncated list.
  */
 export function listDir(root: string, relDir: string): ListReply {
   const dir = resolved(root, relDir);
@@ -99,13 +117,14 @@ export function listDir(root: string, relDir: string): ListReply {
 }
 
 /**
- * The directories under the root that hold a `.git` file or directory,
- * breadth first.
+ * Finds the directories under the root that hold a `.git` file or directory, breadth first.
  *
- * The walk skips the pruned names and stops at the depth, the count of read
- * directories or the count of finds. Breadth first means a limit leaves the
- * deepest directories unread, where dependency trees sit. The walk never
- * follows a link.
+ * The walk skips the pruned names and does not follow links. It stops at the first limit that it reaches. The walk is
+ * breadth first, so a limit leaves the deepest directories unread, where dependency trees usually are.
+ *
+ * @param root The root directory.
+ * @param limits The limits of the walk and the pruned names.
+ * @returns The paths of the directories, relative to the root.
  */
 export function findRepos(root: string, limits: FindReposRequest): FindReposReply {
   const pruned = new Set(limits.pruned);
@@ -125,7 +144,7 @@ export function findRepos(root: string, limits: FindReposRequest): FindReposRepl
       try {
         entries = readdirSync(dir.absolute, { withFileTypes: true });
       } catch {
-        continue; // unreadable directory: skipped, not fatal
+        continue; // The walk skips a directory that it cannot read.
       }
 
       for (const entry of entries) {
@@ -147,7 +166,13 @@ export function findRepos(root: string, limits: FindReposRequest): FindReposRepl
   return { paths: found };
 }
 
-/** The type and the size of one path. */
+/**
+ * Gives the type and the size of one path.
+ *
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @returns The type and the size.
+ */
 export function statPath(root: string, relPath: string): StatReply {
   const path = resolved(root, relPath);
   try {
@@ -159,15 +184,15 @@ export function statPath(root: string, relPath: string): StatReply {
   }
 }
 
-/** What one capped read got. */
+/** The result of one capped read. */
 export interface FileRead {
   /** The bytes up to the cap. Empty for a binary file. */
   content: Buffer;
-  /** True when the file was longer than the cap and the rest was dropped. */
+  /** True when the file is longer than the cap. */
   truncated: boolean;
   /** True when the bytes up to the cap hold a NUL byte. */
   binary: boolean;
-  /** The file's real size in bytes. */
+  /** The size of the file in bytes. */
   size: number;
   /** The hash of the file, as {@link hashOf} gives it. */
   hash: string;
@@ -176,9 +201,13 @@ export interface FileRead {
 /**
  * Reads one plain file, up to `cap` bytes, and hashes it.
  *
- * A NUL byte anywhere in the bytes up to the cap marks the file as binary,
- * like git's own heuristic. A binary file comes back with no content rather
- * than as an error, because the tree lists files the viewer cannot show.
+ * A NUL byte in the bytes up to the cap marks the file as binary. A binary file comes back without content and
+ * without an error, because the tree lists files that the viewer cannot show.
+ *
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @param cap The maximum number of bytes of content.
+ * @returns The content and the facts about the file.
  */
 export function readFile(root: string, relPath: string, cap: number): FileRead {
   const path = resolved(root, relPath);
@@ -197,20 +226,23 @@ export function readFile(root: string, relPath: string, cap: number): FileRead {
   return { content: slice, truncated: buffer.length > cap, binary: false, size, hash };
 }
 
-/** What one capped read got, and how large the file it came from is. */
+/** The bytes of one capped read, and the size of the file. */
 interface CappedRead {
-  /** The bytes read: at most the cap plus one. */
+  /** The bytes read, at most the cap plus one. */
   buffer: Buffer;
-  /** The file's real size in bytes. */
+  /** The size of the file in bytes. */
   size: number;
 }
 
 /**
- * Reads at most `cap` bytes of a plain file, plus the one byte that tells a
- * file ending at the cap from one going past it.
+ * Reads at most `cap` bytes of a plain file, plus one byte that shows if the file continues after the cap.
  *
- * It reads through a descriptor, so bytes past the cap are never held in
- * memory. A workspace can hold a log of hundreds of megabytes.
+ * The bytes after the cap do not go into memory, because a workspace can hold a log of hundreds of megabytes.
+ *
+ * @param path The absolute path.
+ * @param cap The maximum number of bytes, without the extra byte.
+ * @returns The bytes and the size of the file.
+ * @throws {FileError} A 409 when the path is not a plain file.
  */
 function readCapped(path: string, cap: number): CappedRead {
   const fd = openSync(path, 'r');
@@ -230,15 +262,21 @@ function readCapped(path: string, cap: number): CappedRead {
   }
 }
 
-/** The hash of some bytes, as {@link hashOf} reports it. */
+/**
+ * Hashes some bytes with SHA-256.
+ *
+ * @param bytes The bytes.
+ * @returns The first 32 hex digits of the hash.
+ */
 function digest(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex').slice(0, 32);
 }
 
 /**
- * Hashes a file's content, or returns '' when there is no plain file.
+ * Hashes the content of a file. The hash covers the first {@link HASH_BYTES} bytes plus one.
  *
- * Only the first {@link HASH_BYTES} bytes, plus one, are hashed.
+ * @param path The absolute path.
+ * @returns The hash, or '' when the file is missing, cannot be read or is not a plain file.
  */
 function hashOf(path: string): string {
   try {
@@ -250,13 +288,20 @@ function hashOf(path: string): string {
 
 /** One plain file opened for a stream of its whole content. */
 export interface RawFile {
-  /** The size in bytes at the open. */
+  /** The size in bytes when the file was opened. */
   size: number;
-  /** The content. */
+  /** The stream of the content. */
   stream: ReadStream;
 }
 
-/** Opens one plain file to stream its whole content. */
+/**
+ * Opens one plain file to stream its whole content.
+ *
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @returns The size and the stream.
+ * @throws {FileError} A 404 when the path is not a plain file.
+ */
 export function openRaw(root: string, relPath: string): RawFile {
   const path = resolved(root, relPath);
   let fd: number;
@@ -273,22 +318,23 @@ export function openRaw(root: string, relPath: string): RawFile {
   return { size: stats.size, stream: createReadStream('', { fd }) };
 }
 
-/**
- * What a write expects of the file it replaces: its hash, or that there is
- * no file yet.
- */
+/** The condition of a write: the expected hash of the file, or no file at the path. */
 export type WriteCondition = { hash: string } | { absent: true };
 
 /**
- * Replaces one file atomically with a stream of bytes, and returns the hash
- * of the new content.
+ * Writes a stream of bytes to one file atomically.
  *
- * The bytes go to a temp file that is then renamed, so a reader never sees a
- * half-written file and a crash leaves the previous version. A file that
- * must be absent is linked into place, so a file that appeared in the
- * meantime is not replaced. A file whose hash does not match is not replaced
- * either. Both are a 412. An existing file keeps its permissions, so a saved
- * shell script stays executable.
+ * The function writes the bytes to a temp file first, so a reader never sees a half-written file, and a crash leaves
+ * the previous version. For a file that must be absent, the function links the temp file into place, so a file that
+ * appeared in the meantime stays. A file with a different hash also stays. An existing file keeps its permissions, so
+ * a saved shell script stays executable.
+ *
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @param body The new content.
+ * @param condition The condition that the current file must meet.
+ * @returns The hash of the new content.
+ * @throws {FileError} A 409 when the path is not a plain file, and a 412 when the file does not meet the condition.
  */
 export async function writeFile(
   root: string,
@@ -325,11 +371,18 @@ export async function writeFile(
 }
 
 /**
- * Writes a stream of bytes under the first free name in a directory: `name`,
- * `name-2`, `name-3`, and so on. Returns the name used.
+ * Writes a stream of bytes under the first free name in a directory. The names are `name`, then the stem of `name`
+ * with -2, -3 and so on before the extension, up to {@link MAX_CREATE_COLLISIONS} names.
  *
- * Each name is taken with a link, so two creates of the same name at once
- * land on two files, and no reader sees a half-written file.
+ * A link takes each name, so two creates of the same name at the same time make two files, and no reader sees a
+ * half-written file.
+ *
+ * @param root The root directory.
+ * @param relDir The directory, relative to the root.
+ * @param name The requested file name, without a separator.
+ * @param body The content.
+ * @returns The name used.
+ * @throws {FileError} A 400 for an invalid name, and a 409 when `relDir` is not a directory or all names are taken.
  */
 export async function createUnderFreeName(
   root: string,
@@ -362,7 +415,13 @@ export async function createUnderFreeName(
   }
 }
 
-/** Removes one file. A missing file is a 404. */
+/**
+ * Removes one file.
+ *
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @throws {FileError} A 404 when the file is missing.
+ */
 export function removeFile(root: string, relPath: string): void {
   const path = resolved(root, relPath);
   try {
@@ -373,8 +432,11 @@ export function removeFile(root: string, relPath: string): void {
 }
 
 /**
- * Creates one directory, or leaves one that is already there. Its parent must
- * exist. Anything else at the path is a 409.
+ * Creates one directory, or keeps a directory that is already there.
+ *
+ * @param root The root directory.
+ * @param relPath The path, relative to the root.
+ * @throws {FileError} A 404 when the parent is missing, and a 409 when something other than a directory is at the path.
  */
 export function makeDir(root: string, relPath: string): void {
   const path = resolved(root, relPath, false);
@@ -391,12 +453,14 @@ export function makeDir(root: string, relPath: string): void {
 }
 
 /**
- * Apparent size of everything under some directories, in bytes.
+ * Adds up the apparent size of all files under some directories.
  *
- * It sums file sizes, like `du --apparent-size`, not allocated blocks.
- * Symlinks count as nothing and are not followed. A subdirectory that cannot
- * be read, for example because the agent deleted it during the walk, is
- * skipped. A root that cannot be read throws.
+ * The sum uses the file sizes, not the allocated blocks. Symlinks add nothing, and the walk does not follow them. The
+ * walk skips a subdirectory that it cannot read, for example because the agent deleted it during the walk.
+ *
+ * @param roots The absolute paths of the directories.
+ * @returns The total size in bytes.
+ * @throws The error of the read when a root cannot be read.
  */
 export async function totalSize(roots: readonly string[]): Promise<number> {
   let total = 0;
@@ -404,7 +468,13 @@ export async function totalSize(roots: readonly string[]): Promise<number> {
   return total;
 }
 
-/** Apparent size of everything under one directory, in bytes. */
+/**
+ * Adds up the apparent size of all files under one directory.
+ *
+ * @param root The absolute path of the directory.
+ * @returns The total size in bytes.
+ * @throws The error of the read when the root cannot be read.
+ */
 async function directorySize(root: string): Promise<number> {
   let total = 0;
   const stack = [root];
@@ -424,7 +494,7 @@ async function directorySize(root: string): Promise<number> {
         try {
           total += (await lstat(child)).size;
         } catch {
-          // Deleted between the readdir and the stat. Nothing to add.
+          // The file was deleted between the readdir and the lstat.
         }
       }
     }
@@ -432,7 +502,12 @@ async function directorySize(root: string): Promise<number> {
   return total;
 }
 
-/** What a path is, without following a final link, or null when nothing is there. */
+/**
+ * Gives the stats of a path without following a final link.
+ *
+ * @param path The absolute path.
+ * @returns The stats, or null when the lstat fails.
+ */
 function statOrNull(path: string): Stats | null {
   try {
     return lstatSync(path);
@@ -441,31 +516,37 @@ function statOrNull(path: string): Stats | null {
   }
 }
 
-/** Removes a temp file, if it is still there. */
+/**
+ * Removes a temp file, if it is still there.
+ *
+ * @param path The absolute path.
+ */
 function removeQuietly(path: string): void {
   try {
     unlinkSync(path);
   } catch {
-    // already gone
+    // The file is already gone.
   }
 }
 
-/**
- * Counts the temp files this process has created, so each gets its own
- * name.
- */
+/** The number of temp file names that this process has used. The count makes each temp file name unique. */
 let tmpFiles = 0;
 
-/** How many times one temp file tries to get its name to itself. */
+/** The maximum number of attempts to open one temp file. */
 const TMP_ATTEMPTS = 5;
 
 /**
- * Writes a stream into a new temp file next to `path`, and returns the temp
- * file's path.
+ * Writes a stream into a new temp file next to a path.
  *
- * The mode is that of the file at `path`, or `mode` when there is none. The
- * open creates the file and follows no link. When the name is taken, by a
- * link or a leftover, the function removes it and tries again.
+ * The open creates a new file and does not follow a link. When a link or an old file has the temp name, the function
+ * removes it and tries again.
+ *
+ * @param path The absolute path of the file that the temp file is for.
+ * @param body The content.
+ * @param mode The mode of the temp file when there is no file at `path`. Otherwise the temp file gets the mode of that
+ *   file.
+ * @returns The path of the temp file.
+ * @throws {Error} When no attempt opens a new temp file.
  */
 async function streamToTemp(path: string, body: Readable, mode = 0o644): Promise<string> {
   const tmp = `${path}.${process.pid}.${tmpFiles++}.tmp`;
@@ -483,7 +564,7 @@ async function streamToTemp(path: string, body: Readable, mode = 0o644): Promise
   if (fd === null) throw new Error(`could not get a clean temp file to write ${path}`);
 
   try {
-    // Set through the descriptor, because the umask masks a mode given to open.
+    // The mode goes through the descriptor, because the umask masks a mode given to open.
     fchmodSync(fd, (statOrNull(path)?.mode ?? mode) & 0o777);
   } catch (err) {
     closeSync(fd);

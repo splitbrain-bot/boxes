@@ -6,14 +6,17 @@ import { useEffect, useRef, useState } from 'react';
  *
  * CSS cannot animate from `height: auto`, so a resize observer measures the
  * real height. Before the first measurement the row has no inline height.
+ *
+ * @param away True to put the row away.
+ * @param children The content of the row.
  */
 export function Shelf({
   away,
   children,
 }: {
-  /** True to put it away. */
+  /** True to put the row away. */
   away: boolean;
-  /** The row's content. */
+  /** The content of the row. */
   children: React.ReactNode;
 }) {
   const content = useRef<HTMLDivElement>(null);
@@ -26,7 +29,7 @@ export function Shelf({
       setHeight(el.offsetHeight);
       return;
     }
-    // Fires once on observe, so the height is known from the first frame.
+    // The observer also reports the size when observation starts.
     const observer = new ResizeObserver(() => setHeight(el.offsetHeight));
     observer.observe(el);
     return () => observer.disconnect();

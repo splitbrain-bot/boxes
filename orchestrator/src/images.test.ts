@@ -18,26 +18,37 @@ const PROXY_CONTAINER = 'boxes-egress-proxy';
 
 /** An inspect answer, as the daemon shapes one. */
 interface FakeImage {
+  /** The local image id. */
   Id: string;
+  /** The registry digests, one per repository. */
   RepoDigests?: string[];
+  /** The build time, as an ISO date. */
   Created?: string;
+  /** The size in bytes. */
   Size?: number;
 }
 
 /** The daemon this suite pretends to talk to. */
 interface Fake {
-  /** Image reference — a tag or an id — to what inspecting it answers. */
+  /** The inspect answer for each image reference, which is a tag or an id. */
   images: Map<string, FakeImage>;
-  /** Container name to the image id it was created from. */
+  /** The image id that each container was created from, by container name. */
   containers: Map<string, string>;
   /** Every image reference inspected, in order, so the cache can be seen. */
   inspected: string[];
 }
 
+/** The fake daemon of the current test. */
 let fake: Fake;
+/** The temporary data directories that afterEach removes. */
 let dirs: string[] = [];
 
-/** An error shaped like the daemon's 404 for a missing image or container. */
+/**
+ * Returns an error shaped like the 404 of the daemon for a missing image or container.
+ *
+ * @param what The kind of object, for the message.
+ * @returns The error.
+ */
 function notFound(what: string): Error {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
@@ -63,7 +74,11 @@ function install(): void {
   } as unknown as Docker);
 }
 
-/** A config pointed at the fake's two names, over a throwaway data directory. */
+/**
+ * Returns a config with the two names of the fake, over a temporary data directory.
+ *
+ * @returns The config.
+ */
 function cfg(): Config {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-images-'));
   dirs.push(dir);
@@ -74,7 +89,12 @@ function cfg(): Config {
   });
 }
 
-/** The images, read by the Docker runtime with this config. */
+/**
+ * Returns the images that the Docker runtime reads with a config.
+ *
+ * @param config The config of the runtime.
+ * @returns The images.
+ */
 function imagesOf(config: Config): ReturnType<typeof deploymentImages> {
   setRuntime(new DockerRuntime(config));
   return deploymentImages();
@@ -115,8 +135,8 @@ describe('deploymentImages', () => {
   });
 
   it('falls back to the local id for an image built on this host', async () => {
-    // What `docker compose build` leaves: a real image that has never been in
-    // a registry, so there is no manifest digest to report.
+    // `docker compose build` leaves a real image that has never been in a
+    // registry, so it has no manifest digest to report.
     fake.images.set(BOX_IMAGE, {
       Id: 'sha256:builthere',
       RepoDigests: [],
@@ -149,7 +169,7 @@ describe('deploymentImages', () => {
   it('says nothing for an image the daemon does not have', async () => {
     const images = await imagesOf(cfg());
 
-    // Both are normal states: no proxy container is up, and the box image is
+    // Both states are normal. No proxy container is up, and the box image is
     // not pulled yet.
     assert.equal(images.proxy, null);
     assert.equal(images.box, null);

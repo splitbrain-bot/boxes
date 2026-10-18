@@ -1,9 +1,9 @@
-import type { UPDATE_KIND } from '../../../../shared/acp.ts';
-
 /**
- * The part of the ACP schema the browser reads and sends, written out by hand
- * so the SDK stays out of the bundle.
+ * The part of the ACP schema that the browser reads and sends. The types are
+ * written by hand, so the SDK stays out of the bundle.
  */
+
+import type { UPDATE_KIND } from '../../../../shared/acp.ts';
 
 /** A displayable block: text, an image, audio, a link or an embedded resource. */
 export type ContentBlock =
@@ -13,10 +13,10 @@ export type ContentBlock =
   | { type: 'resource_link'; uri: string; name?: string; title?: string }
   | { type: 'resource'; resource?: { uri?: string; text?: string } };
 
-/** How far along a tool call is. */
+/** The progress of a tool call. */
 export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
-/** The category of a tool, which picks its icon and treatment. */
+/** The category of a tool, which selects its icon and display. */
 export type ToolKind =
   | 'read'
   | 'edit'
@@ -29,7 +29,7 @@ export type ToolKind =
   | 'switch_mode'
   | 'other';
 
-/** A file the tool touched, and where in it. */
+/** A file that the tool touched, and the position in it. */
 export interface ToolCallLocation {
   /** The file's path. */
   path: string;
@@ -37,7 +37,7 @@ export interface ToolCallLocation {
   line?: number | null;
 }
 
-/** What a tool call produced: content, a diff, or a terminal handle. */
+/** The output of a tool call, which is content, a diff or a terminal handle. */
 export type ToolCallContent =
   | { type: 'content'; content: ContentBlock }
   | { type: 'diff'; path: string; oldText?: string | null; newText: string }
@@ -53,9 +53,9 @@ interface ToolCall {
   name?: string | null;
   /** The category of the tool. */
   kind?: ToolKind;
-  /** How far along the call is. */
+  /** The progress of the call. */
   status?: ToolCallStatus;
-  /** What the call produced so far. */
+  /** The output of the call so far. */
   content?: ToolCallContent[] | null;
   /** The files the call touches. */
   locations?: ToolCallLocation[] | null;
@@ -78,7 +78,7 @@ interface ThreadMode {
   description?: string | null;
 }
 
-/** The modes an adapter advertises, and the one it is in. */
+/** The modes that an adapter advertises, and its current mode. */
 export interface ThreadModeState {
   /** The id of the mode the adapter is in. */
   currentModeId: string;
@@ -108,12 +108,12 @@ export interface ThreadConfigOption {
   /** A longer explanation, when the adapter sends one. */
   description?: string | null;
   /**
-   * What the option is for: `model`, `mode`, `model_config`, `thought_level`,
-   * or an unknown label. A client can place a known option by it without
-   * relying on the adapter's id.
+   * The purpose of the option: `model`, `mode`, `model_config`,
+   * `thought_level`, or an unknown label. A client can place a known option by
+   * its category, without the id from the adapter.
    */
   category?: string | null;
-  /** `select` carries an options list; other kinds carry none. */
+  /** The kind of option. Only a `select` has an options list. */
   type?: string;
   /** The value in effect. */
   currentValue?: string;
@@ -125,19 +125,19 @@ export interface ThreadConfigOption {
 export interface AvailableCommand {
   /** The command name. */
   name: string;
-  /** What the command does. */
+  /** The description of the command. */
   description?: string | null;
-  /** What the command expects after its name, when it takes anything. */
+  /** The hint for the input after the command name, when the command takes input. */
   input?: { hint?: string } | null;
 }
 
 /** A step of the agent's plan. */
 export interface PlanEntry {
-  /** What the step does. */
+  /** The description of the step. */
   content: string;
   /** The step's priority, as the adapter labels it. */
   priority?: string;
-  /** How far along the step is, as the adapter labels it. */
+  /** The progress of the step, as the adapter labels it. */
   status?: string;
 }
 
@@ -149,7 +149,7 @@ interface ContentChunk {
   messageId?: string | null;
 }
 
-/** Everything the adapter can push through session/update. */
+/** Every update that the adapter can send through session/update. */
 export type ThreadUpdate =
   | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.userMessageChunk })
   | (ContentChunk & { sessionUpdate: typeof UPDATE_KIND.agentMessageChunk })
@@ -160,7 +160,7 @@ export type ThreadUpdate =
   | { sessionUpdate: typeof UPDATE_KIND.currentMode; currentModeId: string }
   | { sessionUpdate: typeof UPDATE_KIND.availableCommands; availableCommands?: AvailableCommand[] }
   | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: ThreadConfigOption[] }
-  // Forward compatibility: an adapter may send a kind this build predates.
+  // Forward compatibility, because an adapter can send a kind that is newer than this build.
   | { sessionUpdate: string; [key: string]: unknown };
 
 /** The params of a session/update notification. */
@@ -171,7 +171,7 @@ export interface ThreadNotification {
   update: ThreadUpdate;
 }
 
-/** What a permission option would do if chosen. */
+/** The effect of a permission option. */
 export type PermissionOptionKind = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
 
 /** One answer the user may give to a permission request. */
@@ -180,11 +180,11 @@ export interface PermissionOption {
   optionId: string;
   /** The button label. */
   name: string;
-  /** What the option would do. */
+  /** The effect of the option. */
   kind: PermissionOptionKind;
 }
 
-/** The adapter asking whether a tool call may proceed. It blocks until answered. */
+/** A request from the adapter for permission to run a tool call. The adapter blocks until the user answers. */
 export interface RequestPermissionRequest {
   /** The ACP thread that asks. */
   sessionId: string;
@@ -200,13 +200,13 @@ export interface RequestPermissionResponse {
   outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
 }
 
-/** What session/new answers with: the thread the connection is pinned to. */
+/** The answer to session/new, with the thread that the connection is pinned to. */
 export interface NewThreadResponse {
   /** The id of the ACP thread. */
   sessionId: string;
 }
 
-/** What session/load answers with. */
+/** The answer to session/load. */
 export interface LoadThreadResponse {
   /** The modes the adapter offers, if any. */
   modes?: ThreadModeState | null;
@@ -214,7 +214,12 @@ export interface LoadThreadResponse {
   configOptions?: ThreadConfigOption[] | null;
 }
 
-/** Reads a content block as plain text, for the blocks that carry any. */
+/**
+ * Reads a content block as plain text, for the blocks that carry any.
+ *
+ * @param block The content block.
+ * @returns The text, or '' for a block without text.
+ */
 export function blockText(block: ContentBlock | undefined): string {
   if (!block) return '';
   if (block.type === 'text') return block.text;
@@ -224,12 +229,15 @@ export function blockText(block: ContentBlock | undefined): string {
 }
 
 /**
- * An image block as a `src` the browser can load, or null when it has none.
+ * Turns an image block into a `src` the browser can load.
  *
  * A block with data and a mime type becomes a data URL. The adapter sends
  * both empty for a remote image, so that block falls through to its `uri`.
  * A `uri` passes only as https or blob, because assistant-ui drops an image
  * with any other src. A null result lets the caller show the link instead.
+ *
+ * @param block The content block.
+ * @returns The src, or null when the block has none.
  */
 export function imageSrc(block: ContentBlock | undefined): string | null {
   if (block?.type !== 'image') return null;
@@ -239,10 +247,14 @@ export function imageSrc(block: ContentBlock | undefined): string | null {
 }
 
 /**
- * The text shown in place of an image that cannot render: the link when there
- * is one, otherwise a bare marker.
+ * Gives the text in place of an image that cannot render. The text is the
+ * link when there is one, and otherwise a bare marker.
  *
- * The wording matches the ACP adapter's own for the same case.
+ * The wording matches the text that the Claude adapter writes for an image
+ * that it cannot send.
+ *
+ * @param block The content block.
+ * @returns The text, or '' for a block that is not an image.
  */
 export function imageFallbackText(block: ContentBlock | undefined): string {
   if (block?.type !== 'image') return '';

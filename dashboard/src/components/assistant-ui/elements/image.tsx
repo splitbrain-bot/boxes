@@ -27,6 +27,12 @@ import { cn } from "@/lib/utils";
 import { useHistoryOverlay } from "@/hooks/use-history-overlay";
 import { Spinner } from "@/components/Spinner";
 
+/**
+ * Gives the file extension for an image MIME type.
+ *
+ * @param mimeType The MIME type, if known.
+ * @returns The extension without a dot. An unknown type gives "png".
+ */
 const extensionForMimeType = (mimeType?: string): string => {
   switch (mimeType) {
     case "image/png":
@@ -45,6 +51,13 @@ const extensionForMimeType = (mimeType?: string): string => {
   }
 };
 
+/**
+ * Converts a data URI to a blob. Base64 data is decoded. Other data is
+ * percent-decoded as text.
+ *
+ * @param dataUri The data URI.
+ * @returns The blob, with the MIME type of the data URI or "application/octet-stream".
+ */
 const dataUriToBlob = (dataUri: string): Blob => {
   const commaIndex = dataUri.indexOf(",");
   const meta = commaIndex >= 0 ? dataUri.slice(0, commaIndex) : dataUri;
@@ -68,9 +81,21 @@ const dataUriToBlob = (dataUri: string): Blob => {
   return new Blob([arr], { type: mime });
 };
 
+/**
+ * Reads the MIME type from a data URI.
+ *
+ * @param image The image source.
+ * @returns The MIME type in lower case, or undefined when the source is not a data URI.
+ */
 const mimeFromImage = (image: string): string | undefined =>
   image.match(/^data:([^;,]+)/i)?.[1]?.toLowerCase();
 
+/**
+ * Downloads an image through a temporary link. A data URI goes through an
+ * object URL, which is revoked after 40 seconds.
+ *
+ * @param part The image part, with its source and optional file name.
+ */
 const downloadImagePart = (
   part: Pick<ImageMessagePart, "image" | "filename">,
 ): void => {
@@ -92,6 +117,12 @@ const downloadImagePart = (
   if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl), 40_000);
 };
 
+/**
+ * Copies an image to the clipboard. A source that is not a data URI is fetched first.
+ *
+ * @param part The image part, with its source.
+ * @throws Error when the clipboard API is not available.
+ */
 const copyImagePart = async (
   part: Pick<ImageMessagePart, "image">,
 ): Promise<void> => {
@@ -109,6 +140,7 @@ const copyImagePart = async (
   await navigator.clipboard.write([new ClipboardItem({ [mime]: blob })]);
 };
 
+/** The class names of an image frame for each variant and size. */
 const imageVariants = cva(
   "aui-image-root relative overflow-hidden rounded-lg",
   {
@@ -132,9 +164,15 @@ const imageVariants = cva(
   },
 );
 
+/** The props of {@link ImageRoot}: any div prop and the variant props. */
 export type ImageRootProps = React.ComponentProps<"div"> &
   VariantProps<typeof imageVariants>;
 
+/**
+ * The frame of an image part.
+ *
+ * @param props The variant, the size, the classes, the content and the other div props.
+ */
 function ImageRoot({
   className,
   variant,
@@ -155,10 +193,17 @@ function ImageRoot({
   );
 }
 
+/** The props of {@link ImagePreview}: any img prop but children, and the classes of the container. */
 type ImagePreviewProps = Omit<React.ComponentProps<"img">, "children"> & {
+  /** Extra classes for the container around the image. */
   containerClassName?: string;
 };
 
+/**
+ * An image with a placeholder while it loads and an icon when it fails.
+ *
+ * @param props The source, the alt text, the classes, the load handlers and the other img props.
+ */
 function ImagePreview({
   className,
   containerClassName,
@@ -210,7 +255,7 @@ function ImagePreview({
           ref={imgRef}
           src={src}
           alt={alt}
-          /* Boxes edit: images load as they scroll into view, because a
+          /* Boxes edit: images load when they scroll into view, because a
              replay puts a whole long thread on the page at once. */
           loading="lazy"
           decoding="async"
@@ -234,6 +279,13 @@ function ImagePreview({
   );
 }
 
+/**
+ * The file name below an image. It renders nothing without a name.
+ *
+ * @param className Extra classes.
+ * @param children The file name.
+ * @param props The other span props.
+ */
 function ImageFilename({
   className,
   children,
@@ -255,13 +307,22 @@ function ImageFilename({
   );
 }
 
+/** The props of {@link ImageZoom}. */
 type ImageZoomProps = PropsWithChildren<{
+  /** The source of the full image. */
   src: string;
+  /** The alt text of the full image. */
   alt?: string;
   /** Boxes edit: classes for the image in the full screen view. */
   contentClassName?: string;
 }>;
 
+/**
+ * A trigger that shows an image full screen in an overlay. Escape, a click and
+ * the close button close it, and the focus stays in the overlay while it is open.
+ *
+ * @param props The source, the alt text, the classes of the full image and the trigger content.
+ */
 function ImageZoom({
   src,
   alt = "Image preview",
@@ -284,8 +345,8 @@ function ImageZoom({
     triggerRef.current?.focus();
   }, []);
 
-  // Boxes edit: back closes the zoomed image instead of leaving the thread.
-  // The overlay is its own portal, not a Radix root, so it calls the hook itself.
+  // Boxes edit: the back button closes the zoomed image, and the thread stays.
+  // The overlay is a plain portal and no Radix root, so it calls the hook itself.
   useHistoryOverlay(isOpen, handleClose);
 
   useEffect(() => {
@@ -384,6 +445,11 @@ function ImageZoom({
   );
 }
 
+/**
+ * The placeholder while an image is generated.
+ *
+ * @param className Extra classes.
+ */
 function ImageGenerating({ className }: { className?: string }) {
   return (
     <div
@@ -393,18 +459,26 @@ function ImageGenerating({ className }: { className?: string }) {
         className,
       )}
     >
-      {/* Boxes edit: the shared spinner. */}
+      {/* Boxes edit: uses the spinner of the dashboard. */}
       <Spinner className="text-muted-foreground size-8" />
       <span className="sr-only">Generating image…</span>
     </div>
   );
 }
 
+/**
+ * The notice for an image that the content filter of the provider blocked.
+ *
+ * @param className Extra classes.
+ * @param reason The reason to show, if any.
+ */
 function ImageContentFilterError({
   className,
   reason,
 }: {
+  /** Extra classes. */
   className?: string;
+  /** The reason to show, if any. */
   reason?: string;
 }) {
   return (
@@ -422,19 +496,28 @@ function ImageContentFilterError({
   );
 }
 
+/** The props of {@link ImageActions}. */
 export type ImageActionsProps = {
+  /** The image part that the actions work on. */
   part: ImageMessagePart;
   /**
    * Called when the user asks to regenerate the image. The regenerate button
    * renders only when this is set.
    */
   onRegenerate?: () => void | Promise<void>;
+  /** Extra classes. */
   className?: string;
 };
 
+/**
+ * The button that regenerates an image. It shows a spinner and is disabled while the call runs.
+ *
+ * @param onRegenerate Called when the user asks to regenerate the image.
+ */
 function RegenerateButton({
   onRegenerate,
 }: {
+  /** Called when the user asks to regenerate the image. */
   onRegenerate: () => void | Promise<void>;
 }) {
   const [isRegenerating, setIsRegenerating] = useState(false);
@@ -455,12 +538,17 @@ function RegenerateButton({
       aria-label="Regenerate image"
       className="hover:bg-muted inline-flex size-7 items-center justify-center rounded disabled:opacity-50"
     >
-      {/* Boxes edit: the shared spinner while it runs. */}
+      {/* Boxes edit: uses the spinner of the dashboard while the call runs. */}
       {isRegenerating ? <Spinner /> : <RefreshCwIcon className="size-4" />}
     </button>
   );
 }
 
+/**
+ * The download, copy and regenerate buttons of an image.
+ *
+ * @param props The image part, the regenerate callback and the classes.
+ */
 function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
   return (
     <div
@@ -492,6 +580,12 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
   );
 }
 
+/**
+ * An image part of a message. It shows a placeholder while the image is
+ * generated, a notice when the content filter blocked it, and the image with zoom otherwise.
+ *
+ * @param props The image part.
+ */
 const ImageImpl: ImageMessagePartComponent = (props) => {
   const { image, filename, status } = props;
 
@@ -522,13 +616,21 @@ const ImageImpl: ImageMessagePartComponent = (props) => {
   );
 };
 
+/** The image part component, with its parts attached for custom layouts. */
 const Image = memo(ImageImpl) as unknown as ImageMessagePartComponent & {
+  /** The root part. */
   Root: typeof ImageRoot;
+  /** The image with its loading and error states. */
   Preview: typeof ImagePreview;
+  /** The file name part. */
   Filename: typeof ImageFilename;
+  /** The full screen view part. */
   Zoom: typeof ImageZoom;
+  /** The action buttons part. */
   Actions: typeof ImageActions;
+  /** The placeholder while the image is generated. */
   Generating: typeof ImageGenerating;
+  /** The notice for a blocked image. */
   ContentFilterError: typeof ImageContentFilterError;
 };
 

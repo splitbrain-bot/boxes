@@ -2,7 +2,7 @@
  * The protocol between the orchestrator and the file service in a box,
  * `boxes-files`.
  *
- * The two speak HTTP/2 over the standard input and output of the file
+ * The two use HTTP/2 over the standard input and output of the file
  * service. Each operation is one request. The method and the path name the
  * operation, the query names the file, and the body carries the bytes. Every
  * path is relative to the workspace, with '' for the workspace itself.
@@ -10,7 +10,7 @@
 
 /**
  * The version of this protocol. The file service sends it with every
- * response, and the orchestrator refuses to work with any other version.
+ * response, and the orchestrator refuses a response with another version.
  */
 export const FILES_PROTOCOL_VERSION = 1;
 
@@ -30,7 +30,7 @@ export const FILE_ROUTES = {
   stat: '/stat',
   /**
    * GET: the start of one file, up to the `cap` in the query. The body is the
-   * bytes. The headers carry the hash, the real size and the flags.
+   * bytes. The `etag` header carries the hash. Other headers carry the real size and the flags.
    */
   read: '/read',
   /** GET: the whole content of one file, as a stream. */
@@ -48,16 +48,14 @@ export const FILE_ROUTES = {
   /** GET: the apparent size of the workspace, the home and the Nix store, as a {@link SizeReply}. */
   size: '/size',
   /**
-   * POST: writes the files of the orchestrator for the setup of the home,
-   * from a tar stream of files relative to the home. Only the CA of the
-   * egress proxy and the git configuration are accepted.
+   * POST: writes the setup files of the home from a tar stream of files relative to the home. The file service
+   * accepts only the CA certificate of the egress proxy and the git configuration.
    */
   setupFiles: '/setup-files',
   /**
-   * POST: installs the agent set in the body, a tar stream of files relative
-   * to the home, and removes what the last install put there. Only the
-   * instructions file and the skill directories of a harness layout are
-   * accepted.
+   * POST: installs the agent set in the body, a tar stream of files relative to the home, and removes the files of
+   * the last install. The file service accepts only the instructions files and the skill directories of the harness
+   * layouts. Then it copies each skill of the image that the set does not replace.
    */
   agentSet: '/agent-set',
 } as const;
@@ -72,20 +70,20 @@ export const TRUNCATED_HEADER = 'boxes-files-truncated';
 export const BINARY_HEADER = 'boxes-files-binary';
 
 /**
- * How many bytes of a file its hash covers, plus one. A change past this
- * point does not change the hash.
+ * The hash of a file covers this number of bytes plus one. A change after
+ * these bytes does not change the hash.
  */
 export const HASH_BYTES = 8 * 1024 * 1024;
 
-/** How many entries one directory listing returns before the rest are left out. */
+/** The maximum number of entries in one directory listing. */
 export const MAX_DIR_ENTRIES = 2000;
 
-/** How many times a colliding name is suffixed before a create is refused. */
+/** The maximum number of names that a create tries, the requested name included, before it fails. */
 export const MAX_CREATE_COLLISIONS = 100;
 
 /** One child of a directory. */
 export interface DirChild {
-  /** Its own name in the directory. */
+  /** The name in the directory. */
   name: string;
   /** True for a directory, false for a plain file. */
   isDir: boolean;
@@ -101,11 +99,11 @@ export interface ListReply {
 
 /** The body of {@link FILE_ROUTES.findRepos}: the limits of the walk. */
 export interface FindReposRequest {
-  /** How deep under the workspace the walk goes. */
+  /** The maximum depth of a directory under the workspace that the walk reads. The workspace has depth 0. */
   maxDepth: number;
-  /** How many directories the walk reads before it stops. */
+  /** The maximum number of directories that the walk reads. */
   maxScanned: number;
-  /** How many directories with a `.git` the walk finds before it stops. */
+  /** The number of directories with a `.git` after which the walk stops. */
   maxRepos: number;
   /** Directory names the walk does not enter. */
   pruned: string[];
@@ -119,7 +117,7 @@ export interface FindReposReply {
 
 /** The reply of {@link FILE_ROUTES.stat}. */
 export interface StatReply {
-  /** What the path is. */
+  /** The kind of the path. */
   type: 'file' | 'dir' | 'other';
   /** The size in bytes. */
   size: number;
@@ -138,13 +136,15 @@ export interface SizeReply {
 }
 
 /**
- * Whether a client-supplied relative path is well-formed, checked before
- * anything touches the filesystem.
+ * Checks that a relative path from a client is well-formed, before any access to the filesystem.
  *
  * Refuses an empty or overlong path, a NUL byte, an absolute path, a leading
  * backslash, a drive letter, an empty segment and any `..` segment. Slashes and
  * backslashes both separate segments. The check works on whole segments, so a
  * name like `[...slug].astro` stays valid.
+ *
+ * @param path The path relative to the workspace.
+ * @returns True when the path is well-formed.
  */
 export function validRelativePath(path: string): boolean {
   if (path === '' || path.length > 4096) return false;

@@ -17,53 +17,66 @@ import * as ws from './workspaces.ts';
 /** The box image the test config names. */
 const IMAGE = 'ghcr.io/example/box:latest';
 
-/** The daemon this suite pretends to talk to. */
+/** The state of the fake Docker daemon. */
 interface Fake {
-  /** Image reference to the id it currently resolves to. */
+  /** Maps each image reference to the image id that it resolves to now. */
   images: Map<string, string>;
-  /** Container id to the image id it was created from, and whether it runs. */
+  /** Maps each container id to its image id and its run state. */
   containers: Map<string, { image: string; running: boolean }>;
-  /** The options of every container created, in order. */
+  /** The options of each created container, in order. */
   created: Array<Record<string, unknown>>;
   /** The ids of the removed containers, in order. */
   removed: string[];
-  /** Every image reference pulled, in order. */
+  /** Each pulled image reference, in order. */
   pulled: string[];
   /**
-   * Image ids on the host that carry no tag, and the label each was built
-   * with. A pull that moves the tag puts the id it moved off in here, the way
-   * the daemon does.
+   * The image ids on the host without a tag, with the labels of each image. A
+   * pull that moves the tag puts the old id here, as the daemon does.
    */
   untagged: Map<string, Record<string, string>>;
-  /** Image ids a container still uses, which the daemon refuses to remove. */
+  /** The image ids that a container still uses, which the daemon refuses to remove. */
   imagesInUse: Set<string>;
-  /** Image ids removed, in the order they went. */
+  /** The removed image ids, in order. */
   imagesRemoved: string[];
-  /** What a pull does to `images`, which is how a tag moves in a test. */
+  /** Changes `images` at a pull, so a test can move a tag. */
   onPull?: (image: string) => void;
-  /** Run as a container is created, for what arrives mid-operation. */
+  /** Runs when a container is created, for an event during an operation. */
   onCreate?: () => void;
-  /** Run as a container is removed, for what arrives mid-teardown. */
+  /** Runs when a container is removed, for an event during a teardown. */
   onRemove?: () => void;
-  /** Networks the daemon has. A prune takes the container's with it. */
+  /** The networks of the daemon. A prune can remove the network of a container. */
   networks: Set<string>;
   /** The containers in which `boxes-setup` ran, in order. */
   setups: string[];
-  /** What `boxes-setup` exits with, and what it writes. */
+  /** The exit code and the output of `boxes-setup`. */
   setupExit: { code: number; output: string };
 }
 
-/** An error shaped like the daemon's 404 for a missing object. */
+/**
+ * Makes an error like the 404 of the daemon for a missing object.
+ *
+ * @param what The kind of the object, for the message.
+ * @returns The error with the status code 404.
+ */
 function notFound(what: string): Error {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
 
-/** Installs the fake daemon as the Docker client. */
+/**
+ * Installs the fake daemon as the Docker client.
+ *
+ * @param fake The state of the fake daemon.
+ */
 function install(fake: Fake): void {
   dk.setDockerForTests(dockerFor(fake));
 }
 
-/** The fake daemon itself, so a test can replace one part of it. */
+/**
+ * Builds the fake Docker client, so a test can replace one part of it.
+ *
+ * @param fake The state of the fake daemon.
+ * @returns The fake client.
+ */
 function dockerFor(fake: Fake): Docker {
   return {
     getImage: (name: string) => ({
@@ -99,8 +112,8 @@ function dockerFor(fake: Fake): Docker {
       },
       start: async () => {
         const c = fake.containers.get(id);
-        // A daemon asked to start a container it does not have says so, which
-        // is the whole of what a pruned box looks like from here.
+        // The daemon answers 404 to the start of a container that it does not have.
+        // A pruned box looks like this to the orchestrator.
         if (!c) throw notFound('container');
         c.running = true;
       },
@@ -113,7 +126,7 @@ function dockerFor(fake: Fake): Docker {
         fake.removed.push(id);
         fake.containers.delete(id);
       },
-      // The one exec this suite sees is the setup, under `timeout`.
+      // The only exec in this suite is the setup, under `timeout`.
       exec: async (opts: { Cmd: string[] }) => {
         assert.equal(opts.Cmd[3], 'boxes-setup');
         fake.setups.push(id);
@@ -147,8 +160,8 @@ function dockerFor(fake: Fake): Docker {
     getNetwork: (name: string) => ({
       inspect: async () => {
         if (!fake.networks.has(name)) throw notFound('network');
-        // Enough of one for ensureProxyAttached, which tolerates whatever it
-        // finds; what this suite reads is `fake.networks` itself.
+        // This answer is enough for ensureProxyAttached, which accepts each answer.
+        // The suite reads `fake.networks` directly.
         return { Containers: {} };
       },
       connect: async () => {},
@@ -167,7 +180,12 @@ function dockerFor(fake: Fake): Docker {
   } as unknown as Docker;
 }
 
-/** One stderr frame of a demuxable Docker stream. */
+/**
+ * Makes one stderr frame of a multiplexed Docker stream.
+ *
+ * @param text The payload of the frame.
+ * @returns The frame with its header.
+ */
 function frame(text: string): Buffer {
   const payload = Buffer.from(text, 'utf8');
   const header = Buffer.alloc(8);
@@ -176,7 +194,12 @@ function frame(text: string): Buffer {
   return Buffer.concat([header, payload]);
 }
 
-/** The managed file of a box's home, as lines. */
+/**
+ * Reads the lines of the managed file in the home of a box.
+ *
+ * @param boxId The id of the box.
+ * @returns The lines, or an empty list when the file does not exist.
+ */
 function managed(boxId: string): string[] {
   const path = join(ws.homePath(dir, boxId), '.boxes', 'managed');
   if (!existsSync(path)) return [];
@@ -185,9 +208,13 @@ function managed(boxId: string): string[] {
     .filter((line) => line !== '');
 }
 
+/** The temporary DATA_DIR of each test. */
 let dir: string;
+/** The database of each test. */
 let db: Db;
+/** The app and the objects behind it, built for each test. */
 let orchestrator: Orchestrator;
+/** The state of the fake Docker daemon of each test. */
 let fake: Fake;
 
 /**
@@ -195,6 +222,9 @@ let fake: Fake;
  *
  * The workspace and home directories are created too, because a start
  * refuses a box whose bind sources are gone.
+ *
+ * @param id The id of the box.
+ * @param imageId The image id of the container.
  */
 function insertBox(id: string, imageId: string): void {
   const now = Date.now();
@@ -226,8 +256,8 @@ beforeEach(async () => {
   db = openDb(dir);
   orchestrator = buildApp(loadConfig({ DATA_DIR: dir, BOX_IMAGE: IMAGE }), db);
   await orchestrator.egress.prepare();
-  // The file service of every container works on the home of the one box
-  // that the test starts, which is what the agent set install writes to.
+  // The file service of each container uses the directories of the one box that
+  // the test starts. The agent set install writes to its home.
   setFileServiceSpawnerForTests(
     inProcessFileService(() => {
       const [row] = db.prepare('SELECT id FROM boxes').all() as Array<{ id: string }>;
@@ -251,7 +281,7 @@ afterEach(async () => {
 describe('starting a box whose image has moved', () => {
   it('recreates the container on what the tag now resolves to', async () => {
     insertBox('a1', 'sha256:one');
-    // The tag stays the same and points at a new id. Comparing tags would
+    // The tag stays the same and points at a new id. A comparison of tags would
     // miss this.
     fake.images.set(IMAGE, 'sha256:two');
 
@@ -261,7 +291,7 @@ describe('starting a box whose image has moved', () => {
     assert.equal(fake.created.length, 1);
     assert.equal(fake.created[0]!.Image, IMAGE);
     assert.equal(fake.containers.get('box-a1')?.image, 'sha256:two');
-    // It is running, not only created.
+    // The container runs, and is not only created.
     assert.equal(fake.containers.get('box-a1')?.running, true);
   });
 
@@ -271,8 +301,8 @@ describe('starting a box whose image has moved', () => {
 
     await orchestrator.manager.start('a2');
 
-    // Everything durable about a box lives in these three mounts, which is
-    // what makes recreating the container cheap rather than destructive.
+    // All durable data of a box is in these three mounts, so a new container is
+    // cheap and loses nothing.
     const host = fake.created[0]!.HostConfig as { Binds: string[] };
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
@@ -285,8 +315,7 @@ describe('starting a box whose image has moved', () => {
     insertBox('a1', 'sha256:one');
     fake.images.set(IMAGE, 'sha256:two');
 
-    // A terminal starts a stopped box without going through start(), and
-    // runs the same repairs it does.
+    // A terminal starts a stopped box without start(), and runs the same repairs.
     await orchestrator.manager.execTarget('a1');
 
     assert.deepEqual(fake.removed, ['box-a1']);
@@ -311,7 +340,7 @@ describe('starting a box whose image has moved', () => {
 
     await orchestrator.manager.start('a4');
 
-    // The idle reaper stops it soon enough, and the next start moves it.
+    // The idle reaper stops it later, and the next start moves it to the new image.
     assert.deepEqual(fake.removed, []);
     assert.equal(fake.containers.get('box-a4')?.image, 'sha256:one');
   });
@@ -330,9 +359,9 @@ describe('starting a box whose image has moved', () => {
 describe('starting a box Docker has forgotten', () => {
   it('rebuilds a container something pruned, and starts it', async () => {
     insertBox('a1', 'sha256:one');
-    // `docker container prune` takes every stopped container, and an idle
-    // box is a stopped container. Nothing durable goes with it: the
-    // workspace, home and Nix store are directories on the data volume.
+    // `docker container prune` removes every stopped container, and an idle box
+    // is a stopped container. No durable data goes with it, because the
+    // workspace, the home and the Nix store are directories on the data volume.
     fake.containers.delete('box-a1');
 
     const detail = await orchestrator.manager.start('a1');
@@ -348,8 +377,8 @@ describe('starting a box Docker has forgotten', () => {
 
     await orchestrator.manager.start('a2');
 
-    // The row describes the container. What it cannot reproduce is in these
-    // directories, which the new container mounts as the old one did.
+    // The row describes the container. The data that the row cannot reproduce is
+    // in these directories, which the new container mounts as the old one did.
     const host = fake.created[0]!.HostConfig as { Binds: string[] };
     assert.deepEqual(host.Binds, [
       `${dir}/workspaces/a2:/workspace`,
@@ -360,8 +389,8 @@ describe('starting a box Docker has forgotten', () => {
 
   it('makes the network again when that went with it', async () => {
     insertBox('a3', 'sha256:one');
-    // `docker system prune` takes the container, and then the network that
-    // has nothing left on it.
+    // `docker system prune` removes the container, and then the network without
+    // containers.
     fake.containers.delete('box-a3');
     fake.networks.delete('bn-a3');
 
@@ -385,8 +414,8 @@ describe('starting a box Docker has forgotten', () => {
 
   it('does not rebuild on a daemon that would not answer', async () => {
     insertBox('a5', 'sha256:one');
-    // A 500 means an unwell daemon, not a missing container. A rebuild here
-    // could replace a working container behind a failed inspect.
+    // A 500 means a daemon with a problem, not a missing container. A rebuild
+    // could replace a working container after a failed inspect.
     dk.setDockerForTests({
       ...(dockerFor(fake) as unknown as Record<string, unknown>),
       getContainer: () => ({
@@ -407,8 +436,8 @@ describe('starting a box Docker has forgotten', () => {
     insertBox('a1', 'sha256:one');
     fake.containers.delete('box-a1');
 
-    // Opening a thread and opening a terminal both start a stopped box
-    // without going through start(), so the repair cannot live only there.
+    // A thread or a terminal starts a stopped box without start(), so the repair
+    // cannot be only in start().
     const target = await orchestrator.manager.execTarget('a1');
 
     assert.equal(fake.created.length, 1);
@@ -442,7 +471,11 @@ describe('having the box image at all', () => {
   });
 });
 
-/** What a pull that moves the tag does: the old id stays, untagged. */
+/**
+ * Moves the tag to `id` as a pull does. The old id stays on the host without a tag.
+ *
+ * @param id The new image id of the tag.
+ */
 function moveTagTo(id: string): void {
   const before = fake.images.get(IMAGE);
   if (before) fake.untagged.set(before, { [dk.IMAGE_LABEL]: dk.BOX_IMAGE_KIND });
@@ -455,14 +488,13 @@ describe('reclaiming what a pull superseded', () => {
 
     await orchestrator.manager.refreshBoxImage();
 
-    // A gigabyte or two per release. Nothing else removes an untagged image.
+    // Each pull that moves the tag leaves the old image on the host without a tag.
     assert.deepEqual(fake.imagesRemoved, ['sha256:one']);
   });
 
   it('leaves the one a box is still on, and takes it the next time round', async () => {
-    // A box that has not started since the tag moved is still on the old
-    // image, and the daemon refuses to remove it. That refusal keeps the box
-    // safe.
+    // A box that did not start after the tag moved is still on the old image,
+    // and the daemon refuses to remove it. The refusal keeps the box safe.
     fake.imagesInUse.add('sha256:one');
     fake.onPull = () => moveTagTo('sha256:two');
 
@@ -470,7 +502,7 @@ describe('reclaiming what a pull superseded', () => {
     assert.deepEqual(fake.imagesRemoved, []);
     assert.ok(fake.untagged.has('sha256:one'));
 
-    // The box started, was recreated on the current image, and let go.
+    // The box started on a new container with the current image, so the old image is free.
     fake.imagesInUse.delete('sha256:one');
     fake.onPull = () => moveTagTo('sha256:three');
     await orchestrator.manager.refreshBoxImage();
@@ -489,8 +521,8 @@ describe('reclaiming what a pull superseded', () => {
   });
 
   it('never touches an untagged image that is not ours', async () => {
-    // The orchestrator holds this host's Docker socket. It must not remove an
-    // image somebody else built, however unused it looks.
+    // The orchestrator holds the Docker socket of this host. It must not remove an
+    // image that somebody else built, also when the image looks unused.
     fake.untagged.set('sha256:somebody-elses', { 'com.example.thing': 'yes' });
     fake.onPull = () => moveTagTo('sha256:two');
 
@@ -526,7 +558,12 @@ describe('reclaiming what a pull superseded', () => {
 });
 
 describe('starting a box whose files are gone', () => {
-  /** The box status as the row now stands. */
+  /**
+   * Reads the current status in the row of a box.
+   *
+   * @param id The id of the box.
+   * @returns The status.
+   */
   function status(id: string): string {
     return (db.prepare('SELECT status FROM boxes WHERE id = ?').get(id) as { status: string })
       .status;
@@ -534,9 +571,9 @@ describe('starting a box whose files are gone', () => {
 
   it('refuses rather than letting the daemon make an empty workspace', async () => {
     insertBox('a1', 'sha256:one');
-    // What a crash during a delete, or a backup restored in part, leaves.
-    // Docker would create the bind source itself, empty and owned by root:
-    // the box would start, look healthy, and the agent could not write in it.
+    // A crash during a delete, or a partial restore of a backup, leaves this state.
+    // Docker would create an empty bind source owned by root. The box would start
+    // and look healthy, but the agent could not write in it.
     rmSync(ws.workspacePath(dir, 'a1'), { recursive: true, force: true });
 
     await assert.rejects(() => orchestrator.manager.start('a1'), /workspace directory/);
@@ -553,8 +590,8 @@ describe('starting a box whose files are gone', () => {
     await assert.rejects(() => orchestrator.manager.start('a2'), /home directory/);
     assert.deepEqual(fake.created, []);
     assert.equal(status('a2'), 'error');
-    // The home holds the adapter's thread transcripts, so a fresh one would
-    // erase every conversation while looking like a repair.
+    // The home holds the thread transcripts of the adapter, so a new home would
+    // erase every thread and look like a repair.
     assert.ok(!existsSync(ws.homePath(dir, 'a2')));
   });
 
@@ -575,9 +612,9 @@ describe('one operation per box at a time', () => {
     insertBox('a1', 'sha256:one');
     fake.images.set(IMAGE, 'sha256:two');
 
-    // Both requests read the same row, and both decide the container has to
-    // be replaced. Run together, the second removes the container the first
-    // just built and started.
+    // Both requests read the same row, and both decide to replace the container.
+    // When they run together, the second removes the container that the first
+    // built and started.
     await Promise.all([orchestrator.manager.start('a1'), orchestrator.manager.start('a1')]);
 
     assert.deepEqual(fake.removed, ['box-a1']);
@@ -588,8 +625,8 @@ describe('one operation per box at a time', () => {
     insertBox('a1', 'sha256:one');
     fake.images.set(IMAGE, 'sha256:two');
     let stopping: Promise<unknown> | null = null;
-    // The stop arrives while the replacement container is being created,
-    // which is the middle of the start rather than a gap between requests.
+    // The stop arrives during the creation of the new container, in the middle of
+    // the start and not between two requests.
     fake.onCreate = () => {
       stopping ??= orchestrator.manager.stop('a1');
     };
@@ -597,7 +634,7 @@ describe('one operation per box at a time', () => {
     await assert.rejects(() => orchestrator.manager.start('a1'), /stopped/);
     await stopping;
 
-    // The start gave up at its next step, and the stop did not wait it out.
+    // The start gave up at its next step, and the stop did not wait for its end.
     const row = db.prepare('SELECT status FROM boxes WHERE id = ?').get('a1') as {
       status: string;
     };
@@ -614,8 +651,8 @@ describe('one operation per box at a time', () => {
 
     await orchestrator.manager.start('a1');
 
-    // A tick that waited here would hold up every other box it has to
-    // look at. This one comes back next minute instead.
+    // A tick that waited here would delay every other box that it checks. The
+    // reaper checks this box again at the next tick.
     assert.equal(await asked, false);
     const row = db.prepare('SELECT status FROM boxes WHERE id = ?').get('a1') as {
       status: string;
@@ -625,10 +662,10 @@ describe('one operation per box at a time', () => {
 
   it('stops writing to a box the moment it is deleted', async () => {
     insertBox('a1', 'sha256:one');
-    /** When the box was last marked active, read back mid-teardown. */
+    /** The last activity time of the box, read during the teardown. */
     let active = -1;
-    // The teardown takes seconds, and a terminal still attached to the box is
-    // able to mark it active during it.
+    // The teardown takes seconds, and a terminal that is still attached to the
+    // box can mark it active during that time.
     fake.onRemove = () => {
       touchBox(db, 'a1');
       active = (
@@ -742,9 +779,9 @@ describe('the upstreams the manager is holding', () => {
 
     orchestrator.manager.maintenance();
 
-    // The reaper builds one of these for every running box on every tick, and
-    // nothing else drops them. This one holds nothing, so a fresh one loses
-    // nothing.
+    // The reaper builds an upstream for each running box that it checks, and
+    // nothing else removes them. This upstream holds nothing, so a new upstream
+    // loses nothing.
     assert.notEqual(orchestrator.manager.upstream('a1'), first);
   });
 
@@ -755,9 +792,9 @@ describe('the upstreams the manager is holding', () => {
 
     orchestrator.manager.maintenance();
 
-    // What is running in a box is read onto its upstream, and the reaper asks
-    // for that reading every tick. Dropping this would throw the answer away
-    // a minute after it was taken, and a box with no answer is held.
+    // The upstream holds the process reading of the box, and the reaper asks for
+    // it at each tick. A new upstream has no reading, and the reaper does not stop
+    // a box without a reading.
     assert.equal(orchestrator.manager.upstream('a1'), first);
   });
 });

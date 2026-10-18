@@ -1,12 +1,14 @@
+/**
+ * The box directories of the Docker runtime, and the uid and gid of the box containers.
+ *
+ * The Docker runtime keeps the workspace, the home and the Nix store of each box under DATA_DIR,
+ * and bind-mounts them into the box container. It creates and removes them as ordinary
+ * directories, with no container running.
+ */
+
 import { type Dirent, lchownSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { log } from './log.ts';
-
-/**
- * The box directories under DATA_DIR: workspace, home and Nix store. They are
- * bind-mounted into the box container, so the orchestrator can use them as
- * ordinary files with no container running.
- */
 
 /** Default uid the box container runs as, and the default of BOX_UID. */
 export const DEFAULT_BOX_UID = 1020;
@@ -23,12 +25,21 @@ let owner: { uid: number; gid: number } = {
   gid: DEFAULT_BOX_GID,
 };
 
-/** Sets the uid and gid box containers run as. */
+/**
+ * Sets the uid and gid box containers run as.
+ *
+ * @param uid The uid.
+ * @param gid The gid.
+ */
 export function setBoxOwner(uid: number, gid: number): void {
   owner = { uid, gid };
 }
 
-/** The uid and gid box containers run as. */
+/**
+ * Returns the uid and gid box containers run as.
+ *
+ * @returns The uid and the gid.
+ */
 export function boxOwner(): { readonly uid: number; readonly gid: number } {
   return owner;
 }
@@ -42,51 +53,100 @@ const HOMES_SUBDIR = 'homes';
 /** Directory under DATA_DIR holding one directory per box Nix store. */
 const NIX_SUBDIR = 'nix';
 
-/** The parent of every workspace directory. */
+/**
+ * Returns the parent of every workspace directory.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @returns The path.
+ */
 export function workspacesRoot(dataDir: string): string {
   return join(dataDir, WORKSPACES_SUBDIR);
 }
 
-/** Where a box's workspace lives, as this process sees it. */
+/**
+ * Returns the workspace path of a box, as this process sees it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ * @returns The path.
+ */
 export function workspacePath(dataDir: string, boxId: string): string {
   return join(workspacesRoot(dataDir), boxId);
 }
 
 /**
- * Where a box's workspace lives as the Docker daemon sees it, which is what a
+ * Returns the workspace path of a box as the Docker daemon sees it, which is what a
  * bind source must name. POSIX joining is right on every supported host, as
  * the daemon always runs on Linux, in a VM under Docker Desktop.
+ *
+ * @param hostDataDir The data directory, as the Docker daemon sees it.
+ * @param boxId The box id.
+ * @returns The path.
  */
 export function hostWorkspacePath(hostDataDir: string, boxId: string): string {
   return posix.join(hostDataDir, WORKSPACES_SUBDIR, boxId);
 }
 
-/** The parent of every home directory. */
+/**
+ * Returns the parent of every home directory.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @returns The path.
+ */
 export function homesRoot(dataDir: string): string {
   return join(dataDir, HOMES_SUBDIR);
 }
 
-/** Where a box's home lives, as this process sees it. */
+/**
+ * Returns the home path of a box, as this process sees it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ * @returns The path.
+ */
 export function homePath(dataDir: string, boxId: string): string {
   return join(homesRoot(dataDir), boxId);
 }
 
-/** A box's home as the Docker daemon sees it, for the bind source. */
+/**
+ * Returns the home path of a box as the Docker daemon sees it, for the bind source.
+ *
+ * @param hostDataDir The data directory, as the Docker daemon sees it.
+ * @param boxId The box id.
+ * @returns The path.
+ */
 export function hostHomePath(hostDataDir: string, boxId: string): string {
   return posix.join(hostDataDir, HOMES_SUBDIR, boxId);
 }
 
-/** The parent of every Nix store directory. */
+/**
+ * Returns the parent of every Nix store directory.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @returns The path.
+ */
 export function nixRoot(dataDir: string): string {
   return join(dataDir, NIX_SUBDIR);
 }
 
-/** Where a box's Nix store lives, as this process sees it. */
+/**
+ * Returns the Nix store path of a box, as this process sees it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ * @returns The path.
+ */
 export function nixPath(dataDir: string, boxId: string): string {
   return join(nixRoot(dataDir), boxId);
 }
 
-/** A box's Nix store as the Docker daemon sees it, for the bind source. */
+/**
+ * Returns the Nix store path of a box as the Docker daemon sees it, for the bind source.
+ *
+ * @param hostDataDir The data directory, as the Docker daemon sees it.
+ * @param boxId The box id.
+ * @returns The path.
+ */
 export function hostNixPath(hostDataDir: string, boxId: string): string {
   return posix.join(hostDataDir, NIX_SUBDIR, boxId);
 }
@@ -94,6 +154,8 @@ export function hostNixPath(hostDataDir: string, boxId: string): string {
 /**
  * Creates the workspaces, homes and nix parents, mode 0700, so that on the
  * data volume only this process can read across boxes.
+ *
+ * @param dataDir The data directory, as this process sees it.
  */
 export function ensureWorkspacesRoot(dataDir: string): void {
   mkdirSync(workspacesRoot(dataDir), { recursive: true, mode: 0o700 });
@@ -103,7 +165,10 @@ export function ensureWorkspacesRoot(dataDir: string): void {
 
 /**
  * Creates a box's workspace directory and hands it to the agent user.
- * Returns the path as this process sees it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ * @returns The path, as this process sees it.
  */
 export function createWorkspace(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);
@@ -114,8 +179,11 @@ export function createWorkspace(dataDir: string, boxId: string): string {
 }
 
 /**
- * Creates a box's home directory, empty. Returns the path as this process
- * sees it. boxes-setup fills it at the first start of the box.
+ * Creates a box's home directory, empty. boxes-setup fills it at the first start of the box.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ * @returns The path, as this process sees it.
  */
 export function createHome(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);
@@ -128,37 +196,46 @@ export function createHome(dataDir: string, boxId: string): string {
 
 /**
  * Creates a box's Nix store directory and hands it to the agent user, or
- * leaves one that is already there as it is. Returns the path as this
- * process sees it.
+ * leaves one that is already there as it is.
  *
- * An empty store is usable, as nix lays it out on first use. Box starts call
- * it too, so a box whose store is gone gets one owned by the agent, not one
- * Docker creates for root.
+ * An empty store is usable, as nix lays it out on first use. The Docker runtime
+ * also calls it before each start of a box, so a box whose store is gone gets one
+ * owned by the agent, not one that Docker creates for root.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ * @returns The path, as this process sees it.
  */
 export function createNix(dataDir: string, boxId: string): string {
   ensureWorkspacesRoot(dataDir);
   const path = nixPath(dataDir, boxId);
-  // 0755 like the workspace: a package store holds nothing secret.
+  // 0755 like the workspace, because a package store holds nothing secret.
   mkdirSync(path, { recursive: true, mode: 0o755 });
   chownToAgent(path);
   return path;
 }
 
 /**
- * Whether a path exists and is a directory.
+ * Returns true when a path exists and is a directory.
  *
- * A box start checks its workspace and home with it. Docker would create a
- * missing bind source empty and owned by root, and the box would look healthy
- * while the agent cannot write.
+ * The Docker runtime checks the workspace and the home of a box with it before a start.
+ * Docker creates a missing bind source empty and owned by root, and the box would
+ * look healthy while the agent cannot write.
+ *
+ * @param path The path.
+ * @returns True for a directory.
  */
 export function directoryExists(path: string): boolean {
   return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
 }
 
 /**
- * The box ids that have a workspace, a home or a Nix store directory on disk,
+ * Returns the box ids that have a workspace, a home or a Nix store directory on disk,
  * read from the three roots rather than the database. A missing root adds
  * nothing.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @returns The box ids.
  */
 export function boxDirectoryIds(dataDir: string): string[] {
   const ids = new Set<string>();
@@ -176,18 +253,33 @@ export function boxDirectoryIds(dataDir: string): string[] {
   return [...ids];
 }
 
-/** Removes a box's workspace directory and everything in it. */
+/**
+ * Removes a box's workspace directory and everything in it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ */
 export function removeWorkspace(dataDir: string, boxId: string): void {
   // Recursive removal unlinks symlinks, so a planted link cannot reach out.
   rmSync(workspacePath(dataDir, boxId), { recursive: true, force: true });
 }
 
-/** Removes a box's home directory and everything in it. */
+/**
+ * Removes a box's home directory and everything in it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ */
 export function removeHome(dataDir: string, boxId: string): void {
   rmSync(homePath(dataDir, boxId), { recursive: true, force: true });
 }
 
-/** Removes a box's Nix store directory and everything in it. */
+/**
+ * Removes a box's Nix store directory and everything in it.
+ *
+ * @param dataDir The data directory, as this process sees it.
+ * @param boxId The box id.
+ */
 export function removeNix(dataDir: string, boxId: string): void {
   rmSync(nixPath(dataDir, boxId), { recursive: true, force: true });
 }
@@ -199,6 +291,8 @@ export function removeNix(dataDir: string, boxId: string): void {
  *
  * Returns at once when this process already runs as the box uid. Otherwise
  * only root can do it, and a failure is logged, not thrown.
+ *
+ * @param path The path to give away.
  */
 export function chownToAgent(path: string): void {
   if (process.getuid?.() === owner.uid) return;

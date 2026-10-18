@@ -13,14 +13,26 @@ import {
   truncateFrom,
 } from './translate.ts';
 
-/** Folds a script of updates into a fresh model, the way a replay arrives. */
+/**
+ * Folds a script of updates into a fresh model, the way a replay arrives.
+ *
+ * @param updates The updates, in order.
+ * @returns The model.
+ */
 function fold(...updates: ThreadUpdate[]): ThreadModel {
   const model = emptyModel();
   for (const u of updates) applyUpdate(model, u);
   return model;
 }
 
-/** A text chunk of the given kind. */
+/**
+ * Builds a text chunk of the given kind.
+ *
+ * @param sessionUpdate The kind of the chunk.
+ * @param text The text of the chunk.
+ * @param messageId The adapter's id for the message, if any.
+ * @returns The update.
+ */
 function chunk(
   sessionUpdate: 'user_message_chunk' | 'agent_message_chunk' | 'agent_thought_chunk',
   text: string,
@@ -231,7 +243,14 @@ test('replaying the same script twice from a fresh model gives the same thread',
   assert.deepEqual(strip(fold(...script)), strip(fold(...script)));
 });
 
-/** An image chunk of the given kind, carrying a base64 payload. */
+/**
+ * Builds an image chunk of the given kind, carrying a base64 payload.
+ *
+ * @param sessionUpdate The kind of the chunk.
+ * @param data The base64 payload.
+ * @param mimeType The MIME type of the image.
+ * @returns The update.
+ */
 function imageChunk(
   sessionUpdate: 'user_message_chunk' | 'agent_message_chunk',
   data: string,
@@ -266,7 +285,7 @@ test('an image block with no payload the browser can load is said in words', () 
   const model = fold(
     {
       sessionUpdate: 'agent_message_chunk',
-      // What the adapter sends for a remote image: no payload, and a URL
+      // The adapter sends a remote image with no payload, and with a URL that
       // assistant-ui would refuse as a src.
       content: { type: 'image', data: '', mimeType: '', uri: 'http://example.test/a.png' },
     } as ThreadUpdate,
@@ -302,12 +321,15 @@ test("a tool call's image result is named in its output rather than left empty",
   assert.equal(toolOutputText(findTool(model, 't10')!), '[image]');
 });
 
-// --- attachments ------------------------------------------------------------
-//
-// The composer sends what the user attached as one block of text. The thread
-// reads it the same way live and on replay.
-
-/** The envelope for one attachment, as a user chunk. */
+/**
+ * Builds the envelope for one attachment, as a user chunk.
+ *
+ * The composer sends what the user attached as one block of text. The thread
+ * reads it the same way live and on replay.
+ *
+ * @param overrides The fields that differ from a PDF attachment.
+ * @returns The update.
+ */
 function attached(
   overrides: Partial<Parameters<typeof buildEnvelope>[0][number]> = {},
 ): ThreadUpdate {
@@ -382,12 +404,12 @@ test('the envelope is only read in a user or agent message, never as a thought',
   assert.equal(model.messages[0]!.parts[0]!.type, 'reasoning');
 });
 
-// --- background tasks -------------------------------------------------------
-//
-// A background task reports by waking the agent with a block of XML in the
-// user role. The thread shows it as a task row, not as the user talking.
-
-/** A monitor's event, as the harness sends one. */
+/**
+ * A monitor's event, as the harness sends one.
+ *
+ * A background task reports by waking the agent with a block of XML in the
+ * user role. The thread shows it as a task row, not as the user talking.
+ */
 const NOTIFICATION = [
   '<task-notification>',
   '<task-id>bnztwmmw5</task-id>',
@@ -441,7 +463,7 @@ test('only a message the adapter named carries its id', () => {
     chunk('user_message_chunk', 'not'),
   );
   assert.equal(model.messages[0]!.named, true);
-  // Numbered by this model, so it cannot serve as a resume point.
+  // The model numbered the message itself, so it cannot serve as a resume point.
   assert.equal(model.messages[1]!.named, undefined);
 });
 

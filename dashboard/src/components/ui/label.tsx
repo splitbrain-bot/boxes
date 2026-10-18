@@ -3,6 +3,12 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * A label for a form control.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix label.
+ */
 function Label({ className, ...props }: React.ComponentProps<typeof LabelPrimitive.Root>) {
   return (
     <LabelPrimitive.Root
