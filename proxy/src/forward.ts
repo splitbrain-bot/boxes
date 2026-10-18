@@ -44,7 +44,8 @@ export interface Target {
 }
 
 /**
- * Splits an authority into host and port.
+ * Splits an authority into host and port. A bracketed host must be an IPv6
+ * address, and nothing but a port may follow the brackets.
  *
  * @param authority The authority, as in example.com:443 or [::1]:443.
  * @param defaultPort The port to use when the authority names none.
@@ -57,16 +58,17 @@ export function parseHostPort(authority: string, defaultPort: number): Target | 
     if (end === -1) return null;
     const host = authority.slice(1, end);
     const rest = authority.slice(end + 1);
-    const port = rest.startsWith(':') ? Number(rest.slice(1)) : defaultPort;
+    if (net.isIP(host) !== 6) return null;
+    if (rest !== '' && !rest.startsWith(':')) return null;
+    const port = rest === '' ? defaultPort : Number(rest.slice(1));
     if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
     return { host, port };
   }
   const colon = authority.lastIndexOf(':');
-  if (colon === -1) return { host: authority, port: defaultPort };
-  const host = authority.slice(0, colon);
-  const port = Number(authority.slice(colon + 1));
+  const host = colon === -1 ? authority : authority.slice(0, colon);
+  if (host === '' || host.includes(':')) return null;
+  const port = colon === -1 ? defaultPort : Number(authority.slice(colon + 1));
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
-  if (host === '') return null;
   return { host, port };
 }
 
