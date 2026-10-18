@@ -571,12 +571,13 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The header belongs to the dashboard, and the thread must not cover it.
-    // The back link, the mode switcher and the review link must stay clickable.
+    // The back link, the settings button and the review link must stay clickable.
     const header = (await page.locator('header').boundingBox())!;
     const thread = (await page.locator('.aui-thread-root').boundingBox())!;
     expect(header.height).toBeGreaterThan(0);
     expect(thread.y).toBeGreaterThanOrEqual(header.y + header.height);
     await expect.poll(() => page.getByLabel('Back to boxes').isVisible()).toBe(true);
+    await expect.poll(() => page.getByLabel('Agent settings').isVisible()).toBe(true);
     await expect.poll(() => page.getByLabel("Review this box's code").isVisible()).toBe(true);
     expect(errors).toEqual([]);
   } finally {
