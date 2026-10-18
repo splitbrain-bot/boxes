@@ -470,19 +470,25 @@ export class DockerRuntime implements Runtime {
    */
   async startLogin(credentialId: string): Promise<Login> {
     const id = await dk.createLoginContainer({ image: this.cfg.BOX_IMAGE, credentialId });
-    await dk.startContainer(id);
+    const remove = async (): Promise<void> => {
+      try {
+        await dk.removeContainer(id);
+      } catch (err) {
+        log.warn('could not remove a login container', {
+          container: id,
+          error: (err as Error).message,
+        });
+      }
+    };
+    try {
+      await dk.startContainer(id);
+    } catch (err) {
+      await remove();
+      throw err;
+    }
     return {
       spawn: (cmd, opts = {}) => dk.spawnExec(id, cmd, { ...opts, workingDir: HOME_DIR }),
-      remove: async () => {
-        try {
-          await dk.removeContainer(id);
-        } catch (err) {
-          log.warn('could not remove a login container', {
-            container: id,
-            error: (err as Error).message,
-          });
-        }
-      },
+      remove,
     };
   }
 
