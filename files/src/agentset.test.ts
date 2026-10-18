@@ -17,8 +17,11 @@ import { afterEach, beforeEach, test } from 'vitest';
 import { installAgentSet, MANAGED_FILE, unitOf } from './agentset.ts';
 import type { FileError } from './ops.ts';
 
+/** The temporary directory of one test. */
 let dir: string;
+/** The home directory of one test, in {@link dir}. */
 let home: string;
+/** The directory with the skills of the image for one test, in {@link dir}. */
 let imageSkills: string;
 
 beforeEach(() => {
@@ -33,10 +36,15 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** One file of a set: its content, and its mode when it is not 0644. */
+/** One entry of a set, as its content or as its content with a mode and a type. The defaults are 0644 and a file. */
 type Entry = string | { content: string; mode?: number; type?: 'file' | 'symlink' | 'directory' };
 
-/** A tar stream of the given files, relative to the home. */
+/**
+ * Packs entries into a tar stream.
+ *
+ * @param files The entries, by their path relative to the home.
+ * @returns The tar stream.
+ */
 function tar(files: Record<string, Entry>): Readable {
   const p = pack();
   for (const [name, entry] of Object.entries(files)) {
@@ -50,7 +58,12 @@ function tar(files: Record<string, Entry>): Readable {
   return Readable.from(p);
 }
 
-/** Writes files under `root`, creating the directories on the way. */
+/**
+ * Writes files under a directory, and creates the missing parent directories.
+ *
+ * @param root The directory.
+ * @param contents The content of each file, by its path relative to `root`.
+ */
 function files(root: string, contents: Record<string, string>): void {
   for (const [rel, content] of Object.entries(contents)) {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
@@ -58,12 +71,21 @@ function files(root: string, contents: Record<string, string>): void {
   }
 }
 
-/** The content of one file of the home. */
+/**
+ * Reads one file of the home.
+ *
+ * @param rel The path, relative to the home.
+ * @returns The content of the file.
+ */
 function inHome(rel: string): string {
   return readFileSync(join(home, rel), 'utf8');
 }
 
-/** The managed file, as lines. */
+/**
+ * Reads the managed file.
+ *
+ * @returns The lines of the managed file, without empty lines.
+ */
 function managed(): string[] {
   return inHome(MANAGED_FILE)
     .split('\n')
@@ -76,7 +98,7 @@ test('a path maps to its unit: the instructions file, or the skill directory', (
   assert.equal(unitOf('.claude/skills/pdf/SKILL.md'), '.claude/skills/pdf');
   assert.equal(unitOf('.agents/skills/pdf/scripts/run.sh'), '.agents/skills/pdf');
   assert.equal(unitOf('.claude/skills/pdf'), '.claude/skills/pdf');
-  // What the layouts do not name is refused, including the layouts as a whole.
+  // A path outside the layouts is refused, and the layout directories are refused too.
   assert.equal(unitOf('.claude'), null);
   assert.equal(unitOf('.claude/skills'), null);
   assert.equal(unitOf('.claude/settings.json'), null);
@@ -100,7 +122,7 @@ test('installs the set into the home and records its units', async () => {
   assert.equal(inHome('.claude/CLAUDE.md'), 'rules');
   assert.equal(inHome('.claude/skills/pdf/SKILL.md'), 'pdf');
   assert.equal(inHome('.agents/skills/pdf/SKILL.md'), 'pdf');
-  // The mode travels with the file, so a script stays executable.
+  // The install keeps the mode of the file, so a script stays executable.
   assert.equal(statSync(join(home, '.claude/skills/pdf/scripts/run.sh')).mode & 0o111, 0o111);
   assert.deepEqual(managed(), ['.agents/skills/pdf', '.claude/CLAUDE.md', '.claude/skills/pdf']);
   assert.equal(existsSync(join(home, '.boxes/agent-set.new')), false);
@@ -181,10 +203,10 @@ test('the skills of the image go into both layouts, unless the set has the skill
   assert.equal(inHome('.claude/skills/nix/SKILL.md'), 'own nix');
   assert.equal(inHome('.claude/skills/share-app/SKILL.md'), 'image share-app');
   assert.equal(inHome('.agents/skills/share-app/SKILL.md'), 'image share-app');
-  // The image skills are not recorded: they are put there again at each install.
+  // The install does not record the image skills, because each install copies them again.
   assert.deepEqual(managed(), ['.claude/skills/nix']);
 
-  // Without the own skill, the image's copy comes back.
+  // Without the skill of the set, the copy from the image comes back.
   await installAgentSet(home, imageSkills, tar({}));
   assert.equal(inHome('.claude/skills/nix/SKILL.md'), 'image nix');
   assert.equal(inHome('.agents/skills/nix/SKILL.md'), 'image nix');

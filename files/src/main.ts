@@ -1,20 +1,20 @@
+/**
+ * The entry point of the file service in a box. The orchestrator starts the service and sends HTTP/2 over its
+ * standard input and output. The service ends when the orchestrator closes the connection.
+ *
+ * Environment variables can change the roots, for tests outside a box.
+ */
+
 import { Duplex } from 'node:stream';
 import { serveFiles } from './server.ts';
 
-/**
- * The file service of a box. The orchestrator starts it in the box and
- * speaks HTTP/2 with it over its standard input and output. It ends when the
- * orchestrator closes the connection.
- *
- * The roots can be moved with environment variables, for tests outside a
- * box.
- */
-// Node accepts a pair of Node streams here. Its type declarations know only
-// the web stream pair.
+/** The connection to the orchestrator over standard input and output. */
 const io = Duplex.from({
   readable: process.stdin,
   writable: process.stdout,
+  // Node accepts a pair of Node streams here, but its type declarations know only the web stream pair.
 } as unknown as Parameters<typeof Duplex.from>[0]);
+/** The HTTP/2 server on the connection. */
 const server = serveFiles(io, {
   workspace: process.env.BOXES_FILES_WORKSPACE ?? '/workspace',
   home: process.env.BOXES_FILES_HOME ?? '/home/agent',

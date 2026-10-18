@@ -38,28 +38,29 @@ import { installSetupFiles } from './setupfiles.ts';
 export interface Roots {
   /** The workspace. Every path in a request is relative to it. */
   workspace: string;
-  /** The home, which only the size covers. */
+  /** The home of the agent. The size covers it, and the setup files and the agent set go into it. */
   home: string;
-  /** The Nix store, which only the size covers. */
+  /** The Nix directory. Only the size covers it. */
   nix: string;
-  /** The skills of the box image, which each agent set install copies into the home. Absent when there are none. */
+  /** The directory with the skills of the box image, or undefined for none. Each agent set install copies them. */
   imageSkills?: string;
 }
 
-/** The most bytes of a JSON request body. */
+/** The maximum size of a JSON request body, in bytes. */
 const MAX_JSON_BODY = 64 * 1024;
 
 /**
- * Serves the file operations over one connection, and returns the server.
+ * Serves the file operations over one connection. The server accepts no other connection.
  *
- * The connection is any byte stream, for example the standard input and
- * output of the process. The server serves no other connection.
+ * @param io The connection, any byte stream, for example the standard input and output of the process.
+ * @param roots The directories of the operations.
+ * @returns The server.
  */
 export function serveFiles(io: Duplex, roots: Roots): Http2Server {
   const server = createServer();
   server.on('stream', (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => {
-    // A request the orchestrator cancels resets its stream. The operation
-    // then fails on its own, and the process must not end.
+    // When the orchestrator cancels a request, it resets the stream. The operation then fails, and the stream error
+    // must not end the process.
     stream.on('error', () => {});
     handle(stream, headers, roots).catch((err: unknown) => {
       const status = err instanceof FileError ? err.status : 500;
@@ -70,7 +71,14 @@ export function serveFiles(io: Duplex, roots: Roots): Http2Server {
   return server;
 }
 
-/** Answers one request. */
+/**
+ * Answers one request.
+ *
+ * @param stream The stream of the request.
+ * @param headers The request headers.
+ * @param roots The directories of the operations.
+ * @throws {FileError} A 400 for an invalid cap, a 404 for an unknown operation, and the refusal of the operation.
+ */
 async function handle(
   stream: ServerHttp2Stream,
   headers: IncomingHttpHeaders,
@@ -160,7 +168,13 @@ async function handle(
   }
 }
 
-/** What a write expects, from its `If-Match` or `If-None-Match` header. */
+/**
+ * Reads the condition of a write from its `If-Match` or `If-None-Match` header.
+ *
+ * @param headers The request headers.
+ * @returns The condition.
+ * @throws {FileError} A 428 when the request has no condition.
+ */
 function writeCondition(headers: IncomingHttpHeaders): WriteCondition {
   if (headers['if-none-match'] === '*') return { absent: true };
   const hash = headers['if-match'];
@@ -170,7 +184,13 @@ function writeCondition(headers: IncomingHttpHeaders): WriteCondition {
   return { hash };
 }
 
-/** The limits of a repository walk, from a request body. */
+/**
+ * Reads and checks the limits of a repository walk from the request body.
+ *
+ * @param stream The stream of the request.
+ * @returns The limits.
+ * @throws {FileError} A 413 when the body is too large, and a 400 when the body is not valid limits.
+ */
 async function findReposBody(stream: ServerHttp2Stream): Promise<FindReposRequest> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -200,14 +220,24 @@ async function findReposBody(stream: ServerHttp2Stream): Promise<FindReposReques
   return b as FindReposRequest;
 }
 
-/** Response headers with the protocol version added. */
+/**
+ * Adds the protocol version to response headers.
+ *
+ * @param headers The response headers.
+ * @returns A copy of the headers with the protocol version.
+ */
 function withVersion(headers: OutgoingHttpHeaders): OutgoingHttpHeaders {
   return { ...headers, [VERSION_HEADER]: String(FILES_PROTOCOL_VERSION) };
 }
 
 /**
- * Sends a complete reply: a JSON body, or none for null. A stream that has
- * already sent its headers or has gone is reset instead.
+ * Sends a complete reply. A closed stream gets nothing. When the stream has already sent its headers, the function
+ * resets the stream.
+ *
+ * @param stream The stream of the request.
+ * @param status The HTTP status.
+ * @param body The JSON body, or null for no body.
+ * @param headers More response headers.
  */
 function reply(
   stream: ServerHttp2Stream,

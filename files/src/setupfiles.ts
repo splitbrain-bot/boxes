@@ -1,22 +1,23 @@
+/** Installation of the setup files that the orchestrator sends into the home. */
+
 import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { unpackTar } from './unpack.ts';
 
-/**
- * The files of the orchestrator in the home: the CA of the egress proxy, and
- * the git configuration with the identity.
- */
-
-/** The paths the orchestrator may write, relative to the home. */
+/** The paths that the orchestrator can write, relative to the home. */
 export const SETUP_FILES = ['.boxes/proxy-ca.crt', '.config/git/config'];
 
-/** Where the files are unpacked before they replace the old ones, relative to the home. */
+/** The directory for the unpacked files before they replace the old files, relative to the home. */
 const STAGE_DIR = '.boxes/setup-files.new';
 
 /**
- * Writes the files of a tar stream into the home. A path outside
- * {@link SETUP_FILES} is refused, and then nothing changes.
+ * Writes the files of a tar stream into the home. The function unpacks the tar into a stage directory first, so a
+ * refused entry changes no file in the home.
+ *
+ * @param home The home directory.
+ * @param tar The files, as a tar stream of files relative to the home.
+ * @throws {FileError} A 400 when an entry is outside {@link SETUP_FILES} or is not a plain file.
  */
 export async function installSetupFiles(home: string, tar: Readable): Promise<void> {
   const stage = join(home, STAGE_DIR);

@@ -6,8 +6,11 @@ import { afterEach, beforeEach, describe, test } from 'vitest';
 import { validRelativePath } from '../../shared/files.ts';
 import { resolveInRoot } from './paths.ts';
 
+/** The root directory of one test, which stands for the workspace. */
 let root: string;
+/** A directory outside {@link root}. */
 let outside: string;
+/** A file in {@link outside} that no operation may change or reveal. */
 let secret: string;
 
 beforeEach(() => {
@@ -104,7 +107,7 @@ describe('resolveInRoot', () => {
   });
 
   test('a file that need not exist yet resolves, if its parent is inside', () => {
-    // This is the REVIEW.md case: the first write creates the file.
+    // The first write of a REVIEW.md creates the file.
     const result = resolveInRoot(root, 'REVIEW.md', false);
     assert.ok(result.ok);
     assert.equal(result.path, join(root, 'REVIEW.md'));
@@ -129,8 +132,8 @@ describe('resolveInRoot', () => {
   });
 
   test('the root itself resolves through its own realpath', () => {
-    // macOS puts temp directories behind /private, so a root given by a path
-    // that is itself a link must not make everything under it "outside".
+    // On macOS, the temp directory is behind a link to /private. A root path through a link must not make all paths
+    // under it "outside".
     const linked = join(outside, 'root-link');
     symlinkSync(root, linked);
     writeFileSync(join(root, 'a.txt'), 'x');

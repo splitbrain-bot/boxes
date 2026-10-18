@@ -6,13 +6,13 @@ import { extract } from 'tar-stream';
 import { FileError } from './ops.ts';
 
 /**
- * Unpacks the plain files of a tar stream into a directory, and returns the
- * accepted names as `accept` mapped them. An entry that `accept` refuses with
- * null, or one that is not a plain file, is a 400.
+ * Unpacks the plain files of a tar stream into a directory.
  *
  * @param tar The tar stream.
  * @param dir The directory the files go into, with the entry name as the relative path.
  * @param accept Maps an entry name to the value to return for it, or null to refuse it.
+ * @returns The values that `accept` gave for the accepted entries.
+ * @throws {FileError} A 400 for an entry that `accept` refuses or that is not a plain file.
  */
 export async function unpackTar(
   tar: Readable,
@@ -24,7 +24,7 @@ export async function unpackTar(
   entries.on('entry', (header, stream, next) => {
     const value = accept(header.name);
     if (value === null || header.type !== 'file') {
-      // The refusal also ends the entry stream, which nothing else listens to.
+      // The refusal also makes the entry stream fail, and no other listener handles that error.
       stream.on('error', () => {});
       stream.resume();
       next(new FileError(400, `refused entry: ${header.name}`));
@@ -38,8 +38,7 @@ export async function unpackTar(
       (err: Error) => next(err),
     );
   });
-  // The request stream stays open on a refused entry, because the refusal
-  // is the reply on it.
+  // `pipe` leaves the tar stream open after a refused entry, because the server sends the refusal as the reply on it.
   await new Promise<void>((resolve, reject) => {
     entries.on('finish', resolve);
     entries.on('error', reject);

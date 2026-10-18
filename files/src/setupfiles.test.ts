@@ -8,6 +8,7 @@ import { afterEach, beforeEach, test } from 'vitest';
 import type { FileError } from './ops.ts';
 import { installSetupFiles } from './setupfiles.ts';
 
+/** The home directory of one test. */
 let home: string;
 
 beforeEach(() => {
@@ -19,7 +20,12 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-/** A tar stream of the given files, relative to the home. */
+/**
+ * Packs files into a tar stream.
+ *
+ * @param files The content of each file, by its path relative to the home.
+ * @returns The tar stream.
+ */
 function tar(files: Record<string, string>): Readable {
   const p = pack();
   for (const [name, content] of Object.entries(files))
