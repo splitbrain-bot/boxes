@@ -126,8 +126,8 @@ export function BoxInfo() {
 
       {running && !box.isolated ? (
         <Notice tone="warn" className="rounded-md border px-3 py-2">
-          The network isolation of this box is not complete. The agent has no internet access until
-          the repair loop fixes it.
+          The network isolation of this box is not complete, so the traffic of the agent may not go
+          through the egress proxy. The orchestrator tries to repair it.
         </Notice>
       ) : null}
 
