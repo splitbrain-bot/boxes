@@ -418,9 +418,18 @@ else
       sh -c 'curl -sS -m 15 -v https://auth.openai.com/ 2>&1 | grep -i "issuer:" | grep -v "Boxes egress proxy CA"'
   fi
 
-  # The deployment CA appears for a translated host and for no other host.
+  # The deployment CA appears for a translated host and for no other host. The
+  # proxy translates only the hosts of the seeded credentials, so the probe
+  # goes to one of those.
+  if [ -n "$REAL_GH" ]; then
+    INJECTION_HOST=api.github.com
+  elif [ -n "$REAL_CLAUDE" ]; then
+    INJECTION_HOST=api.anthropic.com
+  else
+    INJECTION_HOST=api.openai.com
+  fi
   must_output "an injection host presents the deployment CA" 'Boxes egress proxy CA' \
-    sh -c 'curl -sS -m 15 -v https://api.github.com/ 2>&1 | grep -i "issuer:"'
+    sh -c "curl -sS -m 15 -v https://$INJECTION_HOST/ 2>&1 | grep -i 'issuer:'"
   must_output "a passthrough host presents its own certificate chain" 'issuer:' \
     sh -c 'curl -sS -m 15 -v https://registry.npmjs.org/ 2>&1 | grep -i "issuer:" | grep -v "Boxes egress proxy CA"'
 fi
