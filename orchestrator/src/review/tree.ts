@@ -73,7 +73,8 @@ export function reviewChildren(relDir: string, entries: readonly DirChild[]): Di
  * when it holds a comment. A folder at a repository root gets `repo`.
  *
  * Files that the change deleted come from the status map, because they are not on
- * disk. A folder that is missing on disk also comes from the status map when it holds a deleted file.
+ * disk. A folder that is missing on disk also comes from the status map when it holds a deleted file, unless the
+ * review skips the folder.
  *
  * @param relDir The workspace-relative path of the directory, or '' for the root.
  * @param children The children that the review lists.
@@ -118,7 +119,7 @@ export function dirEntries(
       const name = rest.slice(0, slash);
       let folder = folders.get(name);
       if (!folder) {
-        if (status !== 'deleted') continue;
+        if (status !== 'deleted' || SKIPPED_DIRS.has(name)) continue;
         folder = { name, path: prefix + name, isDir: true };
         folders.set(name, folder);
       }

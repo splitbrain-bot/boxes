@@ -307,6 +307,15 @@ describe('dirEntries', () => {
     assert.equal(entries[0]!.changed, true);
   });
 
+  test('a skipped folder the change emptied stays out', () => {
+    const statuses: Record<string, ReviewFileStatus> = {
+      '.boxes/x': 'deleted',
+      'sub/.hg/x': 'deleted',
+    };
+    assert.deepEqual(named(dirEntries('', [], statuses, new Map(), noRepos())), ['d:sub']);
+    assert.deepEqual(dirEntries('sub', [], statuses, new Map(), noRepos()), []);
+  });
+
   test('a file with a status but no entry is not invented', () => {
     // For example a file removed between git's answer and the directory read.
     // Only a deletion is added back.
