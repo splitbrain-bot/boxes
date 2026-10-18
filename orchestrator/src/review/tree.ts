@@ -2,47 +2,58 @@ import type { DirChild } from '../../../shared/files.ts';
 import type { ReviewDirEntry, ReviewFileStatus } from '../../../shared/types.ts';
 import type { RepoMap } from './repos.ts';
 
-/** The review file at the workspace root, which the tree does not list. */
+/** The name of the review file at the workspace root. The review tree does not list it. */
 export const REVIEW_FILE = 'REVIEW.md';
 
 /**
- * Directory names the listing skips: version control metadata, and the Boxes
+ * The directory names that the listing skips. They are the version control metadata, and the Boxes
  * directory that holds files attached to prompts.
  */
 const SKIPPED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
 
 export { type DirChild, MAX_DIR_ENTRIES } from '../../../shared/files.ts';
 
-/** Whether any segment of a path names a directory the listing steps over. */
+/**
+ * Checks if a segment of a path names a directory that the listing skips.
+ *
+ * @param path The workspace-relative path.
+ * @returns True when a segment is in {@link SKIPPED_DIRS}.
+ */
 function inSkippedDir(path: string): boolean {
   return path.split('/').some((segment) => SKIPPED_DIRS.has(segment));
 }
 
 /**
- * Whether the review lists a file at this workspace-relative path.
+ * Checks if the review lists a file at a workspace-relative path.
  *
- * It applies the listing's rule to one path: the path is not inside a skipped
- * directory, and it is not the review file at the workspace root. The file
- * endpoints serve by this rule. It does not check containment.
+ * The file endpoints use this rule. The function does not check that the path
+ * is inside the workspace.
+ *
+ * @param relPath The workspace-relative path of the file.
+ * @returns True when the review lists the file.
  */
 export function listedFile(relPath: string): boolean {
   return !inSkippedDir(relPath) && relPath !== REVIEW_FILE;
 }
 
 /**
- * Whether the review browses a directory at this workspace-relative path: the
- * path is not inside a skipped directory.
+ * Checks if the review lists a directory at a workspace-relative path.
+ *
+ * @param relDir The workspace-relative path of the directory.
+ * @returns True when the review lists the directory.
  */
 export function listedDir(relDir: string): boolean {
   return !inSkippedDir(relDir);
 }
 
 /**
- * The children of one directory of the workspace that the review lists.
+ * Filters the children of one directory of the workspace to those that the review lists. The
+ * function removes the skipped directories, and the review file at the
+ * workspace root.
  *
- * The file service lists only this directory, with its plain files and
- * directories. This leaves out the directories the listing skips and the
- * review file at the workspace root.
+ * @param relDir The workspace-relative path of the directory.
+ * @param entries The children on disk.
+ * @returns The children that the review lists.
  */
 export function reviewChildren(relDir: string, entries: readonly DirChild[]): DirChild[] {
   return entries.filter((entry) =>
@@ -54,16 +65,22 @@ export function reviewChildren(relDir: string, entries: readonly DirChild[]): Di
 }
 
 /**
- * One directory of the review, as the API reports it.
+ * Builds the entries of one directory of the review, as the API reports them.
  *
- * It merges the children on disk with the review's git statuses and comment
- * counts. A file gets its own status and comment count. A folder gets flags for
- * its whole subtree: `changed` when git reports a change in it, and `commented`
+ * The function merges the children on disk with the git statuses and comment
+ * counts of the review. A file gets its own status and comment count. A folder gets flags for
+ * its whole subtree. It gets `changed` when git reports a change in it, and `commented`
  * when it holds a comment. A folder at a repository root gets `repo`.
  *
- * Files the change deleted come from the status map, because they are not on
- * disk. So do folders the change emptied. Folders come first, then files, each
- * in name order.
+ * Files that the change deleted come from the status map, because they are not on
+ * disk. A folder that is missing on disk also comes from the status map when it holds a deleted file.
+ *
+ * @param relDir The workspace-relative path of the directory, or '' for the root.
+ * @param children The children that the review lists.
+ * @param statuses The git statuses of the workspace, by workspace-relative path.
+ * @param counts The number of comments of each annotated file, by workspace-relative path.
+ * @param map The repositories of the workspace.
+ * @returns The entries. Folders come first, then files, each in name order.
  */
 export function dirEntries(
   relDir: string,
@@ -129,18 +146,35 @@ export function dirEntries(
   return [...sorted(folders), ...sorted(files)];
 }
 
-/** What is left of a path under a directory prefix, or null when it is elsewhere. */
+/**
+ * Gives the rest of a path under a directory prefix.
+ *
+ * @param prefix The directory with a trailing slash, or '' for the root.
+ * @param path The workspace-relative path.
+ * @returns The rest of the path, or null when the path is not under the prefix.
+ */
 function under(prefix: string, path: string): string | null {
   if (prefix === '') return path;
   return path.startsWith(prefix) ? path.slice(prefix.length) : null;
 }
 
-/** The entries of one kind, in name order. */
+/**
+ * Sorts the entries of one kind by name.
+ *
+ * @param entries The entries by name.
+ * @returns The entries in name order.
+ */
 function sorted(entries: Map<string, ReviewDirEntry>): ReviewDirEntry[] {
   return [...entries.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-/** Whether the change deleted a file somewhere under a directory. */
+/**
+ * Checks if the change deleted a file under a directory.
+ *
+ * @param statuses The git statuses of the workspace, by workspace-relative path.
+ * @param relDir The workspace-relative path of the directory.
+ * @returns True when a file under the directory has the status deleted.
+ */
 export function holdsDeleted(statuses: Record<string, ReviewFileStatus>, relDir: string): boolean {
   const prefix = `${relDir}/`;
   return Object.entries(statuses).some(

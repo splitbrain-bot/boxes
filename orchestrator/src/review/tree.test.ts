@@ -21,7 +21,12 @@ import {
 
 /**
  * A runner that starts git on this machine, in the directory the target names,
- * for repository discovery over repositories the tests build themselves.
+ * for repository discovery over repositories that the tests build.
+ *
+ * @param target The target whose directory git runs in.
+ * @param argv The command line.
+ * @param env The variables added to the environment.
+ * @returns The result of git.
  */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
@@ -43,12 +48,21 @@ const localGit: GitRunner = async (target, argv, env) => {
   }
 };
 
-/** A map with no repository in it, for the merges that are not about git. */
+/**
+ * Builds a map with no repository in it, for the merges that are not about git.
+ *
+ * @returns The empty map.
+ */
 function noRepos(): RepoMap {
   return new RepoMap('/workspace', []);
 }
 
-/** The merged entries of one directory, named as `d:name` or `f:name`. */
+/**
+ * Names the merged entries of one directory.
+ *
+ * @param entries The entries.
+ * @returns Each entry as `d:name` for a folder or `f:name` for a file.
+ */
 function named(entries: ReviewDirEntry[]): string[] {
   return entries.map((entry) => `${entry.isDir ? 'd' : 'f'}:${entry.name}`);
 }
@@ -79,7 +93,7 @@ describe('listedFile', () => {
   });
 
   test('a directory is judged on its segments alone', () => {
-    // A folder is never the review's own file.
+    // A folder cannot be the review file.
     assert.equal(listedDir('REVIEW.md'), true);
     assert.equal(listedDir('src/util'), true);
     assert.equal(listedDir('.git'), false);
@@ -87,7 +101,13 @@ describe('listedFile', () => {
   });
 });
 
-/** The children of one directory as the review lists them. */
+/**
+ * Reads the children of one directory as the review lists them.
+ *
+ * @param root The local workspace directory.
+ * @param relDir The workspace-relative path of the directory.
+ * @returns The children that the review lists.
+ */
 function readDir(root: string, relDir: string): Array<{ name: string; isDir: boolean }> {
   return reviewChildren(relDir, listDir(root, relDir).entries);
 }
@@ -103,7 +123,12 @@ describe('reviewChildren', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Creates a file, and the directories above it. */
+  /**
+   * Creates a file, and the directories above it.
+   *
+   * @param rel The workspace-relative path of the file.
+   * @param content The content of the file.
+   */
   function file(rel: string, content = 'x\n'): void {
     const full = join(dir, rel);
     mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
@@ -173,7 +198,12 @@ describe('reviewChildren', () => {
     assert.equal(MAX_DIR_ENTRIES, 2000);
   });
 
-  /** A child as an entry, for the naming helper. */
+  /**
+   * Converts a child into an entry, for the naming helper.
+   *
+   * @param child The child.
+   * @returns The entry, with the name as its path.
+   */
   function asEntry(child: { name: string; isDir: boolean }): ReviewDirEntry {
     return { name: child.name, path: child.name, isDir: child.isDir };
   }
@@ -214,7 +244,7 @@ describe('dirEntries', () => {
     const app = entries.find((entry) => entry.name === 'app.ts')!;
     assert.equal(app.status, 'modified');
     assert.equal(app.comments, 3);
-    // Absent rather than empty: a directory of a thousand files goes to a phone.
+    // The fields are absent and not empty, to keep large listings small.
     const readme = entries.find((entry) => entry.name === 'README.md')!;
     assert.equal('status' in readme, false);
     assert.equal('comments' in readme, false);
@@ -229,7 +259,7 @@ describe('dirEntries', () => {
       noRepos(),
     );
     const src = entries.find((entry) => entry.name === 'src')!;
-    // The badge a closed folder shows, from a prefix scan rather than a walk.
+    // The flags come from the path prefixes, without a walk of the subtree.
     assert.equal(src.changed, true);
     assert.equal(src.commented, true);
   });
@@ -301,19 +331,32 @@ describe('dirEntries over real repositories', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The box this workspace would be reviewed in. */
+  /**
+   * Makes the git box for the test workspace.
+   *
+   * @returns The git box.
+   */
   function box(): GitBox {
     return { boxId: 'box-1', workspaceDir: dir };
   }
 
-  /** Initialises a repository at a workspace-relative path. */
+  /**
+   * Initialises a repository at a workspace-relative path.
+   *
+   * @param rel The workspace-relative path, or '' for the workspace.
+   */
   function repo(rel: string): void {
     const root = rel === '' ? dir : join(dir, rel);
     mkdirSync(root, { recursive: true });
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root, stdio: 'pipe' });
   }
 
-  /** Writes a file, creating the directories above it. */
+  /**
+   * Writes a file, creating the directories above it.
+   *
+   * @param rel The workspace-relative path of the file.
+   * @param content The content of the file.
+   */
   function file(rel: string, content = 'x\n'): void {
     const full = join(dir, rel);
     mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
@@ -331,7 +374,7 @@ describe('dirEntries over real repositories', () => {
     assert.equal(byName.get('repo-a')?.repo, true);
     assert.equal(byName.get('notes')?.repo, undefined);
 
-    // And not on a directory inside one, only on its root.
+    // A directory inside the repository is not marked.
     const inside = dirEntries('repo-a', readDir(dir, 'repo-a'), {}, new Map(), map);
     assert.equal(inside.find((entry) => entry.name === 'src')?.repo, undefined);
   });

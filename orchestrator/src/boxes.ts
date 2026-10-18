@@ -52,58 +52,60 @@ import { setUpBox } from './setup.ts';
 import type { BoxReading } from './tunnels.ts';
 
 /**
- * How many times more boxes the host may hold than the database knows of
- * before the orphan sweep refuses to run.
+ * The maximum ratio of stray boxes in the runtime to rows in the boxes table.
+ * Above it, the orphan sweep refuses to run.
  *
- * It catches a database that does not belong to these files, such as a data
- * volume mounted from the wrong place. A ratio rather than an empty-table
- * check, so one box created against the wrong database does not disarm it.
+ * The check catches a database that does not belong to these files, for
+ * example a data volume mounted from the wrong place. The check uses a ratio
+ * and not an empty table, so one box created with the wrong database does not
+ * disable it.
  */
 const STRAY_BOX_RATIO = 3;
 
 /**
- * How often typing in a terminal writes the box's activity back, in
+ * The minimum time between two activity writes from typing in a terminal, in
  * milliseconds.
  *
- * The reaper reads activity in minutes, so writing a row per keystroke would
- * record nothing it acts on any differently.
+ * The reaper reads activity in minutes, so a write for each keystroke would not
+ * change what the reaper does.
  */
 const TOUCH_INTERVAL_MS = 60_000;
 
 /**
- * Creates, starts, stops and describes boxes, and owns every UpstreamBox.
- * The runtime holds the runtime state; the boxes table holds the metadata.
+ * The manager of the box lifecycle, which also holds every UpstreamBox. The
+ * runtime holds the runtime state, and the boxes table holds the metadata.
  */
 export class BoxManager {
   /** The gateway connection of each box, created on first use. */
   private readonly upstreams = new Map<string, UpstreamBox>();
 
   /**
-   * One promise chain per box, so two operations that change the same box
-   * never overlap. Different boxes do not wait on each other, and a
-   * box's entry goes as soon as its chain drains.
+   * One promise chain for each box, so two operations that change the same box
+   * do not overlap. Different boxes do not wait for each other. The entry of a
+   * box goes when its chain is empty.
    */
   private readonly slots = new Map<string, Promise<unknown>>();
 
   /**
-   * Boxes a stop or a delete has overtaken. Whatever is queued or running
-   * for one gives itself up at its next step; see {@link giveUpIfPreempted}.
+   * The boxes where a stop or a delete has overtaken the queued operations.
+   * Each queued or running operation of such a box gives up at its next step,
+   * in {@link giveUpIfPreempted}.
    */
   private readonly preempted = new Set<string>();
 
   /**
-   * How many terminals are open on each box, and when typing in one last
-   * marked it active.
+   * The number of open terminals of each box, and the time of the last
+   * activity mark from typing.
    *
-   * A box with a terminal open holds the reaper off the way an attached
-   * browser does. Entries go as the last terminal of a box closes.
+   * The reaper does not stop a box with an open terminal, the same as a box
+   * with an attached browser. The entry goes when the last terminal closes.
    */
   private readonly terminals = new Map<string, { open: number; touchedAt: number }>();
 
   /** Permission requests waiting for a browser, across all boxes. */
   readonly pending: PendingStore;
 
-  /** How big each box has got, measured by the file service in the box. */
+  /** The disk usage of each box, which the file service in the box measures. */
   private readonly usage = new BoxUsage({
     measure: (id) => this.measureDisk(id),
     store: (id, bytes, at) => {
@@ -121,41 +123,49 @@ export class BoxManager {
   /** The error of the last pull of the box image, or null when it worked. */
   private lastPullError: string | null = null;
 
+  /**
+   * @param db The database that stores the boxes and their threads.
+   * @param cfg The configuration of the deployment.
+   * @param egress The egress manager.
+   * @param notifier The sender of push notifications.
+   * @param agents The store of agent sets.
+   * @param tunnelsOf The function that returns the dev tunnel ports of a box.
+   */
   constructor(
     /** Where the boxes and their threads are stored. */
     private readonly db: Db,
     /** The deployment's configuration. */
     private readonly cfg: Config,
-    /** The egress policy, and the credential placeholders a box is given. */
+    /** The egress manager, which gives the policy and the credential placeholders of a box. */
     private readonly egress: EgressManager,
     /** Sends the push notifications a thread raises. */
     private readonly notifier: Notifier,
-    /**
-     * The AGENTS.md and skills a box is given. The app creates it,
-     * so the REST routes and the lifecycle share one store.
-     */
+    /** The agent sets. The app creates the store, so the routes and the lifecycle share it. */
     private readonly agents: AgentStore,
-    /** The dev tunnel ports a box hosts, as the tunnel reconciler last read them. */
+    /** Returns the dev tunnel ports of a box, from the last read of the tunnel reconciler. */
     private readonly tunnelsOf: (boxId: string) => BoxTunnel[] = () => [],
   ) {
     this.pending = new PendingStore(db);
   }
 
-  // --- one operation per box at a time -----------------------------------
-
   /**
-   * Runs `fn` with the box to itself, after whatever is already queued
-   * for it.
+   * Runs `fn` alone for the box, after the operations already in the queue of
+   * the box.
    *
-   * Container repairs check the runtime's state and act on it a moment later.
-   * Start, a local command and the gateway all reach them, and the reaper
-   * stops boxes under all three. So every operation that changes a box runs
-   * alone, in arrival order. Reads are not queued. A request for a busy box
-   * waits without a timeout, and a rejection does not block the queue.
+   * A container repair reads the state of the runtime and acts on it a moment
+   * later. Start, a local command and the gateway all start repairs, and the
+   * reaper can stop a box during each of them. So each operation that changes
+   * a box runs alone, in the order of arrival. Reads do not go into the queue.
+   * A request for a busy box waits without a timeout, and a rejection does not
+   * block the queue.
    *
-   * Nothing `fn` calls may take a slot for the same box again, or it would
-   * wait for itself forever. So each queued public method wraps a private
-   * form that takes no slot, and the repairs and the teardown call those.
+   * `fn` must not take a slot for the same box again, because it would wait for
+   * itself forever. So each queued public method wraps a private form that
+   * takes no slot, and the repairs and the teardown call the private forms.
+   *
+   * @param id The id of the box.
+   * @param fn The operation.
+   * @returns The result of the operation.
    */
   private withSlot<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.slots.get(id) ?? Promise.resolve();
@@ -168,25 +178,30 @@ export class BoxManager {
     return result;
   }
 
-  /** Forgets a box's chain once nothing is left waiting on it. */
+  /**
+   * Removes the chain of a box when nothing waits on it.
+   *
+   * @param id The id of the box.
+   * @param tail The end of the chain that the caller added.
+   */
   private releaseSlot(id: string, tail: Promise<void>): void {
     if (this.slots.get(id) === tail) this.slots.delete(id);
   }
 
   /**
-   * Gives up the operation in flight when a stop or a delete has overtaken
-   * it.
+   * Throws a 409 when a stop or a delete has overtaken the running operation.
    *
-   * Checked between the steps of an operation rather than inside one: a
-   * container half created is worse than one step too many, and every step
-   * here is short.
+   * The check runs between the steps of an operation and not in a step,
+   * because a half-created container is worse than one step too many. Each
+   * step is short.
+   *
+   * @param id The id of the box.
+   * @throws {HttpError} A 409 when a stop or a delete has overtaken the operation.
    */
   private giveUpIfPreempted(id: string): void {
     if (!this.preempted.has(id)) return;
     throw new HttpError(409, 'This box was stopped while the request was in flight');
   }
-
-  // --- the box image ----------------------------------------------------
 
   /**
    * Makes the box image available, and throws when it cannot. Without the
@@ -200,7 +215,7 @@ export class BoxManager {
 
   /**
    * Asks the runtime for a new image behind the tag of the box image. A box
-   * moves onto the new image at its next start. The manager keeps the error
+   * gets the new image at its next start. The manager keeps the error
    * of a failed pull for the error message of a failed setup.
    *
    * @param onProgress Called with each progress event of a pull.
@@ -216,27 +231,27 @@ export class BoxManager {
   }
 
   /**
-   * Removes the runtime objects of boxes that no longer exist, and the login
-   * containers that nothing waits for.
+   * Removes the runtime objects of deleted boxes, and the login containers
+   * that nothing waits for.
    *
-   * reconcile() looks up what the runtime has for each row; this looks up the
-   * row for each object of the inventory. It finds what a crash during a create, or a
-   * teardown that failed halfway, left behind.
+   * reconcile() looks up the runtime objects for each row. This method looks
+   * up the row for each object of the inventory. It finds the objects that a
+   * crash during a create, or a teardown that failed halfway, left.
    *
-   * create() inserts the row before any runtime object exists, so an object
-   * whose box has no live row is never one being created. A deleted box's
-   * tombstone counts as no row, so a failed teardown is swept too.
+   * create() inserts the row before it creates a runtime object, so an object
+   * without a live row is never part of a create. The tombstone of a deleted
+   * box counts as no row, so the sweep also removes a failed teardown.
    *
-   * The objects go in the order of the inventory, which is the order the
-   * runtime can remove them in.
+   * The sweep removes the objects in the order of the inventory, which is an
+   * order that the runtime can remove them in.
    */
   async sweepOrphans(): Promise<void> {
     const inventory = await runtime().inventory();
     // A login belongs to no box, so the rules below do not apply to it.
     await this.sweepLogins(inventory);
 
-    // Read last: a box created while the inventory was read has its row by
-    // now, so its objects are not taken for orphans.
+    // The rows are read last, so a box created during the inventory read has its
+    // row, and its objects are not orphans.
     const live = new Set(this.allRows().map((row) => row.id));
     const strays = inventory.filter(
       (obj): obj is Exclude<RuntimeObject, { kind: 'login' }> =>
@@ -268,12 +283,14 @@ export class BoxManager {
   /**
    * Removes login containers that nothing is waiting on.
    *
-   * A login removes its container when the flow ends. A restart mid-login
-   * leaves the container behind, holding half a credential in a tmpfs home.
+   * A login removes its container when the flow ends. A restart during a login
+   * leaves the container, with part of a credential in a tmpfs home.
    *
    * Age is the only rule, because a login container has no owner to ask. The
-   * cutoff is longer than the ten minutes a flow may take, so a login in
-   * progress is never swept.
+   * cutoff is longer than the ten minutes of a login, so the sweep never
+   * removes a running login.
+   *
+   * @param inventory The runtime objects of the deployment.
    */
   private async sweepLogins(inventory: RuntimeObject[]): Promise<void> {
     const cutoff = Date.now() - LOGIN_CONTAINER_MAX_AGE_MS;
@@ -295,9 +312,12 @@ export class BoxManager {
   }
 
   /**
-   * Runs one removal of the sweep, keeping the rest going when it fails.
+   * Runs one removal of the sweep. A failure goes to the log and does not stop
+   * the sweep. The next sweep tries again.
    *
-   * A failure is logged, and the next sweep tries again.
+   * @param boxId The id of the box that the object belonged to.
+   * @param what The kind of the object, for the log.
+   * @param remove The removal.
    */
   private async sweeping(boxId: string, what: string, remove: () => Promise<void>): Promise<void> {
     try {
@@ -311,14 +331,21 @@ export class BoxManager {
     }
   }
 
-  // --- helpers --------------------------------------------------------------
-
-  /** The stored row for a box, including deleted ones. */
+  /**
+   * Gives the stored row of a box, also of a deleted box.
+   *
+   * @param id The id of the box.
+   * @returns The row, or undefined when no row has this id.
+   */
   getRow(id: string): BoxRow | undefined {
     return this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as BoxRow | undefined;
   }
 
-  /** Every box that has not been deleted, newest first. */
+  /**
+   * Gives the rows of all boxes that are not deleted.
+   *
+   * @returns The rows, newest first.
+   */
   private allRows(): BoxRow[] {
     return this.db
       .prepare("SELECT * FROM boxes WHERE status != 'deleted' ORDER BY created_at DESC")
@@ -326,9 +353,12 @@ export class BoxManager {
   }
 
   /**
-   * Records a new status, leaving a deleted box deleted. An upstream spawn
-   * still retrying when the box was removed reports its outcome later, and
-   * that must not bring the row back.
+   * Records a new status, but a deleted box stays deleted. An upstream spawn
+   * that still retries after the box was removed reports its result later, and
+   * that report must not bring the row back.
+   *
+   * @param id The id of the box.
+   * @param status The new status.
    */
   private setStatus(id: string, status: BoxRow['status']): void {
     this.db
@@ -337,12 +367,14 @@ export class BoxManager {
   }
 
   /**
-   * Everything the runtime needs to create or repair the container of a box.
-   * Both a new box and every recreated container are built from it.
+   * The data that the runtime needs to create or repair the container of a
+   * box. The runtime builds a new box and each recreated container from it.
    *
-   * The placeholders are those of the credentials stored right now, so a
-   * credential that arrives later reaches a box when its container is next
-   * created.
+   * The placeholders are those of the credentials stored now, so a credential
+   * that arrives later reaches a box when its container is created again.
+   *
+   * @param id The id of the box.
+   * @returns The id and the environment of the box.
    */
   private boxSpec(id: string): BoxSpec {
     return {
@@ -358,7 +390,12 @@ export class BoxManager {
     };
   }
 
-  /** The persistent upstream for a box, created on first use. */
+  /**
+   * Gives the persistent upstream of a box, and creates it on first use.
+   *
+   * @param id The id of the box.
+   * @returns The upstream.
+   */
   upstream(id: string): UpstreamBox {
     let up = this.upstreams.get(id);
     if (!up) {
@@ -378,30 +415,33 @@ export class BoxManager {
     return up;
   }
 
-  // --- create ---------------------------------------------------------------
-
   /**
    * Creates the storage and the container of a new box. Any failed step
    * tears the whole box down and marks it as an error.
+   *
+   * @param body The name, the agent set and the first thread of the box.
+   * @returns The detail of the new box.
+   * @throws {HttpError} A 400 for a request that is not valid, a 503 when the box image is
+   *   not available, or a 500 when a step of the create fails.
    */
   async create(body: CreateBoxBody): Promise<BoxDetail> {
     const name = body.name?.trim();
     if (!name) throw new HttpError(400, 'name is required');
     if (name.length > 100) throw new HttpError(400, 'name must be 100 characters or fewer');
 
-    // The global set is applied whatever this says, so naming it is the same
-    // as naming nothing and is stored as nothing.
+    // Each box gets the global set, so a request that names it is the same as a
+    // request without a set, and the row stores null.
     const requested = body.agentSet?.trim() ?? '';
     const agentSetId = requested === '' || requested === GLOBAL_AGENT_SET ? null : requested;
     if (agentSetId && !this.agents.has(agentSetId)) {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
 
-    // Checked before anything is allocated, so an unknown harness costs no
-    // resources on its way to a 400.
+    // The check comes before any allocation, so an unknown harness gets a 400
+    // without cost.
     const thread = threadOptions(body.thread);
 
-    // After the checks above, so an invalid request pulls no image.
+    // The pull comes after the checks above, so an invalid request pulls no image.
     try {
       await this.ensureBoxImage();
     } catch (err) {
@@ -411,20 +451,21 @@ export class BoxManager {
       );
     }
 
-    // Server-generated: user input never reaches a runtime object name.
+    // The orchestrator makes the id, so user input never gets into the name of a
+    // runtime object.
     const id = randomBytes(4).toString('hex');
     const now = Date.now();
     const row: BoxRow = {
       id,
       name,
-      // Every box is DEFAULT: the deployment has one set of credentials.
+      // Each box has the DEFAULT profile, because the deployment has one set of credentials.
       profile: 'DEFAULT',
-      // No base revision until the reviewer picks one. A review compares
-      // each repository against its own HEAD by default.
+      // No base revision until the reviewer selects one. By default, a review
+      // compares each repository with its own HEAD.
       review_base_rev: null,
       status: 'creating',
       agent_set_id: agentSetId,
-      // A token of its own, so it opens this box's WebSocket and no other.
+      // The box has its own token, which opens only the WebSocket of this box.
       ws_token: generateWsToken(),
       created_at: now,
       last_active_at: now,
@@ -446,9 +487,9 @@ export class BoxManager {
     try {
       await this.withSlot(id, () => this.createResources(id));
       this.setStatus(id, 'running');
-      // The first conversation, as a row only. The first browser to open it
-      // starts the adapter, so a box can be created for a harness whose
-      // credential has not been entered yet.
+      // The first thread is only a row. The first browser that opens it starts
+      // the adapter, so a box can be created for a harness without a stored
+      // credential.
       insertThread(this.db, id, {
         harness: thread.harness,
         modeId: thread.modeId ?? null,
@@ -467,8 +508,9 @@ export class BoxManager {
 
   /**
    * Builds the storage and the container of a new box, starts it and makes
-   * it ready. Runs under the box's slot. The storage comes before the
-   * container that mounts it.
+   * it ready. Runs under the slot of the box.
+   *
+   * @param id The id of the box.
    */
   private async createResources(id: string): Promise<void> {
     await runtime().createStorage(id);
@@ -478,28 +520,31 @@ export class BoxManager {
     await this.makeReady(this.mustGet(id));
   }
 
-  // --- start / stop / delete ------------------------------------------------
-
   /**
-   * Brings a box's container and isolation up to date before it is started.
+   * Repairs the container and the isolation of a box before the start.
    *
-   * Runs under the caller's slot and takes none of its own. A stop or a
-   * delete that arrives meanwhile takes effect before the repair.
+   * Runs under the slot of the caller. A stop or a delete that arrives in the
+   * meantime takes effect before the repair.
+   *
+   * @param id The id of the box.
    */
   private async prepareContainer(id: string): Promise<void> {
     this.giveUpIfPreempted(id);
-    // Before anything mounts the storage.
+    // The check comes before anything mounts the storage.
     await this.requireStorage(id);
     this.giveUpIfPreempted(id);
     await runtime().ensure(this.boxSpec(id));
   }
 
   /**
-   * Refuses to go on when a box's storage is gone, naming what is missing,
-   * and marks the box as an error.
+   * Throws a 409 that names the missing storage when the storage of a box is
+   * gone, and marks the box as an error.
    *
-   * The storage is not created again, because a fresh home would erase the
-   * adapter's thread transcripts.
+   * The method does not create the storage again, because a new home would
+   * erase the thread transcripts of the adapter.
+   *
+   * @param id The id of the box.
+   * @throws {HttpError} A 409 when a part of the storage is missing.
    */
   private async requireStorage(id: string): Promise<void> {
     const missing = await runtime().missingStorage(id);
@@ -516,13 +561,21 @@ export class BoxManager {
 
   /**
    * Starts a stopped box, after its container and isolation are repaired.
-   * Waits for whatever else the box is in the middle of.
+   * Waits for the other queued operations of the box.
+   *
+   * @param id The id of the box.
+   * @returns The detail of the box.
    */
   async start(id: string): Promise<BoxDetail> {
     return this.withSlot(id, () => this.startHeld(id));
   }
 
-  /** The body of {@link start}, which runs under the box's slot. */
+  /**
+   * The body of {@link start}, which runs under the slot of the box.
+   *
+   * @param id The id of the box.
+   * @returns The detail of the box.
+   */
   private async startHeld(id: string): Promise<BoxDetail> {
     await this.bringUp(id);
     this.setStatus(id, 'running');
@@ -532,18 +585,20 @@ export class BoxManager {
   }
 
   /**
-   * Brings a box up and makes it ready. Runs under the caller's slot.
+   * Starts a box and makes it ready. Runs under the slot of the caller.
    *
-   * Every path into a box comes through here, so nothing reaches a box
+   * Each path into a box goes through this method, so nothing reaches a box
    * before its setup is complete.
+   *
+   * @param id The id of the box.
    */
   private async bringUp(id: string): Promise<void> {
     this.mustGet(id);
     await this.prepareContainer(id);
     this.giveUpIfPreempted(id);
     if ((await runtime().state(id)) !== 'running') {
-      // Taken off before the start, so a crash between the two leaves the box
-      // not ready.
+      // The ready mark goes before the start, so a crash between the two leaves
+      // the box not ready.
       this.db.prepare('UPDATE boxes SET ready_at = NULL WHERE id = ?').run(id);
       await runtime().start(this.boxSpec(id));
     }
@@ -557,6 +612,9 @@ export class BoxManager {
    *
    * The mark survives a restart of the orchestrator, so a running box is not
    * set up twice.
+   *
+   * @param row The row of the box.
+   * @throws {HttpError} A 409 when the setup fails.
    */
   private async makeReady(row: BoxRow): Promise<void> {
     if (this.mustGet(row.id).ready_at !== null) return;
@@ -588,9 +646,12 @@ export class BoxManager {
   /**
    * Stops the box and drops the upstream connection.
    *
-   * Overtakes what the box is in the middle of rather than queueing behind
-   * it. The flag and the upstream's stop are set before the slot is asked
-   * for, so the work in flight gives up at its next step.
+   * The stop overtakes the running operation of the box and does not wait in
+   * the queue. The method sets the flag and stops the upstream before it asks
+   * for the slot, so the running work gives up at its next step.
+   *
+   * @param id The id of the box.
+   * @returns The detail of the box.
    */
   async stop(id: string): Promise<BoxDetail> {
     this.preempted.add(id);
@@ -599,12 +660,15 @@ export class BoxManager {
   }
 
   /**
-   * Stops a box unless something else is already working on it, and says
-   * whether it did.
+   * Stops a box when no other operation runs on it, and returns true when it
+   * stopped the box.
    *
-   * For the reaper, which must never wait. A box with an operation in flight
-   * is in use, so the reaper looks at it again on the next tick. The queue
-   * is checked and taken in the same synchronous step.
+   * The reaper uses this method, because it must never wait. A box with a
+   * running operation is in use, so the reaper checks it again at the next
+   * tick. The check and the slot request happen in the same synchronous step.
+   *
+   * @param id The id of the box.
+   * @returns True when the method stopped the box.
    */
   async stopUnlessBusy(id: string): Promise<boolean> {
     if (this.slots.has(id)) return false;
@@ -612,9 +676,14 @@ export class BoxManager {
     return true;
   }
 
-  /** The body of {@link stop}, which runs under the box's slot. */
+  /**
+   * The body of {@link stop}, which runs under the slot of the box.
+   *
+   * @param id The id of the box.
+   * @returns The detail of the box.
+   */
   private async stopHeld(id: string): Promise<BoxDetail> {
-    // Everything queued before this has given up; what comes after may run.
+    // Each operation queued before this one gave up. Later operations can run.
     this.preempted.delete(id);
     this.mustGet(id);
     // Nothing in a stopped box changes, so the value measured now stays
@@ -629,8 +698,10 @@ export class BoxManager {
   }
 
   /**
-   * Deletes a box and everything it is made of, its storage included.
-   * Overtakes what the box is in the middle of, the way a stop does.
+   * Deletes a box with all its parts, also its storage. Like a stop, it
+   * overtakes the running operation of the box.
+   *
+   * @param id The id of the box.
    */
   async remove(id: string): Promise<void> {
     this.preempted.add(id);
@@ -638,16 +709,20 @@ export class BoxManager {
     return this.withSlot(id, () => this.removeHeld(id));
   }
 
-  /** The body of {@link remove}, which runs under the box's slot. */
+  /**
+   * The body of {@link remove}, which runs under the slot of the box.
+   *
+   * @param id The id of the box.
+   */
   private async removeHeld(id: string): Promise<void> {
     this.preempted.delete(id);
     const row = this.mustGet(id);
-    // The tombstone goes first. Every writer still in flight checks it, so
-    // none of them inserts a row for a box that is going away.
+    // The tombstone goes first. Each writer that still runs checks it, so no
+    // writer inserts a row for the deleted box.
     this.setStatus(id, 'deleted');
     this.upstreams.delete(id);
     await this.teardownResources(id);
-    // Every table keyed by the box id. The box row stays as a tombstone.
+    // The threads and the pending requests go. The box row stays as a tombstone.
     for (const table of ['pending_requests', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE box_id = ?`).run(id);
     }
@@ -655,8 +730,10 @@ export class BoxManager {
   }
 
   /**
-   * Removes a box's container, isolation and storage. Every failure is
-   * logged rather than thrown, so teardown always finishes.
+   * Removes the container, the isolation and the storage of a box. Each
+   * failure goes to the log and is not thrown, so the teardown always finishes.
+   *
+   * @param id The id of the box.
    */
   private async teardownResources(id: string): Promise<void> {
     if (!this.getRow(id)) return;
@@ -673,9 +750,13 @@ export class BoxManager {
     }
   }
 
-  // --- views ----------------------------------------------------------------
-
-  /** The stored row for a live box, or a 404. */
+  /**
+   * Gives the stored row of a box that is not deleted.
+   *
+   * @param id The id of the box.
+   * @returns The row.
+   * @throws {HttpError} A 404 when the box does not exist or is deleted.
+   */
   mustGet(id: string): BoxRow {
     const row = this.getRow(id);
     if (!row || row.status === 'deleted') throw new HttpError(404, 'Box not found');
@@ -683,17 +764,25 @@ export class BoxManager {
   }
 
   /**
-   * Where a local command should run for this box, starting the box if it
-   * is stopped. The workspace root, which is where the adapter runs too.
+   * The place for a local command of this box, which is the workspace root,
+   * where the adapter also runs. The method starts a stopped box.
    *
-   * Marks the box active, because everything that asks for this is about
-   * to work in the box: a terminal opening a shell, or a review running git.
+   * It marks the box active, because each caller is about to work in the box,
+   * for example a terminal that opens a shell, or a review that runs git.
+   *
+   * @param id The id of the box.
+   * @returns The id of the box and the working directory in the box.
    */
   async execTarget(id: string): Promise<{ boxId: string; workingDir: string }> {
     return this.withSlot(id, () => this.execTargetHeld(id));
   }
 
-  /** The body of {@link execTarget}, which runs under the box's slot. */
+  /**
+   * The body of {@link execTarget}, which runs under the slot of the box.
+   *
+   * @param id The id of the box.
+   * @returns The id of the box and the working directory in the box.
+   */
   private async execTargetHeld(id: string): Promise<{ boxId: string; workingDir: string }> {
     await this.bringUp(id);
     this.touch(id);
@@ -701,24 +790,35 @@ export class BoxManager {
   }
 
   /**
-   * What a running box takes up on disk, in bytes, as the file service in it
-   * measures. It neither starts the box nor marks it active, so a
-   * measurement does not keep a box from the reaper.
+   * The disk usage of a running box in bytes, from the file service in the
+   * box. The method does not start the box or mark it active, so a measurement
+   * does not keep the reaper from a box.
+   *
+   * @param id The id of the box.
+   * @returns The size in bytes.
    */
   private async measureDisk(id: string): Promise<number> {
     this.mustGet(id);
     return fileService(id).size();
   }
 
-  /** Marks a box active, so reaching into the box holds off the reaper. */
+  /**
+   * Marks a box active, which delays the reaper.
+   *
+   * @param id The id of the box.
+   */
   touch(id: string): void {
     touchBox(this.db, id);
   }
 
   /**
-   * Marks a box active, at most once every {@link TOUCH_INTERVAL_MS}.
+   * Marks a box active, at most once in each {@link TOUCH_INTERVAL_MS}.
    *
-   * What a terminal calls as its reader types.
+   * The terminal calls this method when the user types, and it holds a terminal
+   * of the box during the call. The throttle keeps its time in that terminal
+   * entry, so a box without an open terminal gets a mark on each call.
+   *
+   * @param id The id of the box.
    */
   touchThrottled(id: string): void {
     const held = this.terminals.get(id);
@@ -729,12 +829,15 @@ export class BoxManager {
   }
 
   /**
-   * Counts one open terminal onto a box, and returns the handle that
-   * takes it off again.
+   * Adds one open terminal to the count of a box, and returns the function that
+   * removes it again.
    *
-   * The count is what the reaper reads, so it has to go up before the box is
-   * started rather than once the shell is there: starting takes seconds, and
-   * a tick landing inside them must not stop the box being opened.
+   * The reaper reads the count, so the count must go up before the box starts
+   * and not when the shell is there. A start takes seconds, and a reaper tick
+   * in that time must not stop the box that opens.
+   *
+   * @param id The id of the box.
+   * @returns The function that removes the terminal from the count. A second call does nothing.
    */
   holdTerminal(id: string): () => void {
     const held = this.terminals.get(id) ?? { open: 0, touchedAt: 0 };
@@ -751,7 +854,12 @@ export class BoxManager {
     };
   }
 
-  /** How many terminals are open on a box. */
+  /**
+   * Gives the number of open terminals of a box.
+   *
+   * @param id The id of the box.
+   * @returns The number of open terminals.
+   */
   terminalCount(id: string): number {
     return this.terminals.get(id)?.open ?? 0;
   }
@@ -760,6 +868,8 @@ export class BoxManager {
    * The command lines running in every box that has not been deleted, for
    * the tunnel reconciler. A box that is not running has none. A box whose
    * state or processes cannot be read is reported as null.
+   *
+   * @returns The reading of each box.
    */
   async processReadings(): Promise<BoxReading[]> {
     return Promise.all(
@@ -777,7 +887,11 @@ export class BoxManager {
     );
   }
 
-  /** Summaries of every live box. */
+  /**
+   * Lists the boxes that are not deleted.
+   *
+   * @returns The summary of each box, newest first.
+   */
   async list(): Promise<BoxSummary[]> {
     const rows = this.allRows();
     const counts = this.pending.countsByBox();
@@ -787,7 +901,14 @@ export class BoxManager {
     );
   }
 
-  /** Builds a summary, resolving the state against the runtime. */
+  /**
+   * Builds the summary of a box, with the state from the runtime.
+   *
+   * @param row The row of the box.
+   * @param pendingCount The number of waiting permission requests of the box.
+   * @param turnActive True when a thread of the box has a running turn.
+   * @returns The summary.
+   */
   private async summarize(
     row: BoxRow,
     pendingCount: number,
@@ -796,9 +917,9 @@ export class BoxManager {
     const runtimeState = await runtime().state(row.id);
     if (runtimeState === 'running') this.usage.refresh(row.id, row.disk_measured_at);
     const pendingByThread = this.pending.countsByThread(row.id);
-    // The gateway's in-memory view of which threads are speaking and which
-    // have tasks running, read once so every thread answers from the same
-    // moment. `upstreams.get` rather than `upstream()`, which would create one.
+    // The gateway holds the speaking threads and the threads with running tasks
+    // in memory. The code reads them once, so all threads use the same moment.
+    // `upstreams.get` does not create an upstream, but `upstream()` would.
     const upstream = this.upstreams.get(row.id);
     const speaking = new Set(upstream?.speakingThreads ?? []);
     const working = new Set(upstream?.workingThreads ?? []);
@@ -808,7 +929,7 @@ export class BoxManager {
       profile: row.profile,
       status: row.status,
       runtimeState,
-      // True when any of the box's threads has a turn running.
+      // True when a thread of the box has a running turn.
       turnActive,
       speaking: speaking.size > 0,
       backgroundBusy: upstream?.backgroundActive ?? false,
@@ -822,14 +943,14 @@ export class BoxManager {
           pendingByThread,
           speaking,
           working,
-          // Each adapter says for itself whether it can fork. An adapter not
-          // yet reached is absent from the set.
+          // Each adapter tells if it can fork. An adapter that was not reached yet
+          // is not in the set.
           upstream?.forkableHarnesses ?? new Set<HarnessId>(),
         ),
       ),
       agentSetId: row.agent_set_id,
       agentSetName: this.agents.nameOf(row.agent_set_id),
-      // What was last measured, and null until there is a measurement.
+      // The last measurement, or null until there is one.
       diskBytes: row.disk_bytes,
       diskMeasuredAt: row.disk_measured_at,
       tunnels: this.tunnelsOf(row.id),
@@ -838,7 +959,13 @@ export class BoxManager {
     };
   }
 
-  /** A summary plus the runtime facts the detail view shows. */
+  /**
+   * Builds the summary of a box with the runtime facts for the detail view.
+   *
+   * @param id The id of the box.
+   * @returns The detail.
+   * @throws {HttpError} A 404 when the box does not exist or is deleted.
+   */
   async detail(id: string): Promise<BoxDetail> {
     const row = this.mustGet(id);
     const summary = await this.summarize(
@@ -851,15 +978,19 @@ export class BoxManager {
       runtimeDetails: await runtime().details(id),
       acpSessionId: latestThread(this.db, id)?.acp_session_id ?? null,
       isolated: await runtime().isolated(id),
-      // `upstreams.get` rather than `upstream()`, which would create one. A
-      // box without an upstream has no reading, so the list is empty.
+      // `upstreams.get` does not create an upstream. A box without an upstream
+      // has no reading, so the list is empty.
       boxWork: [...(this.upstreams.get(id)?.boxWork ?? [])],
     };
   }
 
-  // --- threads --------------------------------------------------------------
-
-  /** Every conversation of a box, oldest first. */
+  /**
+   * Lists the threads of a box.
+   *
+   * @param id The id of the box.
+   * @returns The summary of each thread, oldest first.
+   * @throws {HttpError} A 404 when the box does not exist or is deleted.
+   */
   threads(id: string): ThreadSummary[] {
     this.mustGet(id);
     const pendingByThread = this.pending.countsByThread(id);
@@ -870,16 +1001,27 @@ export class BoxManager {
   }
 
   /**
-   * Whether a thread belongs to a box. The WebSocket upgrade asks before
-   * a socket exists, so a path naming another box's thread is a 404
-   * rather than a connection that fails later.
+   * Checks if a thread belongs to a box. The WebSocket upgrade calls it before
+   * a socket exists, so a path with the thread of another box gets a 404 and
+   * not a connection that fails later.
+   *
+   * @param boxId The id of the box.
+   * @param threadId The id of the thread.
+   * @returns True when the thread belongs to the box.
    */
   hasThread(boxId: string, threadId: string): boolean {
     const row = getThread(this.db, threadId);
     return row !== undefined && row.box_id === boxId;
   }
 
-  /** One of a box's threads, or a 404 when the box has no such thread. */
+  /**
+   * Gives the row of one thread of a box.
+   *
+   * @param id The id of the box.
+   * @param threadId The id of the thread.
+   * @returns The row of the thread.
+   * @throws {HttpError} A 404 when the box has no such thread.
+   */
   private mustGetThread(id: string, threadId: string): ThreadRow {
     const row = getThread(this.db, threadId);
     if (!row || row.box_id !== id) throw new HttpError(404, THREAD_NOT_FOUND);
@@ -887,19 +1029,24 @@ export class BoxManager {
   }
 
   /**
-   * Adds a conversation to a box: on the agent and
-   * settings the body names, or carrying another thread's context when `from`
-   * names one.
+   * Adds a thread to a box, with the harness and the settings in the body, or
+   * with the context of the thread that `from` names.
    *
    * A fork needs the adapter, because only the adapter can branch a
-   * transcript. A fresh thread's row is written before its conversation is
-   * created, so a harness without a credential still gets a thread.
+   * transcript. The row of a new thread is written before its adapter session,
+   * so a harness without a credential still gets a thread.
+   *
+   * @param id The id of the box.
+   * @param body The options of the new thread, or the thread to fork.
+   * @returns The summary of the new thread.
+   * @throws {HttpError} A 404 for an unknown box or source thread, a 409 for a source
+   *   without a session, a 400 for an unknown harness, or a 500 when the adapter fails.
    */
   async createThread(id: string, body: CreateThreadBody | undefined): Promise<ThreadSummary> {
     this.mustGet(id);
     const from = body?.from?.trim();
-    // A fork keeps its source's harness and options, because only the adapter
-    // that wrote a transcript can load it.
+    // A fork keeps the harness and the options of its source, because only the
+    // adapter that wrote a transcript can load it.
     const options = from ? undefined : threadOptions(body?.options);
     const up = this.upstream(id);
     try {
@@ -914,17 +1061,22 @@ export class BoxManager {
     } catch (err) {
       const message = (err as Error).message;
       if (message === THREAD_NOT_FOUND) throw new HttpError(404, message);
-      // A thread never prompted has no conversation to fork yet.
+      // A thread without a prompt has no session to fork yet.
       if (message === NOTHING_TO_FORK) throw new HttpError(409, message);
       throw new HttpError(500, `Failed to create thread: ${message}`);
     }
   }
 
   /**
-   * Marks one of a box's conversations done, or takes the mark off again.
+   * Marks one thread of a box done, or removes the mark.
    *
-   * The mark is the reader's own note. The thread keeps its conversation, its
-   * tasks go on running, and it still answers prompts.
+   * The mark is a note of the user. The thread keeps its session, its tasks
+   * continue to run, and it still answers prompts.
+   *
+   * @param id The id of the box.
+   * @param threadId The id of the thread.
+   * @param done True to set the mark, false to remove it.
+   * @returns The summary of the thread.
    */
   setThreadDone(id: string, threadId: string, done: boolean): ThreadSummary {
     this.mustGet(id);
@@ -940,9 +1092,14 @@ export class BoxManager {
   }
 
   /**
-   * Stops one task a thread left running, or every task it has.
+   * Stops one background task of a thread, or every task of the thread.
    *
-   * A thread with no adapter conversation has no tasks, so it answers zero.
+   * A thread without an adapter session has no tasks, so the answer is zero.
+   *
+   * @param id The id of the box.
+   * @param threadId The id of the thread.
+   * @param taskId The id of the task in the adapter. Without it, every task of the thread stops.
+   * @returns The number of tasks that the adapter stopped.
    */
   async stopBackgroundWork(
     id: string,
@@ -956,24 +1113,25 @@ export class BoxManager {
   }
 
   /**
-   * Kills every process in a box that Boxes did not start itself, whether or
-   * not a thread has a task for it.
+   * Kills every process in a box that Boxes did not start, with or without a
+   * task of a thread.
    *
-   * An adapter restart loses the tasks the old process announced, and a
-   * signal is the only way to reach the work they left running.
+   * An adapter restart loses the tasks that the old process announced. A signal
+   * is the only way to reach the work of those tasks.
+   *
+   * @param id The id of the box.
+   * @returns The number of processes that got a signal.
    */
   async stopBoxWork(id: string): Promise<{ stopped: number }> {
     this.mustGet(id);
     return { stopped: await this.upstream(id).stopBoxWork() };
   }
 
-  // --- boot reconciliation --------------------------------------------------
-
   /**
-   * Aligns the stored rows with what the runtime runs: adopts live boxes,
-   * marks missing ones stopped, fails a create that was interrupted, and
-   * repairs the isolation of every box that runs. Upstream connections are
-   * re-established on first use.
+   * Aligns the stored rows with the runtime. The method adopts live boxes,
+   * marks missing boxes stopped, marks an interrupted create as an error, and
+   * repairs the isolation of each running box. Upstream connections are made
+   * again on first use.
    */
   async reconcile(): Promise<void> {
     this.pending.clearStale();
@@ -999,8 +1157,8 @@ export class BoxManager {
         continue;
       }
       this.setStatus(row.id, box.running ? 'running' : 'stopped');
-      // A stopped box gets its repair at its next start. A failed repair is
-      // retried by the isolation loop, so it does not stop the boot.
+      // A stopped box gets its repair at its next start. The isolation loop
+      // retries a failed repair, so it does not stop the boot.
       if (!box.running) continue;
       try {
         await this.withSlot(row.id, () => runtime().ensure(this.boxSpec(row.id)));
@@ -1012,13 +1170,14 @@ export class BoxManager {
   }
 
   /**
-   * Repairs the isolation of every running box. Returns the ids of the boxes
-   * where that failed.
+   * Repairs the isolation of every running box.
    *
-   * A box with an operation in flight is skipped, so the loop never waits.
-   * That operation is a start, which repairs the isolation itself, or a stop
-   * or a delete, after which there is nothing to repair. The state is read
-   * under the slot, so a box that stopped meanwhile is left alone.
+   * The loop skips a box with a running operation, so it never waits. The
+   * running operation is a start, which repairs the isolation, or a stop or a
+   * delete, after which nothing needs a repair. The state is read under the
+   * slot, so a box that stopped in the meantime stays as it is.
+   *
+   * @returns The ids of the boxes where the repair failed.
    */
   async reconcileIsolation(): Promise<string[]> {
     const warnings: string[] = [];
@@ -1045,21 +1204,21 @@ export class BoxManager {
     this.upstreams.clear();
   }
 
-  /** Periodic housekeeping: forgetting the upstreams that hold nothing. */
+  /** Runs the periodic housekeeping, which removes the upstreams that hold nothing. */
   maintenance(): void {
     this.dropIdleUpstreams();
   }
 
   /**
-   * Forgets every upstream of a box that is down and holding nothing.
+   * Removes each upstream that holds nothing, when its box is not running.
    *
-   * The reaper creates an upstream for every running box it checks, and
-   * nothing else drops them. An upstream with no browser attached, no request
-   * waiting and no adapter connection holds nothing a fresh one could not
-   * rebuild.
+   * The reaper creates an upstream for each running box that it checks, and
+   * nothing else removes them. An upstream without an attached browser, a
+   * waiting request or an adapter connection holds nothing that a new upstream
+   * cannot build again.
    *
-   * A running box keeps its upstream, because the upstream holds the reading
-   * of what runs in the box, which the reaper asks for every tick.
+   * A running box keeps its upstream, because the upstream holds the process
+   * reading of the box, and the reaper asks for it at each tick.
    */
   private dropIdleUpstreams(): void {
     for (const [id, up] of this.upstreams) {
@@ -1072,11 +1231,18 @@ export class BoxManager {
 }
 
 /**
- * One stored thread, as the API reports it.
+ * Converts one stored thread to the form that the API reports.
  *
- * The live sets and `pendingByThread` are keyed by the adapter's own id. A
- * thread without one has nothing running, nobody speaking and no request
- * waiting.
+ * The live sets and `pendingByThread` use the session id of the adapter as
+ * key. A thread without a session id has no running task, no speech and no
+ * waiting request.
+ *
+ * @param row The stored thread.
+ * @param pendingByThread The number of waiting requests, by session id.
+ * @param speaking The session ids of the threads that speak now.
+ * @param working The session ids of the threads with running tasks.
+ * @param forkable The harnesses whose adapter can fork.
+ * @returns The summary of the thread.
  */
 function toThreadSummary(
   row: ThreadRow,
@@ -1093,13 +1259,12 @@ function toThreadSummary(
     title: row.title,
     ordinal: row.ordinal,
     turnActive: row.turn_active === 1,
-    // These three come from the live gateway, keyed by the adapter's own id.
     speaking: acp ? speaking.has(acp) : false,
     backgroundBusy: acp ? working.has(acp) : false,
     pendingCount: acp ? (pendingByThread.get(acp) ?? 0) : 0,
     modeId: row.mode_id,
     config: threadConfig(row),
-    // False while this thread's adapter has not been reached.
+    // False until the adapter of this thread is reached.
     canFork: forkable.has(row.harness),
     done: row.done === 1,
     createdAt: row.created_at,
@@ -1108,11 +1273,15 @@ function toThreadSummary(
 }
 
 /**
- * What a request asked a thread to be, checked.
+ * Checks the thread options of a request.
  *
- * An absent harness means Claude on its defaults. An unknown harness is a
- * 400. The config map keeps its string values unchecked, because the adapter
+ * An absent harness means Claude. An unknown harness is a 400. The config map
+ * keeps only its string values and does not check them, because the adapter
  * decides which options a harness offers.
+ *
+ * @param options The options from the request.
+ * @returns The checked options.
+ * @throws {HttpError} A 400 for an unknown harness.
  */
 function threadOptions(options: ThreadOptions | undefined): ThreadOptions {
   const wanted = options?.harness ?? DEFAULT_HARNESS;

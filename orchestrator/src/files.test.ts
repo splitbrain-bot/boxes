@@ -21,6 +21,7 @@ import {
 import { inProcessFileService } from './files-in-process.ts';
 import { HttpError } from './http-error.ts';
 
+/** The temporary workspace of the current test. */
 let workspace: string;
 
 /** The real file service on the test workspace. */
@@ -36,7 +37,13 @@ afterEach(() => {
   rmSync(workspace, { recursive: true, force: true });
 });
 
-/** A tar stream with one file, relative to the home. */
+/**
+ * Returns a tar stream with one file.
+ *
+ * @param name The path of the file, relative to the home.
+ * @param content The content of the file.
+ * @returns The tar stream.
+ */
 function tarOf(name: string, content: string): Readable {
   const p = pack();
   p.entry({ name, size: content.length }, content);
@@ -44,7 +51,12 @@ function tarOf(name: string, content: string): Readable {
   return Readable.from(p);
 }
 
-/** A file service that answers every request with `answer`. */
+/**
+ * Returns a spawner of a fake file service.
+ *
+ * @param answer The handler that answers every request.
+ * @returns The spawner.
+ */
 function fake(
   answer: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => void,
 ): FileServiceSpawner {
@@ -57,12 +69,23 @@ function fake(
   };
 }
 
-/** Response headers of the current protocol version. */
+/**
+ * Returns the response headers with the current protocol version added.
+ *
+ * @param headers The response headers.
+ * @returns The headers with the version header.
+ */
 function current(headers: OutgoingHttpHeaders): OutgoingHttpHeaders {
   return { ...headers, [VERSION_HEADER]: String(FILES_PROTOCOL_VERSION) };
 }
 
-/** A spawner that counts its spawns, and uses `first` for the first one. */
+/**
+ * Returns a spawner that counts its spawns.
+ *
+ * @param first The spawner for the first spawn.
+ * @param then The spawner for every later spawn.
+ * @returns The counter and the spawner.
+ */
 function counted(first: FileServiceSpawner, then: FileServiceSpawner) {
   const counter = { spawns: 0 };
   const spawner: FileServiceSpawner = async (id) => {
@@ -133,7 +156,7 @@ test('a file service of another version is refused, naming both versions', async
 test('an image without the file service is refused as one of no version', async () => {
   setFileServiceSpawnerForTests(async () => {
     const io = new PassThrough();
-    // The exec ends at once, as Docker reports a command that is not found.
+    // The exec ends at once with code 127, as for a command that is not in the image.
     queueMicrotask(() => io.destroy());
     return { io, exited: Promise.resolve(127), kill: () => io.destroy() };
   });

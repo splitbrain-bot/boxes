@@ -20,7 +20,12 @@ import {
 
 /**
  * A runner that starts git on this machine, in the directory the target names,
- * over repositories the tests build themselves.
+ * over repositories that the tests build.
+ *
+ * @param target The target whose directory git runs in.
+ * @param argv The command line.
+ * @param env The variables added to the environment.
+ * @returns The result of git.
  */
 const localGit: GitRunner = async (target, argv, env) => {
   try {
@@ -42,16 +47,22 @@ const localGit: GitRunner = async (target, argv, env) => {
   }
 };
 
-/** The box a workspace would be reviewed in. */
+/**
+ * Makes the git box for a local workspace directory.
+ *
+ * @param workspaceDir The local workspace directory.
+ * @returns The git box.
+ */
 function box(workspaceDir: string): GitBox {
   return { boxId: 'box-1', workspaceDir };
 }
 
+/** The workspace directory of the current test. */
 let dir: string;
 
 beforeEach(() => {
   setGitRunnerForTests(localGit);
-  // The container id names the workspace the file service works on.
+  // The box id is the path of the workspace that the file service uses.
   setFileServiceSpawnerForTests(
     inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
   );
@@ -64,7 +75,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Initialises a repository at a workspace-relative path, and returns it. */
+/**
+ * Initialises a repository at a workspace-relative path.
+ *
+ * @param rel The workspace-relative path, or '' for the workspace.
+ * @returns The absolute path of the repository.
+ */
 function repo(rel: string): string {
   const root = rel === '' ? dir : join(dir, rel);
   mkdirSync(root, { recursive: true });
@@ -72,14 +88,24 @@ function repo(rel: string): string {
   return root;
 }
 
-/** Writes a file, creating the directories above it. */
+/**
+ * Writes a file, creating the directories above it.
+ *
+ * @param rel The workspace-relative path of the file.
+ * @param content The content of the file.
+ */
 function file(rel: string, content = 'x\n'): void {
   const full = join(dir, rel);
   mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
   writeFileSync(full, content);
 }
 
-/** The discovered repositories as workspace-relative paths. */
+/**
+ * Discovers the repositories of a workspace.
+ *
+ * @param workspace The workspace directory.
+ * @returns The workspace-relative paths of the repositories.
+ */
 async function paths(workspace = dir): Promise<string[]> {
   return (await discoverRepos(fileService(workspace), box(workspace))).repos.map((r) => r.path);
 }
@@ -126,8 +152,8 @@ describe('discovery', () => {
   });
 
   test('a workspace reached through a symlink still resolves its repositories', async () => {
-    // `rev-parse --show-toplevel` resolves symlinks, so comparing its answer
-    // against the linked path would fail here.
+    // Git resolves symlinks in the paths it prints, so a check that compares
+    // paths fails here.
     repo('project');
     const link = join(tmpdir(), `boxes-link-${process.pid}-${Math.random().toString(36).slice(2)}`);
     symlinkSync(dir, link);
@@ -207,7 +233,12 @@ describe('discovery', () => {
 });
 
 describe('repoFor', () => {
-  /** A map over paths, without touching a filesystem. */
+  /**
+   * Builds a map over paths, without touching a filesystem.
+   *
+   * @param repoPaths The workspace-relative paths of the repositories.
+   * @returns The map.
+   */
   function mapOf(...repoPaths: string[]): RepoMap {
     return new RepoMap(
       '/data/workspaces/aaa',
@@ -248,7 +279,7 @@ describe('repoFor', () => {
   test('a file no repository claims has none', () => {
     const map = mapOf('repo-a');
     assert.equal(map.repoFor('notes/todo.md'), null);
-    // A sibling whose name merely starts the same way is not inside it.
+    // A sibling whose name starts with the same characters is not inside it.
     assert.equal(map.repoFor('repo-abc/x.ts'), null);
   });
 

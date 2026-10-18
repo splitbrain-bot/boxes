@@ -1,9 +1,3 @@
-import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
-import type { Readable } from 'node:stream';
-import { afterAll, beforeAll, describe, it } from 'vitest';
-import { HOME_DIR, NIX_DIR, type ProcessStream, type Runtime, WORKSPACE_DIR } from './runtime.ts';
-
 /**
  * The conformance suite of the Runtime interface.
  *
@@ -13,7 +7,13 @@ import { HOME_DIR, NIX_DIR, type ProcessStream, type Runtime, WORKSPACE_DIR } fr
  * has an entry file that calls runtimeConformance with its own subject.
  */
 
-/** One address that a box must not be able to connect to. */
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import type { Readable } from 'node:stream';
+import { afterAll, beforeAll, describe, it } from 'vitest';
+import { HOME_DIR, NIX_DIR, type ProcessStream, type Runtime, WORKSPACE_DIR } from './runtime.ts';
+
+/** One address with a TCP port that a check connects to. */
 export interface Target {
   /** What the address is, for the name of the check. */
   label: string;
@@ -44,7 +44,11 @@ export interface ConformanceSubject {
   unreachable: Target[];
   /** The paths that must not exist in a box, for example a socket of the runtime. */
   absentPaths: AbsentPath[];
-  /** Breaks the isolation of a running box from outside, as an operator could. */
+  /**
+   * Breaks the isolation of a running box from outside, as an operator could.
+   *
+   * @param boxId The id of the box.
+   */
   breakIsolation(boxId: string): Promise<void>;
 }
 
@@ -57,7 +61,12 @@ const SIBLING_PORT = 8080;
 /** How long one connection attempt from a box may take, in seconds. */
 const CONNECT_SECONDS = 5;
 
-/** The command that connects to an address from inside a box, and exits 0 when it can. */
+/**
+ * Builds the command that connects to an address from inside a box.
+ *
+ * @param target The address.
+ * @returns The argument vector of a command that exits 0 when it can connect.
+ */
 function connectCommand(target: Target): string[] {
   return [
     'timeout',
@@ -70,19 +79,35 @@ function connectCommand(target: Target): string[] {
   ];
 }
 
-/** A box id of the suite. The prefix makes a left-over box easy to find. */
+/**
+ * Makes a new box id for the suite. The prefix makes a left-over box easy to find.
+ *
+ * @returns The box id.
+ */
 function boxId(): string {
   return `conf${randomBytes(3).toString('hex')}`;
 }
 
-/** Everything a stream produces until it ends, as a buffer. */
+/**
+ * Reads a stream to its end.
+ *
+ * @param stream The stream.
+ * @returns Everything the stream produced.
+ */
 async function collect(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.from(chunk as Buffer));
   return Buffer.concat(chunks);
 }
 
-/** Resolves when the output of a process contains a text. Fails after a time. */
+/**
+ * Waits until the stdout of a process contains a text.
+ *
+ * @param proc The process.
+ * @param text The text to wait for.
+ * @param timeoutMs The time to wait, in milliseconds.
+ * @returns The output until the text appeared. Rejects after the time.
+ */
 function waitForOutput(proc: ProcessStream, text: string, timeoutMs = 10_000): Promise<string> {
   return new Promise((resolve, reject) => {
     let seen = '';
@@ -100,7 +125,14 @@ function waitForOutput(proc: ProcessStream, text: string, timeoutMs = 10_000): P
   });
 }
 
-/** Resolves with the value of a promise, or fails after a time. */
+/**
+ * Waits for a promise, with a time limit.
+ *
+ * @param promise The promise.
+ * @param timeoutMs The time limit, in milliseconds.
+ * @param what The name of the wait, for the error message.
+ * @returns The value of the promise. Rejects after the time.
+ */
 async function within<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -134,14 +166,26 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
     let subject: ConformanceSubject;
     let rt: Runtime;
 
-    /** Runs a command in the box and fails the check when its exit code is not 0. */
+    /**
+     * Runs a shell script in a box, and fails the check when its exit code is not 0.
+     *
+     * @param script The script for `sh -c`.
+     * @param id The id of the box. The main box by default.
+     * @returns The stdout of the script.
+     */
     async function sh(script: string, id = box): Promise<string> {
       const out = await rt.run(id, ['sh', '-c', script]);
       assert.equal(out.code, 0, `${script}: ${out.stderr}`);
       return out.stdout;
     }
 
-    /** Whether the box can open a TCP connection to an address. */
+    /**
+     * Checks if a box can open a TCP connection to an address.
+     *
+     * @param target The address.
+     * @param id The id of the box. The main box by default.
+     * @returns True when the connection opens.
+     */
     async function canConnect(target: Target, id = box): Promise<boolean> {
       const out = await rt.run(id, connectCommand(target), {
         timeoutMs: (CONNECT_SECONDS + 5) * 1000,
@@ -366,7 +410,8 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
         ]);
         try {
           await waitForOutput(listener, 'listening');
-          // The listener answers in its own box, so a failure below is the isolation.
+          // The listener answers inside its own box, so a refused connection from the main box comes
+          // from the isolation.
           assert.equal(await canConnect(target, sibling), true);
           assert.equal(await canConnect(target), false);
         } finally {

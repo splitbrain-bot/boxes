@@ -24,7 +24,12 @@ const RFC8291 = {
     'pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN',
 };
 
-/** Decodes base64url text. */
+/**
+ * Decodes base64url text.
+ *
+ * @param value The base64url text.
+ * @returns The bytes.
+ */
 const b64 = (value: string): Buffer => Buffer.from(value, 'base64url');
 
 test('encryptPayload reproduces the RFC 8291 example byte for byte', () => {
@@ -64,8 +69,8 @@ test('a payload too long for one record is refused rather than mangled', () => {
 });
 
 test('a subscriber can decrypt what encryptPayload produced', () => {
-  // The receiver's side of RFC 8291, done independently of the sender's: the
-  // round trip covers the random salt and ephemeral key the vector cannot.
+  // The receiver side of RFC 8291, written apart from the sender side. The
+  // round trip covers the random salt and ephemeral key that the vector cannot.
   const message = 'Box muffin is waiting for a permission decision.';
   const body = encryptPayload(
     Buffer.from(message, 'utf8'),
@@ -124,8 +129,7 @@ test('vapidHeader signs a JWT the public key verifies', () => {
 
   const [encodedHeader, encodedClaims, signature] = jwt!.split('.');
   const claims = JSON.parse(b64(encodedClaims!).toString('utf8')) as Record<string, unknown>;
-  // The audience is the push service's origin. The endpoint path is a
-  // capability and stays out of the token.
+  // The audience is the origin of the push service, without the endpoint path.
   assert.equal(claims.aud, 'https://push.example.net');
   assert.equal(claims.sub, 'mailto:a@b.c');
   assert.ok((claims.exp as number) > Date.now() / 1000);
@@ -151,7 +155,12 @@ test('vapidHeader signs a JWT the public key verifies', () => {
   );
 });
 
-/** Runs a case against a throwaway data dir. */
+/**
+ * Runs a case against a throwaway data directory, and removes the directory after it.
+ *
+ * @param fn The case, which gets the path of the directory.
+ * @returns The result of the case.
+ */
 function withDataDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-push-'));
   try {
@@ -201,7 +210,7 @@ test('sendPush reports an unreachable push service rather than throwing', async 
     'mailto:a@b.c',
   );
   assert.equal(result.ok, false);
-  // Unreachable is not gone: the subscription may well outlive the outage.
+  // An unreachable service is not gone, because the subscription can outlive the outage.
   assert.equal(result.gone, false);
   assert.ok(result.error);
 });

@@ -1,7 +1,7 @@
+/** The processes in a box, read and signalled with the tools of the box image. */
+
 import { log } from './log.ts';
 import { runtime } from './runtime/runtime.ts';
-
-/** The processes in a box, read and signalled with the tools of the box image. */
 
 /** One process inside a box, as the box's own `ps` reports it. */
 export interface ContainerProcess {
@@ -16,11 +16,15 @@ export interface ContainerProcess {
 }
 
 /**
- * Every process running inside a box, with the box's own pids.
+ * Returns every process running inside a box, with the box's own pids.
  *
- * It runs the box image's `ps`, which appears in its own output. A box that
- * cannot be reached, or one without `ps`, throws, so the caller cannot
- * mistake it for one with nothing running.
+ * It runs the `ps` of the box image, which appears in its own output. It
+ * throws when the box cannot be reached or has no `ps`, so the caller cannot
+ * mistake the box for one with nothing running.
+ *
+ * @param boxId The id of the box.
+ * @returns The processes.
+ * @throws Error when `ps` exits with an error or the runtime cannot reach the box.
  */
 export async function boxProcesses(boxId: string): Promise<ContainerProcess[]> {
   const ps = ['ps', '-eo', 'pid,ppid,etimes,args'];
@@ -49,7 +53,11 @@ export async function boxProcesses(boxId: string): Promise<ContainerProcess[]> {
  *
  * The pids must be the box's own. They are passed to `kill` as separate
  * arguments, never through a shell. A non-zero exit, for example for a pid
- * that has already gone, is only logged at debug level.
+ * that has already gone, goes to the log at debug level.
+ *
+ * @param boxId The id of the box.
+ * @param signal The signal.
+ * @param pids The pids, in the numbering of the box.
  */
 export async function killInBox(
   boxId: string,

@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import { fetchRepo, findSkills, repoName } from './skill-repos.ts';
 
+/** The temporary directory of the current test. */
 let dir: string;
 
 beforeEach(() => {
@@ -24,7 +25,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Writes files under `root`, creating the directories on the way. */
+/**
+ * Writes files, and creates the directories on the way.
+ *
+ * @param root The directory to write under.
+ * @param contents The content of each file, by path relative to the root.
+ */
 function files(root: string, contents: Record<string, string>): void {
   for (const [rel, content] of Object.entries(contents)) {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
@@ -32,7 +38,13 @@ function files(root: string, contents: Record<string, string>): void {
   }
 }
 
-/** Runs git in `cwd` without any user configuration. */
+/**
+ * Runs git without any user configuration.
+ *
+ * @param cwd The directory to run git in.
+ * @param args The arguments of git.
+ * @returns The trimmed standard output.
+ */
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(
     'git',
@@ -41,7 +53,12 @@ function git(cwd: string, ...args: string[]): string {
   ).trim();
 }
 
-/** Creates a source repository with one commit of `contents` on `main`. Returns its path. */
+/**
+ * Creates a source repository with one commit on `main`.
+ *
+ * @param contents The content of each file of the commit, by path.
+ * @returns The path of the repository.
+ */
 function source(contents: Record<string, string>): string {
   const src = join(dir, 'src');
   mkdirSync(src);
@@ -52,10 +69,13 @@ function source(contents: Record<string, string>): string {
   return src;
 }
 
-/** Accepts the names the agent store accepts. */
+/**
+ * Accepts the names the agent store accepts.
+ *
+ * @param name The skill name.
+ * @returns True for a name that can be installed.
+ */
 const valid = (name: string): boolean => /^[a-z0-9][a-z0-9-]{0,63}$/.test(name);
-
-// --- fetching -----------------------------------------------------------------
 
 test('a fetch checks out the default branch and returns its commit', async () => {
   const src = source({ 'skills/a/SKILL.md': 'one' });
@@ -65,7 +85,7 @@ test('a fetch checks out the default branch and returns its commit', async () =>
 
   assert.equal(commit, git(src, 'rev-parse', 'HEAD'));
   assert.equal(readFileSync(join(repo, 'tree', 'skills/a/SKILL.md'), 'utf8'), 'one');
-  // Only the checkout stays; the git directory goes after each fetch.
+  // Only the checkout stays. The git directory goes after each fetch.
   assert.equal(existsSync(join(repo, 'git.new')), false);
   assert.equal(existsSync(join(repo, 'tree', '.git')), false);
 });
@@ -107,8 +127,6 @@ test('a fetch for a repository removed meanwhile leaves nothing behind', async (
 
   assert.equal(existsSync(repo), false);
 });
-
-// --- finding skills -----------------------------------------------------------
 
 test('every directory with a SKILL.md is a skill, at any depth', () => {
   const tree = join(dir, 'tree');

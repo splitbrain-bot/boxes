@@ -1,3 +1,8 @@
+/**
+ * The SQLite database of the orchestrator, in WAL mode. The runtime holds the
+ * runtime state of the boxes, and the adapter holds the transcripts.
+ */
+
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,98 +15,94 @@ import type {
   ThreadModeState,
 } from '../../shared/types.ts';
 
-/**
- * SQLite persistence in WAL mode. The database holds box metadata only:
- * the runtime holds the runtime state, and the adapter holds the transcripts.
- */
-
 /** A row of the boxes table. */
 export interface BoxRow {
-  /** The server-generated box id. */
+  /** The box id, which the orchestrator makes. */
   id: string;
   /** The display name. */
   name: string;
   /** The credential profile. Every box is DEFAULT. */
   profile: string;
   /**
-   * The revision the review is compared against, as the user gave it, such as
-   * a branch, a tag or a short id. Null means each repository's working tree.
-   * Each repository in the workspace resolves it on its own, per request.
+   * The revision that the review compares against, as the user gave it, for
+   * example a branch, a tag or a short id. Null means the HEAD of each
+   * repository. Each repository in the workspace resolves it separately, for
+   * each request.
    */
   review_base_rev: string | null;
   /** The lifecycle state. A deleted box keeps its row as a tombstone. */
   status: BoxStatus;
   /**
-   * The extra agent set this box was created with, or null for the global
-   * set alone. Cleared by the database if that set is later deleted.
+   * The extra agent set of this box, or null for only the global set. The
+   * database clears it when the set is deleted.
    */
   agent_set_id: string | null;
-  /** The bearer token a WebSocket upgrade must present. It opens this box only. */
+  /** The bearer token that a WebSocket upgrade must give. It opens only this box. */
   ws_token: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
-  /** Epoch milliseconds of the last activity, read by the idle reaper. */
+  /** Epoch milliseconds of the last activity. The idle reaper reads it. */
   last_active_at: number;
   /** The last measured disk usage in bytes, or null before the first measurement. */
   disk_bytes: number | null;
-  /** Epoch milliseconds of that measurement, or null before the first. */
+  /** Epoch milliseconds of the last disk measurement, or null before the first. */
   disk_measured_at: number | null;
   /**
-   * Epoch milliseconds of when the setup in the box finished after its last
-   * container start, or null while the box is not ready.
+   * Epoch milliseconds of the end of the setup after the last container start,
+   * or null while the box is not ready.
    */
   ready_at: number | null;
 }
 
-/** One conversation of a box, as stored. */
+/** One stored thread of a box. */
 export interface ThreadRow {
   /** The thread id. */
   id: string;
   /** The box the thread belongs to. */
   box_id: string;
   /**
-   * Which agent runs this conversation, by its harness id. It is per thread,
-   * as one box may run both agents, and only the adapter that wrote a
-   * transcript can load it.
+   * The harness id of the agent of this thread. Each thread has its own
+   * harness, because one box can run both agents, and only the adapter that
+   * wrote a transcript can load it.
    */
   harness: HarnessId;
   /**
-   * The adapter's own id for the conversation, or null while the adapter has
-   * none. A thread that was never prompted does not survive an adapter restart.
+   * The session id of the thread in the adapter, or null while the adapter has
+   * none. A thread without a prompt loses its session at an adapter restart.
    */
   acp_session_id: string | null;
   /**
-   * What the thread is called: the title the agent generates at the end of a
-   * turn, or the first line of a prompt sent on it while it has none. Null on
-   * a thread that has never been prompted.
+   * The title of the thread. It is the title that the agent makes at the end
+   * of a turn, or the first line of a prompt while the thread has no title.
+   * Null for a thread without a prompt.
    */
   title: string | null;
-  /** Per box and never reused; what an untitled thread is called. */
+  /** The number of the thread in its box, never used again. It names a thread without a title. */
   ordinal: number;
   /** 1 while a prompt turn is running on this thread, else 0. */
   turn_active: number;
   /**
-   * The thread this one was forked from, until its first prompt. The adapter
-   * writes a fork's transcript only then, so until then the replay comes from
-   * the source thread.
+   * The source thread of a fork, until the first prompt of the fork. The
+   * adapter writes the transcript of a fork only at that prompt, so until then
+   * the replay comes from the source thread.
    */
   inherits_from: string | null;
   /**
-   * The mode this thread is meant to be in, or null for the deployment's
-   * default. Stored here, as a respawned adapter loads the conversation back
-   * without its mode.
+   * The intended mode of this thread, or null for the default of the
+   * deployment. The row stores it, because an adapter that starts again loads
+   * the session without its mode.
    */
   mode_id: string | null;
   /**
-   * The thread's other options, such as the model, as a JSON map of the
-   * adapter's option id to its value. Stored for the same reason as the mode.
-   * An option that echoes the mode is not stored here, so the two cannot
-   * drift apart.
+   * The other options of the thread, for example the model, as a JSON map from
+   * the option id of the adapter to its value. The row stores them, because an
+   * adapter that starts again loads the session without them. An option that
+   * repeats the mode is not stored here, so the two values cannot differ.
    */
   config: string;
   /**
-   * 1 once the reader has marked this conversation finished with. It changes
-   * only how the dashboard shows the thread.
+   * 1 when the user marked this thread done, else 0. The mark changes only how
+   * the dashboard shows the thread.
    */
   done: number;
   /** Epoch milliseconds of creation. */
@@ -110,64 +111,62 @@ export interface ThreadRow {
   last_active_at: number;
 }
 
-/** A permission request the adapter is still blocked on. */
+/** A permission request for which the adapter still waits. */
 export interface PendingRequestRow {
   /** The row id. */
   id: number;
-  /** The box whose adapter asked. */
+  /** The box of the adapter that asked. */
   box_id: string;
   /**
-   * The ACP thread that asked, so a browser gets only the requests for the
-   * thread it watches. Null only on old rows, which PendingStore.clearStale
-   * drops at boot.
+   * The ACP session that asked, so a browser gets only the requests for the
+   * thread that it shows. Null when the request names no session.
    */
   acp_session_id: string | null;
   /** The JSON-RPC method of the request. */
   method: string;
-  /** The JSON-encoded request params. */
+  /** The JSON-encoded params of the request. */
   params: string;
   /** Epoch milliseconds of arrival. */
   created_at: number;
 }
 
-/** One browser that has asked to be pushed to. */
+/** One browser that subscribed to push notifications. */
 export interface PushSubscriptionRow {
   /**
-   * The push service's opaque URL for this subscription, and its key. The same
-   * browser subscribing again gets the same endpoint.
+   * The opaque URL of the push service for this subscription, and the key of
+   * the row. A browser that subscribes again gets the same endpoint.
    */
   endpoint: string;
-  /** The subscriber's public key, uncompressed P-256, base64url. */
+  /** The public key of the subscriber, uncompressed P-256, base64url. */
   p256dh: string;
-  /** The subscriber's authentication secret, base64url. */
+  /** The authentication secret of the subscriber, base64url. */
   auth: string;
-  /** What the browser called itself when it registered; for the UI only. */
+  /** The name that the browser gave at registration, for the UI only. */
   label: string | null;
   /** Epoch milliseconds of the first registration. */
   created_at: number;
   /** Epoch milliseconds of the last successful push. */
   last_used_at: number;
   /**
-   * The VAPID public key the subscription was made under, or null on an old
-   * row. A push signed with another key is refused.
+   * The VAPID public key of the subscription, or null when the row has none. A
+   * push signed with another key is refused.
    */
   vapid_key: string | null;
 }
 
 /**
- * One named collection of agent configuration: an AGENTS.md, plus any number
- * of skills.
+ * One named agent set, with an AGENTS.md and any number of skills.
  *
- * The `global` set, seeded by its migration, applies to every box. A box may
- * name one more set at creation, whose contents are merged over the global
- * ones.
+ * The `global` set, which its migration inserts, applies to every box. A box
+ * can name one more set at creation, and the orchestrator merges its content
+ * over the global set.
  */
 export interface AgentSetRow {
   /** The set id. */
   id: string;
   /** The display name. */
   name: string;
-  /** This set's own AGENTS.md, or '' when it contributes none. */
+  /** The AGENTS.md of this set, or '' when it has none. */
   agents_md: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
@@ -175,11 +174,11 @@ export interface AgentSetRow {
   updated_at: number;
 }
 
-/** One skill belonging to an agent set. */
+/** One skill of an agent set. */
 export interface AgentItemRow {
   /** The set the skill belongs to. */
   set_id: string;
-  /** A safe single path component. */
+  /** The skill name, which is safe as one path component. */
   name: string;
   /** The SKILL.md content. */
   content: string;
@@ -189,13 +188,13 @@ export interface AgentItemRow {
   updated_at: number;
 }
 
-/** One git repository an agent set takes skills from. */
+/** One git repository that an agent set takes skills from. */
 export interface AgentRepoRow {
   /** The repository id, which also names its directory under DATA_DIR. */
   id: string;
   /** The set the repository belongs to. */
   set_id: string;
-  /** The HTTPS URL it is fetched from. */
+  /** The HTTPS URL for the fetch. */
   url: string;
   /** The branch, tag or commit to fetch, or '' for the default branch. */
   ref: string;
@@ -205,15 +204,15 @@ export interface AgentRepoRow {
   skills: string;
   /** Epoch milliseconds of the last pull, good or failed, or null before the first. */
   pulled_at: number | null;
-  /** Why the last pull failed, or null when it did not. */
+  /** The reason of the last failed pull, or null when the pull worked. */
   error: string | null;
   /** Epoch milliseconds of creation. */
   created_at: number;
 }
 
 /**
- * Schema migrations, applied in order and tracked by user_version. Exported,
- * so a test can build a database at an earlier version.
+ * The schema migrations, applied in order and tracked by user_version. The
+ * array is exported, so a test can build a database at an earlier version.
  */
 export const MIGRATIONS: string[] = [
   `
@@ -265,8 +264,9 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE sessions DROP COLUMN repo_url;
   `,
-  // A box owns several threads. The single acp_session_id column becomes
-  // one row per thread, and the box points at the one that is current.
+  // Adds the threads table. The migration copies the acp_session_id of each
+  // session into one thread row, points the session at that thread, and drops
+  // the column.
   `
   CREATE TABLE threads (
     id             TEXT PRIMARY KEY,
@@ -289,17 +289,18 @@ export const MIGRATIONS: string[] = [
 
   ALTER TABLE sessions DROP COLUMN acp_session_id;
   `,
-  // Threads run in parallel, so the turn flag and pending requests move onto
-  // the thread. No data moves: no turn survives the restart, and
-  // pending_requests is cleared at every boot.
+  // Adds the turn flag of each thread and the session id of each pending
+  // request, and drops the turn flag of the session. The migration copies no
+  // data, because no turn survives a restart, and the orchestrator clears
+  // pending_requests at each boot.
   `
   ALTER TABLE threads ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE pending_requests ADD COLUMN acp_session_id TEXT;
   ALTER TABLE sessions DROP COLUMN turn_active;
   `,
-  // Browsers subscribed to Web Push, keyed by the push service's endpoint.
-  // It must stay at this index: deployments that applied it are at
-  // user_version 6.
+  // Adds the table of the browsers that subscribed to Web Push, with the
+  // endpoint of the push service as key. The migration must stay at this index,
+  // because a deployment that applied it is at user_version 6.
   `
   CREATE TABLE push_subscriptions (
     endpoint     TEXT PRIMARY KEY,
@@ -310,22 +311,20 @@ export const MIGRATIONS: string[] = [
     last_used_at INTEGER NOT NULL
   );
   `,
-  // Workspaces become directories on the data volume. An existing box keeps
-  // its ws_volume and moves at its next start, when its container is
-  // recreated.
+  // Adds the workspace directory of each session on the data volume.
   `
   ALTER TABLE sessions ADD COLUMN workspace_dir TEXT;
   `,
-  // What a review remembers between requests. The annotations live in
-  // REVIEW.md in the workspace.
+  // Adds the review state of each session. REVIEW.md in the workspace holds
+  // the annotations.
   `
   ALTER TABLE sessions ADD COLUMN review_root TEXT;
   ALTER TABLE sessions ADD COLUMN review_base_rev TEXT;
   ALTER TABLE sessions ADD COLUMN review_base_commit TEXT;
   `,
-  // Agent sets: an AGENTS.md, skills and slash commands, managed from the
-  // dashboard. The `global` set is seeded here. Deleting a set clears the
-  // references of the boxes that named it.
+  // Adds the agent sets with an AGENTS.md, skills and slash commands, and
+  // inserts the `global` set. A deleted set clears the references of the boxes
+  // that named it.
   `
   CREATE TABLE agent_sets (
     id         TEXT PRIMARY KEY,
@@ -348,70 +347,72 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE sessions ADD COLUMN agent_set_id TEXT
     REFERENCES agent_sets(id) ON DELETE SET NULL;
   `,
-  // The source of a fork, whose transcript stands in until the first prompt.
+  // Adds the source thread of a fork, whose transcript stands in until the
+  // first prompt.
   `
   ALTER TABLE threads ADD COLUMN inherits_from TEXT;
   `,
-  // The mode and model a thread is meant to be in, for an adapter respawn.
-  // NULL means the deployment's default, so existing rows need no backfill.
+  // Adds the intended mode and model of a thread, for an adapter respawn. NULL
+  // means the default of the deployment, so the migration fills in no value.
   `
   ALTER TABLE threads ADD COLUMN mode_id TEXT;
   ALTER TABLE threads ADD COLUMN model_id TEXT;
   `,
-  // Nothing reads pending_requests.upstream_id.
+  // Drops pending_requests.upstream_id, which nothing reads.
   `
   ALTER TABLE pending_requests DROP COLUMN upstream_id;
   `,
-  // The review covers the whole workspace, and each repository resolves the
-  // base itself, so neither a root nor a single commit is stored. An old
-  // REVIEW.md in a subdirectory stays as an ordinary file.
+  // Drops the review root and the base commit. The review covers the whole
+  // workspace, and each repository resolves the base itself. A REVIEW.md in a
+  // subdirectory stays as an ordinary file.
   `
   ALTER TABLE sessions DROP COLUMN review_root;
   ALTER TABLE sessions DROP COLUMN review_base_commit;
   `,
-  // Homes become directories on the data volume. Only new boxes get one; an
-  // existing box keeps mounting its home_volume.
+  // Adds the home directory of each session on the data volume.
   `
   ALTER TABLE sessions ADD COLUMN home_dir TEXT;
   `,
-  // A local command belongs to its thread. The stored rows name no thread,
-  // so they are deleted.
+  // Adds the thread of each local command. The migration deletes the stored
+  // rows, because they name no thread.
   `
   DELETE FROM exec_log;
   ALTER TABLE exec_log ADD COLUMN thread_id TEXT;
   `,
-  // Whether the reader is finished with a conversation.
+  // Adds the done mark of a thread.
   `
   ALTER TABLE threads ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
   `,
-  // The id of the transcript entry a command was typed after, for replay.
+  // Adds the id of the transcript entry that a command was typed after, for replay.
   `
   ALTER TABLE exec_log ADD COLUMN after_id TEXT;
   `,
-  // A WebSocket token per box. SQLite draws randomblob per row, so every
-  // existing box gets its own token.
+  // Adds a WebSocket token for each box. SQLite runs randomblob for each row,
+  // so each stored box gets its own token.
   `
   ALTER TABLE sessions ADD COLUMN ws_token TEXT NOT NULL DEFAULT '';
   UPDATE sessions SET ws_token = lower(hex(randomblob(32)));
   `,
-  // ACP messages are logged to stderr, so acp_log has no reader or writer.
+  // Drops acp_log, which has no reader or writer. The orchestrator logs ACP
+  // messages to stderr.
   `
   DROP INDEX IF EXISTS idx_acp_log_session;
   DROP TABLE IF EXISTS acp_log;
   `,
-  // The VAPID key a browser subscribed under, so rows of another key can be
-  // dropped. Existing rows get no key.
+  // Adds the VAPID key that a browser subscribed under, so the rows of another
+  // key can be dropped. The stored rows get no key.
   `
   ALTER TABLE push_subscriptions ADD COLUMN vapid_key TEXT;
   `,
-  // exec_log has no reader or writer.
+  // Drops exec_log, which has no reader or writer.
   `
   DROP INDEX IF EXISTS idx_exec_log_session;
   DROP TABLE IF EXISTS exec_log;
   `,
-  // Credentials and settings, managed from the settings page. The secret is
-  // stored unencrypted, as the orchestrator must hand it to the proxy on every
-  // boot. Also the harness of each thread and the harness catalogue.
+  // Adds the credentials and the settings of the settings page. The secret is
+  // stored unencrypted, because the orchestrator must give it to the proxy at
+  // each boot. The migration also adds the harness of each thread and the
+  // harness catalogue.
   `
   CREATE TABLE credentials (
     id           TEXT PRIMARY KEY,
@@ -431,18 +432,18 @@ export const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL
   );
 
-  -- Which agent a thread runs, and its options beyond the mode. Existing
-  -- threads are Claude's. Both adapters call the model option "model".
+  -- The agent of each thread, and its options beyond the mode. The stored
+  -- threads get Claude. Both adapters call the model option "model".
   ALTER TABLE threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
   ALTER TABLE threads ADD COLUMN config  TEXT NOT NULL DEFAULT '{}';
   UPDATE threads SET config = json_object('model', model_id) WHERE model_id IS NOT NULL;
   ALTER TABLE threads DROP COLUMN model_id;
 
-  -- The harness registry holds the adapter argv, so the box does not.
+  -- Drops the adapter argv of the session. The harness registry holds it.
   ALTER TABLE sessions DROP COLUMN agent_cmd;
 
-  -- What each adapter last advertised, for a dialog that has no thread to ask
-  -- and must not start a box to find out.
+  -- The catalogue that each adapter last advertised, for a dialog that has no
+  -- thread to ask and must not start a box to find out.
   CREATE TABLE harness_catalog (
     harness        TEXT PRIMARY KEY,
     modes          TEXT NOT NULL,
@@ -450,8 +451,8 @@ export const MIGRATIONS: string[] = [
     seen_at        INTEGER NOT NULL
   );
   `,
-  // Sessions become boxes, so the name does not collide with ACP sessions.
-  // `acp_session_id` keeps its name, as it holds the adapter's own id.
+  // Renames sessions to boxes, so the name does not collide with ACP sessions.
+  // `acp_session_id` keeps its name, because it holds the id of the adapter.
   `
   ALTER TABLE sessions RENAME TO boxes;
   ALTER TABLE threads RENAME COLUMN session_id TO box_id;
@@ -461,12 +462,13 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_pending_box ON pending_requests(box_id);
   CREATE INDEX idx_threads_box ON threads(box_id, ordinal);
   `,
-  // A caller naming no thread gets the most recently active one.
+  // Drops the current thread of a box. A caller that names no thread gets the
+  // most recently active thread.
   `
   ALTER TABLE boxes DROP COLUMN current_thread_id;
   `,
-  // The dev tunnels boxes have hosted, so that the orchestrator can delete
-  // the ones nobody hosts any more. A row outlives its box on purpose.
+  // Adds the dev tunnels that boxes hosted, so the orchestrator can delete the
+  // tunnels that no box hosts. A row stays after its box on purpose.
   `
   CREATE TABLE tunnels (
     id             TEXT PRIMARY KEY,
@@ -477,16 +479,16 @@ export const MIGRATIONS: string[] = [
     created_at     INTEGER NOT NULL
   );
   `,
-  // Every box keeps its workspace and home in directories under DATA_DIR,
-  // named by its id, so no row records a volume or a path.
+  // Drops the volume and directory columns. Each box keeps its workspace and
+  // home in directories under DATA_DIR, named by its id.
   `
   ALTER TABLE boxes DROP COLUMN ws_volume;
   ALTER TABLE boxes DROP COLUMN home_volume;
   ALTER TABLE boxes DROP COLUMN workspace_dir;
   ALTER TABLE boxes DROP COLUMN home_dir;
   `,
-  // Skills replace slash commands, so the stored commands are deleted and an
-  // item is always a skill.
+  // Drops the kind of an agent item and deletes the stored slash commands, so
+  // each item is a skill.
   `
   CREATE TABLE agent_items_new (
     set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
@@ -502,8 +504,7 @@ export const MIGRATIONS: string[] = [
   DROP TABLE agent_items;
   ALTER TABLE agent_items_new RENAME TO agent_items;
   `,
-  // Git repositories an agent set takes more skills from, in the order the
-  // user added them.
+  // Adds the git repositories that an agent set takes skills from.
   `
   CREATE TABLE agent_repos (
     id         TEXT PRIMARY KEY,
@@ -518,11 +519,9 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_agent_repos_set ON agent_repos(set_id, created_at);
   `,
-  // The keys the orchestrator generates for itself, one JSON value per key.
-  // Each credential carries its own placeholder, and a box holds a
-  // placeholder only for the credentials stored when its container was
-  // created. Existing credentials get one here, with the prefix a real token
-  // of the service has.
+  // Adds the table of the keys that the orchestrator makes for itself, one JSON
+  // value for each key. Adds the placeholder of each credential, and gives each
+  // stored credential a placeholder with the prefix of a real token of the service.
   `
   CREATE TABLE app_keys (
     key        TEXT PRIMARY KEY,
@@ -539,22 +538,23 @@ export const MIGRATIONS: string[] = [
       WHEN 'devtunnels' THEN 'ghu_'
     END || hex(randomblob(18));
   `,
-  // The last measured disk usage of each box and when it was taken. The file
+  // Adds the last measured disk usage of each box and its time. The file
   // service in the box measures it, so a stopped box keeps the value of its
   // last measurement.
   `
   ALTER TABLE boxes ADD COLUMN disk_bytes INTEGER;
   ALTER TABLE boxes ADD COLUMN disk_measured_at INTEGER;
   `,
-  // When the setup in the box finished after its last container start, so a
-  // restart of the orchestrator does not run it again. Every existing box is
-  // set up, so it counts as ready until its next start.
+  // Adds the time at which the setup finished after the last container start,
+  // so a restart of the orchestrator does not run the setup again. The
+  // migration marks each stored box as ready until its next start.
   `
   ALTER TABLE boxes ADD COLUMN ready_at INTEGER;
   UPDATE boxes SET ready_at = created_at;
   `,
-  // The runtime finds the container, the network and the image of a box by
-  // the box id, and picks the subnet of a new network from the free ones.
+  // Drops the image, container, network and subnet columns and the counters
+  // table. The runtime finds the container, the network and the image of a box
+  // by the box id, and picks the subnet of a new network from the free ones.
   `
   ALTER TABLE boxes DROP COLUMN image;
   ALTER TABLE boxes DROP COLUMN container_id;
@@ -562,9 +562,9 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes DROP COLUMN subnet;
   DROP TABLE counters;
   `,
-  // API keys for services Boxes has no credential for. Each reaches every box
-  // as a placeholder in the variable it is named by, and the proxy swaps it on
-  // its hosts. The hosts are a JSON array.
+  // Adds the API keys for services without a credential in Boxes. Each key
+  // reaches every box as a placeholder in the variable with its name, and the
+  // proxy replaces it on its hosts. The hosts are a JSON array.
   `
   CREATE TABLE api_keys (
     name        TEXT PRIMARY KEY,
@@ -580,7 +580,13 @@ export const MIGRATIONS: string[] = [
 /** An open database handle. */
 export type Db = Database.Database;
 
-/** Opens boxes.db under dataDir, creating and migrating it as needed. */
+/**
+ * Opens boxes.db under dataDir, and creates and migrates it as needed.
+ *
+ * @param dataDir The data directory.
+ * @returns The open database.
+ * @throws {Error} When a newer build migrated the database.
+ */
 export function openDb(dataDir: string): Db {
   mkdirSync(dataDir, { recursive: true });
   const db = new Database(join(dataDir, 'boxes.db'));
@@ -592,8 +598,11 @@ export function openDb(dataDir: string): Db {
 }
 
 /**
- * Runs every migration the database has not applied yet, one per transaction.
- * Throws for a database a newer build migrated, as there is no migration back.
+ * Runs each migration that the database has not applied yet, one transaction
+ * for each.
+ *
+ * @param db The database.
+ * @throws {Error} When a newer build migrated the database, because no migration goes back.
  */
 function migrate(db: Db): void {
   const current = db.pragma('user_version', { simple: true }) as number;
@@ -619,8 +628,11 @@ function migrate(db: Db): void {
 }
 
 /**
- * Marks a box active now, which holds the idle reaper off. A deleted box is
- * left alone, as an upstream may still report after the delete.
+ * Marks a box active now, which delays the idle reaper. A deleted box stays
+ * unchanged, because an upstream can still report after the delete.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
  */
 export function touchBox(db: Db, boxId: string): void {
   db.prepare("UPDATE boxes SET last_active_at = ? WHERE id = ? AND status != 'deleted'").run(
@@ -629,23 +641,40 @@ export function touchBox(db: Db, boxId: string): void {
   );
 }
 
-// --- threads ----------------------------------------------------------------
-
-/** Every thread of a box, oldest first. */
+/**
+ * Lists the threads of a box.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
+ * @returns The rows, oldest first.
+ */
 export function listThreads(db: Db, boxId: string): ThreadRow[] {
   return db
     .prepare('SELECT * FROM threads WHERE box_id = ? ORDER BY ordinal ASC')
     .all(boxId) as ThreadRow[];
 }
 
-/** One thread by id, whichever box it belongs to. */
+/**
+ * Gives one thread by id, in any box.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ * @returns The row, or undefined when no thread has this id.
+ */
 export function getThread(db: Db, threadId: string): ThreadRow | undefined {
   return db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as ThreadRow | undefined;
 }
 
 /**
- * One thread by the adapter's own id for it, within a box and a harness. A
- * message on one adapter's connection can only be about that adapter's thread.
+ * Finds one thread by its session id in the adapter, in a box and a harness. A
+ * message on the connection of an adapter can only be about a thread of that
+ * adapter.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
+ * @param harness The harness of the adapter.
+ * @param acpSessionId The session id in the adapter.
+ * @returns The row, or undefined when no thread matches.
  */
 export function threadByAcpId(
   db: Db,
@@ -659,8 +688,11 @@ export function threadByAcpId(
 }
 
 /**
- * The box's most recently active thread, or undefined before it has one.
- * Ties go to the newer thread.
+ * Gives the most recently active thread of a box. A tie goes to the newer thread.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
+ * @returns The row, or undefined when the box has no thread.
  */
 export function latestThread(db: Db, boxId: string): ThreadRow | undefined {
   return db
@@ -671,25 +703,30 @@ export function latestThread(db: Db, boxId: string): ThreadRow | undefined {
     .get(boxId) as ThreadRow | undefined;
 }
 
-/** What a thread is created as. Everything but the harness has a default. */
+/** The data of a new thread. Each field except the harness has a default. */
 export interface NewThread {
   /** The agent that runs the thread. */
   harness: HarnessId;
-  /** The adapter's own id, or null for a thread whose conversation is minted later. */
+  /** The session id in the adapter, or null for a thread that gets its session later. */
   acpSessionId?: string | null;
-  /** The mode it is meant to be in, or null for its harness's default. */
+  /** The intended mode, or null for the default of its harness. */
   modeId?: string | null;
-  /** What it is configured with, by option id. */
+  /** The options of the thread, by option id. */
   config?: Record<string, string>;
-  /** The thread it was forked from, while it has no transcript of its own. */
+  /** The source thread of a fork, while the fork has no transcript of its own. */
   inheritsFrom?: string | null;
 }
 
 /**
  * Inserts a thread and returns its row.
  *
- * The ordinal is one past the highest the box has ever used, so a name like
- * "Thread 2" stays that thread's for good.
+ * The ordinal is one more than the highest ordinal of the box, so a name like
+ * "Thread 2" stays with that thread.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
+ * @param thread The data of the new thread.
+ * @returns The new row.
  */
 export function insertThread(db: Db, boxId: string, thread: NewThread): ThreadRow {
   const now = Date.now();
@@ -723,20 +760,35 @@ export function insertThread(db: Db, boxId: string, thread: NewThread): ThreadRo
   return row;
 }
 
-/** Records the adapter's own id for a thread, or clears it. */
+/**
+ * Records the session id of a thread in the adapter, or clears it.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ * @param acpSessionId The session id, or null to clear it.
+ */
 export function setThreadAcpId(db: Db, threadId: string, acpSessionId: string | null): void {
   db.prepare('UPDATE threads SET acp_session_id = ? WHERE id = ?').run(acpSessionId, threadId);
 }
 
 /**
- * Drops a fork's link to its source, once its first prompt gives it a
- * transcript that holds the source's history too.
+ * Removes the link of a fork to its source, when its first prompt gives it a
+ * transcript that also holds the history of the source.
+ *
+ * @param db The database.
+ * @param threadId The id of the fork.
  */
 export function clearThreadInheritance(db: Db, threadId: string): void {
   db.prepare('UPDATE threads SET inherits_from = NULL WHERE id = ?').run(threadId);
 }
 
-/** Records what a thread is called, or clears it back to its ordinal. */
+/**
+ * Records the title of a thread, or clears it, and marks the thread active.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ * @param title The title, or null to clear it.
+ */
 export function setThreadTitle(db: Db, threadId: string, title: string | null): void {
   db.prepare('UPDATE threads SET title = ?, last_active_at = ? WHERE id = ?').run(
     title,
@@ -746,24 +798,35 @@ export function setThreadTitle(db: Db, threadId: string, title: string | null): 
 }
 
 /**
- * Records the mode a thread is meant to be in, or clears it back to the
- * deployment's default.
+ * Records the intended mode of a thread, or clears it back to the default of
+ * the deployment.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ * @param modeId The mode id, or null for the default.
  */
 export function setThreadMode(db: Db, threadId: string, modeId: string | null): void {
   db.prepare('UPDATE threads SET mode_id = ? WHERE id = ?').run(modeId, threadId);
 }
 
 /**
- * Records a thread's other options, replacing the whole map. The adapter
- * answers a change with its full list of options.
+ * Records the other options of a thread and replaces the whole map. The
+ * adapter answers a change with its full list of options.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ * @param config The options, by option id.
  */
 export function setThreadConfig(db: Db, threadId: string, config: Record<string, string>): void {
   db.prepare('UPDATE threads SET config = ? WHERE id = ?').run(JSON.stringify(config), threadId);
 }
 
 /**
- * A thread's config column, parsed. Non-string values are dropped, and a
- * value that is not a JSON object reads as an empty map.
+ * Parses the config column of a thread. Values that are not strings are
+ * removed, and a value that is not a JSON object reads as an empty map.
+ *
+ * @param row The row of the thread.
+ * @returns The options, by option id.
  */
 export function threadConfig(row: ThreadRow): Record<string, string> {
   try {
@@ -779,22 +842,36 @@ export function threadConfig(row: ThreadRow): Record<string, string> {
 }
 
 /**
- * Marks a thread finished with, or takes the mark off again. It leaves
- * `last_active_at` alone, so the mark does not make the thread the latest.
+ * Marks a thread done, or removes the mark. `last_active_at` stays the same,
+ * so the mark does not make the thread the latest.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ * @param done True to set the mark, false to remove it.
  */
 export function setThreadDone(db: Db, threadId: string, done: boolean): void {
   db.prepare('UPDATE threads SET done = ? WHERE id = ?').run(done ? 1 : 0, threadId);
 }
 
-/** Marks a thread active now. */
+/**
+ * Marks a thread active now.
+ *
+ * @param db The database.
+ * @param threadId The id of the thread.
+ */
 export function touchThread(db: Db, threadId: string): void {
   db.prepare('UPDATE threads SET last_active_at = ? WHERE id = ?').run(Date.now(), threadId);
 }
 
 /**
- * Records whether a prompt turn is running on the thread the adapter knows by
- * `acpSessionId`, the id a prompt's params carry. Marks the thread and its box
- * active.
+ * Records if a prompt turn runs on the thread with the session id
+ * `acpSessionId`, which is the id in the params of a prompt. Marks the thread
+ * and its box active.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
+ * @param acpSessionId The session id of the thread in the adapter.
+ * @param active True while the turn runs.
  */
 export function setThreadTurnActive(
   db: Db,
@@ -814,12 +891,21 @@ export function setThreadTurnActive(
 /**
  * Clears the running-turn flag on every thread of a box, after a stop, an
  * adapter exit or boot reconciliation.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
  */
 export function clearBoxTurns(db: Db, boxId: string): void {
   db.prepare('UPDATE threads SET turn_active = 0 WHERE box_id = ?').run(boxId);
 }
 
-/** Whether any of a box's threads has a turn running. */
+/**
+ * Checks if a thread of a box has a running turn.
+ *
+ * @param db The database.
+ * @param boxId The id of the box.
+ * @returns True when a turn runs.
+ */
 export function boxTurnActive(db: Db, boxId: string): boolean {
   const row = db
     .prepare('SELECT 1 AS hit FROM threads WHERE box_id = ? AND turn_active = 1 LIMIT 1')
@@ -827,7 +913,12 @@ export function boxTurnActive(db: Db, boxId: string): boolean {
   return row !== undefined;
 }
 
-/** The box ids that have a turn running on any of their threads. */
+/**
+ * Finds the boxes with a running turn on one of their threads.
+ *
+ * @param db The database.
+ * @returns The ids of the boxes.
+ */
 export function boxesWithActiveTurns(db: Db): Set<string> {
   const rows = db
     .prepare('SELECT DISTINCT box_id FROM threads WHERE turn_active = 1')
@@ -835,12 +926,17 @@ export function boxesWithActiveTurns(db: Db): Set<string> {
   return new Set(rows.map((r) => r.box_id));
 }
 
-// --- push subscriptions -----------------------------------------------------
-
 /**
- * Records a browser's subscription, replacing whatever was stored for the
- * same endpoint. A browser re-subscribes on every load with the same
- * endpoint, so this keeps one row and refreshes rotated keys.
+ * Records the subscription of a browser and replaces the row with the same
+ * endpoint. A browser subscribes again at each load with the same endpoint,
+ * so the function keeps one row and updates the keys.
+ *
+ * @param db The database.
+ * @param endpoint The URL of the push service.
+ * @param p256dh The public key of the subscriber.
+ * @param auth The authentication secret of the subscriber.
+ * @param label The name that the browser gave, or null.
+ * @param vapidKey The current VAPID public key.
  */
 export function upsertPushSubscription(
   db: Db,
@@ -862,28 +958,46 @@ export function upsertPushSubscription(
 }
 
 /**
- * Deletes the subscriptions made under any key but this one, rows with no
- * key included, and returns how many went. The browser subscribes again on
- * its next visit.
+ * Deletes the subscriptions with another key or without a key. The browser
+ * subscribes again at its next visit.
+ *
+ * @param db The database.
+ * @param vapidKey The current VAPID public key.
+ * @returns The number of deleted subscriptions.
  */
 export function dropOtherKeySubscriptions(db: Db, vapidKey: string): number {
   return db.prepare('DELETE FROM push_subscriptions WHERE vapid_key IS NOT ?').run(vapidKey)
     .changes;
 }
 
-/** Every subscription this deployment would push to. */
+/**
+ * Lists every push subscription of this deployment.
+ *
+ * @param db The database.
+ * @returns The rows, oldest first.
+ */
 export function listPushSubscriptions(db: Db): PushSubscriptionRow[] {
   return db
     .prepare('SELECT * FROM push_subscriptions ORDER BY created_at ASC')
     .all() as PushSubscriptionRow[];
 }
 
-/** Deletes one subscription, for an unsubscribe or a gone subscription. */
+/**
+ * Deletes one subscription, for an unsubscribe or a subscription that the push service removed.
+ *
+ * @param db The database.
+ * @param endpoint The URL of the push service.
+ */
 export function deletePushSubscription(db: Db, endpoint: string): void {
   db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
 }
 
-/** Marks a subscription as delivered to just now. */
+/**
+ * Records a successful push to a subscription now.
+ *
+ * @param db The database.
+ * @param endpoint The URL of the push service.
+ */
 export function touchPushSubscription(db: Db, endpoint: string): void {
   db.prepare('UPDATE push_subscriptions SET last_used_at = ? WHERE endpoint = ?').run(
     Date.now(),
@@ -891,7 +1005,12 @@ export function touchPushSubscription(db: Db, endpoint: string): void {
   );
 }
 
-/** How many boxes exist that have not been deleted. */
+/**
+ * Counts the boxes that are not deleted.
+ *
+ * @param db The database.
+ * @returns The number of boxes.
+ */
 export function countLiveBoxes(db: Db): number {
   const row = db.prepare("SELECT COUNT(*) AS n FROM boxes WHERE status != 'deleted'").get() as {
     n: number;
@@ -899,7 +1018,12 @@ export function countLiveBoxes(db: Db): number {
   return row.n;
 }
 
-/** How many browsers are subscribed. */
+/**
+ * Counts the subscribed browsers.
+ *
+ * @param db The database.
+ * @returns The number of subscriptions.
+ */
 export function countPushSubscriptions(db: Db): number {
   const row = db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as {
     n: number;
@@ -907,26 +1031,29 @@ export function countPushSubscriptions(db: Db): number {
   return row.n;
 }
 
-// --- the harness catalogue ---------------------------------------------------
-
-/** One harness's cached answer, as stored. */
+/** The stored cached answer of one harness. */
 export interface HarnessCatalogRow {
   /** The harness id. */
   harness: string;
-  /** JSON: the `modes` of the last answer, or `null`. */
+  /** The `modes` of the last answer as JSON, or `null`. */
   modes: string;
-  /** JSON: the `configOptions` of the last answer. */
+  /** The `configOptions` of the last answer as JSON. */
   config_options: string;
   /** Epoch milliseconds of the last answer. */
   seen_at: number;
 }
 
 /**
- * Records what an adapter advertised, against its harness.
+ * Records the modes and the options that an adapter sent, for its harness.
  *
- * Called for every `session/new`, `session/load` and `session/fork` answer
- * that carries either list. A list the answer leaves out keeps its last
- * stored value.
+ * The adapter connection calls it for each `session/new`, `session/load` and
+ * `session/fork` answer with one of the lists. A list that the answer leaves
+ * out keeps its last stored value.
+ *
+ * @param db The database.
+ * @param harness The harness of the adapter.
+ * @param modes The modes of the answer, or null or undefined when it has none.
+ * @param configOptions The options of the answer, or null or undefined when it has none.
  */
 export function upsertHarnessCatalog(
   db: Db,
@@ -949,11 +1076,14 @@ export function upsertHarnessCatalog(
 }
 
 /**
- * What one harness's adapter last advertised, or null on a deployment that has
- * never run it.
+ * Reads the last modes and options of the adapter of one harness.
  *
- * It is a cache, which the adapter corrects on the thread's first answer. A
+ * It is a cache, which the first answer of the adapter in a thread corrects. A
  * row that cannot be parsed counts as no row.
+ *
+ * @param db The database.
+ * @param harness The harness.
+ * @returns The catalogue, or null on a deployment that never ran the harness.
  */
 export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog | null {
   const row = db.prepare('SELECT * FROM harness_catalog WHERE harness = ?').get(harness) as
@@ -971,9 +1101,13 @@ export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog |
   }
 }
 
-// --- the keys the orchestrator generates for itself ---------------------------
-
-/** The stored value under `key`, parsed from JSON, or undefined when there is none. */
+/**
+ * Reads the stored value under `key`.
+ *
+ * @param db The database.
+ * @param key The name of the key.
+ * @returns The value parsed from JSON, or undefined when there is none.
+ */
 export function readAppKey<T>(db: Db, key: string): T | undefined {
   const row = db.prepare('SELECT value FROM app_keys WHERE key = ?').get(key) as
     | { value: string }
@@ -981,7 +1115,13 @@ export function readAppKey<T>(db: Db, key: string): T | undefined {
   return row ? (JSON.parse(row.value) as T) : undefined;
 }
 
-/** Stores `value` under `key` as JSON, replacing what was there. */
+/**
+ * Stores `value` under `key` as JSON, and replaces the old value.
+ *
+ * @param db The database.
+ * @param key The name of the key.
+ * @param value The value.
+ */
 export function writeAppKey(db: Db, key: string, value: unknown): void {
   db.prepare(
     `INSERT INTO app_keys (key, value, created_at) VALUES (?, ?, ?)

@@ -28,7 +28,12 @@ import { type ProcessStream, type Runtime, setRuntime } from './runtime/runtime.
 /** The escape byte, spelled rather than typed, so the source stays printable. */
 const ESC = String.fromCharCode(27);
 
-/** Some output as a colouring CLI would actually write it. */
+/**
+ * Returns some output as a CLI that uses colour writes it.
+ *
+ * @param text The plain text.
+ * @returns The text between colour escapes.
+ */
 function coloured(text: string): string {
   return `${ESC}[1;32m${text}${ESC}[0m`;
 }
@@ -48,14 +53,20 @@ class FakeExec implements ProcessStream {
    * chunk as one keypress, so the split is part of what was sent.
    */
   chunks: string[] = [];
-  /** Whether the flow killed the command. */
+  /** True when the flow killed the command. */
   killed = false;
   /** Resolves with the exit code, or null when the command was killed. */
   readonly exited: Promise<number | null>;
-  /** Resolves exited. */
+  /** Resolves `exited`. */
   private settle: (code: number | null) => void = () => {};
 
-  constructor(readonly spec: LoginExecSpec) {
+  /**
+   * @param spec The spec that the command was started with.
+   */
+  constructor(
+    /** The spec the command was started with. */
+    readonly spec: LoginExecSpec,
+  ) {
     this.stdin.on('data', (chunk: Buffer) => {
       this.input += chunk.toString('utf8');
       this.chunks.push(chunk.toString('utf8'));
@@ -65,12 +76,20 @@ class FakeExec implements ProcessStream {
     });
   }
 
-  /** Writes text to the command's output. */
+  /**
+   * Writes text to the command's output.
+   *
+   * @param text The text.
+   */
   print(text: string): void {
     this.stdout.write(text);
   }
 
-  /** The command exits, which is what ends its output. */
+  /**
+   * Ends the output, and exits.
+   *
+   * @param code The exit code.
+   */
   end(code = 0): void {
     this.stdout.end();
     this.settle(code);
@@ -99,7 +118,11 @@ interface Fake {
   execs: FakeExec[];
 }
 
-/** Creates a fake runtime with nothing started. */
+/**
+ * Creates a fake runtime with nothing started.
+ *
+ * @returns The fake.
+ */
 function fakeRuntime(): Fake {
   const fake: Fake = {
     started: [],
@@ -138,7 +161,12 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-/** Waits for something the flow does on its own, or fails the test when it does not happen. */
+/**
+ * Waits for something the flow does on its own, or fails the test when it does not happen.
+ *
+ * @param what The thing to wait for, for the failure message.
+ * @param ready Returns true once the thing happened.
+ */
 async function until(what: string, ready: () => boolean): Promise<void> {
   for (let i = 0; i < 500; i += 1) {
     if (ready()) return;
@@ -147,13 +175,24 @@ async function until(what: string, ready: () => boolean): Promise<void> {
   assert.fail(`timed out waiting for ${what}`);
 }
 
-/** A JWT as the two services mint them: three parts, only one of them read. */
+/**
+ * Returns a JWT in the form the two services mint. Of its three parts, only the claims are read.
+ *
+ * @param claims The claims.
+ * @returns The JWT, with a fake header and signature.
+ */
 function jwt(claims: Record<string, unknown>): string {
   const body = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
   return `header.${body}.signature`;
 }
 
-/** What `codex login --device-auth` leaves behind. */
+/**
+ * Returns the auth.json that `codex login --device-auth` leaves behind.
+ *
+ * @param expSeconds The expiry of the access token, in epoch seconds.
+ * @param email The email address in the id token.
+ * @returns The JSON document.
+ */
 function authJson(expSeconds: number, email = 'someone@example.com'): string {
   return JSON.stringify({
     OPENAI_API_KEY: null,
@@ -167,10 +206,15 @@ function authJson(expSeconds: number, email = 'someone@example.com'): string {
   });
 }
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
+/** The credential store that the logins write to. */
 let store: CredentialStore;
+/** The fake runtime of the current test. */
 let fake: Fake;
+/** The login manager of the current test. */
 let logins: LoginManager;
 
 beforeEach(() => {
@@ -238,7 +282,6 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   assert.equal(row?.secret, document);
   assert.equal(row?.account, 'someone@example.com');
   assert.equal(row?.expires_at, 1_800_000_000_000);
-  // The container it ran in is removed.
   await until('the container to be removed', () => fake.removed.length === 1);
   assert.deepEqual(fake.removed, [fake.started[0]]);
 });
@@ -262,8 +305,8 @@ test('the Claude flow takes a code back and stores the token it prints', async (
   const loginId = logins.start('claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
-  // An Ink UI: it refuses to run without a terminal, and the code goes back
-  // up the same stream.
+  // The CLI is an Ink UI. It refuses to run without a terminal, and the code
+  // goes back up the same stream.
   assert.equal(cli.spec.tty, true);
   assert.match(cli.spec.cmd.join(' '), /claude setup-token/);
 
@@ -282,8 +325,8 @@ test('the Claude flow takes a code back and stores the token it prints', async (
 
   logins.submitCode('claude', loginId, '  the-code-from-the-page  ');
   await until('the code to be entered', () => cli.input.endsWith('\r'));
-  // A carriage return, which is what the Enter key sends: the UI reads its
-  // terminal raw, and a newline is typed rather than entered.
+  // A carriage return is what the Enter key sends. The UI reads its terminal
+  // raw, so a newline is typed rather than entered.
   assert.equal(cli.input, 'the-code-from-the-page\r');
 
   cli.print('\nsk-ant-oat01-abcdefghijklmnop1234\n');
@@ -341,8 +384,8 @@ test('a code sent before the prompt is drawn still reaches the CLI', async () =>
   cli.print('Visit: https://claude.ai/oauth/authorize\n');
   await until('the URL', () => logins.state('claude', loginId).state === 'awaiting_browser');
 
-  // Whether the prompt has been drawn is a race about terminal output; the
-  // stream takes the answer either way.
+  // The prompt can be drawn before or after the code arrives. The stream
+  // takes the code either way.
   logins.submitCode('claude', loginId, 'early');
   await until('the code to be entered', () => cli.input.endsWith('\r'));
   assert.equal(cli.input, 'early\r');
@@ -355,8 +398,9 @@ test('the return that enters a code is a keypress of its own', async () => {
   cli.print('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
   await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
 
-  // The length of a real one. A short code hides this: it arrives in a chunk
-  // small enough that the UI reads the return in it as the key either way.
+  // A real code has this length. A short code hides the problem, because it
+  // arrives in a chunk small enough that the UI reads the return in it as the
+  // key either way.
   const code = 'a'.repeat(92);
   logins.submitCode('claude', loginId, code);
   await until('the code to be entered', () => cli.input.endsWith('\r'));
@@ -374,8 +418,8 @@ test('a code the CLI refuses is shown, and the login stays open for another', as
   await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
 
   logins.submitCode('claude', loginId, 'the-wrong-one');
-  // The CLI's own complaint, with the prompt drawn again underneath: it is
-  // asking for another code rather than ending.
+  // The CLI prints its complaint and draws the prompt again underneath,
+  // because it asks for another code rather than ending.
   const complaint = 'Invalid code. Please make sure the full code was copied.';
   cli.print(`\r\nOAuth error: ${complaint}\r\nPaste code here if prompted > `);
   await until('the refusal to be read', () => {
@@ -384,8 +428,8 @@ test('a code the CLI refuses is shown, and the login stays open for another', as
   });
   const refused = logins.state('claude', loginId);
   assert.equal(refused.state, 'awaiting_code');
-  // The CLI's own words, whole: the screen it is read off kept every
-  // character it drew.
+  // The error holds the whole complaint, because the screen keeps every
+  // character the CLI drew.
   assert.equal(refused.state === 'awaiting_code' ? refused.error : null, complaint);
 
   // Sending another code clears the previous refusal at once.
@@ -436,9 +480,12 @@ test('a second login cancels the first, and the first id stops resolving', async
 });
 
 /**
- * A GitHub that answers the device login from a script: the device code
- * first, then one answer per poll. It records every POST and every account
- * lookup.
+ * Returns a fake GitHub that answers the device login from a script. It sends
+ * the device code first, then one answer per poll. It records every POST and
+ * every account lookup.
+ *
+ * @param polls The answers to the polls, in order.
+ * @returns The fake client, its recorded POSTs and its recorded lookups.
  */
 function fakeGitHub(polls: TokenAnswer[]): {
   github: GitHubClient;
@@ -489,7 +536,7 @@ test('the Dev Tunnels flow shows GitHub’s code and stores both tokens', async 
   });
 
   await until('the login', () => manager.state('devtunnels', loginId).state === 'done');
-  // The orchestrator runs the device flow itself: no container is started.
+  // The orchestrator runs the device flow itself, so no container starts.
   assert.deepEqual(fake.started, []);
   assert.deepEqual(calls[0]?.body, { client_id: DEVTUNNELS_CLIENT_ID, scope: 'read:user' });
   assert.equal(calls[1]?.url, GITHUB_TOKEN_URL);
@@ -558,8 +605,6 @@ test('a code is refused when no login is waiting for one', async () => {
     (err: unknown) => err instanceof HttpError && err.statusCode === 404,
   );
 });
-
-// --- reading what a CLI printed ----------------------------------------------
 
 test('terminal escapes are removed before anything is read', () => {
   assert.equal(stripAnsi(`${ESC}[1mbold${ESC}[0m`), 'bold');

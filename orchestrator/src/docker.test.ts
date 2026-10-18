@@ -11,7 +11,9 @@ import { type Db, openDb } from './db.ts';
 import { createContainer, createLoginContainer, setDockerForTests } from './docker.ts';
 import { EgressManager } from './egress.ts';
 
+/** The temporary data directories of the current test. */
 let dirs: string[] = [];
+/** The open databases of the current test. */
 let dbs: Db[] = [];
 
 afterEach(() => {
@@ -21,7 +23,11 @@ afterEach(() => {
   dirs = [];
 });
 
-/** Creates a temporary data directory that afterEach removes. */
+/**
+ * Creates a temporary data directory that afterEach removes.
+ *
+ * @returns The path of the directory.
+ */
 function dataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'boxes-docker-'));
   dirs.push(dir);
@@ -29,8 +35,13 @@ function dataDir(): string {
 }
 
 /**
- * A deployment: a config, a credential store holding whatever was passed, and
- * a prepared egress manager over both.
+ * Creates a deployment with a config, a credential store with the given
+ * secrets, and a prepared egress manager.
+ *
+ * @param secrets The secret of each stored credential.
+ * @param over The config variables that replace the defaults.
+ * @param methods The method of each stored credential. The default is a token.
+ * @returns The config, the database and the egress manager.
  */
 async function deployment(
   secrets: Partial<Record<CredentialId, string>> = {},
@@ -50,7 +61,11 @@ async function deployment(
 }
 
 describe('the container template', () => {
-  /** Captures what createContainer would ask the daemon for. */
+  /**
+   * Captures the options that createContainer sends to the daemon.
+   *
+   * @returns The options of the create call.
+   */
   async function capture(): Promise<Record<string, unknown>> {
     const { cfg } = await deployment();
 
@@ -83,33 +98,32 @@ describe('the container template', () => {
   it('binds the workspace, the home and the nix store from host paths', async () => {
     const opts = await capture();
     const host = opts.HostConfig as { Binds: string[] };
-    // Paths, not volume names: the orchestrator reads these files itself, for
-    // review and to measure the size of a box.
+    // The binds use paths and not volume names, because the workspace, the home
+    // and the Nix store are directories on the data volume.
     assert.deepEqual(host.Binds, [
       '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234:/workspace',
       '/var/lib/docker/volumes/boxes-data/_data/homes/abcd1234:/home/agent',
-      // At /nix and nowhere else: the binary cache is built against that
-      // path, and nothing in it would substitute anywhere else.
+      // The store must be at /nix, because the binary cache is built for that
+      // path, and its content would not substitute at another path.
       '/var/lib/docker/volumes/boxes-data/_data/nix/abcd1234:/nix',
     ]);
   }, 30_000);
 
   it("runs as the configured uid and gid, not the image's user name", async () => {
     const opts = await capture();
-    // Numbers, so BOX_UID alone decides who a box runs as. The default avoids
-    // 1000, which on a host usually belongs to a person.
+    // The user is numbers, so only BOX_UID decides the user of a box. The default
+    // avoids 1000, which on a host usually belongs to a person.
     assert.equal(opts.User, '1020:1020');
   }, 30_000);
 
   it('tells an outside updater to leave box containers alone', async () => {
     const opts = await capture();
     const labels = opts.Labels as Record<string, string>;
-    // The box id is how Boxes finds its own containers again.
+    // Boxes finds its containers again by the box id.
     assert.equal(labels['boxes.box'], 'abcd1234');
     // This label tells an updater to leave the container alone. A recreated
-    // container loses its id in the database and its proxy attachment, which
-    // is the box's only way out. The orchestrator moves boxes onto a new image
-    // itself, at start.
+    // container loses its proxy attachment, which is the only way out of the
+    // box. The orchestrator moves boxes to a new image itself, at start.
     assert.equal(labels['com.centurylinklabs.watchtower.enable'], 'false');
   }, 30_000);
 
@@ -123,9 +137,9 @@ describe('the container template', () => {
     assert.deepEqual(host.SecurityOpt, ['no-new-privileges:true']);
   }, 30_000);
 
-  // The box image drops Playwright's --disable-dev-shm-usage because of this
-  // size. Without it, Chromium gets Docker's 64 MB /dev/shm and reports the
-  // exhaustion as a closed target on a large page.
+  // The playwright-cli config of the box image drops the Playwright flag
+  // --disable-dev-shm-usage because of this size. Without this size, Chromium gets the 64 MB /dev/shm of Docker and
+  // reports the full memory as a closed target on a large page.
   it('gives the browser enough shared memory to not need the flag', async () => {
     const opts = await capture();
     const host = opts.HostConfig as Record<string, unknown>;
@@ -134,7 +148,11 @@ describe('the container template', () => {
 });
 
 describe('the login container', () => {
-  /** What createLoginContainer would ask the daemon for. */
+  /**
+   * Captures the options that createLoginContainer sends to the daemon.
+   *
+   * @returns The options of the create call.
+   */
   async function capture(): Promise<Record<string, unknown>> {
     let opts: Record<string, unknown> = {};
     setDockerForTests({
@@ -170,8 +188,9 @@ describe('the login container', () => {
 
   it('sits on the default bridge, which is the point of it', async () => {
     const opts = await capture();
-    // The one container Boxes creates with a route out of its own: the login
-    // hosts are the service's, not the deployment's, and it lives for minutes.
+    // It is the only container of Boxes with its own route out. The login hosts
+    // belong to the service and not to the deployment, and the container lives
+    // for minutes.
     assert.equal((opts.HostConfig as Record<string, unknown>).NetworkMode, 'bridge');
   }, 30_000);
 

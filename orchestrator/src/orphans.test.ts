@@ -16,17 +16,21 @@ interface Fake {
   containers: Map<string, { boxId: string; running: boolean }>;
   /** Login containers, which belong to a credential rather than to a box. */
   logins: Map<string, { credentialId: string; createdAt: number }>;
-  /** Network name to the id of the box it is labelled with. */
+  /** The id of the box that each network is labelled with, by network name. */
   networks: Map<string, string>;
   /** Names of objects the sweep removed, in the order it removed them. */
   removed: string[];
   /** Objects the daemon refuses to remove, by name. */
   stuck: Set<string>;
-  /** Run as the daemon answers a listing, for what happens mid-sweep. */
+  /** Runs as the daemon answers a listing, to simulate events during a sweep. */
   whileListing?: () => void;
 }
 
-/** Installs a Docker client that lists and removes the objects of the fake. */
+/**
+ * Installs a Docker client that lists and removes the objects of the fake.
+ *
+ * @param fake The fake daemon.
+ */
 function install(fake: Fake): void {
   const refuse = (name: string): void => {
     if (fake.stuck.has(name)) throw Object.assign(new Error('in use'), { statusCode: 409 });
@@ -38,8 +42,8 @@ function install(fake: Fake): void {
         State: c.running ? 'running' : 'exited',
         Labels: { [dk.LABEL]: c.boxId },
       })),
-      // The daemon answers one listing; each caller's own label filter is
-      // what picks its own containers out of it.
+      // The daemon answers with one listing. The label filter of each caller
+      // picks its own containers from it.
       ...[...fake.logins].map(([id, l]) => ({
         Id: id,
         State: 'running',
@@ -86,12 +90,21 @@ function install(fake: Fake): void {
   } as unknown as Docker);
 }
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** The database of the current test. */
 let db: Db;
+/** The orchestrator of the current test. */
 let orchestrator: Orchestrator;
+/** The fake daemon of the current test. */
 let fake: Fake;
 
-/** Inserts a box row. */
+/**
+ * Inserts a box row.
+ *
+ * @param id The box id.
+ * @param status The status of the box.
+ */
 function insertBox(id: string, status = 'stopped'): void {
   const now = Date.now();
   db.prepare(
@@ -100,7 +113,11 @@ function insertBox(id: string, status = 'stopped'): void {
   ).run(id, status, now, now);
 }
 
-/** The Docker objects and the directories one box owns. */
+/**
+ * Inserts the Docker objects and the directories that one box owns.
+ *
+ * @param id The box id.
+ */
 function insertObjects(id: string): void {
   fake.containers.set(`box-${id}`, { boxId: id, running: false });
   fake.networks.set(`bn-${id}`, id);
@@ -112,17 +129,32 @@ function insertObjects(id: string): void {
   writeFileSync(join(nix, 'store'), 'and installed things');
 }
 
-/** The workspace directory of a box. */
+/**
+ * Returns the workspace directory of a box.
+ *
+ * @param id The box id.
+ * @returns The path.
+ */
 function workspaceOf(id: string): string {
   return ws.workspacePath(orchestrator.cfg.DATA_DIR, id);
 }
 
-/** The home directory of a box. */
+/**
+ * Returns the home directory of a box.
+ *
+ * @param id The box id.
+ * @returns The path.
+ */
 function homeOf(id: string): string {
   return ws.homePath(orchestrator.cfg.DATA_DIR, id);
 }
 
-/** The Nix store directory of a box. */
+/**
+ * Returns the Nix store directory of a box.
+ *
+ * @param id The box id.
+ * @returns The path.
+ */
 function nixOf(id: string): string {
   return ws.nixPath(orchestrator.cfg.DATA_DIR, id);
 }
@@ -163,8 +195,8 @@ describe('sweeping objects no box owns', () => {
 
     assert.deepEqual(fake.removed, ['box-gone', 'bn-gone']);
     assert.ok(!existsSync(workspaceOf('gone')));
-    // The home and the store are the bigger part: the caches and whatever
-    // the agent installed at runtime are in them.
+    // The home and the store are the bigger part, because they hold the caches
+    // and whatever the agent installed at runtime.
     assert.ok(!existsSync(homeOf('gone')));
     assert.ok(!existsSync(nixOf('gone')));
     // Nothing of the live box is touched.
@@ -222,7 +254,7 @@ describe('sweeping objects no box owns', () => {
 
     await orchestrator.manager.sweepOrphans();
 
-    // The network stays for the next sweep; nothing behind it is held up.
+    // The network stays for the next sweep. Nothing behind it is held up.
     assert.deepEqual(fake.removed, ['box-gone']);
     assert.ok(fake.networks.has('bn-gone'));
     assert.ok(!existsSync(workspaceOf('gone')));
@@ -268,8 +300,8 @@ describe('sweeping objects no box owns', () => {
   });
 
   it('refuses to sweep for a database that knows of no box at all', async () => {
-    // A data volume mounted from the wrong place, or replaced: the rows are
-    // gone but the host's boxes are not. Their homes could not be recovered.
+    // A data volume mounted from the wrong place, or replaced, has no rows, but
+    // the boxes on the host remain. Their homes could not be recovered.
     insertObjects('orphan-by-accident');
 
     await orchestrator.manager.sweepOrphans();
@@ -280,9 +312,9 @@ describe('sweeping objects no box owns', () => {
   });
 
   it('refuses when the host holds far more boxes than the database knows of', async () => {
-    // The same wrong database, a minute later: somebody whose dashboard looked
-    // empty created a box in it. One row must not disarm the guard, so it
-    // is a ratio rather than an empty table.
+    // A minute later on the same wrong database, somebody whose dashboard
+    // looked empty created a box in it. One row must not disarm the guard, so
+    // the guard uses a ratio rather than an empty table.
     insertBox('created-against-the-wrong-database');
     for (const id of ['a', 'b', 'c', 'd']) insertObjects(id);
 
@@ -306,9 +338,8 @@ describe('sweeping objects no box owns', () => {
 
   it('takes the files of a box whose Docker objects are already gone', async () => {
     insertBox('keep');
-    // The shape a failed teardown leaves: it removes the container and the
-    // network first, so a box it gave up on halfway is its directories and
-    // nothing else.
+    // A failed teardown removes the container and the network first, so a box
+    // it gave up on halfway has only its directories left.
     insertObjects('half-torn-down');
     fake.containers.delete('box-half-torn-down');
     fake.networks.delete('bn-half-torn-down');
@@ -321,8 +352,8 @@ describe('sweeping objects no box owns', () => {
   });
 
   it('sweeps for a deployment whose boxes have all been deleted', async () => {
-    // The tombstone is what tells the two cases apart: this database made
-    // these objects, and one of its teardowns did not finish.
+    // The tombstone row tells the two cases apart. It shows that this database
+    // made these objects, and that one of its teardowns did not finish.
     insertBox('gone', 'deleted');
     insertObjects('gone');
 

@@ -47,16 +47,21 @@ export const LOGIN_POLICY = 'boxes-login';
 
 /** The names of the objects of a box. */
 export const names = {
-  /** Name of the pod, the policy and the claim of a box. */
+  /**
+   * Gives the name of the pod, the policy and the claim of a box.
+   *
+   * @param id The id of the box.
+   * @returns The name.
+   */
   box: (id: string) => `box-${id}`,
 };
 
-/** The grace period of a stop, as on Docker. */
+/** The grace period of a stop in seconds, as on Docker. */
 const STOP_GRACE_SECONDS = 10;
 
 /**
- * Reasons of a waiting container that do not go away without a change, so a
- * start that sees one fails at once.
+ * Reasons of a waiting container that make a start fail at once. They report
+ * an image that the kubelet cannot pull or a container that it cannot create.
  */
 const FATAL_WAITING = new Set([
   'ErrImagePull',
@@ -68,9 +73,8 @@ const FATAL_WAITING = new Set([
 ]);
 
 /**
- * Address ranges a login pod must not reach: the ranges the egress proxy
- * also refuses. The pod and Service ranges of nearly every cluster are in
- * them.
+ * Address ranges a login pod must not reach. The egress proxy refuses them
+ * too. The pod and Service ranges of nearly every cluster are in them.
  */
 const PRIVATE_V4 = [
   '10.0.0.0/8',
@@ -80,27 +84,30 @@ const PRIVATE_V4 = [
   '169.254.0.0/16',
 ];
 
-/** The IPv6 counterparts of {@link PRIVATE_V4}: unique local and link-local. */
+/** The IPv6 counterparts of {@link PRIVATE_V4}, unique local and link-local. */
 const PRIVATE_V6 = ['fc00::/7', 'fe80::/10'];
 
 /** The clients of the Kubernetes API that the runtime uses, and its namespace. */
 export interface KubeClients {
   /** The namespace that holds the boxes, the proxy and the orchestrator. */
   namespace: string;
-  /** Pods, claims and Services. */
+  /** The client for pods, claims and Services. */
   core: CoreV1Api;
-  /** Network policies. */
+  /** The client for network policies. */
   networking: NetworkingV1Api;
-  /** The exec of a process in a pod. */
+  /** The client that starts a process in a pod. */
   exec: Pick<Exec, 'exec'>;
 }
 
 /**
  * Connects with the kubeconfig of this process, or with the service account
  * of its pod in the cluster. The namespace is the one of the context, which
- * in the cluster is the namespace of the pod.
+ * in the cluster is the namespace of the pod. It is `default` when the
+ * context names none.
  *
  * @param context The kubeconfig context to use. The current context when absent.
+ * @returns The clients and the namespace.
+ * @throws Error when the kubeconfig has no context of that name.
  */
 export function connect(context?: string): KubeClients {
   const kc = new KubeConfig();
@@ -121,7 +128,7 @@ export function connect(context?: string): KubeClients {
 export interface Timing {
   /** The time between two reads of a pod that starts or stops. */
   pollMs: number;
-  /** How long a pod may take to run: to be scheduled, to get its volume and its image. */
+  /** How long a pod may take to run. The time includes scheduling, the volume and the image pull. */
   startMs: number;
   /** How long a deleted pod may take to go. */
   stopMs: number;
@@ -145,28 +152,34 @@ interface ProxyService {
 }
 
 /**
- * Runs boxes as pods in the namespace of the orchestrator.
+ * The runtime that runs the boxes as pods in the namespace of the orchestrator.
  *
  * A box is a pod, a volume claim and a network policy with the same name.
  */
 export class KubernetesRuntime implements Runtime {
-  /** The proxy Service, as prepare() read it. */
+  /** The proxy Service, as prepare() read it, or null before prepare(). */
   private proxy: ProxyService | null = null;
 
+  /**
+   * Creates the runtime.
+   *
+   * @param cfg The configuration of the deployment.
+   * @param kube The clients of the API. By default, the clients of {@link connect}.
+   * @param timing The waits. Tests make them short.
+   */
   constructor(
-    /** The deployment's configuration. */
+    /** The configuration of the deployment. */
     private readonly cfg: Config,
     /** The clients of the API. */
     private readonly kube: KubeClients = connect(),
-    /** The waits. Tests make them short. */
+    /** The waits. */
     private readonly timing: Timing = TIMING,
   ) {}
 
-  // --- boot -------------------------------------------------------------------
-
   /**
-   * Reads the Service of the egress proxy. Throws when the Service cannot be
-   * read, or has no cluster IP, no selector or no proxy port.
+   * Reads the Service of the egress proxy.
+   *
+   * @throws Error when the Service cannot be read, or has no cluster IP, no selector or no proxy port.
    */
   async prepare(): Promise<void> {
     const name = this.cfg.EGRESS_PROXY_SERVICE;
@@ -190,9 +203,11 @@ export class KubernetesRuntime implements Runtime {
     log.info('found the egress proxy', { service: name, ip, namespace: this.kube.namespace });
   }
 
-  // --- storage ----------------------------------------------------------------
-
-  /** Creates the claim of a box from the default storage class. */
+  /**
+   * Creates the claim of a box from the default storage class.
+   *
+   * @param boxId The id of the box.
+   */
   async createStorage(boxId: string): Promise<void> {
     await this.kube.core.createNamespacedPersistentVolumeClaim({
       namespace: this.kube.namespace,
@@ -206,7 +221,12 @@ export class KubernetesRuntime implements Runtime {
     });
   }
 
-  /** The claim, when it is gone or is being deleted. */
+  /**
+   * Checks the claim of a box.
+   *
+   * @param boxId The id of the box.
+   * @returns A description of the claim when it is gone or is being deleted, else nothing.
+   */
   async missingStorage(boxId: string): Promise<string[]> {
     const name = names.box(boxId);
     const claim = await absentAsNull(() =>
@@ -219,16 +239,19 @@ export class KubernetesRuntime implements Runtime {
   /**
    * Deletes the claim and waits until it is gone. The storage class decides
    * what happens to the volume.
+   *
+   * @param boxId The id of the box.
+   * @throws Error when a pod still uses the claim after the stop time.
    */
   async removeStorage(boxId: string): Promise<void> {
     await this.deleteClaim(names.box(boxId));
   }
 
-  // --- lifecycle --------------------------------------------------------------
-
   /**
    * Creates the policy of a box, or replaces it when its spec differs. The pod
    * is made at each start, so there is nothing else to repair.
+   *
+   * @param box The id and the environment of the box.
    */
   async ensure(box: BoxSpec): Promise<void> {
     const wanted = this.boxPolicy(box.boxId);
@@ -260,6 +283,9 @@ export class KubernetesRuntime implements Runtime {
    * example after an out-of-memory kill, or that is being deleted, goes first,
    * so the new pod never competes with it for the volume. A pod that cannot
    * start is deleted again, so the box does not read as running.
+   *
+   * @param box The id and the environment of the box.
+   * @throws Error when the pod ends, cannot start, or does not run within the start time.
    */
   async start(box: BoxSpec): Promise<void> {
     const name = names.box(box.boxId);
@@ -280,12 +306,21 @@ export class KubernetesRuntime implements Runtime {
     }
   }
 
-  /** Deletes the pod with a 10 second grace period, and waits until it is gone. The claim stays. */
+  /**
+   * Deletes the pod with a 10 second grace period, and waits until it is gone. The claim stays.
+   *
+   * @param boxId The id of the box.
+   * @throws Error when the pod is still there after the stop time.
+   */
   async stop(boxId: string): Promise<void> {
     await this.deletePod(names.box(boxId), STOP_GRACE_SECONDS);
   }
 
-  /** Deletes the pod and the policy. */
+  /**
+   * Deletes the pod and the policy.
+   *
+   * @param boxId The id of the box.
+   */
   async remove(boxId: string): Promise<void> {
     await this.stop(boxId);
     await absentAsNull(() =>
@@ -296,7 +331,14 @@ export class KubernetesRuntime implements Runtime {
     );
   }
 
-  /** A pod that runs or starts is running. No pod, or a pod that ended, is stopped. */
+  /**
+   * Reads the state of the pod. A pod that runs or starts is running. No pod,
+   * or a pod that ended, is stopped. A failed read or the pod phase Unknown
+   * gives unknown.
+   *
+   * @param boxId The id of the box.
+   * @returns The state of the box.
+   */
   async state(boxId: string): Promise<RuntimeState> {
     let pod: V1Pod | null;
     try {
@@ -309,7 +351,12 @@ export class KubernetesRuntime implements Runtime {
     return pod.status?.phase === 'Unknown' ? 'unknown' : 'stopped';
   }
 
-  /** True when the policy of the box exists as ensure() makes it. */
+  /**
+   * Checks the policy of a box.
+   *
+   * @param boxId The id of the box.
+   * @returns True when the policy exists as ensure() makes it. False when it cannot be read.
+   */
   async isolated(boxId: string): Promise<boolean> {
     try {
       const current = await this.readPolicy(names.box(boxId));
@@ -319,23 +366,28 @@ export class KubernetesRuntime implements Runtime {
     }
   }
 
-  // --- the box image ----------------------------------------------------------
-
-  /** The image id of the pod, which the kubelet reports once the container runs. */
+  /**
+   * Reads the image id of the pod, which the kubelet reports once the container runs.
+   *
+   * @param boxId The id of the box.
+   * @returns The image id, or null when there is no pod or no image id yet.
+   */
   async imageOf(boxId: string): Promise<string | null> {
     const pod = await this.readPod(names.box(boxId));
     return pod ? podImageId(pod) : null;
   }
 
-  /** Does nothing: the kubelet pulls the image at the start of a pod. */
+  /** Does nothing, because the kubelet pulls the image at the start of a pod. */
   async ensureImage(): Promise<void> {}
 
-  /** Does nothing: BOX_IMAGE_PULL_POLICY decides when the kubelet pulls. */
+  /** Does nothing, because BOX_IMAGE_PULL_POLICY decides when the kubelet pulls. */
   async refreshImage(): Promise<void> {}
 
-  // --- inventory --------------------------------------------------------------
-
-  /** The labelled pods, policies and claims, and the login pods. */
+  /**
+   * Lists the labelled pods, policies and claims, and the login pods.
+   *
+   * @returns The objects. Pods come before policies, and policies before claims.
+   */
   async inventory(): Promise<RuntimeObject[]> {
     const namespace = this.kube.namespace;
     const [pods, policies, claims, logins] = await Promise.all([
@@ -389,7 +441,11 @@ export class KubernetesRuntime implements Runtime {
     ];
   }
 
-  /** Deletes one pod, policy or claim. A box pod gets its grace period, and the call waits for it. */
+  /**
+   * Deletes one pod, policy or claim. A box pod gets its grace period, and the call waits for it.
+   *
+   * @param obj The object from {@link KubernetesRuntime.inventory}.
+   */
   async removeObject(obj: RuntimeObject): Promise<void> {
     const ref = { name: obj.ref, namespace: this.kube.namespace };
     switch (obj.kind) {
@@ -410,9 +466,14 @@ export class KubernetesRuntime implements Runtime {
     }
   }
 
-  // --- processes --------------------------------------------------------------
-
-  /** One exec in the pod. The `timeout` command in the box enforces the timeout. */
+  /**
+   * Runs one exec in the pod. The `timeout` command in the box enforces the timeout.
+   *
+   * @param boxId The id of the box.
+   * @param cmd The argument vector of the command.
+   * @param opts The options of the command.
+   * @returns The output and the exit code.
+   */
   async run(boxId: string, cmd: readonly string[], opts: RunOptions = {}): Promise<RunOutput> {
     const proc = await this.exec(
       names.box(boxId),
@@ -428,7 +489,14 @@ export class KubernetesRuntime implements Runtime {
     return { stdout, stderr, code };
   }
 
-  /** One long-lived exec in the pod. */
+  /**
+   * Starts one long-lived exec in the pod.
+   *
+   * @param boxId The id of the box.
+   * @param cmd The argument vector of the process.
+   * @param opts The options of the process.
+   * @returns The stdio and the end of the process.
+   */
   async spawn(
     boxId: string,
     cmd: readonly string[],
@@ -453,6 +521,12 @@ export class KubernetesRuntime implements Runtime {
    *
    * The end of stdin reaches the process only with the protocol
    * `v5.channel.k8s.io`, from Kubernetes 1.30. The client asks for it first.
+   *
+   * @param pod The name of the pod.
+   * @param cmd The argument vector of the process.
+   * @param opts The options of the process.
+   * @param withStdin True to connect stdin.
+   * @returns The stdio and the end of the process.
    */
   private async exec(
     pod: string,
@@ -493,7 +567,7 @@ export class KubernetesRuntime implements Runtime {
       CONTAINER,
       command,
       stdout,
-      // A terminal has one output stream, and the API refuses a second.
+      // With a terminal, the kubelet sends all output on stdout and drops a stderr request.
       tty ? null : stderr,
       withStdin ? stdin : null,
       tty !== undefined,
@@ -530,15 +604,20 @@ export class KubernetesRuntime implements Runtime {
         try {
           socket.close();
         } catch {
-          // already closed
+          // kill() must not throw, whatever state the socket is in.
         }
       },
     };
   }
 
   /**
-   * Starts a login pod from the box image. Its policy lets it reach the
-   * internet and the cluster DNS, and no private address.
+   * Starts a login pod from the box image, and waits until it runs. Its
+   * policy lets it reach the internet and the cluster DNS, and no private
+   * address.
+   *
+   * @param credentialId The id of the credential that the login is for.
+   * @returns The handle of the login pod.
+   * @throws Error when the pod ends, cannot start, or does not run within the start time.
    */
   async startLogin(credentialId: string): Promise<Login> {
     await this.ensureLoginPolicy();
@@ -572,16 +651,24 @@ export class KubernetesRuntime implements Runtime {
     };
   }
 
-  // --- facts ------------------------------------------------------------------
-
-  /** The URL of the egress proxy at the cluster IP of its Service. */
+  /**
+   * Gives the address of the egress proxy at the cluster IP of its Service.
+   *
+   * @returns The URL of the proxy.
+   * @throws Error before prepare().
+   */
   proxyUrl(): string {
     if (!this.proxy) throw new Error('The Kubernetes runtime is not prepared');
     const host = this.proxy.ip.includes(':') ? `[${this.proxy.ip}]` : this.proxy.ip;
     return `http://${host}:${this.cfg.EGRESS_PROXY_PORT}`;
   }
 
-  /** The pod with its node, the claim, and the image id, as far as they can be read. */
+  /**
+   * Reads the pod with its node, the claim, and the image id, as far as they can be read.
+   *
+   * @param boxId The id of the box.
+   * @returns The facts that could be read, each as label and value.
+   */
   async details(boxId: string): Promise<Array<[string, string]>> {
     const name = names.box(boxId);
     const [pod, claim] = await Promise.all([
@@ -610,7 +697,11 @@ export class KubernetesRuntime implements Runtime {
     return facts;
   }
 
-  /** Reads the Service of the egress proxy. */
+  /**
+   * Reads the Service of the egress proxy.
+   *
+   * @throws Error when the Service cannot be read.
+   */
   async health(): Promise<void> {
     await this.kube.core.readNamespacedService({
       name: this.cfg.EGRESS_PROXY_SERVICE,
@@ -622,6 +713,8 @@ export class KubernetesRuntime implements Runtime {
    * The image ids of the pod of this process, of a proxy pod, and of the box
    * pod that started last. The kubelet resolves the tag of BOX_IMAGE, so only
    * a started pod knows the image of a new box.
+   *
+   * @returns The three images. An image that cannot be read is null.
    */
   async deploymentImages(): Promise<DeploymentImages> {
     const namespace = this.kube.namespace;
@@ -649,9 +742,13 @@ export class KubernetesRuntime implements Runtime {
     return { orchestrator, proxy, box };
   }
 
-  // --- objects ----------------------------------------------------------------
-
-  /** The policy of a box: no ingress, and egress only to the proxy pods on the proxy port. */
+  /**
+   * Builds the policy of a box: no ingress, and egress only to the proxy pods on the proxy port.
+   *
+   * @param boxId The id of the box.
+   * @returns The policy.
+   * @throws Error before prepare().
+   */
   private boxPolicy(boxId: string): V1NetworkPolicy {
     if (!this.proxy) throw new Error('The Kubernetes runtime is not prepared');
     return {
@@ -707,10 +804,13 @@ export class KubernetesRuntime implements Runtime {
   }
 
   /**
-   * The pod of a box. It meets the `restricted` Pod Security Standard and has
-   * the hardening of the Docker container. It must not share its process
-   * namespace, because the process list expects the init of the image as
-   * pid 1.
+   * Builds the pod of a box. It meets the `restricted` Pod Security Standard
+   * and has the hardening of the Docker container. It must not share its
+   * process namespace, because the process list expects the init of the image
+   * as pid 1.
+   *
+   * @param box The id and the environment of the box.
+   * @returns The pod.
    */
   private boxPod(box: BoxSpec): V1Pod {
     const claim = names.box(box.boxId);
@@ -754,7 +854,13 @@ export class KubernetesRuntime implements Runtime {
     };
   }
 
-  /** The pod of a login: the box image with its home in memory and no storage. */
+  /**
+   * Builds the pod of a login: the box image with its home in memory and no storage.
+   *
+   * @param name The name of the pod.
+   * @param credentialId The id of the credential that the login is for.
+   * @returns The pod.
+   */
   private loginPod(name: string, credentialId: string): V1Pod {
     return {
       metadata: { name, labels: { [LOGIN_LABEL]: credentialId } },
@@ -766,7 +872,7 @@ export class KubernetesRuntime implements Runtime {
           { name: 'home', emptyDir: { medium: 'Memory', sizeLimit: '256Mi' } },
           { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '64Mi' } },
         ],
-        // No resource limits, as on Docker: a low limit can break the CLI of a login.
+        // No resource limits, as on Docker, because a low limit can break the CLI of a login.
         containers: [
           {
             ...this.containerBasics(),
@@ -781,7 +887,11 @@ export class KubernetesRuntime implements Runtime {
     };
   }
 
-  /** What every pod of the runtime has: no restart, no API token, no Service variables. */
+  /**
+   * Gives the settings of every pod of the runtime.
+   *
+   * @returns No restart, no API token and no Service variables.
+   */
   private podBasics() {
     return {
       restartPolicy: 'Never',
@@ -790,7 +900,11 @@ export class KubernetesRuntime implements Runtime {
     } as const;
   }
 
-  /** The user, the group and the seccomp profile of every pod of the runtime. */
+  /**
+   * Gives the security context of every pod of the runtime.
+   *
+   * @returns The user, the group and the seccomp profile.
+   */
   private podSecurity(): V1PodSecurityContext {
     return {
       runAsUser: this.cfg.BOX_UID,
@@ -801,7 +915,11 @@ export class KubernetesRuntime implements Runtime {
     };
   }
 
-  /** The image and the hardening of the container of every pod of the runtime. */
+  /**
+   * Gives the image and the hardening of the container of every pod of the runtime.
+   *
+   * @returns The name, the image, the pull policy and the security context of the container.
+   */
   private containerBasics() {
     const securityContext: V1SecurityContext = {
       allowPrivilegeEscalation: false,
@@ -817,16 +935,24 @@ export class KubernetesRuntime implements Runtime {
     };
   }
 
-  // --- reads and waits --------------------------------------------------------
-
-  /** A pod by its name, or null when it does not exist. */
+  /**
+   * Reads a pod.
+   *
+   * @param name The name of the pod.
+   * @returns The pod, or null when it does not exist.
+   */
   private async readPod(name: string): Promise<V1Pod | null> {
     return absentAsNull(() =>
       this.kube.core.readNamespacedPod({ name, namespace: this.kube.namespace }),
     );
   }
 
-  /** A policy by its name, or null when it does not exist. */
+  /**
+   * Reads a network policy.
+   *
+   * @param name The name of the policy.
+   * @returns The policy, or null when it does not exist.
+   */
   private async readPolicy(name: string): Promise<V1NetworkPolicy | null> {
     return absentAsNull(() =>
       this.kube.networking.readNamespacedNetworkPolicy({ name, namespace: this.kube.namespace }),
@@ -834,8 +960,11 @@ export class KubernetesRuntime implements Runtime {
   }
 
   /**
-   * Waits until a pod runs. Fails at once when the pod ended or its image
-   * cannot be pulled, and after the start time with the reason it waits for.
+   * Waits until a pod runs.
+   *
+   * @param name The name of the pod.
+   * @throws Error at once when the pod is gone, ended, or has a reason in {@link FATAL_WAITING}, and
+   *   after the start time with the reason it waits for.
    */
   private async waitUntilRunning(name: string): Promise<void> {
     const deadline = Date.now() + this.timing.startMs;
@@ -868,6 +997,9 @@ export class KubernetesRuntime implements Runtime {
   /**
    * Deletes a claim and waits until it is gone. A claim stays while a pod
    * uses it. Tolerates a claim that is gone already.
+   *
+   * @param name The name of the claim.
+   * @throws Error when the claim is still there after the stop time.
    */
   private async deleteClaim(name: string): Promise<void> {
     const ref = { name, namespace: this.kube.namespace };
@@ -879,7 +1011,13 @@ export class KubernetesRuntime implements Runtime {
     }
   }
 
-  /** Deletes a pod and waits until it is gone. Tolerates a pod that is gone already. */
+  /**
+   * Deletes a pod and waits until it is gone. Tolerates a pod that is gone already.
+   *
+   * @param name The name of the pod.
+   * @param gracePeriodSeconds The time the pod gets to stop before it is killed.
+   * @throws Error when the pod is still there after the stop time.
+   */
   private async deletePod(name: string, gracePeriodSeconds: number): Promise<void> {
     await absentAsNull(() =>
       this.kube.core.deleteNamespacedPod({
@@ -891,8 +1029,8 @@ export class KubernetesRuntime implements Runtime {
     const deadline = Date.now() + this.timing.stopMs;
     while (await this.readPod(name)) {
       if (Date.now() >= deadline) {
-        // A pod on a node that is gone stays here until the cluster releases
-        // its volume. Deleting it by force would risk the data.
+        // A pod on an unreachable node stays until the node comes back or is removed. A forced
+        // delete could let a new pod use the volume while the old pod still runs on that node.
         throw new Error(`The pod ${name} is still terminating. Its node may be unreachable.`);
       }
       await sleep(this.timing.pollMs);
@@ -900,31 +1038,54 @@ export class KubernetesRuntime implements Runtime {
   }
 }
 
-/** True for a pod that runs, or that starts and will run. */
+/**
+ * Checks if a pod runs or starts.
+ *
+ * @param pod The pod.
+ * @returns True for the phases Running and Pending.
+ */
 function isLive(pod: V1Pod): boolean {
   const phase = pod.status?.phase;
   return phase === 'Running' || phase === 'Pending';
 }
 
 /**
- * The image id of the first container of a pod that has one. The pods that
- * the runtime reads have one container each.
+ * Reads the image id of the first container of a pod that has one. The pods
+ * that the runtime reads have one container each.
+ *
+ * @param pod The pod.
+ * @returns The image id, or null when no container has one.
  */
 function podImageId(pod: V1Pod): string | null {
   return pod.status?.containerStatuses?.find((c) => c.imageID)?.imageID || null;
 }
 
-/** When a pod started, in epoch milliseconds, or 0. */
+/**
+ * Reads the start time of a pod.
+ *
+ * @param pod The pod.
+ * @returns The start time in epoch milliseconds, or 0 when the pod has none.
+ */
 function startedAt(pod: V1Pod): number {
   return pod.status?.startTime ? new Date(pod.status.startTime).getTime() : 0;
 }
 
-/** The `sha256:` digest in an image id such as `docker.io/library/x@sha256:…`, or the id itself. */
+/**
+ * Finds the `sha256:` digest in an image id such as `docker.io/library/x@sha256:…`.
+ *
+ * @param imageId The image id.
+ * @returns The digest, or the image id itself when it has no digest.
+ */
 function digestOf(imageId: string): string {
   return /sha256:[0-9a-f]{64}/.exec(imageId)?.[0] ?? imageId;
 }
 
-/** The exit code in the status that an exec ends with, or null when it has none. */
+/**
+ * Reads the exit code from the status that an exec ends with.
+ *
+ * @param status The status.
+ * @returns 0 for success, the code of an `ExitCode` cause, or null when the status has none.
+ */
 export function exitCodeOf(status: V1Status): number | null {
   if (status.status === 'Success') return 0;
   const cause = status.details?.causes?.find((c) => c.reason === 'ExitCode');
@@ -933,8 +1094,12 @@ export function exitCodeOf(status: V1Status): number | null {
 }
 
 /**
- * A size such as `4g` as a Kubernetes quantity. Kubernetes reads `m` as a
- * thousandth, so the suffix is changed to the binary unit.
+ * Converts a size such as `4g` to a Kubernetes quantity. Kubernetes reads `m`
+ * as a thousandth, so the suffix is changed to the binary unit.
+ *
+ * @param size A number with an optional suffix k, m or g, in any case.
+ * @returns The quantity, such as `4Gi`.
+ * @throws Error when the size has another form.
  */
 export function quantity(size: string): string {
   const match = /^(\d+)([kmgKMG]?)$/.exec(size);
@@ -946,8 +1111,12 @@ export function quantity(size: string): string {
 }
 
 /**
- * True when two policy specs say the same. The API leaves out empty lists
- * and absent fields, so both are compared without them.
+ * Compares two policy specs. The API leaves out empty lists and absent
+ * fields, so both are compared without them.
+ *
+ * @param a The first spec.
+ * @param b The second spec.
+ * @returns True when the specs say the same.
  */
 export function sameSpec(
   a: V1NetworkPolicySpec | undefined,
@@ -956,7 +1125,13 @@ export function sameSpec(
   return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
-/** A value with its keys sorted, and with no null, undefined, empty list or empty object. */
+/**
+ * Normalizes a value for a comparison.
+ *
+ * @param value The value.
+ * @returns The value with its keys sorted, and with no null, empty list or empty object. Undefined when
+ *   nothing is left.
+ */
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) {
     const items = value.map(canonical).filter((v) => v !== undefined);
@@ -973,7 +1148,12 @@ function canonical(value: unknown): unknown {
   return value ?? undefined;
 }
 
-/** Runs one call of the API, and gives null when the object does not exist. */
+/**
+ * Runs one call of the API, and gives null when the object does not exist.
+ *
+ * @param call The call.
+ * @returns The result of the call, or null on a 404.
+ */
 async function absentAsNull<T>(call: () => Promise<T>): Promise<T | null> {
   try {
     return await call();
@@ -983,7 +1163,12 @@ async function absentAsNull<T>(call: () => Promise<T>): Promise<T | null> {
   }
 }
 
-/** The message of an error of the API, without the headers that the client adds. */
+/**
+ * Gives the message of an error of the API, without the headers that the client adds.
+ *
+ * @param err The error.
+ * @returns The HTTP code with the message of the body, or the message of an error without a code.
+ */
 function message(err: unknown): string {
   const { code, body } = err as { code?: number; body?: unknown };
   if (code === undefined) return (err as Error).message;
@@ -1000,7 +1185,12 @@ function message(err: unknown): string {
   return `HTTP ${code}${text ? `: ${text}` : ''}`;
 }
 
-/** Runs one read for the details page, and gives null when it throws. */
+/**
+ * Runs one read for the details page, and gives null when it throws.
+ *
+ * @param read The read.
+ * @returns The value of the read, or null.
+ */
 async function quietly<T>(read: () => Promise<T | null>): Promise<T | null> {
   try {
     return await read();
@@ -1010,7 +1200,13 @@ async function quietly<T>(read: () => Promise<T | null>): Promise<T | null> {
   }
 }
 
-/** Reads one image id for the image footer, and gives null when it throws or finds none. */
+/**
+ * Reads one image id for the image footer, and gives null when it throws or finds none.
+ *
+ * @param what The image that is read, for the log.
+ * @param read The read of the image id.
+ * @returns The image with the digest of the id. The build date and the size are null.
+ */
 async function safely(what: string, read: () => Promise<string | null>): Promise<ImageInfo | null> {
   try {
     const id = await read();
@@ -1021,7 +1217,12 @@ async function safely(what: string, read: () => Promise<string | null>): Promise
   }
 }
 
-/** Resolves after a time. */
+/**
+ * Waits for a time.
+ *
+ * @param ms The time in milliseconds.
+ * @returns A promise that resolves after the time.
+ */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

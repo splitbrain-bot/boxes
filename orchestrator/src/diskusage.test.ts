@@ -6,8 +6,11 @@ import { BoxUsage } from './diskusage.ts';
 const TTL = 1000;
 
 /**
- * A usage tracker over a stub measurement that records every call, with a
- * clock the test moves.
+ * Builds a usage tracker with a fake measurement that records each call, and
+ * with a clock that the test moves.
+ *
+ * @param measure The fake measurement of one box.
+ * @returns The tracker, the recorded calls, stores and failures, and the clock.
  */
 function usage(measure: (id: string) => Promise<number> = async () => 42) {
   const calls: string[] = [];

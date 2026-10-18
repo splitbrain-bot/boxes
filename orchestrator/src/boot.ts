@@ -8,9 +8,9 @@ interface LayerProgress {
   current: number;
   /** The size of the layer, or 0 while it is not known. */
   total: number;
-  /** Whether the layer is downloaded. */
+  /** True when the layer is downloaded. */
   downloaded: boolean;
-  /** Whether the layer is on the host, unpacked. */
+  /** True when the layer is unpacked on the host. */
   done: boolean;
 }
 
@@ -25,8 +25,8 @@ interface Pull {
 }
 
 /**
- * Whether the orchestrator has started, and how far the pull of the box
- * image has come while it starts.
+ * The start state of the orchestrator, with the progress of the pull of the
+ * box image during the start.
  */
 export class BootState {
   /** True once the orchestrator serves the dashboard and the API. */
@@ -36,7 +36,7 @@ export class BootState {
   private pull: Pull | null = null;
 
   /**
-   * @param ready Whether the orchestrator has started already.
+   * @param ready True when the orchestrator has already started.
    */
   constructor(ready = false) {
     this.ready = ready;
@@ -50,8 +50,8 @@ export class BootState {
   /**
    * Gives the progress callback for one pull of an image.
    *
-   * The pull becomes the one that is shown with its first event. Thus a pull
-   * that does not occur replaces nothing.
+   * The pull becomes the shown pull at its first event, so a pull without
+   * events replaces nothing.
    *
    * @param image The image reference that is pulled.
    * @returns The callback for the progress events of the pull.
@@ -96,13 +96,22 @@ export class BootState {
     };
   }
 
-  /** The state for the boot endpoint. */
+  /**
+   * Gives the state for the boot endpoint.
+   *
+   * @returns The ready flag and the progress of the last pull that reported.
+   */
   status(): BootResponse {
     return { ready: this.ready, pull: this.pull ? summarize(this.pull) : null };
   }
 }
 
-/** Adds the progress of the layers of a pull together. */
+/**
+ * Adds the progress of the layers of a pull together.
+ *
+ * @param pull The pull.
+ * @returns The progress of the whole pull.
+ */
 function summarize(pull: Pull): PullProgress {
   const progress: PullProgress = {
     image: pull.image,

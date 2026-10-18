@@ -13,7 +13,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
 import * as ws from './workspaces.ts';
 
+/** The temporary data directory of the current test. */
 let dir: string;
+/** A temporary directory outside the data directory, which no removal may touch. */
 let outside: string;
 
 beforeEach(() => {
@@ -29,8 +31,7 @@ test('the workspaces parent is created 0700', () => {
   ws.ensureWorkspacesRoot(dir);
   const mode = statSync(ws.workspacesRoot(dir)).mode & 0o777;
   // One box must not read another box's files. Only the orchestrator reads
-  // across all of them. A stray `docker run -v boxes_boxes-data:/x` sees
-  // nothing through this.
+  // across all of them.
   assert.equal(mode, 0o700);
 });
 
@@ -41,15 +42,14 @@ test('a workspace is created under the parent and reported back', () => {
 });
 
 test('creating a workspace creates the parent it needs', () => {
-  // No ensureWorkspacesRoot first: create is also the first thing a fresh
-  // deployment runs.
   ws.createWorkspace(dir, 'abcd1234');
   assert.equal(statSync(ws.workspacesRoot(dir)).mode & 0o777, 0o700);
 });
 
 test('the host path is the daemon-side path, joined POSIX-style', () => {
-  // Bind sources are resolved by the daemon, so this is the path it knows the
-  // data volume by — on Linux the host's, under Docker Desktop the VM's.
+  // The daemon resolves bind sources, so the path is the one the daemon knows
+  // the data volume by. On Linux it is the host path, and under Docker Desktop
+  // it is the path in the VM.
   assert.equal(
     ws.hostWorkspacePath('/var/lib/docker/volumes/boxes-data/_data', 'abcd1234'),
     '/var/lib/docker/volumes/boxes-data/_data/workspaces/abcd1234',
@@ -90,14 +90,13 @@ test('the homes parent is created 0700 alongside the workspaces one', () => {
 test('a home is created 0700, because of what is in one', () => {
   const path = ws.createHome(dir, 'abcd1234');
   assert.equal(path, join(dir, 'homes', 'abcd1234'));
-  // Thread transcripts, tool caches, and whatever credential a login inside
-  // the box wrote. The workspace is 0755; this is not.
+  // A home holds thread transcripts, tool caches and the credentials that a
+  // login inside the box wrote. The workspace is 0755.
   assert.equal(statSync(path).mode & 0o777, 0o700);
 });
 
 test('a home and a workspace of the same box are different directories', () => {
-  // Both are named by the box id, under different parents: one is the
-  // agent's work, and the other is everything the agent installed to do it.
+  // Both are named by the box id, under different parents.
   assert.notEqual(ws.homePath(dir, 'abcd1234'), ws.workspacePath(dir, 'abcd1234'));
 });
 
@@ -134,7 +133,7 @@ test('a nix store is created 0755, because a package store holds nothing secret'
 });
 
 test('creating a nix store that is there keeps what is in it', () => {
-  // Every start creates the store, so a second call must keep its contents.
+  // The Docker runtime creates the store before each start, so a second call must keep its contents.
   const path = ws.createNix(dir, 'abcd1234');
   writeFileSync(join(path, 'kept'), 'what the agent installed');
 
@@ -188,8 +187,8 @@ test.skipIf(process.getuid?.() !== 0)(
 );
 
 test('a directory that is there is reported, and one that is gone is not', () => {
-  // A start checks this before it binds the workspace or home. Docker would
-  // create a missing bind source itself, empty and owned by root.
+  // The Docker runtime checks this before a start. Docker creates a missing
+  // bind source itself, empty and owned by root.
   const path = ws.createWorkspace(dir, 's1');
   assert.equal(ws.directoryExists(path), true);
 

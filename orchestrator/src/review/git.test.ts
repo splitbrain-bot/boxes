@@ -19,12 +19,14 @@ import {
   setGitRunnerForTests,
 } from './git.ts';
 
-/** A target naming a container and a path inside it, as the service builds one. */
+/** A target that names a box and a path inside it, as the service builds one. */
 const target: GitTarget = { boxId: 'box-1', dir: '/workspace/project' };
 
 /**
- * Installs a runner that records each call and answers with `result`, by
- * default with empty output.
+ * Installs a runner that records each call and answers with `result`.
+ *
+ * @param result The fields of the result that replace the default result, which is a success with empty output.
+ * @returns The list of recorded calls, which grows with each call.
  */
 function recorder(result: Partial<GitResult> = {}): {
   calls: Array<{ target: GitTarget; argv: string[]; env: Record<string, string> }>;
@@ -39,7 +41,12 @@ function recorder(result: Partial<GitResult> = {}): {
 
 /**
  * A runner that starts git on this machine, in the directory the target names,
- * so the builders are checked against real git.
+ * so the tests check the command line against real git.
+ *
+ * @param called The target whose directory git runs in.
+ * @param argv The command line.
+ * @param env The variables added to the environment.
+ * @returns The result of git.
  */
 const localGit: GitRunner = async (called, argv, env) => {
   try {
@@ -120,7 +127,7 @@ describe('the environment', () => {
   });
 
   test('nothing of this process travels into the box', () => {
-    // The container has an environment of its own, and this is added to it.
+    // The runtime adds these variables to the environment of the container.
     assert.deepEqual(Object.keys(env).sort(), [
       'GIT_LITERAL_PATHSPECS',
       'GIT_OPTIONAL_LOCKS',
@@ -165,9 +172,9 @@ describe('where an invocation is addressed', () => {
 });
 
 test('no file of the orchestrator can start a process of its own', () => {
-  // A repository's configuration can make git run commands, and this process
-  // holds the Docker socket. The skill repositories are fetched into a new git
-  // directory, which holds no configuration a repository could set.
+  // The configuration of a repository can make git run commands, and this
+  // process holds the runtime credentials. skill-repos.ts fetches into a new git
+  // directory, which holds no configuration that a repository can set.
   const src = fileURLToPath(new URL('..', import.meta.url));
   const offenders = readdirSync(src, { recursive: true, encoding: 'utf8' })
     .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))
@@ -197,7 +204,12 @@ describe('over a repository git really answers about', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The repository this test built, addressed the way the service addresses one. */
+  /**
+   * Makes the git target for the test repository, or for a directory in it.
+   *
+   * @param sub The directory relative to the repository, or '' for the repository root.
+   * @returns The git target.
+   */
   function here(sub = ''): GitTarget {
     return { boxId: 'box-1', dir: sub === '' ? dir : join(dir, sub) };
   }

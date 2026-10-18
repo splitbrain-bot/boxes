@@ -13,7 +13,7 @@ export type FileStatuses = Record<string, FileStatus>;
  * is the default.
  */
 export interface Base {
-  /** What the user asked for: a branch, a tag or a short id. */
+  /** The revision that the user gave, for example a branch, a tag or a short commit id. */
   rev: string;
   /** The commit resolved from `rev` that the review compares against. */
   commit: string;
@@ -22,16 +22,22 @@ export interface Base {
 /** No base revision chosen, so the review compares against HEAD. */
 export const NO_BASE: Base = { rev: '', commit: '' };
 
-/** The revision to hand `git diff`. */
+/**
+ * Returns the revision that `git diff` compares against.
+ *
+ * @param base The base of the review.
+ * @returns The base commit, or 'HEAD' when no base is set.
+ */
 export function baseRev(base: Base): string {
   return base.commit === '' ? 'HEAD' : base.commit;
 }
 
-// --- pure parsers -----------------------------------------------------------
-
 /**
  * Normalises a relative, slash-separated path from git. It drops `.` segments,
  * duplicate separators and a trailing separator.
+ *
+ * @param path The path from git.
+ * @returns The normalised path.
  */
 function cleanPath(path: string): string {
   const parts = path.split('/').filter((p) => p !== '' && p !== '.');
@@ -42,8 +48,11 @@ function cleanPath(path: string): string {
  * Parses `git status --porcelain -z` output into per-file statuses.
  *
  * Each record is `XY path`, ends in a NUL byte and holds the path verbatim.
- * With `-z`, git does not quote names, and a name holding a space, an arrow or
+ * With `-z`, git writes names unquoted, and a name holding a space, an arrow or
  * a newline stays one record.
+ *
+ * @param out The output of git status.
+ * @returns The statuses by path.
  */
 export function parsePorcelain(out: string): FileStatuses {
   const result: FileStatuses = {};
@@ -62,7 +71,12 @@ export function parsePorcelain(out: string): FileStatuses {
   return result;
 }
 
-/** Parses `git diff --name-status <base>` into per-file statuses. */
+/**
+ * Parses `git diff --name-status <base>` into per-file statuses.
+ *
+ * @param out The output of git diff.
+ * @returns The statuses by path.
+ */
 export function parseNameStatus(out: string): FileStatuses {
   const result: FileStatuses = {};
   for (const line of out.split('\n')) {
@@ -76,7 +90,12 @@ export function parseNameStatus(out: string): FileStatuses {
   return result;
 }
 
-/** Parses a newline-separated path list, as `ls-files` produces. */
+/**
+ * Parses a newline-separated path list, as `ls-files` writes it.
+ *
+ * @param out The output of git.
+ * @returns The normalised paths.
+ */
 export function parsePathList(out: string): string[] {
   return out
     .split('\n')
@@ -84,7 +103,12 @@ export function parsePathList(out: string): string[] {
     .map(cleanPath);
 }
 
-/** Maps a `git diff --name-status` letter onto a status. */
+/**
+ * Maps a `git diff --name-status` letter onto a status.
+ *
+ * @param code The status letter.
+ * @returns The status, or null for a letter that the tree does not show.
+ */
 function classifyDiffStatus(code: string): FileStatus | null {
   switch (code) {
     case 'A':
@@ -101,17 +125,23 @@ function classifyDiffStatus(code: string): FileStatus | null {
   }
 }
 
-/** Maps a porcelain index/work-tree letter pair onto a status. */
+/**
+ * Maps a porcelain letter pair onto a status.
+ *
+ * @param x The letter for the index.
+ * @param y The letter for the work tree.
+ * @returns The status, or null for a pair that the tree does not show.
+ */
 function classifyStatus(x: string, y: string): FileStatus | null {
   if (x === '?' && y === '?') return 'untracked';
   if (x === 'U' || y === 'U' || (x === 'A' && y === 'A') || (x === 'D' && y === 'D')) {
     return 'conflict';
   }
-  // Staged changes take priority in what is shown.
+  // A staged addition or deletion has priority over a change in the work tree.
   if (x === 'A') return 'added';
   if (x === 'D') return 'deleted';
   if (x === 'M' || x === 'R' || x === 'C') {
-    // A further change in the working tree shows as modified.
+    // A further change in the work tree shows as modified.
     if (y === 'M' || y === 'D') return 'modified';
     return 'staged';
   }
@@ -120,17 +150,18 @@ function classifyStatus(x: string, y: string): FileStatus | null {
   return null;
 }
 
-// --- the invocations --------------------------------------------------------
-
 /**
- * The status of every file in a repository. With a base commit set, files are
- * reported by how they differ from that commit rather than from HEAD.
+ * Reads the status of every file in a repository. With a base commit set, the status
+ * compares the files against that commit. Without one, it compares against HEAD.
  *
  * `-uall` lists untracked files one by one, as the file tree lists them.
  * `--no-renames` reports a rename as a deletion and an addition, so the tree
  * can show the path the file moved away from.
  *
- * Returns null when git fails, as it does outside a repository.
+ * @param target The repository to run git in.
+ * @param base The base to compare against.
+ * @returns The statuses by path relative to the repository, or null when git fails, as it does outside a
+ *   repository.
  */
 export async function fileStatuses(target: GitTarget, base: Base): Promise<FileStatuses | null> {
   if (base.commit !== '') return statusesSince(target, base);
@@ -141,9 +172,13 @@ export async function fileStatuses(target: GitTarget, base: Base): Promise<FileS
 }
 
 /**
- * How the working tree differs from a base commit, covering both committed and
- * uncommitted changes. Untracked files are listed as well, since they are part
- * of what is under review.
+ * Reads the differences between the work tree and a base commit, with committed and
+ * uncommitted changes. The result also lists untracked files, because they are
+ * part of the review.
+ *
+ * @param target The repository to run git in.
+ * @param base The base to compare against. Its commit is set.
+ * @returns The statuses by path relative to the repository, or null when git diff fails.
  */
 async function statusesSince(target: GitTarget, base: Base): Promise<FileStatuses | null> {
   const named = await git(target, ['diff', '--name-status', '--no-renames', base.commit]);
@@ -157,12 +192,16 @@ async function statusesSince(target: GitTarget, base: Base): Promise<FileStatuse
 }
 
 /**
- * Resolves a user-supplied revision — a branch, a tag, a commit id — into the
- * commit a review is compared against.
+ * Resolves a revision from the user, for example a branch, a tag or a commit id,
+ * into the commit that a review compares against.
  *
- * The merge base of that revision and HEAD is used, so commits made on the base
- * branch after branching off are not reported as this branch's changes. Falls
- * back to the revision itself when the two have no common ancestor.
+ * The function uses the merge base of the revision and HEAD, so commits on the
+ * base branch after the branch point do not show as changes. When the two have
+ * no common ancestor, it uses the revision itself.
+ *
+ * @param target The repository to run git in.
+ * @param rev The revision from the user.
+ * @returns The base, or an error message when the target is not a repository or the revision names no commit.
  */
 export async function resolveBase(
   target: GitTarget,
@@ -184,20 +223,24 @@ export async function resolveBase(
   return { base: { rev, commit } };
 }
 
-// --- the workspace layer ----------------------------------------------------
-
 /**
- * The status of every file in the workspace, merged from every repository in
+ * Reads the status of every file in the workspace, merged from every repository in
  * it.
  *
- * The repositories are asked in parallel, and each prefixes its paths with its
- * own path. A status from repository `P` is kept only when `P` is the closest
- * repository to that path. This stops an outer repository from reporting an
- * inner work tree as one untracked entry, and keeps the merged keys disjoint.
+ * The function runs git in all repositories in parallel and puts the path of each
+ * repository in front of its paths. It keeps a status from repository `P` only
+ * when `P` is the closest repository to that path. Thus an outer repository
+ * cannot report an inner work tree as one untracked entry, and no two
+ * repositories report the same path.
  *
- * The workspace's REVIEW.md is left out, because it is the review and not a
- * file under review. Git reports it only when the workspace is itself a
- * repository.
+ * The result leaves out the REVIEW.md of the workspace, because it is the
+ * review and not a file under review. Git reports it only when the workspace is
+ * itself a repository.
+ *
+ * @param box The box and the workspace in it.
+ * @param map The repositories of the workspace.
+ * @param bases The base of each repository, by repository path. A repository without an entry compares against HEAD.
+ * @returns The statuses by workspace-relative path.
  */
 export async function workspaceStatuses(
   box: GitBox,
@@ -226,10 +269,14 @@ export async function workspaceStatuses(
 /**
  * Resolves one revision expression in every repository of a workspace.
  *
- * `main` means main-in-each, through the merge base with that repository's own
- * HEAD. A repository where the revision names nothing is left out of the
- * result, so it is compared against its own HEAD. A workspace can hold one
- * repository with the branch and another without it.
+ * For example, `main` resolves to the merge base of `main` and HEAD in each
+ * repository. The result leaves out a repository where the revision names
+ * nothing, so that repository is compared against its own HEAD.
+ *
+ * @param box The box and the workspace in it.
+ * @param map The repositories of the workspace.
+ * @param rev The revision expression, or '' for no base.
+ * @returns The base of each repository, by repository path. The map is empty when `rev` is ''.
  */
 export async function resolveBases(
   box: GitBox,

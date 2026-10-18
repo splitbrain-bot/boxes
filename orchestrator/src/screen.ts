@@ -5,12 +5,12 @@ const ESC = '\u001b';
 const BEL = '\u0007';
 
 /**
- * What a terminal would be showing, rebuilt from what was written to it.
+ * A model of the cells a terminal shows, rebuilt from the output written to it.
  *
  * A UI that redraws itself sends only the changed cells and moves the cursor
  * over the rest. Stripping the escape sequences would lose every character it
- * did not resend, so the cells are kept instead. Only the cursor movements and
- * erases the login CLIs use are understood. Other sequences are skipped.
+ * did not resend, so the class keeps the cells. It understands the cursor
+ * movements and erases that the login CLIs use, and skips other sequences.
  */
 export class Screen {
   /** The cells, by row. Short rows end where they end rather than in spaces. */
@@ -22,7 +22,11 @@ export class Screen {
   /** A partial escape sequence, held until the rest of it arrives. */
   private pending = '';
 
-  /** Writes a chunk to the screen, moving the cursor as it says. */
+  /**
+   * Writes a chunk to the screen, and moves the cursor as the chunk says.
+   *
+   * @param chunk The output of the terminal program.
+   */
   write(chunk: string): void {
     const text = this.pending + chunk;
     this.pending = '';
@@ -31,8 +35,8 @@ export class Screen {
       const ch = text.charAt(i);
       if (ch === ESC) {
         const taken = this.escape(text, i);
-        // The chunk ended mid-sequence: keep it for the next one rather than
-        // printing its letters as text.
+        // The chunk ended mid-sequence, so the class keeps it for the next one
+        // rather than printing its letters as text.
         if (taken === null) {
           this.pending = text.slice(i);
           return;
@@ -56,8 +60,10 @@ export class Screen {
   }
 
   /**
-   * Everything on the screen, one line per row, with trailing blanks dropped.
+   * The text on the screen, one line per row, with trailing blanks dropped.
    * Rows never written to are empty lines.
+   *
+   * @returns The text.
    */
   get text(): string {
     return this.rows
@@ -70,7 +76,11 @@ export class Screen {
       .join('\n');
   }
 
-  /** Puts one character where the cursor is, and steps over it. */
+  /**
+   * Puts one character where the cursor is, and steps over it.
+   *
+   * @param ch The character.
+   */
   private put(ch: string): void {
     const cells = this.rows[this.row] ?? [];
     this.rows[this.row] = cells;
@@ -80,8 +90,11 @@ export class Screen {
   }
 
   /**
-   * Reads one escape sequence, acts on it, and returns its length. Returns
-   * null when the rest of the sequence has not arrived yet.
+   * Reads one escape sequence and acts on it.
+   *
+   * @param text The text that holds the sequence.
+   * @param at The index of the escape character.
+   * @returns The length of the sequence, or null when the rest of the sequence has not arrived yet.
    */
   private escape(text: string, at: number): number | null {
     const next = text[at + 1];
@@ -155,14 +168,17 @@ export class Screen {
         this.clearLine(n(0));
         break;
       default:
-        // Colour, cursor visibility, a query the CLI sends the terminal:
-        // nothing that changes a cell.
+        // Colour, cursor visibility and queries to the terminal change no cell.
         break;
     }
     return i - at + 1;
   }
 
-  /** Erases part of the cursor's row: 0 to its end, 1 to its start, 2 all. */
+  /**
+   * Erases part of the cursor's row.
+   *
+   * @param mode 0 erases from the cursor to the end, 1 from the start to the cursor, 2 the whole row.
+   */
   private clearLine(mode: number): void {
     const cells = this.rows[this.row];
     if (!cells) return;

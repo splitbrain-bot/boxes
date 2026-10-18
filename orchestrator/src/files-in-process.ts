@@ -3,10 +3,11 @@ import { type Roots, serveFiles } from '../../files/src/server.ts';
 import type { FileServiceSpawner } from './files.ts';
 
 /**
- * A spawner for tests: it runs the real file service in this process, on
- * directories of this machine, and needs no runtime.
+ * Makes a spawner for tests. The spawner runs the real file service in the orchestrator process, on
+ * local directories, and needs no runtime.
  *
- * `rootsOf` names the directories for a box id.
+ * @param rootsOf Returns the directories that the file service serves for a box id.
+ * @returns The spawner.
  */
 export function inProcessFileService(rootsOf: (boxId: string) => Roots): FileServiceSpawner {
   return async (boxId) => {

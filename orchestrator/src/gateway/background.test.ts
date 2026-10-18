@@ -10,7 +10,7 @@ import {
   workPids,
 } from './background.ts';
 
-/** Both harnesses, which is what a reading of a box is taken against. */
+/** Both harnesses. A reading of a box always uses every harness. */
 const BOTH: readonly Harness[] = [HARNESSES.claude, HARNESSES.codex];
 
 /** A conversation of the box. */
@@ -18,9 +18,13 @@ const ONE = '90732d29-a1aa-4df7-9b78-a726bb859148';
 /** A second conversation of the same box. */
 const TWO = 'd6d8f0a1-2b3c-4d5e-8f90-1a2b3c4d5e6f';
 
-// --- what the adapters say -------------------------------------------------
-
-/** A spawn, as either adapter sends one. */
+/**
+ * A spawn, as either adapter sends one.
+ *
+ * @param id The adapter's id for the task.
+ * @param fields Fields that replace or add to the defaults.
+ * @returns The `async_task_spawned` update.
+ */
 function spawned(id: string, fields: Record<string, unknown> = {}): unknown {
   return {
     sessionUpdate: 'async_task_spawned',
@@ -33,7 +37,13 @@ function spawned(id: string, fields: Record<string, unknown> = {}): unknown {
   };
 }
 
-/** A state update, which is the only thing Codex sends after a spawn. */
+/**
+ * A state update, which is the only async-task update that Codex sends after a spawn.
+ *
+ * @param id The adapter's id for the task.
+ * @param value The new state.
+ * @returns The `async_task_state_update` update.
+ */
 function state(id: string, value: string): unknown {
   return { sessionUpdate: 'async_task_state_update', asyncTaskId: id, state: value };
 }
@@ -58,8 +68,8 @@ test('a spawn becomes what the bar shows, on the thread it names', () => {
 
 test('a task with no name of its own is still something a person can read', () => {
   const board = new TaskBoard();
-  // Claude's shell tasks carry the command as both `name` and `description`.
-  // Its other kinds carry a description alone, or nothing.
+  // Claude sends the description as `name` too. An update with a description
+  // alone, or with neither, still gets a readable name.
   board.note(ONE, spawned('a', { name: undefined, description: 'Watching the build log' }));
   board.note(ONE, spawned('b', { name: undefined, description: undefined }));
   assert.deepEqual(
@@ -158,9 +168,12 @@ test('an adapter that has gone takes every task it announced with it', () => {
   assert.deepEqual(board.for(ONE), []);
 });
 
-// --- what the box says -----------------------------------------------------
-
-/** A process table, written parent-first. */
+/**
+ * A process table, written parent-first.
+ *
+ * @param rows The pid, the parent pid and the command of each process.
+ * @returns The processes.
+ */
 function table(...rows: Array<[number, number, string]>): ContainerProcess[] {
   return rows.map(([pid, ppid, command]) => ({ pid, ppid, command, elapsedSeconds: 0 }));
 }
@@ -173,7 +186,13 @@ const CLAUDE_AGENT =
   '/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/node_modules/' +
   '@anthropic-ai/claude-agent-sdk-linux-x64/claude --output-format stream-json --verbose';
 
-/** A tool call's shell under Claude, wrapper and all. */
+/**
+ * A tool call's shell under Claude, wrapper and all.
+ *
+ * @param command The command the agent runs.
+ * @param token The random part of the name of the cwd file.
+ * @returns The command line of the shell.
+ */
 function shell(command: string, token = 'cfec'): string {
   return (
     `/bin/bash -c source /home/agent/.claude/shell-snapshots/snapshot-bash-1788851622550.sh ` +
@@ -295,7 +314,7 @@ test('what the reading found is named, numbered and aged', () => {
 });
 
 test('a box with nothing of ours in it is empty, not unreadable', () => {
-  // Boxes spawns an adapter as an exec, so a box that was never opened runs
+  // The orchestrator spawns an adapter as an exec, so a box that was never opened runs
   // only the entrypoint.
   assert.equal(readBox(table(...HELD), BOTH).busy, false);
   assert.equal(readBox([], BOTH).busy, false);
@@ -332,8 +351,6 @@ test('an agent an adapter left behind is still the harness, not work', () => {
   );
 });
 
-// --- stopping what nobody claims -------------------------------------------
-
 test('the pids to kill are the work, leaves before what spawned them', () => {
   const procs = table(
     ...BOTH_IDLE,
@@ -350,9 +367,12 @@ test('a stop never reaches the box itself', () => {
   assert.deepEqual(workPids(table(...BOTH_IDLE, [4242, 0, 'ps -eo pid,ppid,args']), BOTH), []);
 });
 
-// --- the probe -------------------------------------------------------------
-
-/** A probe over a table the test can swap, with a clock it can move. */
+/**
+ * A probe over a table the test can swap, with a clock it can move.
+ *
+ * @param initial The first process table, or null for a box that is not running.
+ * @returns The probe, the controls of the test and the records of the callbacks.
+ */
 function probe(initial: ContainerProcess[] | null): {
   p: BackgroundProbe;
   set: (procs: ContainerProcess[] | null) => void;
@@ -459,7 +479,7 @@ test('a reading stands until it goes stale', async () => {
   assert.equal(reads(), 1);
 
   set(IDLE);
-  // Asked again inside the window: the same answer, and the box is not asked.
+  // A second read inside the window gives the same answer and does not list the processes again.
   assert.equal(p.active, true);
   assert.equal(reads(), 1);
 
@@ -548,14 +568,11 @@ test('a box that cannot be asked keeps the answer it had, and says so once', asy
 });
 
 test('two readers in the same moment are one reading', async () => {
-  // For example the reaper sweeping while a browser is served. Each reader
-  // finds the same stale answer.
+  // For example, the reaper and a browser request can read at the same moment. Both share the reading in flight.
   const { p, reads } = probe(WORKING);
   await Promise.all([p.refresh(), p.refresh(), p.refresh()]);
   assert.equal(reads(), 1);
 });
-
-// --- the call that started it ----------------------------------------------
 
 test('the adapters say outright which call backgrounded something', () => {
   // Codex sends no `run_in_background` flag and no tool name, so the marker is

@@ -21,16 +21,16 @@ export class Broadcast {
   /** Every attached browser, with or without a thread yet. */
   private readonly downstreams = new Set<DownstreamHandle>();
   /**
-   * How many prompts the gateway is forwarding and has echoed itself, per
+   * The number of prompts that the gateway forwards and has echoed itself, per
    * thread. While a thread's count is above zero, the gateway drops the
    * adapter's own echo of the prompt.
    */
   private readonly promptsInFlight = new Map<string, number>();
   /**
-   * What each thread the adapter holds has said, by the adapter's id for it.
+   * The log of each thread that the adapter holds, by the adapter's id for the thread.
    *
-   * A browser opening a thread is sent its log only. The adapter's replay is
-   * read into the log once, when the thread is brought up.
+   * A browser that opens a thread gets only the log. The adapter's replay goes into the log once, when the thread
+   * comes up.
    */
   private readonly logs = new Map<string, ThreadLog>();
   /**
@@ -54,7 +54,7 @@ export class Broadcast {
     }),
   ) {}
 
-  /** How many browsers are attached, across every thread. */
+  /** Number of attached browsers, across every thread. */
   get size(): number {
     return this.downstreams.size;
   }
@@ -68,7 +68,12 @@ export class Broadcast {
     return [...threads];
   }
 
-  /** Browsers watching one thread, most recently active first. */
+  /**
+   * The browsers watching one thread.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns The browsers, most recently active first.
+   */
   byRecency(acpThreadId: string): DownstreamHandle[] {
     return [...this.downstreams]
       .filter((d) => d.acpThreadId === acpThreadId)
@@ -78,12 +83,18 @@ export class Broadcast {
   /**
    * Adds a browser. Until its thread is resolved, it counts as attached but
    * nothing is routed to it.
+   *
+   * @param handle The browser connection.
    */
   add(handle: DownstreamHandle): void {
     this.downstreams.add(handle);
   }
 
-  /** Drops a browser. */
+  /**
+   * Drops a browser.
+   *
+   * @param handle The browser connection.
+   */
   remove(handle: DownstreamHandle): void {
     this.downstreams.delete(handle);
   }
@@ -97,8 +108,10 @@ export class Broadcast {
   }
 
   /**
-   * Routes one adapter update: into its thread's log, and on to the browsers
+   * Routes one adapter update into its thread's log, and on to the browsers
    * watching that thread.
+   *
+   * @param params The params of the `session/update` notification.
    */
   update(params: unknown): void {
     const thread = threadOf(params);
@@ -120,16 +133,17 @@ export class Broadcast {
     if (this.isPrompting(thread) && updateKind(params) === UPDATE_KIND.userMessageChunk) {
       return;
     }
+    // Logged even with nobody watching, for a browser that opens the thread later.
     history?.append(params);
-    // Logged even with nobody watching, for a browser that opens the thread
-    // later.
     this.deliver(this.byRecency(thread), params);
   }
 
   /**
    * Starts reading a thread's transcript into a fresh log, which replaces any
-   * earlier one. Until {@link endFill}, the thread's updates are logged and
+   * earlier one. Until {@link Broadcast.endFill}, the thread's updates are logged and
    * sent to nobody.
+   *
+   * @param acpThreadId The adapter's id for the thread.
    */
   beginFill(acpThreadId: string): void {
     const history = new ThreadLog();
@@ -137,7 +151,12 @@ export class Broadcast {
     this.logs.set(acpThreadId, history);
   }
 
-  /** Ends the fill: the thread's updates are sent to its browsers again. */
+  /**
+   * Ends the fill and stores the adapter options. The thread's updates go to its browsers again.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @param options The modes and options the adapter answered the load with.
+   */
   endFill(acpThreadId: string, options: AdapterOptions): void {
     const history = this.logs.get(acpThreadId);
     if (!history) return;
@@ -145,7 +164,11 @@ export class Broadcast {
     history.options = options;
   }
 
-  /** Forgets a thread's log, for a thread the adapter does not hold. */
+  /**
+   * Forgets a thread's log, for a thread the adapter does not hold.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   */
   dropLog(acpThreadId: string): void {
     this.logs.delete(acpThreadId);
   }
@@ -153,13 +176,20 @@ export class Broadcast {
   /**
    * Sets the current mode in a thread's log.
    *
+   * @param acpThreadId The adapter's id for the thread.
+   * @param modeId The mode that is now current.
    * @returns The mode that was current before, or null when the log has none.
    */
   logMode(acpThreadId: string, modeId: string): string | null {
     return this.logs.get(acpThreadId)?.setMode(modeId) ?? null;
   }
 
-  /** The current mode in a thread's log, or null when the log has none. */
+  /**
+   * The current mode in a thread's log.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns The mode, or null when the log has none.
+   */
   modeOf(acpThreadId: string): string | null {
     return this.logs.get(acpThreadId)?.options.modes?.currentModeId ?? null;
   }
@@ -167,6 +197,9 @@ export class Broadcast {
   /**
    * Sets one option's value in a thread's log.
    *
+   * @param acpThreadId The adapter's id for the thread.
+   * @param configId The option's id.
+   * @param value The value it is now set to.
    * @param answered The options the adapter answered the change with, if any.
    */
   logConfig(
@@ -181,9 +214,10 @@ export class Broadcast {
   /**
    * Opens a log for a thread the adapter has just minted.
    *
-   * @param from The thread it was forked from, whose log the new one starts
-   *   as a copy of. The adapter writes a fork no transcript until its first
-   *   prompt.
+   * @param acpThreadId The adapter's id for the new thread.
+   * @param options The modes and options the adapter answered with.
+   * @param from The thread that the new thread is a fork of. The new log starts as a copy of its log, because the
+   *   adapter writes no transcript for a fork until its first prompt.
    */
   openLog(acpThreadId: string, options: AdapterOptions, from?: string): void {
     const history = new ThreadLog();
@@ -202,7 +236,10 @@ export class Broadcast {
    * the log still holds the start of the thread. A thread with no log is sent
    * as empty.
    *
+   * @param handle The browser connection.
+   * @param acpThreadId The adapter's id for the thread.
    * @param anchor The last message the browser holds, if any.
+   * @returns The modes and options for the answer to the load.
    */
   open(handle: DownstreamHandle, acpThreadId: string, anchor?: string): AdapterOptions {
     const history = this.logs.get(acpThreadId);
@@ -223,11 +260,14 @@ export class Broadcast {
   }
 
   /**
-   * Sends a thread's updates to one browser only, until {@link endRelay}.
+   * Sends a thread's updates to one browser only, until {@link Broadcast.endRelay}.
    * The browser is told first that the whole thread follows.
    *
-   * This is for the adapter replaying the full history, which must not reach
-   * the log or the other browsers.
+   * The adapter replays the full history through the relay, so the history does not reach the log or the other
+   * browsers.
+   *
+   * @param handle The browser that gets the replay.
+   * @param acpThreadId The adapter's id for the thread.
    */
   beginRelay(handle: DownstreamHandle, acpThreadId: string): void {
     const params: ReplayParams = { sessionId: acpThreadId, resumed: false, truncated: false };
@@ -235,12 +275,21 @@ export class Broadcast {
     this.relays.set(acpThreadId, handle);
   }
 
-  /** Ends the relay: the thread's updates go to the log and its browsers again. */
+  /**
+   * Ends the relay. The thread's updates go to the log and its browsers again.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   */
   endRelay(acpThreadId: string): void {
     this.relays.delete(acpThreadId);
   }
 
-  /** Whether the adapter is replaying a thread's full history to one browser. */
+  /**
+   * Checks if the adapter replays a thread's full history to one browser.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns True while the relay runs.
+   */
   isRelaying(acpThreadId: string): boolean {
     return this.relays.has(acpThreadId);
   }
@@ -250,6 +299,8 @@ export class Broadcast {
    * counts it as in flight.
    *
    * ACP does not require the adapter to echo a prompt live.
+   *
+   * @param params The params of the `session/prompt` request.
    */
   beginPrompt(params: unknown): void {
     const thread = threadOf(params);
@@ -270,7 +321,11 @@ export class Broadcast {
     }
   }
 
-  /** Counts a prompt on a thread as done, and sends the new state after the last one. */
+  /**
+   * Counts a prompt on a thread as done, and sends the new state after the last one.
+   *
+   * @param params The params of the `session/prompt` request.
+   */
   endPrompt(params: unknown): void {
     const thread = threadOf(params);
     if (!thread) return;
@@ -283,7 +338,12 @@ export class Broadcast {
     this.threadState(thread);
   }
 
-  /** Whether the gateway is carrying a prompt on a thread right now. */
+  /**
+   * Checks if the gateway carries a prompt on a thread.
+   *
+   * @param acpThreadId The adapter's id for the thread.
+   * @returns True while a prompt is in flight.
+   */
   isPrompting(acpThreadId: string): boolean {
     return (this.promptsInFlight.get(acpThreadId) ?? 0) > 0;
   }
@@ -293,12 +353,18 @@ export class Broadcast {
    *
    * A browser cannot tell on its own that a turn it did not start is still
    * running, or that the thread has background work.
+   *
+   * @param acpThreadId The adapter's id for the thread.
    */
   threadState(acpThreadId: string): void {
     this.send(this.byRecency(acpThreadId), TURN_STATE_METHOD, this.stateOf(acpThreadId));
   }
 
-  /** Sends one browser the state of its thread, after it opens the thread. */
+  /**
+   * Sends one browser the state of its thread, after it opens the thread.
+   *
+   * @param handle The browser connection.
+   */
   threadStateTo(handle: DownstreamHandle): void {
     if (!handle.acpThreadId) return;
     this.send([handle], TURN_STATE_METHOD, this.stateOf(handle.acpThreadId));
@@ -312,12 +378,23 @@ export class Broadcast {
     for (const thread of this.watchedThreads) this.threadState(thread);
   }
 
-  /** Sends one update to a set of browsers, surviving any one of them failing. */
+  /**
+   * Sends one update to a set of browsers, surviving any one of them failing.
+   *
+   * @param targets The browsers.
+   * @param params The params of the `session/update` notification.
+   */
   private deliver(targets: Iterable<DownstreamHandle>, params: unknown): void {
     this.send(targets, ACP_METHOD.sessionUpdate, params);
   }
 
-  /** Sends one notification to a set of browsers, surviving any one failing. */
+  /**
+   * Sends one notification to a set of browsers, surviving any one failing.
+   *
+   * @param targets The browsers.
+   * @param method The method of the notification.
+   * @param params The params of the notification.
+   */
   private send(targets: Iterable<DownstreamHandle>, method: string, params: unknown): void {
     for (const d of targets) {
       try {
@@ -332,13 +409,23 @@ export class Broadcast {
   }
 }
 
-/** The ACP thread a message is about, or undefined when it names none. */
+/**
+ * The ACP thread a message is about.
+ *
+ * @param params The params of the message.
+ * @returns The adapter's id for the thread, or undefined when the message names none.
+ */
 export function threadOf(params: unknown): string | undefined {
   const sessionId = (params as { sessionId?: unknown })?.sessionId;
   return typeof sessionId === 'string' && sessionId ? sessionId : undefined;
 }
 
-/** The kind of a session/update notification, or undefined for anything else. */
+/**
+ * The kind of a session/update notification.
+ *
+ * @param params The params of the message.
+ * @returns The update kind, or undefined for anything else.
+ */
 function updateKind(params: unknown): string | undefined {
   const update = (params as { update?: { sessionUpdate?: unknown } })?.update;
   return typeof update?.sessionUpdate === 'string' ? update.sessionUpdate : undefined;

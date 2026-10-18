@@ -1,3 +1,8 @@
+/**
+ * Web Push delivery on `node:crypto`: RFC 8291 payload encryption and RFC 8292
+ * (VAPID) sender authentication.
+ */
+
 import {
   createCipheriv,
   createECDH,
@@ -8,11 +13,6 @@ import {
 } from 'node:crypto';
 import { type Db, readAppKey, writeAppKey } from './db.ts';
 import { log } from './log.ts';
-
-/**
- * Web Push delivery on `node:crypto`: RFC 8291 payload encryption and RFC 8292
- * (VAPID) sender authentication.
- */
 
 /** One browser's subscription, as the Push API hands it to the page. */
 export interface PushSubscription {
@@ -32,10 +32,10 @@ export interface VapidKeys {
   privateKey: string;
 }
 
-/** Record size the payload is written with; every message here fits one. */
+/** Record size of the payload, in bytes. Every message fits one record. */
 const RECORD_SIZE = 4096;
 
-/** What one record adds to its plaintext: the padding delimiter and the tag. */
+/** Bytes that one record adds to its plaintext, for the padding delimiter and the tag. */
 const RECORD_OVERHEAD = 17;
 
 /** How long a push service should hold an undelivered message, in seconds. */
@@ -43,32 +43,54 @@ const DEFAULT_TTL = 12 * 60 * 60;
 
 /**
  * How long one delivery attempt may take, in milliseconds. The caller awaits
- * all browsers at once, so one silent push service would otherwise hold them.
+ * all browsers at once, so the limit keeps one silent push service from holding the others.
  */
 const REQUEST_TIMEOUT_MS = 10_000;
 
-/** Lifetime of a VAPID assertion. Well under the 24h RFC 8292 allows. */
+/** Lifetime of a VAPID assertion, in seconds. RFC 8292 allows at most 24 hours. */
 const VAPID_LIFETIME_SECONDS = 12 * 60 * 60;
 
 /** The app key under which the generated keypair is stored. */
 const APP_KEY = 'vapid';
 
-/** Base64url of raw bytes, which is how every key and salt here travels. */
+/**
+ * Returns raw bytes as base64url, the form in which every key and salt travels.
+ *
+ * @param buf The bytes.
+ * @returns The base64url string.
+ */
 function b64url(buf: Buffer): string {
   return buf.toString('base64url');
 }
 
-/** The bytes behind a base64url string. */
+/**
+ * Returns the bytes of a base64url string.
+ *
+ * @param value The base64url string.
+ * @returns The bytes.
+ */
 function unb64url(value: string): Buffer {
   return Buffer.from(value, 'base64url');
 }
 
-/** HKDF-SHA256 over Node's one-shot, as a Buffer. */
+/**
+ * Returns HKDF-SHA256 output as a Buffer.
+ *
+ * @param salt The salt.
+ * @param ikm The input key material.
+ * @param info The info string.
+ * @param length The number of bytes to derive.
+ * @returns The derived bytes.
+ */
 function hkdf(salt: Buffer, ikm: Buffer, info: Buffer, length: number): Buffer {
   return Buffer.from(hkdfSync('sha256', ikm, salt, info, length));
 }
 
-/** A fresh P-256 keypair, in the raw form both halves of this file want. */
+/**
+ * Returns a new P-256 keypair in the raw form that the encryption and VAPID code use.
+ *
+ * @returns The keypair.
+ */
 export function generateVapidKeys(): VapidKeys {
   const ecdh = createECDH('prime256v1');
   ecdh.generateKeys();
@@ -79,15 +101,23 @@ export function generateVapidKeys(): VapidKeys {
   };
 }
 
-/** Left-pads a scalar to the 32 bytes P-256 uses. */
+/**
+ * Left-pads a scalar to the 32 bytes P-256 uses.
+ *
+ * @param scalar The scalar.
+ * @returns The scalar with 32 bytes or more.
+ */
 function pad32(scalar: Buffer): Buffer {
   if (scalar.length >= 32) return scalar;
   return Buffer.concat([Buffer.alloc(32 - scalar.length), scalar]);
 }
 
 /**
- * The deployment's keypair, generated once and kept in the database. A new
+ * Returns the keypair of the deployment, generated once and kept in the database. A new
  * keypair invalidates every subscription.
+ *
+ * @param db The database.
+ * @returns The keypair.
  */
 export function loadVapidKeys(db: Db): VapidKeys {
   const stored = readAppKey<VapidKeys>(db, APP_KEY);
@@ -99,15 +129,17 @@ export function loadVapidKeys(db: Db): VapidKeys {
   return keys;
 }
 
-// --- RFC 8291 payload encryption -------------------------------------------
-
 /**
  * Encrypts one push message for one subscriber, producing a whole
  * `aes128gcm` body: header, then a single record.
  *
- * Throws for a plaintext that does not fit the one record.
- *
- * `salt` and `senderKeys` let a test pin the random inputs to the RFC's own.
+ * @param plaintext The message.
+ * @param subscriberKey The public key of the subscriber, uncompressed P-256.
+ * @param authSecret The authentication secret of the subscriber.
+ * @param salt The salt. A test passes the salt of the RFC example.
+ * @param senderKeys The one-time keypair of the sender. A test passes the keypair of the RFC example.
+ * @returns The body.
+ * @throws Error when the plaintext does not fit the one record.
  */
 export function encryptPayload(
   plaintext: Buffer,
@@ -152,19 +184,25 @@ export function encryptPayload(
   return Buffer.concat([header, senderPublic, body]);
 }
 
-// --- RFC 8292 VAPID --------------------------------------------------------
-
-/** The `aud` of a VAPID assertion: the push service's own origin. */
+/**
+ * Returns the `aud` of a VAPID assertion, which is the origin of the push service.
+ *
+ * @param endpoint The endpoint URL.
+ * @returns The origin.
+ */
 function audienceOf(endpoint: string): string {
   const url = new URL(endpoint);
   return `${url.protocol}//${url.host}`;
 }
 
 /**
- * The Authorization header proving this deployment sent the message.
+ * Returns the Authorization header that proves this deployment sent the message.
  *
- * `subject` is the operator's contact for the push service, as a mailto: or
- * https: URL.
+ * @param endpoint The endpoint URL.
+ * @param keys The VAPID keypair.
+ * @param subject The contact of the operator for the push service, as a mailto: or https: URL.
+ * @param now The current time, in epoch milliseconds.
+ * @returns The header value.
  */
 export function vapidHeader(
   endpoint: string,
@@ -203,21 +241,19 @@ export function vapidHeader(
   return `vapid t=${header}.${claims}.${b64url(signature)}, k=${keys.publicKey}`;
 }
 
-// --- sending ---------------------------------------------------------------
-
 /** What one delivery attempt did, as the caller needs to see it. */
 export interface PushResult {
-  /** Whether the push service accepted the message. */
+  /** True when the push service accepted the message. */
   ok: boolean;
   /** HTTP status from the push service, or 0 when it could not be reached. */
   status: number;
   /**
-   * True when the subscription can never work again, so its row should go:
-   * the push service answered 404 or 410, or the subscription keys are
-   * malformed.
+   * True when the subscription can never work again, so its row should go.
+   * The cause is a 404 or 410 from the push service, or malformed
+   * subscription keys.
    */
   gone: boolean;
-  /** Why the attempt failed, or null. Never carries the payload. */
+  /** The reason for the failure, or null. It never contains the payload. */
   error: string | null;
 }
 
@@ -225,6 +261,13 @@ export interface PushResult {
  * Posts one encrypted message to one push service.
  *
  * Never throws. Every failure comes back as a result the caller can log.
+ *
+ * @param subscription The subscription.
+ * @param payload The message.
+ * @param keys The VAPID keypair.
+ * @param subject The contact of the operator for the push service.
+ * @param ttl How long the push service should hold an undelivered message, in seconds.
+ * @returns The result of the attempt.
  */
 export async function sendPush(
   subscription: PushSubscription,

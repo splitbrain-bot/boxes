@@ -1,3 +1,5 @@
+/** The HTTP app of the orchestrator, with the REST API and the dashboard bundle. */
+
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
@@ -78,32 +80,33 @@ import { fetchRepo } from './skill-repos.ts';
 import { devTunnelsApi, TunnelReconciler } from './tunnels.ts';
 import { setBoxOwner } from './workspaces.ts';
 
-/** The HTTP surface: the REST API and the static bundle. */
-
-/** Version reported by the health endpoint. */
+/** The version that the health endpoint reports. */
 const VERSION = '1.0.0';
 
-/** Directory of this module. */
+/** The directory of this module. */
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Dashboard bundle, where the orchestrator image puts it. */
+/** The directory of the dashboard bundle in the orchestrator image. */
 const DASHBOARD_DIR = resolve(here, '../dashboard');
 
 /**
- * The bundle directory whose filenames carry a content hash, which is Vite's
- * `build.assetsDir`.
+ * The URL path of the bundle directory with a content hash in each filename. It
+ * is the `build.assetsDir` of the Vite build.
  */
 const HASHED_ASSETS = '/assets/';
 
-/** How long a content-hashed asset may be held, in seconds. A year. */
+/** The maximum cache time of an asset with a content hash, in seconds (one year). */
 const ASSET_MAX_AGE = 31_536_000;
 
 /**
- * The Cache-Control value for one file of the bundle.
+ * Gives the Cache-Control value for one file of the bundle.
  *
- * A name under the hashed-asset directory changes whenever its bytes change,
- * so a cached copy is never stale. Every other name, index.html above all,
- * stays the same across builds and is revalidated on every load.
+ * A name under {@link HASHED_ASSETS} changes when its bytes change, so a
+ * cached copy is never stale. Each other name, for example index.html, stays
+ * the same across builds, so the browser validates it again on each load.
+ *
+ * @param path The URL path of the file.
+ * @returns The Cache-Control value.
  */
 function cacheControlFor(path: string): string {
   return path.startsWith(HASHED_ASSETS)
@@ -112,34 +115,36 @@ function cacheControlFor(path: string): string {
 }
 
 /**
- * SHA-256 of the one inline script of index.html, base64.
+ * The SHA-256 hash, in base64, of the inline script of index.html.
  *
- * The theme switch that runs before first paint. It is the page's only inline
- * script and it is stated here rather than allowed wholesale, so the policy
- * still refuses every script it does not know. Editing that script means
- * editing this.
+ * The script sets the theme before the first paint. The policy allows only
+ * this hash, so it refuses each other inline script. A change to the script
+ * needs a change to this hash.
  */
 const THEME_SCRIPT_HASH = "'sha256-CnZHNPAF6WOocb4/bNl9c3BRy4DGumb4xxVfhF7huZc='";
 
 /** The paths that are served while the orchestrator starts. */
 const BOOT_OPEN_PATHS = new Set(['/api/boot', '/healthz', '/readyz']);
 
-/** A Host header worth putting in a header this process writes. */
+/** The pattern of a Host header that is safe to copy into a response header. */
 const SAFE_HOST = /^[A-Za-z0-9.\-[\]]+(:\d+)?$/;
 
 /**
- * The content security policy the dashboard document is served under.
+ * Makes the content security policy of the dashboard document.
  *
- * The thread renders markdown the agent wrote. A remote `<img>` in it would
- * carry data out through the reader's browser and past the egress proxy, so
- * every fetch the page makes is pinned to this origin.
+ * The thread shows markdown that the agent wrote. A remote `<img>` in it could
+ * send data out through the browser of the reader, past the egress proxy. So
+ * the policy limits each fetch of the page to this origin.
  *
  * Styles allow `'unsafe-inline'`, because the overlay primitives and the code
  * pane set the style attribute, and a style attribute cannot be hashed.
  *
- * The socket is named as well as covered by `'self'`, because some browsers
- * do not read `'self'` as including the ws and wss forms of the origin. A Host
- * header that is not a plain host is left out.
+ * The policy names the socket origins in addition to `'self'`, because some
+ * browsers do not include the ws and wss forms of the origin in `'self'`. A
+ * Host header that does not match {@link SAFE_HOST} is left out.
+ *
+ * @param host The Host header of the request.
+ * @returns The value of the Content-Security-Policy header.
  */
 function documentCsp(host: string | undefined): string {
   const origin = host !== undefined && SAFE_HOST.test(host) ? host : null;
@@ -159,29 +164,35 @@ function documentCsp(host: string | undefined): string {
 }
 
 /**
- * Smallest body that is compressed, in bytes. Below it the encoding headers
- * cost more than the saving.
+ * The smallest body that is compressed, in bytes. For a smaller body, the
+ * encoding headers cost more than the compression saves.
  */
 const COMPRESS_THRESHOLD_BYTES = 1024;
 
 /**
- * Sends one file out of a workspace, typed by its name rather than its bytes.
+ * Sends one file of a workspace, with a content type from its name and not
+ * from its bytes.
  *
- * {@link servedTypeFor} decides the type and the policy. The stream comes
- * from the file service and is piped to the browser, so a large file is not
- * held in memory.
+ * {@link servedTypeFor} gives the type and the policy. The stream comes from
+ * the file service and goes to the browser, so a large file stays out of memory.
+ *
+ * @param reply The reply to set the headers on.
+ * @param stream The content of the file.
+ * @param name The name of the file.
+ * @param size The size of the file in bytes.
+ * @returns The stream, for the route to send.
  */
 function sendWorkspaceFile(reply: FastifyReply, stream: Readable, name: string, size: number) {
   const served = servedTypeFor(name);
   void reply.headers({
     'Content-Type': served.contentType,
     'Content-Length': String(size),
-    // The name is percent-encoded: it comes from a directory the agent
-    // writes to, and a quote or a newline in it must not reach the header.
+    // The name is percent-encoded, because it comes from a directory that the
+    // agent writes to. A quote or a newline in it must not reach the header.
     'Content-Disposition': `${served.inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
     // The browser must not sniff the bytes and treat a download as a document.
     'X-Content-Type-Options': 'nosniff',
-    // Lets an SVG be served as itself: nothing in it may run or fetch.
+    // The policy lets the browser show an SVG, but nothing in it can run or fetch.
     'Content-Security-Policy': served.csp,
     // Short, because the agent can rewrite the file under a stable name.
     'Cache-Control': 'private, max-age=60',
@@ -189,7 +200,12 @@ function sendWorkspaceFile(reply: FastifyReply, stream: Readable, name: string, 
   return stream;
 }
 
-/** Whether the database answers a query, for the readiness probe. */
+/**
+ * Checks if the database answers a query, for the readiness probe.
+ *
+ * @param db The database.
+ * @returns True when the query succeeds.
+ */
 function databaseAnswers(db: Db): boolean {
   try {
     db.prepare('SELECT 1').get();
@@ -200,7 +216,11 @@ function databaseAnswers(db: Db): boolean {
   }
 }
 
-/** True when the runtime answers, for the readiness probe. */
+/**
+ * Checks if the runtime answers, for the readiness probe.
+ *
+ * @returns True when the health check of the runtime succeeds.
+ */
 async function runtimeAnswers(): Promise<boolean> {
   try {
     await runtime().health();
@@ -211,19 +231,19 @@ async function runtimeAnswers(): Promise<boolean> {
   }
 }
 
-/** What a caller may put in place of a default when it builds the app. */
+/** The options that replace the defaults of {@link buildApp}. */
 export interface BuildOptions {
-  /** Where the dashboard bundle is, for a caller serving one it built itself. */
+  /** The directory of the dashboard bundle. */
   bundleDir?: string;
   /**
-   * Whether the orchestrator has started. Until it has, the app serves only
-   * the starting page, the boot endpoint and the probes. Without it, the app
-   * serves everything at once.
+   * The start state of the orchestrator. Until the start is complete, the app
+   * serves only the starting page, the boot endpoint and the probes. Without
+   * it, the app serves everything at once.
    */
   boot?: BootState;
 }
 
-/** What one orchestrator process hands its boot and its tests, wired together. */
+/** The connected objects of one orchestrator process, for its start code and its tests. */
 export interface Orchestrator {
   /** The HTTP app, not yet listening. */
   app: ReturnType<typeof Fastify>;
@@ -233,44 +253,54 @@ export interface Orchestrator {
   agents: AgentStore;
   /** The config the app was built with. */
   cfg: Config;
-  /** Owns the egress policy and keeps the proxy holding it. */
+  /** The manager of the egress policy, which keeps the policy in the proxy. */
   egress: EgressManager;
-  /** The deployment's credentials, as the settings page manages them. */
+  /** The credentials of the deployment, which the settings page manages. */
   credentials: CredentialStore;
-  /** The logins in flight, one per credential at most. */
+  /** The logins that run now, at most one for each credential. */
   logins: LoginManager;
-  /** Which dev tunnels each box hosts, and the removal of unserved ones. */
+  /** The dev tunnels of each box, and the removal of tunnels that no box uses. */
   tunnels: TunnelReconciler;
-  /** Box ids whose network isolation the repair loop could not complete. */
+  /**
+   * Sets the box ids whose network isolation the repair loop could not complete.
+   *
+   * @param warnings The box ids, for the health endpoint.
+   */
   setIsolationWarnings(warnings: string[]): void;
 }
 
 /**
- * Builds the HTTP app and the objects behind it, without listening or
- * touching the runtime, so a test can drive the real routes over a real
- * database. It sets the runtime that the boxes run on.
+ * Builds the HTTP app and the objects behind it, and sets the runtime of the
+ * boxes. The function does not listen and does not call the runtime, so a
+ * test can use the real routes with a real database.
+ *
+ * @param cfg The config of the orchestrator.
+ * @param db The database.
+ * @param opts The options that replace the defaults.
+ * @returns The app and the objects behind it.
  */
 export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestrator {
   const bundleDir = opts.bundleDir ?? DASHBOARD_DIR;
   const boot = opts.boot ?? new BootState(true);
-  // Before anything creates a workspace directory or a container: everything
-  // that writes files for the agent, or runs a process as it, reads this.
+  // This call comes before the first workspace directory or container, because each part
+  // that writes files for the agent or runs a process as the agent reads the owner.
   setBoxOwner(cfg.BOX_UID, cfg.BOX_GID);
   setRuntime(createRuntime(cfg));
 
-  // The store and the egress manager need each other: the policy is composed
-  // from the store's rows, and every write to the store re-pushes it. The
-  // hoisted function below lets the store be built first.
+  // The stores and the egress manager need each other. The manager makes the policy from
+  // the rows of the stores, and each write to a store pushes the policy again. The hoisted
+  // function below lets the stores be built first.
   const credentials = new CredentialStore(db, () => repushPolicy(), cfg.credentialSet);
   const apiKeys = new ApiKeyStore(db, () => repushPolicy());
   const egress = new EgressManager(cfg, credentials, apiKeys, db);
   const notifier = new Notifier(db, cfg);
 
   /**
-   * Pushes the policy again because a credential changed.
+   * Pushes the policy again after a credential or an API key changed.
    *
-   * Best effort and never awaited, so the settings page does not fail while
-   * the proxy restarts. The reconciler pushes it again every minute.
+   * The push is best effort and not awaited, so the settings page does not
+   * fail while the proxy restarts. The reconciler pushes the policy again
+   * every minute.
    */
   function repushPolicy(): void {
     void egress.sync().catch((err: Error) => {
@@ -279,8 +309,6 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       });
     });
   }
-  // A login runs the harness's own CLI in a throwaway container built from
-  // the box image.
   const logins = new LoginManager(credentials);
   // Private repositories on github.com are fetched with the GitHub credential.
   const agents = new AgentStore(
@@ -303,8 +331,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     () => manager.processReadings(),
   );
   const manager = new BoxManager(db, cfg, egress, notifier, agents, (id) => tunnels.forBox(id));
-  // The manager knows where a box's files are and how to get its container
-  // running.
+  // The manager finds the files of a box and starts its container when it is stopped.
   const review = new ReviewService(db, {
     execTarget: (id) => manager.execTarget(id),
   });
@@ -314,18 +341,19 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   const app = Fastify({ logger: false });
 
   /**
-   * Hands attachment uploads to the route as a Buffer. The route sets the
-   * size limit.
+   * Gives each octet-stream body, for example an attachment upload, to the
+   * route as a Buffer. The route sets the size limit.
    */
   app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) =>
     done(null, body),
   );
 
   /**
-   * The request log: one line per response, through the structured logger.
+   * Writes one line to the request log for each response.
    *
-   * The path is logged without its query string, which can carry a filename
-   * or a path the reader typed. A 4xx logs as a warning and a 5xx as an error.
+   * The log line has the path without its query string, because the query
+   * can hold a filename or a path that the user typed. A 4xx logs as a warning
+   * and a 5xx as an error.
    */
   app.addHook('onResponse', async (req, reply) => {
     const status = reply.statusCode;
@@ -343,7 +371,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * boot endpoint and the probes.
    *
    * A browser that asks for a page gets the starting page, which loads the
-   * dashboard when the start is complete. Every other request gets a 503.
+   * dashboard when the start is complete. Each other request gets a 503.
    */
   app.addHook('onRequest', async (req, reply) => {
     if (boot.ready) return;
@@ -365,14 +393,14 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(503).header('Retry-After', '5').send({ error: 'Boxes is starting' });
   });
 
-  // --- REST: unauthenticated here, the deployment puts auth in front ----------
+  // --- REST API, without authentication (the reverse proxy in front authenticates) ---
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof HttpError) {
       return reply.code(err.statusCode).send({ error: err.message });
     }
-    // Fastify's own refusals, such as a body over the route's limit, already
-    // carry a status and a message worth showing.
+    // A refusal from Fastify, for example a body over the limit of the route,
+    // has a status and a message for the client.
     const status = (err as { statusCode?: number }).statusCode;
     if (typeof status === 'number' && status >= 400 && status < 500) {
       return reply.code(status).send({ error: (err as Error).message });
@@ -382,9 +410,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Liveness: this process is serving requests. Always 200, so a probe does
-   * not restart a deployment that is only misconfigured. The body says what
-   * is wrong.
+   * The liveness probe. It always answers 200, so a probe does not restart a
+   * deployment that only has a wrong configuration. The body tells what is
+   * wrong.
    */
   app.get('/healthz', async (): Promise<HealthResponse> => {
     const boxes = countLiveBoxes(db);
@@ -397,15 +425,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       harnesses: harnessHealth(),
       credentials: credentials.list().map((row) => credentials.summarize(row)),
       pushSubscriptions: countPushSubscriptions(db),
-      // The one thing here that asks the runtime anything. Cached for a minute
-      // and null on every failure, so the probe answers at the same speed and
-      // stays green where the runtime cannot be reached.
+      // Only this field asks the runtime. The reading is cached for a minute, and an
+      // image that cannot be read is null, so the probe stays green without the runtime.
       images: await deploymentImages(),
     };
   });
 
   /**
-   * Readiness: whether this deployment can serve boxes, as a status code.
+   * The readiness probe. It answers 200 when this deployment can serve boxes,
+   * and 503 when it cannot.
    *
    * The database has to answer, the proxy has to hold the current egress
    * policy, and the runtime has to be reachable. A box started against
@@ -424,14 +452,17 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(ready ? 200 : 503).send({ ready, version: VERSION, checks });
   });
 
-  /** Whether the orchestrator has started, and how far the pull of the box image has come. */
+  /** The start state of the orchestrator, and the progress of the pull of the box image. */
   app.get('/api/boot', async (): Promise<BootResponse> => boot.status());
 
   /**
-   * What each harness needs, and whether it has it.
+   * The credential state of each harness.
    *
-   * Lists only the harnesses whose credential is in the config's credential
-   * set, because a box holds a placeholder for those credentials alone.
+   * The list holds only the harnesses with a credential in the credential set
+   * of the config, because the orchestrator gives a box a placeholder only for
+   * those credentials.
+   *
+   * @returns The state of each harness.
    */
   function harnessHealth(): HarnessHealth[] {
     const deliverable = new Set(cfg.credentialSet.map((spec) => spec.id));
@@ -439,9 +470,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       .filter((h) => deliverable.has(h.credentialId))
       .map((h) => {
         const row = credentials.get(h.credentialId);
-        // A valid credential may still not reach a box: a subscription
-        // obtained by logging in is a document rather than a header value.
-        // The reason goes in the field the dashboard shows beside the harness.
+        // A valid credential can fail to reach a box, because a subscription from
+        // a login is a document and not a header value. The reason goes in the
+        // field that the dashboard shows next to the harness.
         const blocked = row ? undeliverableReason(row) : null;
         const summary = row ? credentials.summarize(row) : null;
         return {
@@ -449,22 +480,22 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
           label: h.label,
           credential:
             summary && blocked ? { ...summary, lastError: summary.lastError ?? blocked } : summary,
-          // An expired or failing credential keeps the harness listed, so the
-          // dashboard can say what is wrong with it.
+          // A harness with an expired or failed credential stays in the list, so
+          // the dashboard can show what is wrong.
           runnable: row?.status === 'ok' && blocked === null,
         };
       });
   }
 
   /**
-   * Every harness this deployment can run, for the dialogs: what the registry
-   * says about it, what its adapter last advertised, and whether it can run
-   * now.
+   * Every harness that this deployment can run, for the dialogs. Each entry
+   * has the registry data, the catalogue that its adapter last sent, and the
+   * state of the harness.
    *
-   * The catalogue is a cache written by the adapter that last answered a
-   * `session/new`, `session/load` or `session/fork`. It is null until an
-   * adapter of that harness has answered one, and the dialog then offers the
-   * agent choice alone.
+   * The catalogue is a cache. The orchestrator writes it from the last answer
+   * of an adapter to `session/new`, `session/load` or `session/fork`. It is
+   * null until an adapter of that harness answers. While it is null, the dialog
+   * offers only the agent choice.
    */
   app.get(
     '/api/harnesses',
@@ -506,21 +537,21 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   app.delete('/api/boxes/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     await manager.remove(id);
-    // The review service caches per box; a deleted one has nothing to cache.
+    // The review service caches data for each box, so it forgets the deleted box.
     review.forget(id);
     return reply.code(204).send();
   });
 
   /**
-   * The conversations a box owns. They share the box's container, files and
-   * egress policy.
+   * Lists the threads of a box. The threads of a box share its container,
+   * files and egress policy.
    */
   app.get('/api/boxes/:id/threads', async (req) => {
     const { id } = req.params as { id: string };
     return manager.threads(id);
   });
 
-  /** Adds a conversation: empty, or carrying the context of the thread named by `from`. */
+  /** Adds a thread, empty or with the context of the thread that `from` names. */
   app.post('/api/boxes/:id/threads', async (req, reply) => {
     const { id } = req.params as { id: string };
     const created = await manager.createThread(id, parseBody(createThreadBody, req.body));
@@ -528,8 +559,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Marks a conversation done, or takes the mark off again. The mark changes
-   * how the thread is drawn in a list, and the thread still runs and answers.
+   * Marks a thread done, or removes the mark. The mark changes how a list shows
+   * the thread. The thread continues to run and answer.
    */
   app.post('/api/boxes/:id/threads/:threadId/done', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
@@ -538,16 +569,16 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Stops one task that conversation left running, or every task it has.
+   * Stops one background task of a thread, or every task of the thread.
    *
-   * A stop and not a cancel: a background command outlives the turn that
-   * started it, and a cancel does not reach it. `processId` is the adapter's
-   * own id for the task, as the thread state carried it. Without one, every
-   * task of the thread stops.
+   * The route stops and does not cancel, because a background command continues
+   * after the turn that started it, and a cancel does not reach it.
+   * `processId` is the id of the task in the adapter, from the thread state.
+   * Without it, every task of the thread stops.
    *
-   * The answer says how many tasks the adapter stopped. Zero is normal for a
-   * task that had already finished, and the thread's state is sent again
-   * either way.
+   * The answer gives the number of tasks that the adapter stopped. Zero is
+   * normal for a task that is already finished. When an adapter holds the
+   * thread, the gateway sends the thread state again after the stop.
    */
   app.post('/api/boxes/:id/threads/:threadId/background/stop', async (req) => {
     const { id, threadId } = req.params as { id: string; threadId: string };
@@ -556,12 +587,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Kills every process in a box that Boxes did not start itself, and
-   * answers how many were signalled.
+   * Kills every process in a box that Boxes did not start, and answers the
+   * number of signalled processes.
    *
-   * This reaches work no adapter can name any more. Neither adapter announces
-   * the tasks of a process that has died again, so after a restart a build
-   * can run with no task to stop.
+   * The route reaches work that no adapter can name. An adapter does not
+   * announce again the tasks of a process that died, so after a restart a build
+   * can run without a task to stop.
    */
   app.post('/api/boxes/:id/background/stop', async (req) => {
     const { id } = req.params as { id: string };
@@ -569,12 +600,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Stores one file the user attached to a prompt, in the box's own
-   * workspace.
+   * Stores one file that the user attached to a prompt, in the workspace of
+   * the box.
    *
-   * The body is the raw bytes of one file, and its name is in the query. The
+   * The body is the raw bytes of one file, and the query holds its name. The
    * upload comes before the prompt that mentions it. The file service in the
-   * box writes it, so the upload starts a stopped box.
+   * box writes the file, so the orchestrator starts a stopped box for the upload.
    */
   app.post(
     '/api/boxes/:id/attachments',
@@ -589,8 +620,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
         throw new HttpError(400, 'an attachment body is required');
       }
 
-      // This marks the box active: an upload is somebody working in the box,
-      // so the reaper leaves it.
+      // The call marks the box active, because an upload is work in the box. So
+      // the reaper does not stop the box.
       const target = await manager.execTarget(id);
       const stored = await storeAttachment(fileService(target.boxId), name, body);
       log.box(id).info('attachment stored', { path: stored.path, size: stored.size });
@@ -599,9 +630,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   );
 
   /**
-   * Serves one stored attachment back, which is how the thread shows the
-   * picture the user attached. The file service in the box reads it, so this
-   * starts a stopped box.
+   * Sends one stored attachment, so the thread can show the picture that the
+   * user attached. The file service in the box reads the file, so the
+   * orchestrator starts a stopped box for the request.
    */
   app.get('/api/boxes/:id/attachments/:name', async (req, reply) => {
     const { id, name } = req.params as { id: string; name: string };
@@ -621,16 +652,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return sendWorkspaceFile(reply, file.stream, name, file.size);
   });
 
-  // --- Code review over a box's workspace ---------------------------------
-  // Files come from the workspace directory. Git runs in the box's container,
-  // so a route that asks git starts a stopped box and marks it active.
+  // --- Code review over the workspace of a box ---------------------------
+  // The file service and git run in the box, so each review route starts a stopped box.
 
   /**
    * One directory of the review, with the facts the whole view needs.
    *
-   * `path` is workspace-relative and empty for the root. `fresh` is the browser
-   * saying it has arrived rather than opened a folder: it takes git's answer
-   * for the workspace again and runs the drift check.
+   * `path` is relative to the workspace, and empty for the root. The browser
+   * sets `fresh` when it arrives at the view, and not when it opens a folder.
+   * Then the service reads the git state again and runs the drift check.
    */
   app.get('/api/boxes/:id/review/dir', async (req) => {
     const { id } = req.params as { id: string };
@@ -646,8 +676,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * One file of the workspace as its bytes, for a file the view cannot show
-   * as text. Served the way an attachment is.
+   * One file of the workspace as its bytes, for a file that the view cannot
+   * show as text. The response has the same headers as an attachment.
    */
   app.get('/api/boxes/:id/review/raw', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -658,16 +688,16 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Saves one file of the workspace, as edited in the review, and answers
+   * Saves one file of the workspace after an edit in the review, and answers
    * with the file view.
    *
-   * The body carries the hash the file was read at, so a save over an edit
-   * the agent made in the meantime is refused.
+   * The body holds the hash of the file at the time of the read, so the
+   * service refuses a save over a later edit by the agent.
    */
   app.put(
     '/api/boxes/:id/review/file',
-    // Twice the display limit, because JSON encoding grows the file and the
-    // service's own size check has to be reached.
+    // Twice the display limit, because JSON encoding makes the file larger, and
+    // the size check of the service must get the request.
     { bodyLimit: 2 * MAX_FILE_BYTES },
     async (req) => {
       const { id } = req.params as { id: string };
@@ -696,9 +726,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * Sets the revision the whole review is compared against, or clears it back
-   * to each repository's working tree. The answer says where it landed, since
-   * one expression resolves separately in every repository.
+   * Sets the revision that the whole review compares against, or clears it
+   * back to the HEAD of each repository. The answer gives the result
+   * for each repository, because one expression resolves separately in each
+   * repository.
    */
   app.put('/api/boxes/:id/review/base', async (req) => {
     const { id } = req.params as { id: string };
@@ -706,7 +737,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return review.setBase(id, rev ?? null);
   });
 
-  /** Deletes REVIEW.md — the "New review" button. The file is the review. */
+  /** Deletes REVIEW.md, for the "New review" button. The file holds the whole review. */
   app.delete('/api/boxes/:id/review', async (req, reply) => {
     const { id } = req.params as { id: string };
     await review.deleteReview(id);
@@ -761,13 +792,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return agents.deleteRepo(setId, repoId);
   });
 
-  /** Pulls one repository now, rather than at its daily pull. */
+  /** Pulls one repository now, before its daily pull. */
   app.post('/api/agent-sets/:setId/repos/:repoId/pull', async (req) => {
     const { setId, repoId } = req.params as { setId: string; repoId: string };
     return agents.refreshRepo(setId, repoId);
   });
 
-  /** What a box selecting this set gets, global set included, for the editor to show. */
+  /** The merged set, with the global set, for a box with this set. The editor shows it. */
   app.get('/api/agent-sets/:setId/preview', async (req) => {
     const { setId } = req.params as { setId: string };
     agents.getSet(setId);
@@ -777,8 +808,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // --- Credentials and settings ------------------------------------------------
 
   /**
-   * The deployment's credentials. A secret goes in through PUT and never
-   * comes back out: this lists only an account and a status for each.
+   * Lists the credentials of the deployment, without the secrets. A secret
+   * goes in through PUT and never comes back out.
    */
   app.get(
     '/api/credentials',
@@ -800,12 +831,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Starts a login, for a credential that cannot be pasted.
    *
-   * Only the harness's own CLI can obtain a ChatGPT or Claude subscription,
-   * so Boxes runs it in a throwaway container and drives it. Dev Tunnels
-   * takes only a token from GitHub's device flow, which the orchestrator runs
-   * itself. The page polls the routes below for the state, sends the code
-   * Claude's CLI asks for, and cancels. `github` and `gitlab` have no flow and
-   * answer a 400.
+   * Only the CLI of a harness can get a ChatGPT or Claude subscription, so
+   * the orchestrator runs the CLI in a temporary container. Dev Tunnels takes
+   * only a token from the GitHub device flow, which the orchestrator runs. The
+   * page uses the routes below to poll the state, to send the code that the
+   * Claude CLI asks for, and to cancel. `github` and `gitlab` have no login
+   * and answer a 400.
    */
   app.post('/api/credentials/:id/login', async (req) => {
     const id = credentialId(req.params as { id: string });
@@ -821,7 +852,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const { loginId } = req.params as { loginId: string };
     const { code } = parseBody(loginCodeBody, req.body);
     logins.submitCode(credentialId(req.params as { id: string }), loginId, code);
-    // The poll above reports where the login goes next.
+    // The state route above reports the next state of the login.
     return reply.code(204).send();
   });
 
@@ -832,8 +863,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   });
 
   /**
-   * The API keys a user added. A key goes in through PUT and never comes
-   * back out: this lists only its hosts and its last four characters.
+   * Lists the API keys, with the hosts and the last four characters of each
+   * key. A key goes in through PUT and never comes back out.
    */
   app.get(
     '/api/api-keys',
@@ -852,7 +883,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(204).send();
   });
 
-  /** The credential a route names, or a 400 rather than a row nobody can use. */
+  /**
+   * Reads the credential id from the route parameters.
+   *
+   * @param params The route parameters.
+   * @returns The credential id.
+   * @throws {HttpError} A 400 for an unknown id.
+   */
   function credentialId(params: { id: string }): CredentialId {
     if (!isCredentialId(params.id)) {
       throw new HttpError(400, `Unknown credential: ${params.id}`);
@@ -862,7 +899,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   app.get('/api/settings', async (): Promise<Settings> => readSettings(db));
 
-  /** Writes the settings a body names and answers with all of them. */
+  /** Writes the settings in the body and answers with all settings. */
   app.patch(
     '/api/settings',
     async (req): Promise<Settings> => patchSettings(db, parseBody(patchSettingsBody, req.body)),
@@ -871,8 +908,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   // --- Web Push --------------------------------------------------------------
 
   /**
-   * The deployment's VAPID public key, which a browser needs before it can
-   * subscribe. It is public by design.
+   * The VAPID public key of the deployment. A browser needs it before it can
+   * subscribe.
    */
   app.get(
     '/api/push/key',
@@ -882,12 +919,16 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   );
 
   /**
-   * Checks a push endpoint before the orchestrator ever POSTs to it.
+   * Checks a push endpoint before the orchestrator sends a POST to it.
    *
-   * It must be https and name a host. An address literal or localhost is
-   * refused, so the route cannot aim the orchestrator at the LAN it can see.
-   * A hostname that resolves to a private address still passes; whatever
-   * authenticates the API is the real boundary.
+   * The endpoint must be an https URL with a hostname. An IP address or
+   * localhost is refused, so the route cannot point the orchestrator at the
+   * local network. A hostname that resolves to a private address passes. The
+   * authentication in front of the API is the security boundary.
+   *
+   * @param value The endpoint from the request.
+   * @returns The endpoint.
+   * @throws {HttpError} A 400 when the endpoint is not valid.
    */
   function validEndpoint(value: unknown): string {
     if (typeof value !== 'string' || value.length > 2000) {
@@ -906,7 +947,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return value;
   }
 
-  /** Checks one base64url key from a subscription decodes to the expected size. */
+  /**
+   * Checks that one base64url key of a subscription decodes to the expected size.
+   *
+   * @param value The key from the request.
+   * @param bytes The expected size in bytes.
+   * @param name The name of the key, for the error message.
+   * @returns The key.
+   * @throws {HttpError} A 400 when the key has the wrong size.
+   */
   function validKey(value: unknown, bytes: number, name: string): string {
     if (typeof value !== 'string' || Buffer.from(value, 'base64url').length !== bytes) {
       throw new HttpError(400, `${name} must be ${bytes} base64url-encoded bytes`);
@@ -917,8 +966,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Registers a browser for push, or refreshes what is stored for it.
    *
-   * Boxes has no accounts, so a subscription belongs to the deployment.
-   * Whatever authenticates `/api` decides who may add one.
+   * Boxes has no accounts, so a subscription belongs to the deployment. The
+   * authentication in front of `/api` decides who can add one.
    */
   app.post('/api/push/subscribe', async (req, reply) => {
     const body = parseBody(pushSubscribeBody, req.body);
@@ -927,23 +976,23 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const auth = validKey(body.keys.auth, 16, 'auth');
     const label = typeof body.label === 'string' ? body.label.slice(0, 100) : null;
 
-    // Stored with the current key, because after a key rotation the
-    // subscription can no longer be delivered to.
+    // The row keeps the current VAPID key, because after a key rotation the
+    // subscription cannot get messages.
     upsertPushSubscription(db, endpoint, p256dh, auth, label, notifier.publicKey);
     log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
     return reply.code(204).send();
   });
 
-  /** Forgets a browser's subscription, on its own way out. */
+  /** Removes the subscription of a browser, when the browser unsubscribes. */
   app.delete('/api/push/subscribe', async (req, reply) => {
     const { endpoint } = parseBody(pushUnsubscribeBody, req.body);
     deletePushSubscription(db, endpoint);
     return reply.code(204).send();
   });
 
-  // --- Static bundles with a single-page fallback -----------------------------
+  // --- Dashboard bundle with a single-page fallback -----------------------------
 
-  /** Content types served from the bundles, by file extension. */
+  /** The content types of the files of the bundle, by file extension. */
   const CONTENT_TYPES: Record<string, string> = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
@@ -964,15 +1013,20 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   };
 
   /**
-   * Serves the dashboard bundle: a real file when the path names one, else its
-   * index.html so client-side routes survive a reload.
+   * Sends a file of the dashboard bundle when the path names one. Otherwise
+   * sends index.html, so a client-side route works after a reload.
    *
    * The path has to stay under the bundle directory. The prefix check
    * includes the separator, so a sibling directory with the same prefix does
    * not count as inside.
    *
-   * Every file is streamed, because the entry chunk is over a megabyte and a
-   * synchronous read would block the event loop.
+   * Each file is streamed, because some chunks are larger than a megabyte, and
+   * a synchronous read blocks the event loop.
+   *
+   * @param reply The reply to send on.
+   * @param path The URL path without the query string.
+   * @param host The Host header of the request.
+   * @returns The reply.
    */
   function sendBundle(reply: FastifyReply, path: string, host: string | undefined): FastifyReply {
     const candidate = resolve(bundleDir, `.${normalize(path)}`);
@@ -1000,19 +1054,17 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   }
 
   /**
-   * The bundle, served compressed.
+   * The dashboard bundle, sent compressed.
    *
-   * The compression plugin attaches to each route as the route is declared,
-   * so it is registered first and the route is declared inside it. For the
-   * same reason the bundle is a route rather than the not-found handler,
-   * which the plugin never sees.
+   * The compression plugin attaches to each route when the route is declared.
+   * So the plugin is registered first, and the route is declared in it. For
+   * the same reason, the bundle is a route and not the not-found handler,
+   * because the plugin does not see that handler.
    */
   void app.register(async (bundle) => {
     await bundle.register(compress, { global: true, threshold: COMPRESS_THRESHOLD_BYTES });
     /**
-     * Every GET that is not the API or the gateway is the dashboard: a file
-     * of the bundle where the path names one, and index.html where it names a
-     * client-side route.
+     * Sends the dashboard for each GET outside the API and the gateway.
      */
     bundle.get('/*', async (req, reply) => {
       const url = req.url.split('?')[0] ?? '/';
@@ -1023,7 +1075,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     });
   });
 
-  /** Anything the routes above did not match, which is never the dashboard. */
+  /** Answers 404 to each request that no route matched. */
   app.setNotFoundHandler(async (_req, reply) => reply.code(404).send({ error: 'Not found' }));
 
   return {

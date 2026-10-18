@@ -1,3 +1,8 @@
+/**
+ * The Docker layer for containers, networks, images and execs. Only the
+ * Docker runtime uses it.
+ */
+
 import { existsSync, readFileSync } from 'node:fs';
 import type { Duplex } from 'node:stream';
 import { PassThrough, type Readable } from 'node:stream';
@@ -17,36 +22,33 @@ import {
 } from './runtime/runtime.ts';
 import { boxOwner } from './workspaces.ts';
 
-/**
- * The Docker layer: containers, networks, images and execs. Only the Docker
- * runtime uses it.
- */
-
-/** Docker label carrying the box id on every object Boxes creates. */
+/** The Docker label with the box id on each box container and box network. */
 export const LABEL = 'boxes.box';
 
 /**
- * Label the box image carries in its own config. It still marks a copy that
- * a pull has left untagged, so the orchestrator can prune that copy without
- * touching images that other users of the host own.
+ * The label in the config of the box image. It also marks a copy that lost
+ * its tag in a pull, so the orchestrator can remove that copy and not touch
+ * the images of other users of the host.
  */
 export const IMAGE_LABEL = 'boxes.image';
 
-/** The value of that label on the box image. */
+/** The value of IMAGE_LABEL on the box image. */
 export const BOX_IMAGE_KIND = 'box';
 
 /**
- * Docker label carrying the credential a throwaway login container belongs to.
- * A login container has no box label, so the sweep finds a left-over one by
- * this label.
+ * The Docker label with the credential of a temporary login container. A
+ * login container has no box label, so the sweep finds an old login container
+ * by this label.
  */
 export const LOGIN_LABEL = 'boxes.login';
 
 /**
- * The `uid:gid` every box process runs as, as Docker wants it written.
+ * The `uid:gid` of each box process, in the Docker format.
  *
- * Numbers rather than the image's `agent` user, so BOX_UID decides without an
- * image rebuild.
+ * The value has numbers and not the `agent` user of the image, so BOX_UID
+ * applies without an image rebuild.
+ *
+ * @returns The user in the form `uid:gid`.
  */
 function boxUser(): string {
   const { uid, gid } = boxOwner();
@@ -56,51 +58,75 @@ function boxUser(): string {
 /** The shared Docker client, or null before first use. */
 let client: Docker | null = null;
 
-/** The shared Docker client, connected to the host socket on first use. */
+/**
+ * Gives the shared Docker client, and connects it to the host socket on first use.
+ *
+ * @returns The client.
+ */
 export function docker(): Docker {
   if (!client) client = new Docker({ socketPath: '/var/run/docker.sock' });
   return client;
 }
 
-/** Test seam: install a client, or null to reset. */
+/**
+ * Installs a client for tests.
+ *
+ * @param d The client, or null to reset.
+ */
 export function setDockerForTests(d: Docker | null): void {
   client = d;
 }
 
 /**
- * Docker object names derived from a box id.
+ * The Docker object names of a box, from its id.
  *
  * Workspaces, homes and Nix stores are directories, so they have no name here.
  */
 export const names = {
-  /** Name of the box container. */
+  /**
+   * Gives the name of the box container.
+   *
+   * @param id The box id.
+   * @returns The container name.
+   */
   container: (id: string) => `box-${id}`,
-  /** Name of the box network. */
+  /**
+   * Gives the name of the box network.
+   *
+   * @param id The box id.
+   * @returns The network name.
+   */
   network: (id: string) => `bn-${id}`,
 };
 
-/** Everything createContainer needs to know about one box. */
+/** The data of one box for createContainer. */
 export interface CreateContainerSpec {
-  /** The server-generated box id. */
+  /** The box id, which the orchestrator makes. */
   boxId: string;
   /** The image to create the container from. */
   image: string;
   /** The box network the container joins. */
   networkName: string;
   /**
-   * Host-side path bind-mounted at WORKSPACE_DIR. A path rather than a volume
-   * name, because the orchestrator reads these files itself.
+   * The host path of the bind mount at WORKSPACE_DIR. It is a path and not a
+   * volume name, because the workspace is a directory on the data volume.
    */
   workspaceSource: string;
-  /** Host-side path of the box's home directory, bound at `/home/agent`. */
+  /** The host path of the home directory of the box, bound at `/home/agent`. */
   homeSource: string;
-  /** Host-side path of the box's Nix store directory, bound at NIX_DIR. */
+  /** The host path of the Nix store directory of the box, bound at NIX_DIR. */
   nixSource: string;
-  /** The full environment of the box, as built by boxEnv(). */
+  /** The full environment of the box, from boxEnv(). */
   env: Record<string, string>;
 }
 
-/** Converts a Docker-style memory limit such as 4g into bytes. */
+/**
+ * Converts a Docker memory limit such as 4g to bytes.
+ *
+ * @param limit The limit, a number with an optional k, m or g unit.
+ * @returns The limit in bytes.
+ * @throws {Error} When the limit has the wrong format.
+ */
 function memoryBytes(limit: string): number {
   const match = /^(\d+)([kmgKMG]?)$/.exec(limit);
   if (!match) throw new Error(`Invalid memory limit: ${limit}`);
@@ -110,7 +136,13 @@ function memoryBytes(limit: string): number {
   return value * scale;
 }
 
-/** Creates a box network. Internal, so it has no NAT and no default route. */
+/**
+ * Creates a box network. The network is internal, so it has no NAT and no default route.
+ *
+ * @param networkName The name of the network.
+ * @param subnet The subnet of the network, in CIDR form.
+ * @param boxId The box id, for the label.
+ */
 export async function createNetwork(
   networkName: string,
   subnet: string,
@@ -126,15 +158,25 @@ export async function createNetwork(
   });
 }
 
-/** Whether a network's inspect lists the egress proxy container on it. */
+/**
+ * Checks if the inspect of a network lists the egress proxy container.
+ *
+ * @param info The inspect of the network.
+ * @param cfg The config, with the name of the proxy container.
+ * @returns True when the proxy is on the network.
+ */
 function proxyOn(info: Docker.NetworkInspectInfo, cfg: Config): boolean {
   return Object.values(info.Containers ?? {}).some((c) => c.Name === cfg.EGRESS_PROXY_CONTAINER);
 }
 
 /**
- * Attaches the egress proxy to a box network under its alias, and reports
- * whether it is attached. The check runs every time, because compose can
- * recreate the proxy container and drop its dynamic attachments.
+ * Attaches the egress proxy to a box network under its alias. The check runs
+ * every time, because compose can recreate the proxy container and drop its
+ * dynamic attachments.
+ *
+ * @param networkName The name of the box network.
+ * @param cfg The config, with the name and the alias of the proxy.
+ * @returns True when the proxy is attached.
  */
 export async function ensureProxyAttached(networkName: string, cfg: Config): Promise<boolean> {
   const net = docker().getNetwork(networkName);
@@ -161,7 +203,13 @@ export async function ensureProxyAttached(networkName: string, cfg: Config): Pro
   }
 }
 
-/** Whether the egress proxy is attached to a box network right now. */
+/**
+ * Checks if the egress proxy is attached to a box network now.
+ *
+ * @param networkName The name of the box network.
+ * @param cfg The config, with the name of the proxy container.
+ * @returns True when the proxy is attached. False when the network cannot be read.
+ */
 export async function isProxyAttached(networkName: string, cfg: Config): Promise<boolean> {
   try {
     return proxyOn(await docker().getNetwork(networkName).inspect(), cfg);
@@ -170,8 +218,6 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
   }
 }
 
-// --- resolving this process's own host-side paths ---------------------------
-
 /**
  * The container id a test installed for selfContainerId, or undefined to read
  * the real sources.
@@ -179,20 +225,23 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
 let selfIdForTests: string | null | undefined;
 
 /**
- * Test seam: makes selfContainerId return id. Undefined restores the real
- * sources.
+ * Makes selfContainerId return `id`, for tests.
+ *
+ * @param id The container id, null for no container, or undefined to restore the real sources.
  */
 export function setSelfContainerIdForTests(id: string | null | undefined): void {
   selfIdForTests = id;
 }
 
 /**
- * This process's own container id, or null when it is not in a container.
+ * Finds the container id of this process.
  *
- * It tries three sources, as none of them holds everywhere. Mountinfo has the
- * id in the paths of the files Docker binds into every container. The cgroup
- * path has it only under some cgroup setups. The hostname is not an id when
- * compose sets it to the service name.
+ * It tries three sources, because no source works everywhere. Mountinfo has
+ * the id in the paths of the files that Docker binds into each container. The
+ * cgroup path has it only with some cgroup setups. The hostname is not an id
+ * when compose sets it to the service name.
+ *
+ * @returns The container id, or null when the process is not in a container.
  */
 export function selfContainerId(): string | null {
   if (selfIdForTests !== undefined) return selfIdForTests;
@@ -206,17 +255,17 @@ export function selfContainerId(): string | null {
       const match = pattern.exec(readFileSync(file, 'utf8').trim());
       if (match?.[1]) return match[1];
     } catch {
-      // not readable here; try the next source
+      // Not readable here, so the loop tries the next source.
     }
   }
   return null;
 }
 
 /**
- * Pulls an image, resolving once the daemon has finished with it.
+ * Pulls an image and resolves when the daemon is finished.
  *
- * It passes no registry auth. A private registry needs credentials in the
- * daemon's own configuration.
+ * The function sends no registry credentials. A private registry needs
+ * credentials in the configuration of the daemon.
  *
  * @param image The image reference to pull.
  * @param onProgress Called with each progress event of the pull.
@@ -227,14 +276,17 @@ export async function pullImage(
 ): Promise<void> {
   const stream = await docker().pull(image);
   await new Promise<void>((resolve, reject) => {
-    // The pull call returns when the transfer starts; the stream ends with it.
+    // The pull call returns when the transfer starts, and the stream ends with the transfer.
     docker().modem.followProgress(stream, (err) => (err ? reject(err) : resolve()), onProgress);
   });
 }
 
 /**
- * Reads something off an inspect, and returns null when the daemon answers
- * 404. Any other failure is rethrown, so no caller reads it as absence.
+ * Reads a value from an inspect, and returns null when the daemon answers
+ * 404. Each other failure is thrown again, so no caller reads it as absence.
+ *
+ * @param read The inspect call.
+ * @returns The value, or null for a 404.
  */
 async function inspecting<T>(read: () => Promise<T>): Promise<T | null> {
   try {
@@ -246,20 +298,25 @@ async function inspecting<T>(read: () => Promise<T>): Promise<T | null> {
 }
 
 /**
- * The id of an image on this host, or null when it is not here. Comparing ids
- * shows whether a moving tag has moved.
+ * Gives the id of an image on this host. A comparison of ids shows if a moving
+ * tag has moved.
+ *
+ * @param image The image reference.
+ * @returns The image id, or null when the image is not on this host.
  */
 export async function imageId(image: string): Promise<string | null> {
   return inspecting(async () => (await docker().getImage(image).inspect()).Id ?? null);
 }
 
 /**
- * The digest, build date and size of an image on this host, or null when it
- * is not here.
+ * Gives the digest, build date and size of an image on this host.
  *
  * The digest is the registry digest, so it matches what was published. An
  * image built on this host has none, and its local id is used instead. A build
  * date or size that cannot be read is null.
+ *
+ * @param image The image reference.
+ * @returns The facts of the image, or null when it is not on this host.
  */
 export async function imageInfo(image: string): Promise<ImageInfo | null> {
   return inspecting(async () => {
@@ -274,38 +331,64 @@ export async function imageInfo(image: string): Promise<ImageInfo | null> {
   });
 }
 
-/** The id of the image a container was created from, or null when it is gone. */
+/**
+ * Gives the id of the image that a container was created from.
+ *
+ * @param container The name or id of the container.
+ * @returns The image id, or null when the container does not exist.
+ */
 export async function containerImageId(container: string): Promise<string | null> {
   return inspecting(async () => (await docker().getContainer(container).inspect()).Image ?? null);
 }
 
-/** The full id of a container, by name or id, or null when it is gone. */
+/**
+ * Gives the full id of a container.
+ *
+ * @param container The name or id of the container.
+ * @returns The full id, or null when the container does not exist.
+ */
 export async function containerId(container: string): Promise<string | null> {
   return inspecting(async () => (await docker().getContainer(container).inspect()).Id ?? null);
 }
 
-/** True when a network exists. */
+/**
+ * Checks if a network exists.
+ *
+ * @param networkName The name of the network.
+ * @returns True when the network exists.
+ */
 export async function networkExists(networkName: string): Promise<boolean> {
   return (await inspecting(() => docker().getNetwork(networkName).inspect())) !== null;
 }
 
-/** The subnet of a network, or null when the network is gone or has none. */
+/**
+ * Gives the subnet of a network.
+ *
+ * @param networkName The name of the network.
+ * @returns The subnet, or null when the network does not exist or has none.
+ */
 export async function networkSubnet(networkName: string): Promise<string | null> {
   const info = await inspecting(() => docker().getNetwork(networkName).inspect());
   return info?.IPAM?.Config?.[0]?.Subnet ?? null;
 }
 
-/** Whether this process is running inside a container. */
+/**
+ * Checks if this process runs in a container.
+ *
+ * @returns True in a container.
+ */
 export function inContainer(): boolean {
   return existsSync('/.dockerenv') || selfContainerId() !== null;
 }
 
 /**
- * The host-side path of a directory mounted into this process's own container,
- * or null when there is no such mount.
+ * Finds the host path of a directory mounted into the container of this process.
  *
  * The daemon resolves bind sources on the host, so a bind of a path under the
- * orchestrator's own /data must name this host-side path.
+ * /data of the orchestrator must name this host path.
+ *
+ * @param destination The mount point in the container.
+ * @returns The host path, or null when there is no such mount.
  */
 export async function resolveHostMountSource(destination: string): Promise<string | null> {
   const self = selfContainerId();
@@ -320,6 +403,10 @@ export async function resolveHostMountSource(destination: string): Promise<strin
 /**
  * Creates a box container from the fixed, hardened HostConfig template. User
  * input never reaches the HostConfig.
+ *
+ * @param spec The data of the box.
+ * @param cfg The config, with the resource limits.
+ * @returns The id of the new container.
  */
 export async function createContainer(spec: CreateContainerSpec, cfg: Config): Promise<string> {
   const container = await docker().createContainer({
@@ -330,11 +417,11 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     Env: Object.entries(spec.env).map(([k, v]) => `${k}=${v}`),
     Labels: {
       [LABEL]: spec.boxId,
-      // Keeps Watchtower away. Only the orchestrator replaces a box
-      // container, and only while the box is stopped.
+      // Watchtower must not touch the container. Only the orchestrator replaces
+      // a box container, and only while the box is stopped.
       'com.centurylinklabs.watchtower.enable': 'false',
     },
-    // The adapter is a separate exec; PID 1 only holds the container open.
+    // The adapter is a separate exec. PID 1 only keeps the container open.
     AttachStdin: false,
     AttachStdout: false,
     AttachStderr: false,
@@ -342,18 +429,18 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
     HostConfig: {
       NetworkMode: spec.networkName,
       Binds: [
-        // Directories on the data volume, so the orchestrator can read a
-        // box's files without a running container.
+        // Directories on the data volume, so the files of a box stay when its
+        // container is replaced.
         `${spec.workspaceSource}:${WORKSPACE_DIR}`,
         `${spec.homeSource}:${HOME_DIR}`,
         `${spec.nixSource}:${NIX_DIR}`,
       ],
       ReadonlyRootfs: true,
       Tmpfs: { '/tmp': 'rw,size=512m,mode=1777' },
-      // Chromium keeps its shared memory in /dev/shm, and Docker's 64 MB
-      // default crashes large pages. The box image turns off Playwright's
-      // --disable-dev-shm-usage, which would move it to TMPDIR on the home.
-      // Like the tmpfs, it counts against the memory limit only as used.
+      // Chromium keeps its shared memory in /dev/shm, and the 64 MB default of
+      // Docker crashes large pages. The playwright-cli config of the box image drops
+      // the Playwright flag --disable-dev-shm-usage, which would move it to TMPDIR.
+      // Like the tmpfs, it counts against the memory limit only when used.
       ShmSize: 512 * 1024 * 1024,
       CapDrop: ['ALL'],
       SecurityOpt: ['no-new-privileges:true'],
@@ -361,10 +448,10 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
       NanoCpus: Math.round(cfg.BOX_CPUS * 1e9),
       PidsLimit: cfg.BOX_PIDS_LIMIT,
       RestartPolicy: { Name: 'no' },
-      // No `Init`: the image's entrypoint starts under tini, which reaps and
-      // forwards SIGTERM. A docker-init in front of it would leave tini a
-      // child that reaps nothing.
-      // Stated explicitly so a later edit cannot loosen them by omission.
+      // No `Init`, because the entrypoint of the image starts under tini, which
+      // reaps and forwards SIGTERM. A docker-init in front of it would leave tini
+      // a child that reaps nothing.
+      // The values below are explicit, so a later edit cannot loosen them by omission.
       Privileged: false,
       PublishAllPorts: false,
     },
@@ -372,7 +459,11 @@ export async function createContainer(spec: CreateContainerSpec, cfg: Config): P
   return container.id;
 }
 
-/** Starts a container, tolerating one that already runs. */
+/**
+ * Starts a container. A container that already runs is not an error.
+ *
+ * @param containerId The name or id of the container.
+ */
 export async function startContainer(containerId: string): Promise<void> {
   try {
     await docker().getContainer(containerId).start();
@@ -382,7 +473,12 @@ export async function startContainer(containerId: string): Promise<void> {
   }
 }
 
-/** Stops a container with a 10 second grace period, tolerating one already gone. */
+/**
+ * Stops a container with a grace period of 10 seconds. A stopped or missing
+ * container is not an error.
+ *
+ * @param containerId The name or id of the container.
+ */
 export async function stopContainer(containerId: string): Promise<void> {
   try {
     await docker().getContainer(containerId).stop({ t: 10 });
@@ -392,7 +488,11 @@ export async function stopContainer(containerId: string): Promise<void> {
   }
 }
 
-/** Removes a container and keeps its volumes. */
+/**
+ * Removes a container and keeps its volumes. A missing container is not an error.
+ *
+ * @param containerId The name or id of the container.
+ */
 export async function removeContainer(containerId: string): Promise<void> {
   try {
     await docker().getContainer(containerId).remove({ force: true, v: false });
@@ -402,14 +502,17 @@ export async function removeContainer(containerId: string): Promise<void> {
 }
 
 /**
- * Creates the throwaway container one login runs in.
+ * Creates the temporary container for one login.
  *
  * It gets no workspace, no agent configuration, no placeholder and no proxy.
- * It holds no deployment secret, so it sits on Docker's default bridge. It is
- * the only container Boxes creates with a direct route to the internet.
+ * It holds no deployment secret, so it is on the default bridge of Docker. It
+ * is the only container of Boxes with a direct route to the internet.
  *
  * The home is a tmpfs, because the rootfs is read-only and both CLIs write
  * their state under `$HOME`. The credential material goes with the container.
+ *
+ * @param spec The image, the credential id for the label, and the environment.
+ * @returns The id of the new container.
  */
 export async function createLoginContainer(spec: {
   image: string;
@@ -432,7 +535,7 @@ export async function createLoginContainer(spec: {
     HostConfig: {
       NetworkMode: 'bridge',
       ReadonlyRootfs: true,
-      // `exec`, because a login CLI may run from the home's PATH. `mode=1777`,
+      // `exec`, because a login CLI can run from a PATH in the home. `mode=1777`,
       // because the box user must write to a tmpfs that root owns.
       Tmpfs: {
         '/home/agent': 'rw,exec,size=256m,mode=1777',
@@ -440,7 +543,7 @@ export async function createLoginContainer(spec: {
       },
       CapDrop: ['ALL'],
       SecurityOpt: ['no-new-privileges:true'],
-      // No memory or CPU limit: a login is one short-lived CLI, and a low
+      // No memory or CPU limit, because a login is one short CLI run, and a low
       // limit can break a Node CLI.
       PidsLimit: 256,
       RestartPolicy: { Name: 'no' },
@@ -452,8 +555,9 @@ export async function createLoginContainer(spec: {
 }
 
 /**
- * Every login container Docker still has, with its creation time in epoch
- * milliseconds. The orphan sweep reads it.
+ * Lists every login container that Docker still has. The orphan sweep reads it.
+ *
+ * @returns The id, the credential id and the creation time in epoch milliseconds of each container.
  */
 export async function listLoginContainers(): Promise<
   Array<{ id: string; credentialId: string; createdAt: number }>
@@ -470,10 +574,16 @@ export async function listLoginContainers(): Promise<
   });
 }
 
-/** Removes a box network, detaching the egress proxy first. */
+/**
+ * Removes a box network, after it disconnects the egress proxy. A missing
+ * network is not an error.
+ *
+ * @param networkName The name of the network.
+ * @param cfg The config, with the name of the proxy container.
+ */
 export async function removeNetwork(networkName: string, cfg: Config): Promise<void> {
   const net = docker().getNetwork(networkName);
-  // Disconnect the proxy first, else Docker refuses to remove the network.
+  // Docker refuses to remove a network while the proxy is connected.
   try {
     await net.disconnect({ Container: cfg.EGRESS_PROXY_CONTAINER, Force: true });
   } catch {
@@ -487,12 +597,17 @@ export async function removeNetwork(networkName: string, cfg: Config): Promise<v
 }
 
 /**
- * The state Docker reports for a container. `missing` means the daemon does
- * not have it, `unknown` that the daemon did not answer.
+ * The state that Docker reports for a container. `missing` means that the
+ * daemon does not have it, and `unknown` means that the daemon did not answer.
  */
 export type ContainerState = 'running' | 'exited' | 'missing' | 'unknown';
 
-/** Resolves a container's live state, mapping every lookup failure onto a state. */
+/**
+ * Reads the live state of a container. Each lookup failure maps to a state.
+ *
+ * @param container The name or id of the container.
+ * @returns The state.
+ */
 export async function containerState(container: string): Promise<ContainerState> {
   try {
     const info = await docker().getContainer(container).inspect();
@@ -512,6 +627,11 @@ export async function containerState(container: string): Promise<ContainerState>
  * signal a running exec. The limit is rounded up to whole seconds. A command
  * that survives SIGTERM is killed five seconds later. Without `timeoutMs`,
  * the command is unbounded.
+ *
+ * @param containerId The name or id of the container.
+ * @param cmd The argument vector.
+ * @param opts The time limit, the output cap, the working directory and the environment.
+ * @returns The output and the exit code.
  */
 export async function execInContainer(
   containerId: string,
@@ -527,7 +647,14 @@ export async function execInContainer(
   return { stdout: out, stderr: err, code };
 }
 
-/** One short exec with its stdout and its stderr demuxed apart. */
+/**
+ * Runs one short exec and splits its stdout and its stderr.
+ *
+ * @param containerId The name or id of the container.
+ * @param cmd The argument vector.
+ * @param opts The time limit, the working directory and the environment.
+ * @returns The two output streams and the promise of the exit code.
+ */
 async function runExec(
   containerId: string,
   cmd: readonly string[],
@@ -557,8 +684,10 @@ async function runExec(
 }
 
 /**
- * Every labelled box container Docker knows about, for boot
- * reconciliation and the orphan sweep.
+ * Lists every labelled box container of Docker, for boot reconciliation and
+ * the orphan sweep.
+ *
+ * @returns The id, the box id and the run state of each container.
  */
 export async function listBoxContainers(): Promise<
   Array<{ id: string; boxId: string; running: boolean }>
@@ -580,7 +709,11 @@ export async function listBoxContainers(): Promise<
   });
 }
 
-/** Box networks Boxes created, by the box each is labelled with, and their subnets. */
+/**
+ * Lists the box networks that Boxes created.
+ *
+ * @returns The name, the box id and the subnet of each network.
+ */
 export async function listBoxNetworks(): Promise<
   Array<{ name: string; boxId: string; subnet: string | null }>
 > {
@@ -593,14 +726,17 @@ export async function listBoxNetworks(): Promise<
 }
 
 /**
- * Ids of box images on this host that have lost their tag.
+ * Lists the box images on this host without a tag.
  *
- * Only images with IMAGE_LABEL are listed, so an image Boxes did not fetch is
- * never listed. `RepoTags` is checked as well as the dangling filter.
+ * Only images with IMAGE_LABEL are listed, so an image that Boxes did not
+ * fetch is never listed. The function checks `RepoTags` in addition to the
+ * dangling filter.
  *
  * The caller excludes the current BOX_IMAGE. A second Boxes deployment on the
  * host that pins BOX_IMAGE by digest also has an untagged current image. It is
- * listed here, and removing it costs that deployment a pull.
+ * listed here, and its removal costs that deployment a pull.
+ *
+ * @returns The image ids.
  */
 export async function listSupersededBoxImages(): Promise<string[]> {
   const images = await docker().listImages({
@@ -613,11 +749,14 @@ export async function listSupersededBoxImages(): Promise<string[]> {
 }
 
 /**
- * Removes an image, and returns whether it went.
+ * Removes an image.
  *
- * Never forced, so the daemon refuses with 409 while a container still uses
- * the image. That box moves to the current image at its next start. A 404
- * means the image is already gone.
+ * The removal is not forced, so the daemon refuses with 409 while a container
+ * still uses the image. The box of that container gets the current image at
+ * its next start. A 404 means that the image is already gone.
+ *
+ * @param id The image id.
+ * @returns True when the image is removed, false for a 404 or a 409.
  */
 export async function removeImage(id: string): Promise<boolean> {
   try {
@@ -631,11 +770,18 @@ export async function removeImage(id: string): Promise<boolean> {
 }
 
 /**
- * Wires up the end of an exec: one promise for its exit code, and a kill.
+ * Connects the end of an exec to a promise for its exit code, and gives a kill
+ * function.
  *
- * A hijacked stream reports its end as both `end` and `close`, so the settle
- * runs at most once. `onEnd` closes whatever the caller demuxed into, before
- * the exit code is read.
+ * A hijacked stream reports its end as `end` and as `close`, so a flag makes
+ * the settle run only once. `onEnd` closes the output streams of the caller
+ * before the exit code is read.
+ *
+ * @param stream The hijacked stream of the exec.
+ * @param exec The exec, for the exit code.
+ * @param onEnd The function that runs once when the stream ends.
+ * @param onError The function that receives a stream error.
+ * @returns The promise of the exit code, and the kill function.
  */
 function execCompletion(
   stream: Duplex,
@@ -682,11 +828,15 @@ function execCompletion(
 /**
  * Starts a long-lived process in a container as the agent user.
  *
- * Without a terminal, Docker frames stdout and stderr into one stream, and
- * the two are demuxed apart. With a terminal, Docker does no framing: the
- * stream is the pty's bytes in both directions, and it is both stdout and
- * stdin. The size is set on the exec, so the first prompt is drawn at the
- * right width.
+ * Without a terminal, Docker frames stdout and stderr into one stream, and the
+ * function splits them. With a terminal, Docker does no framing. The stream
+ * holds the bytes of the pty in both directions, and it is stdout and stdin.
+ * The size is set on the exec, so the first prompt has the right width.
+ *
+ * @param container The name or id of the container.
+ * @param cmd The argument vector.
+ * @param opts The working directory, the environment, and the terminal size for a terminal.
+ * @returns The streams, the promise of the exit code, and the resize and kill functions.
  */
 export async function spawnExec(
   container: string,
@@ -709,8 +859,8 @@ export async function spawnExec(
       ...(opts.tty ? { ConsoleSize: [opts.tty.rows, opts.tty.cols] } : {}),
     });
 
-  // Tty on the start request too: the daemon reads it there to decide
-  // whether to frame the output. Frame headers would corrupt the text.
+  // The start request also has Tty, because the daemon reads it there to decide
+  // on the framing of the output. Frame headers would corrupt the text.
   const stream = (await exec.start({ hijack: true, stdin: true, Tty: tty })) as Duplex;
   let stdout: Readable = stream;
   const stderr = new PassThrough();
@@ -735,8 +885,8 @@ export async function spawnExec(
     stderr,
     stdin: stream,
     exited,
-    // A resize against an exec that has ended is left at debug: the stream
-    // ending is what the caller acts on.
+    // A failed resize of an ended exec goes to the debug log, because the caller
+    // acts on the end of the stream.
     resize: async (cols, rows) => {
       if (!tty) return;
       try {

@@ -7,16 +7,21 @@ import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
 import type { TunnelReconciler } from './tunnels.ts';
 
-/** The interval of the reaper, proxy and credential loops, in milliseconds. */
+/** The interval of the loops that run every minute, in milliseconds. */
 const TICK_MS = 60_000;
 
 /**
- * Runs `tick` every `everyMs` until the returned handle stops it, logging
- * whatever it throws rather than letting it reach an unhandled rejection.
+ * Runs a tick at a fixed interval until the returned handle stops it, and logs
+ * whatever the tick throws, so it cannot become an unhandled rejection.
  *
- * A tick that outlasts the interval skips the next one rather than overlap
- * it. Each tick re-asserts a state, so the running tick does the skipped
+ * A tick that outlasts the interval makes the loop skip the next one, so two
+ * ticks never overlap. Each tick re-asserts a state, so the running tick does the skipped
  * one's work. The timer does not keep the process alive.
+ *
+ * @param what The name of the loop, for the log.
+ * @param everyMs The interval, in milliseconds.
+ * @param tick The work of one tick.
+ * @returns The handle that stops the loop.
  */
 function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop: () => void } {
   let running = false;
@@ -39,8 +44,13 @@ function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop:
  * no attached browser, no open terminal, no background task still believed to
  * be running, and no activity for IDLE_STOP_MINUTES. It never deletes a box.
  *
- * The same tick removes the runtime objects and the storage of boxes that no
- * longer exist. No row names them, so reconcile() at boot cannot find them.
+ * The same tick removes the runtime objects and the storage that no live box
+ * row owns. reconcile() at boot starts from the rows, so it cannot find them.
+ *
+ * @param db The database.
+ * @param cfg The configuration, with IDLE_STOP_MINUTES.
+ * @param manager The box manager.
+ * @returns The handle that stops the loop.
  */
 export function startReaper(db: Db, cfg: Config, manager: BoxManager): { stop: () => void } {
   const idleMs = cfg.IDLE_STOP_MINUTES * 60_000;
@@ -71,7 +81,7 @@ export function startReaper(db: Db, cfg: Config, manager: BoxManager): { stop: (
       if (manager.terminalCount(row.id) > 0) continue;
 
       try {
-        // Does not wait for the box's queue: a box with queued work is not
+        // Does not wait for the queue of the box. A box with queued work is not
         // idle, and this tick has other boxes to check.
         if (!(await manager.stopUnlessBusy(row.id))) {
           log.box(row.id).info('not reaping a box that is busy; trying again next tick');
@@ -86,8 +96,6 @@ export function startReaper(db: Db, cfg: Config, manager: BoxManager): { stop: (
     }
 
     manager.maintenance();
-    // The reverse of reconcile(): objects labelled with a box that no longer
-    // exists.
     await manager.sweepOrphans();
   };
 
@@ -99,8 +107,12 @@ export function startReaper(db: Db, cfg: Config, manager: BoxManager): { stop: (
  * BOX_IMAGE_PULL_MINUTES, and returns a handle that stops it. Returns a
  * no-op handle when the setting is 0.
  *
- * Each box moves onto a new image at its next start, so nothing running is
- * disturbed. A failed pull is logged, and the image already here still works.
+ * A box gets the new image at its next start, so nothing running is
+ * disturbed. A failed pull is logged as a warning, and the image already here still works.
+ *
+ * @param cfg The configuration, with BOX_IMAGE and BOX_IMAGE_PULL_MINUTES.
+ * @param manager The box manager.
+ * @returns The handle that stops the loop.
  */
 export function startImageRefresher(cfg: Config, manager: BoxManager): { stop: () => void } {
   if (cfg.BOX_IMAGE_PULL_MINUTES === 0) {
@@ -108,7 +120,6 @@ export function startImageRefresher(cfg: Config, manager: BoxManager): { stop: (
     return { stop: () => {} };
   }
 
-  // The one loop whose failure is a warning rather than an error.
   return loop('box image refresh', cfg.BOX_IMAGE_PULL_MINUTES * 60_000, async () => {
     try {
       await manager.refreshBoxImage();
@@ -126,6 +137,11 @@ export function startImageRefresher(cfg: Config, manager: BoxManager): { stop: (
  * a handle that stops it. The state is the isolation of each running box,
  * which connects it to the proxy, and the proxy's policy. A proxy restart
  * loses the policy, and a recreate by compose loses the connections.
+ *
+ * @param manager The box manager.
+ * @param egress The egress manager.
+ * @param onWarnings Gets the ids of the boxes with incomplete isolation after each tick.
+ * @returns The handle that stops the loop.
  */
 export function startProxyReconciler(
   manager: BoxManager,
@@ -153,7 +169,10 @@ export function startProxyReconciler(
  * Starts the loop that keeps the stored credentials valid, and returns a handle
  * that stops it.
  *
- * It runs every minute, well inside the hour before an access token expires.
+ * It runs every minute. The store refreshes a credential in the last hour before its access token expires.
+ *
+ * @param credentials The credential store.
+ * @returns The handle that stops the loop.
  */
 export function startCredentialRefresh(credentials: CredentialStore): { stop: () => void } {
   return loop('credential refresh', TICK_MS, () => refreshCredentials(credentials));
@@ -165,6 +184,9 @@ export function startCredentialRefresh(credentials: CredentialStore): { stop: ()
  *
  * It looks every minute, and pulls a repository when its last pull is a day
  * old.
+ *
+ * @param agents The agent store.
+ * @returns The handle that stops the loop.
  */
 export function startSkillRepoRefresh(agents: AgentStore): { stop: () => void } {
   return loop('skill repository refresh', TICK_MS, () => agents.pullDue());
@@ -174,6 +196,9 @@ export function startSkillRepoRefresh(agents: AgentStore): { stop: () => void } 
  * Starts the tunnel reconciler and returns a handle that stops it. Every
  * minute it reads which dev tunnels each box hosts, and deletes the
  * remembered tunnels that no box has hosted for a few minutes.
+ *
+ * @param tunnels The tunnel reconciler.
+ * @returns The handle that stops the loop.
  */
 export function startTunnelReconciler(tunnels: TunnelReconciler): { stop: () => void } {
   return loop('tunnel reconciler', TICK_MS, () => tunnels.tick());

@@ -7,7 +7,11 @@ const QUIET = 3_000;
 /** Silence in milliseconds after which a turn counts as settled. */
 const SETTLE = 30_000;
 
-/** A clock the test moves, and the timers armed against it. */
+/**
+ * A clock the test moves, and the timers armed against it.
+ *
+ * @returns The delay to give an Activity, and the function that moves the clock and fires the due timers.
+ */
 function clock(): { delay: Delay; pass: (ms: number) => void } {
   let now = 0;
   let next = 1;
@@ -32,7 +36,11 @@ function clock(): { delay: Delay; pass: (ms: number) => void } {
   };
 }
 
-/** An Activity recording every transition and every settled turn. */
+/**
+ * An Activity that records every transition and every settled turn.
+ *
+ * @returns The Activity, the function that moves its clock, its transitions and its settled threads.
+ */
 function activity(): {
   a: Activity;
   pass: (ms: number) => void;
@@ -52,12 +60,24 @@ function activity(): {
   return { a, pass, changes, settled };
 }
 
-/** One update, as the adapter sends it. */
+/**
+ * One update, as the adapter sends it.
+ *
+ * @param sessionUpdate The update kind.
+ * @param over More fields of the update.
+ * @returns The update.
+ */
 function update(sessionUpdate: string, over: Record<string, unknown> = {}): unknown {
   return { sessionUpdate, ...over };
 }
 
-/** A tool call the agent is waiting on. */
+/**
+ * A tool call the agent is waiting on.
+ *
+ * @param toolCallId The id of the call.
+ * @param over Fields that replace or add to the defaults.
+ * @returns The `tool_call` update.
+ */
 function toolCall(toolCallId: string, over: Record<string, unknown> = {}): unknown {
   return update('tool_call', {
     toolCallId,
@@ -175,8 +195,7 @@ test('a thread that starts talking again is not announced as finished', () => {
   const { a, pass, settled } = activity();
   a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(QUIET);
-  // The pause between two tool calls, or the harness waking the agent with a
-  // task's report: either way the turn is not over.
+  // A pause between two tool calls, or a task report that wakes the agent, does not end the turn.
   a.observe('t1', update('agent_message_chunk'), 'claude');
   pass(SETTLE);
   assert.deepEqual(settled, []);
@@ -237,6 +256,9 @@ test('an adapter that has gone takes every thread with it', () => {
 /**
  * The usage_update with a cost, which the Claude adapter sends when a
  * processing cycle is over.
+ *
+ * @param over Fields that replace or add to the defaults.
+ * @returns The `usage_update` update.
  */
 function cycleEnd(over: Record<string, unknown> = {}): unknown {
   return update('usage_update', {
@@ -250,7 +272,7 @@ function cycleEnd(over: Record<string, unknown> = {}): unknown {
 test('the adapter saying the cycle is over is taken at its word', () => {
   const { a, changes, settled, pass } = activity();
   a.observe('t1', update('agent_message_chunk'), 'claude');
-  // No timer runs out: the usage_update with a cost ends the cycle.
+  // The usage_update with a cost ends the cycle before a timer runs out.
   a.observe('t1', cycleEnd(), 'claude');
   assert.equal(a.speaking('t1'), false);
   assert.deepEqual(changes, [

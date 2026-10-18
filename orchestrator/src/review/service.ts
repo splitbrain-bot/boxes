@@ -54,14 +54,11 @@ import {
   reviewChildren,
 } from './tree.ts';
 
-/**
- * What one review last learned from git about the whole workspace. Every
- * directory answer is a slice of it.
- */
+/** The git state of the whole workspace for one review, as the last snapshot found it. */
 interface GitSnapshot {
-  /** When it was taken, which is what its lifetime is measured from. */
+  /** The time the snapshot was taken, in milliseconds since the epoch. */
   at: number;
-  /** The repositories the workspace held, and which of them owns a path. */
+  /** The repositories in the workspace, with the lookup for the repository of a path. */
   map: RepoMap;
   /** The same repositories as the API reports them. */
   repos: ReviewRepo[];
@@ -69,19 +66,21 @@ interface GitSnapshot {
   statuses: FileStatuses;
 }
 
-/** What the review needs of the boxes it is a view onto. */
+/** The access to the boxes that the review needs. */
 export interface ReviewBoxes {
   /**
-   * The box, started if it was stopped, and the directory a command runs in
-   * inside it.
+   * Starts the box when it is stopped, and gives the place for a command in the box.
    *
-   * Asking for it marks the box active, so a review that keeps asking
-   * keeps the box it is asking about.
+   * The call marks the box active, so the reaper does not stop a box while a
+   * review reads it.
+   *
+   * @param id The box id.
+   * @returns The box id and the directory in the box that a command runs in.
    */
   execTarget(id: string): Promise<{ boxId: string; workingDir: string }>;
 }
 
-/** A running box as the review reaches it: git and the file service. */
+/** A running box, with the workspace for git and the file service in the box. */
 interface ReviewBox extends GitBox {
   /** The file service in the box. */
   files: FileService;
@@ -104,41 +103,48 @@ interface DirListing {
 }
 
 /**
- * Review operations over the boxes of one orchestrator.
+ * The service for the code review of each box.
  *
- * The review of a box is its whole workspace. REVIEW.md at the workspace root
- * is the only store of annotations, and the agent can edit it too. Files are
- * read and written by the file service in the box, and git runs in the box,
- * so every request starts a stopped box and marks it active.
+ * The review of a box covers its whole workspace. REVIEW.md at the workspace
+ * root is the only store of annotations, and the agent can edit it too.
  */
 export class ReviewService {
   /**
-   * One promise chain per box, so two mutations of the same REVIEW.md are
-   * serialized. Different boxes do not wait on each other.
+   * The tail of the promise chain of each box, by box id. The chain runs the reads and writes of one
+   * REVIEW.md one after the other.
    */
   private readonly locks = new Map<string, Promise<unknown>>();
 
-  /** What each open review last learned from git, by box id. */
+  /** The last git snapshot of each review, by box id. */
   private readonly snapshots = new Map<string, GitSnapshot>();
 
+  /**
+   * Creates the service.
+   *
+   * @param db The database that holds the box rows.
+   * @param boxes The access to the boxes that the reviews read.
+   */
   constructor(
     /** The database that holds the box rows. */
     private readonly db: Db,
-    /** The boxes the reviews look into. */
+    /** The access to the boxes that the reviews read. */
     private readonly boxes: ReviewBoxes,
   ) {}
 
-  // --- the workspace and its repositories -----------------------------------
-
   /**
-   * How long a git snapshot is reused when no request asks for a new one.
+   * The time in milliseconds that a git snapshot stays in use when no request asks for a new one.
    *
-   * A burst of folder taps runs git once. Arrivals, saves and base changes
-   * take a new snapshot sooner.
+   * Many folder opens in this time run git once.
    */
   private static readonly SNAPSHOT_MS = 60_000;
 
-  /** The box row, or a 404 for an unknown or deleted box. */
+  /**
+   * Reads the row of a box.
+   *
+   * @param id The box id.
+   * @returns The box row.
+   * @throws {HttpError} 404 for an unknown or deleted box.
+   */
   private row(id: string): BoxRow {
     const row = this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as BoxRow | undefined;
     if (!row || row.status === 'deleted') throw new HttpError(404, 'Box not found');
@@ -146,11 +152,14 @@ export class ReviewService {
   }
 
   /**
-   * The box's container to run git and the file service in, started if it
-   * was stopped. An unknown or deleted box is a 404.
+   * Starts the box when it is stopped, and gives the place where git and the file service run.
    *
-   * Each request asks for it again, because a container can stop or be
+   * Each request calls this method again, because a container can stop or be
    * replaced between two requests.
+   *
+   * @param id The box id.
+   * @returns The box with its workspace and its file service.
+   * @throws {HttpError} 404 for an unknown or deleted box.
    */
   private async box(id: string): Promise<ReviewBox> {
     this.row(id);
@@ -163,12 +172,16 @@ export class ReviewService {
   }
 
   /**
-   * What a review knows from git: which repositories the workspace holds, what
-   * each is compared against, and the status of every changed file in it.
+   * Gives the git snapshot of a review.
    *
-   * The snapshot is reused, because each git call is an exec into the
-   * box. A new one is taken when `fresh` says the browser has just arrived,
-   * after a save or a base change, and when {@link SNAPSHOT_MS} has passed.
+   * The method reuses the held snapshot, because each git call is an exec into the
+   * box. It takes a new snapshot when `fresh` is true, when no snapshot is held,
+   * and when {@link ReviewService.SNAPSHOT_MS} has passed.
+   *
+   * @param box The box to run git in.
+   * @param id The box id.
+   * @param fresh True to take a new snapshot in all cases.
+   * @returns The snapshot.
    */
   private async snapshot(box: ReviewBox, id: string, fresh: boolean): Promise<GitSnapshot> {
     const held = this.snapshots.get(id);
@@ -185,34 +198,43 @@ export class ReviewService {
     return taken;
   }
 
-  /** Drops a box's git snapshot, for a change that moves what git says. */
+  /**
+   * Drops the git snapshot of a box, after a change that can change the git status.
+   *
+   * @param id The box id.
+   */
   private invalidate(id: string): void {
     this.snapshots.delete(id);
   }
 
   /**
-   * The revision expression the box compares against, or '' when none is set,
-   * which compares each repository against its own HEAD.
+   * Reads the revision expression that the review of a box compares against.
    *
-   * One expression serves the whole workspace. It resolves to a different
-   * commit in each repository, and those commits are not stored.
+   * One expression serves the whole workspace. Each repository resolves it to its own commit.
+   *
+   * @param id The box id.
+   * @returns The revision expression, or '' when none is set. With '', each repository is compared against
+   *   its own HEAD.
    */
   private baseRev(id: string): string {
     return this.row(id).review_base_rev ?? '';
   }
 
-  // --- reading --------------------------------------------------------------
-
   /**
-   * One directory of the review: its children, and the facts the whole view
+   * Gives one directory of the review with its children, and the facts that the whole view
    * needs.
    *
-   * Listing and status come in one answer, because a file the change deleted
+   * Listing and status come in one answer, because a file that the change deleted
    * has no directory entry and only the status map names it.
    *
-   * `fresh` says the browser has arrived: the view mounted, a file closed back
-   * to the tree, or the tab came back. It takes a new git snapshot and runs the
-   * drift check over every annotated file. Opening a folder does neither.
+   * @param id The box id.
+   * @param relDir The workspace-relative path of the directory, or '' for the root.
+   * @param fresh True to take a new git snapshot and run the drift check over every annotated file. The
+   *   browser sets it when it shows the tree again, for example when the view mounts, a file closes back to
+   *   the tree, or the tab becomes visible.
+   * @returns The directory response.
+   * @throws {HttpError} 404 for an unknown box, or for a directory that the review does not list or that is
+   *   missing.
    */
   async dir(id: string, relDir: string, fresh: boolean): Promise<ReviewDirResponse> {
     const box = await this.box(id);
@@ -241,11 +263,17 @@ export class ReviewService {
   }
 
   /**
-   * One file: content, diff markers and its comments, in one response.
+   * Gives one file with its content, diff markers and comments, in one response.
    *
    * The diff and the status come from the repository that owns the path, with
-   * the path as that repository names it. A file no repository claims gets
-   * neither. The content is plain text, and the browser does the highlighting.
+   * the path relative to that repository. A file outside every repository has
+   * no diff and no status. The content is plain text, and the browser adds the
+   * highlighting.
+   *
+   * @param id The box id.
+   * @param relPath The workspace-relative path of the file.
+   * @returns The file response. For a file that git reports deleted, the response has no content.
+   * @throws {HttpError} 404 for an unknown box or a path that the review does not offer.
    */
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
     const box = await this.box(id);
@@ -257,8 +285,8 @@ export class ReviewService {
     const read = await box.files.read(relPath, MAX_FILE_BYTES);
     const base = repo ? await this.baseIn(box, id, repo) : NO_BASE;
 
-    // Only the owning repository is asked, so opening a file costs the same
-    // however many repositories the workspace holds.
+    // Git runs only in the owning repository, so opening a file costs the same
+    // for any number of repositories in the workspace.
     const [diff, statuses] = await Promise.all([
       repo && !read.binary
         ? fileDiff(gitTarget(box, repo.path), base, inRepo(repo, relPath), read.content)
@@ -295,11 +323,16 @@ export class ReviewService {
   }
 
   /**
-   * The bytes of a file the review offers, as a stream.
+   * Gives the bytes of a file that the review offers, as a stream.
    *
-   * It applies `listedFile` as {@link resolveFile} does, without asking git.
+   * The method applies {@link listedFile} as {@link ReviewService.resolveFile} does, but it does not run git.
    * A deleted file has no bytes to serve, so it gets the same 404 as any path
-   * the review does not offer.
+   * that the review does not offer.
+   *
+   * @param id The box id.
+   * @param relPath The workspace-relative path of the file.
+   * @returns The content of the file as a stream, with its size.
+   * @throws {HttpError} 404 for an unknown box or a path that the review does not offer.
    */
   async rawFile(id: string, relPath: string): Promise<FileStream> {
     if (!listedFile(relPath)) throw new HttpError(404, 'File not found');
@@ -312,17 +345,22 @@ export class ReviewService {
     }
   }
 
-  // --- mutation -------------------------------------------------------------
-
   /**
-   * Replaces one file of the workspace with the reviewer's edited content, and
-   * returns the file view as it now stands.
+   * Replaces one file of the workspace with the content that the reviewer edited, and
+   * returns the file view after the write.
    *
-   * `hash` is the file hash the browser last read. When the file no longer
-   * matches it, something else changed it, and the save is refused so that
-   * change is not lost. A truncated file is refused too, because the browser
-   * holds only the part up to the cap. The response comes from {@link file},
+   * When the file does not match `hash`, something else changed it. The method then refuses the save, so
+   * that change is kept. The method also refuses a truncated file, because the browser
+   * holds only the part up to the cap. The response comes from {@link ReviewService.file},
    * whose drift check moves the comments with the edit.
+   *
+   * @param id The box id.
+   * @param relPath The workspace-relative path of the file.
+   * @param content The new content.
+   * @param hash The hash of the file that the browser read last.
+   * @returns The file response after the write.
+   * @throws {HttpError} 400 for content larger than {@link MAX_FILE_BYTES}, 404 for a path that the review does
+   *   not offer, 409 for a deleted, binary or truncated file, and 412 when the file does not match `hash`.
    */
   async writeFile(
     id: string,
@@ -347,8 +385,8 @@ export class ReviewService {
         'This file is larger than the display limit, so it cannot be saved.',
       );
     }
-    // 412 rather than 409, because the reviewer can overrule this refusal and
-    // save anyway. The file service checks the hash once more as it writes.
+    // 412 and not 409, because the reviewer can overrule this refusal and
+    // save anyway. The file service checks the hash again as it writes.
     const changed = new HttpError(412, 'This file changed on disk while you were editing it.');
     if (read.hash !== hash) throw changed;
     try {
@@ -357,12 +395,23 @@ export class ReviewService {
       if (failedCondition(err)) throw changed;
       throw err;
     }
-    // The write can change this file's git status.
+    // The write can change the git status of this file.
     this.invalidate(id);
     return this.file(id, relPath);
   }
 
-  /** Adds or replaces the comment on one line, and returns the file's comments. */
+  /**
+   * Adds or replaces the comment on one line.
+   *
+   * @param id The box id.
+   * @param relPath The workspace-relative path of the file.
+   * @param line The line number, starting at 1.
+   * @param comment The comment. The method trims it.
+   * @returns The comments of the file after the drift check.
+   * @throws {HttpError} 400 for a line that is not a positive integer or a comment that is empty or longer
+   *   than 20000 characters, 404 for a path that the review does not offer, 409 for a deleted file or when
+   *   REVIEW.md changes during both write attempts.
+   */
   async setAnnotation(
     id: string,
     relPath: string,
@@ -377,8 +426,8 @@ export class ReviewService {
     if (text.length > 20_000) throw new HttpError(400, 'comment is too long');
 
     const box = await this.box(id);
-    // The path must name a file the review lists, or the comment could never
-    // be shown.
+    // The path must name a file that the review lists, or the review cannot show
+    // the comment.
     if (!(await this.resolveFile(box, id, relPath))) {
       throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
     }
@@ -390,7 +439,16 @@ export class ReviewService {
     return this.drifted(id, box.files, relPath);
   }
 
-  /** Removes the comment on one line, and returns what is left for the file. */
+  /**
+   * Removes the comment on one line.
+   *
+   * @param id The box id.
+   * @param relPath The workspace-relative path of the file.
+   * @param line The line number, starting at 1.
+   * @returns The comments of the file that are left, after the drift check.
+   * @throws {HttpError} 400 for a line that is not a positive integer, 404 for an unknown box, 409 when
+   *   REVIEW.md changes during both write attempts.
+   */
   async deleteAnnotation(id: string, relPath: string, line: number): Promise<ReviewAnnotation[]> {
     if (!Number.isInteger(line) || line < 1) {
       throw new HttpError(400, 'line must be a positive integer');
@@ -403,8 +461,12 @@ export class ReviewService {
   }
 
   /**
-   * Runs the drift check over the whole review and returns one file's comments
-   * as they then stand. Every comment write ends with this.
+   * Runs the drift check over the whole review. The comment writes call it after the write.
+   *
+   * @param id The box id.
+   * @param files The file service in the box.
+   * @param relPath The workspace-relative path of the file.
+   * @returns The comments of the file after the drift check.
    */
   private async drifted(
     id: string,
@@ -418,6 +480,9 @@ export class ReviewService {
   /**
    * Deletes REVIEW.md, which starts a new review. A missing file is not an
    * error.
+   *
+   * @param id The box id.
+   * @throws {HttpError} 404 for an unknown or deleted box.
    */
   async deleteReview(id: string): Promise<void> {
     const { files } = await this.box(id);
@@ -431,21 +496,26 @@ export class ReviewService {
   }
 
   /**
-   * Records the revision the whole review is compared against, and reports
-   * where it landed.
+   * Records the revision that the whole review compares against, and returns the
+   * base commit of each repository.
    *
-   * The expression is resolved in each repository through the merge base with
-   * that repository's own HEAD. A repository where it names nothing is compared
-   * against its own HEAD. A 400 comes back only when it resolves nowhere. Null
-   * clears the base.
+   * The expression resolves in each repository through the merge base with the
+   * HEAD of that repository. A repository where it names nothing is compared
+   * against its own HEAD.
+   *
+   * @param id The box id.
+   * @param rev The revision expression. Null or a blank string clears the base.
+   * @returns The stored expression and the repositories with their base commits.
+   * @throws {HttpError} 400 for an expression that is too long or that resolves in no repository, 404 for an
+   *   unknown box, 409 when the workspace holds no git repository.
    */
   async setBase(id: string, rev: string | null): Promise<ReviewBaseResponse> {
-    // Checks the box first: a held snapshot would answer without checking it.
+    // The box check comes first, because a held snapshot skips the box check.
     const box = await this.box(id);
     const { map } = await this.snapshot(box, id, false);
     if (rev === null || rev.trim() === '') {
       this.db.prepare('UPDATE boxes SET review_base_rev = NULL WHERE id = ?').run(id);
-      // Every status the snapshot holds was an answer about the old base.
+      // The statuses in the snapshot compare against the old base.
       this.invalidate(id);
       return { rev: '', repos: await this.describeRepos(box, map, new Map()) };
     }
@@ -470,15 +540,19 @@ export class ReviewService {
     return { rev: wanted, repos: await this.describeRepos(box, map, bases) };
   }
 
-  // --- the read-modify-write ------------------------------------------------
-
   /**
-   * Applies one change to REVIEW.md and writes it back, under the box's lock.
+   * Applies one change to REVIEW.md and writes it back, under the lock of the box.
    *
    * The agent can edit or delete REVIEW.md at any time. The write expects the
-   * hash that was read, and the file service refuses it when the file moved.
-   * The change is then applied once more to the new content. A second move
-   * gives a 409.
+   * hash that was read, and the file service refuses it when the file changed.
+   * The method then applies the change again to the new content.
+   *
+   * @param id The box id.
+   * @param files The file service in the box.
+   * @param relPath The workspace-relative path of the file whose comments the method returns.
+   * @param apply The change. It changes the review in place.
+   * @returns The comments of the file after the change.
+   * @throws {HttpError} 409 when REVIEW.md changes during both write attempts.
    */
   private async mutate(
     id: string,
@@ -511,7 +585,13 @@ export class ReviewService {
     });
   }
 
-  /** Reads and parses REVIEW.md, or an empty review when there is none. */
+  /**
+   * Reads and parses REVIEW.md.
+   *
+   * @param files The file service in the box.
+   * @returns The review and its hash. A missing REVIEW.md gives an empty review and the hash ''. A binary
+   *   REVIEW.md gives an empty review.
+   */
   private async read(files: FileService): Promise<ReviewRead> {
     const empty = (): Review => ({ data: new Map(), started: '' });
     let read: FileRead;
@@ -525,11 +605,16 @@ export class ReviewService {
   }
 
   /**
-   * One file's comments as REVIEW.md holds them, without a drift check.
+   * Gives the comments of one file as REVIEW.md holds them, without a drift check.
    *
-   * For files the drift check cannot compare against: deleted, binary, or past
-   * the display cap. The tree counts their comments, so the file view shows
-   * them too.
+   * The method is for files that the drift check cannot compare, which are
+   * deleted, binary, or larger than the display cap. The tree counts their
+   * comments, so the file view shows them too.
+   *
+   * @param id The box id.
+   * @param files The file service in the box.
+   * @param relPath The workspace-relative path of the file.
+   * @returns The comments of the file.
    */
   private async annotationsOf(
     id: string,
@@ -542,11 +627,15 @@ export class ReviewService {
   }
 
   /**
-   * Runs drift on every annotated file and writes the result once if anything
-   * moved. Returns the review as it now stands.
+   * Runs the drift check on every annotated file and writes the result once
+   * when an annotation changed.
    *
-   * When the agent changed REVIEW.md in the meantime, the result is not
-   * written. The next drift check runs on the agent's version.
+   * When the agent changed REVIEW.md in the meantime, the method does not
+   * write the result. The next drift check runs on the version of the agent.
+   *
+   * @param id The box id.
+   * @param files The file service in the box.
+   * @returns The review after the drift check, with the hash that was read.
    */
   private async driftAll(id: string, files: FileService): Promise<ReviewRead> {
     return this.withLock(id, async () => {
@@ -556,7 +645,7 @@ export class ReviewService {
       let changed = false;
       for (const [file, annotations] of read.review.data) {
         const source = await sourceLines(files, file);
-        // Undefined is a binary or truncated file: skipped, not marked outdated.
+        // Undefined is a binary or truncated file. The drift check skips it and does not mark it outdated.
         if (source === undefined) continue;
         if (checkDrift(annotations, source)) changed = true;
       }
@@ -565,7 +654,15 @@ export class ReviewService {
     });
   }
 
-  /** Runs drift on one file and returns its comments as they now stand. */
+  /**
+   * Runs the drift check on one file.
+   *
+   * @param id The box id.
+   * @param files The file service in the box.
+   * @param relPath The workspace-relative path of the file.
+   * @param source The current lines of the file.
+   * @returns The comments of the file after the drift check.
+   */
   private async driftFile(
     id: string,
     files: FileService,
@@ -584,6 +681,9 @@ export class ReviewService {
   /**
    * Writes the result of a drift check, unless REVIEW.md changed since it was
    * read.
+   *
+   * @param files The file service in the box.
+   * @param read The review after the drift check, with the hash that was read.
    */
   private async writeDrifted(files: FileService, read: ReviewRead): Promise<void> {
     try {
@@ -594,10 +694,14 @@ export class ReviewService {
   }
 
   /**
-   * Runs `fn` after every earlier holder of the box's lock has finished.
+   * Runs `fn` after every earlier holder of the lock of the box has finished.
    *
    * The stored tail catches rejections, so one failure does not block the
    * next holder.
+   *
+   * @param id The box id.
+   * @param fn The function to run.
+   * @returns The result of `fn`.
    */
   private withLock<T>(id: string, fn: () => T | Promise<T>): Promise<T> {
     const previous = this.locks.get(id) ?? Promise.resolve();
@@ -609,14 +713,16 @@ export class ReviewService {
     return result;
   }
 
-  // --- repositories and the base --------------------------------------------
-
   /**
-   * The repositories as the API reports them: where each is, what its HEAD
-   * names, and what the review's base resolved to in it.
+   * Gives the repositories as the API reports them.
    *
    * A revision can name a branch in one repository and nothing in another, so
    * each repository reports its own `baseCommit`.
+   *
+   * @param box The box to run git in.
+   * @param map The repositories of the workspace.
+   * @param bases The base of each repository, by repository path.
+   * @returns The repositories with their HEAD and base commits.
    */
   private async describeRepos(
     box: GitBox,
@@ -634,8 +740,13 @@ export class ReviewService {
   }
 
   /**
-   * What one repository is compared against, for a single-file request that
-   * has no reason to resolve the base in any of the others.
+   * Resolves the base of one repository, for a request about a single file in it. The
+   * method resolves the base only in this repository.
+   *
+   * @param box The box to run git in.
+   * @param id The box id.
+   * @param repo The repository.
+   * @returns The base, or {@link NO_BASE} when no revision is set or the revision names nothing.
    */
   private async baseIn(box: GitBox, id: string, repo: Repo): Promise<Base> {
     const rev = this.baseRev(id);
@@ -645,18 +756,20 @@ export class ReviewService {
     return 'base' in resolved ? resolved.base : NO_BASE;
   }
 
-  // --- paths ----------------------------------------------------------------
-
   /**
-   * Checks a client-supplied path to a file the review offers.
+   * Checks that a path from the client names a file that the review offers.
    *
-   * {@link listedFile} applies the listing's rule, so the API serves only what
-   * a directory listing offers. The file service keeps the path inside the
-   * workspace. A directory is refused too. Every refusal is the same 404, so an
-   * escape attempt learns no more than an unknown path would.
+   * {@link listedFile} applies the rule of the listing, so the API serves only
+   * what a directory listing offers. The file service keeps the path inside the
+   * workspace. The method also refuses a directory. Every refusal is the same 404, so an
+   * escape attempt learns no more than an unknown path.
    *
-   * Returns false for a file that is missing on disk and that git reports
-   * deleted. The caller decides how to answer for it.
+   * @param box The box with its file service.
+   * @param id The box id.
+   * @param relPath The workspace-relative path from the client.
+   * @returns True for a file on disk. False for a file that is missing on disk and that git reports
+   *   deleted. The caller decides how to answer for it.
+   * @throws {HttpError} 404 for every other path.
    */
   private async resolveFile(box: ReviewBox, id: string, relPath: string): Promise<boolean> {
     if (!listedFile(relPath)) throw new HttpError(404, 'File not found');
@@ -679,11 +792,17 @@ export class ReviewService {
   }
 
   /**
-   * The children of one directory of the workspace, or a 404.
+   * Lists the children of one directory of the workspace.
    *
    * A directory missing on disk counts as empty when git reports deleted files
-   * under it, and {@link dirEntries} adds those files. Any other missing
-   * directory is a 404.
+   * under it, and {@link dirEntries} adds those files.
+   *
+   * @param files The file service in the box.
+   * @param relDir The workspace-relative path of the directory, or '' for the root.
+   * @param statuses The git statuses of the workspace.
+   * @returns The children that the review lists.
+   * @throws {HttpError} 404 for a directory that the review does not list, and for every other error of the
+   *   file service.
    */
   private async children(
     files: FileService,
@@ -704,7 +823,11 @@ export class ReviewService {
     }
   }
 
-  /** Drops the snapshot and the lock of a deleted box. */
+  /**
+   * Drops the snapshot and the lock of a deleted box.
+   *
+   * @param id The box id.
+   */
   forget(id: string): void {
     this.snapshots.delete(id);
     this.locks.delete(id);
@@ -712,10 +835,15 @@ export class ReviewService {
 }
 
 /**
- * The answer for a file the change removed: it is in the tree because git
- * reports it deleted, and there is nothing on disk to read. Its comments come
- * with it, because the tree counts them and they are still there to be read
- * and deleted.
+ * Builds the response for a file that the change removed. The file is in the tree
+ * because git reports it deleted, but it is not on disk. The response holds its
+ * comments, because the tree counts them and the reviewer can still read and
+ * delete them.
+ *
+ * @param relPath The workspace-relative path of the file.
+ * @param repo The repository that owns the path, or null.
+ * @param annotations The comments of the file.
+ * @returns The file response without content.
  */
 function goneFile(
   relPath: string,
@@ -740,12 +868,15 @@ function goneFile(
 }
 
 /**
- * A file's current lines for a drift check.
+ * Reads the current lines of a file for a drift check.
  *
- * Null says the file is gone or cannot be read, which marks every annotation
- * on it outdated. Undefined says the file is binary or longer than the display
- * cap, so the drift check skips it. A connection that fails throws, so it
- * marks nothing outdated.
+ * A connection that fails throws, so it marks nothing outdated.
+ *
+ * @param files The file service in the box.
+ * @param relPath The workspace-relative path of the file.
+ * @returns The lines. Null when the file service answers with an error, for example for a missing file, which
+ *   marks every annotation on it outdated. Undefined for a binary file or a file larger than the display
+ *   cap, which the drift check skips.
  */
 async function sourceLines(
   files: FileService,
@@ -761,17 +892,32 @@ async function sourceLines(
   }
 }
 
-/** The condition a write of a file read with this hash expects: '' is no file. */
+/**
+ * Gives the condition for a write of a file that was read with a hash.
+ *
+ * @param hash The hash from the read, or '' when there was no file.
+ * @returns The condition that the file still has the hash, or that it is still absent.
+ */
 function expecting(hash: string): WriteCondition {
   return hash === '' ? { absent: true } : { hash };
 }
 
-/** Whether an error is the file service refusing a write whose condition failed. */
+/**
+ * Checks if the file service refused a write because its condition failed.
+ *
+ * @param err The error of the write.
+ * @returns True for a 412 from the file service.
+ */
 function failedCondition(err: unknown): boolean {
   return err instanceof FileServiceError && err.status === 412;
 }
 
-/** One file's annotations, as the API reports them: a list, in line order. */
+/**
+ * Converts the annotations of one file into the list that the API reports.
+ *
+ * @param annotations The annotations by line number.
+ * @returns The annotations in line order.
+ */
 function toAnnotations(
   annotations: Map<number, { comment: string; outdated: boolean }>,
 ): ReviewAnnotation[] {

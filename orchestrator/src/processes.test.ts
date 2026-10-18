@@ -4,12 +4,18 @@ import { boxProcesses, killInBox } from './processes.ts';
 import { type Runtime, setRuntime } from './runtime/runtime.ts';
 
 /**
- * How the box's process table is read, which is what says whether a
- * conversation has anything still running in it, and which pids a stop
+ * Tests for reading and signalling the processes in a box. The process table
+ * shows if a conversation still has something running, and which pids a stop
  * signals.
  */
 describe('reading and signalling what is running in a box', () => {
-  /** A runtime whose commands answer with `output` and record what ran. */
+  /**
+   * Installs a runtime whose commands answer with the same output and record what ran.
+   *
+   * @param output The standard output of every command.
+   * @param code The exit code of every command.
+   * @returns The commands that ran, in order.
+   */
   function fakeRun(output: string, code = 0): { ran: Array<readonly string[]> } {
     const ran: Array<readonly string[]> = [];
     setRuntime({

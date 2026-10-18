@@ -7,7 +7,7 @@ FROM node:26-bookworm AS dashboard-build
 WORKDIR /build
 COPY dashboard/package.json dashboard/package-lock.json* ./dashboard/
 WORKDIR /build/dashboard
-# ci, so the image uses the lock file versions.
+# npm ci installs the versions from the lock file.
 RUN npm ci
 # After npm ci, so a change in shared/ keeps the installed dependencies.
 COPY shared/ /build/shared/
@@ -16,7 +16,6 @@ COPY dashboard/ ./
 # needs the orchestrator's source.
 RUN npm run check:app && npm run build
 
-# --- orchestrator ------------------------------------------------------------
 FROM node:26-bookworm AS orchestrator-build
 WORKDIR /build
 # The tests run the file service in process, and the check covers them, so
@@ -39,9 +38,8 @@ ENV NODE_ENV=production
 # better-sqlite3 is a native module, so the production dependencies are
 # installed against the runtime image's own libc.
 COPY orchestrator/package.json orchestrator/package-lock.json* ./
-# git stays, because the review runs it over a box's workspace and the
-# orchestrator fetches skill repositories with it. git needs ca-certificates to
-# verify HTTPS servers. The native module's build toolchain is installed and
+# The orchestrator fetches skill repositories with git. git needs
+# ca-certificates to verify HTTPS servers. The native module's build toolchain is installed and
 # removed in the same layer.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \

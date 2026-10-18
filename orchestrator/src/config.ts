@@ -1,22 +1,22 @@
-import { z } from 'zod';
-import type { CredentialId } from '../../shared/types.ts';
-import { DEFAULT_BOX_GID, DEFAULT_BOX_UID } from './workspaces.ts';
-
 /**
- * The orchestrator's configuration, read from the process environment.
+ * The configuration of the orchestrator, read from the process environment.
  *
  * Every setting has a working default, so the orchestrator starts with no
  * configuration at all.
  */
 
+import { z } from 'zod';
+import type { CredentialId } from '../../shared/types.ts';
+import { DEFAULT_BOX_GID, DEFAULT_BOX_UID } from './workspaces.ts';
+
 /** A positive whole number of minutes. */
 const durationMinutes = z.coerce.number().int().positive();
 
-/** A bare hostname of two labels or more: no scheme, no port, no path. */
+/** A bare hostname with two or more labels, without a scheme, a port or a path. */
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 
 /**
- * An on/off setting, spelled the way a person would write one.
+ * An on or off setting, with the usual words for true and false.
  *
  * An unrecognised value fails at boot with the rest of the configuration.
  */
@@ -27,49 +27,49 @@ const flag = z
 /** Every setting the orchestrator reads from its environment, with its default. */
 const schema = z.object({
   /**
-   * What runs the boxes: the Docker daemon of this host, or the Kubernetes
-   * cluster the orchestrator runs in. Settings that only one runtime reads
-   * say so.
+   * The runtime of the boxes, which is the Docker daemon of this host or the
+   * Kubernetes cluster of the orchestrator. The doc of a setting that only one
+   * runtime reads tells so.
    */
   RUNTIME: z.enum(['docker', 'kubernetes']).default('docker'),
-  /** Where the orchestrator keeps its database and every box's files. */
+  /** The directory of the database and of the files of each box. */
   DATA_DIR: z.string().min(1).default('/data'),
   /**
-   * Host-side path of DATA_DIR. Bind sources name this path, because the
+   * The path of DATA_DIR on the host. Bind sources name this path, because the
    * Docker daemon resolves them.
    *
-   * Empty is the normal case: at boot the orchestrator inspects its own
-   * container and takes the `Source` of the mount at DATA_DIR. With the
-   * shipped compose that is `/var/lib/docker/volumes/boxes_boxes-data/_data`.
-   * Set this where that cannot work: a nested or rootless daemon, or a
-   * compose file that mounts a real host directory for /data.
+   * Empty is the normal case. Then at boot, the orchestrator inspects its own
+   * container and takes the `Source` of the mount at DATA_DIR. With the shipped
+   * compose file, that is `/var/lib/docker/volumes/boxes_boxes-data/_data`.
+   * Set this value where that cannot work, for example for a nested or
+   * rootless daemon, or for a compose file that mounts a host directory for /data.
    *
    * Docker only.
    */
   HOST_DATA_DIR: z.string().default(''),
-  /** Port the HTTP server listens on. */
+  /** The port of the HTTP server. */
   PORT: z.coerce.number().int().positive().default(3000),
   /**
-   * Lowest severity written to stderr. `debug` logs every forwarded ACP
+   * The lowest severity that goes to stderr. `debug` logs every forwarded ACP
    * message, which is a lot of output for a busy deployment.
    */
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
-  /** Image every box container is created from. */
+  /** The image of each box container. */
   BOX_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/box:latest'),
   /**
-   * uid box containers run as, and so the owner of every file in a
+   * The uid of the box containers, which is also the owner of each file in a
    * workspace.
    *
-   * When this is the uid the orchestrator runs as, the orchestrator needs no
-   * root to hand files to the agent.
+   * When the orchestrator runs as this uid, it needs no root to give files to
+   * the agent.
    */
   BOX_UID: z.coerce.number().int().positive().default(DEFAULT_BOX_UID),
-  /** gid box containers run as, on the same terms as BOX_UID. */
+  /** The gid of the box containers, like BOX_UID. */
   BOX_GID: z.coerce.number().int().positive().default(DEFAULT_BOX_GID),
   /**
-   * How often the box image is pulled again, in minutes, so a moving tag such
-   * as `:latest` keeps moving. A box moves onto the new image at its next
+   * The time between two pulls of the box image, in minutes, so a moving tag
+   * such as `:latest` stays current. A box gets the new image at its next
    * start.
    *
    * 0 turns the refresh off, for an image built on the host that no registry
@@ -80,49 +80,48 @@ const schema = z.object({
    */
   BOX_IMAGE_PULL_MINUTES: z.coerce.number().int().nonnegative().default(60),
   /**
-   * Whether a copy of the box image that a pull has superseded is removed
-   * from this host.
+   * True to remove from this host each copy of the box image that a pull
+   * replaced.
    *
-   * On by default, because each untagged image left behind costs a gigabyte
-   * or two. The candidates are the image the last pull replaced and every
-   * untagged image with the box image's label. The daemon refuses to remove
-   * an image that a container was created from.
+   * On by default, because each untagged image takes disk space. The
+   * candidates are the image that the last pull replaced and every untagged
+   * image with the label of the box image. The daemon refuses to remove an
+   * image that a container was created from.
    *
-   * Off is for a host that keeps old images on purpose: to roll back without
-   * the registry, or because something outside Boxes runs them.
+   * Off is for a host that keeps old images on purpose, for example for a
+   * rollback without the registry, or for programs outside Boxes that run them.
    *
    * Docker only. On Kubernetes, the kubelet removes unused images.
    */
   BOX_IMAGE_PRUNE: flag.default(true),
-  /** Address range each box's own /24 network is taken from. Docker only. */
+  /** The address range for the /24 network of each box. Docker only. */
   BOX_SUBNET_POOL: z
     .string()
     .regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/)
     .default('10.200.0.0/16'),
   /**
-   * Memory one box container may use, such as `4g`.
+   * The memory limit of one box container, for example `4g`.
    *
-   * The limit covers every adapter in the box. Each harness that has a
-   * thread runs its own adapter process with its own agent under it. The
-   * defaults are not measured against two busy agents in one box. When a box
+   * The limit applies to all adapters in the box. Each harness with a thread
+   * runs its own adapter process, with its own agent below it. When a box
    * reaches the limit, the kernel kills a process in it.
    */
   BOX_MEM_LIMIT: z
     .string()
     .regex(/^\d+[kmgKMG]?$/)
     .default('4g'),
-  /** CPUs one box container may use. */
+  /** The CPU limit of one box container. */
   BOX_CPUS: z.coerce.number().positive().default(2),
   /**
-   * Processes one box container may run. When a box reaches the limit, a tool
-   * call fails because it cannot fork.
+   * The process limit of one box container. When a box reaches the limit, a
+   * tool call fails because it cannot fork.
    *
    * Docker only. On Kubernetes, the kubelet setting `podPidsLimit` limits the
    * processes of each pod on a node.
    */
   BOX_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
   /**
-   * Memory the scheduler reserves for one box pod, in the format of
+   * The memory that the scheduler reserves for one box pod, in the format of
    * BOX_MEM_LIMIT. Kubernetes only.
    *
    * Less than the limit, because most boxes are idle most of the time. A box
@@ -132,52 +131,52 @@ const schema = z.object({
     .string()
     .regex(/^\d+[kmgKMG]?$/)
     .default('1g'),
-  /** CPUs the scheduler reserves for one box pod. Kubernetes only. */
+  /** The CPUs that the scheduler reserves for one box pod. Kubernetes only. */
   BOX_CPU_REQUEST: z.coerce.number().positive().default(0.5),
   /**
-   * Size of the volume claim of one box, which holds its workspace, its home
-   * and its Nix store, in the format of BOX_MEM_LIMIT. Kubernetes only.
+   * The size of the volume claim of one box, which holds its workspace, its
+   * home and its Nix store, in the format of BOX_MEM_LIMIT. Kubernetes only.
    */
   BOX_STORAGE_SIZE: z
     .string()
     .regex(/^\d+[kmgKMG]?$/)
     .default('20g'),
   /**
-   * When the kubelet pulls the box image for a box pod. Kubernetes only.
+   * The pull policy of the kubelet for the box image of a box pod. Kubernetes
+   * only.
    *
-   * `Always` resolves the tag at each start, so a box moves onto a new image
-   * at its next start. `IfNotPresent` is for an image that is loaded into
+   * `Always` resolves the tag at each start, so a box gets a new image at its
+   * next start. `IfNotPresent` is for an image that is loaded into
    * the cluster and is in no registry.
    */
   BOX_IMAGE_PULL_POLICY: z.enum(['Always', 'IfNotPresent', 'Never']).default('Always'),
 
-  /** How many minutes a box may go without activity before the reaper stops it. */
+  /** The minutes without activity after which the reaper stops a box. */
   IDLE_STOP_MINUTES: durationMinutes.default(30),
 
   /**
-   * How long a reading of what is running in a box stays valid, in seconds.
+   * The time in seconds for which a process reading of a box stays valid.
    *
-   * Each new reading costs one Docker API call. A longer window lets a
-   * finished build show as running for longer in the browser.
+   * Each new reading runs `ps` in the box. With a longer time, the browser
+   * shows a finished build as running for longer.
    */
   BACKGROUND_POLL_SECONDS: z.coerce.number().int().positive().default(20),
 
   /**
-   * How long a thread has to be silent before the agent counts as stopped,
-   * in seconds.
+   * The silence in seconds after which the agent of a thread counts as stopped.
    *
    * `claude-agent-acp` ends each processing cycle with a `usage_update` that
-   * carries a cost, and that marker decides before this timer does.
-   * `codex-acp` sends no such update, so every Codex thread depends on this
-   * timer. While a tool call the agent waits on is open, the thread counts as
-   * working however long it is silent.
+   * has a cost, and that marker decides before this timer does. `codex-acp`
+   * sends no such update, so every Codex thread depends on this timer. While a
+   * tool call that the agent waits on is open, the thread counts as working,
+   * however long the silence is.
    */
   AGENT_QUIET_SECONDS: z.coerce.number().int().positive().default(3),
 
   /**
-   * How long a thread has to stay silent before a push notification says its
-   * turn has finished, in seconds. Measured from the last thing the agent
-   * said, so it includes AGENT_QUIET_SECONDS.
+   * The silence in seconds after which a push notification tells that the turn
+   * of a thread is finished. The time starts at the last message of the agent,
+   * so it includes AGENT_QUIET_SECONDS.
    *
    * Longer than the quiet threshold, because a screen can correct itself a
    * moment later and a push notification cannot.
@@ -185,29 +184,27 @@ const schema = z.object({
   AGENT_SETTLE_SECONDS: z.coerce.number().int().positive().default(30),
 
   /**
-   * Largest single attachment a prompt may carry into a workspace, in
-   * mebibytes.
+   * The maximum size of one attachment, in mebibytes.
    *
-   * It limits one upload, which the orchestrator holds in memory before it
-   * writes the file.
+   * The orchestrator holds the upload in memory before it writes the file.
    */
   MAX_ATTACHMENT_MB: z.coerce.number().int().positive().default(25),
 
   /**
-   * What happens to a permission request nobody answered within
-   * PERMISSION_HOLD_MINUTES: `hold` keeps waiting, `deny` picks the request's
-   * own reject option.
+   * The action for a permission request without an answer after
+   * PERMISSION_HOLD_MINUTES. `hold` continues to wait, and `deny` selects the
+   * reject option of the request.
    */
   PERMISSION_FALLBACK: z.enum(['hold', 'deny']).default('hold'),
   /**
-   * How long a permission request waits for an answer before
+   * The minutes that a permission request waits for an answer before
    * PERMISSION_FALLBACK applies.
    */
   PERMISSION_HOLD_MINUTES: durationMinutes.default(120),
 
   /**
-   * Who operates this deployment, for the VAPID assertion every Web Push
-   * carries. A push service with a problem contacts this address. RFC 8292
+   * The contact of the operator of this deployment, for the VAPID assertion of
+   * each Web Push. A push service with a problem contacts this address. RFC 8292
    * allows a mailto: or an https: URL.
    */
   PUSH_SUBJECT: z
@@ -217,37 +214,38 @@ const schema = z.object({
     })
     .default('https://github.com/splitbrain/boxes'),
 
-  /** Container name of the egress proxy the orchestrator attaches. Docker only. */
+  /** The container name of the egress proxy that the orchestrator attaches. Docker only. */
   EGRESS_PROXY_CONTAINER: z.string().min(1).default('boxes-egress-proxy'),
-  /** Name the egress proxy answers to on every box network. Docker only. */
+  /** The name of the egress proxy on each box network. Docker only. */
   EGRESS_PROXY_ALIAS: z.string().min(1).default('proxy'),
-  /** Port boxes reach the egress proxy on. */
+  /** The port of the egress proxy for the boxes. */
   EGRESS_PROXY_PORT: z.coerce.number().int().positive().default(3128),
   /**
-   * Name of the Service of the egress proxy, in the namespace of the
+   * The name of the Service of the egress proxy, in the namespace of the
    * orchestrator. Boxes reach the proxy at its cluster IP, and the isolation
-   * of a box allows the pods it selects. Kubernetes only.
+   * of a box allows the pods that the Service selects. Kubernetes only.
    */
   EGRESS_PROXY_SERVICE: z.string().min(1).default('boxes-egress-proxy'),
   /**
-   * URL of the proxy's control channel, on the compose network or at the
-   * proxy Service. Only the orchestrator connects to it.
+   * The URL of the control channel of the proxy, on the compose network or at
+   * the proxy Service. Only the orchestrator connects to it.
    */
   EGRESS_CONTROL_URL: z.url({ protocol: /^http$/ }).default('http://boxes-egress-proxy:3129'),
 
   /**
-   * Hosts boxes may reach, comma or whitespace separated. Exact names and
-   * one-label wildcards: `github.com, *.githubusercontent.com`. Empty is off,
-   * which leaves every public host reachable.
+   * The hosts that boxes can reach, separated by commas or whitespace. Each
+   * entry is an exact name or a wildcard for the first label, for example
+   * `github.com, *.githubusercontent.com`. Empty turns the allowlist off, so
+   * every public host is reachable.
    */
   EGRESS_ALLOWED_HOSTS: z.string().default(''),
 
   /**
-   * The GitLab the settings page's token is for, as a bare hostname with no
-   * scheme and no path. `gitlab.com` unless a deployment runs its own.
+   * The GitLab host of the token on the settings page, as a bare hostname
+   * without a scheme or a path.
    *
-   * A self-managed instance has to be on a public address, because the proxy
-   * refuses private ranges whatever the credential set says.
+   * A self-managed instance must be on a public address, because the proxy
+   * refuses private ranges, also for a host in the credential set.
    */
   GITLAB_HOST: z
     .string()
@@ -260,77 +258,78 @@ export type Config = Readonly<z.infer<typeof schema>> & {
   /** The parsed allowlist. Empty means the allowlist is off. */
   readonly egressAllowedHosts: readonly string[];
   /**
-   * Every credential this deployment can translate, and where each one
-   * travels. A box holds a placeholder for each entry; the proxy swaps in the
-   * ones the store holds a secret for.
+   * Every credential that this deployment can translate, with its hosts and
+   * headers. A box holds a placeholder for each entry with a stored secret,
+   * and the proxy replaces the placeholder with the secret.
    */
   readonly credentialSet: readonly CredentialSpec[];
 };
 
 /**
- * One credential the proxy can translate, and everything the deployment knows
- * about it except the secret. The secret is stored in the database.
+ * One credential that the proxy can translate, with all data of the
+ * deployment about it except the secret. The database stores the secret.
  */
 export interface CredentialSpec {
-  /** Which stored credential this is: the key of the row that holds its secret. */
+  /** The id of the credential, which is the key of the row with its secret. */
   id: CredentialId;
-  /** Hosts intercepted so the credential can be swapped in. */
+  /** The hosts where the proxy puts in the credential. */
   hosts: readonly string[];
-  /** Headers the credential may travel in, lowercased. */
+  /** The headers that can hold the credential, in lowercase. */
   headers: readonly string[];
   /**
-   * Hosts this credential's tools need reachable but never send it to, so a
-   * narrow allowlist cannot break them. Not intercepted.
+   * The hosts that the tools of this credential must reach, but that never get
+   * the credential. A narrow allowlist then does not break the tools. The proxy
+   * does not intercept these hosts.
    */
   alsoAllow: readonly string[];
   /**
-   * Prefix a generated placeholder carries, so that a client checking the
-   * shape of its token accepts it and fails at the API rather than at startup.
+   * The prefix of a generated placeholder, so a client that checks the format
+   * of its token accepts the placeholder at startup.
    */
   placeholderPrefix: string;
   /**
-   * Authorization schemes under which the hosts accept tokens they issued
-   * themselves. The proxy lets values under these schemes through unchanged.
+   * The authorization schemes for tokens that the hosts issued. The proxy lets
+   * values with these schemes through unchanged.
    * Absent means none.
    */
   passthroughSchemes?: readonly string[];
 }
 
 /**
- * The credentials whose hosts are fixed. A deployment translates the ones the
- * credential store holds a secret for; the rest stay ordinary passthrough
- * hosts.
+ * The credentials with fixed hosts. A deployment translates each credential
+ * with a stored secret. The hosts of the other credentials stay normal
+ * passthrough hosts.
  *
- * No setting changes these entries, because the hosts and headers are facts
- * about the services.
+ * No setting changes these entries, because the hosts and the headers are
+ * facts of the services.
  */
 const FIXED_CREDENTIALS: readonly CredentialSpec[] = [
   {
     id: 'claude',
     hosts: ['api.anthropic.com'],
     headers: ['authorization', 'x-api-key'],
-    // The token endpoints an OAuth credential is refreshed at. Not
-    // intercepted: the orchestrator sends the refresh with its own credential.
+    // The token endpoints for the refresh of an OAuth credential. The proxy does
+    // not intercept them, because the orchestrator sends the refresh itself.
     alsoAllow: ['console.anthropic.com', 'platform.claude.com', 'claude.ai'],
     placeholderPrefix: 'sk-ant-oat01-',
   },
   {
     id: 'openai',
-    // The API-key endpoint only. `chatgpt.com` serves subscriptions, and the
-    // two reject each other's credentials. Leaving it unintercepted lets a
-    // deployment key and a person's subscription coexist in one box.
+    // Only the endpoint for API keys. `chatgpt.com` serves subscriptions, and each
+    // endpoint refuses the credentials of the other. The proxy does not intercept
+    // `chatgpt.com`, so a deployment key and a subscription can work in one box.
     hosts: ['api.openai.com'],
     headers: ['authorization'],
-    // Where Codex logs in and refreshes, and the subscription endpoint.
-    // `files.openai.com` and `ab.chatgpt.com` are left to the allowlist.
+    // The login and refresh host of Codex, and the subscription endpoint. The
+    // allowlist decides for `files.openai.com` and `ab.chatgpt.com`.
     alsoAllow: ['auth.openai.com', 'chatgpt.com'],
     placeholderPrefix: 'sk-',
   },
   {
     id: 'github',
     hosts: ['github.com', 'api.github.com', '*.githubusercontent.com'],
-    // git sends the token as the password of an HTTP Basic pair and gh sends
-    // it directly; both arrive in this one header.
+    // git sends the token as the password of HTTP Basic, and gh sends it
+    // directly. Both use this header.
     headers: ['authorization'],
     alsoAllow: ['codeload.github.com'],
     placeholderPrefix: 'ghp_',
@@ -342,7 +341,10 @@ const FIXED_CREDENTIALS: readonly CredentialSpec[] = [
  *
  * git sends the token as the password of an HTTP Basic pair. glab sends a
  * personal access token in PRIVATE-TOKEN and an OAuth token as a bearer.
- * The proxy reads both headers, so it swaps or refuses every form.
+ * The proxy reads both headers, so it replaces or refuses each form.
+ *
+ * @param host The GitLab host.
+ * @returns The credential spec.
  */
 function gitlabCredential(host: string): CredentialSpec {
   return {
@@ -355,13 +357,14 @@ function gitlabCredential(host: string): CredentialSpec {
 }
 
 /**
- * The Dev Tunnels credential: a GitHub token from the Dev Tunnels app, which
- * the share-app skill creates tunnels with.
+ * The Dev Tunnels credential, which is a GitHub token from the Dev Tunnels
+ * app. The share-app skill uses it to create tunnels.
  *
  * The pattern covers the global and regional control planes and the regional
  * relays. Only a control plane gets the GitHub token. While a tunnel is
- * hosted, the CLI sends a control plane and a relay a token the service
- * issued for that tunnel, under the `tunnel` scheme, which passes unchanged.
+ * hosted, the CLI sends a token for that tunnel to a control plane and to a
+ * relay, with the `tunnel` scheme. The service issued that token, so it
+ * passes unchanged.
  */
 const DEVTUNNELS_CREDENTIAL: CredentialSpec = {
   id: 'devtunnels',
@@ -372,12 +375,22 @@ const DEVTUNNELS_CREDENTIAL: CredentialSpec = {
   passthroughSchemes: ['tunnel'],
 };
 
-/** Every credential this deployment can translate, in settings-page order. */
+/**
+ * Gives every credential that this deployment can translate, in the order of the settings page.
+ *
+ * @param gitlabHost The GitLab host.
+ * @returns The credential specs.
+ */
 function credentialSetFor(gitlabHost: string): readonly CredentialSpec[] {
   return [...FIXED_CREDENTIALS, gitlabCredential(gitlabHost), DEVTUNNELS_CREDENTIAL];
 }
 
-/** Splits a comma or whitespace separated host list into patterns. */
+/**
+ * Splits a comma or whitespace separated host list into patterns.
+ *
+ * @param value The host list.
+ * @returns The patterns in lowercase, without duplicates.
+ */
 function parseHostList(value: string): string[] {
   return [
     ...new Set(
@@ -399,12 +412,21 @@ let cached: Config | null = null;
  * `FOO=` in an .env file, and a compose pass-through for a variable the host
  * does not set, both arrive as an empty string, which would fail the regex
  * and enum fields at boot.
+ *
+ * @param env The environment.
+ * @returns The environment without the empty entries.
  */
 function withoutEmpty(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
 }
 
-/** Parses an environment into a config, throwing on any invalid value. */
+/**
+ * Parses an environment into a config.
+ *
+ * @param env The environment.
+ * @returns The config.
+ * @throws {Error} When a value is not valid. The message lists each problem.
+ */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.safeParse(withoutEmpty(env));
   if (!parsed.success) {
@@ -436,13 +458,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-/** The process-wide config, parsed on first call. */
+/**
+ * Gives the config of the process, and parses it on the first call.
+ *
+ * @returns The config.
+ */
 export function config(): Config {
   if (!cached) cached = loadConfig();
   return cached;
 }
 
-/** Test seam: install a config without touching process.env. */
+/**
+ * Installs a config for tests, without a change to process.env.
+ *
+ * @param c The config.
+ */
 export function setConfigForTests(c: Config): void {
   cached = c;
 }

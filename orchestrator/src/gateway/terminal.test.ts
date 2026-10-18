@@ -36,18 +36,27 @@ class FakeSocket extends EventEmitter {
   readonly sent: Buffer[] = [];
   /** The code and reason of each close asked for, in order. */
   readonly closes: Array<{ code: number; reason: string }> = [];
-  /** How many times the socket was pinged. */
+  /** The number of pings sent to the socket. */
   pings = 0;
   /** True once the connection was dropped without a closing handshake. */
   terminated = false;
 
-  /** Takes one binary frame and leaves its bytes buffered. */
+  /**
+   * Takes one binary frame and leaves its bytes buffered.
+   *
+   * @param data The frame.
+   */
   send(data: Buffer): void {
     this.sent.push(Buffer.from(data));
     this.bufferedAmount += data.length;
   }
 
-  /** Records a close and marks the socket as closed. */
+  /**
+   * Records a close and marks the socket as closed.
+   *
+   * @param code The close code.
+   * @param reason The close reason.
+   */
   close(code?: number, reason?: string): void {
     this.closes.push({ code: code ?? 1000, reason: reason ?? '' });
     this.readyState = 3;
@@ -63,12 +72,20 @@ class FakeSocket extends EventEmitter {
     this.terminated = true;
   }
 
-  /** Delivers typed bytes, the way a browser sends them. */
+  /**
+   * Delivers typed bytes, the way a browser sends them.
+   *
+   * @param text The typed text.
+   */
   type(text: string): void {
     this.emit('message', Buffer.from(text, 'utf8'), true);
   }
 
-  /** Delivers one control frame. */
+  /**
+   * Delivers one control frame.
+   *
+   * @param message The control message.
+   */
   control(message: unknown): void {
     this.emit('message', Buffer.from(JSON.stringify(message), 'utf8'), false);
   }
@@ -79,7 +96,7 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-/** What a test's fake pty recorded, and the handles to drive it by. */
+/** The records of a test's fake pty, and the handles that drive it. */
 interface FakePty {
   /** Bytes written into the last pty by the endpoint. */
   readonly typed: () => string;
@@ -101,7 +118,7 @@ interface FakePty {
   client: () => string;
   /** Sets whether the container runs. */
   setRunning: (running: boolean) => void;
-  /** Makes the next opens of a pty fail. */
+  /** Makes the next `count` opens of a pty fail. */
   failOpens: (count: number) => void;
 }
 
@@ -117,7 +134,11 @@ interface Pty {
   killed: boolean;
 }
 
-/** Installs a Docker client whose execs are ptys a test can drive. */
+/**
+ * Installs a Docker client whose execs are ptys a test can drive.
+ *
+ * @returns The records and the controls of the fake ptys.
+ */
 function fakeDocker(): FakePty {
   const ptys: Pty[] = [];
   const sizes: Array<{ cols: number; rows: number }> = [];
@@ -211,19 +232,24 @@ function fakeDocker(): FakePty {
   };
 }
 
-/** What a test's fake manager recorded about the box being held. */
+/** The records of a test's fake manager about the held box. */
 interface FakeManager {
   /** The stand-in manager to attach terminals with. */
   manager: BoxManager;
-  /** How many terminals the manager currently counts on the box. */
+  /** The number of terminals the manager counts on the box. */
   held: () => number;
-  /** How many times the box was marked active by typing. */
+  /** The number of times typing marked the box active. */
   touches: () => number;
-  /** How many times the box was asked for, which starts a stopped box. */
+  /** The number of calls for the exec target, which starts a stopped box. */
   targets: () => number;
 }
 
-/** A manager that answers with a container and counts the holds on it. */
+/**
+ * A manager that answers with a container and counts the holds on it.
+ *
+ * @param opts The error message that `execTarget` fails with, if any.
+ * @returns The manager and its counters.
+ */
 function fakeManager(opts: { fail?: string } = {}): FakeManager {
   let open = 0;
   let touches = 0;
@@ -247,7 +273,13 @@ function fakeManager(opts: { fail?: string } = {}): FakeManager {
   return { manager, held: () => open, touches: () => touches, targets: () => targets };
 }
 
-/** Opens a terminal and waits for the pty behind it to be there. */
+/**
+ * Opens a terminal and waits for the pty behind it to be there.
+ *
+ * @param ws The socket.
+ * @param manager The manager.
+ * @param size The size to report, or null to report none.
+ */
 async function attach(
   ws: FakeSocket,
   manager: BoxManager,
@@ -255,8 +287,7 @@ async function attach(
 ): Promise<void> {
   attachTerminal(ws as unknown as WebSocket, 'box-1', manager);
   if (size) ws.control({ type: 'resize', ...size });
-  // The pty opens across two awaits: the box being reached, and the size
-  // being known.
+  // The pty opens after two awaits, one for the box and one for the size.
   await vi.waitFor(() => assert.ok(true));
   await new Promise((resolve) => setImmediate(resolve));
 }

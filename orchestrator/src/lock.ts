@@ -1,12 +1,12 @@
+/** The claim that keeps two orchestrators from sharing one DATA_DIR. */
+
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** The claim that keeps two orchestrators from sharing one DATA_DIR. */
-
-/** The file that says which process owns DATA_DIR, under DATA_DIR itself. */
+/** Name of the lock file in DATA_DIR. The file records which process owns DATA_DIR. */
 export const LOCK_FILE = 'orchestrator.lock';
 
-/** How often the holder says it is still there, in milliseconds. */
+/** Interval at which the holder stamps the lock file, in milliseconds. */
 export const HEARTBEAT_MS = 5_000;
 
 /**
@@ -26,14 +26,14 @@ export type Claim =
       /** Stops the heartbeat and gives the directory up. */
       release: () => void;
       /**
-       * When the replaced claim was last stamped, or null when there was no
+       * The time of the last stamp of the replaced claim, or null when there was no
        * claim to replace.
        */
       tookOver: number | null;
     }
   | {
       held: true;
-      /** How long ago the holder last said it was there, in milliseconds. */
+      /** Time since the holder last stamped the lock file, in milliseconds. */
       quietFor: number;
     };
 
@@ -46,10 +46,12 @@ export type Claim =
  * the first one is waiting on.
  *
  * A claim not stamped for LOCK_STALE_MS is taken over. The process id in the
- * file cannot tell this: in a container every orchestrator is PID 1, so the
- * id of a killed one is alive in its replacement.
+ * file cannot show a dead holder. In a container every orchestrator is PID 1,
+ * so the id of a killed one is alive in its replacement.
  *
- * `now` is injected so a test can move time rather than wait for it.
+ * @param dataDir The data directory to claim.
+ * @param now The clock. A test passes its own clock to move time.
+ * @returns The claim, or the report that another process holds the directory.
  */
 export function claimDataDir(dataDir: string, now: () => number = Date.now): Claim {
   mkdirSync(dataDir, { recursive: true });
@@ -59,8 +61,10 @@ export function claimDataDir(dataDir: string, now: () => number = Date.now): Cla
   };
 
   /**
-   * When the claim was last stamped, or null when the file holds no time.
+   * Returns the time of the last stamp, or null when the file holds no time.
    * Such a file, for example one with a bare process id, counts as abandoned.
+   *
+   * @returns The time in epoch milliseconds, or null.
    */
   const stampedAt = (): number | null => {
     try {

@@ -2,7 +2,7 @@ import { afterEach } from 'vitest';
 import { setRuntime } from './runtime/runtime.ts';
 
 /**
- * Runs before each test file. A runtime that one test sets does not carry
- * over to the next, so each test sets the runtime it uses.
+ * Vitest loads this file before each test file. The hook clears the runtime
+ * after each test, so each test sets the runtime it uses.
  */
 afterEach(() => setRuntime(null));

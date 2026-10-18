@@ -6,12 +6,16 @@ import { afterEach, beforeEach, test } from 'vitest';
 import { ApiKeyStore, placeholderFor } from './api-keys.ts';
 import { type Db, openDb } from './db.ts';
 
+/** The temporary data directory of each test. */
 let dir: string;
+/** The database of each test. */
 let db: Db;
+/** The number of calls of the change callback. */
 let changes: number;
+/** The store under test. */
 let store: ApiKeyStore;
 
-/** An OpenRouter-shaped key. */
+/** A key in the format of OpenRouter. */
 const KEY = 'sk-or-v1-0123456789abcdef0123456789abcdef';
 
 beforeEach(() => {
