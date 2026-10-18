@@ -247,6 +247,9 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     addContainer: (id, running) => {
       containers.set(id, { image: BOX_IMAGE.id, running });
     },
-    close: () => dk.setDockerForTests(null),
+    close: () => {
+      dk.setDockerForTests(null);
+      dk.setSelfContainerIdForTests(undefined);
+    },
   };
 }

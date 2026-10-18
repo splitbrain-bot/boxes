@@ -86,7 +86,10 @@ function current(headers: OutgoingHttpHeaders): OutgoingHttpHeaders {
  * @param then The spawner for every later spawn.
  * @returns The counter and the spawner.
  */
-function counted(first: FileServiceSpawner, then: FileServiceSpawner) {
+function counted(
+  first: FileServiceSpawner,
+  then: FileServiceSpawner,
+): { counter: { spawns: number }; spawner: FileServiceSpawner } {
   const counter = { spawns: 0 };
   const spawner: FileServiceSpawner = async (id) => {
     counter.spawns++;

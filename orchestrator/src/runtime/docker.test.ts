@@ -115,3 +115,23 @@ describe('the facts of the details page', () => {
     assert.deepEqual(await dockerRuntime().details('gone'), []);
   });
 });
+
+describe('a login', () => {
+  it('removes its container when the start fails', async () => {
+    const removed: string[] = [];
+    dk.setDockerForTests({
+      createContainer: async () => ({ id: 'login-1' }),
+      getContainer: (id: string) => ({
+        start: async () => {
+          throw new Error('no start');
+        },
+        remove: async () => {
+          removed.push(id);
+        },
+      }),
+    } as unknown as Docker);
+
+    await assert.rejects(() => dockerRuntime().startLogin('claude'), /no start/);
+    assert.deepEqual(removed, ['login-1']);
+  });
+});

@@ -17,6 +17,7 @@ const LOOK: Record<string, { Icon: typeof CheckIcon; tone: string }> = {
   completed: { Icon: CheckIcon, tone: 'text-ok' },
   failed: { Icon: XIcon, tone: 'text-danger' },
   killed: { Icon: XIcon, tone: 'text-muted-foreground' },
+  stopped: { Icon: XIcon, tone: 'text-muted-foreground' },
   blocked: { Icon: HandIcon, tone: 'text-warn' },
 };
 

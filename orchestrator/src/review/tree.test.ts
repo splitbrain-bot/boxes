@@ -225,7 +225,7 @@ describe('dirEntries', () => {
     );
   });
 
-  test('paths are the workspace’s, whatever directory is listed', () => {
+  test("paths are the workspace's, whatever directory is listed", () => {
     const entries = dirEntries('project/src', children, {}, new Map(), noRepos());
     assert.deepEqual(
       entries.map((entry) => entry.path),
@@ -305,6 +305,15 @@ describe('dirEntries', () => {
     const entries = dirEntries('', [], { 'src/gone.ts': 'deleted' }, new Map(), noRepos());
     assert.deepEqual(named(entries), ['d:src']);
     assert.equal(entries[0]!.changed, true);
+  });
+
+  test('a skipped folder the change emptied stays out', () => {
+    const statuses: Record<string, ReviewFileStatus> = {
+      '.boxes/x': 'deleted',
+      'sub/.hg/x': 'deleted',
+    };
+    assert.deepEqual(named(dirEntries('', [], statuses, new Map(), noRepos())), ['d:sub']);
+    assert.deepEqual(dirEntries('sub', [], statuses, new Map(), noRepos()), []);
   });
 
   test('a file with a status but no entry is not invented', () => {

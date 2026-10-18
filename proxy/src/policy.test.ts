@@ -214,6 +214,23 @@ describe('decideCredentials', () => {
     expect(verdict.action).toBe('deny');
   });
 
+  it('refuses a named header that occurs more than one time', () => {
+    for (const authorization of [
+      ['', 'Bearer ghp_someoneElsesToken'],
+      ['Bearer ghp_someoneElsesToken', ''],
+      [`Bearer ${GITHUB.placeholder}`, `Bearer ${GITHUB.placeholder}`],
+    ]) {
+      expect(decideCredentials('api.github.com', { authorization }, policy()).action).toBe('deny');
+    }
+    expect(
+      decideCredentials(
+        'api.github.com',
+        { authorization: 'Bearer ghp_someoneElsesToken', Authorization: '' },
+        policy(),
+      ).action,
+    ).toBe('deny');
+  });
+
   it('swaps a credential that names no header in whatever header carries it', () => {
     const anyHeader = policy({ credentials: [OPENROUTER] });
     expect(
@@ -236,7 +253,7 @@ describe('decideCredentials', () => {
     ).toEqual({ action: 'pass' });
   });
 
-  it('refuses another credential host s placeholder, so hosts do not share', () => {
+  it("refuses another credential host's placeholder, so hosts do not share", () => {
     const verdict = decideCredentials(
       'api.github.com',
       { authorization: `Bearer ${CLAUDE.placeholder}` },

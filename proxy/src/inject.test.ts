@@ -432,12 +432,12 @@ describe('the interception engine', () => {
     expect(received[0]?.headers.authorization).toBe(tunnelToken);
   }, 30_000);
 
-  it('refuses a caller that did not come through the front door', async () => {
+  it('refuses a caller that did not come through the front door', async ({ skip }) => {
     // An agent in a box can reach the engine port on an interface that is not loopback.
     const outward = Object.values(networkInterfaces())
       .flat()
       .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
-    if (!outward) return; // Only loopback exists, so there is nothing to check.
+    if (!outward) return skip('only loopback exists, so there is nothing to check');
 
     policy = githubPolicy();
     await interceptor.apply();

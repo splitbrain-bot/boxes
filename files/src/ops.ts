@@ -310,10 +310,13 @@ export function openRaw(root: string, relPath: string): RawFile {
   } catch (err) {
     throw asFileError(err, relPath);
   }
-  const stats = fstatSync(fd);
-  if (!stats.isFile()) {
+  let stats: Stats;
+  try {
+    stats = fstatSync(fd);
+    if (!stats.isFile()) throw new FileError(404, `not a file: ${relPath}`);
+  } catch (err) {
     closeSync(fd);
-    throw new FileError(404, `not a file: ${relPath}`);
+    throw asFileError(err, relPath);
   }
   return { size: stats.size, stream: createReadStream('', { fd }) };
 }
@@ -326,8 +329,9 @@ export type WriteCondition = { hash: string } | { absent: true };
  *
  * The function writes the bytes to a temp file first, so a reader never sees a half-written file, and a crash leaves
  * the previous version. For a file that must be absent, the function links the temp file into place, so a file that
- * appeared in the meantime stays. A file with a different hash also stays. An existing file keeps its permissions, so
- * a saved shell script stays executable.
+ * appeared in the meantime stays. A file with a different hash also stays, and so does a file that changes while the
+ * function reads it for the hash. A change after that read and before the rename is not detected, because there is no
+ * conditional rename. An existing file keeps its permissions, so a saved shell script stays executable.
  *
  * @param root The root directory.
  * @param relPath The path, relative to the root.
@@ -361,7 +365,9 @@ export async function writeFile(
       unlinkSync(tmp);
       return hash;
     }
+    const before = statOrNull(path);
     if (hashOf(path) !== condition.hash) throw new FileError(412, `changed: ${relPath}`);
+    if (!sameVersion(before, statOrNull(path))) throw new FileError(412, `changed: ${relPath}`);
     renameSync(tmp, path);
     return hash;
   } catch (err) {
@@ -514,6 +520,19 @@ function statOrNull(path: string): Stats | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Tells if two stats show the same version of a file.
+ *
+ * @param a The first stats, or null for a missing file.
+ * @param b The second stats, or null for a missing file.
+ * @returns True when both files exist and have the same inode, size and modification time.
+ */
+function sameVersion(a: Stats | null, b: Stats | null): boolean {
+  return (
+    a !== null && b !== null && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs
+  );
 }
 
 /**

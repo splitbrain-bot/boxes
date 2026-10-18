@@ -47,6 +47,21 @@ describe('parseHostPort', () => {
     expect(parseHostPort('example.com:99999', 443)).toBeNull();
     expect(parseHostPort('example.com:http', 443)).toBeNull();
     expect(parseHostPort('[::1', 443)).toBeNull();
+    // Only a port may follow the brackets, and the brackets must hold an IPv6 address.
+    expect(parseHostPort('[8.8.8.8]junk', 443)).toBeNull();
+    expect(parseHostPort('[::ffff:8.8.8.8]x', 443)).toBeNull();
+    expect(parseHostPort('[::1]443', 443)).toBeNull();
+    expect(parseHostPort('[8.8.8.8]', 443)).toBeNull();
+    expect(parseHostPort('[example.com]:443', 443)).toBeNull();
+    expect(parseHostPort('[]', 443)).toBeNull();
+    expect(parseHostPort('[]:443', 443)).toBeNull();
+    // A host outside brackets cannot hold a colon.
+    expect(parseHostPort('a:b:443', 443)).toBeNull();
+    expect(parseHostPort('::1', 443)).toBeNull();
+    expect(parseHostPort('[::ffff:8.8.8.8]:443', 443)).toEqual({
+      host: '::ffff:8.8.8.8',
+      port: 443,
+    });
   });
 });
 

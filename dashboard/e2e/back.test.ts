@@ -197,7 +197,7 @@ test('back closes the hunk sheet and leaves the file where it was', async () => 
   try {
     await expect.poll(() => page.getByLabel('Show the change at line 2').isVisible()).toBe(true);
     await page.getByLabel('Show the change at line 2').click();
-    await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Lines 1 to 4').isVisible()).toBe(true);
     // The sheet is an entry of its own, at the same URL as the file under it.
     await expect.poll(() => stackIndex(page)).toBe(1);
 
@@ -221,7 +221,7 @@ test('closing a sheet by hand takes its entry back out with it', async () => {
   );
   try {
     await page.getByLabel('Show the change at line 2').click();
-    await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Lines 1 to 4').isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Close' }).click();
     await expect.poll(() => page.locator('[data-slot="sheet-content"]').count()).toBe(0);
 

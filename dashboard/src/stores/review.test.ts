@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test, vi } from 'vitest';
-import type { ReviewDirResponse, ReviewFileResponse } from '../../../shared/types.ts';
+import type {
+  ReviewDirEntry,
+  ReviewDirResponse,
+  ReviewFileResponse,
+} from '../../../shared/types.ts';
 import {
   closeFile,
   deleteComment,
@@ -155,7 +159,7 @@ async function settle(): Promise<void> {
  * @param entryPath The path of the entry.
  * @returns The entry, or undefined when the directory is not loaded or does not list it.
  */
-function entryIn(dirPath: string, entryPath: string) {
+function entryIn(dirPath: string, entryPath: string): ReviewDirEntry | undefined {
   return useReview.getState().dirs[dirPath]?.entries.find((e) => e.path === entryPath);
 }
 

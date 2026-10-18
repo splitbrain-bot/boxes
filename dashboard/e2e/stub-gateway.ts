@@ -576,7 +576,6 @@ export function attachStubGateway(
   }
 
   let nextRequestId = 1000;
-  const waiting = new Map<number, (value: unknown) => void>();
 
   /**
    * Sends a request to a browser and waits for its answer.
@@ -589,7 +588,6 @@ export function attachStubGateway(
   function request(ws: WebSocket, method: string, params: unknown): Promise<unknown> {
     const id = nextRequestId++;
     return new Promise((resolve) => {
-      waiting.set(id, resolve);
       const onMessage = (data: unknown): void => {
         let msg: Rpc;
         try {
@@ -599,7 +597,6 @@ export function attachStubGateway(
         }
         if (msg.id !== id) return;
         ws.off('message', onMessage);
-        waiting.delete(id);
         resolve(msg.result);
       };
       ws.on('message', onMessage);

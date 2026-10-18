@@ -328,7 +328,7 @@ describe('the control channel, from the orchestrator side', () => {
     expect(JSON.parse(seen[0]!.body).credentials[0].secret).toBe(CLAUDE_TOKEN);
   }, 30_000);
 
-  it('reports the proxy s own reason when it refuses a push', async () => {
+  it("reports the proxy's own reason when it refuses a push", async () => {
     const { cfg, material, store } = await fakeProxy({
       status: 400,
       body: { error: 'invalid policy: a bare * ...' },

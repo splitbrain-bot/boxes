@@ -139,25 +139,21 @@ export type CredentialVerdict =
   | { action: 'deny'; reason: string };
 
 /**
- * Finds the value of a header. For an array value, only the first entry counts.
+ * Finds all values of a header, blank values included.
  * Names are compared in lower case, so the capitalisation of a client cannot hide a header.
  *
  * @param headers The request headers.
  * @param name The header name.
- * @returns The value, or null when the header is missing or blank.
+ * @returns The values in the order of the headers, or an empty list when the header is missing.
  */
-function headerValue(
+function headerValues(
   headers: Readonly<Record<string, string | string[] | undefined>>,
   name: string,
-): string | null {
+): string[] {
   const wanted = name.toLowerCase();
-  for (const [key, raw] of Object.entries(headers)) {
-    if (key.toLowerCase() !== wanted) continue;
-    const value = Array.isArray(raw) ? raw[0] : raw;
-    if (typeof value !== 'string' || value.trim() === '') continue;
-    return value;
-  }
-  return null;
+  return Object.entries(headers)
+    .filter(([key]) => key.toLowerCase() === wanted)
+    .flatMap(([, raw]) => raw ?? []);
 }
 
 /**
@@ -178,7 +174,8 @@ function schemeOf(value: string): string | null {
  * placeholder gets the real credential. A named header under a pass-through
  * scheme of its credential stays unchanged, because the host issued that value.
  * A named header with any other value refuses the request, so no foreign
- * credential reaches the host. All other headers stay unchanged.
+ * credential reaches the host. A named header that occurs more than one time
+ * also refuses the request. All other headers stay unchanged.
  *
  * A request without these headers passes, so an agent can still log in with a
  * session cookie.
@@ -207,8 +204,13 @@ export function decideCredentials(
   const used: string[] = [];
 
   for (const name of names) {
-    const present = headerValue(headers, name);
-    if (present === null) continue;
+    const values = headerValues(headers, name);
+    // Only the first value would be checked, so a repeated named header is refused.
+    if (values.length > 1 && credentials.some((c) => c.headers.includes(name))) {
+      return { action: 'deny', reason: `repeated credential header ${name} for ${host}` };
+    }
+    const present = values[0];
+    if (present === undefined || present.trim() === '') continue;
 
     // Credentials that may travel in this header, in policy order. The first
     // credential with its placeholder in the value is swapped in.

@@ -21,11 +21,11 @@ export function TokenWarning({ className }: { className?: string }) {
     <Notice tone="warn" className={className}>
       {broken.map((h) => (
         <p key={h.id}>
-          {reason(h)}{' '}
+          {reason(h)} Enter its credential in{' '}
           <Link className="underline" to="/settings">
             Settings
-          </Link>{' '}
-          is where its credential is entered.
+          </Link>
+          .
         </p>
       ))}
     </Notice>

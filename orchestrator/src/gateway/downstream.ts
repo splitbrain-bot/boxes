@@ -31,7 +31,6 @@ const FORWARDED_REQUESTS = [
   ACP_METHOD.sessionResume,
   ACP_METHOD.sessionClose,
   ACP_METHOD.sessionDelete,
-  ACP_METHOD.sessionSelectProvider,
   ACP_METHOD.authenticate,
 ] as const;
 

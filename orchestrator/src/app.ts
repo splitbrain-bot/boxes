@@ -304,9 +304,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    */
   function repushPolicy(): void {
     void egress.sync().catch((err: Error) => {
-      log.warn('could not push the egress policy after a credential changed; will retry', {
-        error: err.message,
-      });
+      log.warn(
+        'could not push the egress policy after a credential or an API key changed; will retry',
+        {
+          error: err.message,
+        },
+      );
     });
   }
   const logins = new LoginManager(credentials);

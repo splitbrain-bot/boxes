@@ -710,7 +710,7 @@ describe('the raw endpoint', () => {
    * @param path The workspace-relative path of the file.
    * @returns The response.
    */
-  function raw(id: string, path: string) {
+  function raw(id: string, path: string): ReturnType<typeof orchestrator.app.inject> {
     return orchestrator.app.inject({
       url: `/api/boxes/${id}/review/raw?path=${encodeURIComponent(path)}`,
     });

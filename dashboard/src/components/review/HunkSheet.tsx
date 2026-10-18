@@ -32,7 +32,7 @@ export function HunkSheet({
       <SheetContent side="bottom" className="max-h-[70vh] gap-0">
         <SheetHeader className="pb-2">
           <SheetTitle className="text-sm">
-            {hunk ? `Lines ${hunk.startLine}–${hunk.endLine}` : 'Changes'}
+            {hunk ? `Lines ${hunk.startLine} to ${hunk.endLine}` : 'Changes'}
           </SheetTitle>
           <SheetDescription className="text-xs">
             What changed here, as git reports it.

@@ -743,6 +743,7 @@ function writeFile(root: string, path: string, content: string): void {
  * @param db The database of the orchestrator.
  * @param docker The fake daemon.
  * @param upstreamFor Gives the stand-in adapter of a box.
+ * @param gateway The stub gateway that mints the conversations.
  * @param spec The box.
  */
 function createBox(
@@ -750,6 +751,7 @@ function createBox(
   db: Db,
   docker: FakeDocker,
   upstreamFor: (boxId: string) => TestUpstream,
+  gateway: StubGateway,
   spec: BoxSpec,
 ): void {
   const cfg: Config = app.cfg;
@@ -771,8 +773,8 @@ function createBox(
   upstream.canFork = spec.canFork ?? true;
   const threads = spec.threads ?? [{}];
   threads.forEach((thread, at) => {
-    // The stub gateway starts with acp-thread-1 and mints the rest in order.
-    const acpSessionId = `acp-thread-${at + 1}`;
+    // The stub gateway mints the id, so no two threads share one.
+    const acpSessionId = gateway.newThread();
     insertThread(db, id, {
       id: thread.id ?? threadName(id, at + 1),
       acpSessionId,
@@ -1204,7 +1206,7 @@ export async function startOrchestrator(
     set terminalAnswer(fn: TestOrchestrator['terminalAnswer']) {
       docker.terminalAnswer = fn;
     },
-    createBox: (spec = {}) => createBox(app, db, docker, upstreamFor, spec),
+    createBox: (spec = {}) => createBox(app, db, docker, upstreamFor, gateway, spec),
     resetBoxes: () => {
       const rows = db.prepare('SELECT id FROM boxes').all() as Array<{ id: string }>;
       for (const row of rows) {

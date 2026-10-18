@@ -520,7 +520,7 @@ function fakeGitHub(polls: TokenAnswer[]): {
   };
 }
 
-test('the Dev Tunnels flow shows GitHub’s code and stores both tokens', async () => {
+test("the Dev Tunnels flow shows GitHub's code and stores both tokens", async () => {
   const { github, calls, lookups } = fakeGitHub([
     { error: 'authorization_pending' },
     { access_token: 'ghu_access', refresh_token: 'ghr_refresh', expires_in: 28_800 },
@@ -557,7 +557,7 @@ test('the Dev Tunnels flow shows GitHub’s code and stores both tokens', async 
   assert.ok((row?.expires_at ?? 0) > Date.now() + 7 * 60 * 60_000);
 });
 
-test('a Dev Tunnels login GitHub ends fails with GitHub’s reason', async () => {
+test("a Dev Tunnels login GitHub ends fails with GitHub's reason", async () => {
   const { github } = fakeGitHub([
     { error: 'access_denied', error_description: 'The authorization request was denied.' },
   ]);

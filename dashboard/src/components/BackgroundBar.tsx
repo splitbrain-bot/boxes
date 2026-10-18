@@ -161,8 +161,8 @@ export function BackgroundBar({
           title={confirming === 'all' && processes.length > 1 ? 'Stop everything?' : 'Stop this?'}
           description={
             confirming === 'all'
-              ? 'Kills what this conversation is still running, and anything those commands started. Half-done work stays half-done, and nothing will report back.'
-              : `Kills "${confirming.command}", and anything it started. Half-done work stays half-done, and nothing will report back.`
+              ? 'Stops what this conversation is still running. A process that a command left running on its own can stay. Half-done work stays half-done, and nothing will report back.'
+              : `Stops "${confirming.command}". A process that it left running on its own can stay. Half-done work stays half-done, and nothing will report back.`
           }
           confirmLabel="Stop"
           danger

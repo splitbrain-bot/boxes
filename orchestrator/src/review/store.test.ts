@@ -559,9 +559,10 @@ describe('checkDrift', () => {
     checkDrift(anns, ['b', 'c', 'd']);
     assert.ok(!anns.has(-3));
     // The annotation stays on its line, with the context it was written
-    // against.
+    // against, and is marked outdated.
     assert.equal(anns.size, 1);
     assert.equal(anns.get(1)?.contextFrom, 5);
+    assert.equal(anns.get(1)?.outdated, true);
   });
 
   test('an annotation moving onto an occupied line is kept', () => {
@@ -571,8 +572,38 @@ describe('checkDrift', () => {
       [5, { comment: 'moves', context: ['dup'], contextFrom: 5, outdated: false }],
       [8, { comment: 'stays', context: ['dup'], contextFrom: 8, outdated: false }],
     ]);
-    checkDrift(anns, ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h']);
+    const source = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h'];
+    assert.equal(checkDrift(anns, source), true);
     assert.deepEqual([...anns.values()].map((ann) => ann.comment).toSorted(), ['moves', 'stays']);
+    // The refused annotation is not next to its code, so it is outdated and
+    // keeps the context position that it was written with.
+    assert.deepEqual(anns.get(5), {
+      comment: 'moves',
+      context: ['dup'],
+      contextFrom: 5,
+      outdated: true,
+    });
+    assert.equal(anns.get(8)?.outdated, false);
+    // The next check finds the same state.
+    assert.equal(checkDrift(anns, source), false);
+    assert.equal(anns.get(5)?.outdated, true);
+  });
+
+  test('a refused annotation moves when its target line is free again', () => {
+    const anns = new Map<number, Annotation>([
+      [5, { comment: 'moves', context: ['dup'], contextFrom: 5, outdated: false }],
+      [8, { comment: 'stays', context: ['dup'], contextFrom: 8, outdated: false }],
+    ]);
+    const source = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h'];
+    checkDrift(anns, source);
+    anns.delete(8);
+    assert.equal(checkDrift(anns, source), true);
+    assert.deepEqual(anns.get(8), {
+      comment: 'moves',
+      context: ['dup'],
+      contextFrom: 8,
+      outdated: false,
+    });
   });
 
   test('a chain of relocations keeps every annotation', () => {
@@ -605,6 +636,10 @@ describe('checkDrift', () => {
         [2, 'second'],
         [3, 'third'],
       ],
+    );
+    assert.deepEqual(
+      [...anns.values()].map((ann) => ann.outdated),
+      [true, true, false],
     );
   });
 });
