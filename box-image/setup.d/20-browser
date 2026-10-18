@@ -93,8 +93,9 @@ if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
       rm -f "$cli_config.tmp"
       log "WARNING: could not write the browser CLI config; the browser uses its own defaults"
     fi
+  elif cp "$cli_base" "$cli_config"; then
+    log "wrote the browser CLI config; no egress proxy is configured"
   else
-    cp "$cli_base" "$cli_config" \
-      && log "wrote the browser CLI config; no egress proxy is configured"
+    log "WARNING: could not write the browser CLI config; the browser uses its own defaults"
   fi
 fi
