@@ -141,13 +141,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Derived from the repository, so a fork publishes to its own
-      # namespace. GHCR needs lowercase names, so the owner and the name of the
-      # repository must be lowercase. The tags are computed on a pull request
-      # too, so it tests everything but the upload.
+      # namespace. GHCR needs lowercase names, and the owner of a fork can
+      # have capital letters, so the step lowercases the repository.
+      - name: Name the images
+        run: echo "IMAGE_BASE=$REGISTRY/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # The tags are computed on a pull request too, so it tests everything
+      # but the upload.
       - id: orchestrator-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator
+          images: ${{ env.IMAGE_BASE }}/orchestrator
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
@@ -157,7 +161,7 @@ jobs:
       - id: egress-proxy-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/egress-proxy
+          images: ${{ env.IMAGE_BASE }}/egress-proxy
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
@@ -167,7 +171,7 @@ jobs:
       - id: box-base-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/box-base
+          images: ${{ env.IMAGE_BASE }}/box-base
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
@@ -177,7 +181,7 @@ jobs:
       - id: box-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/box
+          images: ${{ env.IMAGE_BASE }}/box
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
@@ -211,11 +215,11 @@ jobs:
           labels: ${{ steps.orchestrator-meta.outputs.labels }}
           platforms: linux/amd64
           cache-from: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/cache:orchestrator
+            type=registry,ref=${{ env.IMAGE_BASE }}/cache:orchestrator
             type=gha,scope=orchestrator
           cache-to: >-
             ${{ github.event_name == 'push'
-            && format('type=registry,ref={0}/{1}/cache:orchestrator,mode=max', env.REGISTRY, github.repository)
+            && format('type=registry,ref={0}/cache:orchestrator,mode=max', env.IMAGE_BASE)
             || 'type=gha,mode=max,scope=orchestrator' }}
           provenance: false
           sbom: false
@@ -232,11 +236,11 @@ jobs:
           labels: ${{ steps.egress-proxy-meta.outputs.labels }}
           platforms: linux/amd64
           cache-from: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/cache:egress-proxy
+            type=registry,ref=${{ env.IMAGE_BASE }}/cache:egress-proxy
             type=gha,scope=egress-proxy
           cache-to: >-
             ${{ github.event_name == 'push'
-            && format('type=registry,ref={0}/{1}/cache:egress-proxy,mode=max', env.REGISTRY, github.repository)
+            && format('type=registry,ref={0}/cache:egress-proxy,mode=max', env.IMAGE_BASE)
             || 'type=gha,mode=max,scope=egress-proxy' }}
           provenance: false
           sbom: false
@@ -255,11 +259,11 @@ jobs:
           labels: ${{ steps.box-meta.outputs.labels }}
           platforms: linux/amd64
           cache-from: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/cache:box
+            type=registry,ref=${{ env.IMAGE_BASE }}/cache:box
             type=gha,scope=box
           cache-to: >-
             ${{ github.event_name == 'push'
-            && format('type=registry,ref={0}/{1}/cache:box,mode=max', env.REGISTRY, github.repository)
+            && format('type=registry,ref={0}/cache:box,mode=max', env.IMAGE_BASE)
             || 'type=gha,mode=max,scope=box' }}
           provenance: false
           sbom: false
@@ -290,8 +294,8 @@ jobs:
       - name: Load the images into kind
         run: kind load docker-image --name boxes "$BOX_IMAGE" "$PROXY_IMAGE"
         env:
-          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
-          PROXY_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/egress-proxy:${{ steps.egress-proxy-meta.outputs.version }}
+          BOX_IMAGE: ${{ env.IMAGE_BASE }}/box:${{ steps.box-meta.outputs.version }}
+          PROXY_IMAGE: ${{ env.IMAGE_BASE }}/egress-proxy:${{ steps.egress-proxy-meta.outputs.version }}
 
       # The namespace and the proxy of the manifests, with the image this job
       # built. The suite runs in the namespace of the current context.
@@ -307,14 +311,14 @@ jobs:
           ]')"
           kubectl rollout status deployment/boxes-egress-proxy --timeout=180s
         env:
-          PROXY_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/egress-proxy:${{ steps.egress-proxy-meta.outputs.version }}
+          PROXY_IMAGE: ${{ env.IMAGE_BASE }}/egress-proxy:${{ steps.egress-proxy-meta.outputs.version }}
 
       - name: Run the runtime conformance suite on Kubernetes
         working-directory: orchestrator
         run: npm run test:conformance -- kubernetes
         env:
           BOXES_CONFORMANCE_CONTEXT: kind-boxes
-          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
+          BOX_IMAGE: ${{ env.IMAGE_BASE }}/box:${{ steps.box-meta.outputs.version }}
           BOX_IMAGE_PULL_POLICY: IfNotPresent
 
       - name: Show the state of the kind cluster
@@ -338,7 +342,7 @@ jobs:
         working-directory: orchestrator
         run: sudo --preserve-env env "PATH=$PATH" npm run test:conformance -- docker
         env:
-          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
+          BOX_IMAGE: ${{ env.IMAGE_BASE }}/box:${{ steps.box-meta.outputs.version }}
 
       # Checks the isolation of a box on a real Docker host, with the images
       # this job built. The box image under test is on no registry, so the
@@ -360,7 +364,7 @@ jobs:
           echo 'The orchestrator did not get ready on /readyz.'
           exit 1
         env:
-          BOX_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/box:${{ steps.box-meta.outputs.version }}
+          BOX_IMAGE: ${{ env.IMAGE_BASE }}/box:${{ steps.box-meta.outputs.version }}
 
       - name: Run the smoke test
         run: ./tests/smoke-test.sh
