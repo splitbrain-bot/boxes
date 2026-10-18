@@ -681,21 +681,16 @@ export function checkDrift(
     }
 
     const newFrom = findContext(sourceLines, ann.context, ann.contextFrom);
-    if (newFrom > 0) {
-      const newLine = lineNum + (newFrom - ann.contextFrom);
-      if (newLine >= 1) {
-        ann.contextFrom = newFrom;
-        ann.outdated = false;
-        if (newLine !== lineNum) relocations.push({ oldLine: lineNum, newLine, ann });
-        changed = true;
-      }
+    const newLine = lineNum + (newFrom - ann.contextFrom);
+    if (newFrom > 0 && newLine >= 1) {
+      relocations.push({ oldLine: lineNum, newLine, newFrom, ann });
     } else if (!ann.outdated) {
       ann.outdated = true;
       changed = true;
     }
   }
 
-  if (relocations.length > 0) relocate(annotations, relocations);
+  if (relocations.length > 0) changed = relocate(annotations, relocations) || changed;
 
   return changed;
 }
@@ -706,6 +701,8 @@ interface Relocation {
   oldLine: number;
   /** The line that its context points to after the move. */
   newLine: number;
+  /** The line number of the first context line after the move. */
+  newFrom: number;
   /** The annotation that moves. */
   ann: Annotation;
 }
@@ -716,13 +713,16 @@ interface Relocation {
  * A move goes ahead only when no staying annotation holds its target line and
  * no earlier move claims it. A refused move leaves its annotation in place,
  * which can block another move, so the loop refuses one move at a time until
- * the rest hold. No annotation is lost and no two share a line. The function
- * rebuilds the map in line order.
+ * the rest hold. No annotation is lost and no two share a line. A moved
+ * annotation takes its new context position. A refused annotation keeps its
+ * context position and is marked outdated, because it is no longer next to its
+ * code. The function rebuilds the map in line order.
  *
  * @param annotations The annotations of the file, by line number.
  * @param relocations The annotations whose context moved.
+ * @returns True when an annotation changed.
  */
-function relocate(annotations: Map<number, Annotation>, relocations: Relocation[]): void {
+function relocate(annotations: Map<number, Annotation>, relocations: Relocation[]): boolean {
   const moves = new Map(relocations.map((r) => [r.oldLine, r]));
   for (;;) {
     const held = new Set([...annotations.keys()].filter((line) => !moves.has(line)));
@@ -736,12 +736,24 @@ function relocate(annotations: Map<number, Annotation>, relocations: Relocation[
     moves.delete(refused.oldLine);
   }
 
+  let changed = moves.size > 0;
+  for (const r of relocations) {
+    if (moves.has(r.oldLine)) {
+      r.ann.contextFrom = r.newFrom;
+      r.ann.outdated = false;
+    } else if (!r.ann.outdated) {
+      r.ann.outdated = true;
+      changed = true;
+    }
+  }
+
   const moved = new Map(annotations);
   for (const r of moves.values()) moved.delete(r.oldLine);
   for (const r of moves.values()) moved.set(r.newLine, r.ann);
 
   annotations.clear();
   for (const [line, ann] of [...moved].sort((a, b) => a[0] - b[0])) annotations.set(line, ann);
+  return changed;
 }
 
 /**
