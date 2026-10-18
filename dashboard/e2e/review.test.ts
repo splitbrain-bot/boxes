@@ -160,7 +160,7 @@ test('a gutter marker opens the hunk, deleted lines included', async () => {
     await page.getByText('lines deleted here').click();
 
     // The hunk is the only place that shows the removed lines.
-    await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Lines 1 to 4').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('console.log("boot")').isVisible()).toBe(true);
     await shoot(page, 'review-hunk-phone', 'viewport');
     expect(errors).toEqual([]);
@@ -177,7 +177,7 @@ test('the gutter opens the hunk, and the code opens the comment', async () => {
   try {
     await expect.poll(() => page.getByLabel('Show the change at line 2').isVisible()).toBe(true);
     await page.getByLabel('Show the change at line 2').click();
-    await expect.poll(() => page.getByText('Lines 1–4').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Lines 1 to 4').isVisible()).toBe(true);
     await expect.poll(() => page.getByText('console.log("boot")').isVisible()).toBe(true);
     await page.keyboard.press('Escape');
 

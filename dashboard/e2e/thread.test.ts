@@ -667,7 +667,7 @@ test('an update the dashboard does not know about does not break the thread', as
   }
 });
 
-test('an image renders wherever it arrives — a tool result, or what the agent said', async () => {
+test('an image renders wherever it arrives, in a tool result or in what the agent said', async () => {
   await start();
 
   const { page, errors, close } = await openPage(

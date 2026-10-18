@@ -544,7 +544,7 @@ function DeletionMarker({
         onClick={() => onShowHunk(hunkIndex)}
         className="flex min-h-6 items-center px-2 text-left text-xs text-danger hover:underline"
       >
-        lines deleted here — tap to see them
+        lines deleted here, tap to see them
       </button>
     </div>
   );

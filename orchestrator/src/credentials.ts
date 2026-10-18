@@ -287,7 +287,7 @@ export function undeliverableReason(row: CredentialRow): string | null {
   if (deliverableSecret(row) !== null) return null;
   return (
     'stored and kept refreshed, but Boxes cannot hand a subscription login ' +
-    'to a box yet \u2014 paste an API key to run this harness'
+    'to a box yet. Paste an API key to run this harness'
   );
 }
 

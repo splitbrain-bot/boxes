@@ -253,7 +253,7 @@ describe('decideCredentials', () => {
     ).toEqual({ action: 'pass' });
   });
 
-  it('refuses another credential host s placeholder, so hosts do not share', () => {
+  it("refuses another credential host's placeholder, so hosts do not share", () => {
     const verdict = decideCredentials(
       'api.github.com',
       { authorization: `Bearer ${CLAUDE.placeholder}` },

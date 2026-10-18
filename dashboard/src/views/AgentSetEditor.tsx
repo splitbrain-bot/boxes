@@ -175,7 +175,7 @@ export function AgentSetEditor() {
 
       <ItemSection
         title="Skills"
-        blurb="A SKILL.md the agent loads on its own when the work matches, or when you type its name after a slash in the composer. It needs YAML front matter with a name and a description — that description is the only thing the agent sees before deciding to read it."
+        blurb="A SKILL.md the agent loads on its own when the work matches, or when you type its name after a slash in the composer. It needs YAML front matter with a name and a description. That description is the only thing the agent sees before deciding to read it."
         items={set.items}
         overridden={overridden}
         busy={busy}
@@ -450,7 +450,7 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
     <Card className="flex flex-col gap-3 p-4">
       <h2 className="text-sm font-medium">Merged result</h2>
       <p className="text-xs text-muted-foreground">
-        The global set with this one laid over it — which is what is actually installed.
+        The global set with this one laid over it, which is what is actually installed.
       </p>
       <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-2 text-sm">
         <dt className="text-xs text-muted-foreground">AGENTS.md</dt>

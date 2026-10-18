@@ -225,7 +225,7 @@ describe('dirEntries', () => {
     );
   });
 
-  test('paths are the workspace’s, whatever directory is listed', () => {
+  test("paths are the workspace's, whatever directory is listed", () => {
     const entries = dirEntries('project/src', children, {}, new Map(), noRepos());
     assert.deepEqual(
       entries.map((entry) => entry.path),

@@ -198,7 +198,7 @@ function describe(set: AgentSetSummary): string {
     parts.push(`${set.repoCount} ${set.repoCount === 1 ? 'repository' : 'repositories'}`);
   }
   if (parts.length === 0) parts.push('empty');
-  if (set.global) return `${parts.join(' · ')} — applied to every box`;
+  if (set.global) return `${parts.join(' · ')} · applied to every box`;
   if (set.boxCount > 0) {
     parts.push(`${set.boxCount} ${set.boxCount === 1 ? 'box' : 'boxes'}`);
   }

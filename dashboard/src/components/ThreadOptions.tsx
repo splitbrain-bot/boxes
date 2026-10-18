@@ -239,11 +239,11 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         {blocked.length > 0 ? (
           <p className="text-muted-foreground">
             {blocked.map((harness) => harness.label).join(' and ')} cannot run a turn until a
-            working credential is entered.{' '}
+            working credential is entered. Enter one in{' '}
             <Link to="/settings" className="underline hover:text-foreground">
               Settings
-            </Link>{' '}
-            is where that happens.
+            </Link>
+            .
           </p>
         ) : null}
       </div>

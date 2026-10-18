@@ -109,8 +109,8 @@ const KINDS: CredentialKind[] = [
     label: 'Dev Tunnels',
     harnesses: [],
     blurb:
-      'Github based authentication with Microsoft Dev Tunnels service. Used to make box services temporarily ' +
-      'accessible from the outside',
+      'GitHub based authentication with the Microsoft Dev Tunnels service. Used to make box services ' +
+      'temporarily accessible from the outside.',
     hint: null,
     method: () => 'oauth',
     canLogin: true,

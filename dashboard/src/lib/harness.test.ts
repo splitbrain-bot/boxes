@@ -25,7 +25,7 @@ function health(over: Partial<HarnessHealth> = {}): HarnessHealth {
 }
 
 describe('mode labels', () => {
-  test('say what the mode does, in the adapter’s own words', () => {
+  test("say what the mode does, in the adapter's own words", () => {
     expect(modeLabel('claude', { id: 'plan', name: 'Plan' })).toBe('Plan');
     expect(
       modeDescription('claude', { id: 'plan', name: 'Plan', description: 'Reads only.' }),
@@ -91,7 +91,7 @@ describe('why a harness cannot run', () => {
 });
 
 describe('the label on a thread', () => {
-  test('is the deployment’s own name for the agent', () => {
+  test("is the deployment's own name for the agent", () => {
     expect(harnessLabel([health(), health({ id: 'codex', label: 'Codex' })], 'codex')).toBe(
       'Codex',
     );
