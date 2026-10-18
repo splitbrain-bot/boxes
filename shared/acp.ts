@@ -40,8 +40,6 @@ export const ACP_METHOD = {
   sessionSetModel: 'session/set_model',
   /** Sets one of the options that a client can change. */
   sessionSetConfigOption: 'session/set_config_option',
-  /** A method outside the ACP schema. The gateway forwards it to the adapter unchanged. */
-  sessionSelectProvider: 'session/select_provider',
   /** Sends a change of a conversation from the adapter. It is a notification. */
   sessionUpdate: 'session/update',
   /** Asks the client if a tool call can continue. The tool call waits for the answer. */
