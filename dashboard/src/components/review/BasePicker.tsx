@@ -1,8 +1,8 @@
 import { GitCompareArrows } from 'lucide-react';
 import { useState } from 'react';
-import type { ReviewBase, ReviewRepo } from '../../../../shared/types.ts';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import type { ReviewBase, ReviewRepo } from '../../../../shared/types.ts';
 
 /**
  * A popover that sets the revision the review is compared against.
@@ -62,16 +62,14 @@ export function BasePicker({
           }
         >
           <GitCompareArrows className="size-3.5" />
-          <span className="hidden max-w-24 truncate sm:inline">
-            {active ? base.rev : 'HEAD'}
-          </span>
+          <span className="hidden max-w-24 truncate sm:inline">{active ? base.rev : 'HEAD'}</span>
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72">
         <div className="flex flex-col gap-2">
           <p className="text-xs text-muted-foreground">
-            Compare against a branch, tag or commit. The merge base with HEAD is used, so work
-            done on the base branch since is not counted as a change here.
+            Compare against a branch, tag or commit. The merge base with HEAD is used, so work done
+            on the base branch since is not counted as a change here.
           </p>
           <input
             value={rev}
@@ -89,12 +87,7 @@ export function BasePicker({
             className="w-full rounded-md border bg-background px-2 py-1.5 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              disabled={busy || rev.trim() === ''}
-              onClick={submit}
-            >
+            <Button type="button" size="sm" disabled={busy || rev.trim() === ''} onClick={submit}>
               Compare
             </Button>
             {active ? (

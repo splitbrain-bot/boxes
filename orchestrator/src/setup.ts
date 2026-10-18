@@ -75,7 +75,10 @@ export async function setUpBox(boxId: string, inputs: SetupInputs, slog: Logger)
 export function setupFiles(inputs: Pick<SetupInputs, 'caCertificate' | 'identity'>): Readable {
   const tar = pack();
   if (inputs.caCertificate !== '') {
-    tar.entry({ name: CA_FILE, mode: 0o644, size: Buffer.byteLength(inputs.caCertificate) }, inputs.caCertificate);
+    tar.entry(
+      { name: CA_FILE, mode: 0o644, size: Buffer.byteLength(inputs.caCertificate) },
+      inputs.caCertificate,
+    );
   }
   const config = gitConfig(inputs.identity);
   tar.entry({ name: GIT_CONFIG_FILE, mode: 0o644, size: Buffer.byteLength(config) }, config);

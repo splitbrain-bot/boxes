@@ -1,5 +1,5 @@
 import type { FileService } from '../files.ts';
-import { isTopLevel, type GitBox, type GitTarget } from './git.ts';
+import { type GitBox, type GitTarget, isTopLevel } from './git.ts';
 
 /** One repository found in a workspace. */
 export interface Repo {
@@ -164,5 +164,10 @@ export async function discoverRepos(files: FileService, box: GitBox): Promise<Re
 
 /** What to call a repository that is the workspace itself. */
 function workspaceName(workspace: string): string {
-  return workspace.split('/').filter((part) => part !== '').pop() ?? 'workspace';
+  return (
+    workspace
+      .split('/')
+      .filter((part) => part !== '')
+      .pop() ?? 'workspace'
+  );
 }

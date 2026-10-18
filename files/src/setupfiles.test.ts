@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pack } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
-import { FileError } from './ops.ts';
+import type { FileError } from './ops.ts';
 import { installSetupFiles } from './setupfiles.ts';
 
 let home: string;
@@ -22,13 +22,17 @@ afterEach(() => {
 /** A tar stream of the given files, relative to the home. */
 function tar(files: Record<string, string>): Readable {
   const p = pack();
-  for (const [name, content] of Object.entries(files)) p.entry({ name, size: content.length }, content);
+  for (const [name, content] of Object.entries(files))
+    p.entry({ name, size: content.length }, content);
   p.finalize();
   return Readable.from(p);
 }
 
 test('writes the CA and the git configuration into the home', async () => {
-  await installSetupFiles(home, tar({ '.boxes/proxy-ca.crt': 'PEM', '.config/git/config': '[user]\n' }));
+  await installSetupFiles(
+    home,
+    tar({ '.boxes/proxy-ca.crt': 'PEM', '.config/git/config': '[user]\n' }),
+  );
   assert.equal(readFileSync(join(home, '.boxes/proxy-ca.crt'), 'utf8'), 'PEM');
   assert.equal(readFileSync(join(home, '.config/git/config'), 'utf8'), '[user]\n');
   assert.equal(existsSync(join(home, '.boxes/setup-files.new')), false);

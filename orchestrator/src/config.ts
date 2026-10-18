@@ -95,7 +95,10 @@ const schema = z.object({
    */
   BOX_IMAGE_PRUNE: flag.default(true),
   /** Address range each box's own /24 network is taken from. Docker only. */
-  BOX_SUBNET_POOL: z.string().regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/).default('10.200.0.0/16'),
+  BOX_SUBNET_POOL: z
+    .string()
+    .regex(/^\d+\.\d+\.\d+\.\d+\/\d+$/)
+    .default('10.200.0.0/16'),
   /**
    * Memory one box container may use, such as `4g`.
    *
@@ -104,7 +107,10 @@ const schema = z.object({
    * defaults are not measured against two busy agents in one box. When a box
    * reaches the limit, the kernel kills a process in it.
    */
-  BOX_MEM_LIMIT: z.string().regex(/^\d+[kmgKMG]?$/).default('4g'),
+  BOX_MEM_LIMIT: z
+    .string()
+    .regex(/^\d+[kmgKMG]?$/)
+    .default('4g'),
   /** CPUs one box container may use. */
   BOX_CPUS: z.coerce.number().positive().default(2),
   /**
@@ -122,14 +128,20 @@ const schema = z.object({
    * Less than the limit, because most boxes are idle most of the time. A box
    * that uses more than this can be evicted when its node runs out of memory.
    */
-  BOX_MEM_REQUEST: z.string().regex(/^\d+[kmgKMG]?$/).default('1g'),
+  BOX_MEM_REQUEST: z
+    .string()
+    .regex(/^\d+[kmgKMG]?$/)
+    .default('1g'),
   /** CPUs the scheduler reserves for one box pod. Kubernetes only. */
   BOX_CPU_REQUEST: z.coerce.number().positive().default(0.5),
   /**
    * Size of the volume claim of one box, which holds its workspace, its home
    * and its Nix store, in the format of BOX_MEM_LIMIT. Kubernetes only.
    */
-  BOX_STORAGE_SIZE: z.string().regex(/^\d+[kmgKMG]?$/).default('20g'),
+  BOX_STORAGE_SIZE: z
+    .string()
+    .regex(/^\d+[kmgKMG]?$/)
+    .default('20g'),
   /**
    * When the kubelet pulls the box image for a box pod. Kubernetes only.
    *

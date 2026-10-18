@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { pollWhileVisible } from '@/lib/poll';
 import type { BoxDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
-import { pollWhileVisible } from '@/lib/poll';
 
 /** How often a view watching one box re-reads it, while its tab is visible. */
 const POLL_MS = 5000;

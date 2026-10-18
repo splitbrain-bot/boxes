@@ -1,4 +1,4 @@
-import { StrictMode, Suspense, lazy } from 'react';
+import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { Loading } from './components/Loading.tsx';

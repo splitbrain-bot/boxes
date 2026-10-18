@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
-import { allLinesAdded, fileDiff, parseDiff, type LineChange } from './difflines.ts';
-import { setGitRunnerForTests, type GitRunner, type GitTarget } from './git.ts';
+import { allLinesAdded, fileDiff, type LineChange, parseDiff } from './difflines.ts';
+import { type GitRunner, type GitTarget, setGitRunnerForTests } from './git.ts';
 import { NO_BASE } from './gitstatus.ts';
 
 /**

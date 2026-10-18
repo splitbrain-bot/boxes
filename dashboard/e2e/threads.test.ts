@@ -50,7 +50,10 @@ async function askOnce(page: import('playwright').Page): Promise<void> {
 }
 
 test('a new thread starts empty on the same box', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await askOnce(page);
 
@@ -71,7 +74,10 @@ test('a new thread starts empty on the same box', async () => {
 });
 
 test('a fork carries the source thread messages into the new one', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await askOnce(page);
 
@@ -95,7 +101,10 @@ test('a fork carries the source thread messages into the new one', async () => {
 });
 
 test('switching back to the first thread returns its transcript', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await askOnce(page);
 
@@ -119,7 +128,10 @@ test('switching back to the first thread returns its transcript', async () => {
 });
 
 test('the thread names itself even when the box has only one', async () => {
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${ID}/threads/${DEFAULT_BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     // Without the name, two tabs on one box look the same.
@@ -174,9 +186,9 @@ test('two tabs on two threads each keep to their own conversation', async () => 
 
     // Fork it and open the fork in its own tab.
     await working.page.getByLabel('Fork this thread').click();
-    await expect.poll(() =>
-      working.page.getByRole('link', { name: 'Open it in a new tab' }).isVisible(),
-    ).toBe(true);
+    await expect
+      .poll(() => working.page.getByRole('link', { name: 'Open it in a new tab' }).isVisible())
+      .toBe(true);
 
     const exploring = await openPage(stub.url, `/boxes/${ID}/threads/th2`);
     try {

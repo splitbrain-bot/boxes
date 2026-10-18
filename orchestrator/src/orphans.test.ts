@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Docker from 'dockerode';
+import type Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { loadConfig } from './config.ts';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 import * as dk from './docker.ts';
 import * as ws from './workspaces.ts';
 

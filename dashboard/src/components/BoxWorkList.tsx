@@ -1,5 +1,5 @@
-import type { BoxWork } from '../../../shared/types.ts';
 import { formatDuration } from '@/lib/task-notifications';
+import type { BoxWork } from '../../../shared/types.ts';
 
 /**
  * Read-only list of the processes a reading of a box's process table found.

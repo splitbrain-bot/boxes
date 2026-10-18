@@ -1,5 +1,5 @@
-import { useCallback, type RefObject } from 'react';
 import { useScrollLock } from '@assistant-ui/react';
+import { type RefObject, useCallback } from 'react';
 import { isFollowingOutput } from '@/hooks/use-follow-output';
 
 /**

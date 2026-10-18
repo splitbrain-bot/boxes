@@ -28,7 +28,7 @@ export class Screen {
     this.pending = '';
     let i = 0;
     while (i < text.length) {
-      const ch = text[i]!;
+      const ch = text.charAt(i);
       if (ch === ESC) {
         const taken = this.escape(text, i);
         // The chunk ended mid-sequence: keep it for the next one rather than
@@ -61,13 +61,19 @@ export class Screen {
    */
   get text(): string {
     return this.rows
-      .map((cells) => cells.map((c) => c ?? ' ').join('').replace(/\s+$/, ''))
+      .map((cells) =>
+        cells
+          .map((c) => c ?? ' ')
+          .join('')
+          .replace(/\s+$/, ''),
+      )
       .join('\n');
   }
 
   /** Puts one character where the cursor is, and steps over it. */
   private put(ch: string): void {
-    const cells = (this.rows[this.row] ??= []);
+    const cells = this.rows[this.row] ?? [];
+    this.rows[this.row] = cells;
     for (let c = cells.length; c < this.col; c++) cells[c] = ' ';
     cells[this.col] = ch;
     this.col += 1;
@@ -95,9 +101,9 @@ export class Screen {
 
     // A control sequence: parameters, then one letter that says what it does.
     let i = at + 2;
-    while (i < text.length && /[0-9;?>]/.test(text[i]!)) i++;
+    while (i < text.length && /[0-9;?>]/.test(text.charAt(i))) i++;
     if (i >= text.length) return null;
-    const final = text[i]!;
+    const final = text.charAt(i);
     const params = text.slice(at + 2, i).replace(/^[?>]/, '');
     const n = (fallback: number): number => {
       const first = Number.parseInt(params.split(';')[0] ?? '', 10);

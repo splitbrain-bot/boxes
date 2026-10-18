@@ -11,7 +11,7 @@ export const REVIEW_FILE = 'REVIEW.md';
  */
 const SKIPPED_DIRS = new Set(['.git', '.svn', '.hg', '.boxes']);
 
-export { MAX_DIR_ENTRIES, type DirChild } from '../../../shared/files.ts';
+export { type DirChild, MAX_DIR_ENTRIES } from '../../../shared/files.ts';
 
 /** Whether any segment of a path names a directory the listing steps over. */
 function inSkippedDir(path: string): boolean {
@@ -137,9 +137,7 @@ function under(prefix: string, path: string): string | null {
 
 /** The entries of one kind, in name order. */
 function sorted(entries: Map<string, ReviewDirEntry>): ReviewDirEntry[] {
-  return [...entries.values()].sort((a, b) =>
-    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-  );
+  return [...entries.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /** Whether the change deleted a file somewhere under a directory. */

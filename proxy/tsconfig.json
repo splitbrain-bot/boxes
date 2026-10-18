@@ -1,9 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    "lib": [
-      "ES2023"
-    ],
+    "lib": ["ES2023"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
@@ -13,13 +11,7 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": [
-      "node"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src/**/*.ts",
-    "../shared/**/*.ts",
-    "vite.config.ts"
-  ]
+  "include": ["src/**/*.ts", "../shared/**/*.ts", "vite.config.ts"]
 }

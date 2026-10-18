@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { anchorAt, scrollForAnchor, type RowOffset } from './anchor.ts';
+import { anchorAt, type RowOffset, scrollForAnchor } from './anchor.ts';
 
 /** Rows of equal height, with extra room after the lines named. */
 function rows(count: number, height: number, cards: Record<number, number> = {}): RowOffset[] {

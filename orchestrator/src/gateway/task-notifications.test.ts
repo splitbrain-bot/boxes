@@ -120,4 +120,3 @@ test('a block that cannot be read costs only itself', () => {
     only(COMMAND),
   );
 });
-

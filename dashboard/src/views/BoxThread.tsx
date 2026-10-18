@@ -1,40 +1,39 @@
 import {
+  type AppendMessage,
   AssistantRuntimeProvider,
   INTERNAL,
   useExternalStoreRuntime,
-  type AppendMessage,
 } from '@assistant-ui/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import type { ThreadSummary } from '../../../shared/types.ts';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { BackgroundBar } from '@/components/BackgroundBar';
 import { FullHistoryButton } from '@/components/FullHistoryButton';
 import { Notice } from '@/components/Notice';
+import { Shelf } from '@/components/Shelf';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
+import { ThreadHeader } from '@/components/ThreadHeader';
+import { ThreadLoading } from '@/components/ThreadLoading';
 import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { api, ApiError } from '../api.ts';
-import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useBox } from '@/hooks/use-box';
+import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useUp } from '@/hooks/use-up';
+import { useViewportLock } from '@/hooks/use-viewport-lock';
+import { type AttachmentEntry, buildEnvelope, formatBytes } from '@/lib/attachments';
+import { harnessLabel } from '@/lib/harness';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
-import { threadTitle, type TabState } from '@/lib/tab-title';
-import { refreshHealth } from '../stores/boxes.ts';
-import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
+import { type TabState, threadTitle } from '@/lib/tab-title';
+import { threadName } from '@/lib/threads';
+import type { ThreadSummary } from '../../../shared/types.ts';
+import { ApiError, api } from '../api.ts';
+import { refreshHealth, useBoxes } from '../stores/boxes.ts';
 import type { ContentBlock } from '../stores/thread/acp-types.ts';
+import { createAttachmentAdapter } from '../stores/thread/attachments.ts';
 import { convertMessage } from '../stores/thread/convert.ts';
 import type { Message } from '../stores/thread/translate.ts';
 import { useThread } from '../stores/thread/use-thread.ts';
-import { harnessLabel } from '@/lib/harness';
-import { threadName } from '@/lib/threads';
-import { useBoxes } from '../stores/boxes.ts';
-import { buildEnvelope, formatBytes, type AttachmentEntry } from '@/lib/attachments';
-import { Shelf } from '@/components/Shelf';
-import { ThreadLoading } from '@/components/ThreadLoading';
-import { ThreadHeader } from '@/components/ThreadHeader';
-import { useScrollAway } from '@/hooks/use-scroll-away';
-import { useViewportLock } from '@/hooks/use-viewport-lock';
 
 /**
  * Returns the typed text of a composer submission, without its attachments.
@@ -335,8 +334,8 @@ export function BoxThread() {
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
                 <span>
-                  {threadName(forked)} branched from this conversation. It opens on everything
-                  said here so far and goes its own way from there.
+                  {threadName(forked)} branched from this conversation. It opens on everything said
+                  here so far and goes its own way from there.
                 </span>
                 {/* A plain link, so a popup blocker does not stop the new tab. */}
                 <Link
@@ -361,9 +360,7 @@ export function BoxThread() {
                 Could not fork this thread: {forkError}
               </Notice>
             ) : null}
-            {state.error ? (
-              <Notice className="border-b px-4 py-2">{state.error}</Notice>
-            ) : null}
+            {state.error ? <Notice className="border-b px-4 py-2">{state.error}</Notice> : null}
             <div className="min-h-0 flex-1">
               {/* A box that could not be read has no token, so the page shows no composer. */}
               {loadError ? (

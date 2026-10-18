@@ -2,13 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, it } from 'vitest';
-import {
-  HOME_DIR,
-  NIX_DIR,
-  WORKSPACE_DIR,
-  type ProcessStream,
-  type Runtime,
-} from './runtime.ts';
+import { HOME_DIR, NIX_DIR, type ProcessStream, type Runtime, WORKSPACE_DIR } from './runtime.ts';
 
 /**
  * The conformance suite of the Runtime interface.
@@ -110,7 +104,10 @@ function waitForOutput(proc: ProcessStream, text: string, timeoutMs = 10_000): P
 async function within<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} took longer than ${timeoutMs} ms`)), timeoutMs);
+    timer = setTimeout(
+      () => reject(new Error(`${what} took longer than ${timeoutMs} ms`)),
+      timeoutMs,
+    );
   });
   try {
     return await Promise.race([promise, timeout]);
@@ -146,7 +143,9 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
 
     /** Whether the box can open a TCP connection to an address. */
     async function canConnect(target: Target, id = box): Promise<boolean> {
-      const out = await rt.run(id, connectCommand(target), { timeoutMs: (CONNECT_SECONDS + 5) * 1000 });
+      const out = await rt.run(id, connectCommand(target), {
+        timeoutMs: (CONNECT_SECONDS + 5) * 1000,
+      });
       return out.code === 0;
     }
 
@@ -232,7 +231,9 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
         assert.equal(await rt.state(box), 'stopped');
         await rt.ensure({ boxId: box, env });
         await rt.start({ boxId: box, env });
-        await sh(`test -e ${WORKSPACE_DIR}/.conformance -a -e ${HOME_DIR}/.conformance -a -e ${NIX_DIR}/.conformance`);
+        await sh(
+          `test -e ${WORKSPACE_DIR}/.conformance -a -e ${HOME_DIR}/.conformance -a -e ${NIX_DIR}/.conformance`,
+        );
       });
 
       it('keeps the files when the box is removed and made again', async () => {
@@ -240,7 +241,9 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
         assert.equal(await rt.state(box), 'stopped');
         await rt.ensure({ boxId: box, env });
         await rt.start({ boxId: box, env });
-        await sh(`test -e ${WORKSPACE_DIR}/.conformance -a -e ${HOME_DIR}/.conformance -a -e ${NIX_DIR}/.conformance`);
+        await sh(
+          `test -e ${WORKSPACE_DIR}/.conformance -a -e ${HOME_DIR}/.conformance -a -e ${NIX_DIR}/.conformance`,
+        );
       });
     });
 
@@ -342,7 +345,10 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
 
       it('lets a box reach the front door of the egress proxy', async () => {
         const url = new URL(rt.proxyUrl());
-        assert.equal(await canConnect({ label: 'proxy', host: url.hostname, port: Number(url.port) }), true);
+        assert.equal(
+          await canConnect({ label: 'proxy', host: url.hostname, port: Number(url.port) }),
+          true,
+        );
       });
 
       it(`keeps a box from ${INTERNET.label}`, async () => {
@@ -350,7 +356,8 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
       });
 
       it('keeps a box from another box', async () => {
-        const address = (await sh('hostname -i', sibling)).trim().split(/\s+/)[0]!;
+        const address = (await sh('hostname -i', sibling)).trim().split(/\s+/)[0];
+        assert.ok(address, 'the sibling has no address');
         const target = { label: 'the other box', host: address, port: SIBLING_PORT };
         const listener = await rt.spawn(sibling, [
           'node',
@@ -369,7 +376,11 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
 
       it('keeps a box from each address of the runtime', async () => {
         for (const target of subject.unreachable) {
-          assert.equal(await canConnect(target), false, `${target.label} (${target.host}:${target.port})`);
+          assert.equal(
+            await canConnect(target),
+            false,
+            `${target.label} (${target.host}:${target.port})`,
+          );
         }
       });
 

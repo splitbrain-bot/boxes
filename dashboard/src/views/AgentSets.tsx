@@ -1,10 +1,7 @@
 import { ChevronRight, Globe, Layers, Plus } from 'lucide-react';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import type { AgentSetSummary } from '../../../shared/types.ts';
-import { api } from '../api.ts';
 import { BackLink } from '@/components/BackLink';
-import { useUp } from '@/hooks/use-up';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
@@ -12,6 +9,9 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { useUp } from '@/hooks/use-up';
+import type { AgentSetSummary } from '../../../shared/types.ts';
+import { api } from '../api.ts';
 
 /**
  * Page that lists every agent set, the global one first.
@@ -86,10 +86,10 @@ export function AgentSets() {
       </div>
 
       <p className="text-sm text-muted-foreground">
-          An agent set defines an <code className="font-mono">AGENTS.md</code> and optionally some skills.
-          The global set is used for every box by default, but you can select an additional set to be
-          merged with the global one when starting a box. The AGENTS.md files are concatenated,
-          and a skill in the named set replaces the global one of the same name.
+        An agent set defines an <code className="font-mono">AGENTS.md</code> and optionally some
+        skills. The global set is used for every box by default, but you can select an additional
+        set to be merged with the global one when starting a box. The AGENTS.md files are
+        concatenated, and a skill in the named set replaces the global one of the same name.
       </p>
 
       {creating ? (
@@ -125,9 +125,7 @@ export function AgentSets() {
         </Card>
       ) : null}
 
-      {error ? (
-        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-      ) : null}
+      {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
 
       {sets === null ? <Loading className="py-8 text-center" /> : null}
 

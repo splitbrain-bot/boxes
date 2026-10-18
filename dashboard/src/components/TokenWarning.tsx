@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
-import type { HarnessHealth } from '../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
+import type { HarnessHealth } from '../../../shared/types.ts';
 import { useBoxes } from '../stores/boxes.ts';
 
 /**

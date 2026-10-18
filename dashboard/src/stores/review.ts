@@ -7,7 +7,7 @@ import type {
   ReviewFileResponse,
 } from '../../../shared/types.ts';
 import { ApiError, api } from '../api.ts';
-import { tokenizeLines, type Token } from '../lib/highlight.ts';
+import { type Token, tokenizeLines } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
 /** Store for the review view: the tree, folder by folder, and the open file. */
@@ -170,8 +170,8 @@ function factsOf(dir: ReviewDirResponse): ReviewFacts {
  * reviewer closed stays closed when the tree is refetched.
  */
 function unwrap(dir: ReviewDirResponse): void {
-  if (dir.entries.length !== 1) return;
-  const only = dir.entries[0]!;
+  const only = dir.entries[0];
+  if (!only || dir.entries.length !== 1) return;
   if (!only.isDir || get().expanded.includes(only.path)) return;
   set({ expanded: [...get().expanded, only.path] });
   void loadDir(only.path);

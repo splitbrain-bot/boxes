@@ -106,9 +106,7 @@ export function parseReview(text: string): Review {
     collecting = false;
   };
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-
+  for (const [i, line] of lines.entries()) {
     // Nothing inside a code fence is structure.
     if (fence !== '') {
       if (closesFence(line, fence)) fence = '';
@@ -130,10 +128,10 @@ export function parseReview(text: string): Review {
       collecting = true;
       continue;
     }
-    const fileHeader = FILE_HEADER.exec(line);
-    if (fileHeader) {
+    const fileHeader = FILE_HEADER.exec(line)?.[1];
+    if (fileHeader !== undefined) {
       save();
-      currentFile = fileHeader[1]!;
+      currentFile = fileHeader;
       if (!data.has(currentFile)) data.set(currentFile, new Map());
       continue;
     }
@@ -143,10 +141,7 @@ export function parseReview(text: string): Review {
     }
 
     if (!collecting) {
-      if (started === '') {
-        const match = STARTED.exec(line.trim());
-        if (match) started = match[1]!;
-      }
+      if (started === '') started = STARTED.exec(line.trim())?.[1] ?? '';
       continue;
     }
     body.push(unescapeStructure(line));
@@ -166,13 +161,17 @@ function splitBody(
   marked: boolean,
 ): { comment: string; context: string[]; contextFrom: number } {
   let end = body.length;
-  while (end > 0 && body[end - 1]!.trim() === '') end--;
+  while (end > 0 && body[end - 1]?.trim() === '') end--;
 
-  const whole = { comment: joinComment(body.slice(0, end)), context: [] as string[], contextFrom: 0 };
+  const whole = {
+    comment: joinComment(body.slice(0, end)),
+    context: [] as string[],
+    contextFrom: 0,
+  };
 
   const block = lastFencedBlock(body.slice(0, end));
   if (!block || block.close !== end - 1) return whole;
-  if (marked && !isContextFence(body[block.open]!)) return whole;
+  if (marked && !isContextFence(body[block.open] ?? '')) return whole;
 
   const parsed = parseContext(body.slice(block.open + 1, block.close));
   if (!parsed) return whole;
@@ -225,8 +224,7 @@ function lastFencedBlock(lines: string[]): { open: number; close: number } | nul
   let fence = '';
   let start = 0;
   let found: { open: number; close: number } | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+  for (const [i, line] of lines.entries()) {
     if (fence === '') {
       const marker = fenceMarker(line);
       if (marker !== '') {
@@ -309,13 +307,13 @@ function unescapeStructure(line: string): string {
 export function serializeReview(review: Review): string {
   const out: string[] = ['# Code Review\n\n', `_Started: ${review.started}_\n`];
 
-  for (const path of sortedPaths(review.data)) {
-    const lines = review.data.get(path)!;
+  for (const [path, lines] of sortedEntries(review.data)) {
     out.push('\n---\n\n', `## \`${path}\`\n`);
 
-    for (const lineNum of [...lines.keys()].sort((a, b) => a - b)) {
-      const ann = lines.get(lineNum)!;
-      out.push(ann.outdated ? `\n#### Line ${lineNum} (outdated)\n\n` : `\n#### Line ${lineNum}\n\n`);
+    for (const [lineNum, ann] of [...lines].sort((a, b) => a[0] - b[0])) {
+      out.push(
+        ann.outdated ? `\n#### Line ${lineNum} (outdated)\n\n` : `\n#### Line ${lineNum}\n\n`,
+      );
       const { text, openFence } = escapeComment(ann.comment);
       out.push(text);
       if (ann.context.length > 0) {
@@ -339,11 +337,10 @@ export function serializeReview(review: Review): string {
  * default sort compares UTF-16 code units, which gives a different order for
  * characters outside the BMP.
  */
-function sortedPaths(data: ReviewData): string[] {
+function sortedEntries(data: ReviewData): [string, Map<number, Annotation>][] {
   return [...data.entries()]
     .filter(([, lines]) => lines.size > 0)
-    .map(([path]) => path)
-    .sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
+    .sort(([a], [b]) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
 }
 
 /**
@@ -405,7 +402,8 @@ export function detectLang(path: string): string {
     'go.mod': 'go',
     'go.sum': 'text',
   };
-  if (byName[name]) return byName[name]!;
+  const known = byName[name];
+  if (known) return known;
 
   const dot = name.lastIndexOf('.');
   const ext = dot <= 0 ? '' : name.slice(dot + 1);
@@ -652,9 +650,7 @@ function relocate(annotations: Map<number, Annotation>, relocations: Relocation[
   for (const r of moves.values()) moved.set(r.newLine, r.ann);
 
   annotations.clear();
-  for (const line of [...moved.keys()].sort((a, b) => a - b)) {
-    annotations.set(line, moved.get(line)!);
-  }
+  for (const [line, ann] of [...moved].sort((a, b) => a[0] - b[0])) annotations.set(line, ann);
 }
 
 /** Whether the context lines match the file at a given 1-based position. */

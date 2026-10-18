@@ -37,7 +37,7 @@ function inV4Range(value: number, base: string, prefix: number): boolean {
   const baseInt = v4ToInt(base);
   if (baseInt === null) return false;
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-  return ((value & mask) >>> 0) === ((baseInt & mask) >>> 0);
+  return (value & mask) >>> 0 === (baseInt & mask) >>> 0;
 }
 
 /** Expands an IPv6 literal to its 8 groups, or null if malformed. */
@@ -108,7 +108,7 @@ function hexGroup(text: string): number | null {
 function embeddedV4(groups: readonly number[]): number | null {
   const at = (i: number): number => groups[i] ?? 0;
   const zeros = (upTo: number): boolean => groups.slice(0, upTo).every((g) => g === 0);
-  const low = (): number => (((at(6) << 16) | at(7)) >>> 0);
+  const low = (): number => ((at(6) << 16) | at(7)) >>> 0;
 
   if (zeros(5) && at(5) === 0xffff) return low(); // ::ffff:a.b.c.d
   if (zeros(4) && at(4) === 0xffff && at(5) === 0) return low(); // ::ffff:0:a.b.c.d
@@ -116,7 +116,7 @@ function embeddedV4(groups: readonly number[]): number | null {
   // 64:ff9b::/96
   const nat64 = at(0) === 0x64 && at(1) === 0xff9b;
   if (nat64 && at(2) === 0 && at(3) === 0 && at(4) === 0 && at(5) === 0) return low();
-  if (at(0) === 0x2002) return (((at(1) << 16) | at(2)) >>> 0); // 2002::/16
+  if (at(0) === 0x2002) return ((at(1) << 16) | at(2)) >>> 0; // 2002::/16
   return null;
 }
 

@@ -69,13 +69,21 @@ function toolCall(toolCallId: string, over: Record<string, unknown> = {}): unkno
 
 test('the agent is talking while it says things, and stops when it stops', () => {
   const { a, pass, changes } = activity();
-  a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'hi' } }), 'claude');
+  a.observe(
+    't1',
+    update('agent_message_chunk', { content: { type: 'text', text: 'hi' } }),
+    'claude',
+  );
   assert.equal(a.speaking('t1'), true);
   assert.deepEqual(changes, [['t1', true]]);
 
   // Every chunk restarts the quiet timer.
   pass(QUIET - 1);
-  a.observe('t1', update('agent_message_chunk', { content: { type: 'text', text: 'there' } }), 'claude');
+  a.observe(
+    't1',
+    update('agent_message_chunk', { content: { type: 'text', text: 'there' } }),
+    'claude',
+  );
   pass(QUIET - 1);
   assert.equal(a.speaking('t1'), true);
 
@@ -94,7 +102,11 @@ test('a tool call the agent is waiting on is not silence', () => {
   for (let i = 0; i < 40; i++) pass(QUIET);
   assert.equal(a.speaking('t1'), true);
 
-  a.observe('t1', update('tool_call_update', { toolCallId: 'call_1', status: 'completed' }), 'claude');
+  a.observe(
+    't1',
+    update('tool_call_update', { toolCallId: 'call_1', status: 'completed' }),
+    'claude',
+  );
   pass(QUIET);
   assert.equal(a.speaking('t1'), false);
 });
@@ -102,7 +114,11 @@ test('a tool call the agent is waiting on is not silence', () => {
 test('a call that runs in the background is not the agent working', () => {
   const { a, pass } = activity();
   // Making the call counts as work. Waiting for it does not.
-  a.observe('t1', toolCall('call_1', { rawInput: { command: 'npm run build', run_in_background: true } }), 'claude');
+  a.observe(
+    't1',
+    toolCall('call_1', { rawInput: { command: 'npm run build', run_in_background: true } }),
+    'claude',
+  );
   assert.equal(a.speaking('t1'), true);
   pass(QUIET);
   assert.equal(a.speaking('t1'), false);

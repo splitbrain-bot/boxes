@@ -3,10 +3,10 @@ import { Terminal } from '@xterm/xterm';
 import { ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router';
-import { Button } from '@/components/ui/button';
 import { Notice } from '@/components/Notice';
-import { useDocumentTitle } from '@/hooks/use-document-title';
+import { Button } from '@/components/ui/button';
 import { useBox } from '@/hooks/use-box';
+import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { TerminalSocket, type TerminalStatus } from '@/lib/terminal-socket';
@@ -141,7 +141,13 @@ export function BoxTerminal() {
           </span>
         </div>
         {status === 'closed' ? (
-          <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={reconnect}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={reconnect}
+          >
             Reconnect
           </Button>
         ) : null}

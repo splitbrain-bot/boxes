@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { tokenizeLines, type Token } from '@/lib/highlight';
+import { type Token, tokenizeLines } from '@/lib/highlight';
 import type { OpenFile } from '../stores/review.ts';
 
 /** How long typing has to pause, in milliseconds, before the buffer is coloured again. */

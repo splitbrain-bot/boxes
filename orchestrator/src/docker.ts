@@ -1,20 +1,20 @@
-import Docker from 'dockerode';
 import { existsSync, readFileSync } from 'node:fs';
-import { PassThrough, Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
+import { PassThrough, type Readable } from 'node:stream';
+import Docker from 'dockerode';
 import type { ImageInfo } from '../../shared/types.ts';
 import type { Config } from './config.ts';
 import { log } from './log.ts';
+import { readAll, withTimeout } from './runtime/exec.ts';
 import {
   HOME_DIR,
   NIX_DIR,
-  WORKSPACE_DIR,
   type ProcessStream,
   type PullEvent,
   type RunOptions,
   type RunOutput,
+  WORKSPACE_DIR,
 } from './runtime/runtime.ts';
-import { readAll, withTimeout } from './runtime/exec.ts';
 import { boxOwner } from './workspaces.ts';
 
 /**
@@ -111,7 +111,11 @@ function memoryBytes(limit: string): number {
 }
 
 /** Creates a box network. Internal, so it has no NAT and no default route. */
-export async function createNetwork(networkName: string, subnet: string, boxId: string): Promise<void> {
+export async function createNetwork(
+  networkName: string,
+  subnet: string,
+  boxId: string,
+): Promise<void> {
   await docker().createNetwork({
     Name: networkName,
     Driver: 'bridge',
@@ -124,9 +128,7 @@ export async function createNetwork(networkName: string, subnet: string, boxId: 
 
 /** Whether a network's inspect lists the egress proxy container on it. */
 function proxyOn(info: Docker.NetworkInspectInfo, cfg: Config): boolean {
-  return Object.values(info.Containers ?? {}).some(
-    (c) => c.Name === cfg.EGRESS_PROXY_CONTAINER,
-  );
+  return Object.values(info.Containers ?? {}).some((c) => c.Name === cfg.EGRESS_PROXY_CONTAINER);
 }
 
 /**
@@ -174,7 +176,7 @@ export async function isProxyAttached(networkName: string, cfg: Config): Promise
  * The container id a test installed for selfContainerId, or undefined to read
  * the real sources.
  */
-let selfIdForTests: string | null | undefined = undefined;
+let selfIdForTests: string | null | undefined;
 
 /**
  * Test seam: makes selfContainerId return id. Undefined restores the real
@@ -274,9 +276,7 @@ export async function imageInfo(image: string): Promise<ImageInfo | null> {
 
 /** The id of the image a container was created from, or null when it is gone. */
 export async function containerImageId(container: string): Promise<string | null> {
-  return inspecting(
-    async () => (await docker().getContainer(container).inspect()).Image ?? null,
-  );
+  return inspecting(async () => (await docker().getContainer(container).inspect()).Image ?? null);
 }
 
 /** The full id of a container, by name or id, or null when it is gone. */
@@ -533,16 +533,18 @@ async function runExec(
   cmd: readonly string[],
   opts: RunOptions,
 ): Promise<{ stdout: Readable; stderr: Readable; exited: Promise<number | null> }> {
-  const exec = await docker().getContainer(containerId).exec({
-    Cmd: withTimeout(cmd, opts.timeoutMs),
-    AttachStdin: false,
-    AttachStdout: true,
-    AttachStderr: true,
-    Tty: false,
-    User: boxUser(),
-    WorkingDir: opts.workingDir,
-    Env: opts.env && Object.entries(opts.env).map(([name, value]) => `${name}=${value}`),
-  });
+  const exec = await docker()
+    .getContainer(containerId)
+    .exec({
+      Cmd: withTimeout(cmd, opts.timeoutMs),
+      AttachStdin: false,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: false,
+      User: boxUser(),
+      WorkingDir: opts.workingDir,
+      Env: opts.env && Object.entries(opts.env).map(([name, value]) => `${name}=${value}`),
+    });
   const stream = (await exec.start({ hijack: true, stdin: false })) as Duplex;
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -692,18 +694,20 @@ export async function spawnExec(
   opts: { workingDir: string; env?: Record<string, string>; tty?: { cols: number; rows: number } },
 ): Promise<ProcessStream> {
   const tty = opts.tty !== undefined;
-  const exec = await docker().getContainer(container).exec({
-    Cmd: [...cmd],
-    AttachStdin: true,
-    AttachStdout: true,
-    AttachStderr: true,
-    Tty: tty,
-    User: boxUser(),
-    WorkingDir: opts.workingDir,
-    Env: Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
-    // The daemon wants the size the way ioctl does, rows before columns.
-    ...(opts.tty ? { ConsoleSize: [opts.tty.rows, opts.tty.cols] } : {}),
-  });
+  const exec = await docker()
+    .getContainer(container)
+    .exec({
+      Cmd: [...cmd],
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: tty,
+      User: boxUser(),
+      WorkingDir: opts.workingDir,
+      Env: Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
+      // The daemon wants the size the way ioctl does, rows before columns.
+      ...(opts.tty ? { ConsoleSize: [opts.tty.rows, opts.tty.cols] } : {}),
+    });
 
   // Tty on the start request too: the daemon reads it there to decide
   // whether to frame the output. Frame headers would corrupt the text.

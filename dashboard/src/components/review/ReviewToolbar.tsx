@@ -178,6 +178,7 @@ function Group({
   return (
     <div className="flex items-center gap-0.5">
       <span
+        role="img"
         className="inline-flex items-center gap-1 px-1 text-muted-foreground"
         aria-label={`${count} ${plural}`}
       >

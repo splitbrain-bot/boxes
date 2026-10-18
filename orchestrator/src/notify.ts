@@ -1,10 +1,10 @@
 import type { Config } from './config.ts';
 import {
+  type Db,
   deletePushSubscription,
   dropOtherKeySubscriptions,
   listPushSubscriptions,
   touchPushSubscription,
-  type Db,
 } from './db.ts';
 import { log } from './log.ts';
 import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';

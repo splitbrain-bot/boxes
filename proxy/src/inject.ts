@@ -1,7 +1,7 @@
-import * as mockttp from 'mockttp';
 import type { CompletedRequest, Headers } from 'mockttp';
+import * as mockttp from 'mockttp';
 import type { EgressPolicy } from '../../shared/types.ts';
-import { PLAINTEXT_CREDENTIAL_REASON, type DenialCategory } from './forward.ts';
+import { type DenialCategory, PLAINTEXT_CREDENTIAL_REASON } from './forward.ts';
 import { credentialsForHost, decideCredentials, injectionPatterns } from './policy.ts';
 
 /** The TLS interception engine, the one place a real credential goes onto the wire. */
@@ -38,7 +38,7 @@ const URL_LINKED_HEADERS = ['host', ':authority'];
  * out here because the engine does not export its callback result type.
  */
 type RequestDecision =
-  | void
+  | undefined
   | { headers: Headers }
   | {
       response: {
@@ -132,12 +132,10 @@ export class Interceptor {
 
     await server.start();
     try {
-      await server
-        .forAnyRequest()
-        .thenPassThrough({
-          beforeRequest: (req) => this.decide(req),
-          proxyConfig: { proxyUrl: this.opts.upstreamProxyUrl() },
-        });
+      await server.forAnyRequest().thenPassThrough({
+        beforeRequest: (req) => this.decide(req),
+        proxyConfig: { proxyUrl: this.opts.upstreamProxyUrl() },
+      });
 
       // The first rule forwards what upgradeAllowed accepts. The second refuses
       // the rest, in place of the engine's "no rules matched".

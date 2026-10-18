@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startOrchestrator, type BoxSpec, type TestOrchestrator } from './orchestrator.ts';
+import { type BoxSpec, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /**
  * Browser tests for the new-thread dialog and the new-box form.
@@ -134,8 +134,9 @@ test('an agent with no credential is offered greyed out, with the reason', async
     );
 
     // The one that can run is the one it opened on.
-    expect(await dialog.getByRole('button', { name: 'Claude Code' }).getAttribute('aria-pressed'))
-      .toBe('true');
+    expect(
+      await dialog.getByRole('button', { name: 'Claude Code' }).getAttribute('aria-pressed'),
+    ).toBe('true');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -151,9 +152,9 @@ test('a deployment that has never run an agent offers the agent choice alone', a
   try {
     await page.getByRole('button', { name: 'New thread' }).click();
     const dialog = page.getByRole('dialog');
-    await expect.poll(() => dialog.getByRole('button', { name: 'Claude Code' }).isVisible()).toBe(
-      true,
-    );
+    await expect
+      .poll(() => dialog.getByRole('button', { name: 'Claude Code' }).isVisible())
+      .toBe(true);
     expect(await dialog.getByLabel('Agent mode').count()).toBe(0);
     expect(await dialog.getByLabel('Model').count()).toBe(0);
     await expect.poll(() => dialog.getByText('has not run here yet').isVisible()).toBe(true);
@@ -182,11 +183,13 @@ test('the dialog opens on what the last one chose, from the deployment', async (
     await page.getByRole('button', { name: 'Start thread' }).click();
 
     // Stored in the deployment per harness, so any device opens on it.
-    await expect.poll(async () => (await stub.settings()).dialogs['claude']).toEqual({
-      modeId: 'plan',
-      // No effort: nobody changed it, and the registry has no default for it.
-      config: { model: 'sonnet' },
-    });
+    await expect
+      .poll(async () => (await stub.settings()).dialogs.claude)
+      .toEqual({
+        modeId: 'plan',
+        // No effort: nobody changed it, and the registry has no default for it.
+        config: { model: 'sonnet' },
+      });
 
     await page.waitForURL(`**/boxes/${ID}/threads/th2`);
     // The back control appears once the thread is connected.

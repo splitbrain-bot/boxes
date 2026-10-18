@@ -40,8 +40,12 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
   const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review`);
   try {
     // The workspace's top level: two repositories and a directory in neither.
-    await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
-    await expect.poll(() => page.getByRole('button', { name: 'lib a git repository' }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
+      .toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'lib a git repository' }).isVisible())
+      .toBe(true);
     await expect.poll(() => page.getByRole('button', { name: /^notes/ }).isVisible()).toBe(true);
     // A repository root is labelled, so the boundaries stay visible.
     expect(await page.getByLabel('a git repository').count()).toBe(2);
@@ -64,7 +68,9 @@ test('the tree is the whole screen on a phone, and a file replaces it', async ()
     // Back steps from the file to the file list, through the header's button.
     await page.getByLabel('Back to the file list').click();
     await expect.poll(() => new URL(page.url()).search).not.toContain('path=');
-    await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
+      .toBe(true);
 
     // From the list, back leads to the boxes: a review opened by a link names
     // no thread to go back to.
@@ -86,7 +92,9 @@ test('the tree is a column beside the pane on a desktop', async () => {
   try {
     await expect.poll(() => page.getByText('wire the router').isVisible()).toBe(true);
     // Tree and file at once, unlike on a phone.
-    await expect.poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'app a git repository' }).isVisible())
+      .toBe(true);
     await page.getByRole('button', { name: 'app a git repository' }).click();
     await page.getByRole('button', { name: 'src' }).click();
     await expect.poll(() => page.getByRole('button', { name: /boot\.ts/ }).isVisible()).toBe(true);
@@ -210,7 +218,9 @@ test('a file the change deleted is listed, and says it is gone', async () => {
   );
   try {
     await expect
-      .poll(() => page.getByText('This file was deleted, so there is nothing left to read.').isVisible())
+      .poll(() =>
+        page.getByText('This file was deleted, so there is nothing left to read.').isVisible(),
+      )
       .toBe(true);
     // And it is in the tree, under the directory it was in.
     await page.getByRole('button', { name: 'app a git repository' }).click();
@@ -238,7 +248,9 @@ test('a binary is listed, and opens in a tab of its own with its own type', asyn
       .poll(() => page.getByText('This file is binary, so it cannot be shown here.').isVisible())
       .toBe(true);
     await page.getByRole('button', { name: /^notes/ }).click();
-    await expect.poll(() => page.getByRole('button', { name: /chart\.png/ }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByRole('button', { name: /chart\.png/ }).isVisible())
+      .toBe(true);
     await shoot(page, 'review-binary-desktop');
 
     // The toolbar has the link too, as it does for every file.
@@ -434,9 +446,7 @@ test('a comment can be edited and deleted', async () => {
 
     await page.getByRole('button', { name: 'Delete the comment on line 2' }).click();
     // Confirmed first, because a delete has no undo.
-    await expect
-      .poll(() => page.getByText('Delete the comment on line 2?').isVisible())
-      .toBe(true);
+    await expect.poll(() => page.getByText('Delete the comment on line 2?').isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect.poll(() => page.getByText('second thoughts').isVisible()).toBe(false);
     expect(await stub.comments(BOX, 'app/src/app.ts')).toEqual([]);
@@ -460,9 +470,9 @@ test('an outdated comment says the code moved', async () => {
   try {
     await expect.poll(() => page.getByText('about the old import').isVisible()).toBe(true);
     // In words, because a symbol for "outdated" is not guessable.
-    expect(
-      await page.getByText('The code this was written about has changed').isVisible(),
-    ).toBe(true);
+    expect(await page.getByText('The code this was written about has changed').isVisible()).toBe(
+      true,
+    );
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -480,9 +490,9 @@ test('handing the review to the agent stages a prompt, unsent', async () => {
   );
   try {
     await page.getByLabel("Review this box's code").click();
-    await expect.poll(() => page.getByRole('button', { name: /Hand to agent/ }).isVisible()).toBe(
-      true,
-    );
+    await expect
+      .poll(() => page.getByRole('button', { name: /Hand to agent/ }).isVisible())
+      .toBe(true);
     await page.getByRole('button', { name: /Hand to agent/ }).click();
 
     // Lands in the thread with the prompt in the composer and no turn started.
@@ -574,9 +584,7 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
       body: { path: 'app/src/boot.ts' },
     });
     // The save lands in the workspace the agent works in.
-    await expect
-      .poll(() => stub.read(BOX, 'app/src/boot.ts'))
-      .toContain('wireTheRouter();');
+    await expect.poll(() => stub.read(BOX, 'app/src/boot.ts')).toContain('wireTheRouter();');
     // Nothing left to save.
     await expect
       .poll(() => page.getByRole('button', { name: 'Save', exact: true }).isDisabled())
@@ -591,15 +599,14 @@ test('a line can be fixed in place, and the save reaches the workspace', async (
 test('the line being read stays put across a switch into editing', async () => {
   // A comment high up, so folding its card away in edit mode moves every row below it.
   stub.review(BOX, {
-    files: { 'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n') },
+    files: {
+      'long.ts': Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n'),
+    },
     repos: [''],
   });
   await stub.comment(BOX, 'long.ts', 3, 'a card tall enough to push the rest down');
 
-  const { page, errors, close } = await openPage(
-    stub.url,
-    `/boxes/${BOX}/review?path=long.ts`,
-  );
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review?path=long.ts`);
   try {
     const pane = page.locator('[data-slot="review-code-pane"]');
     await expect.poll(() => pane.isVisible()).toBe(true);
@@ -656,7 +663,9 @@ test('a save the agent got in first is refused, and the choice is offered', asyn
 
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect
-      .poll(() => page.getByText('The agent changed this file while you were editing it.').isVisible())
+      .poll(() =>
+        page.getByText('The agent changed this file while you were editing it.').isVisible(),
+      )
       .toBe(true);
     // Refused rather than applied, and the buffer is still there to save.
     expect(stub.read(BOX, 'lib/index.ts')).toBe('export const version = "9.9.9";\n');
@@ -715,10 +724,7 @@ test('the rows and the editor over them wrap in the same places', async () => {
   const lines = Array.from({ length: 25 }, (_, i) => shapes[i % shapes.length]!);
   stub.write(BOX, 'readme.md', `${lines.join('\n')}\n`);
 
-  const { page, errors, close } = await openPage(
-    stub.url,
-    `/boxes/${BOX}/review?path=readme.md`,
-  );
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review?path=readme.md`);
   try {
     await expect.poll(() => page.locator('[data-line="1"] code').isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Edit this file' }).click();
@@ -795,7 +801,14 @@ test('the base picker sets a revision and says which one is active', async () =>
     // The picker shows what the revision resolved to in each repository.
     await page.getByRole('button', { name: /main/ }).click();
     // The commit ids differ per fixture run, so the test matches their shape.
-    await expect.poll(() => page.getByText(/^[0-9a-f]{8}$/).first().isVisible()).toBe(true);
+    await expect
+      .poll(() =>
+        page
+          .getByText(/^[0-9a-f]{8}$/)
+          .first()
+          .isVisible(),
+      )
+      .toBe(true);
     await shoot(page, 'review-base-desktop');
     expect(errors).toEqual([]);
   } finally {
@@ -959,7 +972,10 @@ test('the review header gives way to reading the file, and returns', async () =>
           new Promise<void>((done) => {
             let left = count;
             const step = (): void => {
-              if (left-- <= 0) return done();
+              if (left-- <= 0) {
+                done();
+                return;
+              }
               el.scrollTop += by;
               requestAnimationFrame(step);
             };
@@ -1023,7 +1039,10 @@ test('the review header stays where it is on a wide screen', async () => {
         new Promise<void>((done) => {
           let left = 4;
           const step = (): void => {
-            if (left-- <= 0) return done();
+            if (left-- <= 0) {
+              done();
+              return;
+            }
             el.scrollTop += 100;
             requestAnimationFrame(step);
           };
@@ -1052,7 +1071,12 @@ test('the review is reachable from the box card and the thread header', async ()
     await list.close();
   }
 
-  const thread = await openPage(stub.url, `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`, 'dark', 'desktop');
+  const thread = await openPage(
+    stub.url,
+    `/boxes/${BOX}/threads/${DEFAULT_BOX.threadId}`,
+    'dark',
+    'desktop',
+  );
   try {
     const link = thread.page.getByRole('link', { name: "Review this box's code" });
     await expect.poll(() => link.isVisible()).toBe(true);

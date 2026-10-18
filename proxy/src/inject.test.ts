@@ -202,7 +202,6 @@ async function throughEngine(
   });
 }
 
-
 /**
  * Asks the engine to upgrade a connection, and answers with 101 when it was
  * forwarded and upgraded, or with the status it refused with. A rejection
@@ -251,7 +250,13 @@ function plainThroughEngine(
 ): Promise<Answer> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: '127.0.0.1', port, method: 'GET', path: url, headers: { host: 'api.github.com', ...headers } },
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'GET',
+        path: url,
+        headers: { host: 'api.github.com', ...headers },
+      },
       (res) => {
         let body = '';
         res.on('data', (c) => (body += c));

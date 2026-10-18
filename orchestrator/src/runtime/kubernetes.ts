@@ -11,6 +11,7 @@ import {
   type V1Pod,
   type V1PodSecurityContext,
   type V1SecurityContext,
+  type V1Service,
   type V1Status,
 } from '@kubernetes/client-node';
 import type { DeploymentImages, ImageInfo, RuntimeState } from '../../../shared/types.ts';
@@ -18,18 +19,18 @@ import type { Config } from '../config.ts';
 import { log } from '../log.ts';
 import { readAll, withTimeout } from './exec.ts';
 import {
-  HOME_DIR,
-  NIX_DIR,
-  RUN_TIMEOUT_MS,
-  WORKSPACE_DIR,
   type BoxSpec,
+  HOME_DIR,
   type Login,
+  NIX_DIR,
   type ProcessStream,
+  RUN_TIMEOUT_MS,
   type RunOptions,
   type RunOutput,
   type Runtime,
   type RuntimeObject,
   type SpawnOptions,
+  WORKSPACE_DIR,
 } from './runtime.ts';
 
 /** Label that holds the box id, on the pod, the policy and the claim of a box. */
@@ -170,7 +171,7 @@ export class KubernetesRuntime implements Runtime {
   async prepare(): Promise<void> {
     const name = this.cfg.EGRESS_PROXY_SERVICE;
     const where = `the Service ${name} in the namespace ${this.kube.namespace}`;
-    let service;
+    let service: V1Service;
     try {
       service = await this.kube.core.readNamespacedService({
         name,
@@ -231,7 +232,7 @@ export class KubernetesRuntime implements Runtime {
    */
   async ensure(box: BoxSpec): Promise<void> {
     const wanted = this.boxPolicy(box.boxId);
-    const name = wanted.metadata!.name!;
+    const name = names.box(box.boxId);
     const current = await this.readPolicy(name);
     if (!current) {
       await this.kube.networking.createNamespacedNetworkPolicy({
@@ -353,30 +354,38 @@ export class KubernetesRuntime implements Runtime {
         return value && ref ? [{ item, value, ref }] : [];
       });
     return [
-      ...labelled(pods.items, LABEL).map(({ item, value, ref }): RuntimeObject => ({
-        kind: 'box',
-        boxId: value,
-        ref,
-        running: isLive(item),
-      })),
-      ...labelled(policies.items, LABEL).map(({ value, ref }): RuntimeObject => ({
-        kind: 'isolation',
-        boxId: value,
-        ref,
-      })),
-      ...labelled(claims.items, LABEL).map(({ value, ref }): RuntimeObject => ({
-        kind: 'storage',
-        boxId: value,
-        ref,
-      })),
-      ...labelled(logins.items, LOGIN_LABEL).map(({ item, value, ref }): RuntimeObject => ({
-        kind: 'login',
-        credentialId: value,
-        ref,
-        createdAt: item.metadata?.creationTimestamp
-          ? new Date(item.metadata.creationTimestamp).getTime()
-          : 0,
-      })),
+      ...labelled(pods.items, LABEL).map(
+        ({ item, value, ref }): RuntimeObject => ({
+          kind: 'box',
+          boxId: value,
+          ref,
+          running: isLive(item),
+        }),
+      ),
+      ...labelled(policies.items, LABEL).map(
+        ({ value, ref }): RuntimeObject => ({
+          kind: 'isolation',
+          boxId: value,
+          ref,
+        }),
+      ),
+      ...labelled(claims.items, LABEL).map(
+        ({ value, ref }): RuntimeObject => ({
+          kind: 'storage',
+          boxId: value,
+          ref,
+        }),
+      ),
+      ...labelled(logins.items, LOGIN_LABEL).map(
+        ({ item, value, ref }): RuntimeObject => ({
+          kind: 'login',
+          credentialId: value,
+          ref,
+          createdAt: item.metadata?.creationTimestamp
+            ? new Date(item.metadata.creationTimestamp).getTime()
+            : 0,
+        }),
+      ),
     ];
   }
 
@@ -589,7 +598,7 @@ export class KubernetesRuntime implements Runtime {
     const facts: Array<[string, string]> = [];
     if (pod) facts.push(['Pod', pod.spec?.nodeName ? `${name} (on ${pod.spec.nodeName})` : name]);
     if (claim)
-      facts.push(['Volume claim', `${name} (${claim.status?.capacity?.['storage'] ?? 'pending'})`]);
+      facts.push(['Volume claim', `${name} (${claim.status?.capacity?.storage ?? 'pending'})`]);
     const image = pod ? podImageId(pod) : null;
     if (image)
       facts.push([
@@ -931,7 +940,7 @@ export function quantity(size: string): string {
   const match = /^(\d+)([kmgKMG]?)$/.exec(size);
   if (!match) throw new Error(`Invalid size: ${size}`);
   const unit = { k: 'Ki', m: 'Mi', g: 'Gi', '': '' }[
-    match[2]!.toLowerCase() as 'k' | 'm' | 'g' | ''
+    (match[2] ?? '').toLowerCase() as 'k' | 'm' | 'g' | ''
   ];
   return `${match[1]}${unit}`;
 }

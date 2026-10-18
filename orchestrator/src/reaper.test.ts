@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test, vi } from 'vitest';
-import { loadConfig } from './config.ts';
-import { openDb, type Db } from './db.ts';
-import { startReaper } from './reaper.ts';
 import type { BoxManager } from './boxes.ts';
+import { loadConfig } from './config.ts';
+import { type Db, openDb } from './db.ts';
+import { startReaper } from './reaper.ts';
 
 /** How long a box must be quiet before the reaper stops it. */
 const IDLE_MINUTES = 30;
@@ -71,8 +71,7 @@ async function tick(
   const manager = {
     pending: {
       countsByBox: () => new Map(over.pending ? [['s1', over.pending]] : []),
-      countForBox: (id: string) =>
-        over.pendingNow?.(id) ?? (id === 's1' ? (over.pending ?? 0) : 0),
+      countForBox: (id: string) => over.pendingNow?.(id) ?? (id === 's1' ? (over.pending ?? 0) : 0),
     },
     upstream: () => ({
       attachedCount: over.attachedCount ?? 0,

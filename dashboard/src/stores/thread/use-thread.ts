@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { AcpClient } from './acp-client.ts';
-import { INITIAL_SNAPSHOT, ThreadStore, type ThreadSnapshot } from './thread-store.ts';
 import { wsUrlFor } from '@/lib/ws-url';
+import { AcpClient } from './acp-client.ts';
+import { INITIAL_SNAPSHOT, type ThreadSnapshot, ThreadStore } from './thread-store.ts';
 
 /**
  * Mounts one thread's ThreadStore for as long as the view is on screen.

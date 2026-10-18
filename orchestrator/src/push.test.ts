@@ -5,13 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'vitest';
 import { openDb } from './db.ts';
-import {
-  encryptPayload,
-  generateVapidKeys,
-  loadVapidKeys,
-  sendPush,
-  vapidHeader,
-} from './push.ts';
+import { encryptPayload, generateVapidKeys, loadVapidKeys, sendPush, vapidHeader } from './push.ts';
 
 /** The example from RFC 8291 section 5, with its intermediates from appendix A. */
 const RFC8291 = {
@@ -92,9 +86,7 @@ test('a subscriber can decrypt what encryptPayload produced', () => {
     b64(RFC8291.uaPublic),
     senderPublic,
   ]);
-  const ikm = Buffer.from(
-    hkdfSync('sha256', shared, b64(RFC8291.authSecret), keyInfo, 32),
-  );
+  const ikm = Buffer.from(hkdfSync('sha256', shared, b64(RFC8291.authSecret), keyInfo, 32));
   const cek = Buffer.from(
     hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: aes128gcm\0'), 16),
   );
@@ -134,9 +126,9 @@ test('vapidHeader signs a JWT the public key verifies', () => {
   const claims = JSON.parse(b64(encodedClaims!).toString('utf8')) as Record<string, unknown>;
   // The audience is the push service's origin. The endpoint path is a
   // capability and stays out of the token.
-  assert.equal(claims['aud'], 'https://push.example.net');
-  assert.equal(claims['sub'], 'mailto:a@b.c');
-  assert.ok((claims['exp'] as number) > Date.now() / 1000);
+  assert.equal(claims.aud, 'https://push.example.net');
+  assert.equal(claims.sub, 'mailto:a@b.c');
+  assert.ok((claims.exp as number) > Date.now() / 1000);
 
   const publicKey = b64(keys.publicKey);
   const verifier = createPublicKey({

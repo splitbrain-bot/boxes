@@ -1,8 +1,8 @@
 import {
-  connect,
-  constants,
   type ClientHttp2Session,
   type ClientHttp2Stream,
+  connect,
+  constants,
   type IncomingHttpHeaders,
   type OutgoingHttpHeaders,
 } from 'node:http2';
@@ -12,21 +12,21 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import {
   BINARY_HEADER,
+  type DirChild,
   FILE_ROUTES,
   FILES_COMMAND,
   FILES_PROTOCOL_VERSION,
+  type FindReposRequest,
   MAX_DIR_ENTRIES,
   SIZE_HEADER,
-  TRUNCATED_HEADER,
-  validRelativePath,
-  VERSION_HEADER,
-  type DirChild,
-  type FindReposRequest,
   type StatReply,
+  TRUNCATED_HEADER,
+  VERSION_HEADER,
+  validRelativePath,
 } from '../../shared/files.ts';
-import { runtime, RUN_TIMEOUT_MS } from './runtime/runtime.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
+import { RUN_TIMEOUT_MS, runtime } from './runtime/runtime.ts';
 
 /**
  * The client side of the file service in a box, `boxes-files`.
@@ -231,9 +231,7 @@ const component = z
 
 /** The shape of a directory listing. */
 const listReply = z.object({
-  entries: z
-    .array(z.object({ name: component, isDir: z.boolean() }))
-    .max(MAX_DIR_ENTRIES),
+  entries: z.array(z.object({ name: component, isDir: z.boolean() })).max(MAX_DIR_ENTRIES),
   truncated: z.boolean(),
 });
 
@@ -269,7 +267,10 @@ export class FileService {
   /** The plain files and directories in one directory of the workspace. */
   async list(relDir: string): Promise<{ entries: DirChild[]; truncated: boolean }> {
     return this.retried(async () =>
-      this.json(await this.send({ method: 'GET', route: FILE_ROUTES.list, query: { path: relDir } }), listReply),
+      this.json(
+        await this.send({ method: 'GET', route: FILE_ROUTES.list, query: { path: relDir } }),
+        listReply,
+      ),
     );
   }
 
@@ -277,7 +278,11 @@ export class FileService {
   async findRepos(limits: FindReposRequest): Promise<string[]> {
     const reply = await this.retried(async () =>
       this.json(
-        await this.send({ method: 'POST', route: FILE_ROUTES.findRepos, body: JSON.stringify(limits) }),
+        await this.send({
+          method: 'POST',
+          route: FILE_ROUTES.findRepos,
+          body: JSON.stringify(limits),
+        }),
         findReposReply,
       ),
     );
@@ -289,7 +294,10 @@ export class FileService {
   /** The type and the size of one path of the workspace. */
   async stat(relPath: string): Promise<StatReply> {
     return this.retried(async () =>
-      this.json(await this.send({ method: 'GET', route: FILE_ROUTES.stat, query: { path: relPath } }), statReply),
+      this.json(
+        await this.send({ method: 'GET', route: FILE_ROUTES.stat, query: { path: relPath } }),
+        statReply,
+      ),
     );
   }
 
@@ -325,7 +333,11 @@ export class FileService {
    */
   async readStream(relPath: string): Promise<FileStream> {
     return this.retried(async () => {
-      const reply = await this.send({ method: 'GET', route: FILE_ROUTES.raw, query: { path: relPath } });
+      const reply = await this.send({
+        method: 'GET',
+        route: FILE_ROUTES.raw,
+        query: { path: relPath },
+      });
       if (reply.status !== 200) await this.fail(reply);
       const size = Number(reply.headers['content-length']);
       if (!Number.isSafeInteger(size) || size < 0) {
@@ -344,7 +356,11 @@ export class FileService {
    * A write is not retried: when the first attempt arrived, the retry would
    * find a changed hash and report a conflict that is not real.
    */
-  async write(relPath: string, content: string | Buffer, condition: WriteCondition): Promise<string> {
+  async write(
+    relPath: string,
+    content: string | Buffer,
+    condition: WriteCondition,
+  ): Promise<string> {
     const reply = await this.send({
       method: 'PUT',
       route: FILE_ROUTES.file,
@@ -360,12 +376,16 @@ export class FileService {
 
   /** Removes one file of the workspace. A missing file is a 404. */
   async remove(relPath: string): Promise<void> {
-    await this.empty(await this.send({ method: 'DELETE', route: FILE_ROUTES.file, query: { path: relPath } }));
+    await this.empty(
+      await this.send({ method: 'DELETE', route: FILE_ROUTES.file, query: { path: relPath } }),
+    );
   }
 
   /** Creates one directory of the workspace, or accepts one that is there. */
   async mkdir(relPath: string): Promise<void> {
-    await this.empty(await this.send({ method: 'POST', route: FILE_ROUTES.mkdir, query: { path: relPath } }));
+    await this.empty(
+      await this.send({ method: 'POST', route: FILE_ROUTES.mkdir, query: { path: relPath } }),
+    );
   }
 
   /**
@@ -403,7 +423,11 @@ export class FileService {
 
   /** The apparent size of the workspace, the home and the Nix store, in bytes. */
   async size(): Promise<number> {
-    const reply = await this.send({ method: 'GET', route: FILE_ROUTES.size, timeoutMs: SIZE_TIMEOUT_MS });
+    const reply = await this.send({
+      method: 'GET',
+      route: FILE_ROUTES.size,
+      timeoutMs: SIZE_TIMEOUT_MS,
+    });
     return (await this.json(reply, sizeReply)).bytes;
   }
 

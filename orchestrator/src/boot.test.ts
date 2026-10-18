@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, it } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { BootState } from './boot.ts';
 import { loadConfig } from './config.ts';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 
 describe('the progress of a pull', () => {
   it('is null until a pull reports', () => {

@@ -1,12 +1,12 @@
-import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
+import { type WebSocket, WebSocketServer } from 'ws';
 import {
-  BOXES_META,
-  REPLAY_METHOD,
-  TURN_STATE_METHOD,
   type BackgroundProcess,
+  BOXES_META,
   type LoadMeta,
+  REPLAY_METHOD,
   type ReplayParams,
+  TURN_STATE_METHOD,
 } from '../../shared/types.ts';
 import type {
   ThreadConfigOption,
@@ -319,15 +319,15 @@ export function attachStubGateway(
         // prompted, the orchestrator replays the source's history, so the
         // fork starts here with a copy of it.
         return reply({
-          sessionId: mint(String(params(msg)['sessionId'] ?? current)),
+          sessionId: mint(String(params(msg).sessionId ?? current)),
           modes: script.modes,
           configOptions: script.configOptions,
         });
 
       case 'session/load': {
-        const threadId = String(params(msg)['sessionId'] ?? pinned);
+        const threadId = String(params(msg).sessionId ?? pinned);
         if (script.holdLoad) await new Promise<void>((go) => heldLoads.push(go));
-        const meta = (params(msg)['_meta'] as Record<string, LoadMeta> | undefined)?.[BOXES_META];
+        const meta = (params(msg)._meta as Record<string, LoadMeta> | undefined)?.[BOXES_META];
         const dropped = meta?.full ? 0 : (script.dropped ?? 0);
         // The notice goes out only when the script cuts the log or the load
         // asks for the full history.
@@ -362,18 +362,15 @@ export function attachStubGateway(
       }
 
       case 'session/set_mode': {
-        const modeId = String(params(msg)['modeId'] ?? '');
+        const modeId = String(params(msg).modeId ?? '');
         if (script.modes) script.modes = { ...script.modes, currentModeId: modeId };
         reply({});
-        return void emit(
-          { sessionUpdate: 'current_mode_update', currentModeId: modeId },
-          pinned,
-        );
+        return void emit({ sessionUpdate: 'current_mode_update', currentModeId: modeId }, pinned);
       }
 
       case 'session/set_config_option': {
-        const configId = String(params(msg)['configId'] ?? '');
-        const value = String(params(msg)['value'] ?? '');
+        const configId = String(params(msg).configId ?? '');
+        const value = String(params(msg).value ?? '');
         script.configOptions = script.configOptions.map((option) =>
           option.id === configId ? { ...option, currentValue: value } : option,
         );
@@ -386,8 +383,8 @@ export function attachStubGateway(
 
       case 'session/prompt': {
         // A turn runs on the thread the prompt names, never on the default.
-        const onThread = String(params(msg)['sessionId'] ?? pinned);
-        const blocks = (params(msg)['prompt'] ?? []) as PromptBlock[];
+        const onThread = String(params(msg).sessionId ?? pinned);
+        const blocks = (params(msg).prompt ?? []) as PromptBlock[];
         const promptText = blocks.map((b) => b.text ?? '').join('');
         prompts.push(promptText);
         promptBlocks.push(blocks);

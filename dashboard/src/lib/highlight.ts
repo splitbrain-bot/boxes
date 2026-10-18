@@ -1,4 +1,4 @@
-import type { HighlighterCore, ThemedToken } from 'shiki/core';
+import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core';
 
 /**
  * Client-side syntax highlighting for the review's code pane.
@@ -24,7 +24,7 @@ export interface Token {
 }
 
 /** The grammars worth loading, by the language name the API reports. */
-const GRAMMARS: Record<string, () => Promise<unknown>> = {
+const GRAMMARS: Record<string, LanguageInput> = {
   typescript: () => import('@shikijs/langs/typescript'),
   javascript: () => import('@shikijs/langs/javascript'),
   json: () => import('@shikijs/langs/json'),
@@ -107,8 +107,7 @@ async function loadGrammar(language: string): Promise<void> {
   if (!pending) {
     pending = (async () => {
       const core = await highlighter();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await core.loadLanguage((await grammar()) as any);
+      await core.loadLanguage(grammar);
     })();
     loaded.set(language, pending);
   }
@@ -149,10 +148,7 @@ export function withinLineLimit(content: string): boolean {
  * grammar for the language, too many lines, a line that is too long, or a
  * failure in the grammar.
  */
-export async function tokenizeLines(
-  content: string,
-  language: string,
-): Promise<Token[][] | null> {
+export async function tokenizeLines(content: string, language: string): Promise<Token[][] | null> {
   if (!canHighlight(language)) return null;
   if (!withinLineLimit(content)) return null;
   if (content.split('\n').some((line) => line.length > MAX_LINE)) return null;

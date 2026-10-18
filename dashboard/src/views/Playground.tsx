@@ -1,7 +1,7 @@
 import {
   AssistantRuntimeProvider,
-  useExternalStoreRuntime,
   type ThreadMessageLike,
+  useExternalStoreRuntime,
 } from '@assistant-ui/react';
 import { Thread } from '@/components/assistant-ui/elements/thread.aui';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -38,7 +38,7 @@ const MESSAGES: ThreadMessageLike[] = [
       {
         type: 'text',
         text: [
-          '`vetTarget` is the egress proxy\'s **security boundary**. It:',
+          "`vetTarget` is the egress proxy's **security boundary**. It:",
           '',
           '1. Resolves the hostname to *every* address it answers with.',
           '2. Rejects the target if any one of them is private.',

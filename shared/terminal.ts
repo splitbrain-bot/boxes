@@ -55,9 +55,9 @@ export function parseTerminalControl(text: string): TerminalControl | null {
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
   const message = parsed as Record<string, unknown>;
-  if (message['type'] !== 'resize') return null;
-  const cols = message['cols'];
-  const rows = message['rows'];
+  if (message.type !== 'resize') return null;
+  const cols = message.cols;
+  const rows = message.rows;
   if (!Number.isInteger(cols) || !Number.isInteger(rows)) return null;
   const clamp = (value: number, max: number): number => Math.min(Math.max(value, 1), max);
   return {

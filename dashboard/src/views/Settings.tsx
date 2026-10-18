@@ -1,15 +1,5 @@
 import { KeyRound, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import type {
-  ApiKeySummary,
-  CredentialId,
-  CredentialMethod,
-  CredentialSummary,
-  HarnessHealth,
-  HarnessId,
-  Settings as SettingsShape,
-} from '../../../shared/types.ts';
-import { api } from '../api.ts';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { BackLink } from '@/components/BackLink';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { CredentialLogin } from '@/components/CredentialLogin';
@@ -21,6 +11,16 @@ import { Label } from '@/components/ui/label';
 import { useUp } from '@/hooks/use-up';
 import { CODEX_LOGIN_OFFERED } from '@/lib/harness';
 import { shortAge } from '@/lib/rough';
+import type {
+  ApiKeySummary,
+  CredentialId,
+  CredentialMethod,
+  CredentialSummary,
+  HarnessHealth,
+  HarnessId,
+  Settings as SettingsShape,
+} from '../../../shared/types.ts';
+import { api } from '../api.ts';
 import { useBoxes } from '../stores/boxes.ts';
 
 /** One credential this page can manage, and what a person is told about it. */
@@ -109,7 +109,7 @@ const KINDS: CredentialKind[] = [
     label: 'Dev Tunnels',
     harnesses: [],
     blurb:
-      'Github based authentication with Microsoft Dev Tunnels service. Used to make box services temporarily '+
+      'Github based authentication with Microsoft Dev Tunnels service. Used to make box services temporarily ' +
       'accessible from the outside',
     hint: null,
     method: () => 'oauth',
@@ -213,9 +213,9 @@ export function Settings() {
       <h1 className="text-xl font-semibold">Authentication Settings</h1>
 
       <p className="text-sm text-muted-foreground">
-          Configure your credentials and the git identity of your boxes here. Credentials are
-          not passed directly to the boxes, but are swapped in by the egress proxy. Agents never
-          see the real secret and thus cannot leak it.
+        Configure your credentials and the git identity of your boxes here. Credentials are not
+        passed directly to the boxes, but are swapped in by the egress proxy. Agents never see the
+        real secret and thus cannot leak it.
       </p>
 
       {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
@@ -439,9 +439,7 @@ function describe(stored: CredentialSummary | null, stalled: HarnessHealth[]): s
  */
 function account(stored: CredentialSummary): string {
   if (!stored.account) return 'Stored';
-  return stored.method === 'oauth'
-    ? `Signed in as ${stored.account}`
-    : `Ends ${stored.account}`;
+  return stored.method === 'oauth' ? `Signed in as ${stored.account}` : `Ends ${stored.account}`;
 }
 
 /**

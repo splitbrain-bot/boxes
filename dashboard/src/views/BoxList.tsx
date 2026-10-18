@@ -1,11 +1,11 @@
 import { KeyRound, Plus, SlidersHorizontal } from 'lucide-react';
 import { useEffect } from 'react';
 import { Link } from 'react-router';
+import { BoxCard } from '@/components/BoxCard';
 import { ImageFooter } from '@/components/ImageFooter';
 import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { PushToggle } from '@/components/PushToggle';
-import { BoxCard } from '@/components/BoxCard';
 import { TokenWarning } from '@/components/TokenWarning';
 import { Button } from '@/components/ui/button';
 import { startPolling, useBoxes } from '../stores/boxes.ts';
@@ -44,9 +44,7 @@ export function BoxList() {
 
       <TokenWarning className="rounded-md border px-3 py-2" />
 
-      {error ? (
-        <Notice className="rounded-md border px-3 py-2">{error}</Notice>
-      ) : null}
+      {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
 
       {loading && boxes.length === 0 ? <Loading className="py-8 text-center" /> : null}
 

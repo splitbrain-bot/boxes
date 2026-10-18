@@ -7,14 +7,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ApiKeyStore } from './api-keys.ts';
 import type { Config } from './config.ts';
 import { loadConfig } from './config.ts';
-import { CredentialStore, type CredentialId, type CredentialRow } from './credentials.ts';
-import { openDb, type Db } from './db.ts';
+import { type CredentialId, type CredentialRow, CredentialStore } from './credentials.ts';
+import { type Db, openDb } from './db.ts';
 import {
-  EgressManager,
   composePolicy,
+  EgressManager,
+  type EgressMaterial,
   pushPolicy,
   resolveEgressMaterial,
-  type EgressMaterial,
 } from './egress.ts';
 
 /** A real Claude token as the store holds it. */
@@ -260,7 +260,7 @@ describe('the control channel, from the orchestrator side', () => {
         seen.push({
           method: req.method ?? '',
           url: req.url ?? '',
-          auth: String(req.headers['authorization'] ?? ''),
+          auth: String(req.headers.authorization ?? ''),
           body,
         });
         res.writeHead(answer.status, { 'content-type': 'application/json' });
@@ -365,9 +365,7 @@ describe('EgressManager', () => {
       req.on('data', (c) => (body += c));
       req.on('end', () => {
         seen.push(
-          (JSON.parse(body) as { credentials: Array<{ id: string }> }).credentials.map(
-            (c) => c.id,
-          ),
+          (JSON.parse(body) as { credentials: Array<{ id: string }> }).credentials.map((c) => c.id),
         );
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(

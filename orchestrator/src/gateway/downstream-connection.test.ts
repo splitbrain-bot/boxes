@@ -3,8 +3,8 @@ import { EventEmitter } from 'node:events';
 import type { AnyNotification } from '@agentclientprotocol/sdk';
 import { expect, test } from 'vitest';
 import type { WebSocket } from 'ws';
-import { setLogLevel } from '../log.ts';
 import type { BoxManager } from '../boxes.ts';
+import { setLogLevel } from '../log.ts';
 import { attachDownstream, wsStream } from './downstream.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
@@ -131,11 +131,7 @@ class FakeUpstream {
   async ensureStarted(): Promise<void> {}
 
   /** Records a forwarded request and answers it with nothing. */
-  async forwardRequest(
-    method: string,
-    params: unknown,
-    from?: DownstreamHandle,
-  ): Promise<unknown> {
+  async forwardRequest(method: string, params: unknown, from?: DownstreamHandle): Promise<unknown> {
     this.forwarded.push({ method, params, from });
     this.calls.push(method);
     return {};

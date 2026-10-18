@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
-import { reply, type GatewayScript } from './stub-gateway.ts';
+import { type GatewayScript, reply } from './stub-gateway.ts';
 
 /**
  * Browser tests for the live thread, against a stub gateway that answers ACP
@@ -17,7 +17,8 @@ const BOX = DEFAULT_BOX;
  * A real 200 by 120 PNG with two bands and a diagonal, so a screenshot shows a
  * recognisable image.
  */
-const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
+const PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
 
 let stub: TestOrchestrator;
 
@@ -49,7 +50,10 @@ test('a prompt streams back and renders as it arrives', async () => {
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -78,16 +82,21 @@ test('a prompt streams back and renders as it arrives', async () => {
 test('an attached image is uploaded, named in the prompt, and shown from the workspace', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('The margin is wrong.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     // The button builds its own file input, so the file goes through the chooser.
     const chooser = page.waitForEvent('filechooser');
     await page.getByLabel('Add Attachment').click();
-    await (
-      await chooser
-    ).setFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from(PNG, 'base64') });
+    await (await chooser).setFiles({
+      name: 'shot.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG, 'base64'),
+    });
 
     const input = page.getByLabel('Message input');
     await input.fill('what is wrong here?');
@@ -110,9 +119,7 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
     // The thread shows the picture, fetched from the workspace, not the note.
     const picture = page.locator('[data-slot="aui_user-message-image"] img').first();
     await expect.poll(() => picture.count()).toBe(1);
-    expect(await picture.getAttribute('src')).toBe(
-      `/api/boxes/${BOX.id}/attachments/shot.png`,
-    );
+    expect(await picture.getAttribute('src')).toBe(`/api/boxes/${BOX.id}/attachments/shot.png`);
     // Loaded, not only linked.
     await expect
       .poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth))
@@ -135,15 +142,16 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
 test('an attached SVG is shown as the drawing it is', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('A box and an arrow.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     const chooser = page.waitForEvent('filechooser');
     await page.getByLabel('Add Attachment').click();
-    await (
-      await chooser
-    ).setFiles({
+    await (await chooser).setFiles({
       name: 'diagram.svg',
       mimeType: 'image/svg+xml',
       // With a script in it: an <img> runs no script, and the response's CSP
@@ -163,9 +171,7 @@ test('an attached SVG is shown as the drawing it is', async () => {
 
     const picture = page.locator('[data-slot="aui_user-message-image"] img').first();
     await expect.poll(() => picture.count()).toBe(1);
-    await expect
-      .poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth))
-      .toBe(80);
+    await expect.poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(80);
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -175,15 +181,16 @@ test('an attached SVG is shown as the drawing it is', async () => {
 test('an attached file that is not an image travels as a path, and reads as a chip', async () => {
   await start({ prompts: [{ match: () => true, updates: reply('It is a receipt.') }] });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
     const chooser = page.waitForEvent('filechooser');
     await page.getByLabel('Add Attachment').click();
-    await (
-      await chooser
-    ).setFiles({
+    await (await chooser).setFiles({
       name: 'report.pdf',
       mimeType: 'application/pdf',
       buffer: Buffer.from('%PDF-1.4 not really'),
@@ -226,7 +233,10 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
     prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually.') }],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -317,12 +327,13 @@ test('a second tab sees updates live', async () => {
 
 test('cancelling stops the run state', async () => {
   await start({
-    prompts: [
-      { match: () => true, updates: reply('Working on it…'), hold: true },
-    ],
+    prompts: [{ match: () => true, updates: reply('Working on it…'), hold: true }],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -362,7 +373,10 @@ test('a turn held open for background work still hands the composer back', async
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -441,7 +455,10 @@ test('the bar names the work by kind, and offers no stop for a task that says it
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -490,7 +507,10 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     } as ThreadUpdate);
   }
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     // Wait for the load to park, because a release frees only parked loads.
     await expect.poll(() => stub.gateway.loadsHeld()).toBe(1);
@@ -517,9 +537,7 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
     const viewport = page.locator('[data-slot="aui_thread-viewport"]');
     await expect
       .poll(() =>
-        viewport.evaluate((el) =>
-          Math.round(el.scrollHeight - el.clientHeight - el.scrollTop),
-        ),
+        viewport.evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop)),
       )
       .toBeLessThanOrEqual(4);
 
@@ -540,7 +558,10 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
     },
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -625,7 +646,10 @@ test('an update the dashboard does not know about does not break the thread', as
     ],
   });
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     const input = page.getByLabel('Message input');
@@ -641,7 +665,10 @@ test('an update the dashboard does not know about does not break the thread', as
 test('an image renders wherever it arrives — a tool result, or what the agent said', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -689,7 +716,10 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
 test('a background task reporting in is a row of its own, not the user talking', async () => {
   await start();
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
@@ -739,13 +769,17 @@ test('a background task reporting in is a row of its own, not the user talking',
     expect(await page.getByText('<task-id>').count()).toBe(0);
 
     // A monitor exists to report its event, so the event is what is shown.
-    await expect.poll(() => page.getByText('Monitor event:', { exact: false }).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText('Monitor event:', { exact: false }).isVisible())
+      .toBe(true);
     await expect.poll(() => page.getByText('2200/30321', { exact: false }).isVisible()).toBe(true);
 
     // A finished task's row folds its whole answer, which a click opens.
     const answer = page.getByText('The 429s are all from one host', { exact: false });
     expect(await answer.isVisible()).toBe(false);
-    await expect.poll(() => page.getByText('48.2k tokens · 6 tool calls · 3m 4s').isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText('48.2k tokens · 6 tool calls · 3m 4s').isVisible())
+      .toBe(true);
     await page.getByText('Agent "Check the crawler logs" finished').click();
     await expect.poll(() => answer.isVisible()).toBe(true);
     await shoot(page, 'task-notification');
@@ -776,7 +810,10 @@ test('a cut thread offers its full history at the top, and loads it in place', a
     } as ThreadUpdate);
   }
 
-  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
   try {
     // "exchange number 1" is also part of "exchange number 10".
     const exactly = (text: string) => page.getByText(text, { exact: true });

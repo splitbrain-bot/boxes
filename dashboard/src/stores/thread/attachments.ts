@@ -1,4 +1,4 @@
-import { generateId, type AttachmentAdapter, type PendingAttachment } from '@assistant-ui/react';
+import { type AttachmentAdapter, generateId, type PendingAttachment } from '@assistant-ui/react';
 import { api } from '../../api.ts';
 
 /** Which of assistant-ui's three tiles a file is shown as. */

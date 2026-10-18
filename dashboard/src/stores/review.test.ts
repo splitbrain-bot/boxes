@@ -162,7 +162,7 @@ test('opening a folder asks for that folder and nothing else', async () => {
 
   assert.equal(hits('/review/dir'), before + 1);
   assert.deepEqual(useReview.getState().expanded, ['src']);
-  assert.equal(useReview.getState().dirs['src']?.entries.length, 1);
+  assert.equal(useReview.getState().dirs.src?.entries.length, 1);
 });
 
 test('a folder that is closed and opened again is not refetched', async () => {
@@ -436,7 +436,10 @@ test('a new review clears the comments and reloads the tree', async () => {
   // The whole review is gone, so the counts have to come from the server
   // rather than be adjusted locally.
   assert.equal(hits('/review/dir'), before + 1);
-  assert.equal(requested.some((url) => url.includes('/review') && !url.includes('/review/')), true);
+  assert.equal(
+    requested.some((url) => url.includes('/review') && !url.includes('/review/')),
+    true,
+  );
 });
 
 // --- the base revision ------------------------------------------------------

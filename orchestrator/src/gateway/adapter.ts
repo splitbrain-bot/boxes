@@ -1,27 +1,26 @@
-import { client as acpClient, type ClientConnection } from '@agentclientprotocol/sdk';
-import type { Stream } from '@agentclientprotocol/sdk';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
 import { PassThrough, Readable } from 'node:stream';
-import {
-  getThread,
-  insertThread,
-  setThreadAcpId,
-  setThreadConfig,
-  threadByAcpId,
-  threadConfig,
-  upsertHarnessCatalog,
-  type Db,
-  type ThreadRow,
-} from '../db.ts';
-import { runtime, WORKSPACE_DIR, type ProcessStream } from '../runtime/runtime.ts';
-import { HARNESS_IDS, type Harness, type HarnessId } from '../harness.ts';
-import type { Logger } from '../log.ts';
+import type { Stream } from '@agentclientprotocol/sdk';
+import { client as acpClient, type ClientConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { ACP_METHOD } from '../../../shared/acp.ts';
 import type {
   BackgroundProcess,
   ThreadConfigOption,
   ThreadModeState,
 } from '../../../shared/types.ts';
+import {
+  type Db,
+  getThread,
+  insertThread,
+  setThreadAcpId,
+  setThreadConfig,
+  type ThreadRow,
+  threadByAcpId,
+  threadConfig,
+  upsertHarnessCatalog,
+} from '../db.ts';
+import { HARNESS_IDS, type Harness, type HarnessId } from '../harness.ts';
+import type { Logger } from '../log.ts';
+import { type ProcessStream, runtime, WORKSPACE_DIR } from '../runtime/runtime.ts';
 import { TaskBoard } from './background.ts';
 import { threadOf } from './broadcast.ts';
 import type { AdapterOptions } from './thread-log.ts';
@@ -35,11 +34,11 @@ const raw = <T = unknown>(params: unknown): T => params as T;
  */
 const EXTENSION_UPDATE = /^async_task_/;
 
-/** How many times the adapter spawn is tried before the box errors. */
-const MAX_SPAWN_ATTEMPTS = 3;
-
 /** Wait before each retry, in milliseconds, by retry number. */
 const SPAWN_BACKOFF_MS = [1000, 3000];
+
+/** How many times the adapter spawn is tried before the box errors. */
+const MAX_SPAWN_ATTEMPTS = SPAWN_BACKOFF_MS.length + 1;
 
 /** JSON-RPC code the ACP SDK uses for a resource that does not exist. */
 const RESOURCE_NOT_FOUND = -32002;
@@ -112,11 +111,7 @@ export function pickModel(
  * The chain matters for a fork of a fork that has not been prompted, because
  * the middle thread has no transcript either.
  */
-export function inheritedSource(
-  db: Db,
-  boxId: string,
-  thread: ThreadRow,
-): ThreadRow | null {
+export function inheritedSource(db: Db, boxId: string, thread: ThreadRow): ThreadRow | null {
   let row: ThreadRow | undefined = thread;
   for (let hop = 0; hop < MAX_INHERIT_HOPS; hop++) {
     const next: string | null = row?.inherits_from ?? null;
@@ -397,10 +392,9 @@ export class AdapterConnection {
     await this.host.ensureContainer();
 
     let lastError: unknown = null;
-    for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
+    for (const [attempt, wait] of [0, ...SPAWN_BACKOFF_MS].entries()) {
       if (this.stopping) return;
-      if (attempt > 0) {
-        const wait = SPAWN_BACKOFF_MS[attempt - 1]!;
+      if (wait > 0) {
         this.slog.warn('retrying adapter spawn', { attempt, waitMs: wait });
         await new Promise((r) => setTimeout(r, wait));
       }
@@ -573,8 +567,7 @@ export class AdapterConnection {
     const row = getThread(this.host.db, threadId);
     const source = row ? inheritedSource(this.host.db, this.host.boxId, row) : null;
     // The row's recorded mode wins over the default for the thread's kind.
-    const modeId =
-      row?.mode_id ?? (source ? this.harness.forkModeId : this.harness.defaultModeId);
+    const modeId = row?.mode_id ?? (source ? this.harness.forkModeId : this.harness.defaultModeId);
     const config = row ? threadConfig(row) : { ...this.harness.defaultConfig };
     let branched: string | null = null;
     if (source?.acp_session_id) {
@@ -659,7 +652,8 @@ export class AdapterConnection {
    * @returns False when the adapter no longer holds the thread.
    */
   private async loadThread(thread: ThreadRow): Promise<boolean> {
-    const acpSessionId = thread.acp_session_id!;
+    const acpSessionId = thread.acp_session_id;
+    if (!acpSessionId) return false;
     this.host.beginFill(acpSessionId);
     try {
       const res = await this.replay(acpSessionId);
@@ -712,7 +706,8 @@ export class AdapterConnection {
    * @param res The adapter's answer to the load.
    */
   async restoreSettings(thread: ThreadRow, res: LoadAnswer): Promise<void> {
-    const acpSessionId = thread.acp_session_id!;
+    const acpSessionId = thread.acp_session_id;
+    if (!acpSessionId) return;
     await this.applyMode(
       acpSessionId,
       res?.modes ?? null,
@@ -992,9 +987,7 @@ export class AdapterConnection {
 
   /** ACP Stream over the demuxed exec: ndJSON in, ndJSON out. */
   private makeStream(exec: ProcessStream): Stream {
-    const readable = Readable.toWeb(
-      this.siftExtensions(exec.stdout),
-    ) as ReadableStream<Uint8Array>;
+    const readable = Readable.toWeb(this.siftExtensions(exec.stdout)) as ReadableStream<Uint8Array>;
     const writable = new WritableStream<Uint8Array>({
       write: (chunk) =>
         new Promise<void>((resolve, reject) => {

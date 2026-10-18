@@ -1,13 +1,19 @@
-import { chromium, type Browser, type BrowserContext, type LaunchOptions, type Page } from 'playwright';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import {
+  type Browser,
+  type BrowserContext,
+  chromium,
+  type LaunchOptions,
+  type Page,
+} from 'playwright';
 
 /** The Chromium the whole e2e run shares, launched on first use. */
 let browser: Browser | null = null;
 
 /** The Chromium binary CHROMIUM_PATH names. It overrides every other choice. */
-const NAMED_CHROMIUM = process.env['CHROMIUM_PATH'];
+const NAMED_CHROMIUM = process.env.CHROMIUM_PATH;
 
 /** The Chromium binary the box image ships. Launching it needs no download. */
 const IMAGE_CHROMIUM = '/usr/local/bin/chromium';
@@ -107,9 +113,10 @@ export async function openPage(
   scheme: 'light' | 'dark' = 'dark',
   viewport: keyof typeof VIEWPORTS = 'phone',
 ): Promise<{ page: Page; errors: string[]; close: () => Promise<void> }> {
-  const context = await (
-    await getBrowser()
-  ).newContext({ colorScheme: scheme, viewport: VIEWPORTS[viewport] });
+  const context = await (await getBrowser()).newContext({
+    colorScheme: scheme,
+    viewport: VIEWPORTS[viewport],
+  });
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('console', (msg) => {

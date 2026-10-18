@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'vitest';
 import {
   chmodSync,
   existsSync,
@@ -12,8 +11,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { extract } from 'tar-stream';
+import { afterEach, beforeEach, test } from 'vitest';
 import { AgentStore } from './agents.ts';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 import { HttpError } from './http-error.ts';
 
 let dir: string;
@@ -55,14 +55,19 @@ afterEach(() => {
 });
 
 /** The files of a packed set, by their home-relative path. */
-async function packed(setId: string | null): Promise<Map<string, { content: string; mode: number }>> {
+async function packed(
+  setId: string | null,
+): Promise<Map<string, { content: string; mode: number }>> {
   const files = new Map<string, { content: string; mode: number }>();
   const entries = extract();
   entries.on('entry', (header, stream, next) => {
     const chunks: Buffer[] = [];
     stream.on('data', (c) => chunks.push(c as Buffer));
     stream.on('end', () => {
-      files.set(header.name, { content: Buffer.concat(chunks).toString('utf8'), mode: header.mode });
+      files.set(header.name, {
+        content: Buffer.concat(chunks).toString('utf8'),
+        mode: header.mode,
+      });
       next();
     });
   });
@@ -142,7 +147,10 @@ test('skills are a union, and the set wins a name clash', async () => {
   );
   // An override is silent in the merged result, so it is reported separately.
   assert.deepEqual(bundle.overrides, ['review']);
-  assert.equal((await packed(set.id)).get('.claude/skills/review/SKILL.md')?.content, 'go review\n');
+  assert.equal(
+    (await packed(set.id)).get('.claude/skills/review/SKILL.md')?.content,
+    'go review\n',
+  );
 });
 
 test('naming the global set as the extra one changes nothing', () => {
@@ -212,7 +220,10 @@ test('the skills of the orchestrator are packed, and a skill of the set wins', a
 
   // A skill whose condition no longer holds is not packed, so the next install removes it.
   builtins = [];
-  assert.deepEqual(await paths(null), ['.agents/skills/diagrams/SKILL.md', '.claude/skills/diagrams/SKILL.md']);
+  assert.deepEqual(await paths(null), [
+    '.agents/skills/diagrams/SKILL.md',
+    '.claude/skills/diagrams/SKILL.md',
+  ]);
 });
 
 // --- repositories ------------------------------------------------------------
@@ -228,9 +239,19 @@ test('a repository is pulled when it is added, and its skills are listed', async
   assert.equal(set.repoCount, 1);
   assert.deepEqual(
     set.repos.map(({ url, ref, commit, skills, error }) => ({ url, ref, commit, skills, error })),
-    [{ url: 'https://example.com/skills', ref: 'v1', commit: 'c0ffee', skills: ['pdf'], error: null }],
+    [
+      {
+        url: 'https://example.com/skills',
+        ref: 'v1',
+        commit: 'c0ffee',
+        skills: ['pdf'],
+        error: null,
+      },
+    ],
   );
-  assert.deepEqual(store.bundle(null).skills, [{ name: 'pdf', repo: 'https://example.com/skills' }]);
+  assert.deepEqual(store.bundle(null).skills, [
+    { name: 'pdf', repo: 'https://example.com/skills' },
+  ]);
 });
 
 test('a skill of the set wins over a repository, and an earlier repository over a later one', async () => {
@@ -289,7 +310,10 @@ test('a skill that changes source leaves no file of the old one behind', async (
   await store.addRepo('global', { url: 'https://example.com/skills' });
   store.putItem('global', { name: 'pdf', content: 'mine' });
 
-  assert.deepEqual(await paths(null), ['.agents/skills/pdf/SKILL.md', '.claude/skills/pdf/SKILL.md']);
+  assert.deepEqual(await paths(null), [
+    '.agents/skills/pdf/SKILL.md',
+    '.claude/skills/pdf/SKILL.md',
+  ]);
 });
 
 test('a failed pull is recorded, and the skills of the last good pull stay', async () => {
@@ -430,10 +454,7 @@ test('an unknown set is a 404 on every route into it', () => {
     () => store.putItem('nope', { name: 'x', content: '' }),
     () => store.deleteItem('nope', 'x'),
   ]) {
-    assert.throws(
-      call,
-      (err: unknown) => err instanceof HttpError && err.statusCode === 404,
-    );
+    assert.throws(call, (err: unknown) => err instanceof HttpError && err.statusCode === 404);
   }
 });
 

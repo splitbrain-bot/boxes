@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMediaQuery } from '@/hooks/use-media-query';
-import { scrollAway, scrollAwayStart, type ScrollAwayState } from '@/lib/scroll-away.ts';
+import { type ScrollAwayState, scrollAway, scrollAwayStart } from '@/lib/scroll-away.ts';
 
 /**
  * Whether a header should move out of the way, for a scroller inside the

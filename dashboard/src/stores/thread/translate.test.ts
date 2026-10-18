@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'vitest';
-import type { ThreadUpdate } from './acp-types.ts';
 import { buildEnvelope } from '../../lib/attachments.ts';
+import type { ThreadUpdate } from './acp-types.ts';
 import {
   applyUpdate,
   emptyModel,
   findTool,
   resetIds,
-  toolOutputText,
-  truncateFrom,
   type ThreadModel,
   type ToolPart,
+  toolOutputText,
+  truncateFrom,
 } from './translate.ts';
 
 /** Folds a script of updates into a fresh model, the way a replay arrives. */
@@ -355,7 +355,10 @@ test('an attached image is a chip too: what it becomes on screen is the converte
 
 test('an envelope that cannot be read is shown rather than swallowed', () => {
   const model = fold(
-    chunk('user_message_chunk', '<attachments>\n- a.png (image/png, 1 B, later field)\n</attachments>'),
+    chunk(
+      'user_message_chunk',
+      '<attachments>\n- a.png (image/png, 1 B, later field)\n</attachments>',
+    ),
   );
   assert.equal(model.messages[0]!.parts[0]!.type, 'text');
 });
@@ -364,14 +367,17 @@ test('the envelope is only read in a user or agent message, never as a thought',
   // The reasoning stream holds only reasoning parts.
   const model = fold({
     sessionUpdate: 'agent_thought_chunk',
-    content: { type: 'text', text: buildEnvelope([
-      {
-        path: '.boxes/attachments/a.png',
-        name: 'a.png',
-        mimeType: 'image/png',
-        size: '1 B',
-      },
-    ]) },
+    content: {
+      type: 'text',
+      text: buildEnvelope([
+        {
+          path: '.boxes/attachments/a.png',
+          name: 'a.png',
+          mimeType: 'image/png',
+          size: '1 B',
+        },
+      ]),
+    },
   } as ThreadUpdate);
   assert.equal(model.messages[0]!.parts[0]!.type, 'reasoning');
 });
@@ -449,8 +455,14 @@ test('truncating drops the message named and everything after it', () => {
 
   const dropped = truncateFrom(model, 'msg_2');
 
-  assert.deepEqual(dropped.map((m) => m.id), ['msg_2', 'msg_3']);
-  assert.deepEqual(model.messages.map((m) => m.id), ['msg_1']);
+  assert.deepEqual(
+    dropped.map((m) => m.id),
+    ['msg_2', 'msg_3'],
+  );
+  assert.deepEqual(
+    model.messages.map((m) => m.id),
+    ['msg_1'],
+  );
   // The tool index loses the call, or a later update would merge into a
   // dropped part.
   assert.equal(findTool(model, 'toolu_1'), undefined);
@@ -459,7 +471,10 @@ test('truncating drops the message named and everything after it', () => {
 test('truncating from a message the model does not hold changes nothing', () => {
   const model = fold(chunk('agent_message_chunk', 'only', 'msg_1'));
   assert.deepEqual(truncateFrom(model, 'msg_gone'), []);
-  assert.deepEqual(model.messages.map((m) => m.id), ['msg_1']);
+  assert.deepEqual(
+    model.messages.map((m) => m.id),
+    ['msg_1'],
+  );
 });
 
 test('a truncated model plus the rest is the model the whole thread builds', () => {

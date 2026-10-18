@@ -1,6 +1,6 @@
-import type { HarnessId, ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 import { modeDescription, modeLabel } from '@/lib/harness';
 import { cn } from '@/lib/utils';
+import type { HarnessId, ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 
 /**
  * Controls for an agent's mode and config options, shared by the thread header
@@ -47,6 +47,7 @@ export function Setting({
   children: React.ReactNode;
 }) {
   return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: the control is the children
     <label className="flex flex-col gap-1 text-xs">
       <span className="font-medium">{name}</span>
       {description ? <span className="text-muted-foreground">{description}</span> : null}

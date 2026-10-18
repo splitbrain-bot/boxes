@@ -3,8 +3,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -12,9 +12,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
-import { safeAttachmentName, storeAttachment, ATTACHMENTS_DIR } from './attachments.ts';
+import { ATTACHMENTS_DIR, safeAttachmentName, storeAttachment } from './attachments.ts';
+import { type FileService, fileService, setFileServiceSpawnerForTests } from './files.ts';
 import { inProcessFileService } from './files-in-process.ts';
-import { fileService, setFileServiceSpawnerForTests, type FileService } from './files.ts';
 
 let workspace: string;
 let outside: string;

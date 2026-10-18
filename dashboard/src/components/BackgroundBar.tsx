@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
 import { ActivityIcon, ChevronDownIcon, SquareIcon } from 'lucide-react';
-import type { BackgroundProcess } from '../../../shared/types.ts';
+import { useEffect, useState } from 'react';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { commandsRunning } from '@/lib/activity';
 import { formatDuration } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
+import type { BackgroundProcess } from '../../../shared/types.ts';
 
 /** How often the ages are re-read, in milliseconds. */
 const TICK_MS = 15_000;

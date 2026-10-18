@@ -127,7 +127,7 @@ export async function fetchRepo(
  */
 function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    PATH: process.env['PATH'],
+    PATH: process.env.PATH,
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
@@ -135,9 +135,9 @@ function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
   };
   if (token && new URL(url).hostname === 'github.com') {
     const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
-    env['GIT_CONFIG_COUNT'] = '1';
-    env['GIT_CONFIG_KEY_0'] = 'http.https://github.com/.extraheader';
-    env['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${basic}`;
+    env.GIT_CONFIG_COUNT = '1';
+    env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader';
+    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`;
   }
   return env;
 }
@@ -146,7 +146,10 @@ function gitEnv(url: string, token: string | null): NodeJS.ProcessEnv {
 function gitError(err: unknown): string {
   const e = err as { stderr?: string; killed?: boolean; message?: string };
   if (e.killed) return 'git took too long and was stopped';
-  const lines = (e.stderr ?? '').trim().split('\n').filter((l) => l.trim() !== '');
+  const lines = (e.stderr ?? '')
+    .trim()
+    .split('\n')
+    .filter((l) => l.trim() !== '');
   return lines.at(-1) ?? e.message ?? String(err);
 }
 
@@ -195,6 +198,10 @@ export function findSkills(
 
 /** The last path segment of a repository URL without `.git`, the name of a skill at its root. */
 export function repoName(url: string): string {
-  const last = new URL(url).pathname.split('/').filter((p) => p !== '').at(-1) ?? '';
+  const last =
+    new URL(url).pathname
+      .split('/')
+      .filter((p) => p !== '')
+      .at(-1) ?? '';
   return last.replace(/\.git$/, '');
 }

@@ -1,55 +1,55 @@
 import { randomBytes } from 'node:crypto';
 import {
-  GLOBAL_AGENT_SET,
-  type CreateBoxBody,
-  type CreateThreadBody,
-  type HarnessId,
   type BoxDetail,
   type BoxSummary,
   type BoxTunnel,
+  type CreateBoxBody,
+  type CreateThreadBody,
+  GLOBAL_AGENT_SET,
+  type HarnessId,
   type ThreadOptions,
   type ThreadSummary,
 } from '../../shared/types.ts';
 import type { AgentStore } from './agents.ts';
-import type { Config } from './config.ts';
 import { boxEnv } from './boxenv.ts';
-import type { EgressManager } from './egress.ts';
+import type { Config } from './config.ts';
 import {
+  type BoxRow,
+  boxesWithActiveTurns,
+  boxTurnActive,
   clearBoxTurns,
-  latestThread,
+  type Db,
   getThread,
   insertThread,
+  latestThread,
   listThreads,
-  boxTurnActive,
-  boxesWithActiveTurns,
   setThreadDone,
+  type ThreadRow,
   threadConfig,
   touchBox,
-  type Db,
-  type BoxRow,
-  type ThreadRow,
 } from './db.ts';
-import { BoxUsage, BOX_SIZE_TTL_MS } from './diskusage.ts';
+import { BOX_SIZE_TTL_MS, BoxUsage } from './diskusage.ts';
+import type { EgressManager } from './egress.ts';
 import { fileService, OutdatedImageError } from './files.ts';
+import { PendingStore } from './gateway/pending.ts';
+import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamBox } from './gateway/upstream.ts';
 import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
-import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import { log } from './log.ts';
+import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
 import type { Notifier } from './notify.ts';
 import { boxProcesses } from './processes.ts';
 import {
-  runtime,
-  WORKSPACE_DIR,
   type BoxSpec,
   type PullEvent,
   type RuntimeObject,
+  runtime,
+  WORKSPACE_DIR,
 } from './runtime/runtime.ts';
 import { generateWsToken } from './secret.ts';
-import { setUpBox } from './setup.ts';
 import { readSettings } from './settings.ts';
+import { setUpBox } from './setup.ts';
 import type { BoxReading } from './tunnels.ts';
-import { PendingStore } from './gateway/pending.ts';
-import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamBox } from './gateway/upstream.ts';
 
 /**
  * How many times more boxes the host may hold than the database knows of
@@ -247,9 +247,7 @@ export class BoxManager {
 
     // Tombstones count, so a deployment whose boxes were all deleted still
     // gets its failed teardowns swept.
-    const known = (
-      this.db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }
-    ).n;
+    const known = (this.db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number }).n;
     if (boxes.size > known * STRAY_BOX_RATIO) {
       log.warn('not sweeping: the runtime holds far more boxes than this database knows of', {
         strays: boxes.size,
@@ -301,11 +299,7 @@ export class BoxManager {
    *
    * A failure is logged, and the next sweep tries again.
    */
-  private async sweeping(
-    boxId: string,
-    what: string,
-    remove: () => Promise<void>,
-  ): Promise<void> {
+  private async sweeping(boxId: string, what: string, remove: () => Promise<void>): Promise<void> {
     try {
       await remove();
       log.box(boxId).info('swept an orphaned object', { what });
@@ -321,9 +315,7 @@ export class BoxManager {
 
   /** The stored row for a box, including deleted ones. */
   getRow(id: string): BoxRow | undefined {
-    return this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as
-      | BoxRow
-      | undefined;
+    return this.db.prepare('SELECT * FROM boxes WHERE id = ?').get(id) as BoxRow | undefined;
   }
 
   /** Every box that has not been deleted, newest first. */
@@ -791,9 +783,7 @@ export class BoxManager {
     const counts = this.pending.countsByBox();
     const running = boxesWithActiveTurns(this.db);
     return Promise.all(
-      rows.map(async (row) =>
-        this.summarize(row, counts.get(row.id) ?? 0, running.has(row.id)),
-      ),
+      rows.map(async (row) => this.summarize(row, counts.get(row.id) ?? 0, running.has(row.id))),
     );
   }
 
@@ -1116,7 +1106,6 @@ function toThreadSummary(
     lastActiveAt: row.last_active_at,
   };
 }
-
 
 /**
  * What a request asked a thread to be, checked.

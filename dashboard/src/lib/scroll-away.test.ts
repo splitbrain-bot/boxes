@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { scrollAway, scrollAwayStart, type ScrollAwayState } from './scroll-away.ts';
+import { type ScrollAwayState, scrollAway, scrollAwayStart } from './scroll-away.ts';
 
 /** One frame in milliseconds, which is what one scroll event is worth. */
 const FRAME = 16;
@@ -9,7 +9,10 @@ const FRAME = 16;
  * A scroller with a given content and viewport height, driven a frame at a
  * time on a clock stepped by hand.
  */
-function reading(content: number, view = 900): {
+function reading(
+  content: number,
+  view = 900,
+): {
   by: (dy: number, frames?: number) => void;
   to: (top: number) => void;
   grows: (by: number, slack?: number) => void;

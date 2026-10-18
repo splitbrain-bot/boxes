@@ -1,13 +1,13 @@
 import {
+  type AgentConnection,
   agent as acpAgent,
   RequestError,
-  type AgentConnection,
   type Stream,
 } from '@agentclientprotocol/sdk';
 import type { WebSocket } from 'ws';
 import { ACP_METHOD } from '../../../shared/acp.ts';
-import { log } from '../log.ts';
 import type { BoxManager } from '../boxes.ts';
+import { log } from '../log.ts';
 import { threadOf } from './broadcast.ts';
 import type { DownstreamHandle, UpstreamBox } from './upstream.ts';
 

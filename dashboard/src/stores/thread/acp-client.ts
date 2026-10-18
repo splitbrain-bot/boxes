@@ -1,10 +1,10 @@
 import { ACP_METHOD, ACP_SUBPROTOCOL } from '../../../../shared/acp.ts';
 import {
   BOXES_META,
-  REPLAY_METHOD,
-  TURN_STATE_METHOD,
   type LoadMeta,
+  REPLAY_METHOD,
   type ReplayParams,
+  TURN_STATE_METHOD,
   type TurnStateParams,
 } from '../../../../shared/types.ts';
 import type {
@@ -92,7 +92,9 @@ interface RpcMessage {
 }
 
 /** Waits between reconnect attempts, in milliseconds, then holds at the last. */
-const BACKOFF_MS = [500, 1000, 2000, 5000, 10_000];
+const BACKOFF_MS = [500, 1000, 2000, 5000];
+/** The wait once the list is used up, in milliseconds. */
+const MAX_BACKOFF_MS = 10_000;
 
 /**
  * The JSON-RPC notification a peer sends to withdraw a request it is still
@@ -261,7 +263,7 @@ export class AcpClient {
   /** Opens a new socket after the backoff for the current attempt. */
   private scheduleReconnect(): void {
     if (this.disposed) return;
-    const wait = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
+    const wait = BACKOFF_MS[this.attempt] ?? MAX_BACKOFF_MS;
     this.attempt++;
     this.handlers.onState('reconnecting');
     this.retryTimer = window.setTimeout(() => {
@@ -346,7 +348,7 @@ export class AcpClient {
     // A request from the agent side. An unknown method still gets an answer,
     // so the adapter does not block on it.
     if (msg.id !== undefined && msg.method) {
-      void this.answer(msg);
+      void this.answer(msg, msg.id);
       return;
     }
 
@@ -377,12 +379,17 @@ export class AcpClient {
     }
   }
 
-  /** Answers a request from the gateway, turning a rejection into a JSON-RPC error. */
-  private async answer(msg: RpcMessage): Promise<void> {
+  /**
+   * Answers a request from the gateway, turning a rejection into a JSON-RPC error.
+   *
+   * @param msg The request.
+   * @param id Its id, which the answer repeats.
+   */
+  private async answer(msg: RpcMessage, id: number | string): Promise<void> {
     const reply = (body: Partial<RpcMessage>): void => {
       const ws = this.ws;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...body }));
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, ...body }));
     };
 
     if (msg.method !== ACP_METHOD.sessionRequestPermission) {
@@ -390,7 +397,6 @@ export class AcpClient {
       return;
     }
 
-    const id = msg.id!;
     const withdrawn = new AbortController();
     this.answering.set(id, withdrawn);
     try {

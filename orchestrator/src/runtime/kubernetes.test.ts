@@ -12,12 +12,12 @@ import type {
 import { beforeEach, describe, it } from 'vitest';
 import { loadConfig } from '../config.ts';
 import {
+  exitCodeOf,
+  type KubeClients,
   KubernetesRuntime,
   LOGIN_POLICY,
-  exitCodeOf,
   quantity,
   sameSpec,
-  type KubeClients,
 } from './kubernetes.ts';
 
 /** One exec that the fake cluster saw. */

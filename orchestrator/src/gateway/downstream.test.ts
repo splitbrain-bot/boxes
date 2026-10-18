@@ -1,5 +1,5 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { ACP_SUBPROTOCOL } from '../../../shared/acp.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../../shared/terminal.ts';
 import { checkUpgrade } from './downstream.ts';

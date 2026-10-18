@@ -81,9 +81,7 @@ test('the global set cannot be deleted, and a named one can', async () => {
 test('the editor shows the merge, and which of its items replaces a global one', async () => {
   const { page, close } = await openPage(stub.url, '/agents/as1');
   try {
-    await expect.poll(() => page.getByText('Merged result').isVisible()).toBe(
-      true,
-    );
+    await expect.poll(() => page.getByText('Merged result').isVisible()).toBe(true);
     // `review` is defined in both sets; the named one wins, and says so.
     await expect.poll(() => page.getByText('replaces the global one').isVisible()).toBe(true);
     // `ship` comes from the global set, which this one adds nothing to.
@@ -96,9 +94,9 @@ test('the editor shows the merge, and which of its items replaces a global one',
 test('the global editor offers no merge panel, because there is nothing to merge', async () => {
   const { page, close } = await openPage(stub.url, '/agents/global');
   try {
-    await expect.poll(() => page.getByText('Everything here goes into every box.').isVisible()).toBe(
-      true,
-    );
+    await expect
+      .poll(() => page.getByText('Everything here goes into every box.').isVisible())
+      .toBe(true);
     expect(await page.getByText('Merged result').count()).toBe(0);
   } finally {
     await close();

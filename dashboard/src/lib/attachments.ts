@@ -79,14 +79,13 @@ export function parseEnvelope(text: string): ParsedEnvelope | null {
   for (const line of body.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed === PREAMBLE) continue;
-    const match = LINE.exec(trimmed);
-    if (!match) return null;
-    const [, path, mimeType, size] = match;
+    const [, path, mimeType, size] = LINE.exec(trimmed) ?? [];
+    if (!path || !mimeType || !size) return null;
     entries.push({
-      path: path!,
-      name: path!.split('/').pop() ?? path!,
-      mimeType: mimeType!,
-      size: size!,
+      path,
+      name: path.split('/').pop() ?? path,
+      mimeType,
+      size,
     });
   }
   if (entries.length === 0) return null;

@@ -5,6 +5,8 @@ import type {
   AgentSetDetail,
   AgentSetSummary,
   ApiKeySummary,
+  BoxDetail,
+  BoxSummary,
   CreateBoxBody,
   CreateThreadBody,
   CredentialId,
@@ -22,8 +24,6 @@ import type {
   ReviewDirResponse,
   ReviewFileBody,
   ReviewFileResponse,
-  BoxDetail,
-  BoxSummary,
   Settings,
   StartLoginResponse,
   StoredAttachment,
@@ -92,11 +92,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Starts a box's container. */
-  startBox: (id: string) =>
-    request<BoxDetail>(`/api/boxes/${id}/start`, { method: 'POST' }),
+  startBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}/start`, { method: 'POST' }),
   /** Stops a box's container. */
-  stopBox: (id: string) =>
-    request<BoxDetail>(`/api/boxes/${id}/stop`, { method: 'POST' }),
+  stopBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}/stop`, { method: 'POST' }),
   /** Deletes a box. */
   deleteBox: (id: string) => request<void>(`/api/boxes/${id}`, { method: 'DELETE' }),
   /** Lists a box's threads. */
@@ -189,9 +187,7 @@ export const api = {
     ),
   /** Reads one file of the review, with everything the file view needs. */
   reviewFile: (id: string, path: string) =>
-    request<ReviewFileResponse>(
-      `/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`,
-    ),
+    request<ReviewFileResponse>(`/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`),
   /** Saves an edited file and returns it as read back. */
   saveReviewFile: (id: string, body: ReviewFileBody) =>
     request<ReviewFileResponse>(`/api/boxes/${id}/review/file`, {
@@ -217,8 +213,7 @@ export const api = {
       body: JSON.stringify({ rev }),
     }),
   /** Deletes the box's REVIEW.md, which holds the review. */
-  deleteReview: (id: string) =>
-    request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
+  deleteReview: (id: string) => request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
 
   // --- agent configuration -------------------------------------------------
   // Every change returns the whole set.

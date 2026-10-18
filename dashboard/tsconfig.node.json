@@ -1,11 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": [
-      "ES2023",
-      "DOM",
-      "DOM.Iterable"
-    ],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -14,13 +10,8 @@
     "noUnusedParameters": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": [
-      "node"
-    ],
+    "types": ["node"],
     "allowImportingTsExtensions": true
   },
-  "include": [
-    "vite.config.ts",
-    "e2e/**/*.ts"
-  ]
+  "include": ["vite.config.ts", "e2e/**/*.ts"]
 }

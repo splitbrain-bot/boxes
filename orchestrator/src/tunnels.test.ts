@@ -3,18 +3,18 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'vitest';
-import { openDb, type Db } from './db.ts';
+import { type Db, openDb } from './db.ts';
 import {
+  type BoxReading,
   boxLabel,
   deploymentLabel,
   hostedTunnels,
-  TUNNEL_GRACE_MS,
-  TunnelReconciler,
-  toRemote,
-  type BoxReading,
   type RemoteTunnel,
+  TUNNEL_GRACE_MS,
   type TunnelApi,
+  TunnelReconciler,
   type TunnelRef,
+  toRemote,
 } from './tunnels.ts';
 
 /** The deployment every case runs as. */
@@ -170,7 +170,11 @@ test('an unserved tunnel is deleted after the grace period, and forgotten', asyn
   const fake = fakeApi([tunnel('abc123')]);
   let now = T0;
   let commands = [hostCommand('abc123')];
-  const reconciler = reconcilerFor(fake.api, () => [{ boxId: 'box1', commands }], () => now);
+  const reconciler = reconcilerFor(
+    fake.api,
+    () => [{ boxId: 'box1', commands }],
+    () => now,
+  );
 
   await reconciler.tick();
   commands = [];
@@ -191,7 +195,11 @@ test('a host process that comes back in time keeps the tunnel', async () => {
   const fake = fakeApi([tunnel('abc123')]);
   let now = T0;
   let commands = [hostCommand('abc123')];
-  const reconciler = reconcilerFor(fake.api, () => [{ boxId: 'box1', commands }], () => now);
+  const reconciler = reconcilerFor(
+    fake.api,
+    () => [{ boxId: 'box1', commands }],
+    () => now,
+  );
 
   await reconciler.tick();
   commands = [];
@@ -213,7 +221,11 @@ test('a box that cannot be read keeps its tunnels', async () => {
   const fake = fakeApi([tunnel('abc123')]);
   let now = T0;
   let reading: BoxReading = { boxId: 'box1', commands: [hostCommand('abc123')] };
-  const reconciler = reconcilerFor(fake.api, () => [reading], () => now);
+  const reconciler = reconcilerFor(
+    fake.api,
+    () => [reading],
+    () => now,
+  );
 
   await reconciler.tick();
   reading = { boxId: 'box1', commands: null };
@@ -229,7 +241,11 @@ test('a deleted box no longer read still has its tunnel deleted', async () => {
   const fake = fakeApi([tunnel('abc123')]);
   let now = T0;
   let readings: BoxReading[] = [{ boxId: 'box1', commands: [hostCommand('abc123')] }];
-  const reconciler = reconcilerFor(fake.api, () => readings, () => now);
+  const reconciler = reconcilerFor(
+    fake.api,
+    () => readings,
+    () => now,
+  );
 
   await reconciler.tick();
   readings = [];

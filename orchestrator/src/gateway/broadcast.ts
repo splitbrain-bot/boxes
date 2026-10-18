@@ -1,13 +1,13 @@
 import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import {
   REPLAY_METHOD,
-  TURN_STATE_METHOD,
   type ReplayParams,
   type ThreadConfigOption,
+  TURN_STATE_METHOD,
   type TurnStateParams,
 } from '../../../shared/types.ts';
 import { log } from '../log.ts';
-import { ThreadLog, type AdapterOptions } from './thread-log.ts';
+import { type AdapterOptions, ThreadLog } from './thread-log.ts';
 import type { DownstreamHandle } from './upstream.ts';
 
 /**

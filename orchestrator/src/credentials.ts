@@ -104,9 +104,7 @@ export class CredentialStore {
   /** Every stored credential, in the order the settings page lists them. */
   list(): CredentialRow[] {
     const rows = this.db.prepare('SELECT * FROM credentials').all() as CredentialRow[];
-    return rows.sort(
-      (a, b) => CREDENTIAL_IDS.indexOf(a.id) - CREDENTIAL_IDS.indexOf(b.id),
-    );
+    return rows.sort((a, b) => CREDENTIAL_IDS.indexOf(a.id) - CREDENTIAL_IDS.indexOf(b.id));
   }
 
   /**
@@ -217,7 +215,7 @@ export class CredentialStore {
 export function deliverableSecret(row: CredentialRow): string | null {
   if (row.method !== 'oauth') return row.secret;
   if (row.id !== 'devtunnels') return null;
-  const token = authObject(row.secret)?.['access_token'];
+  const token = authObject(row.secret)?.access_token;
   return typeof token === 'string' && token !== '' ? token : null;
 }
 
@@ -274,10 +272,8 @@ export function parseAuthDocument(document: string): AuthDocument | null {
   const { access_token: access, id_token: id } = tokens as Record<string, unknown>;
   if (typeof access !== 'string' || access === '') return null;
 
-  const exp = jwtClaims(access)?.['exp'];
-  const lastRefresh = Date.parse(
-    String((parsed as { last_refresh?: unknown }).last_refresh ?? ''),
-  );
+  const exp = jwtClaims(access)?.exp;
+  const lastRefresh = Date.parse(String((parsed as { last_refresh?: unknown }).last_refresh ?? ''));
   return {
     account: typeof id === 'string' ? emailIn(jwtClaims(id)) : null,
     expiresAt: typeof exp === 'number' ? exp * 1000 : null,
@@ -306,7 +302,7 @@ export function jwtClaims(token: string): Record<string, unknown> | null {
  */
 function emailIn(claims: Record<string, unknown> | null): string | null {
   if (!claims) return null;
-  const plain = claims['email'];
+  const plain = claims.email;
   if (typeof plain === 'string' && plain !== '') return plain;
   for (const value of Object.values(claims)) {
     if (typeof value !== 'object' || value === null) continue;
@@ -315,7 +311,6 @@ function emailIn(claims: Record<string, unknown> | null): string | null {
   }
   return null;
 }
-
 
 // --- keeping an account credential alive ------------------------------------
 
@@ -387,7 +382,8 @@ export const postToken: TokenPost = async (url, body) => {
     signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} from the token endpoint: ${text.trim().slice(0, 300)}`);
+  if (!res.ok)
+    throw new Error(`${res.status} from the token endpoint: ${text.trim().slice(0, 300)}`);
   return JSON.parse(text) as TokenAnswer;
 };
 
@@ -447,14 +443,19 @@ async function refreshCodex(
 ): Promise<void> {
   const parsed = parseAuthDocument(row.secret);
   const doc = authObject(row.secret);
-  const refreshToken = doc && typeof doc['tokens'] === 'object' && doc['tokens'] !== null
-    ? (doc['tokens'] as Record<string, unknown>)['refresh_token']
-    : undefined;
+  const refreshToken =
+    doc && typeof doc.tokens === 'object' && doc.tokens !== null
+      ? (doc.tokens as Record<string, unknown>).refresh_token
+      : undefined;
 
   if (typeof refreshToken !== 'string' || refreshToken === '') {
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
-      store.markStatus(row.id, 'failing', 'the stored login carries no refresh token: log in again');
+      store.markStatus(
+        row.id,
+        'failing',
+        'the stored login carries no refresh token: log in again',
+      );
     }
     return;
   }
@@ -477,10 +478,10 @@ async function refreshCodex(
     return;
   }
 
-  const tokens = { ...(doc?.['tokens'] as Record<string, unknown>) };
-  tokens['access_token'] = answer.access_token;
-  if (answer.refresh_token) tokens['refresh_token'] = answer.refresh_token;
-  if (answer.id_token) tokens['id_token'] = answer.id_token;
+  const tokens = { ...(doc?.tokens as Record<string, unknown>) };
+  tokens.access_token = answer.access_token;
+  if (answer.refresh_token) tokens.refresh_token = answer.refresh_token;
+  if (answer.id_token) tokens.id_token = answer.id_token;
   const updated = {
     ...doc,
     tokens,
@@ -491,9 +492,7 @@ async function refreshCodex(
   store.put(row.id, 'oauth', JSON.stringify(updated), {
     // The new id token names the account, if it came back.
     account: described?.account ?? row.account,
-    expires_at:
-      described?.expiresAt ??
-      (answer.expires_in ? now + answer.expires_in * 1000 : null),
+    expires_at: described?.expiresAt ?? (answer.expires_in ? now + answer.expires_in * 1000 : null),
     refreshed_at: now,
   });
 }
@@ -511,11 +510,15 @@ async function refreshDevTunnels(
   post: TokenPost,
   now: number,
 ): Promise<void> {
-  const refreshToken = authObject(row.secret)?.['refresh_token'];
+  const refreshToken = authObject(row.secret)?.refresh_token;
   if (typeof refreshToken !== 'string' || refreshToken === '') {
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
-      store.markStatus(row.id, 'failing', 'the stored login carries no refresh token: log in again');
+      store.markStatus(
+        row.id,
+        'failing',
+        'the stored login carries no refresh token: log in again',
+      );
     }
     return;
   }
@@ -535,7 +538,11 @@ async function refreshDevTunnels(
 
   if (!answer.access_token) {
     const reason = answer.error_description ?? answer.error ?? 'no access token in the answer';
-    store.markStatus(row.id, 'failing', `could not refresh: ${reason}. Log in again if this persists`);
+    store.markStatus(
+      row.id,
+      'failing',
+      `could not refresh: ${reason}. Log in again if this persists`,
+    );
     return;
   }
 

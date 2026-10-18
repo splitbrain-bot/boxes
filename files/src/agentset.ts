@@ -78,7 +78,13 @@ export async function installAgentSet(
 
   removeManaged(home);
   // Recorded before the move, so an interrupted install is undone by the next one.
-  writeFileSync(join(home, MANAGED_FILE), [...units].sort().map((u) => `${u}\n`).join(''));
+  writeFileSync(
+    join(home, MANAGED_FILE),
+    [...units]
+      .sort()
+      .map((u) => `${u}\n`)
+      .join(''),
+  );
   for (const unit of units) {
     const target = join(home, unit);
     mkdirSync(dirname(target), { recursive: true });

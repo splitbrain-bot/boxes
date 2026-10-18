@@ -36,8 +36,9 @@ export interface ScrollAnchor {
  * @param rows The rows in the order they are rendered.
  */
 export function anchorAt(rows: RowOffset[], scrollTop: number): ScrollAnchor | null {
-  if (rows.length === 0) return null;
-  let standing = rows[0]!;
+  const first = rows[0];
+  if (!first) return null;
+  let standing = first;
   for (const row of rows) {
     if (row.top > scrollTop) break;
     standing = row;

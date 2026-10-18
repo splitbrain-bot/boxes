@@ -31,7 +31,9 @@ export function Spinner({ className, label, ...props }: SpinnerProps) {
       fill="currentColor"
       /* size-4 and the current colour, like the icons. A caller passes its own size-*. */
       className={cn('size-4 shrink-0', className)}
-      {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })}
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
       {...props}
     >
       {TRACK.map((row) =>

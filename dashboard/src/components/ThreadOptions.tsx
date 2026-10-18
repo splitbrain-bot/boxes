@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
+import {
+  ConfigSelect,
+  currentModeDescription,
+  isSelectable,
+  ModeSelect,
+  optionName,
+  Setting,
+} from '@/components/AgentSettings';
+import { Notice } from '@/components/Notice';
+import { Button } from '@/components/ui/button';
+import { unavailableReason } from '@/lib/harness';
 import type {
   HarnessId,
   HarnessInfo,
@@ -7,17 +18,6 @@ import type {
   ThreadDialogDefaults,
   ThreadOptions as ThreadOptionsBody,
 } from '../../../shared/types.ts';
-import {
-  ConfigSelect,
-  ModeSelect,
-  Setting,
-  currentModeDescription,
-  isSelectable,
-  optionName,
-} from '@/components/AgentSettings';
-import { Notice } from '@/components/Notice';
-import { Button } from '@/components/ui/button';
-import { unavailableReason } from '@/lib/harness';
 import { rememberDialog, useHarnesses } from '../stores/harnesses.ts';
 
 /** The block's state, held by the hook and rendered by the component. */
@@ -90,15 +90,12 @@ export function useThreadOptions(): ThreadOptionsState {
 
   const chosen = harnesses?.find((harness) => harness.id === harnessId) ?? null;
 
-  const choose = useCallback(
-    (info: HarnessInfo, saved: ThreadDialogDefaults | undefined) => {
-      const start = prefill(info, saved);
-      setHarnessId(info.id);
-      setModeId(start.modeId);
-      setConfigMap(start.config);
-    },
-    [],
-  );
+  const choose = useCallback((info: HarnessInfo, saved: ThreadDialogDefaults | undefined) => {
+    const start = prefill(info, saved);
+    setHarnessId(info.id);
+    setModeId(start.modeId);
+    setConfigMap(start.config);
+  }, []);
 
   // The first harness list picks the first harness that can run. An agent
   // without a working credential fails at its first prompt. When none can
@@ -163,7 +160,7 @@ export function useThreadOptions(): ThreadOptionsState {
  * @param config The block's chosen values.
  * @returns The value to select, or an empty string without choices.
  */
-function valueOf(option: ThreadConfigOption, config: Record<string, string>): string {
+function selectedValue(option: ThreadConfigOption, config: Record<string, string>): string {
   const offered = (value: string | undefined): boolean =>
     value !== undefined && (option.options?.some((entry) => entry.value === value) ?? false);
   const chosen = config[option.id];
@@ -215,7 +212,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
       {/* A harness that cannot run stays in the list, disabled, with its reason. */}
       <div className="flex flex-col gap-1 text-xs">
         <span className="font-medium">Agent</span>
-        <div role="group" aria-label="Agent" className="flex flex-wrap gap-1.5">
+        <fieldset aria-label="Agent" className="flex flex-wrap gap-1.5">
           {harnesses.map((harness) => {
             const reason = unavailableReason(harness);
             return (
@@ -233,7 +230,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
               </Button>
             );
           })}
-        </div>
+        </fieldset>
         {blocked.length > 0 ? (
           <p className="text-muted-foreground">
             {blocked.map((harness) => harness.label).join(' and ')} cannot run a turn until a
@@ -248,10 +245,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
 
       {/* The mode comes next, because it decides what the agent may do without asking. */}
       {modes && hasModes ? (
-        <Setting
-          name="Agent mode"
-          description={currentModeDescription(modes, chosen?.id ?? null)}
-        >
+        <Setting name="Agent mode" description={currentModeDescription(modes, chosen?.id ?? null)}>
           <ModeSelect
             modes={modes}
             harness={chosen?.id ?? null}
@@ -267,7 +261,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         <Setting key={option.id} name={optionName(option)} description={option.description}>
           <ConfigSelect
             option={option}
-            value={valueOf(option, config)}
+            value={selectedValue(option, config)}
             className="mt-0.5 py-1.5"
             onSet={(value) => state.setConfig(option.id, value)}
           />

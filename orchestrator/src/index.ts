@@ -6,20 +6,20 @@ import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import { buildApp } from './app.ts';
 import { BootState } from './boot.ts';
 import { config } from './config.ts';
-import { openDb, boxesWithActiveTurns } from './db.ts';
-import { checkUpgrade, attachDownstream } from './gateway/downstream.ts';
+import { boxesWithActiveTurns, openDb } from './db.ts';
+import { attachDownstream, checkUpgrade } from './gateway/downstream.ts';
 import { attachTerminal } from './gateway/terminal.ts';
 import { claimDataDir } from './lock.ts';
 import { log, setLogLevel } from './log.ts';
-import { runtime } from './runtime/runtime.ts';
 import {
   startCredentialRefresh,
-  startTunnelReconciler,
   startImageRefresher,
   startProxyReconciler,
   startReaper,
   startSkillRepoRefresh,
+  startTunnelReconciler,
 } from './reaper.ts';
+import { runtime } from './runtime/runtime.ts';
 
 // --- the app and its database ----------------------------------------------
 
@@ -57,11 +57,8 @@ const db = openDb(cfg.DATA_DIR);
 const boot = new BootState();
 
 /** The HTTP app and the services it built. */
-const { app, manager, agents, credentials, egress, logins, tunnels, setIsolationWarnings } = buildApp(
-  cfg,
-  db,
-  { boot },
-);
+const { app, manager, agents, credentials, egress, logins, tunnels, setIsolationWarnings } =
+  buildApp(cfg, db, { boot });
 
 // --- WebSocket gateway: token-authed on the upgrade itself ------------------
 
@@ -81,8 +78,7 @@ const wss = new WebSocketServer({
   // The client offers [ACP_SUBPROTOCOL, 'bearer.<token>']. The bearer entry
   // is credentials, not a protocol, so the subprotocol is negotiated
   // explicitly rather than relying on the client to list it first.
-  handleProtocols: (protocols) =>
-    protocols.has(ACP_SUBPROTOCOL) ? ACP_SUBPROTOCOL : false,
+  handleProtocols: (protocols) => (protocols.has(ACP_SUBPROTOCOL) ? ACP_SUBPROTOCOL : false),
 });
 
 /**
@@ -91,8 +87,7 @@ const wss = new WebSocketServer({
  * The long form names a thread and connects to that conversation. The short
  * form names none and pins the box's most recently active thread.
  */
-const WS_PATH =
-  /^\/ws\/boxes\/([A-Za-z0-9_-]{1,64})(?:\/threads\/([A-Za-z0-9_-]{1,64}))?\/acp$/;
+const WS_PATH = /^\/ws\/boxes\/([A-Za-z0-9_-]{1,64})(?:\/threads\/([A-Za-z0-9_-]{1,64}))?\/acp$/;
 
 /**
  * The WebSocket server for terminals. It is separate from the ACP one, because
@@ -126,12 +121,12 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   const path = url.split('?')[0] ?? '';
   const match = WS_PATH.exec(path);
   const terminal = match ? null : TERMINAL_PATH.exec(path);
-  if (!match && !terminal) {
+  const boxId = match?.[1] ?? terminal?.[1];
+  if (!boxId) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     socket.destroy();
     return;
   }
-  const boxId = (match ?? terminal!)[1]!;
   const threadId = match?.[2] ?? null;
 
   // A token opens only the box the path names. A missing or deleted box has

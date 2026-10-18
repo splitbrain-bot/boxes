@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
-import net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import net from 'node:net';
 import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer, resolveControlAddress } from './control.ts';
 import { ALLOWED_PORTS, createForwardServer, type DenialCategory } from './forward.ts';
@@ -17,9 +17,7 @@ import { EMPTY_POLICY, injectionPatterns, policyHash } from './policy.ts';
 
 /** Writes one JSON line to stderr. */
 function log(msg: string, fields: Record<string, unknown> = {}): void {
-  process.stderr.write(
-    `${JSON.stringify({ ts: new Date().toISOString(), msg, ...fields })}\n`,
-  );
+  process.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), msg, ...fields })}\n`);
 }
 
 /** Reports a setting the proxy cannot start with, and stops. */
@@ -52,7 +50,7 @@ const CONTROL_PORT = portFromEnv('CONTROL_PORT', 3129);
  * Address the control channel binds to. Left unset it is derived from the
  * default route, which is the compose network and not any box's.
  */
-const CONTROL_BIND = process.env['CONTROL_BIND']?.trim() ?? '';
+const CONTROL_BIND = process.env.CONTROL_BIND?.trim() ?? '';
 if (CONTROL_BIND !== '' && net.isIP(CONTROL_BIND) === 0) {
   fatalConfig(`CONTROL_BIND must be an IP address, not ${CONTROL_BIND}`);
 }

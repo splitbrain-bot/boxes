@@ -2,17 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { finished, PassThrough, type Readable, type Writable } from 'node:stream';
 import type { CredentialId, LoginState } from '../../shared/types.ts';
 import {
+  type CredentialStore,
   DEVTUNNELS_CLIENT_ID,
   GITHUB_TOKEN_URL,
   parseAuthDocument,
   postToken,
-  type CredentialStore,
   type TokenPost,
 } from './credentials.ts';
 import { HttpError } from './http-error.ts';
-import { runtime, type Login } from './runtime/runtime.ts';
-import { Screen } from './screen.ts';
 import { log } from './log.ts';
+import { type Login, runtime } from './runtime/runtime.ts';
+import { Screen } from './screen.ts';
 
 /**
  * Account logins. A harness login is run by the harness's own CLI in a
@@ -166,7 +166,12 @@ async function spawnLogin(login: Login, spec: LoginExecSpec): Promise<LoginExec>
       if (open === 0) output.end();
     });
   }
-  return { output, stdin: spec.tty ? proc.stdin : null, exited: proc.exited, kill: () => proc.kill() };
+  return {
+    output,
+    stdin: spec.tty ? proc.stdin : null,
+    exited: proc.exited,
+    kill: () => proc.kill(),
+  };
 }
 
 // --- GitHub, for the device login ------------------------------------------
@@ -347,10 +352,11 @@ export class LoginManager {
       return;
     }
     try {
-      flow.login = await runtime().startLogin(flow.credentialId);
+      const login = await runtime().startLogin(flow.credentialId);
+      flow.login = login;
       if (flow.settled) return;
-      if (flow.credentialId === 'openai') await this.codexLogin(flow);
-      else await this.claudeLogin(flow);
+      if (flow.credentialId === 'openai') await this.codexLogin(flow, login);
+      else await this.claudeLogin(flow, login);
     } catch (err) {
       this.fail(flow, (err as Error).message);
     } finally {
@@ -371,8 +377,8 @@ export class LoginManager {
    * person, writes `auth.json` and exits 0. On failure it exits 1 with the
    * reason on stderr.
    */
-  private async codexLogin(flow: Flow): Promise<void> {
-    const exec = await spawnLogin(flow.login!, {
+  private async codexLogin(flow: Flow, login: Login): Promise<void> {
+    const exec = await spawnLogin(login, {
       // The Codex CLI fails when CODEX_HOME does not exist.
       cmd: ['bash', '-lc', `mkdir -p "$CODEX_HOME" && exec codex login --device-auth`],
       env: { CODEX_HOME },
@@ -398,7 +404,7 @@ export class LoginManager {
       return;
     }
 
-    const read = await spawnLogin(flow.login!, {
+    const read = await spawnLogin(login, {
       cmd: ['cat', `${CODEX_HOME}/auth.json`],
     });
     const document = await readOutput(read.output, () => {});
@@ -511,8 +517,8 @@ export class LoginManager {
    * prints a one-year token once the code is entered. The scan reads a
    * rebuilt screen, as the UI redraws only the cells it changes.
    */
-  private async claudeLogin(flow: Flow): Promise<void> {
-    const exec = await spawnLogin(flow.login!, {
+  private async claudeLogin(flow: Flow, login: Login): Promise<void> {
+    const exec = await spawnLogin(login, {
       cmd: ['bash', '-lc', 'exec claude setup-token'],
       env: { CLAUDE_CONFIG_DIR },
       tty: true,
@@ -577,10 +583,7 @@ export class LoginManager {
       return;
     }
     log.info('claude setup-token finished', { exit: await exec.exited, url, output: tail(output) });
-    this.fail(
-      flow,
-      `claude setup-token printed no token before it ended: ${tail(output)}`,
-    );
+    this.fail(flow, `claude setup-token printed no token before it ended: ${tail(output)}`);
   }
 
   /**
@@ -651,10 +654,7 @@ function sleep(ms: number): Promise<void> {
  * end. onText gets the screen after every chunk, as the URL and the prompt
  * may be drawn over later.
  */
-async function readScreen(
-  output: Readable,
-  onText: (text: string) => void,
-): Promise<string> {
+async function readScreen(output: Readable, onText: (text: string) => void): Promise<string> {
   const screen = new Screen();
   try {
     for await (const chunk of output) {
@@ -672,10 +672,7 @@ async function readScreen(
  * text. onText gets the whole text so far after every chunk, as a match may
  * be split across reads.
  */
-async function readOutput(
-  output: Readable,
-  onText: (text: string) => void,
-): Promise<string> {
+async function readOutput(output: Readable, onText: (text: string) => void): Promise<string> {
   let text = '';
   try {
     for await (const chunk of output) {
@@ -707,10 +704,7 @@ const ESC = String.fromCharCode(0x1b);
 const CSI = String.fromCharCode(0x9b);
 
 /** Operating-system commands: a title change, a hyperlink. */
-const OSC_PATTERN = new RegExp(
-  `${ESC}\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)`,
-  'g',
-);
+const OSC_PATTERN = new RegExp(`${ESC}\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)`, 'g');
 
 /** Control sequences: colour, cursor moves, erases, and the shorter escapes. */
 const CSI_PATTERN = new RegExp(
@@ -757,10 +751,38 @@ export function deviceUrlIn(text: string): string | null {
 
 /** Words that have the shape of a device code and are not one. */
 const NOT_A_CODE = new Set([
-  'HTTP', 'HTTPS', 'URL', 'CODE', 'OPENAI', 'CHATGPT', 'CODEX', 'ENTER', 'VISIT',
-  'PASTE', 'HERE', 'PROMPTED', 'LOGIN', 'DEVICE', 'AUTH', 'COPY', 'PRESS',
-  'CTRL', 'WARNING', 'ERROR', 'NOTE', 'THEN', 'YOUR', 'USER', 'OPEN', 'PLEASE',
-  'WAITING', 'BROWSER', 'ACCOUNT', 'SUCCESS', 'FAILED', 'TOKEN',
+  'HTTP',
+  'HTTPS',
+  'URL',
+  'CODE',
+  'OPENAI',
+  'CHATGPT',
+  'CODEX',
+  'ENTER',
+  'VISIT',
+  'PASTE',
+  'HERE',
+  'PROMPTED',
+  'LOGIN',
+  'DEVICE',
+  'AUTH',
+  'COPY',
+  'PRESS',
+  'CTRL',
+  'WARNING',
+  'ERROR',
+  'NOTE',
+  'THEN',
+  'YOUR',
+  'USER',
+  'OPEN',
+  'PLEASE',
+  'WAITING',
+  'BROWSER',
+  'ACCOUNT',
+  'SUCCESS',
+  'FAILED',
+  'TOKEN',
 ]);
 
 /**

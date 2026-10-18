@@ -1,26 +1,19 @@
-import {
-  FileSearch,
-  HardDrive,
-  Info,
-  Plus,
-  Square,
-  SquareTerminal,
-} from 'lucide-react';
+import { FileSearch, HardDrive, Info, Plus, Square, SquareTerminal } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import type { BoxWork, BoxSummary, ThreadSummary } from '../../../shared/types.ts';
-import { DOT, StatusBadge, type BadgeKind } from './StatusBadge';
 import { BoxWorkList } from '@/components/BoxWorkList';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { NewThreadDialog } from '@/components/NewThreadDialog';
 import { Card } from '@/components/ui/card';
-import { api } from '../api.ts';
 import { JOBS, jobsLabel } from '@/lib/activity';
 import { harnessLabel } from '@/lib/harness';
 import { shortAge, shortSize } from '@/lib/rough';
 import { threadName } from '@/lib/threads';
-import { refresh, useBoxes } from '../stores/boxes.ts';
 import { cn } from '@/lib/utils';
+import type { BoxSummary, BoxWork, ThreadSummary } from '../../../shared/types.ts';
+import { api } from '../api.ts';
+import { refresh, useBoxes } from '../stores/boxes.ts';
+import { type BadgeKind, DOT, StatusBadge } from './StatusBadge';
 
 /**
  * A count with the thing it counts: "1 approval", "3 approvals".
@@ -96,10 +89,7 @@ export function BoxCard({ box }: { box: BoxSummary }) {
    *   Otherwise back from the new thread would land on the list twice.
    * @returns Whether the thread opened, so a caller knows whether to close its dialog.
    */
-  async function open(
-    work: () => Promise<ThreadSummary>,
-    replace = false,
-  ): Promise<boolean> {
+  async function open(work: () => Promise<ThreadSummary>, replace = false): Promise<boolean> {
     if (busy) return false;
     setBusy(true);
     setError(null);
@@ -297,8 +287,8 @@ export function BoxCard({ box }: { box: BoxSummary }) {
               <p className="text-xs text-muted-foreground">Reading what is running in it…</p>
             ) : boxWork === 'unreadable' ? (
               <p className="text-xs text-muted-foreground">
-                What is running in it could not be read. Stopping signals whatever the
-                orchestrator finds.
+                What is running in it could not be read. Stopping signals whatever the orchestrator
+                finds.
               </p>
             ) : boxWork.length === 0 ? (
               /* The badge is up to a poll old, so the work may have ended since. */

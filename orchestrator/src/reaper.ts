@@ -1,10 +1,10 @@
 import type { AgentStore } from './agents.ts';
+import type { BoxManager } from './boxes.ts';
 import type { Config } from './config.ts';
-import { refreshCredentials, type CredentialStore } from './credentials.ts';
-import { boxTurnActive, boxesWithActiveTurns, type Db, type BoxRow } from './db.ts';
+import { type CredentialStore, refreshCredentials } from './credentials.ts';
+import { type BoxRow, boxesWithActiveTurns, boxTurnActive, type Db } from './db.ts';
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
-import type { BoxManager } from './boxes.ts';
 import type { TunnelReconciler } from './tunnels.ts';
 
 /** The interval of the reaper, proxy and credential loops, in milliseconds. */
@@ -42,17 +42,11 @@ function loop(what: string, everyMs: number, tick: () => Promise<void>): { stop:
  * The same tick removes the runtime objects and the storage of boxes that no
  * longer exist. No row names them, so reconcile() at boot cannot find them.
  */
-export function startReaper(
-  db: Db,
-  cfg: Config,
-  manager: BoxManager,
-): { stop: () => void } {
+export function startReaper(db: Db, cfg: Config, manager: BoxManager): { stop: () => void } {
   const idleMs = cfg.IDLE_STOP_MINUTES * 60_000;
 
   const tick = async (): Promise<void> => {
-    const rows = db
-      .prepare("SELECT * FROM boxes WHERE status = 'running'")
-      .all() as BoxRow[];
+    const rows = db.prepare("SELECT * FROM boxes WHERE status = 'running'").all() as BoxRow[];
     const pendingCounts = manager.pending.countsByBox();
     // A box is busy when any of its threads has a turn running.
     const running = boxesWithActiveTurns(db);
@@ -108,10 +102,7 @@ export function startReaper(
  * Each box moves onto a new image at its next start, so nothing running is
  * disturbed. A failed pull is logged, and the image already here still works.
  */
-export function startImageRefresher(
-  cfg: Config,
-  manager: BoxManager,
-): { stop: () => void } {
+export function startImageRefresher(cfg: Config, manager: BoxManager): { stop: () => void } {
   if (cfg.BOX_IMAGE_PULL_MINUTES === 0) {
     log.info('box image refresh is off', { image: cfg.BOX_IMAGE });
     return { stop: () => {} };

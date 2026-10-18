@@ -2,9 +2,9 @@ import { randomBytes } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import type { WebSocket } from 'ws';
 import { parseTerminalControl } from '../../../shared/terminal.ts';
+import type { BoxManager } from '../boxes.ts';
 import { log } from '../log.ts';
 import { runtime } from '../runtime/runtime.ts';
-import type { BoxManager } from '../boxes.ts';
 
 /**
  * How many bytes one browser's socket may have waiting on it.
@@ -114,7 +114,12 @@ function reattachShell(client: string): string {
  * exec. The exec then ends with {@link NO_TERMINAL_SESSION} when the session
  * is gone.
  */
-async function openTerminal(target: Target, cols: number, rows: number, reattach?: string): Promise<TerminalExec> {
+async function openTerminal(
+  target: Target,
+  cols: number,
+  rows: number,
+  reattach?: string,
+): Promise<TerminalExec> {
   // Random rather than a counter, so the name cannot collide with a session
   // that an earlier orchestrator process left behind.
   const client = reattach ?? `web-${randomBytes(4).toString('hex')}`;
@@ -321,7 +326,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
         close(1000, 'box stopped');
         return;
       }
-      let opened;
+      let opened: TerminalExec;
       try {
         opened = await openTerminal(target, cols, rows, client);
       } catch (err) {
@@ -341,7 +346,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
   };
 
   void (async () => {
-    let target;
+    let target: Target;
     try {
       target = await manager.execTarget(boxId);
     } catch (err) {
@@ -352,7 +357,7 @@ export function attachTerminal(ws: WebSocket, boxId: string, manager: BoxManager
     await knownSize;
     if (closed) return;
 
-    let opened;
+    let opened: TerminalExec;
     try {
       opened = await openTerminal(target, cols, rows);
     } catch (err) {

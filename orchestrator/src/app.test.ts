@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'vitest';
-import Docker from 'dockerode';
-import { PassThrough } from 'node:stream';
 import {
   existsSync,
   mkdirSync,
@@ -13,12 +10,15 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
+import Docker from 'dockerode';
+import { afterEach, beforeEach, test } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
 import { config } from './config.ts';
-import { openDb, upsertHarnessCatalog, type Db } from './db.ts';
+import { type Db, openDb, upsertHarnessCatalog } from './db.ts';
 import * as dk from './docker.ts';
-import { inProcessFileService } from './files-in-process.ts';
 import { setFileServiceSpawnerForTests } from './files.ts';
+import { inProcessFileService } from './files-in-process.ts';
 import type { LoginExecSpec } from './login.ts';
 import { runtime } from './runtime/runtime.ts';
 import * as ws from './workspaces.ts';
@@ -115,7 +115,7 @@ beforeEach(async () => {
   killedInBox = [];
   dir = mkdtempSync(join(tmpdir(), 'boxes-app-'));
   // Before config(), which reads DATA_DIR once and keeps it for the process.
-  process.env['DATA_DIR'] = dir;
+  process.env.DATA_DIR = dir;
   db = openDb(dir);
   orchestrator = buildApp(config(), db);
   // The setup of a box writes the CA of the egress proxy into the home.
@@ -205,10 +205,7 @@ test('a running box is measured off the request path and reported on the list', 
   // The first list answers with no size rather than waiting for the walk it
   // starts. A card shows nothing; a zero would be a claim.
   const first = await orchestrator.app.inject({ url: '/api/boxes' });
-  assert.equal(
-    (first.json() as Array<{ diskBytes: number | null }>)[0]!.diskBytes,
-    null,
-  );
+  assert.equal((first.json() as Array<{ diskBytes: number | null }>)[0]!.diskBytes, null);
 
   assert.equal(await measuredSize('abc123'), 4096 + 2048);
 });
@@ -599,8 +596,8 @@ test('a deployment that cannot serve boxes is live but not ready', async () => {
   const body = ready.json() as { ready: boolean; checks: Record<string, boolean> };
   assert.equal(body.ready, false);
   // Of the three checks, only the database passes here.
-  assert.equal(body.checks['database'], true);
-  assert.equal(body.checks['egress'], false);
+  assert.equal(body.checks.database, true);
+  assert.equal(body.checks.egress, false);
 
   // Liveness says this process serves. A probe must not restart an
   // orchestrator that is only unconfigured.
@@ -624,18 +621,18 @@ test('every response is logged with what was asked and what came back', async ()
 
   const logged = lines
     .map((line) => JSON.parse(line) as Record<string, unknown>)
-    .filter((line) => line['msg'] === 'request');
+    .filter((line) => line.msg === 'request');
 
-  const ok = logged.find((line) => line['status'] === 200);
-  assert.equal(ok?.['method'], 'GET');
+  const ok = logged.find((line) => line.status === 200);
+  assert.equal(ok?.method, 'GET');
   // The query string is left off: it carries what the reader typed.
-  assert.equal(ok?.['path'], '/api/boxes');
-  assert.equal(typeof ok?.['ms'], 'number');
+  assert.equal(ok?.path, '/api/boxes');
+  assert.equal(typeof ok?.ms, 'number');
 
   // A refusal is the caller's problem, not the deployment's, so it is logged
   // as a warning.
-  const refused = logged.find((line) => line['status'] === 404);
-  assert.equal(refused?.['level'], 'warn');
+  const refused = logged.find((line) => line.status === 404);
+  assert.equal(refused?.level, 'warn');
 });
 
 // --- Web Push registration --------------------------------------------------
@@ -654,9 +651,7 @@ function subscription(endpoint = 'https://push.example.net/x/abc'): Record<strin
 
 /** Every stored subscription, as rows. */
 function subscriptions(): Array<Record<string, unknown>> {
-  return db.prepare('SELECT * FROM push_subscriptions').all() as Array<
-    Record<string, unknown>
-  >;
+  return db.prepare('SELECT * FROM push_subscriptions').all() as Array<Record<string, unknown>>;
 }
 
 test('the VAPID public key is served and stays the same across reads', async () => {
@@ -683,9 +678,7 @@ test('a browser registers once however many times it subscribes', async () => {
   // Re-subscribing hands back the same endpoint with fresh keys, which has to
   // update the row rather than add one.
   const rotated = subscription();
-  (rotated['keys'] as Record<string, string>)['auth'] = Buffer.alloc(16, 1).toString(
-    'base64url',
-  );
+  (rotated.keys as Record<string, string>).auth = Buffer.alloc(16, 1).toString('base64url');
   await orchestrator.app.inject({
     method: 'POST',
     url: '/api/push/subscribe',
@@ -694,7 +687,7 @@ test('a browser registers once however many times it subscribes', async () => {
 
   const rows = subscriptions();
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!['auth'], (rotated['keys'] as Record<string, string>)['auth']);
+  assert.equal(rows[0]!.auth, (rotated.keys as Record<string, string>).auth);
 });
 
 test('the health probe counts subscribed browsers', async () => {
@@ -727,7 +720,7 @@ test('an endpoint the orchestrator must not be aimed at is refused', async () =>
 
 test('a subscription with keys of the wrong size is refused', async () => {
   const bad = subscription();
-  (bad['keys'] as Record<string, string>)['p256dh'] = Buffer.alloc(32).toString('base64url');
+  (bad.keys as Record<string, string>).p256dh = Buffer.alloc(32).toString('base64url');
   const res = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/push/subscribe',
@@ -865,7 +858,13 @@ test('starting a container to reach into installs the current configuration firs
   // orchestrator's own rather than this test's fresh one.
   assert.equal(
     readFileSync(
-      join(ws.homePath(orchestrator.cfg.DATA_DIR, 'abc123'), '.claude', 'skills', 'ship', 'SKILL.md'),
+      join(
+        ws.homePath(orchestrator.cfg.DATA_DIR, 'abc123'),
+        '.claude',
+        'skills',
+        'ship',
+        'SKILL.md',
+      ),
       'utf8',
     ),
     'Open a PR.\n',
@@ -1005,13 +1004,10 @@ test('a listed box carries its own WebSocket token', async () => {
 
   // Each summary hands out the token of the box it is about, so a reader
   // of one box never learns what opens the one beside it.
-  assert.deepEqual(
-    listed.map((s) => [s.id, s.wsToken]).sort(),
-    [
-      ['abc123', 'token-abc123'],
-      ['def456', 'token-def456'],
-    ],
-  );
+  assert.deepEqual(listed.map((s) => [s.id, s.wsToken]).sort(), [
+    ['abc123', 'token-abc123'],
+    ['def456', 'token-def456'],
+  ]);
 });
 
 // --- request bodies over the real routes --------------------------------------
@@ -1134,7 +1130,7 @@ test('a credential nobody can use is refused rather than stored', async () => {
  * settings page calls.
  */
 function fakeLogins(): {
-  execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> ;
+  execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }>;
   removed: string[];
 } {
   const execs: Array<{ spec: LoginExecSpec; output: PassThrough; input: string }> = [];
@@ -1167,10 +1163,7 @@ function fakeLogins(): {
 }
 
 /** Waits for something a flow does on its own, or gives up loudly. */
-async function untilTrue(
-  what: string,
-  ready: () => boolean | Promise<boolean>,
-): Promise<void> {
+async function untilTrue(what: string, ready: () => boolean | Promise<boolean>): Promise<void> {
   for (let i = 0; i < 500; i += 1) {
     if (await ready()) return;
     await new Promise((resolve) => setTimeout(resolve, 2));
@@ -1195,9 +1188,7 @@ test('a login is started, polled, and cancelled over its own routes', async () =
   assert.deepEqual(first.json(), { state: 'starting' });
 
   await untilTrue('the CLI to be running', () => fake.execs.length === 1);
-  fake.execs[0]!.output.write(
-    'Open https://auth.openai.com/codex/device and enter WXYZ-1234\n',
-  );
+  fake.execs[0]!.output.write('Open https://auth.openai.com/codex/device and enter WXYZ-1234\n');
 
   let state = { state: 'starting' } as Record<string, unknown>;
   await untilTrue('the poll to move', async () => {
@@ -1205,7 +1196,7 @@ test('a login is started, polled, and cancelled over its own routes', async () =
       url: `/api/credentials/openai/login/${loginId}`,
     });
     state = res.json() as Record<string, unknown>;
-    return state['state'] === 'awaiting_browser';
+    return state.state === 'awaiting_browser';
   });
   assert.deepEqual(state, {
     state: 'awaiting_browser',
@@ -1496,9 +1487,9 @@ test('the harness list carries the registry, the catalogue and the health', asyn
 
 test('a thread reports the agent it runs and what it is configured with', async () => {
   insertBox('harn01');
-  db.prepare(
-    `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
-  ).run('harn01-t1');
+  db.prepare(`UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`).run(
+    'harn01-t1',
+  );
 
   const res = await orchestrator.app.inject({ url: '/api/boxes/harn01/threads' });
   assert.deepEqual(res.json(), [

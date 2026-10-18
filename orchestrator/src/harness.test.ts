@@ -1,6 +1,6 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { HARNESS_IDS, HARNESSES, harness, type Harness } from './harness.ts';
+import { test } from 'vitest';
+import { HARNESS_IDS, HARNESSES, type Harness, harness } from './harness.ts';
 
 /** Every harness in the registry. */
 const all: Harness[] = HARNESS_IDS.map((id) => HARNESSES[id]);
@@ -18,7 +18,8 @@ test('every harness fills in every field, in the right shape', () => {
     // that nothing in the box runs.
     assert.equal(h.processToken, h.cmd[0], `${h.id}: processToken`);
     assert.ok(Array.isArray(h.residentProcesses), `${h.id}: residentProcesses`);
-    for (const re of h.residentProcesses) assert.ok(re instanceof RegExp, `${h.id}: resident entry`);
+    for (const re of h.residentProcesses)
+      assert.ok(re instanceof RegExp, `${h.id}: resident entry`);
     assert.ok(h.defaultModeId.length > 0, `${h.id}: defaultModeId`);
     assert.ok(h.forkModeId.length > 0, `${h.id}: forkModeId`);
     // A fork asks questions about work the original is still doing, so it
@@ -71,8 +72,8 @@ test('env() is a fresh object each call, so a caller can edit what it gets', () 
   const first = HARNESSES.claude.env('a', 'token');
   const second = HARNESSES.claude.env('b', 'token');
   assert.notEqual(first, second);
-  assert.equal(first['CLAUDE_CODE_OAUTH_TOKEN'], 'a');
-  assert.equal(second['CLAUDE_CODE_OAUTH_TOKEN'], 'b');
+  assert.equal(first.CLAUDE_CODE_OAUTH_TOKEN, 'a');
+  assert.equal(second.CLAUDE_CODE_OAUTH_TOKEN, 'b');
 });
 
 test('the CA variables stay out of the registry: they belong to the deployment', () => {
@@ -136,7 +137,7 @@ test('the Codex entry matches what codex-acp reads', () => {
     DEFAULT_AUTH_REQUEST: '{"methodId":"api-key"}',
   });
   // The adapter's start mode and the mode of a new thread must match.
-  assert.equal(h.env('key', 'api_key')['INITIAL_AGENT_MODE'], h.defaultModeId);
+  assert.equal(h.env('key', 'api_key').INITIAL_AGENT_MODE, h.defaultModeId);
   assert.equal(h.alwaysBackground.size, 0);
 });
 

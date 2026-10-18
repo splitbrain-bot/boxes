@@ -170,12 +170,12 @@ export class ThreadLog {
    */
   private noteOptions(params: unknown): void {
     const update = (params as { update?: Record<string, unknown> } | null)?.update;
-    if (update?.['sessionUpdate'] === UPDATE_KIND.currentMode) {
-      if (typeof update['currentModeId'] === 'string') this.setMode(update['currentModeId']);
+    if (update?.sessionUpdate === UPDATE_KIND.currentMode) {
+      if (typeof update.currentModeId === 'string') this.setMode(update.currentModeId);
       return;
     }
-    if (update?.['sessionUpdate'] === UPDATE_KIND.configOption) {
-      const configOptions = update['configOptions'];
+    if (update?.sessionUpdate === UPDATE_KIND.configOption) {
+      const configOptions = update.configOptions;
       this.options = {
         ...this.options,
         configOptions: Array.isArray(configOptions) ? (configOptions as ThreadConfigOption[]) : [],

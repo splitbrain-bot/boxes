@@ -1,6 +1,6 @@
+import dns from 'node:dns';
 import http from 'node:http';
 import net from 'node:net';
-import dns from 'node:dns';
 import type { EgressPolicy } from '../../shared/types.ts';
 import { allAddressesAllowed, isBlockedAddress } from './cidr.ts';
 import { hostAllowed, isInjectionHost } from './policy.ts';
@@ -163,11 +163,9 @@ const HOP_BY_HOP_HEADERS = [
  * further headers that end at this hop, and every name is compared in lower
  * case.
  */
-export function forwardableHeaders(
-  headers: http.IncomingHttpHeaders,
-): http.IncomingHttpHeaders {
+export function forwardableHeaders(headers: http.IncomingHttpHeaders): http.IncomingHttpHeaders {
   const drop = new Set(HOP_BY_HOP_HEADERS);
-  const connection = headers['connection'];
+  const connection = headers.connection;
   const named = Array.isArray(connection) ? connection.join(',') : (connection ?? '');
   for (const name of named.split(',')) {
     const trimmed = name.trim().toLowerCase();
@@ -227,7 +225,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       return;
     }
 
-    if (req.headers['upgrade']) {
+    if (req.headers.upgrade) {
       // A forwarded upgrade would leave this proxy with a protocol it cannot
       // vet, and the request would never reach its response callback.
       res.writeHead(501, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -263,7 +261,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       if (res.destroyed) return;
 
       const headers = forwardableHeaders(req.headers);
-      headers['host'] = url.host;
+      headers.host = url.host;
 
       const upstream = http.request(
         {
@@ -424,7 +422,10 @@ function connectToEngine(
     engine.destroy();
   };
 
-  const handshake = setTimeout(() => failed('engine did not answer the CONNECT'), INTERCEPT_HANDSHAKE_MS);
+  const handshake = setTimeout(
+    () => failed('engine did not answer the CONNECT'),
+    INTERCEPT_HANDSHAKE_MS,
+  );
   handshake.unref?.();
 
   let banner = Buffer.alloc(0);

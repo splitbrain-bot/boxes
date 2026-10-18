@@ -1,9 +1,8 @@
 import { ArrowLeft, ExternalLink, FilePlus2, Send } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
-import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Notice } from '@/components/Notice';
-import { Shelf } from '@/components/Shelf';
 import { BasePicker } from '@/components/review/BasePicker';
 import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
@@ -11,20 +10,21 @@ import { ComposerSheet, InlineComposer } from '@/components/review/CommentCompos
 import { HunkSheet } from '@/components/review/HunkSheet';
 import { ReviewToolbar } from '@/components/review/ReviewToolbar';
 import { ReviewTree } from '@/components/review/ReviewTree';
+import { Shelf } from '@/components/Shelf';
 import { Button } from '@/components/ui/button';
-import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { useBox } from '@/hooks/use-box';
 import { useCodeEdit } from '@/hooks/use-code-edit';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useScrollAway } from '@/hooks/use-scroll-away';
-import { useBox } from '@/hooks/use-box';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
-import { anchorAt, rowOffsets, scrollForAnchor, type ScrollAnchor } from '@/lib/anchor';
+import { anchorAt, rowOffsets, type ScrollAnchor, scrollForAnchor } from '@/lib/anchor';
 import { withinLineLimit } from '@/lib/highlight';
 import { historyIndex } from '@/lib/history';
 import { stagePrompt } from '@/lib/staged-prompt';
 import { cn } from '@/lib/utils';
+import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
 import {
   closeFile,
   compose,
@@ -391,12 +391,14 @@ export function BoxReview() {
 
   /** Steps to the next or previous entry of a sorted line list. */
   const step = (lines: number[], direction: -1 | 1): void => {
-    if (lines.length === 0) return;
+    const first = lines[0];
+    const last = lines.at(-1);
+    if (first === undefined || last === undefined) return;
     const from = scrollTo?.line ?? (direction === 1 ? 0 : Number.MAX_SAFE_INTEGER);
     const next =
       direction === 1
-        ? (lines.find((line) => line > from) ?? lines[0]!)
-        : ([...lines].reverse().find((line) => line < from) ?? lines.at(-1)!);
+        ? (lines.find((line) => line > from) ?? first)
+        : ([...lines].reverse().find((line) => line < from) ?? last);
     // The nonce makes every press a new request, so the pane scrolls even when
     // the target line has not changed.
     setScrollTo((current) => ({ line: next, nonce: (current?.nonce ?? 0) + 1 }));
@@ -570,11 +572,7 @@ export function BoxReview() {
                   <p>This file is binary, so it cannot be shown here.</p>
                   {/* A plain link, so the browser handles the file by its type. */}
                   <Button asChild variant="outline" size="sm">
-                    <a
-                      href={rawHref(id, file.path)}
-                      target="_blank"
-                      rel="noopener"
-                    >
+                    <a href={rawHref(id, file.path)} target="_blank" rel="noopener">
                       <ExternalLink />
                       Open in a new tab
                     </a>

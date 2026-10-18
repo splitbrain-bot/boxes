@@ -12,13 +12,12 @@ import {
   BINARY_HEADER,
   FILE_ROUTES,
   FILES_PROTOCOL_VERSION,
+  type FindReposRequest,
   SIZE_HEADER,
   TRUNCATED_HEADER,
   VERSION_HEADER,
-  type FindReposRequest,
 } from '../../shared/files.ts';
 import { installAgentSet } from './agentset.ts';
-import { installSetupFiles } from './setupfiles.ts';
 import {
   createUnderFreeName,
   FileError,
@@ -30,9 +29,10 @@ import {
   removeFile,
   statPath,
   totalSize,
-  writeFile,
   type WriteCondition,
+  writeFile,
 } from './ops.ts';
+import { installSetupFiles } from './setupfiles.ts';
 
 /** The directories the file service works on. */
 export interface Roots {

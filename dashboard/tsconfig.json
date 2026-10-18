@@ -1,11 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -18,22 +14,11 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": [
-      "vite/client"
-    ],
+    "types": ["vite/client"],
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
+      "@/*": ["./src/*"]
     }
   },
-  "include": [
-    "src/**/*.ts",
-    "src/**/*.tsx",
-    "../shared/**/*.ts"
-  ],
-  "exclude": [
-    "src/**/*.test.ts",
-    "src/**/*.test.tsx"
-  ]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "../shared/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

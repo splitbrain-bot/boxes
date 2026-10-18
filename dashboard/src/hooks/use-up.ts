@@ -1,4 +1,4 @@
-import { useCallback, useRef, type MouseEvent } from 'react';
+import { type MouseEvent, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import { historyIndex } from '@/lib/history';
 

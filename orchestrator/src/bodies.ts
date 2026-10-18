@@ -22,7 +22,8 @@ import { HttpError } from './http-error.ts';
 export function parseBody<S extends z.ZodTypeAny>(schema: S, body: unknown): z.infer<S> {
   const parsed = schema.safeParse(body ?? {});
   if (parsed.success) return parsed.data;
-  const issue = parsed.error.issues[0]!;
+  const [issue] = parsed.error.issues;
+  if (!issue) throw new HttpError(400, 'invalid body');
   const field = issue.path.join('.');
   throw new HttpError(400, field ? `${field}: ${issue.message}` : issue.message);
 }

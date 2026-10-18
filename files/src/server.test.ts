@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { connect, type ClientHttp2Session, type OutgoingHttpHeaders } from 'node:http2';
+import { type ClientHttp2Session, connect, type OutgoingHttpHeaders } from 'node:http2';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Duplex, duplexPair } from 'node:stream';
@@ -116,7 +116,10 @@ describe('paths', () => {
     writeFileSync(join(dir, 'secret'), 'x');
     symlinkSync(dir, join(workspace, 'out'));
     symlinkSync(join(dir, 'secret'), join(workspace, 'link'));
-    assert.equal((await request('GET', at(FILE_ROUTES.read, 'out/secret', { cap: '10' }))).status, 403);
+    assert.equal(
+      (await request('GET', at(FILE_ROUTES.read, 'out/secret', { cap: '10' }))).status,
+      403,
+    );
     assert.equal((await request('GET', at(FILE_ROUTES.read, 'link', { cap: '10' }))).status, 403);
     assert.equal((await request('GET', at(FILE_ROUTES.raw, 'link'))).status, 403);
   });
@@ -227,7 +230,10 @@ describe('read', () => {
     const small = await request('GET', at(FILE_ROUTES.read, 'big.txt', { cap: '10' }));
     big[HASH_BYTES + 5] = 'b'.charCodeAt(0);
     put('big.txt', big);
-    const large = await request('GET', at(FILE_ROUTES.read, 'big.txt', { cap: String(HASH_BYTES) }));
+    const large = await request(
+      'GET',
+      at(FILE_ROUTES.read, 'big.txt', { cap: String(HASH_BYTES) }),
+    );
     assert.equal(small.headers.etag, large.headers.etag);
   });
 
@@ -281,9 +287,13 @@ describe('write', () => {
   });
 
   test('creates a file that must be absent, and refuses when it exists', async () => {
-    const first = await request('PUT', at(FILE_ROUTES.file, 'n.txt'), 'one', { 'if-none-match': '*' });
+    const first = await request('PUT', at(FILE_ROUTES.file, 'n.txt'), 'one', {
+      'if-none-match': '*',
+    });
     assert.equal(first.status, 204);
-    const second = await request('PUT', at(FILE_ROUTES.file, 'n.txt'), 'two', { 'if-none-match': '*' });
+    const second = await request('PUT', at(FILE_ROUTES.file, 'n.txt'), 'two', {
+      'if-none-match': '*',
+    });
     assert.equal(second.status, 412);
     assert.equal(readFileSync(join(workspace, 'n.txt'), 'utf8'), 'one');
     assert.deepEqual(readdirSync(workspace), ['n.txt']);
@@ -334,7 +344,11 @@ describe('create', () => {
     mkdirSync(join(workspace, 'att'));
     const names: unknown[] = [];
     for (let i = 0; i < 3; i++) {
-      const reply = await request('POST', at(FILE_ROUTES.create, 'att', { name: 'a.png' }), `n${i}`);
+      const reply = await request(
+        'POST',
+        at(FILE_ROUTES.create, 'att', { name: 'a.png' }),
+        `n${i}`,
+      );
       assert.equal(reply.status, 201);
       names.push((json(reply) as { name: string }).name);
     }
@@ -363,7 +377,11 @@ describe('size', () => {
 
 describe('setup files', () => {
   test('writes the body into the home', async () => {
-    const reply = await request('POST', FILE_ROUTES.setupFiles, await tarOf('.config/git/config', '[user]\n'));
+    const reply = await request(
+      'POST',
+      FILE_ROUTES.setupFiles,
+      await tarOf('.config/git/config', '[user]\n'),
+    );
     assert.equal(reply.status, 204);
     assert.equal(readFileSync(join(dir, 'home', '.config/git/config'), 'utf8'), '[user]\n');
   });
@@ -383,7 +401,11 @@ function tarOf(name: string, content: string): Promise<Buffer> {
 
 describe('agent set', () => {
   test('installs the body into the home', async () => {
-    const reply = await request('POST', FILE_ROUTES.agentSet, await tarOf('.claude/CLAUDE.md', 'rules'));
+    const reply = await request(
+      'POST',
+      FILE_ROUTES.agentSet,
+      await tarOf('.claude/CLAUDE.md', 'rules'),
+    );
     assert.equal(reply.status, 204);
     assert.equal(readFileSync(join(dir, 'home', '.claude/CLAUDE.md'), 'utf8'), 'rules');
   });

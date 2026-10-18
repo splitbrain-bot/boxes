@@ -1,8 +1,8 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
 import { Notice } from '@/components/Notice';
-import { withinLineLimit, type Token } from '@/lib/highlight';
+import { type Token, withinLineLimit } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
+import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
 /** The gutter bar class and row background class for each kind of changed line. */
@@ -169,6 +169,8 @@ export function CodePane({
   // Editing always wraps, because a textarea that scrolls sideways would move
   // apart from the rows behind it.
   const wrapped = wrap || editing;
+  // Lines removed at the top sit after no row, so their marker comes before the rows.
+  const firstDeletion = deletions.get(0);
 
   return (
     <div
@@ -194,12 +196,13 @@ export function CodePane({
           className={cn('relative min-w-full', editing && 'pb-[1.55em]')}
           style={{ '--review-gutter': gutterWidth(digits) } as React.CSSProperties}
         >
-          {deletions.has(0) && !editing ? (
-            <DeletionMarker hunkIndex={deletions.get(0)!} onShowHunk={onShowHunk} />
+          {firstDeletion !== undefined && !editing ? (
+            <DeletionMarker hunkIndex={firstDeletion} onShowHunk={onShowHunk} />
           ) : null}
 
           {lines.map((text, index) => (
             <Row
+              // biome-ignore lint/suspicious/noArrayIndexKey: the line number is the identity
               key={index + 1}
               line={index + 1}
               text={text}
@@ -468,6 +471,7 @@ function Tokens({ tokens }: { tokens: Token[] }) {
     <>
       {tokens.map((token, i) => (
         // The span carries both theme colours, and globals.css picks one.
+        // biome-ignore lint/suspicious/noArrayIndexKey: tokens have no id, and a line is replaced whole
         <span key={i} style={token.style as React.CSSProperties}>
           {token.content}
         </span>
@@ -522,4 +526,3 @@ function splitLines(content: string): string[] {
   if (lines.at(-1) === '') lines.pop();
   return lines;
 }
-

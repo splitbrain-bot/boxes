@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
+import { CODEX_LOGIN_OFFERED } from '../src/lib/harness.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
-import { CODEX_LOGIN_OFFERED } from '../src/lib/harness.ts';
 
 /**
  * Browser tests for the settings page.
@@ -44,7 +44,8 @@ for (const scheme of ['light', 'dark'] as const) {
 test('the Dev Tunnels card offers a login and no paste form', async () => {
   const { page, errors, close } = await openPage(stub.url, '/settings');
   try {
-    await expect.poll(() => page.getByRole('heading', { name: 'Dev Tunnels' }).isVisible())
+    await expect
+      .poll(() => page.getByRole('heading', { name: 'Dev Tunnels' }).isVisible())
       .toBe(true);
     await expect
       .poll(() => page.getByRole('button', { name: 'Log in to Dev Tunnels' }).isVisible())
@@ -172,7 +173,9 @@ test('an API key under a name Boxes sets itself is refused', async () => {
     await page.getByLabel('Key', { exact: true }).fill('sk-whatever1234');
     await page.getByRole('button', { name: 'Add key' }).click();
 
-    await expect.poll(() => page.getByText(/GH_TOKEN is set by Boxes itself/).isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText(/GH_TOKEN is set by Boxes itself/).isVisible())
+      .toBe(true);
     expect(await stub.apiKeys()).toEqual([]);
   } finally {
     await close();
@@ -244,14 +247,16 @@ codexLogin('a Codex login shows the URL and the code, and the account with it', 
       .poll(() => page.getByText('https://auth.openai.com/codex/device').isVisible())
       .toBe(true);
     await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(true);
-    await expect.poll(() => page.getByText(/Open this link and enter the code/).isVisible())
+    await expect
+      .poll(() => page.getByText(/Open this link and enter the code/).isVisible())
       .toBe(true);
     expect(stub.logins.map((l) => l.id)).toEqual(['openai']);
 
     // The CLI finishes by itself. On its next poll the page swaps the flow for
     // the stored account.
     stub.logins[0]!.exit(0);
-    await expect.poll(() => page.getByText(/Signed in as agent@example.com/).isVisible())
+    await expect
+      .poll(() => page.getByText(/Signed in as agent@example.com/).isVisible())
       .toBe(true);
     await expect.poll(() => page.getByText('WDJB-MJHT').isVisible()).toBe(false);
     expect((await stub.credentials()).map((c) => [c.id, c.method])).toEqual([

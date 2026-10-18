@@ -1,7 +1,7 @@
 import { describe, it } from 'vitest';
 import { loadConfig } from '../config.ts';
 import { runtimeConformance } from './conformance.ts';
-import { KubernetesRuntime, connect, names } from './kubernetes.ts';
+import { connect, KubernetesRuntime, names } from './kubernetes.ts';
 
 /**
  * The conformance suite against the Kubernetes cluster of the kubeconfig
@@ -19,7 +19,7 @@ import { KubernetesRuntime, connect, names } from './kubernetes.ts';
 const CONTROL_PORT = 3129;
 
 /** The kubeconfig context the suite runs against. */
-const context = process.env['BOXES_CONFORMANCE_CONTEXT'];
+const context = process.env.BOXES_CONFORMANCE_CONTEXT;
 
 if (context) {
   runtimeConformance('Kubernetes', async () => {

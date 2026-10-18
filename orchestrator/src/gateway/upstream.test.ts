@@ -1,30 +1,30 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import Docker from 'dockerode';
-import { Duplex, Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { config } from '../config.ts';
-import { setLogLevel } from '../log.ts';
-import { openDb, readHarnessCatalog, type Db } from '../db.ts';
-import * as dk from '../docker.ts';
-import { ApiKeyStore } from '../api-keys.ts';
-import { CredentialStore } from '../credentials.ts';
-import { EgressManager } from '../egress.ts';
-import { Notifier, type NotifyEvent } from '../notify.ts';
+import { Duplex, Readable } from 'node:stream';
+import Docker from 'dockerode';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
 import { AgentStore } from '../agents.ts';
+import { ApiKeyStore } from '../api-keys.ts';
 import { BoxManager } from '../boxes.ts';
+import { config } from '../config.ts';
+import { CredentialStore } from '../credentials.ts';
+import { type Db, openDb, readHarnessCatalog } from '../db.ts';
+import * as dk from '../docker.ts';
+import { EgressManager } from '../egress.ts';
+import { setLogLevel } from '../log.ts';
+import { Notifier, type NotifyEvent } from '../notify.ts';
 import { DockerRuntime } from '../runtime/docker.ts';
 import { setRuntime } from '../runtime/runtime.ts';
 import * as ws from '../workspaces.ts';
-import { HISTORY_LOADING, THREAD_WORKING, type DownstreamHandle } from './upstream.ts';
-import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
+import { type DownstreamHandle, HISTORY_LOADING, THREAD_WORKING } from './upstream.ts';
 
 // A turn is announced once its thread has gone quiet, so these tests wait for
 // that. Set to the shortest the config allows, before anything reads it.
-process.env['AGENT_QUIET_SECONDS'] = '1';
-process.env['AGENT_SETTLE_SECONDS'] = '1';
+process.env.AGENT_QUIET_SECONDS = '1';
+process.env.AGENT_SETTLE_SECONDS = '1';
 
 /** One frame of a Docker-multiplexed stream, on stdout. */
 function frame(text: string): Buffer {
@@ -270,7 +270,7 @@ beforeEach(async () => {
     return true;
   });
   dir = mkdtempSync(join(tmpdir(), 'boxes-upstream-'));
-  process.env['DATA_DIR'] = dir;
+  process.env.DATA_DIR = dir;
   db = openDb(dir);
   const cfg = config();
   announced = [];
@@ -409,10 +409,10 @@ test('a thread the adapter has forgotten is re-minted, and the others are left a
 
   // The latest thread keeps its row and its ordinal, and gets the freshly
   // minted conversation.
-  assert.equal(thread('t1')['acp_session_id'], 'acp-fresh');
-  assert.equal(thread('t1')['ordinal'], 1);
+  assert.equal(thread('t1').acp_session_id, 'acp-fresh');
+  assert.equal(thread('t1').ordinal, 1);
   // The box's other thread has a transcript of its own and is untouched.
-  assert.equal(thread('t2')['acp_session_id'], 'acp-kept');
+  assert.equal(thread('t2').acp_session_id, 'acp-kept');
   const count = db.prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number };
   assert.equal(count.n, 2);
 });
@@ -426,7 +426,7 @@ test('a thread the adapter still holds is replayed rather than replaced', async 
 
   await manager.upstream('s1').ensureStarted();
 
-  assert.equal(thread('t1')['acp_session_id'], 'acp-gone');
+  assert.equal(thread('t1').acp_session_id, 'acp-gone');
   assert.ok(adapter.seen.includes('session/load'));
   assert.ok(!adapter.seen.includes('session/new'));
 });
@@ -445,8 +445,8 @@ test('a box with no thread yet gets its first one recorded', async () => {
 
   const rows = db.prepare('SELECT * FROM threads').all() as Array<Record<string, unknown>>;
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!['acp_session_id'], 'acp-first');
-  assert.equal(rows[0]!['ordinal'], 1);
+  assert.equal(rows[0]!.acp_session_id, 'acp-first');
+  assert.equal(rows[0]!.ordinal, 1);
   assert.ok(!adapter.seen.includes('session/load'));
 });
 
@@ -535,8 +535,8 @@ test('a title the adapter reports lands on the thread it is about', async () => 
     ),
   );
 
-  await expect.poll(() => thread('t2')['title']).toBe('Refactor the proxy');
-  assert.equal(thread('t1')['title'], null);
+  await expect.poll(() => thread('t2').title).toBe('Refactor the proxy');
+  assert.equal(thread('t1').title, null);
 });
 
 test('a thread with no title is named after the prompt sent on it', async () => {
@@ -553,15 +553,15 @@ test('a thread with no title is named after the prompt sent on it', async () => 
       { type: 'text', text: '  Make the proxy stop\nlogging bodies  ' },
     ],
   });
-  assert.equal(thread('t1')['title'], 'Make the proxy stop');
-  assert.equal(thread('t2')['title'], null, 'only the thread prompted is named');
+  assert.equal(thread('t1').title, 'Make the proxy stop');
+  assert.equal(thread('t2').title, null, 'only the thread prompted is named');
 
   // A later prompt does not rename the thread. Only the agent replaces a name.
   await up.forwardRequest('session/prompt', {
     sessionId: 'acp-gone',
     prompt: [{ type: 'text', text: 'and the headers' }],
   });
-  assert.equal(thread('t1')['title'], 'Make the proxy stop');
+  assert.equal(thread('t1').title, 'Make the proxy stop');
 });
 
 test('a prompt with nothing to name a thread after leaves it on its ordinal', async () => {
@@ -573,7 +573,7 @@ test('a prompt with nothing to name a thread after leaves it on its ordinal', as
     sessionId: 'acp-gone',
     prompt: [{ type: 'image', data: 'x', mimeType: 'image/png' }],
   });
-  assert.equal(thread('t1')['title'], null);
+  assert.equal(thread('t1').title, null);
 });
 
 test('a new thread is minted, recorded and becomes the latest', async () => {
@@ -603,7 +603,7 @@ test('a fork asks the adapter to branch the named thread', async () => {
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === 'session/fork') {
-      forkedFrom = msg.params?.['sessionId'];
+      forkedFrom = msg.params?.sessionId;
       return { sessionId: 'acp-branch' };
     }
     return {};
@@ -616,7 +616,7 @@ test('a fork asks the adapter to branch the named thread', async () => {
   assert.equal(forkedFrom, 'acp-kept');
   assert.equal(created.acpSessionId, 'acp-branch');
   // The source is left exactly as it was; a fork branches rather than moves.
-  assert.equal(thread('t2')['acp_session_id'], 'acp-kept');
+  assert.equal(thread('t2').acp_session_id, 'acp-kept');
 });
 
 test('forking a thread of another box is a 404 rather than a fork', async () => {
@@ -651,9 +651,9 @@ test('a prompt sets the running-turn flag on its own thread and no other', async
     sessionId: 'acp-gone',
     prompt: [{ type: 'text', text: 'a long job' }],
   });
-  await expect.poll(() => thread('t1')['turn_active']).toBe(1);
+  await expect.poll(() => thread('t1').turn_active).toBe(1);
   // The box's other conversation is not running anything.
-  assert.equal(thread('t2')['turn_active'], 0);
+  assert.equal(thread('t2').turn_active, 0);
   // And the box's own answer is derived from its threads.
   const summary = await manager.detail('s1');
   assert.equal(summary.turnActive, true);
@@ -664,7 +664,7 @@ test('a prompt sets the running-turn flag on its own thread and no other', async
 
   releasePrompt();
   await inFlight;
-  await expect.poll(() => thread('t1')['turn_active']).toBe(0);
+  await expect.poll(() => thread('t1').turn_active).toBe(0);
   assert.equal((await manager.detail('s1')).turnActive, false);
 });
 
@@ -771,7 +771,7 @@ test('a respawn re-issues session/load for every watched thread', async () => {
       new FakeAdapter((msg) => {
         if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
         if (msg.method === 'session/load') {
-          loaded.push(String(msg.params?.['sessionId']));
+          loaded.push(String(msg.params?.sessionId));
           return {};
         }
         return {};
@@ -801,7 +801,7 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
         if (msg.method === 'session/load') {
           // The default thread always comes back; the watched one is gone by
           // the time the adapter restarts.
-          if (msg.params?.['sessionId'] === 'acp-kept' && firstLoadDone) {
+          if (msg.params?.sessionId === 'acp-kept' && firstLoadDone) {
             return new Error('Session not found');
           }
           return {};
@@ -823,7 +823,7 @@ test('a respawn that cannot bring a watched thread back drops its browsers', asy
   // Its pinned id is one the adapter would now reject, so its socket is
   // closed: the browser reconnects and pins whatever that thread is next.
   assert.equal(stranded.closed, 1);
-  assert.equal(thread('t2')['acp_session_id'], null);
+  assert.equal(thread('t2').acp_session_id, null);
 });
 
 test('a respawn that re-mints the latest thread drops the browsers on its old id', async () => {
@@ -836,7 +836,7 @@ test('a respawn that re-mints the latest thread drops the browsers on its old id
           // The latest thread's own transcript is gone by the time the
           // adapter restarts, so its stored id is re-minted rather than
           // loaded back.
-          if (msg.params?.['sessionId'] === 'acp-gone' && firstLoadDone) {
+          if (msg.params?.sessionId === 'acp-gone' && firstLoadDone) {
             return new Error('Session not found');
           }
           return {};
@@ -858,7 +858,7 @@ test('a respawn that re-mints the latest thread drops the browsers on its old id
   // The row names the fresh conversation now, so the id this browser is
   // pinned to belongs to no thread at all: its socket is closed, and its
   // handshake pins whatever the thread is next.
-  assert.equal(thread('t1')['acp_session_id'], 'acp-fresh');
+  assert.equal(thread('t1').acp_session_id, 'acp-fresh');
   assert.equal(stranded.closed, 1);
 });
 
@@ -906,7 +906,7 @@ test('pinning to a thread the adapter has forgotten mints one for it', async () 
   // No transcript is lost, so a fresh conversation in that row repairs it,
   // and the pinned id is a live one.
   assert.equal(await up.pin(handle, 't2'), 'acp-minted');
-  assert.equal(thread('t2')['acp_session_id'], 'acp-minted');
+  assert.equal(thread('t2').acp_session_id, 'acp-minted');
 });
 
 test('a fork starts in plan mode where a fresh thread starts in auto', async () => {
@@ -925,7 +925,7 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh', modes };
     if (msg.method === 'session/fork') return { sessionId: 'acp-branch', modes };
     if (msg.method === 'session/set_mode') {
-      modeSet.push({ session: msg.params?.['sessionId'], mode: msg.params?.['modeId'] });
+      modeSet.push({ session: msg.params?.sessionId, mode: msg.params?.modeId });
       return {};
     }
     return {};
@@ -977,11 +977,11 @@ function forgetfulAdapter(asked: string[]): {
         if (msg.method === 'session/new') return { sessionId: 'acp-gone', ...state() };
         if (msg.method === 'session/load') return state();
         if (msg.method === 'session/set_mode') {
-          asked.push(`mode ${String(msg.params?.['modeId'])}`);
+          asked.push(`mode ${String(msg.params?.modeId)}`);
           return {};
         }
         if (msg.method === 'session/set_config_option') {
-          asked.push(`model ${String(msg.params?.['value'])}`);
+          asked.push(`model ${String(msg.params?.value)}`);
           return {};
         }
         return {};
@@ -1008,7 +1008,7 @@ test('a respawn puts a loaded thread back in the mode it was left in', async () 
   asked.length = 0;
   await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'plan' });
   assert.deepEqual(asked, ['mode plan']);
-  assert.equal(thread('t1')['mode_id'], 'plan');
+  assert.equal(thread('t1').mode_id, 'plan');
 
   // The idle reaper stops the box, and returning to it starts it again.
   // The adapter is a fresh process in `default`; the thread is put back.
@@ -1029,7 +1029,7 @@ test("a respawn honours the adapter's own mode change over the last one asked fo
   // An adapter leaves plan mode by itself once a plan is accepted, and says
   // so.
   adapter.notify({ sessionUpdate: 'current_mode_update', currentModeId: 'auto' });
-  await expect.poll(() => thread('t1')['mode_id']).toBe('auto');
+  await expect.poll(() => thread('t1').mode_id).toBe('auto');
 
   asked.length = 0;
   up.stop();
@@ -1050,7 +1050,7 @@ test('a respawn puts a loaded thread back on the model it was left on', async ()
     sessionUpdate: 'config_option_update',
     configOptions: [{ id: 'model', category: 'model', currentValue: 'sonnet' }],
   });
-  await expect.poll(() => thread('t1')['config']).toBe('{"model":"sonnet"}');
+  await expect.poll(() => thread('t1').config).toBe('{"model":"sonnet"}');
 
   // Left on sonnet, so it comes back on sonnet. The harness default applies
   // only to a thread nobody has chosen a model for.
@@ -1086,7 +1086,7 @@ function twoThreadAdapter(asked: string[], gone: Set<string> = new Set()): () =>
   });
   return () =>
     new FakeAdapter((msg) => {
-      const session = String(msg.params?.['sessionId'] ?? '');
+      const session = String(msg.params?.sessionId ?? '');
       if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
       if (msg.method === 'session/new') return { sessionId: 'acp-minted', ...state() };
       if (msg.method === 'session/load') {
@@ -1095,11 +1095,11 @@ function twoThreadAdapter(asked: string[], gone: Set<string> = new Set()): () =>
         return state();
       }
       if (msg.method === 'session/set_mode') {
-        asked.push(`mode ${session} ${String(msg.params?.['modeId'])}`);
+        asked.push(`mode ${session} ${String(msg.params?.modeId)}`);
         return {};
       }
       if (msg.method === 'session/set_config_option') {
-        asked.push(`model ${session} ${String(msg.params?.['value'])}`);
+        asked.push(`model ${session} ${String(msg.params?.value)}`);
         return {};
       }
       return {};
@@ -1138,9 +1138,9 @@ test('opening a thread the spawn did not load brings it up in its own mode', asy
 test('re-minting the latest thread keeps the mode and model its row remembers', async () => {
   // A thread minted and never prompted: the row remembers what it was put
   // into, and the adapter has no transcript to bring back.
-  db.prepare(
-    `UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`,
-  ).run('t1');
+  db.prepare(`UPDATE threads SET mode_id = 'plan', config = '{"model":"opus"}' WHERE id = ?`).run(
+    't1',
+  );
   const asked: string[] = [];
   fakeDocker(twoThreadAdapter(asked, new Set(['acp-gone'])));
   const up = manager.upstream('s1');
@@ -1148,7 +1148,7 @@ test('re-minting the latest thread keeps the mode and model its row remembers', 
 
   // A fresh conversation in that row, but not a fresh thread: `plan`, not the
   // `auto` a thread nobody has chosen for starts in.
-  assert.equal(thread('t1')['acp_session_id'], 'acp-minted');
+  assert.equal(thread('t1').acp_session_id, 'acp-minted');
   assert.deepEqual(asked, ['mode acp-minted plan', 'model acp-minted opus']);
 });
 
@@ -1177,12 +1177,12 @@ function forkingAdapter(history: Record<string, string>): FakeAdapter {
     }
     if (msg.method === 'session/fork') {
       branches += 1;
-      forkedFrom.push(msg.params?.['sessionId']);
+      forkedFrom.push(msg.params?.sessionId);
       return { sessionId: `acp-branch-${branches}` };
     }
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     if (msg.method === 'session/load') {
-      const of = String(msg.params?.['sessionId']);
+      const of = String(msg.params?.sessionId);
       loaded.push(of);
       const said = history[of];
       if (said) {
@@ -1226,7 +1226,7 @@ test('a fork with no transcript of its own is shown the one it came from', async
     },
   ]);
   assert.deepEqual(loaded, []);
-  assert.equal(thread(created.id)['inherits_from'], 't2');
+  assert.equal(thread(created.id).inherits_from, 't2');
 });
 
 test('forking a thread no browser has opened loads it first, for the fork to copy', async () => {
@@ -1264,7 +1264,7 @@ test('a fork stops borrowing the moment it is prompted', async () => {
   // here a restart loads the fork itself rather than branching the source
   // again. What the browser is sent does not change: the conversation the
   // fork carries, and then what was said on the fork.
-  assert.equal(thread(created.id)['inherits_from'], null);
+  assert.equal(thread(created.id).inherits_from, null);
   assert.deepEqual(loaded, []);
   assert.deepEqual(
     reader.told.map((p) => (p as { update: { content: { text: string } } }).update.content.text),
@@ -1287,7 +1287,7 @@ test('a fork the adapter has forgotten is branched again rather than started emp
   // source's context, and a restart is not the user changing their mind.
   assert.equal(await up.pin(handle, created.id), 'acp-branch-2');
   assert.deepEqual(forkedFrom, ['acp-kept', 'acp-kept']);
-  assert.equal(thread(created.id)['inherits_from'], 't2');
+  assert.equal(thread(created.id).inherits_from, 't2');
 });
 
 test('a fork whose source is gone too is started empty rather than left unpinnable', async () => {
@@ -1338,7 +1338,7 @@ function transcriptAdapter(history: Record<string, Array<Record<string, unknown>
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh' };
     if (msg.method === 'session/load') {
-      const of = String(msg.params?.['sessionId']);
+      const of = String(msg.params?.sessionId);
       loaded.push(of);
       for (const update of history[of] ?? []) {
         adapter.notify('session/update', { sessionId: of, update });
@@ -1555,7 +1555,7 @@ test('a prompt is refused while the full history loads', async () => {
   let release = (): void => {};
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
-    if (msg.method === 'session/load' && msg.params?.['sessionId'] === 'acp-kept') {
+    if (msg.method === 'session/load' && msg.params?.sessionId === 'acp-kept') {
       loads++;
       // The first load brings the thread up. The second one is the full
       // history, and it waits.
@@ -1607,7 +1607,7 @@ test("a browser's load answers with the thread's modes and options", async () =>
     sessionId: 'acp-gone',
     update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' },
   });
-  await expect.poll(() => thread('t1')['mode_id']).toBe('plan');
+  await expect.poll(() => thread('t1').mode_id).toBe('plan');
 
   // What the adapter answered when the gateway loaded the thread, kept
   // current: the browser's own load never reaches the adapter.
@@ -1639,7 +1639,7 @@ async function loadAnswer(
   return {
     mode: answer.modes?.currentModeId,
     config: Object.fromEntries(
-      answer.configOptions.map((option) => [option['id'], option['currentValue']]),
+      answer.configOptions.map((option) => [option.id, option.currentValue]),
     ),
   };
 }
@@ -1697,11 +1697,11 @@ test('a mode the adapter falls back from is shown as the one it fell back to', a
   const adapter: FakeAdapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === 'session/load') return { modes: modes() };
-    if (msg.method === 'session/set_mode' && msg.params?.['modeId'] === 'auto') {
+    if (msg.method === 'session/set_mode' && msg.params?.modeId === 'auto') {
       // Auto mode is not available to this account, and the adapter says so
       // before it answers.
       adapter.notify('session/update', {
-        sessionId: msg.params?.['sessionId'],
+        sessionId: msg.params?.sessionId,
         update: { sessionUpdate: 'current_mode_update', currentModeId: 'default' },
       });
       return {};
@@ -1715,13 +1715,13 @@ test('a mode the adapter falls back from is shown as the one it fell back to', a
   up.attach(reader);
   await up.ensureStarted();
   assert.equal((await loadAnswer(up, reader, 'acp-gone')).mode, 'default');
-  assert.equal(thread('t1')['mode_id'], 'default');
+  assert.equal(thread('t1').mode_id, 'default');
 
   // A browser asking for it gets the same fallback, and the row records the
   // fallback rather than the ask. Otherwise the next restart asks again.
   await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'auto' });
   assert.equal((await loadAnswer(up, reader, 'acp-gone')).mode, 'default');
-  assert.equal(thread('t1')['mode_id'], 'default');
+  assert.equal(thread('t1').mode_id, 'default');
 
   // A refused change leaves the mode where it was.
   await expect(
@@ -2007,8 +2007,8 @@ test('a task the adapter announces belongs to the thread it names', async () => 
   // The other conversation of the same box is told nothing.
   assert.deepEqual(up.threadState('acp-kept').background, []);
   // The watching browser is told without asking.
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(
     told.at(-1)?.background.map((task) => task.command),
@@ -2041,8 +2041,8 @@ test('a task that ends takes its own bar away', async () => {
     update: { sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' },
   });
   await expect.poll(() => up.threadState('acp-gone').background.length).toBe(0);
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(told.at(-1)?.background, []);
 });
@@ -2067,8 +2067,8 @@ test('an adapter that dies drops its tasks and re-sends the threads it had', asy
 
   live.destroy();
   await expect.poll(() => up.threadState('acp-gone').background.length).toBe(0);
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(told.at(-1)?.background, []);
 });
@@ -2213,7 +2213,7 @@ test('a stop with no task named stops everything that thread is running', async 
   const adapter = new FakeAdapter((msg) => {
     if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
     if (msg.method === '_session/async_task/stop') {
-      stops.push(String(msg.params?.['asyncTaskId']));
+      stops.push(String(msg.params?.asyncTaskId));
       return { stopped: true };
     }
     return {};
@@ -2252,8 +2252,8 @@ test('a task that was already over is taken off the bar anyway', async () => {
 
   assert.equal(await up.stopBackgroundWork('acp-gone', 'task-1'), 0);
   assert.deepEqual(up.threadState('acp-gone').background, []);
-  const told = watcher.told.filter(
-    (params) => Array.isArray((params as TurnStateParams).background),
+  const told = watcher.told.filter((params) =>
+    Array.isArray((params as TurnStateParams).background),
   ) as TurnStateParams[];
   assert.deepEqual(told.at(-1)?.background, []);
 });
@@ -2591,7 +2591,7 @@ function harnessAdapter(
 ): () => FakeAdapter {
   return () =>
     new FakeAdapter((msg) => {
-      const session = String(msg.params?.['sessionId'] ?? '');
+      const session = String(msg.params?.sessionId ?? '');
       const answer = answers(msg);
       if (answer !== undefined) {
         seen.push(`${tag} ${String(msg.method)} ${session}`.trim());
@@ -2694,8 +2694,8 @@ test('each thread is served by its own harness, and only its own is started', as
   });
   assert.deepEqual(seen, ['codex session/prompt cx-1', 'claude session/prompt acp-gone']);
   // Each turn was recorded against its own thread, whichever adapter ran it.
-  assert.equal(thread('t3')['title'], 'what does this repo do');
-  assert.equal(thread('t1')['title'], 'and refactor it');
+  assert.equal(thread('t3').title, 'what does this repo do');
+  assert.equal(thread('t1').title, 'and refactor it');
 });
 
 test('initialize is answered by the adapter holding the thread that asked', async () => {
@@ -2742,47 +2742,42 @@ test('initialize is answered by the adapter holding the thread that asked', asyn
   );
 });
 
-test(
-  'an adapter that will not start costs the box only its own threads',
-  async () => {
-    seedThread('t3', 'codex', 'cx-1', 3);
-    const seen: string[] = [];
-    fakeDocker({
-      'claude-agent-acp': harnessAdapter(seen, 'claude'),
-      // The stand-in throws on every message, so no handshake succeeds.
-      'codex-acp': () =>
-        new FakeAdapter(() => {
-          throw new Error('codex-acp: not installed in this image');
-        }),
-    });
+test('an adapter that will not start costs the box only its own threads', async () => {
+  seedThread('t3', 'codex', 'cx-1', 3);
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    // The stand-in throws on every message, so no handshake succeeds.
+    'codex-acp': () =>
+      new FakeAdapter(() => {
+        throw new Error('codex-acp: not installed in this image');
+      }),
+  });
 
-    const up = manager.upstream('s1');
-    await up.ensureStarted();
-    const handle = fakeHandle(1, null);
-    up.attach(handle);
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const handle = fakeHandle(1, null);
+  up.attach(handle);
 
-    // Three attempts and then the box is in error, because a thread of
-    // this box cannot be opened at all.
-    await assert.rejects(() => up.pin(handle, 't3'));
-    assert.deepEqual(
-      spawned.filter((cmd) => cmd === 'codex-acp'),
-      ['codex-acp', 'codex-acp', 'codex-acp'],
-    );
+  // Three attempts and then the box is in error, because a thread of
+  // this box cannot be opened at all.
+  await assert.rejects(() => up.pin(handle, 't3'));
+  assert.deepEqual(
+    spawned.filter((cmd) => cmd === 'codex-acp'),
+    ['codex-acp', 'codex-acp', 'codex-acp'],
+  );
 
-    // And the other adapter is untouched: its conversation is still up, and a
-    // prompt on it runs.
-    seen.length = 0;
-    await up.forwardRequest('session/prompt', {
-      sessionId: 'acp-gone',
-      prompt: [{ type: 'text', text: 'carry on' }],
-    });
-    assert.deepEqual(seen, ['claude session/prompt acp-gone']);
-    assert.equal(up.initializeFor('acp-gone') !== null, true);
-    assert.equal(up.initializeFor('cx-1'), null);
-  },
-  // Two backoffs — one second and three — between the three attempts.
-  20_000,
-);
+  // And the other adapter is untouched: its conversation is still up, and a
+  // prompt on it runs.
+  seen.length = 0;
+  await up.forwardRequest('session/prompt', {
+    sessionId: 'acp-gone',
+    prompt: [{ type: 'text', text: 'carry on' }],
+  });
+  assert.deepEqual(seen, ['claude session/prompt acp-gone']);
+  assert.equal(up.initializeFor('acp-gone') !== null, true);
+  assert.equal(up.initializeFor('cx-1'), null);
+}, 20_000); // Two backoffs — one second and three — between the three attempts.
 
 test('an adapter with no credential is not retried, and is kept up', async () => {
   seedThread('t3', 'codex', 'cx-1', 3);
@@ -2889,19 +2884,19 @@ function configurableAdapter(asked: string[]): () => FakeAdapter {
       if (msg.method === 'session/new') return { sessionId: 'acp-gone', ...state() };
       if (msg.method === 'session/load') return state();
       if (msg.method === 'session/set_mode') {
-        asked.push(`mode ${String(msg.params?.['modeId'])}`);
+        asked.push(`mode ${String(msg.params?.modeId)}`);
         return {};
       }
       if (msg.method === 'session/set_config_option') {
-        const id = String(msg.params?.['configId']);
-        const value = String(msg.params?.['value']);
+        const id = String(msg.params?.configId);
+        const value = String(msg.params?.value);
         asked.push(`${id} ${value}`);
         // Both adapters answer with the whole list, which is what the gateway
         // records: the value the adapter settled on, not the one it was asked
         // for.
         const answer = state();
-        const options = answer['configOptions'] as Array<Record<string, unknown>>;
-        for (const option of options) if (option['id'] === id) option['currentValue'] = value;
+        const options = answer.configOptions as Array<Record<string, unknown>>;
+        for (const option of options) if (option.id === id) option.currentValue = value;
         return answer;
       }
       return {};
@@ -2937,15 +2932,15 @@ test('a setting changed through the gateway is recorded, and the mode is not', a
   });
   // Recorded from the adapter's own answer, merged over what the row holds:
   // the thread was already on opus, by its harness's default.
-  assert.deepEqual(JSON.parse(String(thread('t1')['config'])), {
+  assert.deepEqual(JSON.parse(String(thread('t1').config)), {
     model: 'opus',
     effort: 'high',
   });
 
   // The mode is recorded in `mode_id` only, never in the config map.
   await up.forwardRequest('session/set_mode', { sessionId: 'acp-gone', modeId: 'auto' });
-  assert.equal(thread('t1')['mode_id'], 'auto');
-  assert.deepEqual(JSON.parse(String(thread('t1')['config'])), {
+  assert.equal(thread('t1').mode_id, 'auto');
+  assert.deepEqual(JSON.parse(String(thread('t1').config)), {
     model: 'opus',
     effort: 'high',
   });
@@ -2982,11 +2977,9 @@ test('a setting the adapter reports on its own is recorded, the mode excluded', 
     },
   });
 
-  await expect
-    .poll(() => thread('t1')['config'])
-    .toBe('{"model":"sonnet","effort":"high"}');
+  await expect.poll(() => thread('t1').config).toBe('{"model":"sonnet","effort":"high"}');
   // The mode in the same message is skipped, because it is not a setting.
-  assert.equal(thread('t1')['mode_id'], null);
+  assert.equal(thread('t1').mode_id, null);
 });
 
 test('a thread is created on the harness and settings it was asked for', async () => {
@@ -3068,7 +3061,7 @@ test('pinning to the thread a spawn already brought back does not replay it twic
       new FakeAdapter((msg) => {
         if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
         if (msg.method === 'session/load') {
-          loads.push(String(msg.params?.['sessionId']));
+          loads.push(String(msg.params?.sessionId));
           return {};
         }
         return {};

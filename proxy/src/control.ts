@@ -109,7 +109,7 @@ export function createControlServer(opts: ControlOptions): ControlServer {
    * it with the token it presents, and every other request is refused.
    */
   const authorize = (req: http.IncomingMessage): boolean => {
-    const header = req.headers['authorization'];
+    const header = req.headers.authorization;
     const value = Array.isArray(header) ? header[0] : header;
     const presented = /^bearer\s+(.+)$/i.exec(value ?? '')?.[1]?.trim();
     if (!presented) return false;

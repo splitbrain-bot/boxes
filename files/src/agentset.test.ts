@@ -15,7 +15,7 @@ import { Readable } from 'node:stream';
 import { pack } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
 import { installAgentSet, MANAGED_FILE, unitOf } from './agentset.ts';
-import { FileError } from './ops.ts';
+import type { FileError } from './ops.ts';
 
 let dir: string;
 let home: string;
@@ -41,7 +41,10 @@ function tar(files: Record<string, Entry>): Readable {
   const p = pack();
   for (const [name, entry] of Object.entries(files)) {
     const e = typeof entry === 'string' ? { content: entry } : entry;
-    p.entry({ name, mode: e.mode ?? 0o644, type: e.type ?? 'file', size: e.content.length }, e.content);
+    p.entry(
+      { name, mode: e.mode ?? 0o644, type: e.type ?? 'file', size: e.content.length },
+      e.content,
+    );
   }
   p.finalize();
   return Readable.from(p);
@@ -62,7 +65,9 @@ function inHome(rel: string): string {
 
 /** The managed file, as lines. */
 function managed(): string[] {
-  return inHome(MANAGED_FILE).split('\n').filter((line) => line !== '');
+  return inHome(MANAGED_FILE)
+    .split('\n')
+    .filter((line) => line !== '');
 }
 
 test('a path maps to its unit: the instructions file, or the skill directory', () => {

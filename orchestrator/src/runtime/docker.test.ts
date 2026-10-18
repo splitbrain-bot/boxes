@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Docker from 'dockerode';
+import type Docker from 'dockerode';
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import { loadConfig } from '../config.ts';
 import * as dk from '../docker.ts';
@@ -45,7 +45,11 @@ beforeEach(() => {
     getContainer: (name: string) => ({
       inspect: async () => {
         if (name !== 'box-a1') throw notFound('container');
-        return { Id: 'abcdef0123456789', Image: 'sha256:0123456789abcdef', State: { Running: true } };
+        return {
+          Id: 'abcdef0123456789',
+          Image: 'sha256:0123456789abcdef',
+          State: { Running: true },
+        };
       },
     }),
   } as unknown as Docker);

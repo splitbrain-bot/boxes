@@ -1,6 +1,6 @@
 import { Pencil, Trash2 } from 'lucide-react';
-import type { ReviewAnnotation } from '../../../../shared/types.ts';
 import { Button } from '@/components/ui/button';
+import type { ReviewAnnotation } from '../../../../shared/types.ts';
 
 /**
  * One comment, as a card under the line it is about.
@@ -53,8 +53,7 @@ export function CommentCard({
       </div>
       {annotation.outdated ? (
         <p className="mt-1 text-xs text-muted-foreground">
-          The code this was written about has changed, so the line may no longer be the right
-          one.
+          The code this was written about has changed, so the line may no longer be the right one.
         </p>
       ) : null}
     </div>

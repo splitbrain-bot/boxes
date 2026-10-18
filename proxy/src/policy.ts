@@ -54,10 +54,7 @@ export function hostAllowed(host: string, policy: EgressPolicy): boolean {
 }
 
 /** The credentials configured for a host, in policy order. */
-export function credentialsForHost(
-  host: string,
-  policy: EgressPolicy,
-): EgressCredential[] {
+export function credentialsForHost(host: string, policy: EgressPolicy): EgressCredential[] {
   return policy.credentials.filter((c) => hostMatchesAny(host, c.hosts));
 }
 
@@ -245,7 +242,7 @@ export function parsePolicy(input: unknown): EgressPolicy {
     });
   };
 
-  const allowedHosts = stringArray(raw['allowedHosts'] ?? [], 'allowedHosts');
+  const allowedHosts = stringArray(raw.allowedHosts ?? [], 'allowedHosts');
   for (const pattern of allowedHosts) {
     if (pattern === '*') return fail('a bare * allowlist entry would allow everything');
     if (pattern.includes('*') && !pattern.startsWith('*.')) {
@@ -254,7 +251,7 @@ export function parsePolicy(input: unknown): EgressPolicy {
   }
 
   let ca: EgressPolicy['ca'] = null;
-  const rawCa = raw['ca'];
+  const rawCa = raw.ca;
   if (rawCa !== null && rawCa !== undefined) {
     if (typeof rawCa !== 'object') return fail('ca must be an object or null');
     const { key, cert } = rawCa as Record<string, unknown>;
@@ -264,14 +261,15 @@ export function parsePolicy(input: unknown): EgressPolicy {
     ca = { key, cert };
   }
 
-  const rawCredentials = raw['credentials'] ?? [];
+  const rawCredentials = raw.credentials ?? [];
   if (!Array.isArray(rawCredentials)) return fail('credentials must be an array');
   const credentials = rawCredentials.map((entry, i): EgressCredential => {
-    if (typeof entry !== 'object' || entry === null) return fail(`credential ${i} is not an object`);
+    if (typeof entry !== 'object' || entry === null)
+      return fail(`credential ${i} is not an object`);
     const c = entry as Record<string, unknown>;
-    const id = c['id'];
-    const placeholder = c['placeholder'];
-    const secret = c['secret'];
+    const id = c.id;
+    const placeholder = c.placeholder;
+    const secret = c.secret;
     if (typeof id !== 'string' || !id) return fail(`credential ${i} needs an id`);
     if (typeof placeholder !== 'string' || !placeholder) {
       return fail(`credential ${id} needs a placeholder`);
@@ -280,14 +278,12 @@ export function parsePolicy(input: unknown): EgressPolicy {
     if (placeholder === secret) {
       return fail(`credential ${id} has a placeholder equal to its secret`);
     }
-    const hosts = stringArray(c['hosts'], `credential ${id} hosts`);
+    const hosts = stringArray(c.hosts, `credential ${id} hosts`);
     if (hosts.length === 0) return fail(`credential ${id} needs at least one host`);
-    const headers = stringArray(c['headers'], `credential ${id} headers`).map((h) =>
-      h.toLowerCase(),
-    );
-    if (c['passthroughSchemes'] === undefined) return { id, hosts, headers, placeholder, secret };
+    const headers = stringArray(c.headers, `credential ${id} headers`).map((h) => h.toLowerCase());
+    if (c.passthroughSchemes === undefined) return { id, hosts, headers, placeholder, secret };
     const passthroughSchemes = stringArray(
-      c['passthroughSchemes'],
+      c.passthroughSchemes,
       `credential ${id} passthroughSchemes`,
     ).map((scheme) => scheme.toLowerCase());
     for (const scheme of passthroughSchemes) {

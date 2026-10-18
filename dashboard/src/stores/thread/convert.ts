@@ -1,14 +1,14 @@
 import type { ThreadMessageLike, ToolApprovalOption } from '@assistant-ui/react';
-import { imageSrc, type PermissionOption, type PermissionOptionKind } from './acp-types.ts';
 import { attachmentUrl, isThumbnailable } from '../../lib/attachments.ts';
 import { TASK_NOTIFICATION_PART } from '../../lib/task-notifications.ts';
+import { imageSrc, type PermissionOption, type PermissionOptionKind } from './acp-types.ts';
 import {
-  toolOutputText,
   type ApprovalState,
   type AttachmentPart,
   type Message,
   type TaskPart,
   type ToolPart,
+  toolOutputText,
 } from './translate.ts';
 
 /** Converts the thread's message model into the shape the assistant-ui runtime reads. */
@@ -32,7 +32,9 @@ function approvalOption(option: PermissionOption): ToolApprovalOption {
 }
 
 /** An approval as the tool-call part carries it. */
-function approval(state: ApprovalState): NonNullable<
+function approval(
+  state: ApprovalState,
+): NonNullable<
   Extract<ThreadMessageLike['content'][number] & object, { type: 'tool-call' }>['approval']
 > {
   const options = state.options.map(approvalOption);

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -12,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { afterEach, beforeEach, test } from 'vitest';
 import { fetchRepo, findSkills, repoName } from './skill-repos.ts';
 
 let dir: string;
@@ -37,7 +37,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync(
     'git',
     ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args],
-    { cwd, env: { PATH: process.env['PATH'], GIT_CONFIG_GLOBAL: '/dev/null' }, encoding: 'utf8' },
+    { cwd, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null' }, encoding: 'utf8' },
   ).trim();
 }
 
